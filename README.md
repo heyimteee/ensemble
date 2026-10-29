@@ -33,7 +33,8 @@ The first release targets the terminal UI only. Scheduled routines, external eve
 - [Glossary](GLOSSARY.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
-- [GitHub Issues](https://github.com/heyimteee/ensemble/issues): specifications, acceptance criteria, and implementation tickets
+- [Product specification](https://github.com/heyimteee/ensemble/issues/1)
+- [Implementation tickets](https://github.com/heyimteee/ensemble/issues): start with the compatibility gate
 
 ## License
 

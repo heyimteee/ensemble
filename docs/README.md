@@ -4,9 +4,10 @@
 
 - [Project overview](../README.md)
 - [Domain glossary](../GLOSSARY.md)
-- [Specifications and tickets](https://github.com/heyimteee/ensemble/issues)
+- [Product specification #1](https://github.com/heyimteee/ensemble/issues/1): approved scope, user stories, decisions, test boundaries, and exclusions
+- [Implementation tickets #2–#16](https://github.com/heyimteee/ensemble/issues): independently verifiable slices with acceptance criteria and blockers
 
-The approved product conversation will be synthesized into a parent specification and independently verifiable implementation tickets. GitHub Issues are the authoritative location for that work; avoid maintaining a competing copy of acceptance criteria here.
+GitHub Issues are the authoritative location for the specification and tickets; avoid maintaining a competing copy of acceptance criteria here. Publishing the plan does not authorize implementation. Start with compatibility ticket #2 and only begin a ticket when its blockers are complete.
 
 ## Working agreements
 
