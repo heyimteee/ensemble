@@ -2,21 +2,32 @@ import { resolve } from "node:path"
 import { realpathSync } from "node:fs"
 import type { AgentProfile, Channel, ModelOption, ModelSelection } from "./types.ts"
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
 export function parseMentions(text: string, agents: AgentProfile[], memberIDs: string[]): string[] {
   const byID = new Map(agents.map((agent) => [agent.id, agent]))
   const members = memberIDs
     .map((id) => byID.get(id))
     .filter((agent): agent is AgentProfile => Boolean(agent))
     .sort((a, b) => b.name.length - a.name.length)
-  const found: Array<{ id: string; at: number }> = []
+  const matches: Array<{ id: string; start: number; end: number }> = []
   for (const agent of members) {
-    const needles = [`!${agent.name}`, `!${agent.id}`]
-    for (const needle of needles) {
-      const index = text.toLowerCase().indexOf(needle.toLowerCase())
-      if (index >= 0) found.push({ id: agent.id, at: index })
+    for (const needle of [`!${agent.name}`, `!${agent.id}`]) {
+      const pattern = new RegExp(escapeRegExp(needle), "gi")
+      for (const match of text.matchAll(pattern)) {
+        matches.push({ id: agent.id, start: match.index ?? 0, end: (match.index ?? 0) + match[0].length })
+      }
     }
   }
-  return [...new Map(found.sort((a, b) => a.at - b.at).map((entry) => [entry.id, entry.id])).values()]
+  matches.sort((a, b) => a.start - b.start || b.end - a.end)
+  const accepted: typeof matches = []
+  for (const match of matches) {
+    if (accepted.some((existing) => match.start < existing.end && match.end > existing.start)) continue
+    accepted.push(match)
+  }
+  return [...new Set(accepted.map((match) => match.id))]
 }
 
 export function routeChannelMessage(text: string, channel: Channel, agents: AgentProfile[]): string[] {

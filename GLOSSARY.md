@@ -27,6 +27,12 @@ _Avoid_: Room, group (when referring to this concept).
 
 **Task chain**: A connected sequence of work and handoffs originating from a request.
 
+**Work**: A queued or running request for one agent in one conversation, with a mode, status, and optional handoff or chain.
+
+**Pending settings**: A saved role, model, or Skillbox change that will apply to subsequent work, not silently to an active turn.
+
+**Proposal**: An agent-initiated request for a roster, membership, leadership, or configuration change that only the user can authorize.
+
 **Approval**: An explicit decision requested from the user before dependent work can proceed. It is distinct from, and cannot override, OpenCode's tool permissions.
 
 **Conversation queue**: Pending messages awaiting an agent's availability in one conversation.

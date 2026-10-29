@@ -28,27 +28,21 @@ export function isRunnable(state: EnsembleState, item: WorkItem): boolean {
 /** Returns the queue entries that may start now, in deterministic order. */
 export function selectRunnable(state: EnsembleState): WorkItem[] {
   const running = activeWork(state)
-  if (running.length >= state.settings.maxConcurrentTurns) return []
-  const locked = running.find((item) => item.mode === "edit" && item.checkoutKey)?.checkoutKey
+  const busyConversations = new Set(running.map((item) => item.conversationID))
+  const editLocks = new Set(running.filter((item) => item.mode === "edit" && item.checkoutKey).map((item) => item.checkoutKey!))
   const selected: WorkItem[] = []
   let slots = state.settings.maxConcurrentTurns - running.length
-  let editLocked = locked
   for (const item of queuedWork(state)) {
     if (slots <= 0) break
     if (!isRunnable(state, item)) continue
-    if (item.mode === "edit" && item.checkoutKey) {
-      if (editLocked) continue
-      editLocked = item.checkoutKey
-    }
+    if (busyConversations.has(item.conversationID)) continue
+    if (item.mode === "edit" && item.checkoutKey && editLocks.has(item.checkoutKey)) continue
     selected.push(item)
+    busyConversations.add(item.conversationID)
+    if (item.mode === "edit" && item.checkoutKey) editLocks.add(item.checkoutKey)
     slots--
   }
   return selected
-}
-
-export function capacityAfterWaiting(state: EnsembleState, waiting: boolean): number {
-  const running = activeWork(state).length
-  return Math.max(0, state.settings.maxConcurrentTurns - running - (waiting ? 0 : 0))
 }
 
 export function chainLimitReached(state: EnsembleState, chainID: string): boolean {

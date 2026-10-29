@@ -1,6 +1,6 @@
 # Ensemble agent instructions
 
-Ensemble extends OpenCode's TUI with persistent agent teams. This repository currently contains documentation only. Preserve that scope until an approved implementation ticket is explicitly selected.
+Ensemble extends OpenCode's TUI with persistent agent teams. The repository now contains a developer-preview implementation on the integration branch. Keep changes within approved tickets and preserve the extension boundaries below.
 
 ## Compatibility boundaries
 

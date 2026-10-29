@@ -18,6 +18,7 @@ function agent(id: string, name: string): AgentProfile {
     backupModels: [],
     skillbox: [],
     archived: false,
+    pendingSettings: false,
     version: 1,
     createdAt: 1,
     updatedAt: 1,
@@ -91,6 +92,7 @@ test("mentions use the longest matching name and stable ids", () => {
   const agents = { a: agent("a", "Nova"), b: agent("b", "Nova Prime") }
   const members = ["a", "b"]
   assert.deepEqual(parseMentions("!Nova Prime and !Nova", Object.values(agents), members), ["b", "a"])
+  assert.deepEqual(parseMentions("!Nova Prime", Object.values(agents), members), ["b"])
   assert.deepEqual(parseMentions("!b", Object.values(agents), members), ["b"])
 })
 
@@ -114,7 +116,7 @@ test("scheduler respects the team limit and edit lock", () => {
   state.agents.b = agent("b", "B")
   state.work.w1 = work("w1", { mode: "edit", checkoutKey: "/repo" })
   state.work.w2 = work("w2", { mode: "edit", checkoutKey: "/repo", queueOrder: 1 })
-  state.work.w3 = work("w3", { mode: "research", queueOrder: 2 })
+  state.work.w3 = work("w3", { mode: "research", queueOrder: 2, conversationID: "c3", checkoutKey: "/other" })
   const first = selectRunnable(state)
   assert.deepEqual(first.map((item) => item.id), ["w1", "w3"])
   state.work.w1.status = "running"
@@ -124,6 +126,20 @@ test("scheduler respects the team limit and edit lock", () => {
   assert.deepEqual(selectRunnable(state).map((item) => item.id), [])
   state.work.w1.status = "completed"
   assert.deepEqual(selectRunnable(state).map((item) => item.id), ["w2"])
+})
+
+test("scheduler allows distinct checkouts and one active turn per conversation", () => {
+  const state = createInitialState({ maxConcurrentTurns: 3 })
+  state.agents.a = agent("a", "A")
+  state.work.w1 = work("w1", { mode: "edit", checkoutKey: "/one", conversationID: "c1" })
+  state.work.w2 = work("w2", { mode: "edit", checkoutKey: "/two", conversationID: "c2", queueOrder: 1 })
+  state.work.w3 = work("w3", { mode: "research", conversationID: "c1", queueOrder: 2 })
+  assert.deepEqual(selectRunnable(state).map((item) => item.id), ["w1", "w2"])
+  state.work.w1.status = "running"
+  state.work.w2.status = "running"
+  assert.deepEqual(selectRunnable(state).map((item) => item.id), [])
+  state.work.w1.status = "completed"
+  assert.deepEqual(selectRunnable(state).map((item) => item.id), ["w3"])
 })
 
 test("queue reordering returns a stable order", () => {
@@ -190,6 +206,28 @@ test("archiving an agent pauses a channel it leads; deleting requires a replacem
   assert.equal(deleted.ok, true)
   assert.equal(deletion.channels.c.leaderID, "member")
   assert.deepEqual(deletion.channels.c.memberIDs, ["member"])
+})
+
+test("archiving an agent cancels its work, handoffs, and pending approvals", () => {
+  const state = createInitialState()
+  state.agents.a = agent("a", "A")
+  state.work.w = work("w")
+  state.approvals.a = createApproval(state, { kind: "outside_roster", title: "Ask", detail: "details", agentID: "a" })
+  state.handoffs.h = {
+    id: "h",
+    channelID: "c",
+    chainID: "chain",
+    fromAgentID: "a",
+    toAgentID: "b",
+    request: "review",
+    status: "queued",
+    createdAt: 1,
+    updatedAt: 1,
+  }
+  assert.equal(archiveAgent(state, "a").ok, true)
+  assert.equal(state.work.w.status, "cancelled")
+  assert.equal(state.handoffs.h.status, "cancelled")
+  assert.equal(state.approvals.a.status, "rejected")
 })
 
 test("deleting a channel removes its conversations and channel memory", () => {

@@ -4,6 +4,7 @@
 
 - [Project overview](../README.md)
 - [Domain glossary](../GLOSSARY.md)
+- [Implementation and acceptance notes](implementation.md)
 - [Product specification #1](https://github.com/heyimteee/ensemble/issues/1): approved scope, user stories, decisions, test boundaries, and exclusions
 - [Implementation tickets #2–#16](https://github.com/heyimteee/ensemble/issues): independently verifiable slices with acceptance criteria and blockers
 - [OpenCode 2.2.1 compatibility report](compatibility/opencode-2.2.1.md): verified extension behavior, constraints, and gaps
@@ -21,4 +22,4 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Architecture status
 
-No code architecture, runtime, package setup, storage schema, or implementation ADR has been selected. Add ADRs only when a significant implementation trade-off is actually decided.
+The developer preview uses a server plugin for state, scheduling, native sessions, RPC, and tools; a TUI plugin for the workspace; and OpenCode plugin storage for durable JSON state. See [Implementation](implementation.md). Add an ADR when a significant, hard-to-reverse trade-off changes this structure.

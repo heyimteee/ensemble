@@ -52,6 +52,7 @@ export type AgentProfile = {
   backupModels: ModelSelection[]
   skillbox: string[]
   archived: boolean
+  pendingSettings: boolean
   version: number
   createdAt: number
   updatedAt: number
@@ -109,6 +110,8 @@ export type Handoff = {
   chainID: Id
   fromAgentID: Id
   toAgentID: Id
+  fromNameSnapshot?: string
+  toNameSnapshot?: string
   request: string
   reply?: string
   status: HandoffStatus
@@ -135,6 +138,7 @@ export type Approval = {
   workID?: Id
   handoffID?: Id
   memoryID?: Id
+  payload?: Record<string, unknown>
   status: "pending" | "approved" | "rejected"
   createdAt: number
   resolvedAt?: number

@@ -105,13 +105,6 @@ export function EnsembleApp() {
     return approvals().map((approval) => approval.id)
   })
 
-  const sectionTitle = createMemo(() => {
-    if (section() === "agents") return "Agents"
-    if (section() === "channels") return "Channels"
-    if (section() === "work") return "Work"
-    return "Approvals"
-  })
-
   const missingSkills = createMemo(() => {
     const agent = draft()
     if (!agent) return []
@@ -132,6 +125,11 @@ export function EnsembleApp() {
     } catch (error: any) {
       setStatus(`Ensemble unavailable: ${error?.message ?? error}`)
     }
+  }
+
+  const isEnsembleRoute = () => {
+    const route = context.ui.router.current()
+    return route.type === "plugin" && route.name === "ensemble"
   }
 
   const showError = (error: any) => {
@@ -338,7 +336,7 @@ export function EnsembleApp() {
   }
 
   const createChannel = async () => {
-    const name = (await uiDialog.prompt({ title: "New channel", description: "A project room", placeholder: "website" }))?.trim()
+    const name = (await uiDialog.prompt({ title: "New channel", description: "A project channel", placeholder: "website" }))?.trim()
     if (!name) return
     if (agents().length === 0) throw new Error("Create an agent first.")
     const agentNames = agents().map((agent) => agent.name).join(", ")
@@ -416,6 +414,17 @@ export function EnsembleApp() {
     const agent = draft()
     if (!agent || agent.backupModels.length === 0) return
     setDraft({ ...agent, backupModels: agent.backupModels.slice(0, -1) })
+    setDirty(true)
+  }
+
+  const reorderBackup = (direction: "up" | "down") => {
+    const agent = draft()
+    if (!agent || agent.backupModels.length < 2) return
+    const models = [...agent.backupModels]
+    const last = models.pop()!
+    const index = direction === "up" ? models.length - 1 : models.length
+    models.splice(Math.max(0, Math.min(models.length, index)), 0, last)
+    setDraft({ ...agent, backupModels: models })
     setDirty(true)
   }
 
@@ -681,7 +690,7 @@ export function EnsembleApp() {
     context.keymap.layer(() => ({
       mode: "global",
       priority: 100,
-      enabled: () => !modal(),
+      enabled: () => !modal() && isEnsembleRoute(),
       commands: [
         { id: "ensemble.section.agents", title: "Ensemble: Agents", bind: "g", run: () => selectSection("agents") },
         { id: "ensemble.section.channels", title: "Ensemble: Channels", bind: "h", run: () => selectSection("channels") },
@@ -711,6 +720,8 @@ export function EnsembleApp() {
         { id: "ensemble.edit", title: "Ensemble: Edit field", bind: "e", run: () => void editSettingsField() },
         { id: "ensemble.space", title: "Ensemble: Toggle skill", bind: "space", run: () => toggleSkill() },
         { id: "ensemble.backup", title: "Ensemble: Remove backup model", bind: "b", run: () => removeBackup() },
+        { id: "ensemble.backup.up", title: "Ensemble: Move backup up", bind: "ctrl+up", run: () => reorderBackup("up") },
+        { id: "ensemble.backup.down", title: "Ensemble: Move backup down", bind: "ctrl+down", run: () => reorderBackup("down") },
         { id: "ensemble.memory.edit", title: "Ensemble: Edit memory", bind: "ctrl+e", run: () => void editMemory() },
         { id: "ensemble.memory.delete", title: "Ensemble: Delete memory", bind: "ctrl+d", run: () => void deleteMemory() },
         { id: "ensemble.memory.promote", title: "Ensemble: Promote memory", bind: "ctrl+p", run: () => void promoteMemory() },
@@ -738,7 +749,7 @@ export function EnsembleApp() {
         "ensemble.up", "ensemble.down", "ensemble.open", "ensemble.new", "ensemble.channel",
         "ensemble.settings", "ensemble.send", "ensemble.native", "ensemble.fresh", "ensemble.leader",
         "ensemble.members", "ensemble.pause", "ensemble.archive", "ensemble.delete", "ensemble.channel.memory", "ensemble.work.cancel", "ensemble.work.retry", "ensemble.team.settings", "ensemble.work.steer", "ensemble.work.up", "ensemble.work.down", "ensemble.edit", "ensemble.space",
-        "ensemble.backup", "ensemble.memory.edit", "ensemble.memory.delete", "ensemble.memory.promote",
+        "ensemble.backup", "ensemble.backup.up", "ensemble.backup.down", "ensemble.memory.edit", "ensemble.memory.delete", "ensemble.memory.promote",
         "ensemble.filter", "ensemble.save", "ensemble.tab", "ensemble.escape",
       ],
     }))
@@ -756,7 +767,7 @@ export function EnsembleApp() {
           <text fg={section() === "agents" ? color.accent : color.text}>Agents</text>
           <For each={agents()}>{(agent, index) => (
             <text fg={section() === "agents" && selected() === index() ? color.good : color.text}>
-              {selectedAgentID() === agent.id ? "› " : "  "}{agent.name}
+              {selectedAgentID() === agent.id ? "› " : "  "}{agent.name}{agent.pendingSettings ? " · pending" : ""}
             </text>
           )}</For>
           <text> </text>
@@ -840,6 +851,7 @@ export function EnsembleApp() {
   function DirectView(props: { agent: AgentProfile; state: EnsembleState | null; models: ModelOption[] }) {
     const conversation = createMemo(() => Object.values(props.state?.conversations ?? {}).filter((item) => item.agentID === props.agent.id).sort((a, b) => b.updatedAt - a.updatedAt)[0])
     const memoryCount = createMemo(() => Object.values(props.state?.memories ?? {}).filter((memory) => memory.agentID === props.agent.id && !memory.deletedAt).length)
+    const directApprovals = createMemo(() => Object.values(props.state?.approvals ?? {}).filter((approval) => approval.agentID === props.agent.id && !approval.channelID && approval.status === "pending"))
     return (
       <box flexDirection="column">
         <text fg={color.accent}>{props.agent.name}</text>
@@ -854,6 +866,11 @@ export function EnsembleApp() {
             </text>
           )}</For>
         </Show>
+        <Show when={directApprovals().length > 0}>
+          <text> </text>
+          <text fg={color.accent}>Approvals ({directApprovals().length})</text>
+          <For each={directApprovals().slice(0, 4)}>{(approval) => <text fg={color.warn}>• {short(approval.title, 90)}</text>}</For>
+        </Show>
         <text> </text>
         <text fg={color.muted}>i send · o open native session · f fresh conversation · s settings</text>
       </box>
@@ -863,6 +880,8 @@ export function EnsembleApp() {
   function ChannelView(props: { channel: Channel; state: EnsembleState | null; memories: MemoryEntry[] }) {
     const conversation = createMemo(() => Object.values(props.state?.conversations ?? {}).filter((item) => item.channelID === props.channel.id && item.activeSessionID)[0])
     const handoffs = createMemo(() => Object.values(props.state?.handoffs ?? {}).filter((item) => item.channelID === props.channel.id))
+    const channelApprovals = createMemo(() => Object.values(props.state?.approvals ?? {}).filter((item) => item.channelID === props.channel.id && item.status === "pending"))
+    const chain = createMemo(() => Object.values(props.state?.chains ?? {}).filter((item) => item.channelID === props.channel.id).sort((a, b) => b.updatedAt - a.updatedAt)[0])
     return (
       <box flexDirection="column">
         <text fg={color.accent}>#{props.channel.name} {props.channel.paused ? "· PAUSED" : ""}</text>
@@ -877,10 +896,15 @@ export function EnsembleApp() {
         <text> </text>
         <text fg={color.accent}>Shared memory ({props.memories.length})</text>
         <For each={props.memories.slice(-4)}>{(memory) => <text fg={color.muted}>• {short(memory.text, 100)}</text>}</For>
+        <Show when={chain() && chain()!.deliveries >= chain()!.limit - 2}>
+          <text fg={color.warn}>Chain warning: {chain()!.deliveries}/{chain()!.limit} agent-to-agent deliveries. It pauses at the limit.</text>
+        </Show>
+        <text fg={color.accent}>Approvals ({channelApprovals().length})</text>
+        <For each={channelApprovals().slice(0, 4)}>{(approval) => <text fg={color.warn}>• {short(approval.title, 90)}</text>}</For>
         <text fg={color.accent}>Handoffs ({handoffs().length})</text>
         <For each={handoffs().slice(-4)}>{(handoff) => (
           <text fg={handoff.status === "completed" ? color.good : handoff.status === "waiting_approval" ? color.warn : color.muted}>
-            {props.state?.agents[handoff.fromAgentID]?.name ?? "?"} → {props.state?.agents[handoff.toAgentID]?.name ?? "?"}: {short(handoff.request, 70)} [{handoff.status}]
+            {props.state?.agents[handoff.fromAgentID]?.name ?? handoff.fromNameSnapshot ?? "?"} → {props.state?.agents[handoff.toAgentID]?.name ?? handoff.toNameSnapshot ?? "?"}: {short(handoff.request, 70)} [{handoff.status}]
           </text>
         )}</For>
         <text> </text>
@@ -930,7 +954,7 @@ export function EnsembleApp() {
     return (
       <Show when={props.agent} fallback={<text fg={color.muted}>Select an agent first.</text>}>
         <box flexDirection="column">
-          <text fg={color.accent}>{props.agent!.name} · settings {dirty() ? "· UNSAVED" : ""}</text>
+          <text fg={color.accent}>{props.agent!.name} · settings {dirty() ? "· UNSAVED" : ""}{props.agent!.pendingSettings ? " · pending next task" : ""}</text>
           <text fg={color.muted}>Tabs: General · Models · Memories · Skillbox (Tab to cycle)</text>
           <text> </text>
           <Show when={props.tab === "general"}>
@@ -942,13 +966,16 @@ export function EnsembleApp() {
             <text fg={props.fieldIndex === 0 ? color.good : color.text}>Main: {props.agent!.mainModel.providerID}/{props.agent!.mainModel.modelID}{props.agent!.mainModel.variant ? `#${props.agent!.mainModel.variant}` : ""}</text>
             <For each={props.agent!.backupModels}>{(model, index) => <text fg={props.fieldIndex === index() + 1 ? color.good : color.muted}>Backup {index() + 1}: {model.providerID}/{model.modelID}{model.variant ? `#${model.variant}` : ""}</text>}</For>
             <text fg={props.fieldIndex === props.agent!.backupModels.length + 1 ? color.good : color.text}>Add backup model</text>
-            <text fg={color.muted}>e selects. b removes the last backup. Unsupported variants are rejected.</text>
+            <text fg={color.muted}>e selects. b removes the last backup. ctrl+↑/↓ reorders it. Unsupported variants are rejected.</text>
           </Show>
           <Show when={props.tab === "memories"}>
             <For each={props.memories}>{(memory, index) => (
-              <text fg={props.memoryIndex === index() ? color.good : color.text}>
-                [{memory.origin === "automatic" ? "learned" : "manual"}/{memory.scope}] {short(memory.text, 90)}
-              </text>
+              <>
+                <text fg={props.memoryIndex === index() ? color.good : color.text}>
+                  [{memory.origin === "automatic" ? "learned" : "manual"}/{memory.scope}] {short(memory.text, 80)}
+                </text>
+                <text fg={color.muted}>    source: {memory.source} · history: {memory.history.map((item) => item.action).join(" → ")}</text>
+              </>
             )}</For>
             <Show when={props.memories.length === 0}><text fg={color.muted}>No saved memories.</text></Show>
             <text fg={color.muted}>e add · ctrl+e edit · ctrl+d delete · ctrl+p promote with approval</text>

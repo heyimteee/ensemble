@@ -4,7 +4,7 @@
 
 Ensemble is a planned TUI extension for OpenCode: named teammates with roles, models, memories, and assigned skills, working together in project channels.
 
-> **Status: documentation-only scaffold.** No plugin is implemented or installable yet. Compatibility with the installed OpenCode release must be verified before implementation. No runtime, package manager, storage design, or code architecture has been selected.
+> **Status: developer preview.** The plugin is loadable locally on OpenCode 2.2.1. It is not published, versioned, or licensed. Compatibility evidence is recorded in the [report](docs/compatibility/opencode-2.2.1.md).
 
 ## The experience
 
@@ -27,8 +27,30 @@ Skills are instructions, not permissions. Memories are saved knowledge, not unli
 
 The first release targets the terminal UI only. Scheduled routines, external event triggers, proactive task monitoring, remote hosting, and browser/computer automation are excluded. Work explicitly requested by the user can continue in the native background server.
 
+## Install for local development
+
+Add the repository to `opencode.json`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["/home/you/dev/ensemble"]
+}
+```
+
+Then run `/ensemble` or the **Open Ensemble** palette command. Do not also load the same plugin from `.opencode/plugins/`; that creates a duplicate plugin ID.
+
+## Development
+
+```bash
+npm test
+```
+
+The core suite uses Node's test runner and type stripping. There is no build step: OpenCode loads the TypeScript server and TUI entrypoints directly.
+
 ## Project documentation
 
+- [Implementation and acceptance notes](docs/implementation.md)
 - [Documentation index](docs/README.md)
 - [Glossary](GLOSSARY.md)
 - [Contributing](CONTRIBUTING.md)

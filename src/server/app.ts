@@ -61,6 +61,14 @@ function sessionModelRef(model: ModelSelection): { providerID: string; id: strin
   return { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) }
 }
 
+function sameModel(a: ModelSelection, b: ModelSelection): boolean {
+  return a.providerID === b.providerID && a.modelID === b.modelID && (a.variant ?? "") === (b.variant ?? "")
+}
+
+function sameModels(a: ModelSelection[], b: ModelSelection[]): boolean {
+  return a.length === b.length && a.every((model, index) => sameModel(model, b[index]))
+}
+
 function modelLabel(model: ModelSelection): string {
   return `${model.providerID}/${model.modelID}${model.variant ? `#${model.variant}` : ""}`
 }
@@ -91,13 +99,13 @@ function availabilityFailure(error: any): boolean {
   return /rate|limit|quota|unavailable|overload|timeout|network|no-route|connection|model|outage|internal|server|500|502|503|504/.test(message) || type === "provider.no-route" || type === "provider.internal"
 }
 
-function completedTool(messages: any[], since: number): boolean {
+function anyToolCall(messages: any[], since: number): boolean {
   return messages.some(
     (message) =>
       message?.type === "assistant" &&
       message?.time?.created >= since &&
       Array.isArray(message.content) &&
-      message.content.some((part: any) => part?.type === "tool" && part?.state?.status && part.state.status !== "pending"),
+      message.content.some((part: any) => part?.type === "tool"),
   )
 }
 
@@ -128,6 +136,8 @@ export class EnsembleServer {
   private catalogModels: ModelOption[] = []
   private catalogSkills: SkillOption[] = []
   private catalogLoading = false
+  private lastCatalogAt = 0
+  private catalogAbort: AbortController | undefined
 
   constructor(ctx: Ctx) {
     this.ctx = ctx
@@ -153,10 +163,19 @@ export class EnsembleServer {
         this.invoke(directory, action, payload ?? {}),
     })
     void this.refreshCatalog()
+    this.catalogAbort = new AbortController()
+    void (async () => {
+      try {
+        for await (const event of this.ctx.event.subscribe({ types: ["skill.updated", "model.updated", "provider.updated"], signal: this.catalogAbort!.signal })) {
+          if (event.type) void this.refreshCatalog()
+        }
+      } catch {}
+    })()
     await this.recover()
     this.pump()
     return async () => {
       this.stopped = true
+      this.catalogAbort?.abort()
       await this.retryRegistration?.dispose?.().catch(() => undefined)
       await Promise.allSettled([...this.running])
     }
@@ -231,7 +250,7 @@ export class EnsembleServer {
               detail: input.detail,
               agentID: profileID,
               workID: this.workForSession(state, context.sessionID)?.id,
-              memoryID: input.kind ? `${input.kind}:${JSON.stringify(input.payload ?? {})}` : undefined,
+              payload: input.kind ? { kind: input.kind, ...input.payload } : undefined,
             }),
           )
           return { content: `Proposal recorded for user approval: ${approval.id}` }
@@ -243,6 +262,7 @@ export class EnsembleServer {
   private async refreshCatalog(): Promise<void> {
     if (this.catalogLoading) return
     this.catalogLoading = true
+    const guard = setTimeout(() => { this.catalogLoading = false }, 10_000)
     try {
       const [modelsRaw, skillsRaw] = await Promise.all([
         this.ctx.model.list().catch(() => []),
@@ -259,14 +279,16 @@ export class EnsembleServer {
         name: skill.name ?? skill.id,
         description: skill.description,
       }))
+      this.lastCatalogAt = Date.now()
       if (this.registration) void this.registration.events.emit("changed", { version: this.store.snapshot().version }).catch(() => undefined)
     } finally {
+      clearTimeout(guard)
       this.catalogLoading = false
     }
   }
 
   private async snapshot(directory: string): Promise<Snapshot> {
-    if (this.catalogModels.length === 0 && this.catalogSkills.length === 0 && !this.catalogLoading) void this.refreshCatalog()
+    if (!this.catalogLoading && Date.now() - this.lastCatalogAt > 10_000) void this.refreshCatalog()
     return {
       state: jsonSafe(this.store.snapshot()),
       models: this.catalogModels,
@@ -333,8 +355,6 @@ export class EnsembleServer {
         return this.retryWork(payload.workID)
       case "settings.update":
         return this.updateSettings(payload)
-      case "debug.tools":
-        return (await this.ctx.tool.list()).map((tool: any) => ({ id: tool.id, name: tool.name, options: tool.options }))
       default:
         throw Object.assign(new Error(`Unknown Ensemble action: ${action}`), { code: "unknown_action" })
     }
@@ -385,6 +405,7 @@ export class EnsembleServer {
         backupModels,
         skillbox: Array.isArray(payload.skillbox) ? payload.skillbox : [],
         archived: false,
+        pendingSettings: false,
         version: 1,
         createdAt: at,
         updatedAt: at,
@@ -399,15 +420,20 @@ export class EnsembleServer {
     return this.store.mutate((state) => {
       const profile = state.agents[payload.id]
       if (!profile) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+      let behaviorChanged = false
       if (payload.name !== undefined) {
         const name = String(payload.name).trim()
         if (!name) throw Object.assign(new Error("Agent name is required."), { code: "invalid_name" })
         profile.name = name
       }
-      if (payload.instructions !== undefined) profile.instructions = String(payload.instructions)
+      if (payload.instructions !== undefined && String(payload.instructions) !== profile.instructions) {
+        profile.instructions = String(payload.instructions)
+        behaviorChanged = true
+      }
       if (payload.mainModel !== undefined) {
         const invalid = validateModelSelection(payload.mainModel, models)
         if (invalid) throw Object.assign(new Error(invalid), { code: "invalid_model" })
+        if (!sameModel(profile.mainModel, payload.mainModel)) behaviorChanged = true
         profile.mainModel = payload.mainModel
       }
       if (payload.backupModels !== undefined) {
@@ -415,10 +441,18 @@ export class EnsembleServer {
           const invalid = validateModelSelection(model, models)
           if (invalid) throw Object.assign(new Error(invalid), { code: "invalid_model" })
         }
+        if (!sameModels(profile.backupModels, payload.backupModels)) behaviorChanged = true
         profile.backupModels = payload.backupModels
       }
-      if (payload.skillbox !== undefined) profile.skillbox = [...new Set(payload.skillbox.map(String))]
-      profile.version++
+      if (payload.skillbox !== undefined) {
+        const nextSkillbox = [...new Set(payload.skillbox.map(String))]
+        if (nextSkillbox.length !== profile.skillbox.length || nextSkillbox.some((id) => !profile.skillbox.includes(id))) behaviorChanged = true
+        profile.skillbox = nextSkillbox
+      }
+      if (behaviorChanged) {
+        profile.version++
+        profile.pendingSettings = true
+      }
       profile.updatedAt = now()
       return profile
     })
@@ -444,9 +478,6 @@ export class EnsembleServer {
 
   private async removeAgent(agentID: string, replacementLeaderID?: string, deleteNativeSessions = false) {
     const nativeIDs = await this.store.mutate((state) => {
-      const blocked = Object.values(state.channels).some(
-        (channel) => !channel.archived && channel.leaderID === agentID && !replacementLeaderID,
-      )
       const conversations = Object.values(state.conversations).filter((conversation) => conversation.agentID === agentID)
       const result = deleteAgent(state, agentID, replacementLeaderID)
       if (!result.ok) throw Object.assign(new Error(result.message), { code: result.code })
@@ -683,6 +714,8 @@ export class EnsembleServer {
         chainID: chain.id,
         fromAgentID: profileID,
         toAgentID: target.id,
+        fromNameSnapshot: state.agents[profileID]?.name ?? "Agent",
+        toNameSnapshot: target.name,
         request: String(input.message ?? "").trim(),
         status: "queued" as const,
         createdAt: at,
@@ -867,15 +900,20 @@ export class EnsembleServer {
           const work = state.work[approval.workID]
           if (work && work.status === "interrupted") work.status = "queued"
         }
-        if (approval.kind === "roster_change" && approval.memoryID) {
-          try {
-            const parsed = JSON.parse(approval.memoryID.slice(approval.memoryID.indexOf(":") + 1))
-            if (parsed.kind === "create_agent" || parsed.kind === "update_agent" || parsed.kind === "add_member" || parsed.kind === "set_leader") {
-              return { approval, apply: parsed }
+        if (approval.kind === "roster_change" && approval.payload) {
+          const parsed = approval.payload as any
+          if (parsed.kind === "create_agent" || parsed.kind === "update_agent" || parsed.kind === "add_member" || parsed.kind === "set_leader") {
+            if (parsed.baseVersion !== undefined && parsed.agentID && state.agents[parsed.agentID]?.version !== parsed.baseVersion) {
+              approval.resolution = "stale proposal: the agent changed after this was requested"
+              return approval
             }
-          } catch {}
+            return { approval, apply: parsed }
+          }
         }
       } else if (approval.kind === "outside_roster" && approval.handoffID) {
+        const handoff = state.handoffs[approval.handoffID]
+        if (handoff) handoff.status = "cancelled"
+      } else if (approval.kind === "chain_limit" && approval.handoffID) {
         const handoff = state.handoffs[approval.handoffID]
         if (handoff) handoff.status = "cancelled"
       }
@@ -893,7 +931,20 @@ export class EnsembleServer {
           if (channel && channel.memberIDs.includes(parsed.agentID)) channel.leaderID = parsed.agentID
         }
         if (parsed.kind === "create_agent" && parsed.agent) {
-          state.agents[parsed.agent.id] = { ...parsed.agent, id: newId("agent"), version: 1, createdAt: now(), updatedAt: now(), archived: false }
+          state.agents[parsed.agent.id] = { ...parsed.agent, id: newId("agent"), version: 1, createdAt: now(), updatedAt: now(), archived: false, pendingSettings: false }
+        }
+        if (parsed.kind === "update_agent" && parsed.agentID) {
+          const agent = state.agents[parsed.agentID]
+          if (agent) {
+            const patch = parsed.patch ?? {}
+            if (patch.name !== undefined) agent.name = String(patch.name)
+            if (patch.instructions !== undefined) agent.instructions = String(patch.instructions)
+            if (patch.mainModel !== undefined) agent.mainModel = patch.mainModel
+            if (patch.skillbox !== undefined) agent.skillbox = [...new Set(patch.skillbox.map(String))]
+            agent.version++
+            agent.pendingSettings = true
+            agent.updatedAt = now()
+          }
         }
       })
       return { approved: true, applied: parsed.kind }
@@ -967,8 +1018,8 @@ export class EnsembleServer {
   private async retryWork(workID: string): Promise<any> {
     return this.store.mutate((state) => {
       const work = state.work[workID]
-      if (!work || (work.status !== "failed" && work.status !== "interrupted")) {
-        throw Object.assign(new Error("Only failed or interrupted work can be retried."), { code: "invalid_status" })
+      if (!work || (work.status !== "failed" && work.status !== "interrupted" && !(work.status === "paused" && work.error))) {
+        throw Object.assign(new Error("Only failed, interrupted, or paused work can be retried."), { code: "invalid_status" })
       }
       work.status = "queued"
       work.error = undefined
@@ -1147,7 +1198,6 @@ export class EnsembleServer {
         value: this.contextForWork(state, work, agent, conversation),
       }).catch(() => undefined)
       const models: ModelSelection[] = [agent.mainModel, ...agent.backupModels]
-      let lastError: any
       let result: { text: string; tools: string[]; failure?: any } | undefined
       for (let index = 0; index < models.length; index++) {
         const model = models[index]
@@ -1157,10 +1207,9 @@ export class EnsembleServer {
         await this.ctx.session.wait({ sessionID }).catch(() => undefined)
         const messages = listData(await this.ctx.session.context({ sessionID }))
         const outcome = assistantResult(messages, startedAt)
-        lastError = outcome.failure
         result = outcome
         if (!outcome.failure) break
-        if (!state.settings.modelFallback || !availabilityFailure(outcome.failure) || completedTool(messages, startedAt)) break
+        if (!state.settings.modelFallback || !availabilityFailure(outcome.failure) || anyToolCall(messages, startedAt)) break
         if (index < models.length - 1) {
           await this.store.mutate((draft) => {
             const conv = draft.conversations[conversation.id]
@@ -1178,6 +1227,7 @@ export class EnsembleServer {
           conversation.activeSessionID = undefined
           const nextSession = await this.ensureSession(agent, conversation, work)
           if (!nextSession) break
+          work.sessionID = nextSession
           await this.ctx.session.instructions.entry.put({
             sessionID: nextSession,
             key: "ensemble.context",
@@ -1192,10 +1242,13 @@ export class EnsembleServer {
         return
       }
       if (result?.failure) {
-        await this.finishWork(workID, "failed", result.failure.message ?? "All backup models failed.")
+        const uncertain = anyToolCall(listData(await this.ctx.session.context({ sessionID: work.sessionID ?? "" }).catch(() => [])), work.startedAt ?? 0)
+        await this.finishWork(workID, "paused", uncertain ? "Model recovery stopped because a tool outcome is uncertain. Retry only after reviewing the transcript." : result.failure.message ?? "All backup models failed.")
         return
       }
       const text = result?.text || "Work completed."
+      let replySessionID: string | undefined
+      let replyHandoffID: string | undefined
       await this.store.mutate((draft) => {
         const workDraft = draft.work[workID]
         const conv = draft.conversations[work.conversationID]
@@ -1234,9 +1287,20 @@ export class EnsembleServer {
             handoff.status = "completed"
             handoff.reply = text
             handoff.updatedAt = now()
+            replyHandoffID = handoff.id
+            const requester = Object.values(draft.conversations).find(
+              (item) => item.channelID === workDraft.channelID && item.agentID === handoff.fromAgentID,
+            )
+            replySessionID = requester?.activeSessionID
           }
         }
       })
+      if (replySessionID && replyHandoffID) {
+        await this.ctx.session.synthetic({
+          sessionID: replySessionID,
+          text: `[ensemble_handoff ${replyHandoffID}] ${agent.name}: ${text}`,
+        }).catch(() => undefined)
+      }
     } catch (error: any) {
       await this.finishWork(workID, "failed", error?.message ?? String(error))
     }
@@ -1260,6 +1324,8 @@ export class EnsembleServer {
       conv.sessionIDs.push(created.id)
       conv.activeSessionID = created.id
       conv.agentVersion = agent.version
+      const profile = draft.agents[agent.id]
+      if (profile) profile.pendingSettings = false
       const workDraft = draft.work[work.id]
       if (workDraft) workDraft.sessionID = created.id
     })
@@ -1295,10 +1361,11 @@ export class EnsembleServer {
     return parts.filter(Boolean).join("\n\n")
   }
 
-  private async finishWork(workID: string, status: "failed", error: string): Promise<void> {
+  private async finishWork(workID: string, status: "failed" | "paused", error: string): Promise<void> {
     await this.store.mutate((draft) => {
       const work = draft.work[workID]
       if (!work) return
+      if (work.status === "cancelled" || (work.status === "paused" && status === "failed")) return
       work.status = status
       work.error = error
       work.finishedAt = now()

@@ -1,6 +1,6 @@
 # Contributing to Ensemble
 
-Ensemble is in its documentation and compatibility-validation phase. There are no build, installation, or test commands yet.
+Ensemble is in developer preview. The server and TUI parts load directly from TypeScript; there is no build step. Run `npm test` for the core suite. See [implementation notes](docs/implementation.md) for local loading.
 
 ## Before starting
 

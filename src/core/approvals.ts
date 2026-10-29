@@ -12,6 +12,7 @@ export function createApproval(
     workID?: string
     handoffID?: string
     memoryID?: string
+    payload?: Record<string, unknown>
   },
 ): Approval {
   const approval: Approval = {
