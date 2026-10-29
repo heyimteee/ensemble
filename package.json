@@ -1,0 +1,29 @@
+{
+  "name": "ensemble",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent agent teams inside OpenCode",
+  "exports": {
+    ".": "./src/server/index.ts",
+    "./tui": "./src/tui/index.tsx",
+    "./rpc": "./src/rpc.ts"
+  },
+  "files": ["src"],
+  "scripts": {
+    "test": "node --test --experimental-strip-types src/core/*.test.ts",
+    "test:watch": "node --test --watch --experimental-strip-types src/core/*.test.ts"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "2.2.1",
+    "@opentui/core": ">=0.7.0",
+    "@opentui/solid": ">=0.7.0",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": { "optional": true },
+    "@opentui/core": { "optional": true },
+    "@opentui/solid": { "optional": true },
+    "solid-js": { "optional": true }
+  }
+}
