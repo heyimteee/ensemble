@@ -35,6 +35,7 @@ The probe code lived outside the repository. No core patch, private API, or glob
 | Per-agent model and variants | **Pass** | The probe model exposed `low`, `medium`, and `high` variants. Sessions selected variants successfully. |
 | Model variant validation | **Caveat** | Session creation accepts an unknown variant such as `bogus`; execution fails later with `provider.no-route: Variant unavailable`. Ensemble must validate before saving. |
 | Native background work | **Pass (standalone server)** | A prompt was still running when the last TUI was killed; the server completed it about 3.5 seconds later with `outcome: succeeded`. |
+| Native queued input | **Pass** | A second prompt admitted with `delivery: "queue"` waited while the first ran, then executed; the inbox drained and the session reached idle. |
 | Inter-plugin coexistence | **Pass** | Two local server plugins were active at the same time in the same location. |
 | Shared global background service | **Not exercised end to end** | The shared service is running and API-reachable, but tests used an isolated standalone server to avoid touching global data/configuration. The same server engine and native lifecycle are expected. |
 
