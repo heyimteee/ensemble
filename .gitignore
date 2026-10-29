@@ -1,0 +1,31 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies and generated output (no runtime selected yet)
+node_modules/
+dist/
+build/
+coverage/
+.cache/
+*.tsbuildinfo
+
+# Local research, runtime data, and logs
+.scratch/
+*.log
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
