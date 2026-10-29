@@ -165,12 +165,31 @@ export function EnsembleApp() {
     }
   }
 
-  const selectSection = (next: Section) => {
+  const applySection = (next: Section) => {
     setSection(next)
     setSelected(0)
     setSelectedAgentID(null)
     setSelectedChannelID(null)
     setSettingsAgentID(null)
+  }
+
+  const selectSection = (next: Section) => {
+    if (settingsAgentID() && dirty()) {
+      void (async () => {
+        const discard = await uiDialog.confirm({
+          title: "Discard unsaved settings?",
+          message: "Switching sections will discard the current agent draft.",
+          label: { confirm: "Discard", cancel: "Keep editing" },
+        })
+        if (discard) {
+          setDirty(false)
+          setDraft(null)
+          applySection(next)
+        }
+      })()
+      return
+    }
+    applySection(next)
   }
 
   const openSettings = (agent?: AgentProfile) => {
@@ -197,6 +216,16 @@ export function EnsembleApp() {
     setSettingsAgentID(null)
     setDraft(null)
     setDirty(false)
+  }
+
+  const stopAndRestart = async () => {
+    const agent = settingsAgent()
+    if (!agent) return
+    await run("Stop and restart", async () => {
+      await invoke(context, "work.stop", { agentID: agent.id })
+      await invoke(context, "work.resume", { agentID: agent.id })
+      context.ui.toast.show({ title: "Ensemble", message: "Stopped this agent's work and queued it with the saved settings.", variant: "success" })
+    })
   }
 
   const saveSettings = async () => {
@@ -419,12 +448,14 @@ export function EnsembleApp() {
 
   const reorderBackup = (direction: "up" | "down") => {
     const agent = draft()
-    if (!agent || agent.backupModels.length < 2) return
+    if (!agent || agent.backupModels.length < 2 || fieldIndex() === 0) return
     const models = [...agent.backupModels]
-    const last = models.pop()!
-    const index = direction === "up" ? models.length - 1 : models.length
-    models.splice(Math.max(0, Math.min(models.length, index)), 0, last)
+    const index = Math.max(0, Math.min(models.length - 1, fieldIndex() - 1))
+    const swap = direction === "up" ? index - 1 : index + 1
+    if (swap < 0 || swap >= models.length) return
+    ;[models[index], models[swap]] = [models[swap], models[index]]
     setDraft({ ...agent, backupModels: models })
+    setFieldIndex(swap + 1)
     setDirty(true)
   }
 
@@ -730,6 +761,7 @@ export function EnsembleApp() {
           if (query !== undefined) { setSkillFilter(query); setSkillIndex(0) }
         } },
         { id: "ensemble.save", title: "Ensemble: Save settings", bind: "ctrl+s", run: () => void saveSettings() },
+        { id: "ensemble.restart", title: "Ensemble: Stop and restart with saved settings", bind: "ctrl+r", run: () => void stopAndRestart() },
         { id: "ensemble.tab", title: "Ensemble: Settings tab", bind: "tab", run: () => {
           if (!settingsAgentID()) return
           const tabs: SettingsTab[] = ["general", "models", "memories", "skillbox"]
@@ -750,7 +782,7 @@ export function EnsembleApp() {
         "ensemble.settings", "ensemble.send", "ensemble.native", "ensemble.fresh", "ensemble.leader",
         "ensemble.members", "ensemble.pause", "ensemble.archive", "ensemble.delete", "ensemble.channel.memory", "ensemble.work.cancel", "ensemble.work.retry", "ensemble.team.settings", "ensemble.work.steer", "ensemble.work.up", "ensemble.work.down", "ensemble.edit", "ensemble.space",
         "ensemble.backup", "ensemble.backup.up", "ensemble.backup.down", "ensemble.memory.edit", "ensemble.memory.delete", "ensemble.memory.promote",
-        "ensemble.filter", "ensemble.save", "ensemble.tab", "ensemble.escape",
+        "ensemble.filter", "ensemble.save", "ensemble.restart", "ensemble.tab", "ensemble.escape",
       ],
     }))
     return stop
@@ -992,7 +1024,7 @@ export function EnsembleApp() {
             <text fg={color.muted}>space toggles assignment. Empty means no optional skills. Native instructions and permissions stay in force.</text>
           </Show>
           <text> </text>
-          <text fg={color.muted}>ctrl+s save · esc cancel {dirty() ? "· changes are pending and apply to new work" : ""}</text>
+          <text fg={color.muted}>ctrl+s save · ctrl+r stop/restart with saved settings · esc cancel {dirty() ? "· changes are pending and apply to new work" : ""}</text>
         </box>
       </Show>
     )

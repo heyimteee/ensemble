@@ -36,14 +36,6 @@ export function routeChannelMessage(text: string, channel: Channel, agents: Agen
   return channel.memberIDs.includes(channel.leaderID) ? [channel.leaderID] : []
 }
 
-export function selectableModels(models: ModelOption[]): ModelOption[] {
-  return [...models].sort((a, b) => `${a.providerID}/${a.modelID}`.localeCompare(`${b.providerID}/${b.modelID}`))
-}
-
-export function modelKey(model: ModelSelection): string {
-  return `${model.providerID}/${model.modelID}${model.variant ? `#${model.variant}` : ""}`
-}
-
 export function variantSupported(model: ModelOption | undefined, variant: string | undefined): boolean {
   if (!model) return false
   if (!variant) return true

@@ -226,6 +226,35 @@ export class EnsembleServer {
         },
       })
       editor.add({
+        name: "share",
+        description: "Request user authorization before sharing information across projects or outside a private direct conversation.",
+        options: { namespace: "ensemble", codemode: false },
+        input: {
+          type: "object",
+          properties: {
+            text: { type: "string" },
+            scope: { type: "string", enum: ["cross_project", "private_transcript"] },
+          },
+          required: ["text", "scope"],
+          additionalProperties: false,
+        },
+        execute: async (input: Json, context: any) => {
+          const profileID = this.profileForSession(context.sessionID)
+          if (!profileID) return { content: "Ensemble tools are only available to Ensemble agents." }
+          const approval = await this.store.mutate((state) =>
+            createApproval(state, {
+              kind: "cross_project",
+              title: `Share ${input.scope === "private_transcript" ? "private transcript content" : "knowledge across projects"}`,
+              detail: input.text,
+              agentID: profileID,
+              workID: this.workForSession(state, context.sessionID)?.id,
+              payload: { text: input.text, scope: input.scope },
+            }),
+          )
+          return { content: `Sharing needs user authorization: ${approval.id}` }
+        },
+      })
+      editor.add({
         name: "propose",
         options: { namespace: "ensemble", codemode: false },
         description: "Ask the user to approve a roster, Skillbox, membership, or leadership change. Proposals never apply themselves.",
@@ -243,16 +272,21 @@ export class EnsembleServer {
         execute: async (input: Json, context: any) => {
           const profileID = this.profileForSession(context.sessionID)
           if (!profileID) return { content: "Ensemble tools are only available to Ensemble agents." }
-          const approval = await this.store.mutate((state) =>
-            createApproval(state, {
+          const approval = await this.store.mutate((state) => {
+            const proposed: Record<string, unknown> = { ...(input.payload ?? {}) }
+            if (proposed.agentID && proposed.baseVersion === undefined) {
+              const target = state.agents[String(proposed.agentID)]
+              if (target) proposed.baseVersion = target.version
+            }
+            return createApproval(state, {
               kind: "roster_change",
               title: input.title,
               detail: input.detail,
               agentID: profileID,
               workID: this.workForSession(state, context.sessionID)?.id,
-              payload: input.kind ? { kind: input.kind, ...input.payload } : undefined,
-            }),
-          )
+              payload: input.kind ? { kind: input.kind, ...proposed } : undefined,
+            })
+          })
           return { content: `Proposal recorded for user approval: ${approval.id}` }
         },
       })
@@ -468,21 +502,30 @@ export class EnsembleServer {
     return this.catalogModels
   }
 
-  private archiveAgent(agentID: string, replacementLeaderID?: string) {
-    return this.store.mutate((state) => {
+  private async archiveAgent(agentID: string, replacementLeaderID?: string) {
+    const sessions = await this.store.mutate((state) => {
+      const running = Object.values(state.work)
+        .filter((work) => work.agentID === agentID && work.status === "running" && work.sessionID)
+        .map((work) => work.sessionID!)
       const result = archiveAgent(state, agentID, replacementLeaderID)
       if (!result.ok) throw Object.assign(new Error(result.message), { code: result.code })
-      return result
+      return running
     })
+    for (const sessionID of sessions) await this.ctx.session.interrupt({ sessionID, resume: false }).catch(() => undefined)
+    return { ok: true }
   }
 
   private async removeAgent(agentID: string, replacementLeaderID?: string, deleteNativeSessions = false) {
     const nativeIDs = await this.store.mutate((state) => {
       const conversations = Object.values(state.conversations).filter((conversation) => conversation.agentID === agentID)
+      const running = Object.values(state.work)
+        .filter((work) => work.agentID === agentID && work.status === "running" && work.sessionID)
+        .map((work) => work.sessionID!)
       const result = deleteAgent(state, agentID, replacementLeaderID)
       if (!result.ok) throw Object.assign(new Error(result.message), { code: result.code })
-      return conversations.flatMap((conversation) => conversation.sessionIDs)
+      return [...new Set([...conversations.flatMap((conversation) => conversation.sessionIDs), ...running])]
     })
+    for (const sessionID of nativeIDs) await this.ctx.session.interrupt({ sessionID, resume: false }).catch(() => undefined)
     if (deleteNativeSessions) {
       for (const sessionID of nativeIDs) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
     }
@@ -535,21 +578,30 @@ export class EnsembleServer {
     })
   }
 
-  private archiveChannel(channelID: string) {
-    return this.store.mutate((state) => {
+  private async archiveChannel(channelID: string) {
+    const sessions = await this.store.mutate((state) => {
+      const running = Object.values(state.work)
+        .filter((work) => work.channelID === channelID && work.status === "running" && work.sessionID)
+        .map((work) => work.sessionID!)
       const result = archiveChannel(state, channelID)
       if (!result.ok) throw Object.assign(new Error(result.message), { code: result.code })
-      return result
+      return running
     })
+    for (const sessionID of sessions) await this.ctx.session.interrupt({ sessionID, resume: false }).catch(() => undefined)
+    return { ok: true }
   }
 
   private async removeChannel(channelID: string, deleteNativeSessions = false) {
     const nativeIDs = await this.store.mutate((state) => {
       const conversations = Object.values(state.conversations).filter((conversation) => conversation.channelID === channelID)
+      const running = Object.values(state.work)
+        .filter((work) => work.channelID === channelID && work.status === "running" && work.sessionID)
+        .map((work) => work.sessionID!)
       const result = deleteChannel(state, channelID)
       if (!result.ok) throw Object.assign(new Error(result.message), { code: result.code })
-      return conversations.flatMap((conversation) => conversation.sessionIDs)
+      return [...new Set([...conversations.flatMap((conversation) => conversation.sessionIDs), ...running])]
     })
+    for (const sessionID of nativeIDs) await this.ctx.session.interrupt({ sessionID, resume: false }).catch(() => undefined)
     if (deleteNativeSessions) {
       for (const sessionID of nativeIDs) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
     }
@@ -680,11 +732,11 @@ export class EnsembleServer {
     })
   }
 
-  private async promoteMemory(payload: Json): Promise<Approval> {
+  private async promoteMemory(payload: Json): Promise<any> {
     return this.store.mutate((state) => {
       const entry = state.memories[payload.id]
       if (!entry || entry.deletedAt) throw Object.assign(new Error("Memory not found."), { code: "not_found" })
-      if (entry.scope === "global") return { id: "already-global" } as Approval
+      if (entry.scope === "global") return { alreadyGlobal: true, memoryID: entry.id }
       return createApproval(state, {
         kind: "promote_memory",
         title: `Promote memory for ${state.agents[entry.agentID ?? ""]?.name ?? "agent"}`,
@@ -841,6 +893,18 @@ export class EnsembleServer {
       const approval = resolveApproval(state, payload.id, payload.approve ? "approved" : "rejected", payload.resolution)
       if (!approval) throw Object.assign(new Error("Approval not found or already resolved."), { code: "not_found" })
       if (approval.status === "approved") {
+        if (approval.kind === "cross_project" && approval.payload) {
+          const payload = approval.payload as any
+          const entry = createMemoryEntry({
+            id: newId("mem"),
+            text: String(payload.text ?? ""),
+            scope: "global",
+            origin: "manual",
+            source: `approved-share:${approval.agentID ?? "agent"}`,
+            agentID: approval.agentID,
+          })
+          state.memories[entry.id] = entry
+        }
         if (approval.kind === "promote_memory" && approval.memoryID) {
           const entry = state.memories[approval.memoryID]
           if (entry) {
@@ -993,7 +1057,7 @@ export class EnsembleServer {
         if (payload.channelID && work.channelID !== payload.channelID) continue
         if (payload.agentID && work.agentID !== payload.agentID) continue
         if (work.status === "running" && work.sessionID) affected.push(work.sessionID)
-        work.status = work.status === "running" ? "paused" : "paused"
+        work.status = "paused"
       }
       if (payload.channelID && state.channels[payload.channelID]) state.channels[payload.channelID].paused = true
       return affected
@@ -1237,18 +1301,18 @@ export class EnsembleServer {
       }
       const current = this.store.snapshot()
       if (current.work[workID]?.status === "cancelled" || current.work[workID]?.status === "paused") return
-      if (result?.failure && (!availabilityFailure(result.failure) || !state.settings.modelFallback || result.tools.length > 0)) {
-        await this.finishWork(workID, "failed", result.failure.message ?? "The model request failed.")
-        return
-      }
       if (result?.failure) {
-        const uncertain = anyToolCall(listData(await this.ctx.session.context({ sessionID: work.sessionID ?? "" }).catch(() => [])), work.startedAt ?? 0)
-        await this.finishWork(workID, "paused", uncertain ? "Model recovery stopped because a tool outcome is uncertain. Retry only after reviewing the transcript." : result.failure.message ?? "All backup models failed.")
+        const uncertain = result.tools.length > 0 || anyToolCall(listData(await this.ctx.session.context({ sessionID: work.sessionID ?? "" }).catch(() => [])), work.startedAt ?? 0)
+        await this.finishWork(
+          workID,
+          uncertain ? "paused" : "failed",
+          uncertain
+            ? "Model recovery stopped because a tool outcome is uncertain. Review the transcript before retrying."
+            : result.failure.message ?? "The model request failed.",
+        )
         return
       }
       const text = result?.text || "Work completed."
-      let replySessionID: string | undefined
-      let replyHandoffID: string | undefined
       await this.store.mutate((draft) => {
         const workDraft = draft.work[workID]
         const conv = draft.conversations[work.conversationID]
@@ -1287,20 +1351,19 @@ export class EnsembleServer {
             handoff.status = "completed"
             handoff.reply = text
             handoff.updatedAt = now()
-            replyHandoffID = handoff.id
             const requester = Object.values(draft.conversations).find(
               (item) => item.channelID === workDraft.channelID && item.agentID === handoff.fromAgentID,
             )
-            replySessionID = requester?.activeSessionID
+            requester?.messages.push({
+              id: newId("msg"),
+              role: "system",
+              text: `Handoff ${handoff.id} reply from ${agent.name}: ${text}`,
+              createdAt: now(),
+              workID,
+            })
           }
         }
       })
-      if (replySessionID && replyHandoffID) {
-        await this.ctx.session.synthetic({
-          sessionID: replySessionID,
-          text: `[ensemble_handoff ${replyHandoffID}] ${agent.name}: ${text}`,
-        }).catch(() => undefined)
-      }
     } catch (error: any) {
       await this.finishWork(workID, "failed", error?.message ?? String(error))
     }

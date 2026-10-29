@@ -28,10 +28,6 @@ export function memoryContext(entries: MemoryEntry[]): string {
   ].join("\n")
 }
 
-export function canPromoteMemory(entry: MemoryEntry): boolean {
-  return entry.origin === "automatic" && entry.scope === "project"
-}
-
 export function createMemoryEntry(input: {
   id: string
   text: string

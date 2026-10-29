@@ -36,8 +36,8 @@ Open `/ensemble` from the prompt, or run the **Open Ensemble** palette command. 
 
 - **Direct conversation:** create a native session with `agent: "build"`, apply the profile’s main model and Skillbox permissions, inject persona/memory, prompt, wait, then record the transcript in Ensemble.
 - **Channel message:** parse recognized `!mentions`; unaddressed messages go only to the leader. Each recipient gets a queued work item and a per-agent channel conversation.
-- **Handoff:** the `ensemble_handoff` tool records a visible handoff, enforces channel membership and the task-chain limit, and queues the target’s work. Replies are posted to the channel and returned to the requester as a synthetic message.
-- **Approvals:** outside-roster contact, chain-limit continuation, memory promotion, roster proposals, and interrupted work. They block dependent work only.
+- **Handoff:** the `ensemble_handoff` tool records a visible handoff, enforces channel membership and the task-chain limit, and queues the target’s work. Replies are posted to the channel and recorded on the requester’s conversation.
+- **Approvals:** outside-roster contact, chain-limit continuation, memory promotion, cross-project/private transcript sharing, roster proposals, and interrupted work. They block dependent work only.
 - **Queues:** one active turn per conversation, a configurable team-wide limit (default 3), and one editing turn per resolved checkout. Distinct checkouts run in parallel.
 - **Model fallback:** availability failures switch through the ordered backup list with visible status; native retries are disabled for Ensemble sessions so fallback can decide. Any tool call makes a retry unsafe, so work pauses for review instead of replaying.
 - **Lifecycle:** archive preserves history; permanent delete is separate and asks whether native sessions should also be deleted.

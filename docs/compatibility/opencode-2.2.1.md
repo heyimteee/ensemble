@@ -142,16 +142,17 @@ Unknown variants are accepted at session creation and fail only at execution.
 
 **Decision:** populate settings from the model's reported variants and reject unknown values before saving. Do not rely on session creation to validate.
 
-## Not yet verified
+## Feature-level verification
 
-These belong to implementation tickets and are not compatibility blockers:
+The compatibility probe did not implement product features. The implementation verification record covers settings, channel routing, handoffs, approvals, queues, editing locks, chain limits, concurrent work, and background execution on the same isolated 2.2.1 installation:
 
-- Full settings tabs and form behavior inside the plugin page.
-- Channel membership, leader routing, mentions, handoffs, and approvals.
-- Conversation queues, editing queues, chain limits, and concurrent sessions.
-- Shared-service work after TUI exit (standalone server was used for isolation).
+- [Implementation verification, 2026-10-29](../verification/2026-10-29.md)
+
+Still unverified at the compatibility boundary:
+
+- The shared `opencode service` lifecycle with real Ensemble work (the isolated standalone server was used).
 - Multiple TUI clients resolving the same approval.
-- Worktree-based parallel editing and cross-checkout coordination.
+- Worktree-based parallel editing and cross-checkout coordination beyond the in-process editing queue.
 - GUI or web clients; these are out of scope.
 
 ## Conclusion

@@ -10,10 +10,6 @@ export function queuedWork(state: EnsembleState): WorkItem[] {
     .sort((a, b) => a.queueOrder - b.queueOrder || a.createdAt - b.createdAt)
 }
 
-export function editingLock(state: EnsembleState): string | undefined {
-  return activeWork(state).find((item) => item.mode === "edit" && item.checkoutKey)?.checkoutKey
-}
-
 export function isRunnable(state: EnsembleState, item: WorkItem): boolean {
   if (item.status !== "queued") return false
   const agent = state.agents[item.agentID]
