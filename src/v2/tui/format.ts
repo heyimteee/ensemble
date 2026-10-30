@@ -47,8 +47,18 @@ export function resultForTask(state: SnapshotState | null, task: Subtask): Messa
   return (state?.messages[task.workspaceID] ?? []).find((message) => message.id === task.resultMessageID)
 }
 
+export function markdownText(value: string): string {
+  return value
+    .replace(/```[\w-]*\n?/g, "\n")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "• ")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+}
+
 export function wrapText(value: string, width: number, maxLines = 6): string[] {
-  const words = value.replaceAll("\n", " ").split(/\s+/).filter(Boolean)
+  const words = markdownText(value).replaceAll("\n", " ").split(/\s+/).filter(Boolean)
   if (words.length === 0) return [""]
   const lines: string[] = []
   let line = ""

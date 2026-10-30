@@ -180,7 +180,7 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 ## Known limitations
 
 - Mention selection uses `m` plus a member picker; there is no inline autocomplete inside the composer.
-- Markdown is shown as wrapped plain text in the group chat; rich markdown rendering and syntax highlighting are not implemented.
+- The group chat renders basic Markdown structure (headings, bullets, inline code, links) as wrapped terminal text. Rich syntax highlighting and tables are not implemented.
 - Direct one-to-one conversations are not implemented in the v2 TUI; a one-member workspace is not treated as a DM.
 - Some host dialog closes leave stale cells until the next full repaint; the page remains usable.
 - No npm package, versioning policy, or license has been selected.
