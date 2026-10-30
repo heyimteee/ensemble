@@ -12,22 +12,24 @@ _Avoid_: Bot, worker (when referring to the lasting teammate).
 **Skillbox**: The exclusive collection of optional skills assigned to an agent. A skill is reusable guidance, not a grant of tool permissions.
 _Avoid_: Toolbox (when referring to assigned skills).
 
-**Project**: The body of work associated with a project directory or repository and its channels.
+**Workspace**: A directory-bound project room with a group chat, a roster, and exactly one leader. One canonical directory belongs to one workspace.
+_Avoid_: Channel, room, group (when referring to this concept).
 
-**Channel**: A project conversation with a defined membership and exactly one leader.
-_Avoid_: Room, group (when referring to this concept).
+**Group chat**: The shared transcript of a workspace where the user and agents communicate. It is the primary interface; native sessions are execution detail underneath.
 
-**Leader**: The channel member responsible for receiving unaddressed messages and coordinating work. Leadership does not confer additional permissions.
+**Leader**: The workspace member responsible for receiving unaddressed messages, coordinating work, and delegating subtasks. Leadership does not confer additional permissions.
 
-**Mention**: An explicit recipient reference introduced with `!` and associated with an agent's lasting identity.
+**Mention**: An explicit recipient reference introduced with `@` and associated with an agent's lasting identity. `!` is accepted as an alias.
 
-**Direct conversation**: A private conversation between the user and one agent, separate from channel conversations.
+**Direct conversation**: A private conversation between the user and one agent, separate from a workspace group chat.
 
-**Handoff**: A visible request from one agent to another, with a recipient, context, result, and status.
+**Handoff**: A visible request from one agent to another, with a recipient, typed task, constraints, expected answer, and status.
 
-**Task chain**: A connected sequence of work and handoffs originating from a request.
+**Subtask**: A unit of work inside a workspace with an assignee, typed instructions, and exactly one visible state: pending, working, or replied.
 
-**Work**: A queued or running request for one agent in one conversation, with a mode, status, and optional handoff or chain.
+**Task tree**: The parent/child relationship between a user request, a leader's delegation, worker subtasks, and an optional leader synthesis.
+
+**Work**: A queued or running execution of a subtask, with an agent, mode, and status.
 
 **Pending settings**: A saved role, model, or Skillbox change that will apply to subsequent work, not silently to an active turn.
 
@@ -37,14 +39,18 @@ _Avoid_: Room, group (when referring to this concept).
 
 **Conversation queue**: Pending messages awaiting an agent's availability in one conversation.
 
-**Editing queue**: Pending editing work coordinated across Ensemble channels that target the same checkout.
+**Editing queue**: Pending editing work coordinated across subtasks that target the same workspace checkout.
 
 **Agent memory**: Saved knowledge belonging to an agent, distinct from conversation history. Its scope can be project-specific or cross-project.
 
-**Channel memory**: Saved project facts and decisions shared with all members of one channel.
+**Workspace memory**: Saved project facts and decisions shared with all members of one workspace.
 
 **Memory provenance**: The recorded origin of a memory: Automatically learned or Manually added. Later edits do not erase its origin.
 
-**Native session**: An OpenCode session in which an agent's execution and tool activity can be inspected through OpenCode's existing interface.
+**Native session**: An OpenCode session in which an agent's execution and tool activity can be inspected through OpenCode's existing interface. A workspace binds one native session per agent.
+
+**Session binding**: The association between a workspace, an agent, and that agent's persistent native session and behavioral version.
+
+**Leader key**: The `~` prefix that opens Ensemble keyboard navigation outside text entry. `~?` shows all shortcuts; `~q` leaves Ensemble.
 
 **Backup model**: An alternative model in an agent's ordered fallback list, used for eligible model availability failures.
