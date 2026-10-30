@@ -19,6 +19,7 @@ BASE="${TMPDIR:-/tmp}/opencode/ensemble-live-$$"
 SERVE="ensemble-live-serve-$$"
 TUI="ensemble-live-tui-$$"
 mkdir -p "$BASE/config/opencode" "$BASE/project" "$BASE/data" "$BASE/state"
+git init -q "$BASE/project" 2>/dev/null || true
 cat > "$BASE/config/opencode/opencode.json" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
@@ -75,6 +76,15 @@ fi
 EMPTY=$(tmux capture-pane -p -t "$TUI")
 if ! grep -q "No currently opened session" <<<"$EMPTY"; then
   echo "live-check: empty chat state was not shown" >&2
+  exit 1
+fi
+if ! grep -q "I init" <<<"$EMPTY"; then
+  echo "live-check: the visible I init shortcut was not shown" >&2
+  exit 1
+fi
+if ! grep -q "git:(" <<<"$EMPTY"; then
+  echo "live-check: git metadata was not shown" >&2
+  tmux capture-pane -p -t "$TUI" >&2 || true
   exit 1
 fi
 
@@ -148,9 +158,21 @@ PY
   sleep 2
   tmux send-keys -t "$TUI" 'i'; sleep 0.5
   tmux send-keys -t "$TUI" '$'; sleep 1
+  POPUP=$(tmux capture-pane -p -t "$TUI")
+  if ! grep -q "\$ agents" <<<"$POPUP"; then
+    echo "live-check: inline agent popup did not open above the composer" >&2
+    tmux capture-pane -p -t "$TUI" >&2 || true
+    exit 1
+  fi
   tmux send-keys -t "$TUI" Enter; sleep 0.5
   tmux send-keys -t "$TUI" ' review '; sleep 0.3
   tmux send-keys -t "$TUI" '@'; sleep 1
+  FILE_POPUP=$(tmux capture-pane -p -t "$TUI")
+  if ! grep -q "@ files" <<<"$FILE_POPUP"; then
+    echo "live-check: inline file popup did not open above the composer" >&2
+    tmux capture-pane -p -t "$TUI" >&2 || true
+    exit 1
+  fi
   tmux send-keys -t "$TUI" 'notes'; sleep 0.5
   tmux send-keys -t "$TUI" Enter; sleep 0.5
   COMPOSER=$(tmux capture-pane -p -t "$TUI")
@@ -162,7 +184,7 @@ PY
   tmux send-keys -t "$TUI" C-u; sleep 0.3
   tmux send-keys -t "$TUI" '/'; sleep 1
   COMMAND=$(tmux capture-pane -p -t "$TUI")
-  if ! grep -q "Ensemble command" <<<"$COMMAND"; then
+  if ! grep -q "/ commands" <<<"$COMMAND"; then
     echo "live-check: slash command palette did not open" >&2
     exit 1
   fi

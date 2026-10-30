@@ -1,7 +1,8 @@
 import { For, Show } from "solid-js"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState, Subtask } from "../types.ts"
 import type { Palette } from "./theme.ts"
-import { agentColor, agentName, busyCount, missingSkills, renderMarkdownLines, short, unreadCount } from "./format.ts"
+import { agentColor, agentName, busyCount, missingSkills, short, unreadCount } from "./format.ts"
+import { pickerWindow } from "./picker.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
@@ -36,12 +37,13 @@ export function Rail(props: {
   filter: string
 }) {
   return (
-    <box width={props.width} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
+    <box width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
       <For each={props.items}>{(item, index) => {
         const previous = index() > 0 ? props.items[index() - 1] : undefined
         const kindHeader = item.kind !== previous?.kind ? item.kind.toUpperCase() + "S" : ""
         const groupHeader = item.group && item.group !== previous?.group ? item.group : ""
         const selected = props.cursor === index()
+        const agent = item.kind === "agent" ? props.state?.agents[item.id] : undefined
         const leader = item.kind === "agent" && props.state?.workspaces[props.activeWorkspaceID ?? ""]?.leaderID === item.id
         const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
         const unread = workspace ? unreadCount(props.state, workspace) : 0
@@ -57,7 +59,7 @@ export function Rail(props: {
             <Show when={groupHeader}>
               <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
             </Show>
-            <text fg={selected ? (props.focus ? props.colors.good : props.colors.warn) : props.colors.text} bg={props.colors.bg} width="100%" truncate>
+            <text fg={selected ? props.colors.good : agent ? agentColor(agent, props.colors.accent as string, index(), props.colors.categorical) : props.focus ? props.colors.text : props.colors.muted} bg={props.colors.bg} width="100%" truncate>
               {selected ? "› " : "  "}{item.kind === "workspace" ? `#${item.title}` : item.title}
               {leader ? " · leader" : ""}
               {item.detail ? ` · ${item.detail}` : ""}
@@ -76,41 +78,6 @@ export function Rail(props: {
   )
 }
 
-export function Transcript(props: {
-  colors: Palette
-  messages: ChatLine[]
-  width: number
-  emptyTitle: string
-  emptyBody: string
-  busy: boolean
-  queued: number
-}) {
-  return (
-    <scrollbox flexGrow={1} stickyScroll stickyStart="bottom" width="100%">
-      <Show when={props.messages.length > 0} fallback={
-        <box flexDirection="column" padding={1}>
-          <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>{props.emptyTitle}</text>
-          <text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{props.emptyBody}</text>
-        </box>
-      }>
-        <For each={props.messages}>{(message) => {
-          const color = message.role === "user" ? props.colors.good : message.role === "system" ? props.colors.muted : props.colors.accent
-          const lines = renderMarkdownLines(message.text || (message.streaming ? "…" : ""), Math.max(16, props.width))
-          return (
-            <box flexDirection="column" paddingY={0} marginTop={1}>
-              <text fg={color} bg={props.colors.bg} width="100%" truncate>
-                {message.author}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.streaming ? " · streaming…" : ""}{message.interrupted ? " · interrupted" : ""}
-              </text>
-              <For each={lines}>{(line) => <text fg={message.role === "system" ? props.colors.muted : props.colors.text} bg={props.colors.bg} width="100%" truncate>{line || " "}</text>}</For>
-            </box>
-          )
-        }}</For>
-      </Show>
-      <Show when={props.busy}><text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>▍ working…</text></Show>
-      <Show when={props.queued > 0}><text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>queued messages: {props.queued}</text></Show>
-    </scrollbox>
-  )
-}
 
 export function TaskBoard(props: {
   colors: Palette
@@ -127,8 +94,8 @@ export function TaskBoard(props: {
     { title: "REPLIED", tasks: props.tasks.filter((task) => task.state === "replied") },
   ]
   return (
-    <box width={props.width} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
-      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>SUBTASKS {props.activeCount > 0 ? `· ${props.activeCount} working` : ""}</text>
+    <box width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
+      <text fg={props.focus ? props.colors.focus : props.colors.accent} bg={props.colors.bg} width="100%" truncate>SUBTASKS {props.activeCount > 0 ? `· ${props.activeCount} working` : ""}</text>
       <TaskGroups colors={props.colors} groups={groups()} state={props.state} cursor={props.cursor} focus={props.focus} />
       <text> </text>
       <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result</text>
@@ -175,7 +142,7 @@ export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cu
 const shortcutGroups: Array<{ title: string; entries: Array<[string, string]> }> = [
   { title: "Leader", entries: [["~", "Leader key"], ["~ ?", "This help"], ["~ q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },
   { title: "Navigation", entries: [["h / l", "Previous / next column"], ["j / k", "Next / previous item"], ["Enter", "Open selected chat"], ["i", "Focus composer"], ["Esc", "Leave composer"]] },
-  { title: "Workspaces", entries: [["n", "New workspace"], ["g", "Edit members and leader"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume"], ["Ctrl+G", "Init Ensemble in this workspace"]] },
+  { title: "Workspaces", entries: [["n", "New workspace"], ["g", "Edit members and leader"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume"], ["I", "Init Ensemble in this workspace"]] },
   { title: "Chat", entries: [["$Name", "Mention an agent"], ["@path", "Reference a workspace file"], ["/command", "Ensemble commands"], ["PageUp / PageDown", "Scroll transcript"]] },
   { title: "Subtasks", entries: [["d", "Delegate"], ["t", "Reassign"], ["Enter", "Open result"], ["r", "Retry"], ["R", "Restart"], ["x", "Cancel"], ["o", "Open native session"]] },
   { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive agent"], ["Ctrl+Shift+A", "Delete agent"]] },
@@ -247,5 +214,37 @@ export function SettingsView(props: {
         <text fg={props.colors.muted}>Ctrl+S save · Esc cancel</text>
       </box>
     </Show>
+  )
+}
+
+export type PickerItem = { id: string; label: string; selected: boolean }
+
+export function PickerOverlay(props: {
+  colors: Palette
+  title: () => string
+  query: () => string
+  items: () => PickerItem[]
+  cursor: () => number
+  multiple: () => boolean
+}) {
+  const slots = Array.from({ length: 8 }, (_, index) => index)
+  return (
+    <box width="100%" height={16} minHeight={16} flexShrink={0} border borderStyle="double" borderColor={props.colors.focus} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
+      <text fg={props.colors.focus} bg={props.colors.bg} width="100%" truncate>{props.title()}</text>
+      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>search: {props.query() || "type to filter"} · {props.items().length} matches</text>
+      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>────────────────────────────────────────────────────────────</text>
+      <For each={slots}>{(slot) => (
+        <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{(() => {
+          const items = props.items()
+          const cursor = props.cursor()
+          const offset = pickerWindow(cursor, items.length).start
+          const item = items[offset + slot]
+          if (!item) return ""
+          const marker = props.multiple() ? (item.selected ? "[x] " : "[ ] ") : (item.selected ? "(•) " : "( ) ")
+          return `${offset + slot === cursor ? "›" : " "} ${marker}${item.label}`
+        })()}</text>
+      )}</For>
+      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>↑/↓ move · {props.multiple() ? "space toggle · " : ""}enter confirm · esc cancel</text>
+    </box>
   )
 }

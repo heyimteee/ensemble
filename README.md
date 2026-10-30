@@ -14,9 +14,10 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **New agents start homeless.** Creating an agent opens a direct chat in its own `.ensemble` home. Add it to a workspace with `g`; you can move its homeless session into the workspace.
 - **The leader coordinates.** Unaddressed messages go to the workspace leader, who can answer or delegate typed subtasks.
 - **Subtasks have three states:** Pending, Working, Replied.
-- **Replies are full Markdown.** Chat streams into a scrollable transcript with headings, lists, code blocks, and tables; replies are not truncated.
+- **Replies stream and stay readable.** Group and direct replies stream token by token. Tables, fenced code, headings, and lists are formatted as terminal text; replies are never truncated. `PageUp` / `PageDown` scroll the transcript.
 - **Workspace config is human-editable.** `<workspace>/.ensemble/config.json` is authoritative for its name, leader, members, synthesis, and pause state. History stays in OpenCode storage, not the repository.
-- **Init writes the team contract.** `Ctrl+G` or `/init` runs native `/init`, then places the versioned Ensemble block at the top of `AGENTS.md`.
+- **Init writes the team contract.** `I` or `/init` runs native `/init`, then places the versioned Ensemble block at the top of `AGENTS.md`.
+- **Completions stay in the composer.** `$`, `@`, and `/` open a bordered popup above the composer; typing filters it, arrows move, and Enter inserts or runs. Workspace members use a searchable checklist instead of comma-separated prompts.
 - **Skillboxes and models are per-agent.** Only assigned skills are available; backup models recover from availability failures.
 - **Memory and approvals are scoped.** Project memory, workspace memory, and global memory have provenance and approval rules.
 - **Work continues through OpenCode's server** after the Ensemble page closes.
@@ -51,7 +52,7 @@ If the plugin was already loaded before updating the package exports, run `openc
 | `@` | Reference a workspace file in the composer |
 | `/` | Ensemble command palette in the composer; workspace search when not composing |
 | `p` | Pause or resume the workspace |
-| `Ctrl+G` | Init Ensemble in the current workspace |
+| `I` | Init Ensemble in the current workspace |
 | `n` | New workspace |
 | `g` | Edit workspace members / leader |
 | `w` / `W` | Next / previous workspace |
@@ -71,6 +72,7 @@ If the plugin was already loaded before updating the package exports, run `openc
 | `Ctrl+S` | Save settings |
 | `Space` | Toggle skill in Skillbox |
 | `Ctrl+F` | Filter skills |
+| `PageUp` / `PageDown` | Scroll the transcript |
 | `Esc` | Back or cancel |
 
 A literal `~` typed in the composer or a dialog stays text. The leader key only acts when the composer and dialogs are inactive. Press `i` to focus the bottom composer; `Esc` cancels it. In the composer, `$Name` addresses an agent, `@path` references a workspace file, and `/` opens Ensemble commands.

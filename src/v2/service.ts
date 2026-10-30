@@ -73,6 +73,7 @@ export class EnsembleV2Service {
   private readonly homeBindingPromises = new Map<string, Promise<{ sessionID: string; directory: string }>>()
   private readonly bindingPromises = new Map<string, Promise<{ sessionID: string } | undefined>>()
   private readonly workspaceEpoch = new Map<string, number>()
+  private readonly liveBySession = new Map<string, { message: Message; lastSave: number; buffer: string }>()
   private globalEpoch = 0
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
@@ -103,6 +104,13 @@ export class EnsembleV2Service {
       try {
         for await (const event of this.ctx.event.subscribe({ types: ["skill.updated", "model.updated", "provider.updated"], signal: this.catalogAbort!.signal })) {
           if (event.type) void this.catalog.refresh()
+        }
+      } catch {}
+    })()
+    void (async () => {
+      try {
+        for await (const event of this.ctx.event.subscribe({ types: ["session.text.delta", "session.idle"], signal: this.catalogAbort!.signal })) {
+          await this.handleStreamEvent(event as any)
         }
       } catch {}
     })()
@@ -1659,6 +1667,22 @@ export class EnsembleV2Service {
     })()
   }
 
+  private async handleStreamEvent(event: any): Promise<void> {
+    if (event?.type !== "session.text.delta") return
+    const data = event.data ?? event
+    const live = this.liveBySession.get(String(data.sessionID ?? ""))
+    if (!live) return
+    const delta = String(data.delta ?? "")
+    if (!delta) return
+    live.buffer += delta
+    live.message.text = live.buffer
+    live.message.streaming = true
+    if (now() - live.lastSave > 120) {
+      live.lastSave = now()
+      await this.store.saveMessage(live.message).catch(() => undefined)
+    }
+  }
+
   private async finalizeStream(message: Message | undefined, text: string, interrupted = false, epoch = 0, workspaceEpoch = 0, workspaceID = ""): Promise<Message | undefined> {
     if (!message) return undefined
     if (this.globalEpoch !== epoch) return undefined
@@ -1702,31 +1726,11 @@ export class EnsembleV2Service {
     this.runBySession.set(binding.sessionID, runID)
     await this.store.saveAgent(agent)
     let live: Message | undefined
-    let timer: ReturnType<typeof setInterval> | undefined
-    let pollBusy = false
     let attemptStartedAt = now()
-    let streamText = ""
     try {
       await this.ctx.session.instructions.entry.put({ sessionID: binding.sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
       live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true })
-      const poll = async () => {
-        if (pollBusy || !live) return
-        if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return
-        const currentTask = this.store.snapshot().subtasks[task.id]
-        if (!currentTask || currentTask.activeRunID !== runID) return
-        pollBusy = true
-        try {
-          const messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
-          const text = assistantResult(messages, attemptStartedAt).text
-          if (text && text !== streamText) {
-            streamText = text
-            live.text = text
-            await this.store.saveMessage(live)
-          }
-        } catch {}
-        finally { pollBusy = false }
-      }
-      timer = setInterval(() => { void poll() }, 500)
+      this.liveBySession.set(binding.sessionID, { message: live, lastSave: 0, buffer: "" })
       await this.ctx.session.instructions.entry.put({
         sessionID: binding.sessionID,
         key: "ensemble.v2.context",
@@ -1738,8 +1742,7 @@ export class EnsembleV2Service {
         const model = models[index]
         if (index > 0) {
           await this.appendMessage(workspace, { author: "system", text: `Model unavailable; switched to ${model.providerID}/${model.modelID}${model.variant ? `#${model.variant}` : ""}.`, kind: "system", taskID: task.id })
-          streamText = ""
-          if (live) { live.text = ""; await this.store.saveMessage(live) }
+          if (live) { live.text = ""; this.liveBySession.get(binding.sessionID)!.buffer = ""; await this.store.saveMessage(live) }
         }
         await this.ctx.session.switchModel({ sessionID: binding.sessionID, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } }).catch(() => undefined)
         attemptStartedAt = now()
@@ -1796,7 +1799,7 @@ export class EnsembleV2Service {
       if (currentTask?.activeRunID === runID) await this.failTask(currentTask, error?.message ?? String(error))
       await this.finalizeStream(live, error?.message ?? String(error), true, globalEpoch, workspaceEpoch, task.workspaceID)
     } finally {
-      if (timer) clearInterval(timer)
+      this.liveBySession.delete(binding.sessionID)
       if (live?.streaming) await this.finalizeStream(live, live.text || "Reply interrupted.", true, globalEpoch, workspaceEpoch, task.workspaceID)
       run.status = "completed"
       this.activeRuns.delete(runID)

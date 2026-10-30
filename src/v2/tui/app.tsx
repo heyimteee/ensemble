@@ -1,16 +1,34 @@
-import { Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
-import { ApprovalList, HelpView, Rail, SettingsView, TaskBoard, Transcript, type ChatLine, type RailItem, type SettingsTab } from "./components.tsx"
-import { composerTrigger, insertAgentMention, insertFileReference, parseSlashCommand } from "./composer.ts"
-import { fuzzyMatch, missingSkills, resultForTask, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, TaskBoard, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { composerTrigger, parseSlashCommand } from "./composer.ts"
+import { fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { palette } from "./theme.ts"
+import { toggleSelected } from "./picker.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat" | "tasks"
+type PickerState = {
+  mode: "members" | "leader" | "workspace"
+  title: string
+  candidates: Array<{ id: string; label: string }>
+  selected: Set<string>
+  cursor: number
+  query: string
+  resolve: (value: string[] | undefined) => void
+}
+
+type Completion = {
+  kind: "agent" | "file" | "command"
+  query: string
+  start: number
+  cursor: number
+  items: Array<{ title: string; value: string }>
+}
 
 function directoryOf(context: any): string {
   return context.location?.directory ?? context.data.location.default().directory
@@ -45,6 +63,7 @@ export function EnsembleV2App() {
   const [helpOpen, setHelpOpen] = createSignal(false)
   const [approvalsOpen, setApprovalsOpen] = createSignal(false)
   const [status, setStatus] = createSignal("Loading workspace…")
+  const [gitLabel, setGitLabel] = createSignal("")
   const [busy, setBusy] = createSignal(false)
   const [modal, setModal] = createSignal(false)
   const [approvalCursor, setApprovalCursor] = createSignal(0)
@@ -54,7 +73,9 @@ export function EnsembleV2App() {
   const [backupCursor, setBackupCursor] = createSignal(0)
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
   const [composerActive, setComposerActive] = createSignal(false)
-  const [completionOpen, setCompletionOpen] = createSignal(false)
+  const [completion, setCompletion] = createSignal<Completion | null>(null)
+  const [picker, setPicker] = createSignal<PickerState | null>(null)
+  const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
   const [transcriptOffset, setTranscriptOffset] = createSignal(0)
   let composerRef: any
   const [restored, setRestored] = createSignal(false)
@@ -108,16 +129,23 @@ export function EnsembleV2App() {
   })
   const groupMessages = createMemo(() => {
     const workspace = activeWorkspace()
-    return workspace ? (state()?.messages[workspace.id] ?? []).slice(Math.max(0, (state()?.messages[workspace.id]?.length ?? 0) - transcriptOffset() - 200)) : []
+    return workspace ? (state()?.messages[workspace.id] ?? []).slice(-40) : []
   })
   const chatLines = createMemo<ChatLine[]>(() => {
-    if (surface()?.kind === "agent") return (chatContext()?.messages ?? []).map((message: ChatMessage) => ({
-      id: message.id,
-      author: message.author,
-      role: message.role,
-      text: message.text,
-      createdAt: message.createdAt,
-    }))
+    if (surface()?.kind === "agent") {
+      const messages = (chatContext()?.messages ?? []).slice(-40).map((message: ChatMessage) => ({
+        id: message.id,
+        author: message.author,
+        role: message.role,
+        text: message.text,
+        createdAt: message.createdAt,
+      }))
+      const live = liveDm()
+      if (live && chatContext()?.sessionID === live.sessionID) {
+        messages.push({ id: "live", author: surfaceAgent()?.name ?? "Agent", role: "assistant" as const, text: live.text, createdAt: Date.now(), streaming: true })
+      }
+      return messages
+    }
     return groupMessages().map((message) => ({
       id: message.id,
       author: message.author === "user" ? "You" : message.author === "system" ? "Ensemble" : state()?.agents[message.agentID ?? ""]?.name ?? "Unknown agent",
@@ -129,6 +157,21 @@ export function EnsembleV2App() {
       createdAt: message.createdAt,
     }))
   })
+  const transcriptLines = () => chatLines().flatMap((message) => [
+    `${message.author}${message.streaming ? " · streaming…" : ""}${message.interrupted ? " · interrupted" : ""}`,
+    ...renderMarkdownLines(message.text || (message.streaming ? "…" : ""), Math.max(16, messageWidth())),
+    "",
+  ])
+  const emptyChat = () => surface()?.kind === "agent"
+    ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}\n\nSend a direct message. It goes to this agent's native OpenCode session.`
+    : "Group chat\n\nSay something to your team. $Name mentions an agent; @path references a file."
+  const plainTranscript = () => {
+    const lines = transcriptLines()
+    if (lines.length === 0) return emptyChat()
+    const end = Math.max(0, lines.length - transcriptOffset())
+    return lines.slice(Math.max(0, end - messageHeight()), end).join("\n")
+  }
+
   const settingsAgent = createMemo(() => settingsAgentID() ? state()?.agents[settingsAgentID()!] : undefined)
   const agentMemories = createMemo(() => {
     const agent = settingsAgent()
@@ -147,6 +190,8 @@ export function EnsembleV2App() {
   const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
   const taskWidth = () => Math.max(28, Math.min(38, Math.floor(viewWidth() * 0.3)))
   const messageWidth = () => Math.max(20, viewWidth() - railWidth() - taskWidth() - 8)
+  const viewHeight = () => context.renderer.height ?? 40
+  const messageHeight = () => Math.max(6, viewHeight() - 12)
 
   const isOurRoute = () => {
     const route = context.ui.router.current()
@@ -175,7 +220,7 @@ export function EnsembleV2App() {
     const value = surface()
     if (value?.kind !== "agent") { setChatContext(null); return }
     try {
-      const next = await callRpc(context, "chat.context", { agentID: value.agentID, workspaceID: value.workspaceID })
+      const next = await invoke(context, "chat.context", { agentID: value.agentID, workspaceID: value.workspaceID })
       setChatContext(next)
     } catch (error: any) {
       setChatContext(null)
@@ -199,10 +244,30 @@ export function EnsembleV2App() {
     await invoke(context, "ui.save", { history, activeWorkspaceID: workspaceID() }).catch(() => undefined)
   }
 
+  let lastGitAt = 0
+  const refreshGit = () => {
+    if (Date.now() - lastGitAt < 2000) return
+    lastGitAt = Date.now()
+    const directory = activeWorkspace()?.directory ?? directoryOf(context)
+    try {
+      const output = execFileSync("git", ["-C", directory, "status", "--porcelain=v1", "--branch"], { encoding: "utf8", timeout: 1500 })
+      const lines = output.split("\n").filter(Boolean)
+      const first = lines[0] ?? ""
+      const branch = first.match(/^## (?:No commits yet on )?([^.\s]+)/)?.[1] ?? "detached"
+      const ahead = Number(first.match(/ahead (\d+)/)?.[1] ?? 0)
+      const behind = Number(first.match(/behind (\d+)/)?.[1] ?? 0)
+      const dirty = lines.length > 1
+      setGitLabel(`git:(${branch}${dirty ? "*" : ""})${ahead ? ` ↑${ahead}` : ""}${behind ? ` ↓${behind}` : ""}`)
+    } catch {
+      setGitLabel("")
+    }
+  }
+
   const refresh = async () => {
     try {
       const next = await callRpc(context, "snapshot", { directory: directoryOf(context) })
       setSnapshot(next)
+      try { (context.renderer as any)?.requestRender?.() } catch {}
       if (next.configError && next.configError !== lastConfigError) {
         lastConfigError = next.configError
         context.ui.toast.show({ title: "Ensemble config", message: next.configError, variant: "warning" })
@@ -239,6 +304,7 @@ export function EnsembleV2App() {
         if (!surface()) setSurface(null)
       }
       if (surface()?.kind === "agent") await refreshChat()
+      refreshGit()
       const current = surface()
       if (current?.kind === "workspace" && !next.state.workspaces[current.workspaceID]) setSurface(null)
       if (current?.kind === "agent" && !next.state.agents[current.agentID]) setSurface(null)
@@ -254,6 +320,7 @@ export function EnsembleV2App() {
     setSurface({ kind: "agent", agentID: agent.id, workspaceID })
     setFocusArea("chat")
     setChatContext(null)
+    setLiveDm(null)
     void refreshChat()
   }
 
@@ -306,26 +373,7 @@ export function EnsembleV2App() {
     return (await modalWrap(() => context.ui.dialog.select({ title: "Reasoning effort", current, options: model.variants.map((variant) => ({ title: variant, value: variant })) }))) ?? undefined
   }
 
-  const pickMembers = async (initial: string[]): Promise<string[] | undefined> => {
-    let selected = new Set(initial)
-    while (true) {
-      const options = rosterAgents().map((agent) => ({ title: `${selected.has(agent.id) ? "[x]" : "[ ]"} ${agent.name}`, value: agent.id }))
-      options.push({ title: "Done", value: "__done__" })
-      const choice = await modalWrap(() => context.ui.dialog.select({
-        title: `Members (${selected.size} selected)`,
-        description: "Select agents, then choose Done.",
-        options,
-        search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
-      }))
-      if (!choice) return undefined
-      if (choice === "__done__") {
-        if (selected.size === 0) { context.ui.toast.show({ title: "Ensemble", message: "Choose at least one member.", variant: "warning" }); continue }
-        return [...selected]
-      }
-      if (selected.has(String(choice))) selected.delete(String(choice))
-      else selected.add(String(choice))
-    }
-  }
+  const pickMembers = (initial: string[]) => openPicker("members", initial)
 
   const pickDirectory = async (): Promise<string | undefined> => {
     const home = homedir()
@@ -357,10 +405,8 @@ export function EnsembleV2App() {
     if (!name) return
     const members = await pickMembers(rosterAgents().slice(0, 1).map((agent) => agent.id))
     if (!members) return
-    const leaderID = await modalWrap(() => context.ui.dialog.select({
-      title: "Workspace leader",
-      options: members.map((memberID) => ({ title: state()?.agents[memberID]?.name ?? memberID, value: memberID })),
-    }))
+    const leader = await openPicker("leader", members.slice(0, 1))
+    const leaderID = leader?.[0]
     if (!leaderID) return
     const synthesis = await modalWrap(() => context.ui.dialog.confirm({ title: "Automatic leader synthesis?", message: "When subtasks complete, the leader combines their replies." }))
     if (synthesis === undefined) return
@@ -407,11 +453,8 @@ export function EnsembleV2App() {
     if (!workspace) return
     const members = await pickMembers(workspace.memberIDs)
     if (!members) return
-    const leaderID = await modalWrap(() => context.ui.dialog.select({
-      title: "Workspace leader",
-      options: members.map((memberID) => ({ title: state()?.agents[memberID]?.name ?? memberID, value: memberID })),
-      current: workspace.leaderID,
-    }))
+    const leader = await openPicker("leader", [workspace.leaderID])
+    const leaderID = leader?.[0]
     if (!leaderID) return
     await run("Update workspace", async () => {
       await invoke(context, "workspace.update", { id: workspace.id, memberIDs: members, leaderID })
@@ -436,39 +479,78 @@ export function EnsembleV2App() {
   }
 
   const focusComposer = () => queueMicrotask(() => composerRef?.focus?.())
+  const handleNativeEvent = (event: any) => {
+    const data = event?.data ?? event
+    const session = String(data?.sessionID ?? "")
+    const delta = String(data?.delta ?? "")
+    if (event?.type === "session.text.delta" && session && delta) {
+      if (chatContext()?.sessionID === session && surface()?.kind === "agent") {
+        setLiveDm((current) => current?.sessionID === session ? { sessionID: session, text: current.text + delta } : { sessionID: session, text: delta })
+      }
+    }
+    if ((event?.type === "session.idle" || event?.type === "session.execution.succeeded" || event?.type === "session.execution.failed" || event?.type === "session.execution.interrupted") && session) {
+      if (chatContext()?.sessionID === session) { setLiveDm(null); void refreshChat() }
+      void refresh()
+    }
+  }
+
   const startCompose = () => {
     if (!surface()) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
     setComposerActive(true); focusComposer()
   }
-  const insertComposer = (value: string) => { if (composerRef) composerRef.value = value; setComposerActive(true); focusComposer() }
   const clearComposer = () => { if (composerRef) composerRef.value = ""; composerRef?.blur?.(); setComposerActive(false) }
 
-  const pickAgentMention = async () => {
-    const chosen = await modalWrap(() => context.ui.dialog.select({
-      title: "Mention an agent",
-      options: activeAgents().map((agent) => ({ title: `${agent.name}${activeWorkspace()?.leaderID === agent.id ? " · leader" : ""}`, value: agent.id })),
-      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
-    }))
-    if (!chosen) return
-    const agent = state()?.agents[String(chosen)]
-    if (agent) insertComposer(insertAgentMention(composerRef?.value ?? "", agent.name))
-  }
+  const agentItems = () => activeAgents().map((agent) => ({ title: `${agent.name}${activeWorkspace()?.leaderID === agent.id ? " · leader" : ""}`, value: agent.name }))
 
-  const pickFileReference = async (current: string) => {
+  const fileItems = () => {
     const workspace = activeWorkspace()
-    if (!workspace) return
-    let files: string[] = []
+    if (!workspace) return []
     try {
       const output = execFileSync("fd", ["--type", "f", "--hidden", "--exclude", ".git", "--exclude", ".ensemble", "--exclude", "node_modules", "--max-depth", "4", ".", workspace.directory], { encoding: "utf8", timeout: 5000 })
-      files = output.split("\n").filter(Boolean).slice(0, 500).map((file) => relative(workspace.directory, file))
-    } catch { files = [] }
-    if (files.length === 0) { context.ui.toast.show({ title: "Ensemble", message: "No files found to reference.", variant: "warning" }); return }
-    const selected = await modalWrap(() => context.ui.dialog.select({
-      title: "Reference a file",
-      options: files.map((file) => ({ title: file, value: file })),
-      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
-    }))
-    if (selected) insertComposer(insertFileReference(current, String(selected)))
+      return output.split("\n").filter(Boolean).slice(0, 500).map((file) => relative(workspace.directory, file)).map((file) => ({ title: file, value: file }))
+    } catch {
+      return []
+    }
+  }
+
+  const openCompletion = (kind: Completion["kind"], value: string, start: number) => {
+    const source = kind === "agent" ? agentItems() : kind === "file" ? fileItems() : slashCommands.map(([command, description]) => ({ title: `/${command} · ${description}`, value: command }))
+    setCompletion({ kind, query: value.slice(start + 1).toLowerCase(), start, cursor: 0, items: source })
+  }
+
+  const filterCompletion = (state: Completion, query: string) => {
+    const source = state.kind === "agent" ? agentItems() : state.kind === "file" ? fileItems() : slashCommands.map(([command, description]) => ({ title: `/${command} · ${description}`, value: command }))
+    const items = source.filter((item) => fuzzyMatch(query, item.title))
+    return { ...state, query, cursor: Math.min(state.cursor, Math.max(0, items.length - 1)), items }
+  }
+
+  const closeCompletion = () => setCompletion(null)
+
+  const selectCompletion = async () => {
+    const state = completion()
+    if (!state || !composerRef) return
+    const item = state.items[state.cursor]
+    if (!item) return
+    if (state.kind === "command") {
+      closeCompletion()
+      await runSlashCommand(`/${item.value}`)
+      return
+    }
+    const value = String(composerRef.value ?? "")
+    const token = state.kind === "agent" ? `$${item.value} ` : `@${item.value} `
+    composerRef.value = `${value.slice(0, state.start)}${token}`
+    closeCompletion()
+    setComposerActive(true)
+    focusComposer()
+  }
+
+  const mention = () => {
+    const value = String(composerRef?.value ?? "")
+    const base = value && !value.endsWith(" ") ? `${value} ` : value
+    if (composerRef) composerRef.value = `${base}$`
+    setComposerActive(true)
+    focusComposer()
+    openCompletion("agent", `${base}$`, base.length)
   }
 
   const slashCommands = [
@@ -479,12 +561,8 @@ export function EnsembleV2App() {
   ] as const
 
   const pickWorkspace = async () => {
-    const target = await modalWrap(() => context.ui.dialog.select({
-      title: "Switch workspace",
-      options: workspaces().map((workspace) => ({ title: `#${workspace.name} · ${workspaceLabel(workspace.directory)}`, value: workspace.id })),
-      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
-    }))
-    const workspace = target ? state()?.workspaces[String(target)] : undefined
+    const selected = await openPicker("workspace", workspaceID() ? [workspaceID()!] : [])
+    const workspace = selected?.[0] ? state()?.workspaces[selected[0]] : undefined
     if (workspace) await openWorkspace(workspace)
   }
 
@@ -517,7 +595,7 @@ export function EnsembleV2App() {
     clearComposer()
     switch (command) {
       case "workspace": await pickWorkspace(); return
-      case "agent": await pickAgentMention(); return
+      case "agent": mention(); return
       case "settings": openSettings(); return
       case "approvals": setApprovalsOpen(true); return
       case "pause": await togglePause(true); return
@@ -535,31 +613,29 @@ export function EnsembleV2App() {
     }
   }
 
-  const pickSlashCommand = async () => {
-    const selected = await modalWrap(() => context.ui.dialog.select({
-      title: "Ensemble command",
-      options: slashCommands.map(([value, description]) => ({ title: `/${value} · ${description}`, value })),
-      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
-    }))
-    if (selected) await runSlashCommand(`/${String(selected)}`)
-  }
-
-  const handleComposerInput = async (value: string) => {
-    if (completionOpen()) return
+  const handleComposerInput = (value: string) => {
+    const current = completion()
+    if (current) {
+      const trigger = current.kind === "agent" ? "$" : current.kind === "file" ? "@" : "/"
+      if (value[current.start] !== trigger) { closeCompletion(); return }
+      setCompletion(filterCompletion(current, value.slice(current.start + 1).toLowerCase()))
+      return
+    }
     const trigger = composerTrigger(value)
     if (!trigger) return
-    setCompletionOpen(true)
-    try {
-      if (trigger === "command") await pickSlashCommand()
-      if (trigger === "agent") await pickAgentMention()
-      if (trigger === "file") await pickFileReference(value)
-    } finally { setCompletionOpen(false) }
+    const start = trigger === "command" ? 0 : value.length - 1
+    openCompletion(trigger, value, start)
+  }
+
+  const moveCompletion = (delta: number) => {
+    setCompletion((current) => current ? { ...current, cursor: Math.max(0, Math.min(Math.max(0, current.items.length - 1), current.cursor + delta)) } : current)
   }
 
   const submitComposer = async (value: string) => {
     const text = value.trim()
     if (!text) return
-    if (text === "/") { await pickSlashCommand(); return }
+    if (completion()) { await selectCompletion(); return }
+    if (text === "/") { openCompletion("command", "/", 0); return }
     if (parseSlashCommand(text)) { await runSlashCommand(text); return }
     await send(text)
     clearComposer()
@@ -760,12 +836,15 @@ export function EnsembleV2App() {
     const timer = setInterval(() => {
       if (surface()?.kind === "agent") void refreshChat()
       void refresh()
-    }, 1500)
+    }, 250)
     const stopData = context.data.listen(({ details }: any) => {
-      if (typeof details?.type === "string" && details.type.startsWith("rpc.ensemble.v2.")) void refresh()
+      const type = typeof details?.type === "string" ? details.type : ""
+      if (type === "session.text.delta" || type === "session.idle" || type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") handleNativeEvent(details)
+      if (type.startsWith("rpc.ensemble.v2.")) void refresh()
     })
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
+      if (picker()) { handlePickerKey(event); return }
       if (!leaderMode()) return
       const name = String(event?.name ?? ""); const sequence = String(event?.sequence ?? "")
       if (name === "escape" || name === "q" || name === "?" || sequence === "?") return
@@ -801,7 +880,10 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.settings", title: "Ensemble: Agent settings", bind: "s", run: () => openSettings() },
         { id: "ensemble.v2.approvals", title: "Ensemble: Approvals", bind: "v", run: () => { setApprovalCursor(0); setApprovalsOpen(true) } },
         { id: "ensemble.v2.search", title: "Ensemble: Search", bind: "/", run: () => void searchWorkspaces().catch(showError) },
-        { id: "ensemble.v2.init", title: "Ensemble: Init workspace", bind: "ctrl+g", run: () => void initEnsemble().catch(showError) },
+        { id: "ensemble.v2.scroll.up", title: "Ensemble: Scroll transcript up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); setTranscriptOffset((value) => value + messageHeight()) } },
+        { id: "ensemble.v2.scroll.down", title: "Ensemble: Scroll transcript down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); setTranscriptOffset((value) => Math.max(0, value - messageHeight())) } },
+        { id: "ensemble.v2.init", title: "Ensemble: Init workspace", bind: "shift+i", run: () => void initEnsemble().catch(showError) },
+        { id: "ensemble.v2.init.alt", title: "Ensemble: Init workspace (alternate)", bind: "ctrl+g", run: () => void initEnsemble().catch(showError) },
         { id: "ensemble.v2.pause", title: "Ensemble: Pause workspace", bind: "p", run: () => void togglePause().catch(showError) },
         { id: "ensemble.v2.native", title: "Ensemble: Native session", bind: "o", run: () => openNative() },
         { id: "ensemble.v2.delegate", title: "Ensemble: Delegate", bind: "d", run: () => void delegateSelected().catch(showError) },
@@ -820,13 +902,24 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.reset", title: "Ensemble: Reset", bind: "ctrl+shift+delete", run: () => void resetEnsemble().catch(showError) },
         { id: "ensemble.v2.back", title: "Ensemble: Back", bind: "escape", run: () => { if (workspaceFilter()) { setWorkspaceFilter(""); return } context.ui.router.navigate({ type: "home" }) } },
       ],
-      bindings: ["ensemble.v2.leader", "ensemble.v2.left", "ensemble.v2.right", "ensemble.v2.down", "ensemble.v2.up", "ensemble.v2.enter", "ensemble.v2.compose", "ensemble.v2.new.agent", "ensemble.v2.new.workspace", "ensemble.v2.workspace.edit", "ensemble.v2.settings", "ensemble.v2.approvals", "ensemble.v2.search", "ensemble.v2.init", "ensemble.v2.pause", "ensemble.v2.native", "ensemble.v2.delegate", "ensemble.v2.reassign", "ensemble.v2.retry", "ensemble.v2.restart", "ensemble.v2.cancel.task", "ensemble.v2.workspace.next", "ensemble.v2.workspace.prev", "ensemble.v2.agent.next", "ensemble.v2.agent.prev", "ensemble.v2.workspace.archive", "ensemble.v2.workspace.delete", "ensemble.v2.agent.archive", "ensemble.v2.agent.delete", "ensemble.v2.reset", "ensemble.v2.back"],
+      bindings: ["ensemble.v2.leader", "ensemble.v2.left", "ensemble.v2.right", "ensemble.v2.down", "ensemble.v2.up", "ensemble.v2.enter", "ensemble.v2.compose", "ensemble.v2.new.agent", "ensemble.v2.new.workspace", "ensemble.v2.workspace.edit", "ensemble.v2.settings", "ensemble.v2.approvals", "ensemble.v2.search", "ensemble.v2.scroll.up", "ensemble.v2.scroll.down", "ensemble.v2.init", "ensemble.v2.init.alt", "ensemble.v2.pause", "ensemble.v2.native", "ensemble.v2.delegate", "ensemble.v2.reassign", "ensemble.v2.retry", "ensemble.v2.restart", "ensemble.v2.cancel.task", "ensemble.v2.workspace.next", "ensemble.v2.workspace.prev", "ensemble.v2.agent.next", "ensemble.v2.agent.prev", "ensemble.v2.workspace.archive", "ensemble.v2.workspace.delete", "ensemble.v2.agent.archive", "ensemble.v2.agent.delete", "ensemble.v2.reset", "ensemble.v2.back"],
     }))
     context.keymap.layer(() => ({
       mode: "global", priority: 130,
       enabled: () => isOurRoute() && composerActive() && !modal(),
-      commands: [{ id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: () => clearComposer() }],
+      commands: [{ id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } }],
       bindings: ["ensemble.v2.composer.cancel"],
+    }))
+    context.keymap.layer(() => ({
+      mode: "global", priority: 140,
+      enabled: () => isOurRoute() && composerActive() && completion() !== null && !modal(),
+      commands: [
+        { id: "ensemble.v2.completion.up", title: "Ensemble: Previous completion", bind: "up", run: () => moveCompletion(-1) },
+        { id: "ensemble.v2.completion.down", title: "Ensemble: Next completion", bind: "down", run: () => moveCompletion(1) },
+        { id: "ensemble.v2.completion.select", title: "Ensemble: Select completion", bind: "enter", run: () => { void selectCompletion().catch(showError) } },
+        { id: "ensemble.v2.completion.cancel", title: "Ensemble: Close completion", bind: "escape", run: () => closeCompletion() },
+      ],
+      bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
     }))
     context.keymap.layer(() => ({
       mode: "global", priority: 110,
@@ -871,6 +964,78 @@ export function EnsembleV2App() {
 
   const showError = (error: any) => context.ui.toast.show({ title: "Ensemble", message: error?.message ?? String(error), variant: "error" })
 
+  const pickerItems = createMemo<PickerItem[]>(() => {
+    const state = picker()
+    if (!state) return []
+    return state.candidates
+      .filter((item) => !state.query || fuzzyMatch(state.query, item.label))
+      .map((item) => ({ id: item.id, label: item.label, selected: state.selected.has(item.id) }))
+  })
+
+  const finishPicker = (value: string[] | undefined) => {
+    const state = picker()
+    if (!state) return
+    setPicker(null)
+    setModal(false)
+    state.resolve(value)
+  }
+
+  const openPicker = (mode: PickerState["mode"], initial: string[] = []): Promise<string[] | undefined> => new Promise((resolve) => {
+    const candidates = mode === "workspace"
+      ? workspaces().map((workspace) => ({ id: workspace.id, label: `#${workspace.name} · ${workspaceLabel(workspace.directory)}` }))
+      : mode === "leader"
+        ? initial.map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent)).map((agent) => ({ id: agent.id, label: agent.name }))
+        : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
+    const state: PickerState = {
+      mode,
+      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : "Switch workspace",
+      candidates,
+      selected: new Set(initial),
+      cursor: 0,
+      query: "",
+      resolve,
+    }
+    setModal(true)
+    setPicker(state)
+  })
+
+  const handlePickerKey = (event: any) => {
+    const state = picker()
+    if (!state) return
+    const name = String(event?.name ?? "")
+    const sequence = String(event?.sequence ?? "")
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    if (name === "escape") { finishPicker(undefined); return }
+    if (name === "up") { setPicker({ ...state, cursor: Math.max(0, state.cursor - 1) }); return }
+    if (name === "down") { setPicker({ ...state, cursor: Math.min(Math.max(0, pickerItems().length - 1), state.cursor + 1) }); return }
+    if (name === "backspace") { setPicker({ ...state, query: state.query.slice(0, -1), cursor: 0 }); return }
+    if ((name === "space" || sequence === " ") && state.mode === "members") {
+      const item = pickerItems()[state.cursor]
+      if (item) setPicker({ ...state, selected: toggleSelected(state.selected, item.id) })
+      return
+    }
+    if (name === "enter") {
+      if (state.mode === "members") {
+        if (state.selected.size === 0) { context.ui.toast.show({ title: "Ensemble", message: "Choose at least one member.", variant: "warning" }); return }
+        finishPicker([...state.selected])
+      } else {
+        const item = pickerItems()[state.cursor]
+        if (item) finishPicker([item.id])
+      }
+      return
+    }
+    if (sequence.length === 1 && !event?.ctrl && !event?.meta && !event?.super) {
+      setPicker({ ...state, query: `${state.query}${sequence}`, cursor: 0 })
+    }
+  }
+
+  const completionWindow = (state: NonNullable<ReturnType<typeof completion>>) => {
+    const max = 6
+    const start = Math.max(0, Math.min(state.cursor - Math.floor(max / 2), Math.max(0, state.items.length - max)))
+    return { start, items: state.items.slice(start, start + max) }
+  }
+
   const surfaceTitle = () => {
     const current = surface()
     if (!current) return "No chat open"
@@ -884,42 +1049,74 @@ export function EnsembleV2App() {
 
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor={colors.bg}>
-      <box height={2} flexDirection="column">
-        <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
-        <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · ? help · q leave · esc cancel" : status()}</text>
+      <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg}>
+        <box flexDirection="column" flexGrow={1}>
+          <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
+          <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · ? help · q leave · esc cancel" : `${status()}`}</text>
+        </box>
+        <text fg={colors.faint} bg={colors.bg} truncate>{gitLabel()}</text>
       </box>
-      <box flexDirection="row" flexGrow={1}>
-        <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
-        <box flexGrow={1} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
-          <text fg={focusArea() === "chat" ? colors.good : colors.accent} bg={colors.bg} width="100%" truncate>{surfaceTitle()}</text>
-          <Show when={settingsAgentID()} fallback={
-            <Show when={helpOpen()} fallback={
-              <Show when={approvalsOpen()} fallback={
-                <Show when={surface()} fallback={
-                  <box flexDirection="column" padding={1} flexGrow={1}>
-                    <text fg={colors.accent} bg={colors.bg} width="100%" truncate>No currently opened session</text>
-                    <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">Select an agent for a direct chat or a workspace for the group chat. Use j/k then Enter.</text>
-                  </box>
+      <Show when={picker()?.mode} keyed fallback={
+        <box flexDirection="row" flexGrow={1}>
+          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
+          <box flexGrow={1} border borderStyle="single" borderColor={focusArea() === "chat" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
+            <text fg={focusArea() === "chat" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate>{surfaceTitle()}</text>
+            <Show when={settingsAgentID()} fallback={
+              <Show when={helpOpen()} fallback={
+                <Show when={approvalsOpen()} fallback={
+                  <Show when={surface()} fallback={
+                    <box flexDirection="column" padding={1} flexGrow={1}>
+                      <text fg={colors.accent} bg={colors.bg} width="100%" truncate>No currently opened session</text>
+                      <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">Select an agent for a direct chat or a workspace for the group chat. Use j/k then Enter.</text>
+                    </box>
+                  }>
+                    <>
+                      <box flexGrow={1} flexDirection="column" width="100%" overflow="hidden">
+                      <text fg={colors.text} bg={colors.bg} width="100%" wrapMode="word">{plainTranscript()}</text>
+                    </box>
+                      <Show when={completion()}>
+                        <box border borderStyle="single" borderColor={colors.leader} backgroundColor={colors.bg} flexDirection="column" height={9} minHeight={9} flexShrink={0}>
+                          <text fg={colors.leader} bg={colors.bg} width="100%" truncate>{(() => {
+                            const state = completion()
+                            if (!state) return ""
+                            const title = state.kind === "agent" ? "$ agents" : state.kind === "file" ? "@ files" : "/ commands"
+                            return `${title}${state.query ? ` · ${state.query}` : ""}`
+                          })()}</text>
+                          <For each={[0, 1, 2, 3, 4, 5]}>{(slot) => (
+                            <text fg={colors.text} bg={colors.bg} width="100%" truncate>{(() => {
+                              const state = completion()
+                              if (!state) return ""
+                              const window = completionWindow(state)
+                              const item = window.items[slot]
+                              if (!item) return ""
+                              return `${window.start + slot === state.cursor ? "› " : "  "}${item.title}`
+                            })()}</text>
+                          )}</For>
+                        </box>
+                      </Show>
+                      <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={composerActive() ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
+                        <input ref={(value: any) => { composerRef = value }} placeholder="Message…  $agent · @file · /command" onInput={(value: string) => { handleComposerInput(value) }} onSubmit={(value: string) => { void submitComposer(value).catch(showError) }} />
+                      </box>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? "COMPOSER · enter send · esc cancel" : "i compose · $ agent · @ file · / command"}</text>
+                    </>
+                  </Show>
                 }>
-                  <>
-                    <Transcript colors={colors} messages={chatLines()} width={messageWidth()} emptyTitle={surface()?.kind === "agent" ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}` : "Group chat"} emptyBody={surface()?.kind === "agent" ? "Send a direct message. It goes to this agent's native OpenCode session." : "Say something to your team. $Name mentions an agent; @path references a file."} busy={isBusy()} queued={chatContext()?.queued ?? 0} />
-                    <input ref={(value: any) => { composerRef = value }} placeholder="Message…  $agent · @file · /command" onInput={(value: string) => { void handleComposerInput(value).catch(showError) }} onSubmit={(value: string) => { void submitComposer(value).catch(showError) }} />
-                    <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{composerActive() ? "COMPOSER · enter send · esc cancel" : "i compose · $ agent · @ file · / command"}</text>
-                  </>
+                  <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} state={state()} onResolve={resolveApproval} />
                 </Show>
               }>
-                <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} state={state()} onResolve={resolveApproval} />
+                <HelpView colors={colors} />
               </Show>
             }>
-              <HelpView colors={colors} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={agentMemories()} memoryCursor={memoryCursor()} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} skillCatalog={skills()} />
             </Show>
-          }>
-            <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={agentMemories()} memoryCursor={memoryCursor()} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} skillCatalog={skills()} />
-          </Show>
+          </box>
+          <TaskBoard colors={colors} tasks={orderedTasks()} state={state()} cursor={taskCursor()} activeCount={activeCount()} focus={focusArea() === "tasks"} width={taskWidth()} />
+        </box>      }>
+        <box flexGrow={1} padding={2}>
+          <PickerOverlay colors={colors} title={() => picker()!.title} query={() => picker()!.query} items={() => pickerItems()} cursor={() => picker()!.cursor} multiple={() => picker()!.mode === "members"} />
         </box>
-        <TaskBoard colors={colors} tasks={orderedTasks()} state={state()} cursor={taskCursor()} activeCount={activeCount()} focus={focusArea() === "tasks"} width={taskWidth()} />
-      </box>
-      <box height={2} flexDirection="column">
+      </Show>
+      <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg}>
         <text fg={colors.muted} bg={colors.bg} width="100%" truncate>h/l columns · j/k select · enter open · i compose · a agent · n workspace · g members · I init · v approvals</text>
         <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : "~ leader · / search · p pause · s settings · o native"}</text>
       </box>

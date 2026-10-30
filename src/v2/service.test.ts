@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
@@ -21,6 +21,29 @@ function fakeContext() {
   let sessions = 0
   const handlers: Partial<Handlers> = {}
   const tools = new Map<string, any>()
+  const subscriptions = new Set<any>()
+  const event = {
+    subscribe: async function* (options: any = {}) {
+      const subscription = { types: options?.types ?? [], queue: [] as any[], wake: undefined as (() => void) | undefined }
+      subscriptions.add(subscription)
+      try {
+        while (true) {
+          if (subscription.queue.length === 0) await new Promise<void>((resolve) => { subscription.wake = resolve })
+          while (subscription.queue.length > 0) yield subscription.queue.shift()
+        }
+      } finally {
+        subscriptions.delete(subscription)
+      }
+    },
+  }
+  const emitEvent = (value: any) => {
+    for (const subscription of subscriptions) {
+      if (subscription.types.length > 0 && !subscription.types.includes(value.type)) continue
+      subscription.queue.push(value)
+      subscription.wake?.()
+      subscription.wake = undefined
+    }
+  }
   const ctx = {
     storage: {
       get: async (key: string) => values.get(key),
@@ -62,9 +85,9 @@ function fakeContext() {
       list: async () => [{ providerID: "probe", id: "probe-model", name: "Probe", variants: [] }],
     },
     skill: { list: async () => [] },
-    event: { subscribe: async function* () {} },
+    event,
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, createdSessionIDs, tools }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, createdSessionIDs, tools, emitEvent }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -1477,5 +1500,51 @@ test("failed init leaves no AGENTS.md block", async () => {
     assert.equal(existsSync(join(directory, "AGENTS.md")), false)
   } finally {
     await stop()
+  }
+})
+
+
+test("streaming deltas accumulate into the live reply and reconcile with the final answer", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-stream-"))
+  const { ctx, emitEvent } = fakeContext()
+  ctx.session.wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "stream", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const workspaceID = workspace.result.id
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID, text: "Hello team" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const run = Object.values(next.state.runs).find((item: any) => item.status === "running") as any
+      sessionID = run?.sessionID ?? ""
+      return Boolean(sessionID)
+    })
+    emitEvent({ type: "session.text.delta", data: { sessionID, delta: "Working" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.messages[workspaceID] ?? []).some((message: any) => message.streaming && message.text === "Working")
+    })
+    emitEvent({ type: "session.text.delta", data: { sessionID, delta: " on it" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.messages[workspaceID] ?? []).some((message: any) => message.streaming && message.text === "Working on it")
+    })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const final = await handlers.snapshot({ directory })
+    const reply = (final.state.messages[workspaceID] ?? []).at(-1) as any
+    assert.equal(reply.text, "OK")
+    assert.equal(reply.streaming, false)
+    assert.equal(reply.interrupted, false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
   }
 })

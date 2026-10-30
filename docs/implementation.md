@@ -1,5 +1,7 @@
 # Ensemble v2 implementation
 
+> **v3 UI and streaming pass.** The v3 work adds real delta streaming, inline composer completions, a searchable member checklist, semantic theme tokens, focus borders, git metadata, and the visible `I` init shortcut. The v2 runtime model and authority boundaries are unchanged.
+
 Status: **developer preview**, tested against OpenCode 2.2.2. The v2 runtime is the default. The v1 preview was removed.
 
 ## Architecture
@@ -100,9 +102,20 @@ Message {
 - `i` focuses an inline bottom composer. `$` opens an agent picker and inserts a stable `$Name` reference; `@` opens a workspace file picker; `/` opens the Ensemble command palette. `m` is the keyboard shortcut for the agent picker.
 - File references are resolved inside the workspace and appended to the subtask instruction. `@` is not a mention.
 - Agent replies and task cards appear in the same transcript.
-- Group replies stream into one growing message row and finalize as full Markdown.
-- Direct chats render the native OpenCode transcript in the center column. `o` opens that native session as a normal OpenCode route.
+- Group replies subscribe to the native `session.text.delta` event. The service maps `sessionID` to the active run, appends deltas to one live message row, throttles persistence, and reconciles with the final assistant text when the run completes. Direct chats consume the same native delta event in the TUI and clear the live block on `session.execution.succeeded`, then reload the committed native transcript.
+- Direct chats render the native OpenCode transcript in the center column and stream deltas into a live assistant block. `o` opens that native session as a normal OpenCode route.
 - Selecting an agent opens its DM; selecting a workspace opens the group chat. The empty state appears when no chat is open.
+
+## v3 composer, transcript, and visual system
+
+- `$`, `@`, and `/` open an inline bordered completion popup above the composer. The composer stays focused; typing filters the list, `↑/↓` move, `Enter` inserts an agent/file token or runs a command, and `Esc` closes. No host completion dialog opens.
+- Agent and file completion insert stable references in place. Slash selection executes through the same command path as a typed `/command`.
+- Workspace member editing is a custom in-page checklist: search filters, `Space` toggles, the selected count is visible, `Enter` confirms, and `Esc` cancels. The leader picker only lists selected members.
+- The transcript is a clipped text viewport, not a scrollbox. Markdown is normalized to aligned terminal text: tables become box tables, fenced code is indented, headings, bullets, links, and inline code lose their markers. `PageUp` / `PageDown` scroll. This avoids the OpenTUI scrollbox freeze that prevented streaming updates inside plugin pages.
+- All chrome uses OpenCode semantic theme tokens: text, muted/faint metadata, borders, focus, and feedback colors. Agent names use the theme categorical palette. The focused pane gets the focus border and brighter title; inactive panes stay muted.
+- The top bar shows the workspace, directory, and familiar `git:(branch*) ↑N ↓N` metadata when the directory is a repository. Non-git directories show no git segment.
+- `I` is bound as `shift+i` and appears in the footer and help. `/init` and `Ctrl+G` remain available.
+- The composer is a bordered input inside the chat column; its border uses the focus token while active and the muted border token otherwise.
 
 ## Direct chats and sessions
 
@@ -121,7 +134,7 @@ handoffs/            typed Markdown handoffs
 init.json            AGENTS.md block version
 ```
 
-`Ctrl+G` or `/init` runs native `/init` in a temporary workspace session, waits for the agent to update `AGENTS.md`, then places the versioned `<!-- ensemble:start v1 -->` block at the top. Existing content outside the markers is preserved. Init failures leave no partial block.
+`I` or `/init` runs native `/init` in a temporary workspace session, waits for the agent to update `AGENTS.md`, then places the versioned `<!-- ensemble:start v1 -->` block at the top. Existing content outside the markers is preserved. Init failures leave no partial block.
 
 Reset is available through `/reset-ensemble` and `Ctrl+Shift+Delete`, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
@@ -232,7 +245,8 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 ## Known limitations
 
 - The composer completes agents on `$`, files on `@`, and Ensemble commands on `/`; arbitrary native OpenCode slash commands are not proxied into the group chat.
-- The transcript renders Markdown structure (headings, bullets, code blocks, links, and tables) as terminal text. Syntax highlighting and clickable links are not implemented.
+- The transcript renders Markdown structure (headings, bullets, code blocks, links, and tables) as terminal text. Syntax highlighting, rich Markdown styling, and clickable links are not implemented. The OpenTUI `markdown` renderable was evaluated, but the plugin page runtime froze reactive children inside `scrollbox`; the clipped text viewport is the reliable path.
+- The transcript viewport scrolls by page, not with a continuous scrollbar. The latest content stays pinned when `transcriptOffset` is zero.
 - Direct chats use the native OpenCode transcript; there is no separate Ensemble DM store, search, or export.
 - Some host dialog closes leave stale cells until the next full repaint; the page remains usable.
 - No npm package, versioning policy, or license has been selected.

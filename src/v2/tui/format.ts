@@ -96,9 +96,12 @@ const namedColors: Record<string, string> = {
   orange: "#ffb86c",
 }
 
-export function agentColor(agent: Agent | undefined, fallback: string): string {
+export function agentColor(agent: Agent | undefined, fallback: string, index = 0, categorical: readonly any[] = []): any {
   if (!agent) return fallback
   if (/^#[0-9a-f]{6}$/i.test(agent.color)) return agent.color
+  const scale: any = categorical[index % Math.max(1, categorical.length)]
+  const themed = scale?.[200] ?? scale
+  if (themed) return themed
   return namedColors[agent.color.toLowerCase()] ?? fallback
 }
 
