@@ -194,7 +194,26 @@ export class V2Store {
   }
 
   async removePrefix(prefix: string): Promise<void> {
-    for (const { key } of await this.scanAll(prefix)) await this.ctx.storage.remove(key)
+    for (const { key } of await this.scanAll(prefix)) {
+      await this.ctx.storage.remove(key)
+      this.removeFromMemory(key)
+    }
+  }
+
+  private removeFromMemory(key: string): void {
+    const parts = key.split("/")
+    if (parts[0] !== "v2") return
+    if (parts[1] === "agent" && parts[2]) delete this.state.agents[parts[2]]
+    if (parts[1] === "workspace" && parts[2]) delete this.state.workspaces[parts[2]]
+    if (parts[1] === "subtask" && parts[2]) delete this.state.subtasks[parts[2]]
+    if (parts[1] === "memory" && parts[2]) delete this.state.memories[parts[2]]
+    if (parts[1] === "approval" && parts[2]) delete this.state.approvals[parts[2]]
+    if (parts[1] === "binding" && parts[2] && parts[3]) delete this.state.bindings[`${parts[2]}:${parts[3]}`]
+    if (parts[1] === "message" && parts[2]) {
+      const sequence = parts[3]
+      this.state.messages[parts[2]] = (this.state.messages[parts[2]] ?? []).filter((message) => String(message.seq).padStart(8, "0") !== sequence)
+      if (this.state.messages[parts[2]].length === 0) delete this.state.messages[parts[2]]
+    }
   }
 
   async bump(): Promise<void> {

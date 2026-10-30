@@ -255,6 +255,13 @@ export class EnsembleV2Service {
       updatedAt: at,
     }
     await this.store.saveAgent(agent)
+    if (payload.workspaceID) {
+      const workspace = this.store.snapshot().workspaces[String(payload.workspaceID)]
+      if (workspace && !workspace.memberIDs.includes(agent.id)) {
+        workspace.memberIDs.push(agent.id)
+        await this.store.saveWorkspace(workspace)
+      }
+    }
     return agent
   }
 

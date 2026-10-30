@@ -89,6 +89,89 @@ fi
 
 tmux send-keys -t "$TUI" Escape; sleep 0.5
 
+printf 'live fixture\n' > "$BASE/project/notes.md"
+python3 - "$URL" "$PASS" "$BASE/project" > "$BASE/snapshot.json" <<'PY'
+import base64, json, sys, urllib.parse, urllib.request
+url, password, directory = sys.argv[1:4]
+auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
+body = json.dumps({"input": {"directory": directory}}).encode()
+location = urllib.parse.quote(directory, safe="")
+request = urllib.request.Request(f"{url}/api/rpc/ensemble.v2/snapshot?location%5Bdirectory%5D={location}", data=body, headers={"Authorization": auth, "Content-Type": "application/json"}, method="POST")
+print(json.dumps(json.load(urllib.request.urlopen(request, timeout=20))["output"]))
+PY
+MODELS=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["models"]))' "$BASE/snapshot.json")
+if [ "$MODELS" -gt 0 ]; then
+  tmux send-keys -t "$TUI" 'a'; sleep 1
+  tmux send-keys -t "$TUI" 'LiveAgent'; sleep 0.3
+  tmux send-keys -t "$TUI" Enter; sleep 0.8
+  tmux send-keys -t "$TUI" Enter; sleep 0.8
+  tmux send-keys -t "$TUI" Enter; sleep 1
+  tmux send-keys -t "$TUI" Enter; sleep 1
+  VARIANT=$(tmux capture-pane -p -t "$TUI")
+  if grep -q "Reasoning effort" <<<"$VARIANT"; then
+    tmux send-keys -t "$TUI" Enter; sleep 1
+  fi
+  sleep 2
+  AGENT_SCREEN=$(tmux capture-pane -p -t "$TUI")
+  if ! grep -q "LiveAgent" <<<"$AGENT_SCREEN"; then
+    echo "live-check: creating an agent did not update the roster" >&2
+    tmux capture-pane -p -t "$TUI" >&2 || true
+    exit 1
+  fi
+
+  python3 - "$URL" "$PASS" "$BASE/project" "$BASE/ids.json" <<'PY'
+import base64, json, sys, urllib.parse, urllib.request
+url, password, directory, output = sys.argv[1:5]
+auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
+location = urllib.parse.quote(directory, safe="")
+def call(method, payload):
+    body = json.dumps({"input": payload}).encode()
+    request = urllib.request.Request(f"{url}/api/rpc/ensemble.v2/{method}?location%5Bdirectory%5D={location}", data=body, headers={"Authorization": auth, "Content-Type": "application/json"}, method="POST")
+    return json.load(urllib.request.urlopen(request, timeout=20))["output"]
+state = call("snapshot", {"directory": directory})["state"]
+agent = next(agent for agent in state["agents"].values() if agent["name"] == "LiveAgent")
+workspace = call("invoke", {"directory": directory, "action": "workspace.create", "payload": {"name": "live", "directory": directory, "memberIDs": [agent["id"]], "leaderID": agent["id"]}})["result"]
+call("invoke", {"directory": directory, "action": "workspace.activate", "payload": {"id": workspace["id"]}})
+json.dump({"agent": agent["id"], "workspace": workspace["id"]}, open(output, "w"))
+PY
+  sleep 2
+  tmux send-keys -t "$TUI" 'i'; sleep 0.5
+  tmux send-keys -t "$TUI" '$'; sleep 1
+  tmux send-keys -t "$TUI" Enter; sleep 0.5
+  tmux send-keys -t "$TUI" ' review '; sleep 0.3
+  tmux send-keys -t "$TUI" '@'; sleep 1
+  tmux send-keys -t "$TUI" Enter; sleep 0.5
+  COMPOSER=$(tmux capture-pane -p -t "$TUI")
+  if ! grep -q '\$LiveAgent' <<<"$COMPOSER" || ! grep -q '@notes.md' <<<"$COMPOSER"; then
+    echo "live-check: composer completions did not insert \$agent and @file" >&2
+    tmux capture-pane -p -t "$TUI" >&2 || true
+    exit 1
+  fi
+  tmux send-keys -t "$TUI" C-u; sleep 0.3
+  tmux send-keys -t "$TUI" '/'; sleep 1
+  COMMAND=$(tmux capture-pane -p -t "$TUI")
+  if ! grep -q "Ensemble command" <<<"$COMMAND"; then
+    echo "live-check: slash command palette did not open" >&2
+    exit 1
+  fi
+  tmux send-keys -t "$TUI" Escape; sleep 0.5
+  tmux send-keys -t "$TUI" Escape; sleep 0.5
+
+  python3 - "$URL" "$PASS" "$BASE/project" "$BASE/ids.json" <<'PY'
+import base64, json, sys, urllib.parse, urllib.request
+url, password, directory, input_path = sys.argv[1:5]
+auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
+location = urllib.parse.quote(directory, safe="")
+ids = json.load(open(input_path))
+def invoke(action, payload):
+    body = json.dumps({"input": {"directory": directory, "action": action, "payload": payload}}).encode()
+    request = urllib.request.Request(f"{url}/api/rpc/ensemble.v2/invoke?location%5Bdirectory%5D={location}", data=body, headers={"Authorization": auth, "Content-Type": "application/json"}, method="POST")
+    return json.load(urllib.request.urlopen(request, timeout=20))["output"]
+invoke("workspace.delete", {"id": ids["workspace"], "deleteNativeSessions": True})
+invoke("agent.delete", {"id": ids["agent"], "deleteNativeSessions": True})
+PY
+fi
+
 tmux send-keys -t "$TUI" '~'; sleep 0.3
 tmux send-keys -t "$TUI" 'q'; sleep 1
 HOME_SCREEN=$(tmux capture-pane -p -t "$TUI")

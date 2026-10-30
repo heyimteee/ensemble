@@ -66,6 +66,8 @@ Agent {
 }
 ```
 
+- Creating an agent inside an active workspace adds it to that workspace as a member.
+- `g` edits workspace members and the leader without recreating the workspace.
 - General, Models, Memories, and Skillbox settings.
 - Main model and supported reasoning; ordered backups can be added, moved, and removed.
 - Exclusive Skillbox enforced with per-session `skill` permissions.

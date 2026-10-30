@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
@@ -17,6 +17,7 @@ function fakeContext() {
   const interruptedSessions: string[] = []
   let sessions = 0
   const handlers: Partial<Handlers> = {}
+  const tools = new Map<string, any>()
   const ctx = {
     storage: {
       get: async (key: string) => values.get(key),
@@ -44,7 +45,7 @@ function fakeContext() {
       interrupt: async ({ sessionID }: any) => { interruptedSessions.push(sessionID) },
       remove: async ({ sessionID }: any) => { removedSessions.push(sessionID) },
     },
-    tool: { transform: async (factory: any) => factory({ namespace() {}, add() {} }) },
+    tool: { transform: async (factory: any) => factory({ namespace() {}, add(tool: any) { tools.set(tool.name, tool) } }) },
     rpc: {
       register: async (_schema: unknown, value: Handlers) => {
         handlers.snapshot = value.snapshot
@@ -58,7 +59,7 @@ function fakeContext() {
     skill: { list: async () => [] },
     event: { subscribe: async function* () {} },
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, tools }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -643,6 +644,476 @@ test("archiving a workspace interrupts its active native run", async () => {
     const archived = await handlers.invoke({ directory, action: "workspace.archive", payload: { id: workspace.result.id } })
     assert.equal(archived.ok, true)
     assert.equal(interruptedSessions.length, 1)
+  } finally {
+    await stop()
+  }
+})
+
+test("creating an agent inside a workspace adds it to the roster", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const leader = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [leader.result.id], leaderID: leader.result.id },
+    })
+    const added = await handlers.invoke({
+      directory,
+      action: "agent.create",
+      payload: { name: "Sage", workspaceID: workspace.result.id },
+    })
+    assert.equal(added.ok, true)
+    const next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.workspaces[workspace.result.id].memberIDs, [leader.result.id, added.result.id])
+    const repeated = await handlers.invoke({
+      directory,
+      action: "agent.create",
+      payload: { name: "Sage Two", workspaceID: workspace.result.id },
+    })
+    assert.equal(repeated.ok, true)
+  } finally {
+    await stop()
+  }
+})
+
+test("workspace member edits validate membership and the leader", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const outside = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id], leaderID: nova.result.id },
+    })
+    const updated = await handlers.invoke({
+      directory,
+      action: "workspace.update",
+      payload: { id: workspace.result.id, memberIDs: [nova.result.id, sage.result.id], leaderID: sage.result.id },
+    })
+    assert.equal(updated.ok, true)
+    assert.deepEqual(updated.result.memberIDs, [nova.result.id, sage.result.id])
+    assert.equal(updated.result.leaderID, sage.result.id)
+    const invalid = await handlers.invoke({
+      directory,
+      action: "workspace.update",
+      payload: { id: workspace.result.id, memberIDs: [nova.result.id], leaderID: outside.result.id },
+    })
+    assert.equal(invalid.ok, false)
+    assert.equal(invalid.error.code, "invalid_leader")
+  } finally {
+    await stop()
+  }
+})
+
+test("agent renames do not bump behavior version but role changes do", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const created = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", role: "Old" } })
+    const renamed = await handlers.invoke({ directory, action: "agent.update", payload: { id: created.result.id, name: "Nova Prime" } })
+    assert.equal(renamed.result.version, 1)
+    assert.equal(renamed.result.pendingSettings, false)
+    const changed = await handlers.invoke({ directory, action: "agent.update", payload: { id: created.result.id, role: "New" } })
+    assert.equal(changed.result.version, 2)
+    assert.equal(changed.result.pendingSettings, true)
+  } finally {
+    await stop()
+  }
+})
+
+test("agent and workspace creation reject invalid input", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const blank = await handlers.invoke({ directory, action: "agent.create", payload: { name: "  " } })
+    assert.equal(blank.ok, false)
+    assert.equal(blank.error.code, "invalid_name")
+    const badModel = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", mainModel: { providerID: "nope", modelID: "nope" } } })
+    assert.equal(badModel.ok, false)
+    assert.equal(badModel.error.code, "invalid_model")
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [nova.result.id], leaderID: nova.result.id } })
+    assert.equal(workspace.ok, true)
+    const duplicate = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "again", directory, memberIDs: [nova.result.id], leaderID: nova.result.id } })
+    assert.equal(duplicate.ok, false)
+    assert.equal(duplicate.error.code, "workspace_exists")
+    const outside = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "bad", directory: mkdtempSync(join(tmpdir(), "ensemble-other-")), memberIDs: [nova.result.id], leaderID: sage.result.id } })
+    assert.equal(outside.ok, false)
+    assert.equal(outside.error.code, "invalid_leader")
+  } finally {
+    await stop()
+  }
+})
+
+test("memory entries can be added, edited, promoted, and deleted", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const memory = await handlers.invoke({ directory, action: "memory.add", payload: { agentID: agent.result.id, scope: "project", text: "Use pnpm" } })
+    assert.equal(memory.result.text, "Use pnpm")
+    const edited = await handlers.invoke({ directory, action: "memory.update", payload: { id: memory.result.id, text: "Use pnpm 9" } })
+    assert.equal(edited.result.text, "Use pnpm 9")
+    const promotion = await handlers.invoke({ directory, action: "memory.promote", payload: { id: memory.result.id } })
+    await handlers.invoke({ directory, action: "approval.resolve", payload: { id: promotion.result.id, approve: true } })
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.memories[memory.result.id].scope, "global")
+    const deleted = await handlers.invoke({ directory, action: "memory.delete", payload: { id: memory.result.id } })
+    assert.equal(deleted.ok, true)
+    const final = await handlers.snapshot({ directory })
+    assert.ok(final.state.memories[memory.result.id].deletedAt)
+  } finally {
+    await stop()
+  }
+})
+
+test("outside-roster approvals create the delegated child once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveAgent({ id: "b", name: "Echo", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "parent", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Parent", instruction: "Parent", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1 })
+  await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "parent", agentID: "a", kind: "outside_roster", title: "Contact Echo", detail: "Check", payload: { assigneeID: "b", title: "Child", instruction: "Check" }, status: "pending", createdAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true } })
+    assert.equal(resolved.ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.title === "Child" && task.state === "replied")
+    })
+    const again = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true } })
+    assert.equal(again.ok, true)
+    const final = await handlers.snapshot({ directory })
+    assert.equal(Object.values(final.state.subtasks).filter((task: any) => task.title === "Child").length, 1)
+  } finally {
+    await stop()
+  }
+})
+
+test("cross-project approval becomes global memory", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveApproval({ id: "ap", workspaceID: "w", agentID: "a", kind: "cross_project", title: "Share", detail: "Shared note", payload: { text: "Shared note" }, status: "pending", createdAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true } })
+    const after = await handlers.snapshot({ directory })
+    assert.ok(Object.values(after.state.memories).some((memory: any) => memory.scope === "global" && memory.text === "Shared note"))
+  } finally {
+    await stop()
+  }
+})
+
+test("discarding interrupted work marks it failed without running", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Interrupted", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const before = await handlers.snapshot({ directory })
+    const approval = Object.values(before.state.approvals)[0] as any
+    await handlers.invoke({ directory, action: "approval.resolve", payload: { id: approval.id, approve: false } })
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks.t.state, "replied")
+    assert.equal(after.state.subtasks.t.outcome, "failed")
+    assert.equal(after.state.subtasks.t.attempts, 1)
+  } finally {
+    await stop()
+  }
+})
+
+test("file references in messages are attached to the task instruction", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  writeFileSync(join(directory, "notes.md"), "hello")
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Read @notes.md" } })
+    const after = await handlers.snapshot({ directory })
+    const task = Object.values(after.state.subtasks)[0] as any
+    assert.match(task.instruction, /Referenced files:\n- notes\.md/)
+  } finally {
+    await stop()
+  }
+})
+
+test("paused workspaces reject delegation and depth limits are enforced", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "settings.update", payload: { maxDepth: 1 } })
+    const root = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, assigneeID: agent.result.id, title: "Root", instruction: "Root" } })
+    const child = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, parentID: root.result.id, assigneeID: agent.result.id, title: "Child", instruction: "Child" } })
+    const grandchild = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, parentID: child.result.id, assigneeID: agent.result.id, title: "Grandchild", instruction: "Grandchild" } })
+    assert.equal(grandchild.ok, false)
+    assert.equal(grandchild.error.code, "delegation_depth")
+    await handlers.invoke({ directory, action: "workspace.pause", payload: { id: workspace.result.id } })
+    const paused = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, assigneeID: agent.result.id, title: "No", instruction: "No" } })
+    assert.equal(paused.ok, false)
+    assert.equal(paused.error.code, "workspace_paused")
+  } finally {
+    await stop()
+  }
+})
+
+test("model fallback emits a visible switch message", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  let calls = 0
+  ;(ctx.session as any).context = async () => {
+    calls++
+    if (calls === 1) return { data: [{ type: "idle", outcome: "failed", error: { type: "provider.unavailable", message: "503 unavailable" } }] }
+    return { data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Recovered" }] }] }
+  }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", backupModels: [{ providerID: "probe", modelID: "probe-model" }] } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Try" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const final = await handlers.snapshot({ directory })
+    assert.ok(final.state.messages[workspace.result.id].some((message: any) => message.text.startsWith("Model unavailable; switched to")))
+  } finally {
+    await stop()
+  }
+})
+
+test("agent tools delegate, ask, remember, and share while a run is active", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Coordinate" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    const toolContext = { sessionID }
+    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, toolContext)
+    assert.match(delegated.content, /Delegated to Sage/)
+    const outside = await tools.get("delegate").execute({ assignee: "Echo", title: "Outside", instruction: "Check" }, toolContext)
+    assert.match(outside.content, /Approval required/)
+    const asked = await tools.get("ask_person").execute({ question: "Which API?" }, toolContext)
+    assert.match(asked.content, /Waiting/)
+    const remembered = await tools.get("remember").execute({ text: "Use pnpm", scope: "project" }, toolContext)
+    assert.match(remembered.content, /Saved project memory/)
+    const shared = await tools.get("share").execute({ text: "Share this", scope: "cross_project" }, toolContext)
+    assert.match(shared.content, /authorization/)
+    const snapshot = await handlers.snapshot({ directory })
+    assert.ok(Object.values(snapshot.state.memories).some((memory: any) => memory.text === "Use pnpm"))
+    const kinds = Object.values(snapshot.state.approvals).map((approval: any) => approval.kind)
+    assert.ok(kinds.includes("outside_roster"))
+    assert.ok(kinds.includes("ask_person"))
+    assert.ok(kinds.includes("cross_project"))
+    assert.ok(Object.values(snapshot.state.subtasks).some((task: any) => task.title === "Child"))
+    assert.ok(Object.values(snapshot.state.agents).some((agent: any) => agent.id === echo.result.id))
+  } finally {
+    await stop()
+  }
+})
+
+test("deleting an agent replaces the leader, cancels work, and removes sessions", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, removedSessions } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id } })
+    await handlers.invoke({ directory, action: "memory.add", payload: { agentID: nova.result.id, scope: "project", text: "Keep" } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Hello" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const before = await handlers.snapshot({ directory })
+    const binding = Object.values(before.state.bindings)[0] as any
+    const deleted = await handlers.invoke({ directory, action: "agent.delete", payload: { id: nova.result.id, replacementLeaderID: sage.result.id, deleteNativeSessions: true } })
+    assert.equal(deleted.ok, true)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.agents[nova.result.id], undefined)
+    assert.equal(after.state.workspaces[workspace.result.id].leaderID, sage.result.id)
+    assert.deepEqual(after.state.workspaces[workspace.result.id].memberIDs, [sage.result.id])
+    assert.ok(removedSessions.includes(binding.sessionID))
+    const memory = Object.values(after.state.memories).find((item: any) => item.text === "Keep") as any
+    assert.ok(memory.deletedAt)
+  } finally {
+    await stop()
+  }
+})
+
+test("session creation failures mark a subtask failed with an explanation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).create = async () => ({ data: {} })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Hello" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const after = await handlers.snapshot({ directory })
+    const task = Object.values(after.state.subtasks)[0] as any
+    assert.equal(task.outcome, "failed")
+    assert.match(task.error, /native session/)
+    assert.ok(after.state.messages[workspace.result.id].some((message: any) => message.text.includes("Subtask failed")))
+  } finally {
+    await stop()
+  }
+})
+
+test("disabling synthesis closes a parent task when children reply", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 50)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id, synthesis: false } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Coordinate" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
+      return parent?.state === "replied"
+    }, 3000)
+    const after = await handlers.snapshot({ directory })
+    assert.ok(after.state.messages[workspace.result.id].some((message: any) => message.text === "Delegated subtasks completed."))
+  } finally {
+    await stop()
+  }
+})
+
+test("rejecting a question fails the waiting task", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "ask_person", title: "Need input", detail: "Which?", status: "pending", createdAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Waiting", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, approvalID: "ap", awaitingChildren: false, attempts: 1, createdAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: false } })
+    assert.equal(resolved.ok, true)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks.t.state, "replied")
+    assert.equal(after.state.subtasks.t.outcome, "failed")
+    assert.match(after.state.subtasks.t.error, /rejected/)
+  } finally {
+    await stop()
+  }
+})
+
+test("agent model, backup, and skillbox updates bump behavior version", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const created = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const model = created.result.mainModel
+    const updated = await handlers.invoke({
+      directory,
+      action: "agent.update",
+      payload: { id: created.result.id, mainModel: model, backupModels: [model], skillbox: ["alpha"], color: "magenta" },
+    })
+    assert.equal(updated.ok, true)
+    assert.equal(updated.result.version, 2)
+    assert.equal(updated.result.pendingSettings, true)
+    assert.deepEqual(updated.result.backupModels, [model])
+    assert.deepEqual(updated.result.skillbox, ["alpha"])
+    assert.equal(updated.result.color, "magenta")
   } finally {
     await stop()
   }

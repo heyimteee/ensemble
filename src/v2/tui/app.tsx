@@ -7,6 +7,7 @@ import type { Agent, Approval, ModelOption, SkillOption, Snapshot, SnapshotState
 import { ApprovalList, HelpView, MessageList, SettingsView, TaskBoard, WorkspaceRail, type SettingsTab } from "./components.tsx"
 import { fuzzyMatch, missingSkills, resultForTask, workspaceLabel } from "./format.ts"
 import { palette } from "./theme.ts"
+import { composerTrigger, insertAgentMention, insertFileReference, parseSlashCommand } from "./composer.ts"
 
 function directoryOf(context: any): string {
   return context.location?.directory ?? context.data.location.default().directory
@@ -106,6 +107,7 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? workspace.memberIDs.map((memberID) => state()?.agents[memberID]).filter((agent): agent is Agent => Boolean(agent)) : []
   })
+  const rosterAgents = createMemo(() => Object.values(state()?.agents ?? {}).filter((agent) => !agent.archived))
   const selectedAgent = createMemo(() => {
     const id = selectedAgentID()
     return id ? state()?.agents[id] : undefined
@@ -264,6 +266,36 @@ export function EnsembleV2App() {
     })
   }
 
+  const editWorkspace = async () => {
+    const workspace = activeWorkspace()
+    if (!workspace) {
+      context.ui.toast.show({ title: "Ensemble", message: "Open a workspace first.", variant: "warning" })
+      return
+    }
+    const available = rosterAgents()
+    const current = workspace.memberIDs.map((memberID) => state()?.agents[memberID]?.name ?? memberID).join(", ")
+    const raw = (await modalWrap(() => context.ui.dialog.prompt({
+      title: `Members of #${workspace.name}`,
+      description: `Comma-separated names. Available: ${available.map((agent) => agent.name).join(", ")}`,
+      value: current,
+    }))) ?? ""
+    const members = raw.split(",").map((part) => part.trim()).filter(Boolean)
+      .map((part) => available.find((agent) => agent.name.toLowerCase() === part.toLowerCase() || agent.id === part))
+      .filter((agent): agent is Agent => Boolean(agent))
+      .map((agent) => agent.id)
+    const unique = [...new Set(members)]
+    if (unique.length === 0) throw new Error("Choose at least one member.")
+    const leaderID = await modalWrap(() => context.ui.dialog.select({
+      title: "Workspace leader",
+      options: unique.map((memberID) => ({ title: state()?.agents[memberID]?.name ?? memberID, value: memberID })),
+      current: workspace.leaderID,
+    }))
+    if (!leaderID) return
+    await run("Update workspace", async () => {
+      await invoke(context, "workspace.update", { id: workspace.id, memberIDs: unique, leaderID })
+    })
+  }
+
   const createAgent = async () => {
     const name = (await modalWrap(() => context.ui.dialog.prompt({ title: "New agent", placeholder: "Nova" })))?.trim()
     if (!name) return
@@ -272,9 +304,24 @@ export function EnsembleV2App() {
     const model = await chooseModel()
     if (!model) return
     const variant = await chooseVariant(model)
+    const workspace = activeWorkspace()
     await run("Create agent", async () => {
-      const agent = await invoke(context, "agent.create", { name, title, role, mainModel: { providerID: model.providerID, modelID: model.modelID, variant }, backupModels: [], skillbox: [], color: "cyan" })
+      const agent = await invoke(context, "agent.create", {
+        name,
+        title,
+        role,
+        workspaceID: workspace?.id,
+        mainModel: { providerID: model.providerID, modelID: model.modelID, variant },
+        backupModels: [],
+        skillbox: [],
+        color: "cyan",
+      })
       setSelectedAgentID(agent.id)
+      context.ui.toast.show({
+        title: "Ensemble",
+        message: workspace ? `${agent.name} created and added to #${workspace.name}.` : `${agent.name} created. Create a workspace with n.`,
+        variant: "success",
+      })
     })
   }
 
@@ -332,7 +379,7 @@ export function EnsembleV2App() {
     }))
     if (!target) return
     const agent = state()?.agents[String(target)]
-    if (agent) insertComposer(`$${agent.name} `)
+    if (agent) insertComposer(insertAgentMention(composerRef?.value ?? "", agent.name))
   }
 
   const pickFileReference = async (current: string) => {
@@ -354,7 +401,7 @@ export function EnsembleV2App() {
       options: files.map((file) => ({ title: file, value: file })),
       search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
     }))
-    if (selected) insertComposer(`${current}${String(selected)} `)
+    if (selected) insertComposer(insertFileReference(current, String(selected)))
   }
 
   const pickWorkspace = async () => {
@@ -394,7 +441,8 @@ export function EnsembleV2App() {
   }
 
   const runSlashCommand = async (input: string): Promise<void> => {
-    const command = input.trim().slice(1).split(/\s+/)[0]
+    const parsed = parseSlashCommand(input)
+    const command = parsed?.command ?? ""
     clearComposer()
     switch (command) {
       case "workspace": await pickWorkspace(); return
@@ -426,19 +474,15 @@ export function EnsembleV2App() {
 
   const handleComposerInput = async (value: string) => {
     if (completionOpen()) return
-    if (value === "/") {
-      setCompletionOpen(true)
-      try { await pickSlashCommand() } finally { setCompletionOpen(false) }
-      return
-    }
-    if (value.endsWith("$") && (value.length === 1 || /\s/.test(value.slice(-2, -1)))) {
-      setCompletionOpen(true)
-      try { await pickAgentMention() } finally { setCompletionOpen(false) }
-      return
-    }
-    if (value.endsWith("@") && (value.length === 1 || /\s/.test(value.slice(-2, -1)))) {
-      setCompletionOpen(true)
-      try { await pickFileReference(value) } finally { setCompletionOpen(false) }
+    const trigger = composerTrigger(value)
+    if (!trigger) return
+    setCompletionOpen(true)
+    try {
+      if (trigger === "command") await pickSlashCommand()
+      if (trigger === "agent") await pickAgentMention()
+      if (trigger === "file") await pickFileReference(value)
+    } finally {
+      setCompletionOpen(false)
     }
   }
 
@@ -449,7 +493,7 @@ export function EnsembleV2App() {
       await pickSlashCommand()
       return
     }
-    if (text.startsWith("/")) {
+    if (parseSlashCommand(text)) {
       await runSlashCommand(text)
       return
     }
@@ -694,7 +738,7 @@ export function EnsembleV2App() {
   }
 
   const cycleAgent = (delta: number) => {
-    const list = activeAgents()
+    const list = rosterAgents()
     if (list.length === 0) return
     const index = Math.max(0, list.findIndex((agent) => agent.id === selectedAgentID()))
     setSelectedAgentID(list[(index + delta + list.length) % list.length].id)
@@ -824,6 +868,7 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.workspace.prev", title: "Ensemble: Previous workspace", bind: "W", run: () => cycleWorkspace(-1) },
         { id: "ensemble.v2.agent.next", title: "Ensemble: Next agent", bind: "z", run: () => cycleAgent(1) },
         { id: "ensemble.v2.agent.prev", title: "Ensemble: Previous agent", bind: "Z", run: () => cycleAgent(-1) },
+        { id: "ensemble.v2.workspace.edit", title: "Ensemble: Edit workspace members", bind: "g", run: () => void editWorkspace().catch(showError) },
         { id: "ensemble.v2.new.workspace", title: "Ensemble: New workspace", bind: "n", run: () => void createWorkspace().catch(showError) },
         { id: "ensemble.v2.new.agent", title: "Ensemble: New agent", bind: "a", run: () => void createAgent().catch(showError) },
         { id: "ensemble.v2.settings", title: "Ensemble: Agent settings", bind: "s", run: () => openSettings() },
@@ -855,7 +900,7 @@ export function EnsembleV2App() {
       bindings: [
         "ensemble.v2.leader", "ensemble.v2.compose", "ensemble.v2.mention", "ensemble.v2.search",
         "ensemble.v2.workspace.next", "ensemble.v2.workspace.prev", "ensemble.v2.agent.next", "ensemble.v2.agent.prev",
-        "ensemble.v2.new.workspace", "ensemble.v2.new.agent", "ensemble.v2.settings", "ensemble.v2.native",
+        "ensemble.v2.workspace.edit", "ensemble.v2.new.workspace", "ensemble.v2.new.agent", "ensemble.v2.settings", "ensemble.v2.native",
         "ensemble.v2.delegate", "ensemble.v2.reassign", "ensemble.v2.result", "ensemble.v2.retry", "ensemble.v2.restart",
         "ensemble.v2.cancel.task", "ensemble.v2.approvals",
         "ensemble.v2.workspace.pause", "ensemble.v2.workspace.archive", "ensemble.v2.workspace.delete", "ensemble.v2.agent.archive", "ensemble.v2.agent.delete",
@@ -940,7 +985,7 @@ export function EnsembleV2App() {
           activeWorkspaceID={activeWorkspaceID()}
           filter={workspaceFilter()}
           state={state()}
-          agents={activeAgents()}
+          agents={rosterAgents()}
           selectedAgentID={selectedAgentID()}
           pendingApprovals={pendingApprovals().length}
           workspaceCount={workspaces().length}

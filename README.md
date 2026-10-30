@@ -11,6 +11,7 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **Workspaces are directories.** One workspace belongs to one project directory. Switching workspaces preserves every session.
 - **The group chat is the main interface.** User and agent messages are attributed with names, colors, and the leader badge.
 - **The leader coordinates.** Unaddressed messages go to the workspace leader, who can answer or delegate typed subtasks.
+- **New agents join the current workspace.** Creating an agent from an active workspace adds it to the roster. `g` edits members and the leader later.
 - **Subtasks have three states:** Pending, Working, Replied.
 - **Native sessions stay underneath.** Each agent has one persistent session per workspace; press `o` to inspect it.
 - **Skillboxes and models are per-agent.** Only assigned skills are available; backup models recover from availability failures.
@@ -46,6 +47,7 @@ If the plugin was already loaded before updating the package exports, run `openc
 | `p` | Pause or resume the workspace |
 | `/` | Search workspaces |
 | `n` | New workspace |
+| `g` | Edit workspace members / leader |
 | `w` / `W` | Next / previous workspace |
 | `a` | New agent |
 | `z` / `Z` | Next / previous agent |
@@ -81,6 +83,7 @@ The unit suite covers mention routing, workspace canonicalization, message seque
 - [v2 specification](https://github.com/heyimteee/ensemble/issues/17)
 - [v2 tickets](https://github.com/heyimteee/ensemble/issues)
 - [OpenCode compatibility report](docs/compatibility/opencode-2.2.1.md)
+- [OpenTUI assessment](docs/assessments/opentui.md)
 - [Glossary](GLOSSARY.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)

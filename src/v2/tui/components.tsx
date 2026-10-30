@@ -48,10 +48,12 @@ export function WorkspaceRail(props: {
       <For each={props.agents}>{(agent) => {
         const busy = () => Object.values(props.state?.subtasks ?? {}).some((task) => task.assigneeID === agent.id && task.state === "working" && task.workspaceID === props.activeWorkspaceID)
         const missing = () => missingSkills(agent, props.skillCatalog)
+        const workspace = () => props.activeWorkspaceID ? props.state?.workspaces[props.activeWorkspaceID] : undefined
+        const member = () => !workspace() || workspace()!.memberIDs.includes(agent.id)
         return (
           <text fg={busy() ? props.colors.warn : props.selectedAgentID === agent.id ? props.colors.good : props.colors.text}>
             {busy() ? "◐ " : "  "}{agent.name}
-            {props.state?.workspaces[props.activeWorkspaceID ?? ""]?.leaderID === agent.id ? " · leader" : ""}
+            {workspace()?.leaderID === agent.id ? " · leader" : !member() ? " · guest" : ""}
             {agent.pendingSettings ? " · pending" : ""}
             {missing().length > 0 ? " · !" : ""}
           </text>
@@ -209,7 +211,7 @@ export function ApprovalList(props: {
 
 const shortcutGroups: Array<{ title: string; entries: Array<[string, string]> }> = [
   { title: "Leader", entries: [["~", "Leader key"], ["~ ?", "This help"], ["~ q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },
-  { title: "Workspaces", entries: [["n", "New workspace"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume workspace"], ["Ctrl+W", "Archive workspace"], ["Ctrl+Shift+W", "Delete workspace"]] },
+  { title: "Workspaces", entries: [["n", "New workspace"], ["g", "Edit members and leader"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume workspace"], ["Ctrl+W", "Archive workspace"], ["Ctrl+Shift+W", "Delete workspace"]] },
   { title: "Chat", entries: [["i", "Compose a message"], ["m", "Mention an agent"], ["$Name / !Name", "Address a message"], ["PageUp / PageDown", "Older / newer messages"], ["@file", "Reference a workspace file in the composer"], ["/command", "Ensemble command palette in the composer"]] },
   { title: "Subtasks", entries: [["d", "Delegate selected subtask"], ["t", "Reassign selected subtask"], ["Enter", "Open selected result"], ["r", "Retry selected subtask"], ["R", "Stop and restart selected subtask"], ["x", "Cancel selected subtask"], ["o", "Open native session"]] },
   { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive selected agent"], ["Ctrl+Shift+A", "Delete selected agent"]] },
