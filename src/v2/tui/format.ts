@@ -122,3 +122,59 @@ export function ageLabel(timestamp: number): string {
   if (minutes < 60) return `${minutes}m`
   return `${Math.floor(minutes / 60)}h`
 }
+
+export function renderMarkdownLines(value: string, width: number): string[] {
+  const raw = value.replace(/\r\n/g, "\n").split("\n")
+  const output: string[] = []
+  let inCode = false
+  for (let index = 0; index < raw.length; index++) {
+    let line = raw[index]
+    if (line.trimStart().startsWith("```")) {
+      inCode = !inCode
+      continue
+    }
+    if (inCode) {
+      output.push(...wrapLine(line || " ", width).map((part) => `  ${part}`))
+      continue
+    }
+    if (/^\s*\|/.test(line) && index + 1 < raw.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(raw[index + 1])) {
+      const rows: string[][] = []
+      let cursor = index
+      while (cursor < raw.length && /^\s*\|/.test(raw[cursor])) {
+        rows.push(raw[cursor].trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim()))
+        cursor++
+      }
+      index = cursor - 1
+      if (rows.length > 1) {
+        const header = rows[0]
+        const body = rows.slice(2)
+        const widths = header.map((cell, column) => Math.max(cell.length, ...body.map((row) => (row[column] ?? "").length)))
+        const format = (row: string[]) => row.map((cell, column) => (cell ?? "").padEnd(widths[column] ?? 0)).join(" │ ")
+        output.push(...wrapLine(format(header), width), ...body.flatMap((row) => wrapLine(format(row), width)))
+        continue
+      }
+    }
+    line = line
+      .replace(/^#{1,6}\s*/, "")
+      .replace(/^(\s*)[-*]\s+/, "$1• ")
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    output.push(...wrapLine(line || " ", width))
+  }
+  return output
+}
+
+function wrapLine(value: string, width: number): string[] {
+  if (value.length <= width) return [value]
+  const words = value.split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let line = ""
+  for (const word of words) {
+    if (!line) line = word
+    else if (line.length + 1 + word.length <= width) line += ` ${word}`
+    else { lines.push(line); line = word }
+  }
+  if (line) lines.push(line)
+  return lines.length > 0 ? lines : [""]
+}

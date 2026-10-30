@@ -54,6 +54,8 @@ export type Agent = {
   color: string
   archived: boolean
   pendingSettings: boolean
+  homeSessionID?: Id
+  homeDirectory?: string
   version: number
   createdAt: number
   updatedAt: number
@@ -68,6 +70,7 @@ export type Workspace = {
   synthesis: boolean
   archived: boolean
   paused: boolean
+  configVersion?: number
   nextSeq: number
   createdAt: number
   lastActiveAt: number
@@ -84,6 +87,8 @@ export type Message = {
   text: string
   kind: MessageKind
   taskID?: Id
+  streaming?: boolean
+  interrupted?: boolean
   createdAt: number
 }
 
@@ -124,6 +129,8 @@ export type SessionBinding = {
   agentID: Id
   sessionID: Id
   history?: Id[]
+  kind?: "workspace" | "home"
+  directory?: string
   agentVersion: number
   updatedAt: number
 }
@@ -162,11 +169,39 @@ export type Run = {
   finishedAt?: number
 }
 
+export type DmQueueEntry = {
+  id: Id
+  agentID: Id
+  workspaceID?: Id
+  directory: string
+  text: string
+  status: "queued" | "sent" | "failed"
+  createdAt: number
+}
+
 export type Settings = {
   maxActiveRuns: number
   maxDelegations: number
   maxDepth: number
   synthesis: boolean
+}
+
+export type ChatMessage = {
+  id: string
+  role: "user" | "assistant" | "system"
+  author: string
+  text: string
+  createdAt: number
+}
+
+export type ChatContext = {
+  agentID: Id
+  workspaceID?: Id
+  sessionID: Id
+  directory: string
+  busy: boolean
+  messages: ChatMessage[]
+  queued: number
 }
 
 export type Snapshot = {
@@ -181,14 +216,24 @@ export type Snapshot = {
     memories: Record<Id, Memory>
     approvals: Record<Id, Approval>
     settings: Settings
+    dmQueue: Record<Id, DmQueueEntry>
     ui: {
       activeWorkspaceID?: Id
+      activeAgentID?: Id
+      history?: Record<string, {
+        surface: "workspace" | "agent"
+        workspaceID?: Id
+        agentID?: Id
+        taskID?: Id
+        column?: "rail" | "chat" | "tasks"
+      }>
     }
     runs: Record<Id, Run>
   }
   models: ModelOption[]
   skills: SkillOption[]
   directory: string
+  configError?: string
 }
 
 export type SnapshotState = Snapshot["state"]

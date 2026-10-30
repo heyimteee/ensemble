@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
@@ -15,6 +15,8 @@ function fakeContext() {
   const values = new Map<string, unknown>()
   const removedSessions: string[] = []
   const interruptedSessions: string[] = []
+  const movedSessions: Array<{ sessionID: string; directory: string }> = []
+  const commands: Array<{ sessionID: string; name: string }> = []
   let sessions = 0
   const handlers: Partial<Handlers> = {}
   const tools = new Map<string, any>()
@@ -44,6 +46,8 @@ function fakeContext() {
       }),
       interrupt: async ({ sessionID }: any) => { interruptedSessions.push(sessionID) },
       remove: async ({ sessionID }: any) => { removedSessions.push(sessionID) },
+      move: async ({ sessionID, directory }: any) => { movedSessions.push({ sessionID, directory }); return { data: { id: sessionID, directory } } },
+      command: async ({ sessionID, name }: any) => { commands.push({ sessionID, name }); return { data: {} } },
     },
     tool: { transform: async (factory: any) => factory({ namespace() {}, add(tool: any) { tools.set(tool.name, tool) } }) },
     rpc: {
@@ -59,7 +63,7 @@ function fakeContext() {
     skill: { list: async () => [] },
     event: { subscribe: async function* () {} },
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, tools }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, tools }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -649,7 +653,7 @@ test("archiving a workspace interrupts its active native run", async () => {
   }
 })
 
-test("creating an agent inside a workspace adds it to the roster", async () => {
+test("creating an agent inside a workspace leaves it homeless until explicitly added", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
@@ -669,13 +673,14 @@ test("creating an agent inside a workspace adds it to the roster", async () => {
     })
     assert.equal(added.ok, true)
     const next = await handlers.snapshot({ directory })
-    assert.deepEqual(next.state.workspaces[workspace.result.id].memberIDs, [leader.result.id, added.result.id])
-    const repeated = await handlers.invoke({
+    assert.deepEqual(next.state.workspaces[workspace.result.id].memberIDs, [leader.result.id])
+    const updated = await handlers.invoke({
       directory,
-      action: "agent.create",
-      payload: { name: "Sage Two", workspaceID: workspace.result.id },
+      action: "workspace.update",
+      payload: { id: workspace.result.id, memberIDs: [leader.result.id, added.result.id], leaderID: leader.result.id },
     })
-    assert.equal(repeated.ok, true)
+    assert.equal(updated.ok, true)
+    assert.deepEqual(updated.result.memberIDs, [leader.result.id, added.result.id])
   } finally {
     await stop()
   }
@@ -967,6 +972,24 @@ test("agent tools delegate, ask, remember, and share while a run is active", asy
     assert.match(remembered.content, /Saved project memory/)
     const shared = await tools.get("share").execute({ text: "Share this", scope: "cross_project" }, toolContext)
     assert.match(shared.content, /authorization/)
+    const info = await tools.get("workspace_info").execute({}, toolContext)
+    assert.match(info.content, /site/)
+    const roster = await tools.get("list_agents").execute({}, toolContext)
+    assert.match(roster.content, /Nova/)
+    const allWorkspaces = await tools.get("list_workspaces").execute({}, toolContext)
+    assert.match(allWorkspaces.content, /workspace/)
+    const status = await tools.get("task_status").execute({}, toolContext)
+    assert.match(status.content, /working|pending|replied/)
+    const posted = await tools.get("send_message").execute({ kind: "workspace", text: "Tool message" }, toolContext)
+    assert.match(posted.content, /Posted/)
+    const otherDirectory = mkdtempSync(join(tmpdir(), "ensemble-other-"))
+    const otherWorkspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "other", directory: otherDirectory, memberIDs: [nova.result.id], leaderID: nova.result.id } })
+    const cross = await tools.get("send_message").execute({ kind: "workspace", id: otherWorkspace.result.id, text: "Nope" }, toolContext)
+    assert.match(cross.content, /Cross-workspace/)
+    mkdirSync(join(directory, ".ensemble", "handoffs"), { recursive: true })
+    writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-1.md"), "---\nensemble: handoff\n---\n# Handoff\n")
+    const handoff = await tools.get("handoff").execute({ task: "task", summary: "summary", path: ".ensemble/handoffs/task-nova-sage-1.md", to: "Sage" }, toolContext)
+    assert.match(handoff.content, /Registered handoff/)
     const snapshot = await handlers.snapshot({ directory })
     assert.ok(Object.values(snapshot.state.memories).some((memory: any) => memory.text === "Use pnpm"))
     const kinds = Object.values(snapshot.state.approvals).map((approval: any) => approval.kind)
@@ -1114,6 +1137,256 @@ test("agent model, backup, and skillbox updates bump behavior version", async ()
     assert.deepEqual(updated.result.backupModels, [model])
     assert.deepEqual(updated.result.skillbox, ["alpha"])
     assert.equal(updated.result.color, "magenta")
+  } finally {
+    await stop()
+  }
+})
+
+test("workspace config is authoritative and can register a workspace on discovery", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    mkdirSync(join(directory, ".ensemble"), { recursive: true })
+    writeFileSync(join(directory, ".ensemble", "config.json"), JSON.stringify({ version: 1, name: "Manual", leader: "Sage", members: ["Nova", "Sage"], synthesis: false, paused: true }))
+    const imported = await handlers.snapshot({ directory })
+    const workspace = Object.values(imported.state.workspaces)[0] as any
+    assert.equal(workspace.name, "Manual")
+    assert.equal(workspace.leaderID, sage.result.id)
+    assert.deepEqual(workspace.memberIDs, [nova.result.id, sage.result.id])
+    assert.equal(workspace.synthesis, false)
+    assert.equal(workspace.paused, true)
+    writeFileSync(join(directory, ".ensemble", "config.json"), JSON.stringify({ version: 1, name: "Edited", leader: "Nova", members: ["Nova"], synthesis: true, paused: false }))
+    const edited = await handlers.snapshot({ directory })
+    const current = Object.values(edited.state.workspaces)[0] as any
+    assert.equal(current.name, "Edited")
+    assert.deepEqual(current.memberIDs, [nova.result.id])
+  } finally {
+    await stop()
+  }
+})
+
+test("agent names are unique and config names must resolve uniquely", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const first = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const duplicate = await handlers.invoke({ directory, action: "agent.create", payload: { name: "nova" } })
+    assert.equal(duplicate.ok, false)
+    assert.equal(duplicate.error.code, "duplicate_name")
+    const other = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova Prime" } })
+    mkdirSync(join(directory, ".ensemble"), { recursive: true })
+    writeFileSync(join(directory, ".ensemble", "config.json"), JSON.stringify({ version: 1, name: "Bad", leader: "Ghost", members: ["Ghost"], synthesis: true }))
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(Object.values(snapshot.state.workspaces).length, 0)
+    assert.equal(first.ok, true)
+    assert.equal(other.ok, true)
+  } finally {
+    await stop()
+  }
+})
+
+test("direct chat creates a home session and queues messages while busy", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "Helpful", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 250)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const homeChat = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    assert.equal(homeChat.ok, true)
+    assert.equal(homeChat.result.directory, home)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "Work" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = next.state.bindings["w:a"]
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    const queued = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "DM while busy" } })
+    assert.equal(queued.result.queued, true)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.values(after.state.dmQueue).filter((entry: any) => entry.status === "queued").length, 1)
+    assert.ok(sessionID)
+  } finally {
+    await stop()
+  }
+})
+
+test("group replies stream as one growing message and finalize", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 220)) }
+  ;(ctx.session as any).context = async () => ({ data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Partial reply" }] }] })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Hello" } })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const during = await handlers.snapshot({ directory })
+    const streaming = Object.values(during.state.messages[workspace.result.id]).find((message: any) => message.streaming)
+    assert.ok(streaming)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    }, 3000)
+    const final = await handlers.snapshot({ directory })
+    const messages = final.state.messages[workspace.result.id]
+    assert.equal(messages.filter((message: any) => message.text === "Partial reply").length >= 1, true)
+    assert.equal(messages.some((message: any) => message.streaming), false)
+  } finally {
+    await stop()
+  }
+})
+
+test("init runs native /init then places the versioned block at the top", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, commands } = fakeContext()
+  ;(ctx.session as any).command = async ({ sessionID, name }: any) => {
+    commands.push({ sessionID, name })
+    writeFileSync(join(directory, "AGENTS.md"), "# Repo\n\nExisting.\n")
+    return { data: {} }
+  }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id } })
+    assert.equal(init.ok, true)
+    assert.ok(commands.some((entry) => entry.name === "init"))
+    const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+    assert.ok(content.startsWith("<!-- ensemble:start v1 -->"))
+    assert.ok(content.includes("# Repo"))
+    assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1)
+  } finally {
+    await stop()
+  }
+})
+
+test("reset removes ensemble state, config, and bound sessions but preserves handoffs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, removedSessions } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    writeFileSync(join(directory, ".ensemble", "handoffs", "keep.md"), "handoff")
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Hello" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const before = await handlers.snapshot({ directory })
+    const binding = Object.values(before.state.bindings)[0] as any
+    const wrong = await handlers.invoke({ directory, action: "ensemble.reset", payload: { confirmation: "no" } })
+    assert.equal(wrong.ok, false)
+    const reset = await handlers.invoke({ directory, action: "ensemble.reset", payload: { confirmation: "RESET", deleteHandoffs: false } })
+    assert.equal(reset.ok, true)
+    assert.ok(removedSessions.includes(binding.sessionID))
+    const after = await handlers.snapshot({ directory })
+    assert.deepEqual(Object.keys(after.state.agents), [])
+    assert.deepEqual(Object.keys(after.state.workspaces), [])
+    assert.equal(existsSync(join(directory, ".ensemble", "config.json")), false)
+    assert.equal(existsSync(join(directory, ".ensemble", "handoffs", "keep.md")), true)
+  } finally {
+    await stop()
+  }
+})
+
+test("adding an agent can move its homeless direct-chat session into a workspace", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
+  const { ctx, movedSessions } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, homeDirectory: home, createdAt: 1, updatedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const chat = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    assert.equal(chat.ok, true)
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: ["a"], leaderID: "a" } })
+    const moved = await handlers.invoke({ directory, action: "agent.moveHome", payload: { agentID: "a", workspaceID: workspace.result.id } })
+    assert.equal(moved.result.moved, true)
+    assert.equal(movedSessions.length, 1)
+    assert.equal(movedSessions[0].directory, directory)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.bindings["home:a"], undefined)
+    assert.ok(after.state.bindings[`${workspace.result.id}:a`])
+  } finally {
+    await stop()
+  }
+})
+
+test("reset during a streaming run leaves no resurrected transcript", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 400)) }
+  ;(ctx.session as any).context = async () => ({ data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "SECRET PARTIAL" }] }] })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Long" } })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const reset = await handlers.invoke({ directory, action: "ensemble.reset", payload: { confirmation: "RESET" } })
+    assert.equal(reset.ok, true)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const after = await handlers.snapshot({ directory })
+    assert.deepEqual(Object.keys(after.state.messages), [])
+    assert.deepEqual(Object.keys(after.state.workspaces), [])
+    assert.deepEqual(Object.keys(after.state.agents), [])
+  } finally {
+    await stop()
+  }
+})
+
+test("a failed direct prompt releases the busy lock", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, homeDirectory: home, createdAt: 1, updatedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    ;(ctx.session as any).prompt = async () => { throw new Error("session gone") }
+    const failed = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "Hello" } })
+    assert.equal(failed.ok, false)
+    const after = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    assert.equal(after.result.busy, false)
   } finally {
     await stop()
   }

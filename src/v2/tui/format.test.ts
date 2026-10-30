@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { ageLabel, agentColor, fuzzyMatch, markdownText, missingSkills, resultForTask, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
+import { ageLabel, agentColor, fuzzyMatch, markdownText, missingSkills, renderMarkdownLines, resultForTask, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
 import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
 
 const agent = (patch: Partial<Agent> = {}): Agent => ({
@@ -70,4 +70,16 @@ test("age labels use compact units", () => {
   assert.match(ageLabel(Date.now() - 5_000), /^\d+s$/)
   assert.match(ageLabel(Date.now() - 120_000), /^\d+m$/)
   assert.match(ageLabel(Date.now() - 7_200_000), /^\d+h$/)
+})
+
+
+test("renderMarkdownLines preserves headings, bullets, code, and tables", () => {
+  const lines = renderMarkdownLines("# Title\n- one\n- two\n\n```ts\nconst x = 1\n```\n\n| Name | Age |\n|---|---|\n| Nova | 2 |\n| Sage | 3 |", 40)
+  assert.equal(lines[0], "Title")
+  assert.equal(lines[1], "• one")
+  assert.equal(lines[2], "• two")
+  assert.ok(lines.some((line) => line.includes("Name") && line.includes("Age")))
+  assert.ok(lines.some((line) => line.includes("Nova") && line.includes("2")))
+  assert.ok(lines.some((line) => line.trimStart().startsWith("const x = 1")))
+  assert.deepEqual(renderMarkdownLines("", 10), [" "])
 })

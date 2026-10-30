@@ -1,12 +1,12 @@
 # Ensemble v2 implementation
 
-Status: **developer preview**, tested against OpenCode 2.2.1. The v2 runtime is the default. The v1 preview was removed.
+Status: **developer preview**, tested against OpenCode 2.2.2. The v2 runtime is the default. The v1 preview was removed.
 
 ## Architecture
 
 ```text
 Ensemble TUI workspace page
-  workspace rail · group chat · subtask board · settings · approvals
+  agents + workspaces rail · direct/group chat · subtask board · settings · approvals
                          │
                   typed RPC + events
                          │
@@ -28,7 +28,9 @@ OpenCode engine
 - **`src/v2/tui/`** — page shell, presentational components, palette, formatting, and keymap layers.
 - **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval.
 - **`src/v2/routing.ts`** — `$`/`!` mention routing and leader fallback.
-- **`src/v2/paths.ts`** — canonical workspace directories.
+- **`src/v2/paths.ts`** — canonical workspace directories and file references.
+- **`src/v2/workspace-config.ts`** — `.ensemble/config.json`, handoff paths, `.gitignore`, AGENTS.md insertion.
+- **`src/v2/init-block.ts`** — the versioned AGENTS.md team contract.
 
 Every execution is a native OpenCode session. Ensemble does not replace tools, providers, permissions, or skills.
 
@@ -46,8 +48,11 @@ Workspace {
 ```
 
 - One canonical directory maps to one active workspace.
-- Switching workspace changes the group chat, task board, and directory for new runs.
+- Switching workspace changes the chat, task board, and directory for new runs.
 - Sessions are bound to `workspace + agent`, so switching does not discard them.
+- `<workspace>/.ensemble/config.json` is authoritative for workspace name, leader, members, synthesis, and paused state. OpenCode storage remains authoritative for agents, messages, subtasks, approvals, memories, bindings, and history.
+- Valid config files discovered in a directory register a workspace automatically; invalid config is rejected and the last good state is kept.
+- `.ensemble/` is created when a workspace is created, is added to `.gitignore`, and contains only config, handoffs, and init metadata. Conversation history stays in OpenCode storage.
 
 The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent workspace directories come first, `~/` expands, and manual paths are supported. The workspace rail groups workspaces by canonical project directory, supports `/` search, and shows unread (`●`), busy (`◐`), and paused (`⏸`) markers. The selected workspace and subtask are persisted and restored when the page reopens.
 
@@ -66,8 +71,9 @@ Agent {
 }
 ```
 
-- Creating an agent inside an active workspace adds it to that workspace as a member.
-- `g` edits workspace members and the leader without recreating the workspace.
+- New agents start homeless. Their native DM session lives under `~/.ensemble/agents/<id>/`.
+- Adding an agent to a workspace can move its homeless session with `session.move`; `g` edits members and the leader without recreating the workspace.
+- Agent names are unique and case-insensitive.
 - General, Models, Memories, and Skillbox settings.
 - Main model and supported reasoning; ordered backups can be added, moved, and removed.
 - Exclusive Skillbox enforced with per-session `skill` permissions.
@@ -94,7 +100,50 @@ Message {
 - `i` focuses an inline bottom composer. `$` opens an agent picker and inserts a stable `$Name` reference; `@` opens a workspace file picker; `/` opens the Ensemble command palette. `m` is the keyboard shortcut for the agent picker.
 - File references are resolved inside the workspace and appended to the subtask instruction. `@` is not a mention.
 - Agent replies and task cards appear in the same transcript.
-- Native sessions are not alternate chat tabs; `o` opens the selected agent's session.
+- Group replies stream into one growing message row and finalize as full Markdown.
+- Direct chats render the native OpenCode transcript in the center column. `o` opens that native session as a normal OpenCode route.
+- Selecting an agent opens its DM; selecting a workspace opens the group chat. The empty state appears when no chat is open.
+
+## Direct chats and sessions
+
+- Every agent has a direct chat. If the agent belongs to the active workspace, the DM uses that workspace’s native session; otherwise it uses a homeless session in `~/.ensemble/agents/<id>/`.
+- Direct chat messages are queued while the agent is running and flushed when the native session becomes idle.
+- Native session transcripts are authoritative; Ensemble stores only queue and UI state.
+- Adding a homeless agent to a workspace can move its session with `session.move`; `/cd` is the human-facing equivalent in OpenCode 2.2.2.
+
+## Configuration and init
+
+`<workspace>/.ensemble/` contains:
+
+```text
+config.json          workspace name, leader, members, synthesis, paused
+handoffs/            typed Markdown handoffs
+init.json            AGENTS.md block version
+```
+
+`Ctrl+G` or `/init` runs native `/init` in a temporary workspace session, waits for the agent to update `AGENTS.md`, then places the versioned `<!-- ensemble:start v1 -->` block at the top. Existing content outside the markers is preserved. Init failures leave no partial block.
+
+Reset is available through `/reset-ensemble` and `Ctrl+Shift+Delete`, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
+
+## Native tools
+
+Read-only tools are available in every native session:
+
+- `ensemble_workspace_info`
+- `ensemble_list_workspaces`
+- `ensemble_list_agents`
+- `ensemble_task_status`
+
+Write tools are registered globally but refuse outside an Ensemble-bound session:
+
+- `ensemble_send_message`
+- `ensemble_handoff`
+- `ensemble_delegate`
+- `ensemble_ask_person`
+- `ensemble_remember`
+- `ensemble_share`
+
+`ensemble_send_message` posts to the group or queues an agent DM; it does not create work. `ensemble_handoff` validates a Markdown file under `.ensemble/handoffs/` and posts its path. `ensemble_delegate` remains the work-creating tool.
 
 ## Subtasks
 
@@ -183,7 +232,7 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 ## Known limitations
 
 - The composer completes agents on `$`, files on `@`, and Ensemble commands on `/`; arbitrary native OpenCode slash commands are not proxied into the group chat.
-- The group chat renders basic Markdown structure (headings, bullets, inline code, links) as wrapped terminal text. Rich syntax highlighting and tables are not implemented.
-- Direct one-to-one conversations are not implemented in the v2 TUI; a one-member workspace is not treated as a DM.
+- The transcript renders Markdown structure (headings, bullets, code blocks, links, and tables) as terminal text. Syntax highlighting and clickable links are not implemented.
+- Direct chats use the native OpenCode transcript; there is no separate Ensemble DM store, search, or export.
 - Some host dialog closes leave stale cells until the next full repaint; the page remains usable.
 - No npm package, versioning policy, or license has been selected.

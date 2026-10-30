@@ -1,113 +1,114 @@
 import { For, Show } from "solid-js"
-import type { Agent, Approval, Memory, Message, SkillOption, SnapshotState, Subtask, Workspace } from "../types.ts"
+import type { Agent, Approval, Memory, SkillOption, SnapshotState, Subtask } from "../types.ts"
 import type { Palette } from "./theme.ts"
-import { ageLabel, agentColor, agentName, busyCount, missingSkills, resultForTask, short, unreadCount, workspaceGroupLabel, wrapText } from "./format.ts"
+import { agentColor, agentName, busyCount, missingSkills, renderMarkdownLines, short, unreadCount } from "./format.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
-export function WorkspaceRail(props: {
+export type RailItem = {
+  kind: "agent" | "workspace"
+  id: string
+  title: string
+  detail?: string
+  group?: string
+}
+
+export type ChatLine = {
+  id: string
+  author: string
+  role: "user" | "agent" | "system"
+  text: string
+  kind?: string
+  streaming?: boolean
+  interrupted?: boolean
+  createdAt: number
+}
+
+export function Rail(props: {
   colors: Palette
-  groups: Array<{ directory: string; workspaces: Workspace[] }>
+  items: RailItem[]
+  cursor: number
+  focus: boolean
   activeWorkspaceID: string | null
-  filter: string
   state: SnapshotState | null
-  agents: Agent[]
-  selectedAgentID: string | null
   pendingApprovals: number
-  workspaceCount: number
-  skillCatalog: SkillOption[]
   width: number
+  filter: string
 }) {
   return (
     <box width={props.width} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
-      <text fg={props.colors.accent}>WORKSPACES {props.workspaceCount > 0 ? `(${props.workspaceCount})` : ""}</text>
-      <Show when={props.filter}><text fg={props.colors.faint}>filter: {props.filter}</text></Show>
-      <Show when={props.groups.length === 0}>
-        <text fg={props.colors.muted}>No workspaces. Press n.</text>
-      </Show>
-      <For each={props.groups}>{(group) => (
-        <>
-          <text fg={props.colors.faint}>{workspaceGroupLabel(group.directory)}</text>
-          <For each={group.workspaces}>{(workspace) => {
-            const active = () => workspace.id === props.activeWorkspaceID
-            const unread = () => unreadCount(props.state, workspace)
-            const busy = () => busyCount(props.state, workspace.id)
-            return (
-              <text fg={active() ? props.colors.good : props.colors.text}>
-                {active() ? "› " : "  "}#{workspace.name}
-                {workspace.paused ? " ⏸" : ""}
-                {busy() > 0 ? ` ◐${busy()}` : ""}
-                {unread() > 0 ? ` ●${unread()}` : ""}
-              </text>
-            )
-          }}</For>
-        </>
-      )}</For>
-      <text> </text>
-      <text fg={props.colors.accent}>AGENTS</text>
-      <For each={props.agents}>{(agent) => {
-        const busy = () => Object.values(props.state?.subtasks ?? {}).some((task) => task.assigneeID === agent.id && task.state === "working" && task.workspaceID === props.activeWorkspaceID)
-        const missing = () => missingSkills(agent, props.skillCatalog)
-        const workspace = () => props.activeWorkspaceID ? props.state?.workspaces[props.activeWorkspaceID] : undefined
-        const member = () => !workspace() || workspace()!.memberIDs.includes(agent.id)
+      <For each={props.items}>{(item, index) => {
+        const previous = index() > 0 ? props.items[index() - 1] : undefined
+        const kindHeader = item.kind !== previous?.kind ? item.kind.toUpperCase() + "S" : ""
+        const groupHeader = item.group && item.group !== previous?.group ? item.group : ""
+        const selected = props.cursor === index()
+        const leader = item.kind === "agent" && props.state?.workspaces[props.activeWorkspaceID ?? ""]?.leaderID === item.id
+        const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
+        const unread = workspace ? unreadCount(props.state, workspace) : 0
+        const busy = workspace ? busyCount(props.state, workspace.id) : 0
         return (
-          <text fg={busy() ? props.colors.warn : props.selectedAgentID === agent.id ? props.colors.good : props.colors.text}>
-            {busy() ? "◐ " : "  "}{agent.name}
-            {workspace()?.leaderID === agent.id ? " · leader" : !member() ? " · guest" : ""}
-            {agent.pendingSettings ? " · pending" : ""}
-            {missing().length > 0 ? " · !" : ""}
-          </text>
+          <>
+            <Show when={kindHeader === "WORKSPACES"}>
+              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>────────</text>
+            </Show>
+            <Show when={kindHeader}>
+              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{kindHeader}</text>
+            </Show>
+            <Show when={groupHeader}>
+              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
+            </Show>
+            <text fg={selected ? (props.focus ? props.colors.good : props.colors.warn) : props.colors.text} bg={props.colors.bg} width="100%" truncate>
+              {selected ? "› " : "  "}{item.kind === "workspace" ? `#${item.title}` : item.title}
+              {leader ? " · leader" : ""}
+              {item.detail ? ` · ${item.detail}` : ""}
+              {workspace?.paused ? " ⏸" : ""}
+              {busy > 0 ? ` ◐${busy}` : ""}
+              {unread > 0 ? ` ●${unread}` : ""}
+            </text>
+          </>
         )
       }}</For>
+      <Show when={props.items.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>No agents or workspaces yet.</text></Show>
       <text> </text>
-      <text fg={props.colors.accent}>APPROVALS {props.pendingApprovals > 0 ? `(${props.pendingApprovals})` : ""}</text>
-      <text fg={props.colors.muted}>v opens inbox</text>
+      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>APPROVALS {props.pendingApprovals > 0 ? `(${props.pendingApprovals})` : ""}</text>
+      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>v opens inbox</text>
     </box>
   )
 }
 
-export function MessageList(props: { colors: Palette; messages: Message[]; state: SnapshotState | null; workspace?: Workspace; width: number }) {
-  const rows = () => {
-    const rendered: Array<{ message: Message; lines: string[] }> = []
-    let budget = 28
-    for (let index = props.messages.length - 1; index >= 0 && budget > 0; index--) {
-      const message = props.messages[index]
-      const lines = wrapText(message.text, props.width, 6)
-      const cost = 1 + lines.length
-      if (rendered.length > 0 && cost > budget) break
-      rendered.unshift({ message, lines })
-      budget -= cost
-    }
-    return rendered
-  }
+export function Transcript(props: {
+  colors: Palette
+  messages: ChatLine[]
+  width: number
+  emptyTitle: string
+  emptyBody: string
+  busy: boolean
+  queued: number
+}) {
   return (
-    <>
-      <For each={rows()}>{(row) => <MessageLine colors={props.colors} message={row.message} lines={row.lines} state={props.state} workspace={props.workspace} />}</For>
-      <Show when={props.messages.length === 0}>
-        <text fg={props.colors.muted}>{props.workspace ? "Say something to your team." : "Create a workspace with n."}</text>
+    <scrollbox flexGrow={1} stickyScroll stickyStart="bottom" width="100%">
+      <Show when={props.messages.length > 0} fallback={
+        <box flexDirection="column" padding={1}>
+          <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>{props.emptyTitle}</text>
+          <text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{props.emptyBody}</text>
+        </box>
+      }>
+        <For each={props.messages}>{(message) => {
+          const color = message.role === "user" ? props.colors.good : message.role === "system" ? props.colors.muted : props.colors.accent
+          const lines = renderMarkdownLines(message.text || (message.streaming ? "…" : ""), Math.max(16, props.width))
+          return (
+            <box flexDirection="column" paddingY={0} marginTop={1}>
+              <text fg={color} bg={props.colors.bg} width="100%" truncate>
+                {message.author}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.streaming ? " · streaming…" : ""}{message.interrupted ? " · interrupted" : ""}
+              </text>
+              <For each={lines}>{(line) => <text fg={message.role === "system" ? props.colors.muted : props.colors.text} bg={props.colors.bg} width="100%" truncate>{line || " "}</text>}</For>
+            </box>
+          )
+        }}</For>
       </Show>
-    </>
-  )
-}
-
-function MessageLine(props: { colors: Palette; message: Message; lines: string[]; state: SnapshotState | null; workspace?: Workspace }) {
-  const name = () => props.message.author === "user" ? "You" : props.message.author === "system" ? "Ensemble" : agentName(props.state, props.message.agentID)
-  const isLeader = () => props.message.agentID === props.workspace?.leaderID
-  const color = () => props.message.author === "user"
-    ? props.colors.good
-    : props.message.author === "system"
-      ? props.colors.muted
-      : isLeader()
-        ? props.colors.leader
-        : agentColor(props.state?.agents[props.message.agentID ?? ""], props.colors.accent as string)
-  const prefix = () => `${name()}${isLeader() ? " · leader" : ""}${props.message.kind === "task" ? " · task" : ""}${props.message.kind === "approval" ? " · approval · v to resolve" : ""}:`
-  return (
-    <box flexDirection="column" paddingY={0}>
-      <text fg={color()} bg={props.colors.bg} width="100%" truncate>{prefix()}</text>
-      <For each={props.lines}>{(line) => (
-        <text fg={props.message.author === "system" ? props.colors.muted : props.colors.text} bg={props.colors.bg} width="100%" truncate>{line}</text>
-      )}</For>
-    </box>
+      <Show when={props.busy}><text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>▍ working…</text></Show>
+      <Show when={props.queued > 0}><text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>queued messages: {props.queued}</text></Show>
+    </scrollbox>
   )
 }
 
@@ -117,91 +118,53 @@ export function TaskBoard(props: {
   state: SnapshotState | null
   cursor: number
   activeCount: number
+  focus: boolean
   width: number
 }) {
-  const groups = () => {
-    const pending = props.tasks.filter((task) => task.state === "pending")
-    const working = props.tasks.filter((task) => task.state === "working")
-    const replied = props.tasks.filter((task) => task.state === "replied")
-    return [
-      { title: "PENDING", tasks: pending },
-      { title: "WORKING", tasks: working },
-      { title: "REPLIED", tasks: replied },
-    ]
-  }
+  const groups = () => [
+    { title: "PENDING", tasks: props.tasks.filter((task) => task.state === "pending") },
+    { title: "WORKING", tasks: props.tasks.filter((task) => task.state === "working") },
+    { title: "REPLIED", tasks: props.tasks.filter((task) => task.state === "replied") },
+  ]
   return (
     <box width={props.width} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
-      <text fg={props.colors.accent}>SUBTASKS {props.activeCount > 0 ? `· ${props.activeCount} working` : ""}</text>
-      <TaskGroups colors={props.colors} groups={groups()} state={props.state} cursor={props.cursor} />
-      <Show when={props.tasks[props.cursor]}>{(task) => {
-        const parent = () => task().parentID ? props.state?.subtasks[task().parentID!]?.title : undefined
-        const result = () => resultForTask(props.state, task())
-        return (
-          <>
-            <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>parent: {parent() ? short(parent()!, 24) : "—"} · {ageLabel(task().createdAt)} · try {task().attempts} · {task().runSummary ?? "—"}</text>
-            <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>result: {result() ? short(result()!.text, 26) : task().error ? short(task().error!, 26) : "—"}</text>
-          </>
-        )
-      }}</Show>
+      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>SUBTASKS {props.activeCount > 0 ? `· ${props.activeCount} working` : ""}</text>
+      <TaskGroups colors={props.colors} groups={groups()} state={props.state} cursor={props.cursor} focus={props.focus} />
       <text> </text>
-      <text fg={props.colors.muted}>d delegate · t reassign · ↵ result</text>
-      <text fg={props.colors.muted}>r retry · R restart · x cancel · o native</text>
+      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result</text>
+      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>r retry · R restart · x cancel · o native</text>
     </box>
   )
 }
 
-function TaskGroups(props: {
-  colors: Palette
-  groups: Array<{ title: string; tasks: Subtask[] }>
-  state: SnapshotState | null
-  cursor: number
-}) {
+function TaskGroups(props: { colors: Palette; groups: Array<{ title: string; tasks: Subtask[] }>; state: SnapshotState | null; cursor: number; focus: boolean }) {
   return (
     <For each={props.groups}>{(group, groupIndex) => {
       const base = props.groups.slice(0, groupIndex()).reduce((sum, item) => sum + item.tasks.length, 0)
-      const max = 5
-      const inGroup = props.cursor >= base && props.cursor < base + group.tasks.length
-      const start = inGroup
-        ? Math.max(0, Math.min(props.cursor - base - Math.floor(max / 2), group.tasks.length - max))
-        : Math.max(0, group.tasks.length - max)
-      const visible = group.tasks.slice(start, start + max)
       return (
         <>
-          <text fg={props.colors.muted}>{group.title} ({group.tasks.length})</text>
-          <For each={visible}>{(task, index) => {
-            const absolute = base + start + index()
-            return (
-              <text fg={props.cursor === absolute ? props.colors.good : task.state === "working" ? props.colors.warn : task.state === "replied" ? props.colors.text : props.colors.muted}>
-                {props.cursor === absolute ? "› " : "  "}
-                {task.state === "working" ? "◐ " : task.state === "replied" ? "● " : "○ "}
-                {short(task.title, 17)} · {agentName(props.state, task.assigneeID)}
-                {task.interrupted ? " · interrupted" : ""}
-              </text>
-            )
-          }}</For>
+          <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{group.title} ({group.tasks.length})</text>
+          <For each={group.tasks}>{(task, index) => (
+            <text fg={props.cursor === base + index() ? (props.focus ? props.colors.good : props.colors.warn) : task.state === "working" ? props.colors.warn : props.colors.text} bg={props.colors.bg} width="100%" truncate>
+              {props.cursor === base + index() ? "› " : "  "}{task.state === "working" ? "◐ " : task.state === "replied" ? "● " : "○ "}
+              {short(task.title, 18)} · {agentName(props.state, task.assigneeID)}{task.interrupted ? " · interrupted" : ""}
+            </text>
+          )}</For>
         </>
       )
     }}</For>
   )
 }
 
-export function ApprovalList(props: {
-  colors: Palette
-  approvals: Approval[]
-  cursor: number
-  state: SnapshotState | null
-  onResolve: (approval: Approval) => Promise<void>
-}) {
+export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cursor: number; state: SnapshotState | null; onResolve: (approval: Approval) => Promise<void> }) {
   return (
     <box flexDirection="column">
-      <text fg={props.colors.accent}>Approvals inbox</text>
+      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>Approvals inbox</text>
       <Show when={props.approvals.length === 0}><text fg={props.colors.muted}>Nothing waits for you.</text></Show>
       <For each={props.approvals}>{(approval, index) => (
         <box flexDirection="column">
-          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn}>
-            {props.cursor === index() ? "› " : "  "}{approval.title}{approval.kind === "interrupted" ? " · interrupted" : ""}
-          </text>
-          <text fg={props.colors.muted}>{short(approval.detail, 100)}</text>
+          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}{approval.title}</text>
+          <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
         </box>
       )}</For>
       <text fg={props.colors.muted}>↑/↓ select · Enter approve/decline · esc close</text>
@@ -211,26 +174,28 @@ export function ApprovalList(props: {
 
 const shortcutGroups: Array<{ title: string; entries: Array<[string, string]> }> = [
   { title: "Leader", entries: [["~", "Leader key"], ["~ ?", "This help"], ["~ q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },
-  { title: "Workspaces", entries: [["n", "New workspace"], ["g", "Edit members and leader"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume workspace"], ["Ctrl+W", "Archive workspace"], ["Ctrl+Shift+W", "Delete workspace"]] },
-  { title: "Chat", entries: [["i", "Compose a message"], ["m", "Mention an agent"], ["$Name / !Name", "Address a message"], ["PageUp / PageDown", "Older / newer messages"], ["@file", "Reference a workspace file in the composer"], ["/command", "Ensemble command palette in the composer"]] },
-  { title: "Subtasks", entries: [["d", "Delegate selected subtask"], ["t", "Reassign selected subtask"], ["Enter", "Open selected result"], ["r", "Retry selected subtask"], ["R", "Stop and restart selected subtask"], ["x", "Cancel selected subtask"], ["o", "Open native session"]] },
-  { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive selected agent"], ["Ctrl+Shift+A", "Delete selected agent"]] },
-  { title: "Settings", entries: [["Tab", "Cycle settings tab"], ["e", "Edit setting"], ["b", "Add backup model"], ["Ctrl+↑ / Ctrl+↓", "Move selected backup"], ["Backspace", "Remove selected backup"], ["Ctrl+S", "Save settings"], ["Space", "Toggle skill"], ["Ctrl+F", "Filter skills"], ["Ctrl+D", "Delete memory"], ["Ctrl+P", "Promote memory"]] },
-  { title: "Approvals", entries: [["v", "Open approvals inbox"], ["↑ / ↓", "Select approval"], ["Enter", "Approve or decline"]] },
+  { title: "Navigation", entries: [["h / l", "Previous / next column"], ["j / k", "Next / previous item"], ["Enter", "Open selected chat"], ["i", "Focus composer"], ["Esc", "Leave composer"]] },
+  { title: "Workspaces", entries: [["n", "New workspace"], ["g", "Edit members and leader"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume"], ["Ctrl+G", "Init Ensemble in this workspace"]] },
+  { title: "Chat", entries: [["$Name", "Mention an agent"], ["@path", "Reference a workspace file"], ["/command", "Ensemble commands"], ["PageUp / PageDown", "Scroll transcript"]] },
+  { title: "Subtasks", entries: [["d", "Delegate"], ["t", "Reassign"], ["Enter", "Open result"], ["r", "Retry"], ["R", "Restart"], ["x", "Cancel"], ["o", "Open native session"]] },
+  { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive agent"], ["Ctrl+Shift+A", "Delete agent"]] },
+  { title: "Settings", entries: [["Tab", "Cycle tab"], ["e", "Edit"], ["b", "Add backup"], ["Ctrl+↑ / Ctrl+↓", "Move backup"], ["Backspace", "Remove backup"], ["Ctrl+S", "Save"], ["Space", "Toggle skill"], ["Ctrl+F", "Filter skills"]] },
 ]
 
 export function HelpView(props: { colors: Palette }) {
   return (
-    <box flexDirection="column">
-      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>Keyboard shortcuts</text>
-      <For each={shortcutGroups}>{(group) => (
-        <>
-          <text fg={props.colors.leader} bg={props.colors.bg} width="100%" truncate>{group.title}</text>
-          <For each={group.entries}>{(entry) => <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{entry[0].padEnd(16)} {entry[1]}</text>}</For>
-        </>
-      )}</For>
-      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>~ is disabled while a dialog or text entry is active.</text>
-    </box>
+    <scrollbox flexGrow={1} stickyScroll stickyStart="top" width="100%">
+      <box flexDirection="column">
+        <text fg={props.colors.accent}>Keyboard shortcuts</text>
+        <For each={shortcutGroups}>{(group) => (
+          <>
+            <text fg={props.colors.leader}>{group.title}</text>
+            <For each={group.entries}>{(entry) => <text fg={props.colors.text}>{entry[0].padEnd(16)} {entry[1]}</text>}</For>
+          </>
+        )}</For>
+        <text fg={props.colors.muted}>~ is disabled while the composer or a dialog is active.</text>
+      </box>
+    </scrollbox>
   )
 }
 
@@ -251,7 +216,7 @@ export function SettingsView(props: {
   return (
     <Show when={props.agent} fallback={<text fg={props.colors.muted}>Select an agent and press s.</text>}>
       <box flexDirection="column">
-        <text fg={props.colors.accent}>{props.agent!.name} · settings {props.dirty ? "· UNSAVED" : ""}{props.agent!.pendingSettings ? " · pending next task" : ""}</text>
+        <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>{props.agent!.name} · settings {props.dirty ? "· UNSAVED" : ""}{props.agent!.pendingSettings ? " · pending next task" : ""}</text>
         <text fg={props.colors.muted}>General · Models · Memories · Skillbox (Tab)</text>
         <Show when={props.tab === "general"}>
           <text>Name: {props.agent!.name}</text>
@@ -272,9 +237,7 @@ export function SettingsView(props: {
           <text fg={props.colors.muted}>e add · Ctrl+D delete · Ctrl+P promote</text>
         </Show>
         <Show when={props.tab === "skillbox"}>
-          <Show when={missing().length > 0}>
-            <text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text>
-          </Show>
+          <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
           <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · Ctrl+F</text>
           <For each={props.skills.slice(0, 40)}>{(skill, index) => (
             <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{props.agent!.skillbox.includes(skill.id) ? "[x]" : "[ ]"} {skill.name} ({skill.id})</text>

@@ -72,6 +72,12 @@ if ! grep -q "ENSEMBLE" <<<"$SCREEN"; then
   exit 1
 fi
 
+EMPTY=$(tmux capture-pane -p -t "$TUI")
+if ! grep -q "No currently opened session" <<<"$EMPTY"; then
+  echo "live-check: empty chat state was not shown" >&2
+  exit 1
+fi
+
 PLUGINS=$(curl -s -u "opencode:$PASS" "$URL/api/plugin")
 if ! grep -q "ensemble.v2" <<<"$PLUGINS"; then
   echo "live-check: ensemble.v2 is not active" >&2
@@ -118,6 +124,11 @@ if [ "$MODELS" -gt 0 ]; then
     tmux capture-pane -p -t "$TUI" >&2 || true
     exit 1
   fi
+  if ! grep -q "Direct chat with LiveAgent" <<<"$AGENT_SCREEN"; then
+    echo "live-check: creating an agent did not open a direct chat" >&2
+    tmux capture-pane -p -t "$TUI" >&2 || true
+    exit 1
+  fi
 
   python3 - "$URL" "$PASS" "$BASE/project" "$BASE/ids.json" <<'PY'
 import base64, json, sys, urllib.parse, urllib.request
@@ -140,6 +151,7 @@ PY
   tmux send-keys -t "$TUI" Enter; sleep 0.5
   tmux send-keys -t "$TUI" ' review '; sleep 0.3
   tmux send-keys -t "$TUI" '@'; sleep 1
+  tmux send-keys -t "$TUI" 'notes'; sleep 0.5
   tmux send-keys -t "$TUI" Enter; sleep 0.5
   COMPOSER=$(tmux capture-pane -p -t "$TUI")
   if ! grep -q '\$LiveAgent' <<<"$COMPOSER" || ! grep -q '@notes.md' <<<"$COMPOSER"; then

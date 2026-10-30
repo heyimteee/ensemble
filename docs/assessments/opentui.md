@@ -13,7 +13,8 @@ Ensemble is **already built on OpenTUI**. The plugin page renders Solid componen
 - `src/v2/tui/app.tsx` and `components.tsx` are Solid/OpenTUI JSX rendered inside the OpenCode TUI route.
 - Layout, text, input, keymap layers, dialogs, toasts, theme tokens, and navigation come from `@opencode/plugin/tui` + `@opentui/solid`.
 - `@opentui/core` is a peer dependency (currently `>=0.7.0`).
-- The custom composer is an OpenTUI `input` renderable with `$`/`@`/`/` completion.
+- The custom composer is an OpenTUI `input` renderable with `$`/`@`/`/` completion, pinned inside the chat column.
+- The transcript uses OpenTUI `scrollbox` with streaming Markdown-style rows.
 
 ## Options
 
@@ -36,8 +37,8 @@ The native OpenCode composer is owned by the host. OpenTUI is the rendering laye
 
 ## Recommended incremental OpenTUI work
 
-1. Replace the manual message viewport with `scrollbox` when the host exposes a stable scroll model.
-2. Use the OpenTUI markdown renderable for replies if a `SyntaxStyle` can be obtained from the host; otherwise keep the current basic Markdown normalizer.
+1. `scrollbox` is now used for the transcript; keep it.
+2. Use the OpenTUI markdown renderable for replies if a `SyntaxStyle` can be obtained from the host; otherwise keep the current Markdown normalizer (headings, lists, code blocks, tables).
 3. Keep `input` for the composer until OpenCode exposes a native prompt slot or composer API.
 4. Keep all host-owned behavior (sessions, approvals, models, permissions) behind the plugin API.
 
