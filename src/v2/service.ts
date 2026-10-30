@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
-import { ENSEMBLE_BLOCK_VERSION, ensembleBlock } from "./init-block.ts"
+import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, onboardingPrompt } from "./init-block.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { unknownMentions, visibleRecipients } from "./routing.ts"
@@ -271,6 +271,8 @@ export class EnsembleV2Service {
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
       "For handoffs, write durable detail to a Markdown file under .ensemble/handoffs and call ensemble_handoff with its path. Keep the chat reply short.",
       "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
+      "",
+      ensembleBlock(),
     ].join("\n")
   }
 
@@ -467,7 +469,17 @@ export class EnsembleV2Service {
     }
     agent.homeDirectory = join(homedir(), ".ensemble", "agents", agent.id)
     await this.store.saveAgent(agent)
+    if (this.ctx.onboarding !== false) void this.onboardAgent(agent).catch(() => undefined)
     return agent
+  }
+
+  private async onboardAgent(agent: Agent): Promise<void> {
+    const current = this.store.snapshot().agents[agent.id]
+    if (!current || current.archived) return
+    const home = await this.ensureHomeBinding(agent)
+    const latest = this.store.snapshot().agents[agent.id]
+    if (!latest || latest.archived) return
+    await this.ctx.session.prompt({ sessionID: home.sessionID, text: onboardingPrompt(agent), delivery: "steer" })
   }
 
   private async updateAgent(directory: string, payload: Json): Promise<Agent> {

@@ -18,6 +18,7 @@ export type ChatLine = {
   id: string
   author: string
   role: "user" | "agent" | "system"
+  agentID?: string
   text: string
   kind?: string
   streaming?: boolean

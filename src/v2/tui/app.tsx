@@ -1,14 +1,16 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { SyntaxStyle } from "@opentui/core"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, TaskBoard, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
-import { composerTrigger, parseSlashCommand } from "./composer.ts"
-import { fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
+import { agentColor, fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { palette } from "./theme.ts"
-import { toggleSelected } from "./picker.ts"
+import { pickerWindow, toggleSelected } from "./picker.ts"
+import { readGitState, type GitState } from "./git.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat" | "tasks"
@@ -30,7 +32,42 @@ type TextPromptState = {
   resolve: (value: string | undefined) => void
 }
 
-type GitState = { branch: string; dirty: boolean; ahead: number; behind: number }
+type WizardOption = { id: string; label: string; detail?: string }
+type WizardStepKind = "pick" | "multi" | "text" | "choice"
+type WizardStep = {
+  key: string
+  title: string
+  description: string
+  kind: WizardStepKind
+  placeholder?: string
+  options?: WizardOption[]
+}
+type WizardDraft = {
+  directory: string
+  name: string
+  memberIDs: string[]
+  leaderID: string
+  synthesis: boolean
+  title: string
+  role: string
+  modelKey: string
+  variant: string
+}
+type WizardState = {
+  flow: "workspace" | "agent"
+  title: string
+  draft: WizardDraft
+  steps: WizardStep[]
+  index: number
+  query: string
+  cursor: number
+  error?: string
+  customDirectory?: boolean
+  directoryOptions: WizardOption[]
+  modelOptions: WizardOption[]
+  resolve: (value: WizardDraft | undefined) => void
+  edit?: Workspace
+}
 
 type Completion = {
   kind: "agent" | "file" | "command"
@@ -58,6 +95,23 @@ async function invoke(context: any, action: string, payload: any = {}): Promise<
 export function EnsembleV2App() {
   const context = usePlugin()
   const colors = palette(context.theme as any)
+  const syntaxStyle = (() => {
+    try {
+      const theme = context.theme as any
+      return SyntaxStyle.fromStyles({
+        default: { fg: theme.text.base },
+        keyword: { fg: theme.syntax?.keyword ?? theme.text.action?.primary?.base ?? theme.text.base },
+        string: { fg: theme.syntax?.string ?? theme.text.feedback?.success?.base ?? theme.text.base },
+        comment: { fg: theme.syntax?.comment ?? theme.text.muted, italic: true },
+        number: { fg: theme.syntax?.number ?? theme.text.base },
+        "markup.heading": { fg: theme.markdown?.heading ?? theme.hue?.accent?.[200] ?? theme.text.base, bold: true },
+        "markup.raw": { fg: theme.markdown?.code ?? theme.text.feedback?.info?.base ?? theme.text.base },
+      }, (context.renderer as any).nativeScene)
+    } catch {
+      return undefined
+    }
+  })()
+  onCleanup(() => { try { syntaxStyle?.destroy?.() } catch {} })
   const [snapshot, setSnapshot] = createSignal<Snapshot | null>(null)
   const [workspaceID, setWorkspaceID] = createSignal<string | null>(null)
   const [surface, setSurface] = createSignal<Surface | null>(null)
@@ -83,13 +137,22 @@ export function EnsembleV2App() {
   const [backupCursor, setBackupCursor] = createSignal(0)
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
   const [composerActive, setComposerActive] = createSignal(false)
+  const [composerDraft, setComposerDraft] = createSignal("")
   const [completion, setCompletion] = createSignal<Completion | null>(null)
   const [picker, setPicker] = createSignal<PickerState | null>(null)
   const [textPrompt, setTextPrompt] = createSignal<TextPromptState | null>(null)
+  const [wizard, setWizard] = createSignal<WizardState | null>(null)
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
-  const [transcriptOffset, setTranscriptOffset] = createSignal(0)
+  const [transcriptVersion, setTranscriptVersion] = createSignal(0)
+  const [atBottom, setAtBottom] = createSignal(true)
   let composerRef: any
   let textPromptRef: any
+  let wizardRef: any
+  let transcriptScrollRef: any
+  let lastFinalizedKey = ""
+  let lastChatKey = ""
+  let savedScrollTop = 0
+  let restoreScroll = false
   const [restored, setRestored] = createSignal(false)
   let lastSavedHistory = ""
   let lastConfigError = ""
@@ -150,11 +213,12 @@ export function EnsembleV2App() {
         author: message.author,
         role: message.role,
         text: message.text,
+        agentID: surfaceAgent()?.id,
         createdAt: message.createdAt,
       }))
       const live = liveDm()
       if (live && chatContext()?.sessionID === live.sessionID) {
-        messages.push({ id: "live", author: surfaceAgent()?.name ?? "Agent", role: "assistant" as const, text: live.text, createdAt: Date.now(), streaming: true })
+        messages.push({ id: "live", author: surfaceAgent()?.name ?? "Agent", role: "assistant" as const, text: live.text, agentID: surfaceAgent()?.id, createdAt: Date.now(), streaming: true })
       }
       return messages
     }
@@ -162,6 +226,7 @@ export function EnsembleV2App() {
       id: message.id,
       author: message.author === "user" ? "You" : message.author === "system" ? "Ensemble" : state()?.agents[message.agentID ?? ""]?.name ?? "Unknown agent",
       role: message.author === "user" ? "user" as const : message.author === "system" ? "system" as const : "agent" as const,
+      agentID: message.agentID,
       text: message.text,
       kind: message.kind,
       streaming: message.streaming,
@@ -169,19 +234,41 @@ export function EnsembleV2App() {
       createdAt: message.createdAt,
     }))
   })
-  const transcriptLines = () => chatLines().flatMap((message) => [
-    `${message.author}${message.streaming ? " · streaming…" : ""}${message.interrupted ? " · interrupted" : ""}`,
-    ...renderMarkdownLines(message.text || (message.streaming ? "…" : ""), Math.max(16, messageWidth())),
-    "",
-  ])
+  const finalizedLines = createMemo(() => chatLines().filter((message) => !message.streaming))
+  const liveLine = createMemo(() => chatLines().find((message) => message.streaming))
+  const liveLines = createMemo(() => {
+    const live = liveLine()
+    if (!live) return []
+    return renderMarkdownLines(live.text || "…", Math.max(16, messageWidth())).slice(-5)
+  })
+  const chatAuthorColor = (line: ChatLine) => {
+    if (line.role === "user") return colors.good
+    if (line.role === "system") return colors.muted
+    const agent = line.agentID ? state()?.agents[line.agentID] : undefined
+    const index = rosterAgents().findIndex((item) => item.id === line.agentID)
+    return agentColor(agent, colors.accent as string, Math.max(0, index), colors.categorical)
+  }
   const emptyChat = () => surface()?.kind === "agent"
     ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}\n\nSend a direct message. It goes to this agent's native OpenCode session.`
     : "Group chat\n\nSay something to your team. $Name mentions an agent; @path references a file."
-  const plainTranscript = () => {
-    const lines = transcriptLines()
-    if (lines.length === 0) return emptyChat()
-    const end = Math.max(0, lines.length - transcriptOffset())
-    return lines.slice(Math.max(0, end - messageHeight()), end).join("\n")
+  const bumpTranscript = () => {
+    const box = transcriptScrollRef
+    const pinned = atBottom()
+    savedScrollTop = Number(box?.scrollTop ?? 0)
+    restoreScroll = !pinned
+    setTranscriptVersion((value) => value + 1)
+  }
+  const syncTranscriptScroll = () => {
+    const box = transcriptScrollRef
+    if (!box) { setAtBottom(true); return }
+    const height = Number(box.height ?? messageHeight())
+    const max = Math.max(0, Number(box.scrollHeight ?? 0) - height)
+    setAtBottom(Number(box.scrollTop ?? 0) >= max - 1)
+  }
+  const jumpToBottom = () => {
+    const box = transcriptScrollRef
+    if (box) box.scrollTop = Number(box.scrollHeight ?? 0)
+    setAtBottom(true)
   }
 
   const settingsAgent = createMemo(() => settingsAgentID() ? state()?.agents[settingsAgentID()!] : undefined)
@@ -237,6 +324,8 @@ export function EnsembleV2App() {
     try {
       const next = await invoke(context, "chat.context", { agentID: value.agentID, workspaceID: value.workspaceID })
       setChatContext(next)
+      const key = (next.messages ?? []).map((message: any) => `${message.id}:${String(message.text ?? "").length}`).join("|")
+      if (key !== lastChatKey) { lastChatKey = key; bumpTranscript() }
     } catch (error: any) {
       setChatContext(null)
       setStatus(`Chat unavailable: ${error?.message ?? error}`)
@@ -264,24 +353,16 @@ export function EnsembleV2App() {
     if (Date.now() - lastGitAt < 2000) return
     lastGitAt = Date.now()
     const directory = activeWorkspace()?.directory ?? directoryOf(context)
-    try {
-      const output = execFileSync("git", ["-C", directory, "status", "--porcelain=v1", "--branch"], { encoding: "utf8", timeout: 1500 })
-      const lines = output.split("\n").filter(Boolean)
-      const first = lines[0] ?? ""
-      const branch = first.match(/^## (?:No commits yet on )?([^.\s]+)/)?.[1] ?? "detached"
-      const ahead = Number(first.match(/ahead (\d+)/)?.[1] ?? 0)
-      const behind = Number(first.match(/behind (\d+)/)?.[1] ?? 0)
-      const dirty = lines.length > 1
-      setGitState({ branch, dirty, ahead, behind })
-    } catch {
-      setGitState(null)
-    }
+    setGitState(readGitState(directory))
   }
 
   const refresh = async () => {
     try {
       const next = await callRpc(context, "snapshot", { directory: directoryOf(context) })
       setSnapshot(next)
+      syncTranscriptScroll()
+      const finalizedKey = Object.values(next.state.messages ?? {}).flat().filter((message: any) => !message.streaming).map((message: any) => `${message.id}:${String(message.text ?? "").length}`).join("|")
+      if (finalizedKey !== lastFinalizedKey) { lastFinalizedKey = finalizedKey; bumpTranscript() }
       try { (context.renderer as any)?.requestRender?.() } catch {}
       if (next.configError && next.configError !== lastConfigError) {
         lastConfigError = next.configError
@@ -312,7 +393,6 @@ export function EnsembleV2App() {
             const index = orderedTasks().findIndex((task) => task.id === taskID)
             if (index >= 0) setTaskCursor(index)
           }
-          setTranscriptOffset(Math.max(0, Number(uiState.transcriptOffset ?? 0)))
         }
       } else {
         if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(null)
@@ -388,73 +468,38 @@ export function EnsembleV2App() {
     return (await modalWrap(() => context.ui.dialog.select({ title: "Reasoning effort", current, options: model.variants.map((variant) => ({ title: variant, value: variant })) }))) ?? undefined
   }
 
-  const pickMembers = (initial: string[]) => openPicker("members", initial)
-
-  const pickDirectory = async (): Promise<string | undefined> => {
-    const home = homedir()
-    const known = new Map(workspaces().map((workspace) => [workspace.directory, workspace.lastActiveAt]))
-    let dirs: string[] = []
-    try {
-      const output = execFileSync("fd", ["--type", "d", "--hidden", "--exclude", ".git", "--exclude", "node_modules", "--max-depth", "3", ".", home], { encoding: "utf8", timeout: 5000 })
-      dirs = output.split("\n").filter(Boolean).slice(0, 500)
-    } catch { dirs = [home] }
-    dirs.sort((a, b) => (known.get(b) ?? -1) - (known.get(a) ?? -1))
-    const selected = await modalWrap(() => context.ui.dialog.select({
-      title: "Workspace directory",
-      options: [
-        { title: `Use current directory · ${directoryOf(context)}`, value: directoryOf(context), category: "Quick" },
-        { title: "Type a path…", value: "__manual__", category: "Quick" },
-        ...dirs.map((directory) => ({ title: workspaceLabel(directory), value: directory, category: known.has(directory) ? "Recent" : "Directories" })),
-      ],
-      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
-    }))
-    if (!selected) return undefined
-    if (selected !== "__manual__") return String(selected)
-    return (await modalWrap(() => context.ui.dialog.prompt({ title: "Directory path", placeholder: "~/dev/project" })))?.trim()
-  }
-
   const createWorkspace = async () => {
-    const directory = await pickDirectory()
-    if (!directory) return
-    const name = (await modalWrap(() => context.ui.dialog.prompt({ title: "Workspace name", placeholder: "website" })))?.trim()
-    if (!name) return
-    const members = await pickMembers(rosterAgents().slice(0, 1).map((agent) => agent.id))
-    if (!members) return
-    const leader = await openPicker("leader", members.slice(0, 1))
-    const leaderID = leader?.[0]
-    if (!leaderID) return
-    const synthesis = await modalWrap(() => context.ui.dialog.confirm({ title: "Automatic leader synthesis?", message: "When subtasks complete, the leader combines their replies." }))
-    if (synthesis === undefined) return
+    const draft = await openWizard("workspace")
+    if (!draft) return
     let created: Workspace | undefined
     await run("Create workspace", async () => {
-      created = await invoke(context, "workspace.create", { name, directory, memberIDs: members, leaderID, synthesis })
+      created = await invoke(context, "workspace.create", { name: draft.name.trim(), directory: draft.directory.trim(), memberIDs: draft.memberIDs, leaderID: draft.leaderID, synthesis: draft.synthesis })
       setWorkspaceID(created.id)
       setSurface({ kind: "workspace", workspaceID: created.id })
       setFocusArea("chat")
       await invoke(context, "workspace.activate", { id: created.id })
     })
     if (created) {
-      await offerMoveHome(created, members)
+      await offerMoveHome(created, draft.memberIDs)
       await refresh()
     }
   }
 
   const createAgent = async () => {
-    const nameValue = await openTextPrompt("New agent · name", { placeholder: "Nova", description: "Names are unique. Enter submits; Shift+Enter adds a line." })
-    if (nameValue === undefined) return
-    const name = nameValue.replace(/\s+/g, " ").trim()
-    if (!name) return
-    const titleValue = await openTextPrompt("New agent · title", { placeholder: "Engineering", description: "A short role title. Enter submits; Shift+Enter adds a line." })
-    if (titleValue === undefined) return
-    const title = titleValue.replace(/\s+/g, " ").trim()
-    const roleValue = await openTextPrompt("New agent · role", { placeholder: "You are a focused coding teammate.", description: "Describe how this agent works. Text wraps automatically." })
-    if (roleValue === undefined) return
-    const role = roleValue.trim()
-    const model = await chooseModel()
-    if (!model) return
-    const variant = await chooseVariant(model)
+    const draft = await openWizard("agent")
+    if (!draft) return
+    const model = models().find((item) => `${item.providerID}/${item.modelID}` === draft.modelKey)
+    if (!model) { showError(new Error("Choose a main model.")); return }
     await run("Create agent", async () => {
-      const agent = await invoke(context, "agent.create", { name, title, role, mainModel: { providerID: model.providerID, modelID: model.modelID, variant }, backupModels: [], skillbox: [], color: "cyan" })
+      const agent = await invoke(context, "agent.create", {
+        name: draft.name.trim(),
+        title: draft.title.replace(/\s+/g, " ").trim(),
+        role: draft.role.trim(),
+        mainModel: { providerID: model.providerID, modelID: model.modelID, ...(draft.variant && draft.variant !== "none" ? { variant: draft.variant } : {}) },
+        backupModels: [],
+        skillbox: [],
+        color: "cyan",
+      })
       context.ui.toast.show({ title: "Ensemble", message: `${agent.name} created. Opening a direct chat.`, variant: "success" })
       openAgent(agent)
     })
@@ -472,14 +517,11 @@ export function EnsembleV2App() {
   const editWorkspace = async () => {
     const workspace = activeWorkspace()
     if (!workspace) return
-    const members = await pickMembers(workspace.memberIDs)
-    if (!members) return
-    const leader = await openPicker("leader", [workspace.leaderID])
-    const leaderID = leader?.[0]
-    if (!leaderID) return
+    const draft = await openWizard("workspace", workspace)
+    if (!draft) return
     await run("Update workspace", async () => {
-      await invoke(context, "workspace.update", { id: workspace.id, memberIDs: members, leaderID })
-      await offerMoveHome(workspace, members.filter((id) => !workspace.memberIDs.includes(id)))
+      await invoke(context, "workspace.update", { id: workspace.id, memberIDs: draft.memberIDs, leaderID: draft.leaderID, synthesis: draft.synthesis })
+      await offerMoveHome(workspace, draft.memberIDs.filter((id) => !workspace.memberIDs.includes(id)))
     })
   }
 
@@ -488,7 +530,6 @@ export function EnsembleV2App() {
     if (!value) return
     const current = surface()
     if (!current) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
-    setTranscriptOffset(0)
     await run("Send message", async () => {
       if (current.kind === "agent") {
         await invoke(context, "chat.send", { agentID: current.agentID, workspaceID: current.workspaceID, text: value })
@@ -500,6 +541,15 @@ export function EnsembleV2App() {
   }
 
   const focusComposer = () => queueMicrotask(() => composerRef?.focus?.())
+  const composerHeight = () => computeComposerHeight(composerDraft(), Math.max(12, messageWidth() - 6))
+  const setComposerValue = (value: string) => {
+    if (composerRef) {
+      composerRef.setText?.(value)
+      composerRef.cursorOffset = value.length
+      composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6))
+    }
+    setComposerDraft(value)
+  }
   const handleNativeEvent = (event: any) => {
     const data = event?.data ?? event
     const session = String(data?.sessionID ?? "")
@@ -519,7 +569,7 @@ export function EnsembleV2App() {
     if (!surface()) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
     setComposerActive(true); focusComposer()
   }
-  const clearComposer = () => { if (composerRef) composerRef.value = ""; composerRef?.blur?.(); setComposerActive(false) }
+  const clearComposer = () => { setComposerValue(""); composerRef?.blur?.(); setComposerActive(false) }
 
   const agentItems = () => activeAgents().map((agent) => ({ title: `${agent.name}${activeWorkspace()?.leaderID === agent.id ? " · leader" : ""}`, value: agent.name }))
 
@@ -557,18 +607,18 @@ export function EnsembleV2App() {
       await runSlashCommand(`/${item.value}`)
       return
     }
-    const value = String(composerRef.value ?? "")
+    const value = String(composerRef?.plainText ?? "")
     const token = state.kind === "agent" ? `$${item.value} ` : `@${item.value} `
-    composerRef.value = `${value.slice(0, state.start)}${token}`
+    setComposerValue(`${value.slice(0, state.start)}${token}`)
     closeCompletion()
     setComposerActive(true)
     focusComposer()
   }
 
   const mention = () => {
-    const value = String(composerRef?.value ?? "")
+    const value = String(composerRef?.plainText ?? "")
     const base = value && !value.endsWith(" ") ? `${value} ` : value
-    if (composerRef) composerRef.value = `${base}$`
+    setComposerValue(`${base}$`)
     setComposerActive(true)
     focusComposer()
     openCompletion("agent", `${base}$`, base.length)
@@ -582,7 +632,7 @@ export function EnsembleV2App() {
   ] as const
 
   const pickWorkspace = async () => {
-    const selected = await openPicker("workspace", workspaceID() ? [workspaceID()!] : [])
+    const selected = await openPicker("workspace", { selected: workspaceID() ? [workspaceID()!] : [] })
     const workspace = selected?.[0] ? state()?.workspaces[selected[0]] : undefined
     if (workspace) await openWorkspace(workspace)
   }
@@ -856,7 +906,7 @@ export function EnsembleV2App() {
     void refresh()
     const timer = setInterval(() => {
       if (surface()?.kind === "agent") void refreshChat()
-      void refresh()
+      void refresh().then(() => syncTranscriptScroll()).catch(() => undefined)
     }, 250)
     const stopData = context.data.listen(({ details }: any) => {
       const type = typeof details?.type === "string" ? details.type : ""
@@ -866,6 +916,7 @@ export function EnsembleV2App() {
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
       if (picker()) { handlePickerKey(event); return }
+      if (wizard()) { handleWizardKey(event); return }
       if (textPrompt()) {
         const name = String(event?.name ?? "")
         if (name === "escape") {
@@ -916,8 +967,9 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.settings", title: "Ensemble: Agent settings", bind: "s", run: () => openSettings() },
         { id: "ensemble.v2.approvals", title: "Ensemble: Approvals", bind: "v", run: () => { setApprovalCursor(0); setApprovalsOpen(true) } },
         { id: "ensemble.v2.search", title: "Ensemble: Search", bind: "/", run: () => void searchWorkspaces().catch(showError) },
-        { id: "ensemble.v2.scroll.up", title: "Ensemble: Scroll transcript up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); setTranscriptOffset((value) => value + messageHeight()) } },
-        { id: "ensemble.v2.scroll.down", title: "Ensemble: Scroll transcript down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); setTranscriptOffset((value) => Math.max(0, value - messageHeight())) } },
+        { id: "ensemble.v2.scroll.up", title: "Ensemble: Scroll transcript up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); transcriptScrollRef?.scrollBy?.(-messageHeight()) } },
+        { id: "ensemble.v2.scroll.down", title: "Ensemble: Scroll transcript down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); transcriptScrollRef?.scrollBy?.(messageHeight()) } },
+        { id: "ensemble.v2.scroll.bottom", title: "Ensemble: Scroll transcript to bottom", bind: "end", enabled: () => !composerActive(), run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); jumpToBottom() } },
         { id: "ensemble.v2.init", title: "Ensemble: Init workspace", bind: "shift+i", run: () => void initEnsemble().catch(showError) },
         { id: "ensemble.v2.init.alt", title: "Ensemble: Init workspace (alternate)", bind: "ctrl+g", run: () => void initEnsemble().catch(showError) },
         { id: "ensemble.v2.pause", title: "Ensemble: Pause workspace", bind: "p", run: () => void togglePause().catch(showError) },
@@ -938,7 +990,7 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.reset", title: "Ensemble: Reset", bind: "ctrl+shift+delete", run: () => void resetEnsemble().catch(showError) },
         { id: "ensemble.v2.back", title: "Ensemble: Back", bind: "escape", run: () => { if (workspaceFilter()) { setWorkspaceFilter(""); return } context.ui.router.navigate({ type: "home" }) } },
       ],
-      bindings: ["ensemble.v2.leader", "ensemble.v2.left", "ensemble.v2.right", "ensemble.v2.down", "ensemble.v2.up", "ensemble.v2.enter", "ensemble.v2.compose", "ensemble.v2.new.agent", "ensemble.v2.new.workspace", "ensemble.v2.workspace.edit", "ensemble.v2.settings", "ensemble.v2.approvals", "ensemble.v2.search", "ensemble.v2.scroll.up", "ensemble.v2.scroll.down", "ensemble.v2.init", "ensemble.v2.init.alt", "ensemble.v2.pause", "ensemble.v2.native", "ensemble.v2.delegate", "ensemble.v2.reassign", "ensemble.v2.retry", "ensemble.v2.restart", "ensemble.v2.cancel.task", "ensemble.v2.workspace.next", "ensemble.v2.workspace.prev", "ensemble.v2.agent.next", "ensemble.v2.agent.prev", "ensemble.v2.workspace.archive", "ensemble.v2.workspace.delete", "ensemble.v2.agent.archive", "ensemble.v2.agent.delete", "ensemble.v2.reset", "ensemble.v2.back"],
+      bindings: ["ensemble.v2.leader", "ensemble.v2.left", "ensemble.v2.right", "ensemble.v2.down", "ensemble.v2.up", "ensemble.v2.enter", "ensemble.v2.compose", "ensemble.v2.new.agent", "ensemble.v2.new.workspace", "ensemble.v2.workspace.edit", "ensemble.v2.settings", "ensemble.v2.approvals", "ensemble.v2.search", "ensemble.v2.scroll.up", "ensemble.v2.scroll.down", "ensemble.v2.scroll.bottom", "ensemble.v2.init", "ensemble.v2.init.alt", "ensemble.v2.pause", "ensemble.v2.native", "ensemble.v2.delegate", "ensemble.v2.reassign", "ensemble.v2.retry", "ensemble.v2.restart", "ensemble.v2.cancel.task", "ensemble.v2.workspace.next", "ensemble.v2.workspace.prev", "ensemble.v2.agent.next", "ensemble.v2.agent.prev", "ensemble.v2.workspace.archive", "ensemble.v2.workspace.delete", "ensemble.v2.agent.archive", "ensemble.v2.agent.delete", "ensemble.v2.reset", "ensemble.v2.back"],
     }))
     context.keymap.layer(() => ({
       mode: "global", priority: 130,
@@ -956,6 +1008,16 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.completion.cancel", title: "Ensemble: Close completion", bind: "escape", run: () => closeCompletion() },
       ],
       bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
+    }))
+    context.keymap.layer(() => ({
+      mode: "global", priority: 160,
+      enabled: () => isOurRoute() && wizard() !== null && !leaderMode(),
+      commands: [
+        { id: "ensemble.v2.wizard.prev", title: "Ensemble: Previous wizard step", bind: "ctrl+left", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardPrev() } },
+        { id: "ensemble.v2.wizard.next", title: "Ensemble: Next wizard step", bind: "ctrl+right", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardNext() } },
+        { id: "ensemble.v2.wizard.cancel", title: "Ensemble: Cancel wizard", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardCancel() } },
+      ],
+      bindings: ["ensemble.v2.wizard.prev", "ensemble.v2.wizard.next", "ensemble.v2.wizard.cancel"],
     }))
     context.keymap.layer(() => ({
       mode: "global", priority: 110,
@@ -1016,17 +1078,17 @@ export function EnsembleV2App() {
     state.resolve(value)
   }
 
-  const openPicker = (mode: PickerState["mode"], initial: string[] = []): Promise<string[] | undefined> => new Promise((resolve) => {
+  const openPicker = (mode: PickerState["mode"], options: { selected?: string[]; candidates?: string[] } = {}): Promise<string[] | undefined> => new Promise((resolve) => {
     const candidates = mode === "workspace"
       ? workspaces().map((workspace) => ({ id: workspace.id, label: `#${workspace.name} · ${workspaceLabel(workspace.directory)}` }))
       : mode === "leader"
-        ? initial.map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent)).map((agent) => ({ id: agent.id, label: agent.name }))
+        ? (options.candidates ?? []).map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent)).map((agent) => ({ id: agent.id, label: agent.name }))
         : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
     const state: PickerState = {
       mode,
       title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : "Switch workspace",
       candidates,
-      selected: new Set(initial),
+      selected: new Set(options.selected ?? []),
       cursor: 0,
       query: "",
       resolve,
@@ -1085,6 +1147,331 @@ export function EnsembleV2App() {
     })
   })
 
+  const directoryChoices = (): WizardOption[] => {
+    const current = directoryOf(context)
+    const known = workspaces().map((workspace) => workspace.directory)
+    let dirs: string[] = []
+    try {
+      const output = execFileSync("fd", ["--type", "d", "--hidden", "--exclude", ".git", "--exclude", "node_modules", "--max-depth", "3", ".", homedir()], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
+      dirs = output.split("\n").filter(Boolean).slice(0, 500)
+    } catch { dirs = [homedir()] }
+    dirs.sort((a, b) => (known.includes(b) ? 1 : 0) - (known.includes(a) ? 1 : 0))
+    const unique = [...new Set([current, ...known, ...dirs])]
+    return [
+      ...unique.map((directory) => ({
+        id: directory,
+        label: directory === current ? `Use current directory · ${workspaceLabel(directory)}` : workspaceLabel(directory),
+        detail: known.includes(directory) ? "recent" : undefined,
+      })),
+      { id: "__manual__", label: "Type a path…" },
+    ]
+  }
+
+  const makeWizardSteps = (state: WizardState): WizardStep[] => {
+    const draft = state.draft
+    if (state.flow === "workspace") {
+      const members = draft.memberIDs.map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent))
+      const memberStep: WizardStep = { key: "members", title: "Workspace members", description: "Space toggles a member. Enter continues.", kind: "multi", options: rosterAgents().map((agent) => ({ id: agent.id, label: agent.name, detail: agent.title || undefined })) }
+      const leaderStep: WizardStep = { key: "leader", title: "Workspace leader", description: "Only members selected in the previous step are listed.", kind: "pick", options: members.map((agent) => ({ id: agent.id, label: agent.name })) }
+      const synthesisStep: WizardStep = { key: "synthesis", title: "Leader synthesis", description: "Combine child replies into one final answer?", kind: "choice", options: [{ id: "yes", label: "Yes — let the leader synthesize" }, { id: "no", label: "No — keep replies separate" }] }
+      if (state.edit) return [memberStep, leaderStep, synthesisStep]
+      return [
+        { key: "directory", title: "Workspace directory", description: "Choose a project directory. Type to filter; choose Type a path for anything else.", kind: "pick", options: state.directoryOptions },
+        { key: "name", title: "Workspace name", description: "Shown in the rail and the chat header.", kind: "text", placeholder: "website" },
+        memberStep,
+        leaderStep,
+        synthesisStep,
+      ]
+    }
+    const model = models().find((item) => `${item.providerID}/${item.modelID}` === draft.modelKey)
+    const steps: WizardStep[] = [
+      { key: "name", title: "Agent name", description: "Names are unique. Text wraps; Enter continues.", kind: "text", placeholder: "Nova" },
+      { key: "title", title: "Agent title", description: "A short role label, such as Engineering.", kind: "text", placeholder: "Engineering" },
+      { key: "role", title: "Agent role", description: "Describe how this agent works and what it owns.", kind: "text", placeholder: "You are a focused coding teammate." },
+      { key: "model", title: "Main model", description: "Used for this agent's native sessions.", kind: "pick", options: state.modelOptions },
+    ]
+    if (model && model.variants.length > 0) {
+      steps.push({ key: "variant", title: "Reasoning effort", description: "Optional model variant for this agent.", kind: "pick", options: model.variants.map((variant) => ({ id: variant, label: variant })) })
+    }
+    return steps
+  }
+
+  const rebuildWizard = (state: WizardState): WizardState => {
+    const next = { ...state, draft: { ...state.draft } }
+    next.steps = makeWizardSteps(next)
+    next.index = Math.max(0, Math.min(next.index, next.steps.length - 1))
+    const length = next.steps[next.index]?.options?.length ?? 1
+    next.cursor = Math.max(0, Math.min(next.cursor, Math.max(0, length - 1)))
+    return next
+  }
+
+  const patchWizard = (mutate: (state: WizardState) => WizardState): WizardState | undefined => {
+    const current = wizard()
+    if (!current) return undefined
+    const next = rebuildWizard(mutate({ ...current, draft: { ...current.draft } }))
+    setWizard(next)
+    return next
+  }
+
+  const wizardStep = (): WizardStep | undefined => {
+    const state = wizard()
+    if (!state) return undefined
+    if (state.customDirectory) return { key: "directoryPath", title: "Workspace directory", description: "Type or paste a directory path. Enter continues.", kind: "text", placeholder: "~/dev/project" }
+    return state.steps[state.index]
+  }
+
+  const wizardStepKey = () => {
+    const state = wizard()
+    const step = wizardStep()
+    return state && step ? `${state.index}:${step.key}:${state.customDirectory ? "custom" : "list"}` : ""
+  }
+
+  const wizardItems = (): WizardOption[] => {
+    const state = wizard()
+    const step = wizardStep()
+    if (!state || !step?.options) return []
+    const query = state.query
+    return step.options.filter((option) => option.id === "__manual__" || !query || fuzzyMatch(query, option.label))
+  }
+
+  const wizardCursor = () => {
+    const state = wizard()
+    const length = wizardItems().length
+    return state ? Math.max(0, Math.min(state.cursor, Math.max(0, length - 1))) : 0
+  }
+
+  const wizardSelected = (step: WizardStep, id: string) => {
+    const state = wizard()
+    if (!state) return false
+    switch (step.key) {
+      case "directory": return state.draft.directory === id
+      case "members": return state.draft.memberIDs.includes(id)
+      case "leader": return state.draft.leaderID === id
+      case "synthesis": return String(state.draft.synthesis) === id
+      case "model": return state.draft.modelKey === id
+      case "variant": return state.draft.variant === id
+      default: return false
+    }
+  }
+
+  const wizardTextValue = () => {
+    const state = wizard()
+    const step = wizardStep()
+    if (!state || !step) return ""
+    if (step.key === "directoryPath") return state.draft.directory
+    return String((state.draft as any)[step.key] ?? "")
+  }
+
+  const wizardFinal = (state: WizardState) => !state.customDirectory && state.index >= state.steps.length - 1
+
+  const validateWizard = (state: WizardState): string | undefined => {
+    const draft = state.draft
+    if (state.flow === "workspace") {
+      if (!draft.directory.trim()) return "Choose a workspace directory."
+      if (!draft.name.trim()) return "Workspace name is required."
+      if (draft.memberIDs.length === 0) return "Choose at least one member."
+      if (!draft.leaderID || !draft.memberIDs.includes(draft.leaderID)) return "Choose a leader from the selected members."
+      return undefined
+    }
+    if (!draft.name.trim()) return "Agent name is required."
+    if (!draft.role.trim()) return "Agent role is required."
+    if (!draft.modelKey) return "Choose a main model."
+    if (rosterAgents().some((agent) => agent.name.toLowerCase() === draft.name.trim().toLowerCase())) return "An agent with that name already exists."
+    const model = models().find((item) => `${item.providerID}/${item.modelID}` === draft.modelKey)
+    if (model && model.variants.length > 0 && !model.variants.includes(draft.variant)) return "Choose a reasoning effort."
+    return undefined
+  }
+
+  const wizardInvalidIndex = (state: WizardState): number => {
+    const draft = state.draft
+    let key = ""
+    if (state.flow === "workspace") {
+      if (!draft.directory.trim()) key = "directory"
+      else if (!draft.name.trim()) key = "name"
+      else if (draft.memberIDs.length === 0) key = "members"
+      else if (!draft.leaderID || !draft.memberIDs.includes(draft.leaderID)) key = "leader"
+    } else {
+      const model = models().find((item) => `${item.providerID}/${item.modelID}` === draft.modelKey)
+      if (!draft.name.trim()) key = "name"
+      else if (!draft.role.trim()) key = "role"
+      else if (!draft.modelKey) key = "model"
+      else if (model && model.variants.length > 0 && !model.variants.includes(draft.variant)) key = "variant"
+    }
+    const index = state.steps.findIndex((step) => step.key === key)
+    return index >= 0 ? index : 0
+  }
+
+  const completeWizard = (state: WizardState, value: WizardDraft | undefined) => {
+    setWizard(null)
+    setModal(false)
+    state.resolve(value)
+  }
+
+  const submitWizard = (state: WizardState) => {
+    const error = validateWizard(state)
+    if (error) {
+      setWizard({ ...state, index: wizardInvalidIndex(state), error, query: "", cursor: 0 })
+      return
+    }
+    completeWizard(state, state.draft)
+  }
+
+  const saveWizardText = (): WizardState | undefined => {
+    const state = wizard()
+    const step = wizardStep()
+    if (!state || !step || step.kind !== "text") return state
+    const value = String(wizardRef?.plainText ?? "")
+    return patchWizard((next) => {
+      if (step.key === "directoryPath") {
+        next.draft.directory = value.trim()
+        next.customDirectory = false
+      } else {
+        ;(next.draft as any)[step.key] = value
+      }
+      next.error = undefined
+      return next
+    })
+  }
+
+  const advanceWizard = (state: WizardState | undefined) => {
+    if (!state) return
+    if (wizardFinal(state)) { submitWizard(state); return }
+    setWizard({ ...state, index: state.index + 1, query: "", cursor: 0, error: undefined, steps: makeWizardSteps(state) })
+  }
+
+  const wizardNext = () => {
+    const state = wizard()
+    if (!state) return
+    const step = wizardStep()
+    if (step?.kind === "text") {
+      const saved = saveWizardText()
+      if (!saved) return
+      if (wizardFinal(saved)) submitWizard(saved)
+      else advanceWizard(saved)
+      return
+    }
+    if (wizardFinal(state)) submitWizard(state)
+    else advanceWizard(state)
+  }
+
+  const wizardPrev = () => {
+    const state = wizard()
+    if (!state) return
+    if (state.customDirectory) {
+      setWizard({ ...state, customDirectory: false, query: "", cursor: 0, error: undefined })
+      return
+    }
+    const step = wizardStep()
+    const saved = step?.kind === "text" ? saveWizardText() : state
+    const next = saved ?? state
+    if (next.index <= 0) return
+    setWizard({ ...next, index: next.index - 1, query: "", cursor: 0, error: undefined, steps: makeWizardSteps(next) })
+  }
+
+  const wizardMove = (delta: number) => {
+    const state = wizard()
+    if (!state) return
+    const length = wizardItems().length
+    setWizard({ ...state, cursor: Math.max(0, Math.min(Math.max(0, length - 1), wizardCursor() + delta)) })
+  }
+
+  const wizardToggle = () => {
+    const state = wizard()
+    const step = wizardStep()
+    const item = wizardItems()[wizardCursor()]
+    if (!state || !step || !item || step.kind !== "multi") return
+    patchWizard((next) => {
+      const selected = new Set(next.draft.memberIDs)
+      if (selected.has(item.id)) selected.delete(item.id)
+      else selected.add(item.id)
+      next.draft.memberIDs = [...selected]
+      if (!next.draft.memberIDs.includes(next.draft.leaderID)) next.draft.leaderID = next.draft.memberIDs[0] ?? ""
+      next.error = undefined
+      return next
+    })
+  }
+
+  const wizardSelect = () => {
+    const state = wizard()
+    const step = wizardStep()
+    const item = wizardItems()[wizardCursor()]
+    if (!state || !step || !item) return
+    if (step.key === "directory" && item.id === "__manual__") {
+      setWizard({ ...state, customDirectory: true, query: "", cursor: 0, error: undefined })
+      return
+    }
+    const next = patchWizard((candidate) => {
+      switch (step.key) {
+        case "directory": candidate.draft.directory = item.id; break
+        case "leader": candidate.draft.leaderID = item.id; break
+        case "synthesis": candidate.draft.synthesis = item.id === "yes"; break
+        case "model": {
+          candidate.draft.modelKey = item.id
+          const model = models().find((value) => `${value.providerID}/${value.modelID}` === item.id)
+          candidate.draft.variant = model?.variants[0] ?? "none"
+          break
+        }
+        case "variant": candidate.draft.variant = item.id; break
+      }
+      candidate.error = undefined
+      return candidate
+    })
+    if (!next) return
+    if (wizardFinal(next)) submitWizard(next)
+    else advanceWizard(next)
+  }
+
+  const wizardCancel = () => {
+    const state = wizard()
+    if (state) completeWizard(state, undefined)
+  }
+
+  const handleWizardKey = (event: any) => {
+    const state = wizard()
+    const step = wizardStep()
+    if (!state || !step) return
+    const name = String(event?.name ?? "")
+    const sequence = String(event?.sequence ?? "")
+    if (step.kind === "text") return
+    if (name === "up") { event?.preventDefault?.(); wizardMove(-1); return }
+    if (name === "down") { event?.preventDefault?.(); wizardMove(1); return }
+    if (name === "backspace") { event?.preventDefault?.(); setWizard({ ...state, query: state.query.slice(0, -1), cursor: 0 }); return }
+    if ((name === "space" || sequence === " ") && step.kind === "multi") { event?.preventDefault?.(); wizardToggle(); return }
+    if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") { event?.preventDefault?.(); wizardSelect(); return }
+    if (sequence.length === 1 && sequence >= " " && !ctrl && !event?.meta && !event?.super) {
+      event?.preventDefault?.()
+      setWizard({ ...state, query: `${state.query}${sequence}`, cursor: 0 })
+    }
+  }
+
+  const openWizard = (flow: "workspace" | "agent", edit?: Workspace): Promise<WizardDraft | undefined> => new Promise((resolve) => {
+    const first = rosterAgents()[0]
+    const model = models()[0]
+    const draft: WizardDraft = flow === "workspace"
+      ? edit
+        ? { directory: edit.directory, name: edit.name, memberIDs: [...edit.memberIDs], leaderID: edit.leaderID, synthesis: edit.synthesis, title: "", role: "", modelKey: "", variant: "" }
+        : { directory: directoryOf(context), name: "", memberIDs: first ? [first.id] : [], leaderID: first?.id ?? "", synthesis: true, title: "", role: "", modelKey: "", variant: "" }
+      : { directory: "", name: "", memberIDs: [], leaderID: "", synthesis: true, title: "", role: "", modelKey: model ? `${model.providerID}/${model.modelID}` : "", variant: model?.variants[0] ?? "none" }
+    const state: WizardState = {
+      flow,
+      title: edit ? `Edit workspace · #${edit.name}` : flow === "workspace" ? "New workspace" : "New agent",
+      draft,
+      steps: [],
+      index: 0,
+      query: "",
+      cursor: 0,
+      directoryOptions: flow === "workspace" ? directoryChoices() : [],
+      modelOptions: models().map((item) => ({ id: `${item.providerID}/${item.modelID}`, label: `${item.name} · ${item.providerID}/${item.modelID}` })),
+      resolve,
+      edit,
+    }
+    state.steps = makeWizardSteps(state)
+    setModal(true)
+    setTextPrompt(null)
+    setPicker(null)
+    setWizard(state)
+  })
+
   const completionWindow = (state: NonNullable<ReturnType<typeof completion>>) => {
     const max = 6
     const start = Math.max(0, Math.min(state.cursor - Math.floor(max / 2), Math.max(0, state.items.length - max)))
@@ -1104,7 +1491,7 @@ export function EnsembleV2App() {
 
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor={colors.bg} padding={1} gap={1}>
-      <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={picker() || textPrompt() ? 0.35 : 1}>
+      <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={picker() || textPrompt() || wizard() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
           <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · ? help · q leave · esc cancel" : `${status()}`}</text>
@@ -1120,10 +1507,10 @@ export function EnsembleV2App() {
           </box>
         </Show>
       </box>
-        <box flexDirection="row" flexGrow={1} gap={1} opacity={picker() || textPrompt() ? 0.35 : 1}>
+        <box flexDirection="row" flexGrow={1} gap={1} opacity={picker() || textPrompt() || wizard() ? 0.35 : 1}>
           <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
-          <box flexGrow={1} border borderStyle="single" borderColor={focusArea() === "chat" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
-            <text fg={focusArea() === "chat" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate>{surfaceTitle()}</text>
+          <box flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={focusArea() === "chat" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
+            <text fg={focusArea() === "chat" ? colors.focus : colors.muted} bg={colors.bg} width="100%" flexShrink={0} truncate>{surfaceTitle()}</text>
             <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
                 <Show when={approvalsOpen()} fallback={
@@ -1134,9 +1521,42 @@ export function EnsembleV2App() {
                     </box>
                   }>
                     <>
-                      <box flexGrow={1} flexDirection="column" width="100%" overflow="hidden">
-                      <text fg={colors.text} bg={colors.bg} width="100%" wrapMode="word">{plainTranscript()}</text>
-                    </box>
+                      <Show when={finalizedLines().length > 0 || liveLine()} fallback={
+                        <box flexDirection="column" padding={1} flexGrow={1}>
+                          <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{surface()?.kind === "agent" ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}` : "Group chat"}</text>
+                          <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? "Send a direct message. It goes to this agent's native OpenCode session." : "Say something to your team. $Name mentions an agent; @path references a file."}</text>
+                        </box>
+                      }>
+                        <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
+                          <Show when={transcriptVersion()} keyed>
+                            <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (!value) return; queueMicrotask(() => { if (restoreScroll) { value.scrollTop = savedScrollTop; restoreScroll = false; syncTranscriptScroll() } else { value.scrollTop = Number(value.scrollHeight ?? 0); setAtBottom(true) } }) }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
+                              <box flexDirection="column" width="100%" paddingRight={1}>
+                                <For each={finalizedLines()}>{(message) => (
+                                  <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
+                                    <text fg={chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{message.author}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.interrupted ? " · interrupted" : ""}</text>
+                                    <Show when={message.role === "agent" && syntaxStyle} fallback={
+                                      <text fg={message.role === "system" ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
+                                    }>
+                                      <markdown content={message.text || " "} syntaxStyle={syntaxStyle} width="100%" fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />
+                                    </Show>
+                                  </box>
+                                )}</For>
+                              </box>
+                            </scrollbox>
+                          </Show>
+                          <Show when={liveLine()}>
+                            <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} flexDirection="column">
+                              <text fg={chatAuthorColor(liveLine()!)} bg={colors.panel} width="100%" truncate>{liveLine()!.author} · streaming…</text>
+                              <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{liveLines().join("\n") || "…"}</text>
+                            </box>
+                          </Show>
+                          <Show when={!atBottom()}>
+                            <box position="absolute" bottom={1} right={1} zIndex={40} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} onMouseDown={() => jumpToBottom()}>
+                              <text fg={colors.focus} bg={colors.panel}>↓ bottom · end</text>
+                            </box>
+                          </Show>
+                        </box>
+                      </Show>
                       <Show when={completion()}>
                         <box border borderStyle="single" borderColor={colors.leader} backgroundColor={colors.bg} flexDirection="column" height={9} minHeight={9} flexShrink={0}>
                           <text fg={colors.leader} bg={colors.bg} width="100%" truncate>{(() => {
@@ -1157,8 +1577,8 @@ export function EnsembleV2App() {
                           )}</For>
                         </box>
                       </Show>
-                      <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={composerActive() ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <input ref={(value: any) => { composerRef = value }} placeholder="Message…  $agent · @file · /command" onInput={(value: string) => { handleComposerInput(value) }} onSubmit={(value: string) => { void submitComposer(value).catch(showError) }} />
+                      <box flexShrink={0} border borderStyle="single" borderColor={composerActive() ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
+                        <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? "COMPOSER · enter send · esc cancel" : "i compose · $ agent · @ file · / command"}</text>
                     </>
@@ -1198,7 +1618,40 @@ export function EnsembleV2App() {
           </box>
         </>
       </Show>
-      <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={picker() || textPrompt() ? 0.35 : 1}>
+      <Show when={wizard()}>
+        <box position="absolute" top={Math.max(1, Math.floor((viewHeight() - 20) / 2))} left={pickerLeft()} width={pickerWidth()} height={20} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+          <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{wizard()!.title} · step {wizard()!.index + 1} / {wizard()!.steps.length}</text>
+          <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
+          <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
+          <Show when={wizardStep()?.kind === "text"} fallback={
+            <box flexDirection="column" height={9}>
+              <text fg={colors.faint} bg={colors.panel} width="100%" truncate>search: {wizard()!.query || "type to filter"} · {wizardItems().length} options</text>
+              <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
+                <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
+                  const state = wizard()
+                  const step = wizardStep()
+                  const items = wizardItems()
+                  if (!state || !step) return ""
+                  const offset = pickerWindow(wizardCursor(), items.length, 8).start
+                  const item = items[offset + slot]
+                  if (!item) return ""
+                  const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
+                  return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.label}${item.detail ? ` · ${item.detail}` : ""}`
+                })()}</text>
+              )}</For>
+            </box>
+          }>
+            <Show when={wizardStepKey()} keyed>
+              <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
+                <textarea ref={(value: any) => { wizardRef = value; queueMicrotask(() => value?.focus?.()) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+              </box>
+            </Show>
+          </Show>
+          <Show when={wizard()?.error}><text fg={colors.bad} bg={colors.panel} width="100%" truncate>{wizard()!.error}</text></Show>
+          <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{`ctrl+← back · ctrl+→ next · enter ${wizard() && wizardFinal(wizard()!) ? "submit" : "continue"} · esc cancel`}</text>
+        </box>
+      </Show>
+      <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={picker() || textPrompt() || wizard() ? 0.35 : 1}>
         <text fg={colors.muted} bg={colors.bg} width="100%" truncate>h/l columns · j/k select · enter open · i compose · a agent · n workspace · g members · I init · v approvals</text>
         <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : "~ leader · / search · p pause · s settings · o native"}</text>
       </box>

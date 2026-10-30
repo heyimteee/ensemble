@@ -12,6 +12,7 @@ export type Palette = {
   border: RGBA | string
   panel: RGBA | string
   focus: RGBA | string
+  categorical: readonly any[]
   bg: RGBA | string
 }
 
@@ -41,6 +42,7 @@ export function palette(theme: {
     border: theme.border.base,
     panel,
     focus: theme.text.base,
+    categorical: (theme as any).categorical ?? [],
     bg: theme.background?.base ?? theme.text.base,
   }
 }

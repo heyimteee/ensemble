@@ -14,10 +14,10 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **New agents start homeless.** Creating an agent opens a direct chat in its own `.ensemble` home. Add it to a workspace with `g`; you can move its homeless session into the workspace.
 - **The leader coordinates.** Unaddressed messages go to the workspace leader, who can answer or delegate typed subtasks.
 - **Subtasks have three states:** Pending, Working, Replied.
-- **Replies stream and stay readable.** Group and direct replies stream token by token. Tables, fenced code, headings, and lists are formatted as terminal text; replies are never truncated. `PageUp` / `PageDown` scroll the transcript.
+- **Replies stream and stay readable.** Group and direct replies stream token by token, then settle into rich Markdown with colored author lines, tables, and fenced code. The transcript scrolls with `PageUp` / `PageDown` or `End`, and replies are never truncated.
 - **Workspace config is human-editable.** `<workspace>/.ensemble/config.json` is authoritative for its name, leader, members, synthesis, and pause state. History stays in OpenCode storage, not the repository.
 - **Init writes the team contract.** `I` or `/init` runs native `/init`, then places the versioned Ensemble block at the top of `AGENTS.md`.
-- **Completions stay in the composer.** `$`, `@`, and `/` open a bordered popup above the composer; typing filters it, arrows move, and Enter inserts or runs. Workspace members use a searchable checklist instead of comma-separated prompts.
+- **Completions stay in the composer.** The composer is a wrapping textarea. `$`, `@`, and `/` open a bordered popup above it; typing filters, arrows move, Enter inserts or runs, and `Shift+Enter` adds a line. Workspace and agent creation use a centered multi-step wizard with Back/Next; member selection is a searchable checklist.
 - **Skillboxes and models are per-agent.** Only assigned skills are available; backup models recover from availability failures.
 - **Memory and approvals are scoped.** Project memory, workspace memory, and global memory have provenance and approval rules.
 - **Work continues through OpenCode's server** after the Ensemble page closes.

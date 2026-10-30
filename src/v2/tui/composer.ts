@@ -22,3 +22,9 @@ export function parseSlashCommand(value: string): { command: string; args: strin
   if (!command) return undefined
   return { command, args }
 }
+
+export function composerHeight(value: string, width: number, max = 8): number {
+  const usable = Math.max(4, width)
+  const lines = value.split("\n").reduce((total, line) => total + Math.max(1, Math.ceil(line.length / usable)), 0)
+  return Math.max(1, Math.min(max, lines))
+}

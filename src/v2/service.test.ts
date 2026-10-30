@@ -45,6 +45,7 @@ function fakeContext() {
     }
   }
   const ctx = {
+    onboarding: false,
     storage: {
       get: async (key: string) => values.get(key),
       set: async (key: string, value: unknown) => { values.set(key, value) },

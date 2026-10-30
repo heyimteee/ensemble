@@ -120,7 +120,9 @@ if [ "$MODELS" -gt 0 ]; then
   tmux send-keys -t "$TUI" 'a'; sleep 1
   tmux send-keys -t "$TUI" 'LiveAgent'; sleep 0.3
   tmux send-keys -t "$TUI" Enter; sleep 0.8
+  tmux send-keys -t "$TUI" 'Engineering'; sleep 0.3
   tmux send-keys -t "$TUI" Enter; sleep 0.8
+  tmux send-keys -t "$TUI" 'Reviews changes and keeps the build green.'; sleep 0.3
   tmux send-keys -t "$TUI" Enter; sleep 1
   tmux send-keys -t "$TUI" Enter; sleep 1
   VARIANT=$(tmux capture-pane -p -t "$TUI")
@@ -140,23 +142,37 @@ if [ "$MODELS" -gt 0 ]; then
     exit 1
   fi
 
+  tmux send-keys -t "$TUI" 'n'; sleep 1
+  tmux send-keys -t "$TUI" Enter; sleep 0.6
+  tmux send-keys -t "$TUI" 'live'; sleep 0.3
+  tmux send-keys -t "$TUI" Enter; sleep 0.6
+  tmux send-keys -t "$TUI" Enter; sleep 0.6
+  tmux send-keys -t "$TUI" Enter; sleep 0.6
+  tmux send-keys -t "$TUI" Enter; sleep 3
+  WORKSPACE_SCREEN=$(tmux capture-pane -p -t "$TUI")
+  if ! grep -q "#live" <<<"$WORKSPACE_SCREEN"; then
+    echo "live-check: workspace wizard did not create and open #live" >&2
+    tmux capture-pane -p -t "$TUI" >&2 || true
+    exit 1
+  fi
+  if grep -q "Move LiveAgent into #live" <<<"$WORKSPACE_SCREEN"; then
+    tmux send-keys -t "$TUI" Escape; sleep 0.5
+  fi
   python3 - "$URL" "$PASS" "$BASE/project" "$BASE/ids.json" <<'PY'
 import base64, json, sys, urllib.parse, urllib.request
 url, password, directory, output = sys.argv[1:5]
 auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
 location = urllib.parse.quote(directory, safe="")
-def call(method, payload):
-    body = json.dumps({"input": payload}).encode()
-    request = urllib.request.Request(f"{url}/api/rpc/ensemble.v2/{method}?location%5Bdirectory%5D={location}", data=body, headers={"Authorization": auth, "Content-Type": "application/json"}, method="POST")
-    return json.load(urllib.request.urlopen(request, timeout=20))["output"]
-state = call("snapshot", {"directory": directory})["state"]
+body = json.dumps({"input": {"directory": directory}}).encode()
+request = urllib.request.Request(f"{url}/api/rpc/ensemble.v2/snapshot?location%5Bdirectory%5D={location}", data=body, headers={"Authorization": auth, "Content-Type": "application/json"}, method="POST")
+state = json.load(urllib.request.urlopen(request, timeout=20))["output"]["state"]
 agent = next(agent for agent in state["agents"].values() if agent["name"] == "LiveAgent")
-workspace = call("invoke", {"directory": directory, "action": "workspace.create", "payload": {"name": "live", "directory": directory, "memberIDs": [agent["id"]], "leaderID": agent["id"]}})["result"]
-call("invoke", {"directory": directory, "action": "workspace.activate", "payload": {"id": workspace["id"]}})
+workspace = next(workspace for workspace in state["workspaces"].values() if workspace["name"] == "live")
 json.dump({"agent": agent["id"], "workspace": workspace["id"]}, open(output, "w"))
 PY
   sleep 2
   tmux send-keys -t "$TUI" 'i'; sleep 0.5
+  tmux send-keys -t "$TUI" 'A long message that wraps across the composer width before opening a completion. '; sleep 0.5
   tmux send-keys -t "$TUI" '$'; sleep 1
   POPUP=$(tmux capture-pane -p -t "$TUI")
   if ! grep -q "\$ agents" <<<"$POPUP"; then
@@ -182,6 +198,15 @@ PY
     exit 1
   fi
   tmux send-keys -t "$TUI" C-u; sleep 0.3
+  tmux send-keys -t "$TUI" 'ping'; sleep 0.3
+  tmux send-keys -t "$TUI" Enter; sleep 1
+  PING=$(tmux capture-pane -p -t "$TUI")
+  if ! grep -q "→ LiveAgent: ping" <<<"$PING"; then
+    echo "live-check: composer Enter did not send the message" >&2
+    tmux capture-pane -p -t "$TUI" >&2 || true
+    exit 1
+  fi
+  tmux send-keys -t "$TUI" 'i'; sleep 0.3
   tmux send-keys -t "$TUI" '/'; sleep 1
   COMMAND=$(tmux capture-pane -p -t "$TUI")
   if ! grep -q "/ commands" <<<"$COMMAND"; then
