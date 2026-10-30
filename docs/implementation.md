@@ -241,6 +241,12 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 | #27 | Skillboxes and model fallback |
 | #28 | Archive/delete, migration, v2 switch, v1 removal |
 | #29 | Acceptance and verification |
+| #30 | v3 specification: streaming, rich text, and TUI visual system |
+| #31 | Native delta streaming and formatted Markdown |
+| #32 | Inline composer completion popup |
+| #33 | Custom searchable member picker |
+| #34 | Semantic theme, focus borders, layout, git metadata, and `I` |
+| #35 | v3 acceptance and verification |
 
 ## Known limitations
 
