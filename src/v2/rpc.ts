@@ -7,8 +7,8 @@ const directory = {
   additionalProperties: false,
 }
 
-export const EnsembleRpc = Rpc.define({
-  id: "ensemble",
+export const EnsembleV2Rpc = Rpc.define({
+  id: "ensemble.v2",
   methods: {
     snapshot: {
       input: directory,

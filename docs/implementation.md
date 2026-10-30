@@ -1,99 +1,177 @@
-# Ensemble implementation
+# Ensemble v2 implementation
 
-Status: **developer preview for OpenCode 2.2.1**. The plugin is loadable and usable locally, but not published, versioned, or license-selected.
-
-## Install for local development
-
-Add the repository as a plugin in a project or global `opencode.json`:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["/home/you/dev/ensemble"]
-}
-```
-
-The package exports both parts:
-
-- `.` — server plugin (state, scheduling, native sessions, RPC, tools)
-- `./tui` — terminal workspace
-
-Open `/ensemble` from the prompt, or run the **Open Ensemble** palette command. Do not also place the same plugin under `.opencode/plugins/`; that creates a duplicate plugin ID.
+Status: **developer preview**, tested against OpenCode 2.2.1. The v2 runtime is the default. The v1 preview was removed.
 
 ## Architecture
 
-- **Server plugin** owns durable state in OpenCode plugin storage, schedules work, creates native OpenCode sessions, and exposes a typed RPC contract.
-- **TUI plugin** is a single workspace page with an internal sidebar for Agents, project-grouped Channels, Approvals, and Work. It talks to the server through RPC and refreshes on `rpc.ensemble.changed`.
-- **Native sessions** execute every model turn. Ensemble injects its persona, memory, and channel context through session instruction entries; it does not replace OpenCode tools, providers, or permissions.
-- **Skillboxes** are enforced with per-session `skill` permissions: deny all, then allow assigned IDs. This is native enforcement for agent-initiated skill loading.
-- **No second daemon**. Work is owned by the OpenCode server, so closing the TUI does not stop running turns.
-
-### State
-
-`EnsembleState` contains agents, channels, conversations, work items, handoffs, approvals, memories, chains, and team settings. `EnsembleStore` serializes mutations and persists one JSON snapshot after each change.
-
-### Key flows
-
-- **Direct conversation:** create a native session with `agent: "build"`, apply the profile’s main model and Skillbox permissions, inject persona/memory, prompt, wait, then record the transcript in Ensemble.
-- **Channel message:** parse recognized `!mentions`; unaddressed messages go only to the leader. Each recipient gets a queued work item and a per-agent channel conversation.
-- **Handoff:** the `ensemble_handoff` tool records a visible handoff, enforces channel membership and the task-chain limit, and queues the target’s work. Replies are posted to the channel and recorded on the requester’s conversation.
-- **Approvals:** outside-roster contact, chain-limit continuation, memory promotion, cross-project/private transcript sharing, roster proposals, and interrupted work. They block dependent work only.
-- **Queues:** one active turn per conversation, a configurable team-wide limit (default 3), and one editing turn per resolved checkout. Distinct checkouts run in parallel.
-- **Model fallback:** availability failures switch through the ordered backup list with visible status; native retries are disabled for Ensemble sessions so fallback can decide. Any tool call makes a retry unsafe, so work pauses for review instead of replaying.
-- **Lifecycle:** archive preserves history; permanent delete is separate and asks whether native sessions should also be deleted.
-
-## Feature map
-
-| Ticket | Implementation |
-| --- | --- |
-| #3 Agents and direct conversations | Agent profiles, direct conversations, native sessions, RPC snapshot/invoke |
-| #4 Settings tabs | General/Models/Memories/Skillbox views, drafts, Save/Cancel, pending marker |
-| #5 Skillboxes | Assigned skill catalog, missing-skill warnings, native per-session permissions |
-| #6 Memories | Manual project/global memories, provenance, history, delete/fresh conversation |
-| #7 Channels | Project grouping, members, leader, `!mentions`, per-agent channel sessions |
-| #8 Handoffs | `ensemble_handoff`, visible records, correlated replies, chain limit |
-| #9 Queues | Per-conversation queues, cancel/steer/reorder, channel stop/resume |
-| #10 Parallel work | Three-turn default, per-conversation lock, per-checkout editing lock |
-| #11 Approvals | Inbox plus originating channel/direct context, idempotent resolution |
-| #12 Learning | `ensemble_remember`, channel memory, approval-governed promotion |
-| #13 Fallback | Ordered backups, visible switches, uncertain-tool pause, retry |
-| #14 Background | Native server ownership, state recovery, no TUI daemon |
-| #15 Archive/delete | Archive default, permanent delete, leader replacement, native-session choice |
-| #16 Acceptance | This document, core tests, compatibility report, manual journey below |
-
-## Tests
-
-```bash
-npm test
+```text
+Ensemble TUI workspace page
+  workspace rail · group chat · subtask board · settings · approvals
+                         │
+                  typed RPC + events
+                         │
+Ensemble server plugin
+  workspace registry · roster · task graph · scheduler
+  memory · approvals · session bindings · recovery
+                         │
+                  native session API
+                         │
+OpenCode engine
+  sessions · models · tools · providers · permissions · skills
 ```
 
-The suite covers state serialization, mention routing and name boundaries, model-variant validation, checkout normalization, concurrency and editing locks, queue ordering, memory scope isolation, lifecycle rules, and approval idempotence.
+### Components
 
-No TUI or server test harness is committed yet. The compatibility report records real OpenCode 2.2.1 probes; the acceptance journey below records the implementation checks.
+- **`src/v2/tui`** — full-screen plugin page. Workspace rail, group chat, subtask board, settings, approvals, leader key.
+- **`src/v2/service.ts`** — domain service and orchestrator. Workspaces, agents, messages, subtasks, delegation, approvals, memory, model fallback, scheduling, recovery.
+- **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval.
+- **`src/v2/routing.ts`** — `@`/`!` mention routing and leader fallback.
+- **`src/v2/paths.ts`** — canonical workspace directories.
 
-A dated record of the live checks is in [verification/2026-10-29.md](verification/2026-10-29.md).
+Every execution is a native OpenCode session. Ensemble does not replace tools, providers, permissions, or skills.
 
-## Manual acceptance journey
+## Workspaces
 
-Run against an isolated OpenCode 2.2.1 project (never the user’s global config):
+A workspace is the directory-bound project room:
 
-1. Add the plugin path to `opencode.json`; open `/ensemble`.
-2. Create two agents with different models and different Skillboxes.
-3. Message one directly; verify the native session opens and the reply is recorded.
-4. Create a channel with both agents and a leader; send an unaddressed message and a `!Agent` message.
-5. Make the leader hand off to a member; verify the channel handoff record and the member’s reply.
-6. Try an outside-roster handoff; verify the approval appears and the handoff waits.
-7. Approve it; verify the target runs and the reopens show the result.
-8. Create editing work in two channels on the same checkout; verify one runs and the other waits. Repeat with a different checkout and verify parallel execution.
-9. Close the TUI while a turn is running; verify the server completes it and reconnecting shows the result.
-10. Restart the server; verify running work becomes interrupted and requires explicit resume.
-11. Assign a Skillbox, then have the agent attempt an unassigned skill; verify native denial.
-12. Delete or archive an agent/channel; verify leader replacement, pending-work handling, and the native-session choice.
+```ts
+Workspace {
+  id, name, directory,
+  leaderID, memberIDs,
+  synthesis, archived, nextSeq,
+  createdAt, lastActiveAt
+}
+```
+
+- One canonical directory maps to one active workspace.
+- Switching workspace changes the group chat, task board, and directory for new runs.
+- Sessions are bound to `workspace + agent`, so switching does not discard them.
+
+The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent and manual paths are supported.
+
+## Agents
+
+An agent is a reusable profile:
+
+```ts
+Agent {
+  id, name, title, role,
+  mainModel, backupModels,
+  skillbox, color,
+  archived, pendingSettings, version
+}
+```
+
+- General, Models, Memories, and Skillbox settings.
+- Main model and supported reasoning; ordered backups.
+- Exclusive Skillbox enforced with per-session `skill` permissions.
+- Behavior changes bump the version and create a new native session for subsequent work. Renaming does not.
+- `pendingSettings` is cleared when the new session is created.
+
+## Group chat
+
+The transcript is shared and attributed:
+
+```ts
+Message {
+  id, workspaceID, seq,
+  author: "user" | "agent" | "system",
+  agentID?, text, kind, taskID?, createdAt
+}
+```
+
+- `@Name` is primary; `!Name` is an alias.
+- Multiple known mentions create one task per recipient.
+- No mention routes only to the leader.
+- Agent replies and task cards appear in the same transcript.
+- Native sessions are not alternate chat tabs; `o` opens the selected agent's session.
+
+## Subtasks
+
+```ts
+Subtask {
+  id, workspaceID, parentID?,
+  creatorType, creatorAgentID?, assigneeID?,
+  title, instruction, constraints?, expected?,
+  mode: "research" | "edit",
+  state: "pending" | "working" | "replied",
+  outcome, stage, interrupted, approvalID?,
+  resultMessageID?, error?, attempts
+}
+```
+
+```text
+pending ──assign──▶ working ──result──▶ replied
+   │                   │
+   └────cancel─────────┴────cancel──────▶ removed
+```
+
+- Failed replies stay **Replied** with a failed outcome.
+- Approval waits are badges on **Working**, not a fourth state.
+- The leader delegates through the `ensemble_delegate` tool with a typed envelope.
+- When all children reply, a leader synthesis subtask is created unless the workspace disables synthesis.
+- The board groups Pending, Working, and Replied. `d` delegates, `r` retries, `x` cancels, `o` opens the run.
+
+## Scheduling and recovery
+
+- Default three active runs.
+- One active run per agent per workspace.
+- One editing run per canonical directory; research can continue.
+- Closing the Ensemble page does not stop native work.
+- On restart, working subtasks return to Pending with an interrupted badge. They are not replayed automatically.
+- Model fallback uses the ordered backup list and surfaces switches.
+- Permission denials and tool failures are not retried; an uncertain tool outcome pauses for review.
+
+## Memory and approvals
+
+Memory scopes:
+
+- **project** — agent + workspace
+- **workspace** — shared with all workspace members
+- **global** — agent across workspaces, approval-gated when promoted
+
+Entries record origin (`automatic`/`manual`), source, and history. Deleting a memory excludes it from future retrieval but does not erase native transcripts.
+
+Approvals cover:
+
+- `ask_person`
+- outside-roster delegation
+- memory promotion
+- cross-project/private transcript sharing
+- interrupted work
+
+Approvals appear inline in the chat and in the inbox. Resolutions are idempotent; only the user can approve.
+
+## Leader key
+
+- `~` enters leader mode outside text entry.
+- `~ ?` opens the full grouped shortcut list.
+- `~ q` leaves Ensemble for the native TUI.
+- `Esc` cancels leader mode.
+- `~` inside a dialog or message remains text.
+
+## Ticket map
+
+| Ticket | Implementation |
+|---|---|
+| #18 | OpenCode navigation/native-session validation |
+| #19 | Native-like workspace shell and leader key |
+| #20 | Directory-bound workspaces and `fd` picker |
+| #21 | Agent roster and settings |
+| #22 | Group chat, leader routing, mentions |
+| #23 | Subtask board, delegation, synthesis |
+| #24 | Native-session drill-down and run detail |
+| #25 | Memory and approvals |
+| #26 | Queues, concurrency, editing locks, recovery |
+| #27 | Skillboxes and model fallback |
+| #28 | Archive/delete, migration, v2 switch, v1 removal |
+| #29 | Acceptance and verification |
 
 ## Known limitations
 
-- TUI workspace is a plugin page, not a native OpenCode tab or global sidebar.
-- `!` autocomplete is a recipient picker plus text mentions, not inline completion.
-- No server/TUI automated integration harness yet.
-- The shared global `opencode service` lifecycle was validated only through the compatibility probes and an isolated standalone server.
+- The group chat composer is a dialog opened with `i`, not an inline focused input.
+- Mention selection is text plus a recipient picker; there is no inline autocomplete.
+- Direct one-to-one conversations are not implemented in the v2 TUI; a one-member workspace is not treated as a DM.
+- Task reassignment and manual backup reordering are available through the service but not fully exposed in the TUI.
+- The shared global `opencode service` lifecycle was not exercised end-to-end with v2 work; the isolated standalone server was.
 - No npm package, versioning policy, or license has been selected.

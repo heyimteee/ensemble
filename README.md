@@ -2,30 +2,20 @@
 
 **Your persistent agent team, inside OpenCode.**
 
-Ensemble is a planned TUI extension for OpenCode: named teammates with roles, models, memories, and assigned skills, working together in project channels.
+Ensemble is a TUI workspace where you and a team of named agents share one group chat, delegate visible subtasks, and inspect each agent's native OpenCode session underneath.
 
-> **Status: developer preview.** The plugin is loadable locally on OpenCode 2.2.1. It is not published, versioned, or licensed. Compatibility evidence is recorded in the [report](docs/compatibility/opencode-2.2.1.md).
+> **Status: developer preview.** The v2 runtime is the default. It is not published, versioned, or licensed. Tested against OpenCode 2.2.1.
 
-## The experience
+## What it does
 
-- Maintain a personal roster of named agents, reusable across projects.
-- Configure each agent through General, Models, Memories, and Skillbox tabs.
-- Choose a main model, supported reasoning effort, and ordered backup models.
-- Assign an exclusive Skillbox from skills already available in OpenCode.
-- Chat privately with agents or bring them into project channels.
-- Address agents with `!mentions`; send unaddressed messages to the channel's assigned leader.
-- Follow visible messages, handoffs, queues, and approvals.
-- Keep work running through OpenCode's native background server after closing the TUI.
-
-## Extend, never replace
-
-OpenCode remains responsible for native sessions, model execution, tools, and permission handling. Ensemble must preserve ordinary sessions, built-in agents, configuration, and existing integrations. Unsupported requirements must be surfaced, not hidden behind core patches or private APIs.
-
-Skills are instructions, not permissions. Memories are saved knowledge, not unlimited model context. A channel leader coordinates work but cannot approve actions on your behalf.
-
-## Scope
-
-The first release targets the terminal UI only. Scheduled routines, external event triggers, proactive task monitoring, remote hosting, and browser/computer automation are excluded. Work explicitly requested by the user can continue in the native background server.
+- **Workspaces are directories.** One workspace belongs to one project directory. Switching workspaces preserves every session.
+- **The group chat is the main interface.** User and agent messages are attributed with names, colors, and the leader badge.
+- **The leader coordinates.** Unaddressed messages go to the workspace leader, who can answer or delegate typed subtasks.
+- **Subtasks have three states:** Pending, Working, Replied.
+- **Native sessions stay underneath.** Each agent has one persistent session per workspace; press `o` to inspect it.
+- **Skillboxes and models are per-agent.** Only assigned skills are available; backup models recover from availability failures.
+- **Memory and approvals are scoped.** Project memory, workspace memory, and global memory have provenance and approval rules.
+- **Work continues through OpenCode's server** after the Ensemble page closes.
 
 ## Install for local development
 
@@ -38,7 +28,36 @@ Add the repository to `opencode.json`:
 }
 ```
 
-Then run `/ensemble` or the **Open Ensemble** palette command. Do not also load the same plugin from `.opencode/plugins/`; that creates a duplicate plugin ID.
+Run `/ensemble` or the **Open Ensemble** palette command. Do not also load the same plugin from `.opencode/plugins/`; that creates a duplicate plugin ID.
+
+If the plugin was already loaded before updating the package exports, run `opencode reload` or restart the OpenCode service.
+
+## Keyboard
+
+| Key | Action |
+|---|---|
+| `~` | Leader key |
+| `~ ?` | Full shortcut help |
+| `~ q` | Leave Ensemble for the native TUI |
+| `i` | Compose a message |
+| `n` | New workspace |
+| `w` / `W` | Next / previous workspace |
+| `a` | New agent |
+| `z` | Next agent |
+| `s` | Agent settings |
+| `v` | Approvals inbox |
+| `d` | Delegate selected subtask |
+| `r` | Retry selected subtask |
+| `x` | Cancel selected subtask |
+| `o` | Open the selected agent's native session |
+| `Tab` | Cycle settings tabs |
+| `e` | Edit the selected setting |
+| `Ctrl+S` | Save settings |
+| `Space` | Toggle skill in Skillbox |
+| `Ctrl+F` | Filter skills |
+| `Esc` | Back or cancel |
+
+A literal `~` typed in a dialog or message stays text. The leader key only acts when no dialog or text entry is active.
 
 ## Development
 
@@ -46,19 +65,17 @@ Then run `/ensemble` or the **Open Ensemble** palette command. Do not also load 
 npm test
 ```
 
-The core suite uses Node's test runner and type stripping. There is no build step: OpenCode loads the TypeScript server and TUI entrypoints directly.
+The v2 suite covers mention routing, workspace canonicalization, and per-entity persistence. Live checks are recorded in [docs/verification/2026-10-30.md](docs/verification/2026-10-30.md).
 
-## Project documentation
+## Documentation
 
-- [Implementation and acceptance notes](docs/implementation.md)
-- [Documentation index](docs/README.md)
+- [v2 implementation notes](docs/implementation.md)
+- [v2 specification](https://github.com/heyimteee/ensemble/issues/17)
+- [v2 tickets](https://github.com/heyimteee/ensemble/issues)
+- [OpenCode compatibility report](docs/compatibility/opencode-2.2.1.md)
 - [Glossary](GLOSSARY.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
-- [OpenCode compatibility report](docs/compatibility/opencode-2.2.1.md)
-- [v2 product specification](https://github.com/heyimteee/ensemble/issues/17)
-- [v2 implementation tickets](https://github.com/heyimteee/ensemble/issues)
-- [Historical v1 specification](https://github.com/heyimteee/ensemble/issues/1)
 
 ## License
 

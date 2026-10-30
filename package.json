@@ -5,14 +5,16 @@
   "type": "module",
   "description": "Persistent agent teams inside OpenCode",
   "exports": {
-    ".": "./src/server/index.ts",
-    "./tui": "./src/tui/index.tsx",
-    "./rpc": "./src/rpc.ts"
+    ".": "./src/v2/server.ts",
+    "./tui": "./src/v2/tui/index.tsx",
+    "./rpc": "./src/v2/rpc.ts"
   },
-  "files": ["src"],
+  "files": [
+    "src"
+  ],
   "scripts": {
-    "test": "node --test --experimental-strip-types src/core/*.test.ts",
-    "test:watch": "node --test --watch --experimental-strip-types src/core/*.test.ts"
+    "test": "node --test --experimental-strip-types src/v2/*.test.ts",
+    "test:watch": "node --test --watch --experimental-strip-types src/v2/*.test.ts"
   },
   "peerDependencies": {
     "@opencode/plugin": "2.2.1",
@@ -21,9 +23,17 @@
     "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
-    "@opencode/plugin": { "optional": true },
-    "@opentui/core": { "optional": true },
-    "@opentui/solid": { "optional": true },
-    "solid-js": { "optional": true }
+    "@opencode/plugin": {
+      "optional": true
+    },
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
   }
 }

@@ -1,18 +1,18 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { EnsembleApp } from "./app.tsx"
+import { EnsembleV2App } from "./app.tsx"
 
 export default Plugin.define({
-  id: "ensemble.tui",
+  id: "ensemble.v2.tui",
   setup(ctx) {
     const unregister = ctx.ui.router.register({
       name: "ensemble",
-      render: () => <EnsembleApp />,
+      render: () => <EnsembleV2App />,
     })
     ctx.keymap.layer(() => ({
       mode: "global",
       commands: [
         {
-          id: "ensemble.open",
+          id: "ensemble.v2.open",
           title: "Open Ensemble",
           group: "Ensemble",
           slash: { name: "ensemble" },
