@@ -62,6 +62,7 @@ export function readWorkspaceConfig(directory: string): WorkspaceConfig | undefi
 }
 
 export function writeWorkspaceConfig(workspace: Workspace, agents: Record<string, Agent>): void {
+  if (workspace.archived) return
   ensureEnsembleDirectory(workspace.directory)
   const config: WorkspaceConfig = {
     version: CONFIG_VERSION,

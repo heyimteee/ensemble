@@ -70,6 +70,8 @@ export class EnsembleV2Service {
   private readonly runBySession = new Map<string, string>()
   private readonly activeRuns = new Map<string, Run>()
   private readonly directBusy = new Set<string>()
+  private readonly homeBindingPromises = new Map<string, Promise<{ sessionID: string; directory: string }>>()
+  private readonly bindingPromises = new Map<string, Promise<{ sessionID: string } | undefined>>()
   private readonly workspaceEpoch = new Map<string, number>()
   private globalEpoch = 0
   private lastConfigError: string | undefined
@@ -267,6 +269,14 @@ export class EnsembleV2Service {
   private async ensureHomeBinding(agent: Agent): Promise<{ sessionID: string; directory: string }> {
     const existing = this.store.binding("home", agent.id)
     if (existing?.kind === "home") return { sessionID: existing.sessionID, directory: existing.directory ?? agent.homeDirectory ?? homedir() }
+    const inFlight = this.homeBindingPromises.get(agent.id)
+    if (inFlight) return inFlight
+    const promise = this.createHomeBinding(agent)
+    this.homeBindingPromises.set(agent.id, promise)
+    try { return await promise } finally { this.homeBindingPromises.delete(agent.id) }
+  }
+
+  private async createHomeBinding(agent: Agent): Promise<{ sessionID: string; directory: string }> {
     const directory = agent.homeDirectory ?? join(homedir(), ".ensemble", "agents", agent.id)
     mkdirSync(directory, { recursive: true })
     const created = unwrap<any>(await this.ctx.session.create({
@@ -717,7 +727,7 @@ export class EnsembleV2Service {
       sessionID = created?.id
       if (!sessionID) throw new Error("Could not create an init session.")
       await this.ctx.session.command({ sessionID, name: "init", text: "" })
-      await this.ctx.session.wait({ sessionID }).catch(() => undefined)
+      await this.ctx.session.wait({ sessionID })
       writeAgentsBlock(workspace.directory, ensembleBlock())
       writeInitMetadata(workspace.directory, ENSEMBLE_BLOCK_VERSION)
       return { ok: true, directory: workspace.directory }
@@ -1701,6 +1711,9 @@ export class EnsembleV2Service {
       live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true })
       const poll = async () => {
         if (pollBusy || !live) return
+        if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return
+        const currentTask = this.store.snapshot().subtasks[task.id]
+        if (!currentTask || currentTask.activeRunID !== runID) return
         pollBusy = true
         try {
           const messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
@@ -1795,6 +1808,16 @@ export class EnsembleV2Service {
   private async ensureBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string } | undefined> {
     const existing = this.store.binding(workspace.id, agent.id)
     if (existing && existing.agentVersion === agent.version) return { sessionID: existing.sessionID }
+    const key = bindingKey(workspace.id, agent.id)
+    const inFlight = this.bindingPromises.get(key)
+    if (inFlight) return inFlight
+    const promise = this.createWorkspaceBinding(workspace, agent)
+    this.bindingPromises.set(key, promise)
+    try { return await promise } finally { this.bindingPromises.delete(key) }
+  }
+
+  private async createWorkspaceBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string } | undefined> {
+    const existing = this.store.binding(workspace.id, agent.id)
     const created = unwrap<any>(await this.ctx.session.create({
       title: `${agent.name} · ${workspace.name}`,
       agent: "build",

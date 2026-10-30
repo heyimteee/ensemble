@@ -211,18 +211,22 @@ export function EnsembleV2App() {
       const directory = directoryOf(context)
       const workspace = Object.values(next.state.workspaces ?? {}).find((item) => !item.archived && item.directory === directory) as Workspace | undefined
       const history = next.state.ui?.history?.[directory]
+      const historyWorkspace = history?.workspaceID && next.state.workspaces[history.workspaceID] && !next.state.workspaces[history.workspaceID].archived ? history.workspaceID : undefined
       const currentWorkspace = workspaceID()
       if (workspace) {
-        if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(workspace.id)
+        if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(historyWorkspace ?? workspace.id)
         if (!surface()) {
+          const targetWorkspace = historyWorkspace ?? workspace.id
           if (history?.surface === "agent" && history.agentID && next.state.agents[history.agentID]) {
-            setSurface({ kind: "agent", agentID: history.agentID, workspaceID: workspace.memberIDs.includes(history.agentID) ? workspace.id : undefined })
+            const member = next.state.workspaces[targetWorkspace]?.memberIDs.includes(history.agentID)
+            setSurface({ kind: "agent", agentID: history.agentID, workspaceID: member ? targetWorkspace : undefined })
           } else {
-            setSurface({ kind: "workspace", workspaceID: workspace.id })
+            setSurface({ kind: "workspace", workspaceID: targetWorkspace })
           }
         }
         if (!restored()) {
           setRestored(true)
+          if (history?.column) setFocusArea(history.column)
           const taskID = history?.taskID ?? uiState.taskID
           if (taskID) {
             const index = orderedTasks().findIndex((task) => task.id === taskID)
