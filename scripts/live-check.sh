@@ -89,4 +89,12 @@ fi
 
 tmux send-keys -t "$TUI" Escape; sleep 0.5
 
+tmux send-keys -t "$TUI" '~'; sleep 0.3
+tmux send-keys -t "$TUI" 'q'; sleep 1
+HOME_SCREEN=$(tmux capture-pane -p -t "$TUI")
+if ! grep -q "Ask anything" <<<"$HOME_SCREEN"; then
+  echo "live-check: leaving Ensemble did not return to the native TUI" >&2
+  exit 1
+fi
+
 echo "live-check: passed ($URL)"

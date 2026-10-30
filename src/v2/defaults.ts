@@ -3,6 +3,7 @@ import type { Settings, SnapshotState } from "./types.ts"
 export const DEFAULT_SETTINGS: Settings = {
   maxActiveRuns: 3,
   maxDelegations: 10,
+  maxDepth: 5,
   synthesis: true,
 }
 

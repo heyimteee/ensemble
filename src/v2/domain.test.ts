@@ -36,6 +36,7 @@ function workspace(id: string, leaderID: string, memberIDs: string[]): Workspace
     memberIDs,
     synthesis: true,
     archived: false,
+    paused: false,
     nextSeq: 1,
     createdAt: 1,
     lastActiveAt: 1,
@@ -79,6 +80,7 @@ test("unknown mentions are reported while emails and known names pass", () => {
   assert.deepEqual(unknownMentions("@Nova Prime and @Nova", ws, agents), [])
   assert.deepEqual(unknownMentions("@Ghost please check", ws, agents), ["@Ghost"])
   assert.deepEqual(unknownMentions("mail me at dev@example.com", ws, agents), [])
+  assert.deepEqual(unknownMentions("Fix the @media query and @ts-ignore", ws, agents), [])
 })
 
 test("workspace canonicalization expands home and normalizes equivalent paths", () => {

@@ -34,6 +34,6 @@ export function palette(theme: {
     text: theme.text.base,
     leader: theme.hue.accent[300] ?? theme.text.feedback.info.base,
     border: theme.border.base,
-    bg: "#1e1e2e",
+    bg: theme.background?.base ?? theme.text.base,
   }
 }

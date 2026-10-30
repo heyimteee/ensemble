@@ -1,7 +1,7 @@
 import { For, Show } from "solid-js"
 import type { Agent, Approval, Memory, Message, SkillOption, SnapshotState, Subtask, Workspace } from "../types.ts"
 import type { Palette } from "./theme.ts"
-import { agentName, busyCount, missingSkills, short, unreadCount, workspaceGroupLabel } from "./format.ts"
+import { ageLabel, agentColor, agentName, busyCount, missingSkills, resultForTask, short, unreadCount, workspaceGroupLabel, wrapText } from "./format.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
@@ -16,9 +16,10 @@ export function WorkspaceRail(props: {
   pendingApprovals: number
   workspaceCount: number
   skillCatalog: SkillOption[]
+  width: number
 }) {
   return (
-    <box width={34} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
+    <box width={props.width} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
       <text fg={props.colors.accent}>WORKSPACES {props.workspaceCount > 0 ? `(${props.workspaceCount})` : ""}</text>
       <Show when={props.filter}><text fg={props.colors.faint}>filter: {props.filter}</text></Show>
       <Show when={props.groups.length === 0}>
@@ -34,6 +35,7 @@ export function WorkspaceRail(props: {
             return (
               <text fg={active() ? props.colors.good : props.colors.text}>
                 {active() ? "› " : "  "}#{workspace.name}
+                {workspace.paused ? " ⏸" : ""}
                 {busy() > 0 ? ` ◐${busy()}` : ""}
                 {unread() > 0 ? ` ●${unread()}` : ""}
               </text>
@@ -62,10 +64,23 @@ export function WorkspaceRail(props: {
   )
 }
 
-export function MessageList(props: { colors: Palette; messages: Message[]; state: SnapshotState | null; workspace?: Workspace }) {
+export function MessageList(props: { colors: Palette; messages: Message[]; state: SnapshotState | null; workspace?: Workspace; width: number }) {
+  const rows = () => {
+    const rendered: Array<{ message: Message; lines: string[] }> = []
+    let budget = 28
+    for (let index = props.messages.length - 1; index >= 0 && budget > 0; index--) {
+      const message = props.messages[index]
+      const lines = wrapText(message.text, props.width, 6)
+      const cost = 1 + lines.length
+      if (rendered.length > 0 && cost > budget) break
+      rendered.unshift({ message, lines })
+      budget -= cost
+    }
+    return rendered
+  }
   return (
     <>
-      <For each={props.messages}>{(message) => <MessageLine colors={props.colors} message={message} state={props.state} workspace={props.workspace} />}</For>
+      <For each={rows()}>{(row) => <MessageLine colors={props.colors} message={row.message} lines={row.lines} state={props.state} workspace={props.workspace} />}</For>
       <Show when={props.messages.length === 0}>
         <text fg={props.colors.muted}>{props.workspace ? "Say something to your team." : "Create a workspace with n."}</text>
       </Show>
@@ -73,7 +88,7 @@ export function MessageList(props: { colors: Palette; messages: Message[]; state
   )
 }
 
-function MessageLine(props: { colors: Palette; message: Message; state: SnapshotState | null; workspace?: Workspace }) {
+function MessageLine(props: { colors: Palette; message: Message; lines: string[]; state: SnapshotState | null; workspace?: Workspace }) {
   const name = () => props.message.author === "user" ? "You" : props.message.author === "system" ? "Ensemble" : agentName(props.state, props.message.agentID)
   const isLeader = () => props.message.agentID === props.workspace?.leaderID
   const color = () => props.message.author === "user"
@@ -82,12 +97,14 @@ function MessageLine(props: { colors: Palette; message: Message; state: Snapshot
       ? props.colors.muted
       : isLeader()
         ? props.colors.leader
-        : props.colors.accent
-  const prefix = () => `${name()}${isLeader() ? " · leader" : ""}${props.message.kind === "task" ? " · task" : ""}${props.message.kind === "approval" ? " · approval" : ""}: `
+        : agentColor(props.state?.agents[props.message.agentID ?? ""], props.colors.accent as string)
+  const prefix = () => `${name()}${isLeader() ? " · leader" : ""}${props.message.kind === "task" ? " · task" : ""}${props.message.kind === "approval" ? " · approval · v to resolve" : ""}:`
   return (
-    <box flexDirection="row" paddingY={0}>
-      <text fg={color()}>{prefix()}</text>
-      <text fg={props.message.author === "system" ? props.colors.muted : props.colors.text}>{short(props.message.text, Math.max(8, 42 - prefix().length))}</text>
+    <box flexDirection="column" paddingY={0}>
+      <text fg={color()} bg={props.colors.bg} width="100%" truncate>{prefix()}</text>
+      <For each={props.lines}>{(line) => (
+        <text fg={props.message.author === "system" ? props.colors.muted : props.colors.text} bg={props.colors.bg} width="100%" truncate>{line}</text>
+      )}</For>
     </box>
   )
 }
@@ -98,16 +115,32 @@ export function TaskBoard(props: {
   state: SnapshotState | null
   cursor: number
   activeCount: number
+  width: number
 }) {
-  const pending = () => props.tasks.filter((task) => task.state === "pending").slice(-5)
-  const working = () => props.tasks.filter((task) => task.state === "working").slice(-5)
-  const replied = () => props.tasks.filter((task) => task.state === "replied").slice(-5)
+  const groups = () => {
+    const pending = props.tasks.filter((task) => task.state === "pending")
+    const working = props.tasks.filter((task) => task.state === "working")
+    const replied = props.tasks.filter((task) => task.state === "replied")
+    return [
+      { title: "PENDING", tasks: pending },
+      { title: "WORKING", tasks: working },
+      { title: "REPLIED", tasks: replied },
+    ]
+  }
   return (
-    <box width={40} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
+    <box width={props.width} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
       <text fg={props.colors.accent}>SUBTASKS {props.activeCount > 0 ? `· ${props.activeCount} working` : ""}</text>
-      <TaskGroup colors={props.colors} title="PENDING" tasks={pending()} state={props.state} cursor={props.cursor} offset={0} />
-      <TaskGroup colors={props.colors} title="WORKING" tasks={working()} state={props.state} cursor={props.cursor} offset={pending().length} />
-      <TaskGroup colors={props.colors} title="REPLIED" tasks={replied()} state={props.state} cursor={props.cursor} offset={pending().length + working().length} />
+      <TaskGroups colors={props.colors} groups={groups()} state={props.state} cursor={props.cursor} />
+      <Show when={props.tasks[props.cursor]}>{(task) => {
+        const parent = () => task().parentID ? props.state?.subtasks[task().parentID!]?.title : undefined
+        const result = () => resultForTask(props.state, task())
+        return (
+          <>
+            <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>parent: {parent() ? short(parent()!, 24) : "—"} · {ageLabel(task().createdAt)} · try {task().attempts} · {task().runSummary ?? "—"}</text>
+            <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>result: {result() ? short(result()!.text, 26) : task().error ? short(task().error!, 26) : "—"}</text>
+          </>
+        )
+      }}</Show>
       <text> </text>
       <text fg={props.colors.muted}>d delegate · t reassign · ↵ result</text>
       <text fg={props.colors.muted}>r retry · R restart · x cancel · o native</text>
@@ -115,19 +148,38 @@ export function TaskBoard(props: {
   )
 }
 
-function TaskGroup(props: { colors: Palette; title: string; tasks: Subtask[]; state: SnapshotState | null; cursor: number; offset: number }) {
+function TaskGroups(props: {
+  colors: Palette
+  groups: Array<{ title: string; tasks: Subtask[] }>
+  state: SnapshotState | null
+  cursor: number
+}) {
   return (
-    <>
-      <text fg={props.colors.muted}>{props.title} ({props.tasks.length})</text>
-      <For each={props.tasks}>{(task, index) => (
-        <text fg={props.cursor === props.offset + index() ? props.colors.good : task.state === "working" ? props.colors.warn : task.state === "replied" ? props.colors.text : props.colors.muted}>
-          {props.cursor === props.offset + index() ? "› " : "  "}
-          {task.state === "working" ? "◐ " : task.state === "replied" ? "● " : "○ "}
-          {short(task.title, 17)} · {agentName(props.state, task.assigneeID)}
-          {task.interrupted ? " · interrupted" : ""}
-        </text>
-      )}</For>
-    </>
+    <For each={props.groups}>{(group, groupIndex) => {
+      const base = props.groups.slice(0, groupIndex()).reduce((sum, item) => sum + item.tasks.length, 0)
+      const max = 5
+      const inGroup = props.cursor >= base && props.cursor < base + group.tasks.length
+      const start = inGroup
+        ? Math.max(0, Math.min(props.cursor - base - Math.floor(max / 2), group.tasks.length - max))
+        : Math.max(0, group.tasks.length - max)
+      const visible = group.tasks.slice(start, start + max)
+      return (
+        <>
+          <text fg={props.colors.muted}>{group.title} ({group.tasks.length})</text>
+          <For each={visible}>{(task, index) => {
+            const absolute = base + start + index()
+            return (
+              <text fg={props.cursor === absolute ? props.colors.good : task.state === "working" ? props.colors.warn : task.state === "replied" ? props.colors.text : props.colors.muted}>
+                {props.cursor === absolute ? "› " : "  "}
+                {task.state === "working" ? "◐ " : task.state === "replied" ? "● " : "○ "}
+                {short(task.title, 17)} · {agentName(props.state, task.assigneeID)}
+                {task.interrupted ? " · interrupted" : ""}
+              </text>
+            )
+          }}</For>
+        </>
+      )
+    }}</For>
   )
 }
 
@@ -157,11 +209,11 @@ export function ApprovalList(props: {
 
 const shortcutGroups: Array<{ title: string; entries: Array<[string, string]> }> = [
   { title: "Leader", entries: [["~", "Leader key"], ["~ ?", "This help"], ["~ q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },
-  { title: "Workspaces", entries: [["n", "New workspace"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["Ctrl+W", "Archive workspace"], ["Ctrl+Shift+W", "Delete workspace"]] },
-  { title: "Chat", entries: [["i", "Compose a message"], ["m", "Mention an agent"], ["@Name / !Name", "Address a message"]] },
+  { title: "Workspaces", entries: [["n", "New workspace"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume workspace"], ["Ctrl+W", "Archive workspace"], ["Ctrl+Shift+W", "Delete workspace"]] },
+  { title: "Chat", entries: [["i", "Compose a message"], ["m", "Mention an agent"], ["@Name / !Name", "Address a message"], ["PageUp / PageDown", "Older / newer messages"]] },
   { title: "Subtasks", entries: [["d", "Delegate selected subtask"], ["t", "Reassign selected subtask"], ["Enter", "Open selected result"], ["r", "Retry selected subtask"], ["R", "Stop and restart selected subtask"], ["x", "Cancel selected subtask"], ["o", "Open native session"]] },
   { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive selected agent"], ["Ctrl+Shift+A", "Delete selected agent"]] },
-  { title: "Settings", entries: [["Tab", "Cycle settings tab"], ["e", "Edit setting"], ["b", "Add backup model"], ["Ctrl+↑ / Ctrl+↓", "Reorder last backup"], ["Ctrl+S", "Save settings"], ["Space", "Toggle skill"], ["Ctrl+F", "Filter skills"], ["Ctrl+D", "Delete memory"], ["Ctrl+P", "Promote memory"]] },
+  { title: "Settings", entries: [["Tab", "Cycle settings tab"], ["e", "Edit setting"], ["b", "Add backup model"], ["Ctrl+↑ / Ctrl+↓", "Move selected backup"], ["Backspace", "Remove selected backup"], ["Ctrl+S", "Save settings"], ["Space", "Toggle skill"], ["Ctrl+F", "Filter skills"], ["Ctrl+D", "Delete memory"], ["Ctrl+P", "Promote memory"]] },
   { title: "Approvals", entries: [["v", "Open approvals inbox"], ["↑ / ↓", "Select approval"], ["Enter", "Approve or decline"]] },
 ]
 
@@ -187,6 +239,7 @@ export function SettingsView(props: {
   dirty: boolean
   memories: Memory[]
   memoryCursor: number
+  backupCursor: number
   skills: SkillOption[]
   skillCursor: number
   skillFilter: string
@@ -206,8 +259,8 @@ export function SettingsView(props: {
         </Show>
         <Show when={props.tab === "models"}>
           <text>Main: {props.agent!.mainModel.providerID}/{props.agent!.mainModel.modelID}{props.agent!.mainModel.variant ? `#${props.agent!.mainModel.variant}` : ""}</text>
-          <For each={props.agent!.backupModels}>{(model, index) => <text fg={props.colors.muted}>Backup {index() + 1}: {model.providerID}/{model.modelID}</text>}</For>
-          <text fg={props.colors.muted}>e main model · b add backup · ctrl+↑/↓ reorder last</text>
+          <For each={props.agent!.backupModels}>{(model, index) => <text fg={props.backupCursor === index() ? props.colors.good : props.colors.muted}>{props.backupCursor === index() ? "› " : "  "}Backup {index() + 1}: {model.providerID}/{model.modelID}</text>}</For>
+          <text fg={props.colors.muted}>e main · b add · ctrl+↑/↓ move · backspace remove</text>
         </Show>
         <Show when={props.tab === "memories"}>
           <For each={props.memories}>{(memory, index) => (

@@ -67,6 +67,7 @@ export type Workspace = {
   memberIDs: Id[]
   synthesis: boolean
   archived: boolean
+  paused: boolean
   nextSeq: number
   createdAt: number
   lastActiveAt: number
@@ -110,6 +111,7 @@ export type Subtask = {
   activeRunID?: Id
   awaitingChildren: boolean
   resultMessageID?: Id
+  runSummary?: string
   error?: string
   attempts: number
   createdAt: number
@@ -162,6 +164,7 @@ export type Run = {
 export type Settings = {
   maxActiveRuns: number
   maxDelegations: number
+  maxDepth: number
   synthesis: boolean
 }
 

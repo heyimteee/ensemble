@@ -22,8 +22,8 @@ OpenCode engine
 
 ### Components
 
-- **`src/v2/tui`** — full-screen plugin page. Workspace rail, group chat, subtask board, settings, approvals, leader key.
 - **`src/v2/service.ts`** — domain service and orchestrator. Workspaces, agents, messages, subtasks, delegation, approvals, memory, model fallback, scheduling, recovery.
+- **`src/v2/catalog.ts`** — model/skill catalog refresh with a timeout guard.
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
 - **`src/v2/tui/`** — page shell, presentational components, palette, formatting, and keymap layers.
 - **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval.
@@ -49,7 +49,9 @@ Workspace {
 - Switching workspace changes the group chat, task board, and directory for new runs.
 - Sessions are bound to `workspace + agent`, so switching does not discard them.
 
-The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent workspace directories come first, `~/` expands, and manual paths are supported. The workspace rail groups rooms by canonical project directory, supports `/` search, and shows unread (`●`) and busy (`◐`) markers. The selected workspace is persisted and restored when the page reopens.
+The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent workspace directories come first, `~/` expands, and manual paths are supported. The workspace rail groups workspaces by canonical project directory, supports `/` search, and shows unread (`●`), busy (`◐`), and paused (`⏸`) markers. The selected workspace and subtask are persisted and restored when the page reopens.
+
+A workspace can be paused with `p`; paused workspaces reject new work until resumed. Automatic leader synthesis is chosen when the workspace is created.
 
 ## Agents
 
@@ -65,8 +67,9 @@ Agent {
 ```
 
 - General, Models, Memories, and Skillbox settings.
-- Main model and supported reasoning; ordered backups.
+- Main model and supported reasoning; ordered backups can be added, moved, and removed.
 - Exclusive Skillbox enforced with per-session `skill` permissions.
+- Automatic leader synthesis is chosen when a workspace is created.
 - Behavior changes bump the version and create a new native session for subsequent work. Renaming does not.
 - `pendingSettings` is cleared when the new session is created.
 
@@ -86,7 +89,7 @@ Message {
 - Multiple known mentions create one task per recipient.
 - No mention routes only to the leader.
 - Unknown `@Name`/`!Name` values fail with a clear `unknown_member` error instead of silently falling back.
-- `m` opens a member picker and composes an addressed message.
+- `i` focuses an inline bottom composer. `m` opens a member picker and composes an addressed message with a stable recipient ID.
 - Agent replies and task cards appear in the same transcript.
 - Native sessions are not alternate chat tabs; `o` opens the selected agent's session.
 
@@ -112,7 +115,7 @@ pending ──assign──▶ working ──result──▶ replied
 
 - Failed replies stay **Replied** with a failed outcome.
 - Approval waits are badges on **Working**, not a fourth state.
-- The leader delegates through the `ensemble_delegate` tool with a typed envelope.
+- The leader delegates through the `ensemble_delegate` tool with a typed envelope. Delegation depth is capped by `maxDepth`.
 - When all children reply, a leader synthesis subtask is created unless the workspace disables synthesis.
 - The board groups Pending, Working, and Replied. `d` delegates, `t` reassigns, `Enter` opens the result, `r` retries, `R` stops and restarts, `x` cancels, and `o` opens the run.
 - Reassignment and restart interrupt the active run and clear its run token, so a late reply from the stopped run cannot overwrite the new assignee.
@@ -175,8 +178,8 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 
 ## Known limitations
 
-- The group chat composer is a dialog opened with `i`, not an inline focused input.
-- Mention selection uses `m` plus a member picker; there is no inline autocomplete inside the text prompt.
+- Mention selection uses `m` plus a member picker; there is no inline autocomplete inside the composer.
+- Markdown is shown as wrapped plain text in the group chat; rich markdown rendering and syntax highlighting are not implemented.
 - Direct one-to-one conversations are not implemented in the v2 TUI; a one-member workspace is not treated as a DM.
 - Some host dialog closes leave stale cells until the next full repaint; the page remains usable.
 - No npm package, versioning policy, or license has been selected.

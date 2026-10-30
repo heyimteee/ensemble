@@ -41,6 +41,7 @@ If the plugin was already loaded before updating the package exports, run `openc
 | `~ q` | Leave Ensemble for the native TUI |
 | `i` | Compose a message |
 | `m` | Mention an agent and compose |
+| `p` | Pause or resume the workspace |
 | `/` | Search workspaces |
 | `n` | New workspace |
 | `w` / `W` | Next / previous workspace |
@@ -62,7 +63,7 @@ If the plugin was already loaded before updating the package exports, run `openc
 | `Ctrl+F` | Filter skills |
 | `Esc` | Back or cancel |
 
-A literal `~` typed in a dialog or message stays text. The leader key only acts when no dialog or text entry is active.
+A literal `~` typed in the composer or a dialog stays text. The leader key only acts when the composer and dialogs are inactive. Press `i` to focus the bottom composer; `Esc` cancels it.
 
 ## Development
 

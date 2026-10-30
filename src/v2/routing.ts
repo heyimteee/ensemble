@@ -33,13 +33,21 @@ export function parseMentions(text: string, workspace: Workspace, agents: Record
   return [...new Set(memberMatches(text, workspace, agents).map((match) => match.id))]
 }
 
+const codeDirectives = new Set([
+  "media", "supports", "import", "keyframes", "font-face", "layer", "container", "property", "scope", "starting-style", "apply",
+  "types", "ts-ignore", "ts-expect-error", "ts-nocheck", "param", "returns", "return", "example", "see", "link", "deprecated",
+  "override", "readonly", "internal", "public", "private", "protected", "license", "preserve", "vitest-environment", "jest-environment",
+])
+
 export function unknownMentions(text: string, workspace: Workspace, agents: Record<string, Agent>): string[] {
   const known = memberMatches(text, workspace, agents)
   const unknown: string[] = []
-  for (const match of text.matchAll(/(?<![\w@!])([@!])([A-Za-z0-9][\w.-]*)/g)) {
+  for (const match of text.matchAll(/(?<![\w@!])([@!])([A-Za-z][\w.-]*)/g)) {
     const start = match.index ?? 0
     const end = start + match[0].length
     if (known.some((knownMatch) => start < knownMatch.end && end > knownMatch.start)) continue
+    const word = match[2].toLowerCase()
+    if (match[1] === "@" && codeDirectives.has(word)) continue
     unknown.push(`${match[1]}${match[2]}`)
   }
   return [...new Set(unknown)]
