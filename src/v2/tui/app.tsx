@@ -22,6 +22,16 @@ type PickerState = {
   resolve: (value: string[] | undefined) => void
 }
 
+type TextPromptState = {
+  title: string
+  description: string
+  value: string
+  placeholder: string
+  resolve: (value: string | undefined) => void
+}
+
+type GitState = { branch: string; dirty: boolean; ahead: number; behind: number }
+
 type Completion = {
   kind: "agent" | "file" | "command"
   query: string
@@ -63,7 +73,7 @@ export function EnsembleV2App() {
   const [helpOpen, setHelpOpen] = createSignal(false)
   const [approvalsOpen, setApprovalsOpen] = createSignal(false)
   const [status, setStatus] = createSignal("Loading workspace…")
-  const [gitLabel, setGitLabel] = createSignal("")
+  const [gitState, setGitState] = createSignal<GitState | null>(null)
   const [busy, setBusy] = createSignal(false)
   const [modal, setModal] = createSignal(false)
   const [approvalCursor, setApprovalCursor] = createSignal(0)
@@ -75,9 +85,11 @@ export function EnsembleV2App() {
   const [composerActive, setComposerActive] = createSignal(false)
   const [completion, setCompletion] = createSignal<Completion | null>(null)
   const [picker, setPicker] = createSignal<PickerState | null>(null)
+  const [textPrompt, setTextPrompt] = createSignal<TextPromptState | null>(null)
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
   const [transcriptOffset, setTranscriptOffset] = createSignal(0)
   let composerRef: any
+  let textPromptRef: any
   const [restored, setRestored] = createSignal(false)
   let lastSavedHistory = ""
   let lastConfigError = ""
@@ -186,12 +198,15 @@ export function EnsembleV2App() {
     const agent = draft() ?? selectedAgent()
     return agent ? missingSkills(agent, skills()) : []
   })
-  const viewWidth = () => context.renderer.width ?? 120
+  const viewWidth = () => Math.max(60, (context.renderer.width ?? 120) - 2)
   const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
   const taskWidth = () => Math.max(28, Math.min(38, Math.floor(viewWidth() * 0.3)))
-  const messageWidth = () => Math.max(20, viewWidth() - railWidth() - taskWidth() - 8)
+  const messageWidth = () => Math.max(20, viewWidth() - railWidth() - taskWidth() - 10)
   const viewHeight = () => context.renderer.height ?? 40
-  const messageHeight = () => Math.max(6, viewHeight() - 12)
+  const messageHeight = () => Math.max(6, viewHeight() - 14)
+  const pickerWidth = () => Math.max(48, Math.min(96, Math.floor(viewWidth() * 0.7)))
+  const pickerTop = () => Math.max(1, Math.floor((viewHeight() - 16) / 2))
+  const pickerLeft = () => Math.max(1, Math.floor((viewWidth() - pickerWidth()) / 2))
 
   const isOurRoute = () => {
     const route = context.ui.router.current()
@@ -257,9 +272,9 @@ export function EnsembleV2App() {
       const ahead = Number(first.match(/ahead (\d+)/)?.[1] ?? 0)
       const behind = Number(first.match(/behind (\d+)/)?.[1] ?? 0)
       const dirty = lines.length > 1
-      setGitLabel(`git:(${branch}${dirty ? "*" : ""})${ahead ? ` ↑${ahead}` : ""}${behind ? ` ↓${behind}` : ""}`)
+      setGitState({ branch, dirty, ahead, behind })
     } catch {
-      setGitLabel("")
+      setGitState(null)
     }
   }
 
@@ -425,10 +440,16 @@ export function EnsembleV2App() {
   }
 
   const createAgent = async () => {
-    const name = (await modalWrap(() => context.ui.dialog.prompt({ title: "New agent", placeholder: "Nova" })))?.trim()
+    const nameValue = await openTextPrompt("New agent · name", { placeholder: "Nova", description: "Names are unique. Enter submits; Shift+Enter adds a line." })
+    if (nameValue === undefined) return
+    const name = nameValue.replace(/\s+/g, " ").trim()
     if (!name) return
-    const title = (await modalWrap(() => context.ui.dialog.prompt({ title: "Title", placeholder: "Engineering" }))) ?? ""
-    const role = (await modalWrap(() => context.ui.dialog.prompt({ title: "Role", placeholder: "You are a focused coding teammate." }))) ?? ""
+    const titleValue = await openTextPrompt("New agent · title", { placeholder: "Engineering", description: "A short role title. Enter submits; Shift+Enter adds a line." })
+    if (titleValue === undefined) return
+    const title = titleValue.replace(/\s+/g, " ").trim()
+    const roleValue = await openTextPrompt("New agent · role", { placeholder: "You are a focused coding teammate.", description: "Describe how this agent works. Text wraps automatically." })
+    if (roleValue === undefined) return
+    const role = roleValue.trim()
     const model = await chooseModel()
     if (!model) return
     const variant = await chooseVariant(model)
@@ -845,6 +866,21 @@ export function EnsembleV2App() {
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
       if (picker()) { handlePickerKey(event); return }
+      if (textPrompt()) {
+        const name = String(event?.name ?? "")
+        if (name === "escape") {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          finishTextPrompt(undefined)
+          return
+        }
+        if (name === "return" || name === "enter" || name === "kpenter") {
+          if (event?.shift) return
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          finishTextPrompt(String(textPromptRef?.plainText ?? ""))
+          return
+        }
+        return
+      }
       if (!leaderMode()) return
       const name = String(event?.name ?? ""); const sequence = String(event?.sequence ?? "")
       if (name === "escape" || name === "q" || name === "?" || sequence === "?") return
@@ -1015,7 +1051,7 @@ export function EnsembleV2App() {
       if (item) setPicker({ ...state, selected: toggleSelected(state.selected, item.id) })
       return
     }
-    if (name === "enter") {
+    if (name === "enter" || name === "return" || name === "kpenter" || sequence === "\r" || sequence === "\n") {
       if (state.mode === "members") {
         if (state.selected.size === 0) { context.ui.toast.show({ title: "Ensemble", message: "Choose at least one member.", variant: "warning" }); return }
         finishPicker([...state.selected])
@@ -1025,10 +1061,29 @@ export function EnsembleV2App() {
       }
       return
     }
-    if (sequence.length === 1 && !event?.ctrl && !event?.meta && !event?.super) {
+    if (sequence.length === 1 && sequence >= " " && !event?.ctrl && !event?.meta && !event?.super) {
       setPicker({ ...state, query: `${state.query}${sequence}`, cursor: 0 })
     }
   }
+
+  const finishTextPrompt = (value: string | undefined) => {
+    const state = textPrompt()
+    if (!state) return
+    setTextPrompt(null)
+    setModal(false)
+    state.resolve(value)
+  }
+
+  const openTextPrompt = (title: string, options: { description?: string; value?: string; placeholder?: string } = {}): Promise<string | undefined> => new Promise((resolve) => {
+    setModal(true)
+    setTextPrompt({
+      title,
+      description: options.description ?? "Enter submits · Shift+Enter adds a line",
+      value: options.value ?? "",
+      placeholder: options.placeholder ?? "",
+      resolve,
+    })
+  })
 
   const completionWindow = (state: NonNullable<ReturnType<typeof completion>>) => {
     const max = 6
@@ -1048,16 +1103,24 @@ export function EnsembleV2App() {
   }
 
   return (
-    <box flexDirection="column" width="100%" height="100%" backgroundColor={colors.bg}>
-      <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg}>
+    <box flexDirection="column" width="100%" height="100%" backgroundColor={colors.bg} padding={1} gap={1}>
+      <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={picker() || textPrompt() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
           <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · ? help · q leave · esc cancel" : `${status()}`}</text>
         </box>
-        <text fg={colors.faint} bg={colors.bg} truncate>{gitLabel()}</text>
+        <Show when={gitState()}>
+          <box flexDirection="row" flexShrink={0} alignItems="center">
+            <text fg={colors.muted} bg={colors.bg}>git:(</text>
+            <text fg={colors.text} bg={colors.bg}>{gitState()!.branch}</text>
+            <Show when={gitState()!.dirty}><text fg={colors.warn} bg={colors.bg}>*</text></Show>
+            <text fg={colors.muted} bg={colors.bg}>)</text>
+            <Show when={gitState()!.ahead > 0}><text fg={colors.good} bg={colors.bg}> ↑{gitState()!.ahead}</text></Show>
+            <Show when={gitState()!.behind > 0}><text fg={colors.bad} bg={colors.bg}> ↓{gitState()!.behind}</text></Show>
+          </box>
+        </Show>
       </box>
-      <Show when={picker()?.mode} keyed fallback={
-        <box flexDirection="row" flexGrow={1}>
+        <box flexDirection="row" flexGrow={1} gap={1} opacity={picker() || textPrompt() ? 0.35 : 1}>
           <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
           <box flexGrow={1} border borderStyle="single" borderColor={focusArea() === "chat" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <text fg={focusArea() === "chat" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate>{surfaceTitle()}</text>
@@ -1111,12 +1174,31 @@ export function EnsembleV2App() {
             </Show>
           </box>
           <TaskBoard colors={colors} tasks={orderedTasks()} state={state()} cursor={taskCursor()} activeCount={activeCount()} focus={focusArea() === "tasks"} width={taskWidth()} />
-        </box>      }>
-        <box flexGrow={1} padding={2}>
-          <PickerOverlay colors={colors} title={() => picker()!.title} query={() => picker()!.query} items={() => pickerItems()} cursor={() => picker()!.cursor} multiple={() => picker()!.mode === "members"} />
         </box>
+      <Show when={picker()?.mode} keyed>
+        <>
+          <box position="absolute" top={pickerTop()} left={pickerLeft()} width={pickerWidth()} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column">
+            <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={110}>
+              <PickerOverlay colors={colors} title={() => picker()!.title} query={() => picker()!.query} items={() => pickerItems()} cursor={() => picker()!.cursor} multiple={() => picker()!.mode === "members"} />
+            </box>
+          </box>
+        </>
       </Show>
-      <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg}>
+      <Show when={textPrompt()} keyed>
+        <>
+          <box position="absolute" top={Math.max(1, Math.floor((viewHeight() - 14) / 2))} left={pickerLeft()} width={pickerWidth()} zIndex={100} height={14} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+            <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
+            <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{textPrompt()!.title}</text>
+            <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{textPrompt()!.description}</text>
+            <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
+              <textarea ref={(value: any) => { textPromptRef = value; queueMicrotask(() => value?.focus?.()) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+            </box>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>enter submit · shift+enter newline · esc cancel</text>
+            </box>
+          </box>
+        </>
+      </Show>
+      <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={picker() || textPrompt() ? 0.35 : 1}>
         <text fg={colors.muted} bg={colors.bg} width="100%" truncate>h/l columns · j/k select · enter open · i compose · a agent · n workspace · g members · I init · v approvals</text>
         <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : "~ leader · / search · p pause · s settings · o native"}</text>
       </box>

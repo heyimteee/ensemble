@@ -1,7 +1,7 @@
 import { For, Show } from "solid-js"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState, Subtask } from "../types.ts"
 import type { Palette } from "./theme.ts"
-import { agentColor, agentName, busyCount, missingSkills, short, unreadCount } from "./format.ts"
+import { agentName, busyCount, missingSkills, short, unreadCount } from "./format.ts"
 import { pickerWindow } from "./picker.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
@@ -59,7 +59,7 @@ export function Rail(props: {
             <Show when={groupHeader}>
               <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
             </Show>
-            <text fg={selected ? props.colors.good : agent ? agentColor(agent, props.colors.accent as string, index(), props.colors.categorical) : props.focus ? props.colors.text : props.colors.muted} bg={props.colors.bg} width="100%" truncate>
+            <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>
               {selected ? "› " : "  "}{item.kind === "workspace" ? `#${item.title}` : item.title}
               {leader ? " · leader" : ""}
               {item.detail ? ` · ${item.detail}` : ""}
@@ -228,10 +228,11 @@ export function PickerOverlay(props: {
   multiple: () => boolean
 }) {
   const slots = Array.from({ length: 8 }, (_, index) => index)
+  const solid = (value: string) => value.replaceAll(" ", "\u00A0")
   return (
-    <box width="100%" height={16} minHeight={16} flexShrink={0} border borderStyle="double" borderColor={props.colors.focus} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
-      <text fg={props.colors.focus} bg={props.colors.bg} width="100%" truncate>{props.title()}</text>
-      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>search: {props.query() || "type to filter"} · {props.items().length} matches</text>
+    <box width="100%" height={16} minHeight={16} flexShrink={0} border borderStyle="double" borderColor={props.colors.focus} backgroundColor={props.colors.panel} flexDirection="column" padding={1}>
+      <text fg={props.colors.focus} bg={props.colors.bg} width="100%" truncate>{solid(props.title())}</text>
+      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{solid(`search: ${props.query() || "type to filter"} · ${props.items().length} matches`)}</text>
       <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>────────────────────────────────────────────────────────────</text>
       <For each={slots}>{(slot) => (
         <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{(() => {
@@ -241,10 +242,10 @@ export function PickerOverlay(props: {
           const item = items[offset + slot]
           if (!item) return ""
           const marker = props.multiple() ? (item.selected ? "[x] " : "[ ] ") : (item.selected ? "(•) " : "( ) ")
-          return `${offset + slot === cursor ? "›" : " "} ${marker}${item.label}`
+          return solid(`${offset + slot === cursor ? "›" : " "} ${marker}${item.label}`)
         })()}</text>
       )}</For>
-      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>↑/↓ move · {props.multiple() ? "space toggle · " : ""}enter confirm · esc cancel</text>
+      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{solid(`↑/↓ move · ${props.multiple() ? "space toggle · " : ""}enter confirm · esc cancel`)}</text>
     </box>
   )
 }

@@ -10,8 +10,8 @@ export type Palette = {
   text: RGBA | string
   leader: RGBA | string
   border: RGBA | string
+  panel: RGBA | string
   focus: RGBA | string
-  categorical: readonly any[]
   bg: RGBA | string
 }
 
@@ -24,9 +24,11 @@ export function palette(theme: {
     action: { primary: { focused: RGBA } }
   }
   border: { base: RGBA }
-  background?: { base: RGBA }
+  background?: { base: RGBA; raised?: { base: RGBA; high?: RGBA } }
   hue: { accent: Record<number, RGBA> }
 }): Palette {
+  const background = (theme as any).background?.raised?.base ?? (theme as any).background?.base
+  const panel = background && typeof background === "object" && background.a >= 1 ? background : "#101010"
   return {
     accent: (theme as any).hue?.accent?.[200] ?? theme.text.feedback.info.base,
     muted: theme.text.muted,
@@ -37,8 +39,8 @@ export function palette(theme: {
     text: theme.text.base,
     leader: theme.hue.accent[300] ?? theme.text.feedback.info.base,
     border: theme.border.base,
-    focus: theme.text.action.primary.focused,
-    categorical: (theme as any).categorical ?? [],
+    panel,
+    focus: theme.text.base,
     bg: theme.background?.base ?? theme.text.base,
   }
 }

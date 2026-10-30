@@ -110,9 +110,12 @@ Message {
 
 - `$`, `@`, and `/` open an inline bordered completion popup above the composer. The composer stays focused; typing filters the list, `↑/↓` move, `Enter` inserts an agent/file token or runs a command, and `Esc` closes. No host completion dialog opens.
 - Agent and file completion insert stable references in place. Slash selection executes through the same command path as a typed `/command`.
-- Workspace member editing is a custom in-page checklist: search filters, `Space` toggles, the selected count is visible, `Enter` confirms, and `Esc` cancels. The leader picker only lists selected members.
+- Workspace member editing is a custom centered overlay: search filters, `Space` toggles, the selected count is visible, `Enter` confirms, and `Esc` cancels. The leader picker only lists selected members.
+- Modal panels use an opaque raised surface and a double focus border. The page bars dim while a modal is open. Agent name, title, and role prompts use a wrapping textarea; `Enter` submits and `Shift+Enter` adds a line.
+- Rail agent names are predictable: selected agents use the success/accent color, every unselected agent uses normal text. Agent identity colors are not shuffled per row.
+- Focused panes and the composer use a white/contrast focus border; inactive panes use the muted border token.
 - The transcript is a clipped text viewport, not a scrollbox. Markdown is normalized to aligned terminal text: tables become box tables, fenced code is indented, headings, bullets, links, and inline code lose their markers. `PageUp` / `PageDown` scroll. This avoids the OpenTUI scrollbox freeze that prevented streaming updates inside plugin pages.
-- All chrome uses OpenCode semantic theme tokens: text, muted/faint metadata, borders, focus, and feedback colors. Agent names use the theme categorical palette. The focused pane gets the focus border and brighter title; inactive panes stay muted.
+- All chrome uses OpenCode semantic theme tokens: text, muted/faint metadata, borders, focus, and feedback colors. The focused pane gets the focus border and brighter title; inactive panes stay muted.
 - The top bar shows the workspace, directory, and familiar `git:(branch*) ↑N ↓N` metadata when the directory is a repository. Non-git directories show no git segment.
 - `I` is bound as `shift+i` and appears in the footer and help. `/init` and `Ctrl+G` remain available.
 - The composer is a bordered input inside the chat column; its border uses the focus token while active and the muted border token otherwise.
