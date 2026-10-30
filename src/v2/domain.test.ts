@@ -1,10 +1,10 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
-import { canonicalDirectory, expandHome } from "./paths.ts"
+import { canonicalDirectory, expandHome, workspaceFileReferences } from "./paths.ts"
 import { homedir } from "node:os"
 import { V2Store } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
@@ -63,24 +63,26 @@ function fakeContext() {
   }
 }
 
-test("mentions use @ or !, longest names win, and unaddressed messages go to the leader", () => {
+test("mentions use $ or !, longest names win, and unaddressed messages go to the leader", () => {
   const agents = { a: agent("a", "Nova"), b: agent("b", "Nova Prime") }
   const ws = workspace("w", "a", ["a", "b"])
-  assert.deepEqual(parseMentions("@Nova Prime", ws, agents), ["b"])
+  assert.deepEqual(parseMentions("$Nova Prime", ws, agents), ["b"])
   assert.deepEqual(parseMentions("!Nova", ws, agents), ["a"])
-  assert.deepEqual(parseMentions("@Nova Prime and @Nova", ws, agents), ["b", "a"])
+  assert.deepEqual(parseMentions("$Nova Prime and $Nova", ws, agents), ["b", "a"])
   assert.deepEqual(parseMentions("no mention", ws, agents), [])
   assert.deepEqual(visibleRecipients("no mention", ws, agents), ["a"])
-  assert.deepEqual(visibleRecipients("@Nova Prime", ws, agents), ["b"])
+  assert.deepEqual(visibleRecipients("$Nova Prime", ws, agents), ["b"])
 })
 
 test("unknown mentions are reported while emails and known names pass", () => {
   const agents = { a: agent("a", "Nova"), b: agent("b", "Nova Prime") }
   const ws = workspace("w", "a", ["a", "b"])
-  assert.deepEqual(unknownMentions("@Nova Prime and @Nova", ws, agents), [])
-  assert.deepEqual(unknownMentions("@Ghost please check", ws, agents), ["@Ghost"])
+  assert.deepEqual(unknownMentions("$Nova Prime and $Nova", ws, agents), [])
+  assert.deepEqual(unknownMentions("$Ghost please check", ws, agents), ["$Ghost"])
   assert.deepEqual(unknownMentions("mail me at dev@example.com", ws, agents), [])
+  assert.deepEqual(unknownMentions("Use $HOME and $PATH", ws, agents), [])
   assert.deepEqual(unknownMentions("Fix the @media query and @ts-ignore", ws, agents), [])
+  assert.deepEqual(unknownMentions("@Nova is no longer a mention", ws, agents), [])
 })
 
 test("workspace canonicalization expands home and normalizes equivalent paths", () => {
@@ -92,6 +94,15 @@ test("workspace canonicalization expands home and normalizes equivalent paths", 
   assert.equal(expandHome("~"), homedir())
   assert.equal(expandHome("~/dev"), join(homedir(), "dev"))
   assert.equal(expandHome("/tmp/project"), "/tmp/project")
+})
+
+test("file references resolve inside the workspace and reject traversal", () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-v2-"))
+  const nested = join(root, "project")
+  mkdirSync(nested)
+  writeFileSync(join(nested, "notes.md"), "hello")
+  assert.deepEqual(workspaceFileReferences("read @notes.md", nested), ["notes.md"])
+  assert.deepEqual(workspaceFileReferences("read @../secret.txt", nested), [])
 })
 
 test("store allocates message sequence numbers without overwriting concurrent appends", async () => {

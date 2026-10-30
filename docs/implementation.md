@@ -27,7 +27,7 @@ OpenCode engine
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
 - **`src/v2/tui/`** — page shell, presentational components, palette, formatting, and keymap layers.
 - **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval.
-- **`src/v2/routing.ts`** — `@`/`!` mention routing and leader fallback.
+- **`src/v2/routing.ts`** — `$`/`!` mention routing and leader fallback.
 - **`src/v2/paths.ts`** — canonical workspace directories.
 
 Every execution is a native OpenCode session. Ensemble does not replace tools, providers, permissions, or skills.
@@ -85,11 +85,12 @@ Message {
 }
 ```
 
-- `@Name` is primary; `!Name` is an alias.
+- `$Name` is primary; `!Name` is an alias. `@` is reserved for file references.
 - Multiple known mentions create one task per recipient.
 - No mention routes only to the leader.
-- Unknown `@Name`/`!Name` values fail with a clear `unknown_member` error instead of silently falling back.
-- `i` focuses an inline bottom composer. `m` opens a member picker and composes an addressed message with a stable recipient ID.
+- Unknown `$Name`/`!Name` values fail with a clear `unknown_member` error instead of silently falling back.
+- `i` focuses an inline bottom composer. `$` opens an agent picker and inserts a stable `$Name` reference; `@` opens a workspace file picker; `/` opens the Ensemble command palette. `m` is the keyboard shortcut for the agent picker.
+- File references are resolved inside the workspace and appended to the subtask instruction. `@` is not a mention.
 - Agent replies and task cards appear in the same transcript.
 - Native sessions are not alternate chat tabs; `o` opens the selected agent's session.
 
@@ -179,7 +180,7 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 
 ## Known limitations
 
-- Mention selection uses `m` plus a member picker; there is no inline autocomplete inside the composer.
+- The composer completes agents on `$`, files on `@`, and Ensemble commands on `/`; arbitrary native OpenCode slash commands are not proxied into the group chat.
 - The group chat renders basic Markdown structure (headings, bullets, inline code, links) as wrapped terminal text. Rich syntax highlighting and tables are not implemented.
 - Direct one-to-one conversations are not implemented in the v2 TUI; a one-member workspace is not treated as a DM.
 - Some host dialog closes leave stale cells until the next full repaint; the page remains usable.

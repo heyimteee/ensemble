@@ -1,6 +1,7 @@
 import { Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
+import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
 import { ApprovalList, HelpView, MessageList, SettingsView, TaskBoard, WorkspaceRail, type SettingsTab } from "./components.tsx"
@@ -52,6 +53,7 @@ export function EnsembleV2App() {
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
   const [transcriptOffset, setTranscriptOffset] = createSignal(0)
   const [composerActive, setComposerActive] = createSignal(false)
+  const [completionOpen, setCompletionOpen] = createSignal(false)
   let composerRef: any
   let restored = false
   const [uiState, setUiState] = context.storage.store("ensemble.v2.ui", {
@@ -313,21 +315,15 @@ export function EnsembleV2App() {
     queueMicrotask(() => composerRef?.focus?.())
   }
 
-  const submitComposer = async (value: string) => {
-    if (!value.trim()) return
-    await send(value)
-    if (composerRef) composerRef.value = ""
-    composerRef?.blur?.()
-    setComposerActive(false)
+  const focusComposer = () => queueMicrotask(() => composerRef?.focus?.())
+
+  const insertComposer = (value: string) => {
+    if (composerRef) composerRef.value = value
+    setComposerActive(true)
+    focusComposer()
   }
 
-  const cancelComposer = () => {
-    if (composerRef) composerRef.value = ""
-    composerRef?.blur?.()
-    setComposerActive(false)
-  }
-
-  const mention = async () => {
+  const pickAgentMention = async () => {
     const workspace = activeWorkspace()
     if (!workspace) return
     const target = await modalWrap(() => context.ui.dialog.select({
@@ -336,9 +332,135 @@ export function EnsembleV2App() {
     }))
     if (!target) return
     const agent = state()?.agents[String(target)]
-    if (!agent) return
-    const text = await modalWrap(() => context.ui.dialog.prompt({ title: `Message ${agent.name}`, placeholder: "Ask for a specific outcome…" }))
-    if (text?.trim()) await send(`@${agent.name} ${text.trim()}`, [agent.id])
+    if (agent) insertComposer(`$${agent.name} `)
+  }
+
+  const pickFileReference = async (current: string) => {
+    const workspace = activeWorkspace()
+    if (!workspace) return
+    let files: string[] = []
+    try {
+      const output = execFileSync("fd", ["--type", "f", "--hidden", "--exclude", ".git", "--exclude", "node_modules", "--max-depth", "4", ".", workspace.directory], { encoding: "utf8", timeout: 5000 })
+      files = output.split("\n").filter(Boolean).slice(0, 500).map((file) => relative(workspace.directory, file))
+    } catch {
+      files = []
+    }
+    if (files.length === 0) {
+      context.ui.toast.show({ title: "Ensemble", message: "No files found to reference.", variant: "warning" })
+      return
+    }
+    const selected = await modalWrap(() => context.ui.dialog.select({
+      title: "Reference a file",
+      options: files.map((file) => ({ title: file, value: file })),
+      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
+    }))
+    if (selected) insertComposer(`${current}${String(selected)} `)
+  }
+
+  const pickWorkspace = async () => {
+    const list = workspaces()
+    if (list.length === 0) {
+      context.ui.toast.show({ title: "Ensemble", message: "No workspaces yet.", variant: "warning" })
+      return
+    }
+    const target = await modalWrap(() => context.ui.dialog.select({
+      title: "Switch workspace",
+      options: list.map((workspace) => ({ title: `#${workspace.name} · ${workspaceLabel(workspace.directory)}`, value: workspace.id })),
+      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
+    }))
+    if (target) await chooseWorkspace(String(target))
+  }
+
+  const slashCommands: Array<{ value: string; title: string; description: string }> = [
+    { value: "workspace", title: "/workspace", description: "switch workspace" },
+    { value: "agent", title: "/agent", description: "mention an agent" },
+    { value: "settings", title: "/settings", description: "agent settings" },
+    { value: "approvals", title: "/approvals", description: "approval inbox" },
+    { value: "pause", title: "/pause", description: "pause this workspace" },
+    { value: "resume", title: "/resume", description: "resume this workspace" },
+    { value: "help", title: "/help", description: "shortcut help" },
+    { value: "native", title: "/native", description: "open native session" },
+    { value: "delegate", title: "/delegate", description: "delegate selected subtask" },
+    { value: "retry", title: "/retry", description: "retry selected subtask" },
+    { value: "restart", title: "/restart", description: "restart selected subtask" },
+    { value: "cancel", title: "/cancel", description: "cancel selected subtask" },
+    { value: "leave", title: "/leave", description: "leave Ensemble" },
+  ]
+
+  const clearComposer = () => {
+    if (composerRef) composerRef.value = ""
+    composerRef?.blur?.()
+    setComposerActive(false)
+  }
+
+  const runSlashCommand = async (input: string): Promise<void> => {
+    const command = input.trim().slice(1).split(/\s+/)[0]
+    clearComposer()
+    switch (command) {
+      case "workspace": await pickWorkspace(); return
+      case "agent": await pickAgentMention(); return
+      case "settings": openSettings(); return
+      case "approvals": setApprovalCursor(0); setApprovalsOpen(true); return
+      case "pause": await togglePause(true); return
+      case "resume": await togglePause(false); return
+      case "help": setHelpOpen(true); return
+      case "native": openNative(); return
+      case "delegate": await delegateSelected(); return
+      case "retry": await retrySelected(); return
+      case "restart": await restartSelected(); return
+      case "cancel": await cancelSelected(); return
+      case "leave": context.ui.router.navigate({ type: "home" }); return
+      default:
+        context.ui.toast.show({ title: "Ensemble", message: `Unknown command: /${command}`, variant: "warning" })
+    }
+  }
+
+  const pickSlashCommand = async () => {
+    const selected = await modalWrap(() => context.ui.dialog.select({
+      title: "Ensemble command",
+      options: slashCommands.map((command) => ({ title: `${command.title} · ${command.description}`, value: command.value })),
+      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
+    }))
+    if (selected) await runSlashCommand(`/${String(selected)}`)
+  }
+
+  const handleComposerInput = async (value: string) => {
+    if (completionOpen()) return
+    if (value === "/") {
+      setCompletionOpen(true)
+      try { await pickSlashCommand() } finally { setCompletionOpen(false) }
+      return
+    }
+    if (value.endsWith("$") && (value.length === 1 || /\s/.test(value.slice(-2, -1)))) {
+      setCompletionOpen(true)
+      try { await pickAgentMention() } finally { setCompletionOpen(false) }
+      return
+    }
+    if (value.endsWith("@") && (value.length === 1 || /\s/.test(value.slice(-2, -1)))) {
+      setCompletionOpen(true)
+      try { await pickFileReference(value) } finally { setCompletionOpen(false) }
+    }
+  }
+
+  const submitComposer = async (value: string) => {
+    const text = value.trim()
+    if (!text) return
+    if (text === "/") {
+      await pickSlashCommand()
+      return
+    }
+    if (text.startsWith("/")) {
+      await runSlashCommand(text)
+      return
+    }
+    await send(text)
+    clearComposer()
+  }
+
+  const cancelComposer = () => clearComposer()
+
+  const mention = async () => {
+    await pickAgentMention()
   }
 
   const delegateSelected = async () => {
@@ -596,11 +718,12 @@ export function EnsembleV2App() {
     })) as string | undefined
   }
 
-  const togglePause = async () => {
+  const togglePause = async (paused?: boolean) => {
     const workspace = activeWorkspace()
     if (!workspace) return
-    await run(workspace.paused ? "Resume workspace" : "Pause workspace", async () => {
-      await invoke(context, workspace.paused ? "workspace.resume" : "workspace.pause", { id: workspace.id })
+    const next = paused ?? !workspace.paused
+    await run(next ? "Pause workspace" : "Resume workspace", async () => {
+      await invoke(context, next ? "workspace.pause" : "workspace.resume", { id: workspace.id })
     })
   }
 
@@ -854,8 +977,8 @@ export function EnsembleV2App() {
         <TaskBoard colors={colors} tasks={orderedTasks()} state={state()} cursor={taskCursor()} activeCount={activeCount()} width={taskWidth()} />
       </box>
       <box height={3} flexDirection="column">
-        <input ref={(value: any) => { composerRef = value }} placeholder="Message the workspace…  @Name to address" onSubmit={(value: string) => { void submitComposer(value).catch(showError) }} />
-        <text fg={composerActive() ? colors.warn : colors.muted}>{composerActive() ? "COMPOSER · enter send · esc cancel" : "i compose · m mention · p pause · @Name to address · / search"}</text>
+        <input ref={(value: any) => { composerRef = value }} placeholder="Message the workspace…  $Name mention · @file · /command" onInput={(value: string) => { void handleComposerInput(value).catch(showError) }} onSubmit={(value: string) => { void submitComposer(value).catch(showError) }} />
+        <text fg={composerActive() ? colors.warn : colors.muted}>{composerActive() ? "COMPOSER · $ agent · @ file · / command · enter send · esc cancel" : "i compose · m mention · p pause · $Name to address · / search"}</text>
         <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint}>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : "n workspace · w switch · z agent · a new agent · s settings · v approvals · ~ leader"}</text>
       </box>
     </box>

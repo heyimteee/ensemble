@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { canonicalDirectory } from "./paths.ts"
+import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { unknownMentions, visibleRecipients } from "./routing.ts"
@@ -531,6 +531,8 @@ export class EnsembleV2Service {
       const available = workspace.memberIDs.map((memberID) => state.agents[memberID]?.name).filter(Boolean).join(", ")
       throw Object.assign(new Error(`Unknown workspace member${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. Members: ${available}`), { code: "unknown_member" })
     }
+    const references = workspaceFileReferences(text, workspace.directory)
+    const instruction = references.length > 0 ? `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}` : text
     const recipientIDs = Array.isArray(payload.recipientIDs) ? payload.recipientIDs.map(String).filter((agentID: string) => workspace.memberIDs.includes(agentID) && state.agents[agentID] && !state.agents[agentID].archived) : []
     const recipients = recipientIDs.length > 0 ? [...new Set(recipientIDs)] : visibleRecipients(text, workspace, state.agents)
     await this.appendMessage(workspace, { author: "user", text, kind: "text" })
@@ -540,7 +542,7 @@ export class EnsembleV2Service {
         assigneeID: agentID,
         creatorType: "user",
         title: text.slice(0, 80),
-        instruction: text,
+        instruction,
         mode: payload.mode === "edit" ? "edit" : "research",
       })
     }

@@ -40,7 +40,9 @@ If the plugin was already loaded before updating the package exports, run `openc
 | `~ ?` | Full shortcut help |
 | `~ q` | Leave Ensemble for the native TUI |
 | `i` | Compose a message |
-| `m` | Mention an agent and compose |
+| `m` / `$` | Insert an agent mention |
+| `@` | Reference a workspace file in the composer |
+| `/` | Ensemble command palette in the composer |
 | `p` | Pause or resume the workspace |
 | `/` | Search workspaces |
 | `n` | New workspace |
@@ -63,7 +65,7 @@ If the plugin was already loaded before updating the package exports, run `openc
 | `Ctrl+F` | Filter skills |
 | `Esc` | Back or cancel |
 
-A literal `~` typed in the composer or a dialog stays text. The leader key only acts when the composer and dialogs are inactive. Press `i` to focus the bottom composer; `Esc` cancels it.
+A literal `~` typed in the composer or a dialog stays text. The leader key only acts when the composer and dialogs are inactive. Press `i` to focus the bottom composer; `Esc` cancels it. In the composer, `$Name` addresses an agent, `@path` references a workspace file, and `/` opens Ensemble commands.
 
 ## Development
 

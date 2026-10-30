@@ -121,11 +121,11 @@ test("unknown mentions fail clearly instead of silently reaching the leader", as
     const response = await handlers.invoke({
       directory,
       action: "message.send",
-      payload: { workspaceID: workspace.result.id, text: "@Ghost take a look" },
+      payload: { workspaceID: workspace.result.id, text: "$Ghost take a look" },
     })
     assert.equal(response.ok, false)
     assert.equal(response.error.code, "unknown_member")
-    assert.match(response.error.message, /@Ghost/)
+    assert.match(response.error.message, /\$Ghost/)
   } finally {
     await stop()
   }

@@ -13,7 +13,7 @@ function memberMatches(text: string, workspace: Workspace, agents: Record<string
     .sort((a, b) => b.name.length - a.name.length)
   const matches: MentionMatch[] = []
   for (const agent of members) {
-    for (const raw of [`@${agent.name}`, `!${agent.name}`, `@${agent.id}`, `!${agent.id}`]) {
+    for (const raw of [`$${agent.name}`, `!${agent.name}`, `$${agent.id}`, `!${agent.id}`]) {
       const pattern = new RegExp(escapeRegExp(raw), "gi")
       for (const match of text.matchAll(pattern)) {
         matches.push({ id: agent.id, start: match.index ?? 0, end: (match.index ?? 0) + match[0].length })
@@ -33,22 +33,16 @@ export function parseMentions(text: string, workspace: Workspace, agents: Record
   return [...new Set(memberMatches(text, workspace, agents).map((match) => match.id))]
 }
 
-const codeDirectives = new Set([
-  "media", "supports", "import", "keyframes", "font-face", "layer", "container", "property", "scope", "starting-style", "apply",
-  "types", "ts-ignore", "ts-expect-error", "ts-nocheck", "param", "returns", "return", "example", "see", "link", "deprecated",
-  "override", "readonly", "internal", "public", "private", "protected", "license", "preserve", "vitest-environment", "jest-environment",
-])
-
 export function unknownMentions(text: string, workspace: Workspace, agents: Record<string, Agent>): string[] {
   const known = memberMatches(text, workspace, agents)
   const unknown: string[] = []
-  for (const match of text.matchAll(/(?<![\w@!])([@!])([A-Za-z][\w.-]*)/g)) {
+  for (const match of text.matchAll(/(?<![\w$!])([$!])([A-Za-z][\w.-]*)/g)) {
     const start = match.index ?? 0
     const end = start + match[0].length
     if (known.some((knownMatch) => start < knownMatch.end && end > knownMatch.start)) continue
-    const word = match[2].toLowerCase()
-    if (match[1] === "@" && codeDirectives.has(word)) continue
-    unknown.push(`${match[1]}${match[2]}`)
+    const word = match[2]
+    if (match[1] === "$" && word === word.toUpperCase() && word.length > 1) continue
+    unknown.push(`${match[1]}${word}`)
   }
   return [...new Set(unknown)]
 }
