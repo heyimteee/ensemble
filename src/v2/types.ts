@@ -123,6 +123,7 @@ export type SessionBinding = {
   workspaceID: Id
   agentID: Id
   sessionID: Id
+  history?: Id[]
   agentVersion: number
   updatedAt: number
 }

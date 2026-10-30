@@ -14,6 +14,7 @@ type Handlers = {
 function fakeContext() {
   const values = new Map<string, unknown>()
   const removedSessions: string[] = []
+  const interruptedSessions: string[] = []
   let sessions = 0
   const handlers: Partial<Handlers> = {}
   const ctx = {
@@ -40,7 +41,7 @@ function fakeContext() {
       context: async () => ({
         data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "OK" }] }],
       }),
-      interrupt: async () => undefined,
+      interrupt: async ({ sessionID }: any) => { interruptedSessions.push(sessionID) },
       remove: async ({ sessionID }: any) => { removedSessions.push(sessionID) },
     },
     tool: { transform: async (factory: any) => factory({ namespace() {}, add() {} }) },
@@ -57,7 +58,7 @@ function fakeContext() {
     skill: { list: async () => [] },
     event: { subscribe: async function* () {} },
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -504,6 +505,144 @@ test("edit work in one directory runs one subtask at a time", async () => {
       const next = await handlers.snapshot({ directory })
       return Object.values(next.state.subtasks).every((task: any) => task.state === "replied")
     }, 4000)
+  } finally {
+    await stop()
+  }
+})
+
+
+test("answering a pending question after restart resumes the interrupted task", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1,
+  })
+  await seed.saveWorkspace({
+    id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true,
+    archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1,
+  })
+  await seed.saveApproval({
+    id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "ask_person",
+    title: "Need input", detail: "Which API?", status: "pending", createdAt: 1,
+  })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Question", instruction: "Do work",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: true, approvalID: "ap",
+    awaitingChildren: false, attempts: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const answered = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true, resolution: "Use v2" } })
+    assert.equal(answered.ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.subtasks.t.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks.t.interrupted, false)
+    assert.equal(after.state.subtasks.t.attempts, 2)
+  } finally {
+    await stop()
+  }
+})
+
+test("resolved stale approvals do not resurrect cancelled work", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1,
+  })
+  await seed.saveWorkspace({
+    id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true,
+    archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1,
+  })
+  await seed.saveApproval({
+    id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "ask_person",
+    title: "Need input", detail: "Which API?", status: "pending", createdAt: 1,
+  })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Cancelled", instruction: "Do work",
+    mode: "research", state: "replied", stage: "initial", outcome: "failed", interrupted: false,
+    awaitingChildren: false, attempts: 1, createdAt: 1, error: "Cancelled by user.",
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true, resolution: "Too late" } })
+    assert.equal(resolved.ok, true)
+    assert.equal(resolved.result.status, "rejected")
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks.t.state, "replied")
+    assert.equal(after.state.subtasks.t.attempts, 1)
+  } finally {
+    await stop()
+  }
+})
+
+test("native-session deletion covers sessions replaced by behavior changes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, removedSessions } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "First" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    await handlers.invoke({ directory, action: "agent.update", payload: { id: agent.result.id, role: "New role" } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Second" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).filter((task: any) => task.state === "replied").length >= 2
+    })
+    const before = await handlers.snapshot({ directory })
+    const binding = Object.values(before.state.bindings)[0] as any
+    const deleted = await handlers.invoke({ directory, action: "workspace.delete", payload: { id: workspace.result.id, deleteNativeSessions: true } })
+    assert.equal(deleted.ok, true)
+    assert.equal(removedSessions.length, 2)
+    assert.ok(removedSessions.includes(binding.sessionID))
+    assert.ok(removedSessions.includes(binding.history[0]))
+  } finally {
+    await stop()
+  }
+})
+
+test("archiving a workspace interrupts its active native run", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, interruptedSessions } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 200)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Long work" } })
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    const archived = await handlers.invoke({ directory, action: "workspace.archive", payload: { id: workspace.result.id } })
+    assert.equal(archived.ok, true)
+    assert.equal(interruptedSessions.length, 1)
   } finally {
     await stop()
   }

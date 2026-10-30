@@ -346,7 +346,9 @@ export class EnsembleV2Service {
       }
       const binding = this.store.binding(workspace.id, agentID)
       if (binding) {
-        if (deleteNativeSessions) await this.ctx.session.remove({ sessionID: binding.sessionID }).catch(() => undefined)
+        if (deleteNativeSessions) {
+          for (const sessionID of [...(binding.history ?? []), binding.sessionID]) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
+        }
         await this.store.removeBinding(workspace.id, agentID)
       }
     }
@@ -439,6 +441,9 @@ export class EnsembleV2Service {
     workspace.lastActiveAt = now()
     await this.store.saveWorkspace(workspace)
     if (state.ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...state.ui, activeWorkspaceID: undefined })
+    for (const run of this.activeRuns.values()) {
+      if (run.workspaceID === workspaceID) await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
+    }
     await this.cancelWorkspaceSubtasks(workspaceID, "Workspace archived.")
     return { ok: true }
   }
@@ -453,7 +458,8 @@ export class EnsembleV2Service {
     }
     if (deleteNativeSessions) {
       for (const binding of Object.values(state.bindings)) {
-        if (binding.workspaceID === workspaceID) await this.ctx.session.remove({ sessionID: binding.sessionID }).catch(() => undefined)
+        if (binding.workspaceID !== workspaceID) continue
+        for (const sessionID of [...(binding.history ?? []), binding.sessionID]) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
       }
     }
     if (state.ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...state.ui, activeWorkspaceID: undefined })
@@ -473,6 +479,19 @@ export class EnsembleV2Service {
       subtask.approvalID = undefined
       subtask.repliedAt = now()
       await this.store.saveSubtask(subtask)
+      await this.settlePendingApprovals(subtask.id, reason)
+    }
+  }
+
+  private async settlePendingApprovals(subtaskID: string, resolution: string): Promise<void> {
+    const state = this.store.snapshot()
+    for (const approval of Object.values(state.approvals)) {
+      if (approval.status !== "pending" || approval.subtaskID !== subtaskID) continue
+      if (approval.kind !== "ask_person" && approval.kind !== "interrupted") continue
+      approval.status = "rejected"
+      approval.resolution = resolution
+      approval.resolvedAt = now()
+      await this.store.saveApproval(approval)
     }
   }
 
@@ -644,14 +663,7 @@ export class EnsembleV2Service {
 
   private async claimForRetry(subtask: Subtask): Promise<void> {
     await this.stopSubtaskRun(subtask)
-    const approvals = this.store.snapshot().approvals
-    for (const approval of Object.values(approvals)) {
-      if (approval.status !== "pending" || approval.kind !== "interrupted" || approval.subtaskID !== subtask.id) continue
-      approval.status = "rejected"
-      approval.resolution = "Subtask retried by the user."
-      approval.resolvedAt = now()
-      await this.store.saveApproval(approval)
-    }
+    await this.settlePendingApprovals(subtask.id, "Subtask retried by the user.")
     subtask.state = "pending"
     subtask.outcome = "pending"
     subtask.error = undefined
@@ -685,6 +697,7 @@ export class EnsembleV2Service {
     const subtask = state.subtasks[subtaskID]
     if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
     await this.stopSubtaskRun(subtask)
+    await this.settlePendingApprovals(subtask.id, "Subtask cancelled by the user.")
     subtask.state = "replied"
     subtask.outcome = "failed"
     subtask.error = "Cancelled by user."
@@ -702,6 +715,7 @@ export class EnsembleV2Service {
     if (!subtask || !workspace) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
     if (!workspace.memberIDs.includes(assigneeID)) throw Object.assign(new Error("That agent is not a workspace member."), { code: "not_member" })
     await this.stopSubtaskRun(subtask)
+    await this.settlePendingApprovals(subtask.id, "Subtask reassigned by the user.")
     subtask.assigneeID = assigneeID
     subtask.state = "pending"
     subtask.outcome = "pending"
@@ -722,6 +736,16 @@ export class EnsembleV2Service {
     if (approval.status !== "pending") {
       if (approval.status === requested) return approval
       throw Object.assign(new Error("Approval was already resolved differently."), { code: "already_resolved" })
+    }
+    if (approval.subtaskID && (approval.kind === "ask_person" || approval.kind === "interrupted" || approval.kind === "outside_roster")) {
+      const subtask = state.subtasks[approval.subtaskID]
+      if (!subtask || subtask.state === "replied") {
+        approval.status = "rejected"
+        approval.resolvedAt = now()
+        approval.resolution = "Subtask is no longer waiting for this decision."
+        await this.store.saveApproval(approval)
+        return approval
+      }
     }
     approval.status = requested
     approval.resolvedAt = now()
@@ -763,6 +787,8 @@ export class EnsembleV2Service {
         subtask.state = "pending"
         subtask.outcome = "pending"
         subtask.approvalID = undefined
+        subtask.interrupted = false
+        subtask.activeRunID = undefined
         subtask.instruction += `\n\nUser answer: ${approval.resolution ?? "Approved."}`
         await this.store.saveSubtask(subtask)
       }
@@ -1233,7 +1259,7 @@ export class EnsembleV2Service {
       location: { directory: workspace.directory },
     }))
     if (!created?.id) return undefined
-    const binding = { workspaceID: workspace.id, agentID: agent.id, sessionID: created.id, agentVersion: agent.version, updatedAt: now() }
+    const binding = { workspaceID: workspace.id, agentID: agent.id, sessionID: created.id, history: existing ? [...(existing.history ?? []), existing.sessionID] : [], agentVersion: agent.version, updatedAt: now() }
     await this.store.saveBinding(binding)
     const current = this.store.snapshot().agents[agent.id]
     if (current?.pendingSettings) {
