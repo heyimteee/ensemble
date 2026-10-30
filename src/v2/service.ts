@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto"
 import { canonicalDirectory } from "./paths.ts"
-import { parseMentions } from "./routing.ts"
-import { EnsembleV2Rpc } from "./rpc.ts"
+import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
+import { parseMentions, unknownMentions } from "./routing.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type {
   Agent,
   Approval,
-  ApprovalKind,
   Memory,
   MemoryScope,
   Message,
@@ -46,72 +45,12 @@ function jsonSafe<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
-function modelLabel(model: ModelRef): string {
-  return `${model.providerID}/${model.modelID}${model.variant ? `#${model.variant}` : ""}`
-}
-
 function sameModel(a: ModelRef, b: ModelRef): boolean {
   return a.providerID === b.providerID && a.modelID === b.modelID && (a.variant ?? "") === (b.variant ?? "")
 }
 
 function sameModels(a: ModelRef[], b: ModelRef[]): boolean {
   return a.length === b.length && a.every((model, index) => sameModel(model, b[index]))
-}
-
-function skillPermissions(skillbox: string[]): Array<{ action: string; resource: string; effect: "allow" | "deny" }> {
-  return [
-    { action: "skill", resource: "*", effect: "deny" },
-    ...skillbox.map((skill) => ({ action: "skill" as const, resource: skill, effect: "allow" as const })),
-  ]
-}
-
-function availabilityFailure(error: any): boolean {
-  if (!error) return false
-  const type = String(error.type ?? "")
-  const message = String(error.message ?? "").toLowerCase()
-  return type.startsWith("provider.") && /rate|limit|quota|unavailable|overload|timeout|network|no-route|connection|model|outage|internal|server|500|502|503|504/.test(message) || type === "provider.internal" || type === "provider.no-route"
-}
-
-function anyToolCall(messages: any[], since: number): boolean {
-  return messages.some(
-    (message) =>
-      message?.type === "assistant" &&
-      message?.time?.created >= since &&
-      Array.isArray(message.content) &&
-      message.content.some((part: any) => part?.type === "tool"),
-  )
-}
-
-function assistantResult(messages: any[], since: number): { text: string; tools: string[]; failure?: any } {
-  const texts: string[] = []
-  const tools: string[] = []
-  let failure: any
-  for (const message of messages) {
-    if (!message || message.time?.created < since) continue
-    if (message.type === "idle" && message.outcome === "failed") failure = message.error
-    if (message.type !== "assistant" || !Array.isArray(message.content)) continue
-    for (const part of message.content) {
-      if (part?.type === "text" && part.text) texts.push(part.text)
-      if (part?.type === "tool") tools.push(`${part.name}:${part.state?.status ?? "unknown"}`)
-    }
-  }
-  return { text: texts.join("\n").trim(), tools, failure }
-}
-
-function visibleMemories(state: SnapshotState, agentID: string, workspaceID: string): Memory[] {
-  return Object.values(state.memories)
-    .filter((memory) => !memory.deletedAt)
-    .filter((memory) => {
-      if (memory.scope === "workspace") return memory.workspaceID === workspaceID
-      if (memory.scope === "global") return memory.agentID === agentID
-      return memory.agentID === agentID && memory.workspaceID === workspaceID
-    })
-    .sort((a, b) => a.createdAt - b.createdAt)
-}
-
-function memoryContext(memories: Memory[]): string {
-  if (memories.length === 0) return ""
-  return ["<ensemble_memory>", ...memories.map((memory) => `- [${memory.scope}] ${memory.text}`), "</ensemble_memory>"].join("\n")
 }
 
 export class EnsembleV2Service {
@@ -139,17 +78,14 @@ export class EnsembleV2Service {
       if (this.registration) void this.registration.events.emit("changed", { version: state.version }).catch(() => undefined)
     })
     await this.store.load()
+    await this.ensureInterruptedApprovals()
     this.retryRegistration = await this.ctx.session.hook("retry", (event: any) => {
       if (!this.profileForSession(event.sessionID)) return
       if (availabilityFailure(event.error)) event.decision = { retry: false }
     })
     await this.installTools()
-    this.registration = await this.ctx.rpc.register(EnsembleV2Rpc, {
-      snapshot: async ({ directory }: { directory: string }) => this.snapshot(directory),
-      invoke: async ({ directory, action, payload }: { directory: string; action: string; payload?: Json }) => this.invoke(directory, action, payload ?? {}),
-    })
     await this.migrateV1()
-    void this.refreshCatalog()
+    await this.refreshCatalog()
     this.catalogAbort = new AbortController()
     void (async () => {
       try {
@@ -165,6 +101,20 @@ export class EnsembleV2Service {
       await this.retryRegistration?.dispose?.().catch(() => undefined)
       await Promise.allSettled([...this.running])
     }
+  }
+
+  handlers(): {
+    snapshot: (input: { directory: string }) => Promise<Snapshot>
+    invoke: (input: { directory: string; action: string; payload?: Json }) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
+  } {
+    return {
+      snapshot: ({ directory }) => this.snapshot(directory),
+      invoke: ({ directory, action, payload }) => this.invoke(directory, action, payload ?? {}),
+    }
+  }
+
+  attach(registration: any): void {
+    this.registration = registration
   }
 
   private async migrateV1(): Promise<void> {
@@ -191,6 +141,32 @@ export class EnsembleV2Service {
         updatedAt: now(),
       }
       await this.store.saveAgent(agent)
+    }
+  }
+
+  private async ensureInterruptedApprovals(): Promise<void> {
+    const state = this.store.snapshot()
+    const pending = Object.values(state.approvals).filter((approval) => approval.status === "pending" && approval.kind === "interrupted")
+    for (const subtask of Object.values(state.subtasks)) {
+      if (!subtask.interrupted || subtask.state !== "pending" || subtask.approvalID) continue
+      if (pending.some((approval) => approval.subtaskID === subtask.id)) continue
+      const approval: Approval = {
+        id: id("approval"),
+        workspaceID: subtask.workspaceID,
+        subtaskID: subtask.id,
+        agentID: subtask.assigneeID,
+        kind: "interrupted",
+        title: `Resume interrupted work: ${subtask.title}`,
+        detail: subtask.error ?? "Ensemble restarted while this subtask was working.",
+        payload: { subtaskID: subtask.id },
+        status: "pending",
+        createdAt: now(),
+      }
+      await this.store.saveApproval(approval)
+      subtask.approvalID = approval.id
+      await this.store.saveSubtask(subtask)
+      const workspace = state.workspaces[subtask.workspaceID]
+      if (workspace) await this.appendMessage(workspace, { author: "system", text: `Interrupted work needs a decision: ${subtask.title}`, kind: "approval", taskID: subtask.id })
     }
   }
 
@@ -251,6 +227,7 @@ export class EnsembleV2Service {
       case "message.send": return this.sendMessage(directory, payload)
       case "task.delegate": return this.delegateFromUser(payload)
       case "task.retry": return this.retryTask(payload.id)
+      case "task.restart": return this.restartTask(payload.id)
       case "task.cancel": return this.cancelTask(payload.id)
       case "task.reassign": return this.reassignTask(payload.id, payload.assigneeID)
       case "approval.resolve": return this.resolveApproval(payload)
@@ -464,6 +441,7 @@ export class EnsembleV2Service {
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     workspace.lastActiveAt = now()
     await this.store.saveWorkspace(workspace)
+    await this.store.saveUi({ ...state.ui, activeWorkspaceID: workspaceID })
     return { ok: true }
   }
 
@@ -474,6 +452,7 @@ export class EnsembleV2Service {
     workspace.archived = true
     workspace.lastActiveAt = now()
     await this.store.saveWorkspace(workspace)
+    if (state.ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...state.ui, activeWorkspaceID: undefined })
     await this.cancelWorkspaceSubtasks(workspaceID, "Workspace archived.")
     return { ok: true }
   }
@@ -491,6 +470,7 @@ export class EnsembleV2Service {
         if (binding.workspaceID === workspaceID) await this.ctx.session.remove({ sessionID: binding.sessionID }).catch(() => undefined)
       }
     }
+    if (state.ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...state.ui, activeWorkspaceID: undefined })
     await this.store.pruneWorkspace(workspaceID)
     return { ok: true }
   }
@@ -503,6 +483,8 @@ export class EnsembleV2Service {
         subtask.state = "replied"
         subtask.outcome = "failed"
         subtask.error = reason
+        subtask.activeRunID = undefined
+        subtask.approvalID = undefined
         subtask.repliedAt = now()
         await this.store.saveSubtask(subtask)
       }
@@ -524,6 +506,8 @@ export class EnsembleV2Service {
         subtask.state = "replied"
         subtask.outcome = "failed"
         subtask.error = reason
+        subtask.activeRunID = undefined
+        subtask.approvalID = undefined
         subtask.repliedAt = now()
         await this.store.saveSubtask(subtask)
       }
@@ -543,6 +527,11 @@ export class EnsembleV2Service {
     if (!workspace || workspace.archived) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     const text = String(payload.text ?? "").trim()
     if (!text) throw Object.assign(new Error("Message is empty."), { code: "empty" })
+    const unknown = unknownMentions(text, workspace, state.agents)
+    if (unknown.length > 0) {
+      const available = workspace.memberIDs.map((memberID) => state.agents[memberID]?.name).filter(Boolean).join(", ")
+      throw Object.assign(new Error(`Unknown workspace member${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. Members: ${available}`), { code: "unknown_member" })
+    }
     const mentions = parseMentions(text, workspace, state.agents).filter((agentID) => state.agents[agentID] && !state.agents[agentID].archived)
     const recipients = mentions.length > 0 ? mentions : [workspace.leaderID]
     await this.appendMessage(workspace, { author: "user", text, kind: "text" })
@@ -609,21 +598,15 @@ export class EnsembleV2Service {
   }
 
   private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; text: string; kind: Message["kind"]; taskID?: string }): Promise<Message> {
-    const current = this.store.snapshot().workspaces[workspace.id] ?? workspace
-    const message: Message = {
+    return this.store.appendMessage(workspace.id, {
       id: id("msg"),
-      workspaceID: current.id,
-      seq: current.nextSeq++,
       author: input.author,
       agentID: input.agentID,
       text: input.text,
       kind: input.kind,
       taskID: input.taskID,
       createdAt: now(),
-    }
-    await this.store.appendMessage(message)
-    await this.store.saveWorkspace(current)
-    return message
+    })
   }
 
   private agentName(agentID: string | undefined): string {
@@ -651,16 +634,48 @@ export class EnsembleV2Service {
     return subtask
   }
 
-  private async retryTask(subtaskID: string): Promise<Subtask> {
-    const state = this.store.snapshot()
-    const subtask = state.subtasks[subtaskID]
-    if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
+  private async stopSubtaskRun(subtask: Subtask): Promise<void> {
+    const runID = subtask.activeRunID ?? [...this.activeRuns.values()].find((run) => run.subtaskID === subtask.id)?.id
+    if (!runID) {
+      subtask.activeRunID = undefined
+      return
+    }
+    const run = this.activeRuns.get(runID)
+    if (run) {
+      await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
+      this.activeRuns.delete(runID)
+      this.runBySession.delete(run.sessionID)
+    }
+    subtask.activeRunID = undefined
+  }
+
+  private async claimForRetry(subtask: Subtask): Promise<void> {
+    await this.stopSubtaskRun(subtask)
     subtask.state = "pending"
     subtask.outcome = "pending"
     subtask.error = undefined
     subtask.interrupted = false
     subtask.approvalID = undefined
+    subtask.activeRunID = undefined
+    subtask.repliedAt = undefined
     await this.store.saveSubtask(subtask)
+  }
+
+  private async retryTask(subtaskID: string): Promise<Subtask> {
+    const state = this.store.snapshot()
+    const subtask = state.subtasks[subtaskID]
+    if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
+    await this.claimForRetry(subtask)
+    return subtask
+  }
+
+  private async restartTask(subtaskID: string): Promise<Subtask> {
+    const state = this.store.snapshot()
+    const subtask = state.subtasks[subtaskID]
+    if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
+    await this.claimForRetry(subtask)
+    const workspace = state.workspaces[subtask.workspaceID]
+    if (workspace) await this.appendMessage(workspace, { author: "system", text: `Restarting work: ${subtask.title}`, kind: "system", taskID: subtask.id })
     return subtask
   }
 
@@ -668,9 +683,12 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     const subtask = state.subtasks[subtaskID]
     if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
+    await this.stopSubtaskRun(subtask)
     subtask.state = "replied"
     subtask.outcome = "failed"
     subtask.error = "Cancelled by user."
+    subtask.activeRunID = undefined
+    subtask.approvalID = undefined
     subtask.repliedAt = now()
     await this.store.saveSubtask(subtask)
     return subtask
@@ -682,10 +700,15 @@ export class EnsembleV2Service {
     const workspace = subtask ? state.workspaces[subtask.workspaceID] : undefined
     if (!subtask || !workspace) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
     if (!workspace.memberIDs.includes(assigneeID)) throw Object.assign(new Error("That agent is not a workspace member."), { code: "not_member" })
+    await this.stopSubtaskRun(subtask)
     subtask.assigneeID = assigneeID
     subtask.state = "pending"
     subtask.outcome = "pending"
     subtask.error = undefined
+    subtask.interrupted = false
+    subtask.approvalID = undefined
+    subtask.activeRunID = undefined
+    subtask.repliedAt = undefined
     await this.store.saveSubtask(subtask)
     return subtask
   }
@@ -693,12 +716,29 @@ export class EnsembleV2Service {
   private async resolveApproval(payload: Json): Promise<Approval> {
     const state = this.store.snapshot()
     const approval = state.approvals[payload.id]
-    if (!approval || approval.status !== "pending") throw Object.assign(new Error("Approval not found or already resolved."), { code: "not_found" })
-    approval.status = payload.approve ? "approved" : "rejected"
+    if (!approval) throw Object.assign(new Error("Approval not found."), { code: "not_found" })
+    const requested = payload.approve ? "approved" : "rejected"
+    if (approval.status !== "pending") {
+      if (approval.status === requested) return approval
+      throw Object.assign(new Error("Approval was already resolved differently."), { code: "already_resolved" })
+    }
+    approval.status = requested
     approval.resolvedAt = now()
     approval.resolution = payload.resolution
     await this.store.saveApproval(approval)
     if (!payload.approve) {
+      if (approval.kind === "interrupted" && approval.subtaskID) {
+        const subtask = state.subtasks[approval.subtaskID]
+        if (subtask) {
+          subtask.state = "replied"
+          subtask.outcome = "failed"
+          subtask.error = "Interrupted work discarded by the user."
+          subtask.interrupted = false
+          subtask.approvalID = undefined
+          subtask.repliedAt = now()
+          await this.store.saveSubtask(subtask)
+        }
+      }
       if (approval.kind === "ask_person" && approval.subtaskID) {
         const subtask = state.subtasks[approval.subtaskID]
         if (subtask) {
@@ -711,6 +751,10 @@ export class EnsembleV2Service {
         }
       }
       return approval
+    }
+    if (approval.kind === "interrupted" && approval.subtaskID) {
+      const subtask = state.subtasks[approval.subtaskID]
+      if (subtask) await this.claimForRetry(subtask)
     }
     if (approval.kind === "ask_person" && approval.subtaskID) {
       const subtask = state.subtasks[approval.subtaskID]
@@ -1056,7 +1100,7 @@ export class EnsembleV2Service {
             .filter(Boolean) as string[],
         )
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID)
+          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID)
           .sort((a, b) => a.createdAt - b.createdAt)
         for (const task of pending) {
           if (slots <= 0) break
@@ -1083,17 +1127,18 @@ export class EnsembleV2Service {
   private async runTask(taskID: string): Promise<void> {
     const state = this.store.snapshot()
     const task = state.subtasks[taskID]
-    if (!task || task.state !== "pending" || !task.assigneeID) return
+    if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
     const workspace = state.workspaces[task.workspaceID]
     const agent = state.agents[task.assigneeID]
     if (!workspace || !agent) return
+    const runID = id("run")
     task.state = "working"
     task.outcome = "pending"
     task.attempts++
     task.startedAt = now()
     task.interrupted = false
+    task.activeRunID = runID
     await this.store.saveSubtask(task)
-    const runID = id("run")
     const binding = await this.ensureBinding(workspace, agent)
     if (!binding) {
       await this.failTask(task, "Could not create a native session.")
@@ -1107,7 +1152,7 @@ export class EnsembleV2Service {
       await this.ctx.session.instructions.entry.put({
         sessionID: binding.sessionID,
         key: "ensemble.v2.context",
-        value: this.contextForTask(state, task, workspace, agent),
+        value: contextForTask(state, task, workspace, agent),
       }).catch(() => undefined)
       const models = [agent.mainModel, ...agent.backupModels]
       let result: { text: string; tools: string[]; failure?: any } | undefined
@@ -1115,48 +1160,55 @@ export class EnsembleV2Service {
         const model = models[index]
         await this.ctx.session.switchModel({ sessionID: binding.sessionID, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } }).catch(() => undefined)
         const startedAt = now()
-        await this.ctx.session.prompt({ sessionID: binding.sessionID, text: this.promptForTask(task), delivery: "steer" })
+        await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task), delivery: "steer" })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
         const messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, startedAt)
         if (!result.failure) break
         if (!availabilityFailure(result.failure) || anyToolCall(messages, startedAt) || index === models.length - 1) break
       }
+      const current = this.store.snapshot()
+      const currentTask = current.subtasks[task.id]
+      if (!currentTask || currentTask.activeRunID !== runID) return
       if (result?.failure) {
         const uncertain = result.tools.length > 0
-        task.state = uncertain ? "pending" : "pending"
-        task.interrupted = true
-        task.error = uncertain ? "A tool outcome is uncertain. Review the native session before retrying." : result.failure.message ?? "All models failed."
-        await this.store.saveSubtask(task)
+        currentTask.state = "pending"
+        currentTask.interrupted = true
+        currentTask.activeRunID = undefined
+        currentTask.error = uncertain ? "A tool outcome is uncertain. Review the native session before retrying." : result.failure.message ?? "All models failed."
+        await this.store.saveSubtask(currentTask)
+        await this.createInterruptedApproval(currentTask)
         return
       }
       const text = result?.text || "Work completed."
-      const current = this.store.snapshot()
-      const currentTask = current.subtasks[task.id] ?? task
-      if (currentTask.state === "replied" || currentTask.state === "pending") return
       if (currentTask.approvalID) {
-        await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text, kind: "text", taskID: task.id })
+        await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text, kind: "text", taskID: currentTask.id })
+        currentTask.activeRunID = undefined
+        await this.store.saveSubtask(currentTask)
         return
       }
-      const children = Object.values(current.subtasks).filter((item) => item.parentID === task.id)
-      if (children.length > 0 && task.stage === "initial") {
-        task.awaitingChildren = true
-        task.state = "working"
-        await this.store.saveSubtask(task)
-        await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text, kind: "text", taskID: task.id })
-        await this.maybeSynthesize(task.id)
+      const children = Object.values(current.subtasks).filter((item) => item.parentID === currentTask.id)
+      currentTask.activeRunID = undefined
+      if (children.length > 0 && currentTask.stage === "initial") {
+        currentTask.awaitingChildren = true
+        currentTask.state = "working"
+        await this.store.saveSubtask(currentTask)
+        await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text, kind: "text", taskID: currentTask.id })
+        await this.maybeSynthesize(currentTask.id)
         return
       }
-      task.state = "replied"
-      task.outcome = "succeeded"
-      task.repliedAt = now()
-      await this.store.saveSubtask(task)
-      const message = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text, kind: "text", taskID: task.id })
-      task.resultMessageID = message.id
-      await this.store.saveSubtask(task)
-      if (task.parentID) await this.maybeSynthesize(task.parentID)
+      currentTask.state = "replied"
+      currentTask.outcome = "succeeded"
+      currentTask.repliedAt = now()
+      await this.store.saveSubtask(currentTask)
+      const message = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text, kind: "text", taskID: currentTask.id })
+      currentTask.resultMessageID = message.id
+      await this.store.saveSubtask(currentTask)
+      if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID)
     } catch (error: any) {
-      await this.failTask(task, error?.message ?? String(error))
+      const current = this.store.snapshot()
+      const currentTask = current.subtasks[task.id]
+      if (currentTask?.activeRunID === runID) await this.failTask(currentTask, error?.message ?? String(error))
     } finally {
       run.status = "completed"
       this.activeRuns.delete(runID)
@@ -1164,32 +1216,32 @@ export class EnsembleV2Service {
     }
   }
 
-  private promptForTask(task: Subtask): string {
-    if (task.stage === "synthesis") {
-      return `Synthesize the completed subtasks into one clear answer for the user.\n\nOriginal request: ${task.instruction}`
+  private async createInterruptedApproval(subtask: Subtask): Promise<void> {
+    if (subtask.approvalID) return
+    const state = this.store.snapshot()
+    const existing = Object.values(state.approvals).find((approval) => approval.status === "pending" && approval.kind === "interrupted" && approval.subtaskID === subtask.id)
+    if (existing) {
+      subtask.approvalID = existing.id
+      await this.store.saveSubtask(subtask)
+      return
     }
-    return [task.instruction, task.constraints ? `Constraints: ${task.constraints}` : "", task.expected ? `Expected: ${task.expected}` : ""].filter(Boolean).join("\n\n")
-  }
-
-  private contextForTask(state: SnapshotState, task: Subtask, workspace: Workspace, agent: Agent): string {
-    const memories = visibleMemories(state, agent.id, workspace.id)
-    const recent = (state.messages[workspace.id] ?? []).slice(-20).map((message) => `${message.author === "user" ? "You" : state.agents[message.agentID ?? ""]?.name ?? "Agent"}: ${message.text}`).join("\n")
-    const children = Object.values(state.subtasks).filter((item) => item.parentID === task.id)
-    const childResults = task.stage === "synthesis"
-      ? children.map((child) => `- ${state.agents[child.assigneeID ?? ""]?.name ?? "Agent"}: ${state.messages[workspace.id]?.find((message) => message.id === child.resultMessageID)?.text ?? child.error ?? "(no reply)"}`).join("\n")
-      : ""
-    return [
-      `<ensemble_persona name="${agent.name}">\n${agent.role}\n</ensemble_persona>`,
-      memoryContext(memories),
-      `<ensemble_workspace name="${workspace.name}" directory="${workspace.directory}">`,
-      `Leader: ${state.agents[workspace.leaderID]?.name ?? workspace.leaderID}`,
-      `Members: ${workspace.memberIDs.map((memberID) => state.agents[memberID]?.name ?? memberID).join(", ")}`,
-      "Recent group messages:",
-      recent || "(none)",
-      "</ensemble_workspace>",
-      `<ensemble_subtask title="${task.title}">\n${task.instruction}\n</ensemble_subtask>`,
-      childResults ? `<ensemble_child_results>\n${childResults}\n</ensemble_child_results>` : "",
-    ].filter(Boolean).join("\n\n")
+    const approval: Approval = {
+      id: id("approval"),
+      workspaceID: subtask.workspaceID,
+      subtaskID: subtask.id,
+      agentID: subtask.assigneeID,
+      kind: "interrupted",
+      title: `Resume interrupted work: ${subtask.title}`,
+      detail: subtask.error ?? "The run stopped before it could reply.",
+      payload: { subtaskID: subtask.id },
+      status: "pending",
+      createdAt: now(),
+    }
+    await this.store.saveApproval(approval)
+    subtask.approvalID = approval.id
+    await this.store.saveSubtask(subtask)
+    const workspace = state.workspaces[subtask.workspaceID]
+    if (workspace) await this.appendMessage(workspace, { author: "system", text: `Interrupted work needs a decision: ${subtask.title}`, kind: "approval", taskID: subtask.id })
   }
 
   private async ensureBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string } | undefined> {
@@ -1217,6 +1269,7 @@ export class EnsembleV2Service {
     task.state = "replied"
     task.outcome = "failed"
     task.error = error
+    task.activeRunID = undefined
     task.repliedAt = now()
     await this.store.saveSubtask(task)
     const workspace = this.store.snapshot().workspaces[task.workspaceID]

@@ -30,6 +30,7 @@ export class V2Store {
       this.state.version = Number(meta.version ?? 0)
       this.state.updatedAt = Number(meta.updatedAt ?? Date.now())
       this.state.settings = { ...DEFAULT_SETTINGS, ...(meta.settings ?? {}) }
+      this.state.ui = typeof meta.ui === "object" && meta.ui ? { ...meta.ui } : {}
     }
     for (const { value } of await this.scanAll("v2/agent/")) {
       const agent = value as Agent
@@ -66,8 +67,12 @@ export class V2Store {
       if (subtask.state === "working") {
         subtask.state = "pending"
         subtask.interrupted = true
+        subtask.activeRunID = undefined
         subtask.error = "Ensemble restarted while this subtask was working."
       }
+    }
+    if (this.state.ui.activeWorkspaceID && !this.state.workspaces[this.state.ui.activeWorkspaceID]) {
+      this.state.ui.activeWorkspaceID = undefined
     }
   }
 
@@ -109,11 +114,24 @@ export class V2Store {
     await this.bump()
   }
 
-  async appendMessage(message: Message): Promise<void> {
-    const list = (this.state.messages[message.workspaceID] ??= [])
+  async appendMessage(
+    workspaceID: string,
+    input: Omit<Message, "workspaceID" | "seq">,
+  ): Promise<Message> {
+    const workspace = this.state.workspaces[workspaceID]
+    if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+    const message: Message = { ...input, workspaceID, seq: workspace.nextSeq++ }
+    const list = (this.state.messages[workspaceID] ??= [])
     list.push(message)
     list.sort((a, b) => a.seq - b.seq)
-    await this.ctx.storage.set(`v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
+    await this.ctx.storage.set(`v2/message/${workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
+    await this.ctx.storage.set(`v2/workspace/${workspaceID}`, workspace)
+    await this.bump()
+    return message
+  }
+
+  async saveUi(ui: SnapshotState["ui"]): Promise<void> {
+    this.state.ui = { ...ui }
     await this.bump()
   }
 
@@ -186,6 +204,7 @@ export class V2Store {
       version: this.state.version,
       updatedAt: this.state.updatedAt,
       settings: this.state.settings,
+      ui: this.state.ui,
     })
     this.onChange?.(this.snapshot())
   }

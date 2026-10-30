@@ -40,14 +40,19 @@ If the plugin was already loaded before updating the package exports, run `openc
 | `~ ?` | Full shortcut help |
 | `~ q` | Leave Ensemble for the native TUI |
 | `i` | Compose a message |
+| `m` | Mention an agent and compose |
+| `/` | Search workspaces |
 | `n` | New workspace |
 | `w` / `W` | Next / previous workspace |
 | `a` | New agent |
-| `z` | Next agent |
+| `z` / `Z` | Next / previous agent |
 | `s` | Agent settings |
 | `v` | Approvals inbox |
 | `d` | Delegate selected subtask |
+| `t` | Reassign selected subtask |
+| `Enter` | Open the selected subtask result |
 | `r` | Retry selected subtask |
+| `R` | Stop and restart selected subtask |
 | `x` | Cancel selected subtask |
 | `o` | Open the selected agent's native session |
 | `Tab` | Cycle settings tabs |
@@ -65,7 +70,7 @@ A literal `~` typed in a dialog or message stays text. The leader key only acts 
 npm test
 ```
 
-The v2 suite covers mention routing, workspace canonicalization, and per-entity persistence. Live checks are recorded in [docs/verification/2026-10-30.md](docs/verification/2026-10-30.md).
+The unit suite covers mention routing, workspace canonicalization, message sequencing, recovery, approvals, scheduling, and reassignment races. `npm run test:live` boots an isolated OpenCode server and TUI to verify the packaged plugin and leader help. Live checks are recorded in [docs/verification/2026-10-30.md](docs/verification/2026-10-30.md).
 
 ## Documentation
 

@@ -24,6 +24,8 @@ OpenCode engine
 
 - **`src/v2/tui`** — full-screen plugin page. Workspace rail, group chat, subtask board, settings, approvals, leader key.
 - **`src/v2/service.ts`** — domain service and orchestrator. Workspaces, agents, messages, subtasks, delegation, approvals, memory, model fallback, scheduling, recovery.
+- **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
+- **`src/v2/tui/`** — page shell, presentational components, palette, formatting, and keymap layers.
 - **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval.
 - **`src/v2/routing.ts`** — `@`/`!` mention routing and leader fallback.
 - **`src/v2/paths.ts`** — canonical workspace directories.
@@ -47,7 +49,7 @@ Workspace {
 - Switching workspace changes the group chat, task board, and directory for new runs.
 - Sessions are bound to `workspace + agent`, so switching does not discard them.
 
-The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent and manual paths are supported.
+The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent workspace directories come first, `~/` expands, and manual paths are supported. The workspace rail groups rooms by canonical project directory, supports `/` search, and shows unread (`●`) and busy (`◐`) markers. The selected workspace is persisted and restored when the page reopens.
 
 ## Agents
 
@@ -83,6 +85,8 @@ Message {
 - `@Name` is primary; `!Name` is an alias.
 - Multiple known mentions create one task per recipient.
 - No mention routes only to the leader.
+- Unknown `@Name`/`!Name` values fail with a clear `unknown_member` error instead of silently falling back.
+- `m` opens a member picker and composes an addressed message.
 - Agent replies and task cards appear in the same transcript.
 - Native sessions are not alternate chat tabs; `o` opens the selected agent's session.
 
@@ -110,7 +114,8 @@ pending ──assign──▶ working ──result──▶ replied
 - Approval waits are badges on **Working**, not a fourth state.
 - The leader delegates through the `ensemble_delegate` tool with a typed envelope.
 - When all children reply, a leader synthesis subtask is created unless the workspace disables synthesis.
-- The board groups Pending, Working, and Replied. `d` delegates, `r` retries, `x` cancels, `o` opens the run.
+- The board groups Pending, Working, and Replied. `d` delegates, `t` reassigns, `Enter` opens the result, `r` retries, `R` stops and restarts, `x` cancels, and `o` opens the run.
+- Reassignment and restart interrupt the active run and clear its run token, so a late reply from the stopped run cannot overwrite the new assignee.
 
 ## Scheduling and recovery
 
@@ -118,9 +123,10 @@ pending ──assign──▶ working ──result──▶ replied
 - One active run per agent per workspace.
 - One editing run per canonical directory; research can continue.
 - Closing the Ensemble page does not stop native work.
-- On restart, working subtasks return to Pending with an interrupted badge. They are not replayed automatically.
+- On restart, working subtasks return to Pending with an interrupted badge and an `interrupted` approval. They never replay automatically; the user resumes or discards them.
 - Model fallback uses the ordered backup list and surfaces switches.
-- Permission denials and tool failures are not retried; an uncertain tool outcome pauses for review.
+- Permission denials, tool failures, and provider exhaustion pause the subtask with an interrupted approval; an uncertain tool outcome is never retried automatically.
+- Message sequence numbers are allocated inside the store, so concurrent appends cannot overwrite a transcript key.
 
 ## Memory and approvals
 
@@ -140,7 +146,7 @@ Approvals cover:
 - cross-project/private transcript sharing
 - interrupted work
 
-Approvals appear inline in the chat and in the inbox. Resolutions are idempotent; only the user can approve.
+Approvals appear inline in the chat and in the inbox. Resolutions are idempotent: repeating the same decision returns the resolved approval, while a conflicting decision fails with `already_resolved`. Only the user can approve. Approving interrupted work resumes it once; discarding marks it failed.
 
 ## Leader key
 
@@ -170,8 +176,7 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 ## Known limitations
 
 - The group chat composer is a dialog opened with `i`, not an inline focused input.
-- Mention selection is text plus a recipient picker; there is no inline autocomplete.
+- Mention selection uses `m` plus a member picker; there is no inline autocomplete inside the text prompt.
 - Direct one-to-one conversations are not implemented in the v2 TUI; a one-member workspace is not treated as a DM.
-- Task reassignment and manual backup reordering are available through the service but not fully exposed in the TUI.
-- The shared global `opencode service` lifecycle was not exercised end-to-end with v2 work; the isolated standalone server was.
+- Some host dialog closes leave stale cells until the next full repaint; the page remains usable.
 - No npm package, versioning policy, or license has been selected.

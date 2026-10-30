@@ -107,6 +107,7 @@ export type Subtask = {
   outcome: SubtaskOutcome
   interrupted: boolean
   approvalID?: Id
+  activeRunID?: Id
   awaitingChildren: boolean
   resultMessageID?: Id
   error?: string
@@ -176,6 +177,9 @@ export type Snapshot = {
     memories: Record<Id, Memory>
     approvals: Record<Id, Approval>
     settings: Settings
+    ui: {
+      activeWorkspaceID?: Id
+    }
     runs: Record<Id, Run>
   }
   models: ModelOption[]

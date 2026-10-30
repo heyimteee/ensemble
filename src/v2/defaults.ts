@@ -18,6 +18,7 @@ export function createInitialState(): SnapshotState {
     memories: {},
     approvals: {},
     settings: { ...DEFAULT_SETTINGS },
+    ui: {},
     runs: {},
   }
 }

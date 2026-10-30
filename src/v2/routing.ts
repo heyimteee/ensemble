@@ -4,12 +4,14 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-export function parseMentions(text: string, workspace: Workspace, agents: Record<string, Agent>): string[] {
+type MentionMatch = { id: string; start: number; end: number }
+
+function memberMatches(text: string, workspace: Workspace, agents: Record<string, Agent>): MentionMatch[] {
   const members = workspace.memberIDs
     .map((memberID) => agents[memberID])
     .filter((agent): agent is Agent => Boolean(agent))
     .sort((a, b) => b.name.length - a.name.length)
-  const matches: Array<{ id: string; start: number; end: number }> = []
+  const matches: MentionMatch[] = []
   for (const agent of members) {
     for (const raw of [`@${agent.name}`, `!${agent.name}`, `@${agent.id}`, `!${agent.id}`]) {
       const pattern = new RegExp(escapeRegExp(raw), "gi")
@@ -19,12 +21,28 @@ export function parseMentions(text: string, workspace: Workspace, agents: Record
     }
   }
   matches.sort((a, b) => a.start - b.start || b.end - a.end)
-  const accepted: typeof matches = []
+  const accepted: MentionMatch[] = []
   for (const match of matches) {
     if (accepted.some((existing) => match.start < existing.end && match.end > existing.start)) continue
     accepted.push(match)
   }
-  return [...new Set(accepted.map((match) => match.id))]
+  return accepted
+}
+
+export function parseMentions(text: string, workspace: Workspace, agents: Record<string, Agent>): string[] {
+  return [...new Set(memberMatches(text, workspace, agents).map((match) => match.id))]
+}
+
+export function unknownMentions(text: string, workspace: Workspace, agents: Record<string, Agent>): string[] {
+  const known = memberMatches(text, workspace, agents)
+  const unknown: string[] = []
+  for (const match of text.matchAll(/(?<![\w@!])([@!])([A-Za-z0-9][\w.-]*)/g)) {
+    const start = match.index ?? 0
+    const end = start + match[0].length
+    if (known.some((knownMatch) => start < knownMatch.end && end > knownMatch.start)) continue
+    unknown.push(`${match[1]}${match[2]}`)
+  }
+  return [...new Set(unknown)]
 }
 
 export function visibleRecipients(text: string, workspace: Workspace, agents: Record<string, Agent>): string[] {
