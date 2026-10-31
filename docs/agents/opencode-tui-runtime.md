@@ -65,6 +65,16 @@ The snapshot RPC selects the location with `location[directory]` and supplies th
 
 Snapshot is the supported read surface, but its server-side discovery/reconciliation may write. Avoid `invoke` for diagnosis. One descriptor targets one service; it cannot establish agreement with other processes without explicit connections to those processes. Do not read opaque storage internals, print descriptors/auth headers, restart unrelated services, or use real conversation data as fixtures.
 
+Use the checked-in doctor rather than ad hoc credential-bearing probes:
+
+```sh
+npm run doctor -- /path/to/project /path/to/another-project
+npm run --silent doctor -- --json --service-file /path/to/service.json /path/to/project
+npm run doctor -- --server http://127.0.0.1:4096 /path/to/project
+```
+
+The [doctor reference](../../README.md#runtime-diagnosis) and `npm run doctor -- --help` define options, credential resolution, and exit codes. It queries one selected service sequentially, not atomically; config is read after each snapshot. Absent lazy bindings and retained former-member bindings alone are not defects. Treat differences as diagnostic evidence, not automatic proof of stale processes or a pre-reconciliation view.
+
 ## Navigate installed package source
 
 Run from the repository after `npm ci`:
