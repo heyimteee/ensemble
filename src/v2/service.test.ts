@@ -8,8 +8,8 @@ import { SharedEnsemble } from "./shared-service.ts"
 import { V2Store } from "./store.ts"
 
 type Handlers = {
-  snapshot: (input: { directory: string }) => Promise<any>
-  invoke: (input: { directory: string; action: string; payload?: any }) => Promise<any>
+  snapshot: (input: unknown) => Promise<any>
+  invoke: (input: unknown) => Promise<any>
 }
 
 function fakeContext(sharedValues?: Map<string, unknown>) {
@@ -155,8 +155,8 @@ test("unknown mentions fail clearly instead of silently reaching the leader", as
       payload: { workspaceID: workspace.result.id, text: "$Ghost take a look" },
     })
     assert.equal(response.ok, false)
-    assert.equal(response.error.code, "unknown_member")
-    assert.match(response.error.message, /\$Ghost/)
+    assert.equal(response.error?.code, "unknown_member")
+    assert.match(response.error?.message ?? "", /\$Ghost/)
   } finally {
     await stop()
   }
@@ -252,7 +252,7 @@ test("approval resolution is idempotent for the same decision", async () => {
     assert.equal(second.ok, true)
     assert.equal(second.result.status, "approved")
     assert.equal(conflict.ok, false)
-    assert.equal(conflict.error.code, "already_resolved")
+    assert.equal(conflict.error?.code, "already_resolved")
   } finally {
     await stop()
   }
@@ -285,7 +285,7 @@ test("reassigning a working subtask ignores the interrupted run's late result", 
     const final = await handlers.snapshot({ directory })
     assert.equal(final.state.subtasks[task.id].assigneeID, sage.result.id)
     const agentMessages = final.state.messages[workspace.result.id].filter((message: any) => message.author === "agent")
-    assert.equal(agentMessages.at(-1).agentID, sage.result.id)
+    assert.equal(agentMessages.at(-1)?.agentID, sage.result.id)
   } finally {
     await stop()
   }
@@ -346,7 +346,7 @@ test("pausing a workspace rejects new work until resumed", async () => {
     await handlers.invoke({ directory, action: "workspace.pause", payload: { id: workspace.result.id } })
     const paused = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Do work" } })
     assert.equal(paused.ok, false)
-    assert.equal(paused.error.code, "workspace_paused")
+    assert.equal(paused.error?.code, "workspace_paused")
     await handlers.invoke({ directory, action: "workspace.resume", payload: { id: workspace.result.id } })
     const resumed = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Do work" } })
     assert.equal(resumed.ok, true)
@@ -411,7 +411,7 @@ test("archiving the leader requires and applies a replacement", async () => {
     })
     const refused = await handlers.invoke({ directory, action: "agent.archive", payload: { id: nova.result.id } })
     assert.equal(refused.ok, false)
-    assert.equal(refused.error.code, "leader_replacement_required")
+    assert.equal(refused.error?.code, "leader_replacement_required")
     const archived = await handlers.invoke({ directory, action: "agent.archive", payload: { id: nova.result.id, replacementLeaderID: sage.result.id } })
     assert.equal(archived.ok, true)
     const next = await handlers.snapshot({ directory })
@@ -741,7 +741,7 @@ test("workspace member edits validate membership and the leader", async () => {
       payload: { id: workspace.result.id, memberIDs: [nova.result.id], leaderID: outside.result.id },
     })
     assert.equal(invalid.ok, false)
-    assert.equal(invalid.error.code, "invalid_leader")
+    assert.equal(invalid.error?.code, "invalid_leader")
   } finally {
     await stop()
   }
@@ -775,20 +775,20 @@ test("agent and workspace creation reject invalid input", async () => {
   try {
     const blank = await handlers.invoke({ directory, action: "agent.create", payload: { name: "  " } })
     assert.equal(blank.ok, false)
-    assert.equal(blank.error.code, "invalid_name")
+    assert.equal(blank.error?.code, "invalid_name")
     const badModel = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", mainModel: { providerID: "nope", modelID: "nope" } } })
     assert.equal(badModel.ok, false)
-    assert.equal(badModel.error.code, "invalid_model")
+    assert.equal(badModel.error?.code, "invalid_model")
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
     const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
     const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [nova.result.id], leaderID: nova.result.id } })
     assert.equal(workspace.ok, true)
     const duplicate = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "again", directory, memberIDs: [nova.result.id], leaderID: nova.result.id } })
     assert.equal(duplicate.ok, false)
-    assert.equal(duplicate.error.code, "workspace_exists")
+    assert.equal(duplicate.error?.code, "workspace_exists")
     const outside = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "bad", directory: mkdtempSync(join(tmpdir(), "ensemble-other-")), memberIDs: [nova.result.id], leaderID: sage.result.id } })
     assert.equal(outside.ok, false)
-    assert.equal(outside.error.code, "invalid_leader")
+    assert.equal(outside.error?.code, "invalid_leader")
   } finally {
     await stop()
   }
@@ -925,11 +925,11 @@ test("paused workspaces reject delegation and depth limits are enforced", async 
     const child = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, parentID: root.result.id, assigneeID: agent.result.id, title: "Child", instruction: "Child" } })
     const grandchild = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, parentID: child.result.id, assigneeID: agent.result.id, title: "Grandchild", instruction: "Grandchild" } })
     assert.equal(grandchild.ok, false)
-    assert.equal(grandchild.error.code, "delegation_depth")
+    assert.equal(grandchild.error?.code, "delegation_depth")
     await handlers.invoke({ directory, action: "workspace.pause", payload: { id: workspace.result.id } })
     const paused = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, assigneeID: agent.result.id, title: "No", instruction: "No" } })
     assert.equal(paused.ok, false)
-    assert.equal(paused.error.code, "workspace_paused")
+    assert.equal(paused.error?.code, "workspace_paused")
   } finally {
     await stop()
   }
@@ -1137,7 +1137,7 @@ test("rejecting a question fails the waiting task", async () => {
     const after = await handlers.snapshot({ directory })
     assert.equal(after.state.subtasks.t.state, "replied")
     assert.equal(after.state.subtasks.t.outcome, "failed")
-    assert.match(after.state.subtasks.t.error, /rejected/)
+    assert.match(after.state.subtasks.t.error ?? "", /rejected/)
   } finally {
     await stop()
   }
@@ -1206,7 +1206,7 @@ test("agent names are unique and config names must resolve uniquely", async () =
     const first = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
     const duplicate = await handlers.invoke({ directory, action: "agent.create", payload: { name: "nova" } })
     assert.equal(duplicate.ok, false)
-    assert.equal(duplicate.error.code, "duplicate_name")
+    assert.equal(duplicate.error?.code, "duplicate_name")
     const other = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova Prime" } })
     mkdirSync(join(directory, ".ensemble"), { recursive: true })
     writeFileSync(join(directory, ".ensemble", "config.json"), JSON.stringify({ version: 1, name: "Bad", leader: "Ghost", members: ["Ghost"], synthesis: true }))
@@ -1498,7 +1498,7 @@ test("failed init leaves no AGENTS.md block", async () => {
     const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
     const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id } })
     assert.equal(init.ok, false)
-    assert.equal(init.error.code, "init_failed")
+    assert.equal(init.error?.code, "init_failed")
     assert.equal(existsSync(join(directory, "AGENTS.md")), false)
   } finally {
     await stop()
@@ -1651,6 +1651,77 @@ test("agent replies normalize @KnownAgent and add a no-dispatch warning", async 
     const messages = next.state.messages[workspace.result.id]
     assert.ok(messages.some((message: any) => message.author === "agent" && message.text === "$Jessy please introduce yourself."))
     assert.ok(messages.some((message: any) => message.author === "system" && message.text.includes("Chat mentions do not assign work")))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("rpc boundary rejects snapshot input without a directory", async () => {
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await assert.rejects(handlers.snapshot({}), (error: { code?: string }) => error.code === "invalid_input")
+    await assert.rejects(handlers.snapshot({ directory: 42 }), (error: { code?: string }) => error.code === "invalid_input")
+  } finally {
+    await stop()
+  }
+})
+
+test("rpc boundary rejects invoke input without an action or with a malformed payload", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-rpc-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const missingAction = await handlers.invoke({ directory })
+    assert.equal(missingAction.ok, false)
+    assert.equal(missingAction.error?.code, "invalid_input")
+    const malformedPayload = await handlers.invoke({ directory, action: "agent.create", payload: "Nova" })
+    assert.equal(malformedPayload.ok, false)
+    assert.equal(malformedPayload.error?.code, "invalid_input")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("agent skillbox updates reject non-list values without clearing the skillbox", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skillbox-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const created = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const updated = await handlers.invoke({ directory, action: "agent.update", payload: { id: created.result.id, skillbox: "alpha" } })
+    assert.equal(updated.ok, false)
+    assert.equal(updated.error?.code, "invalid_input")
+    const next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.agents[created.result.id].skillbox, [])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("workspace member updates reject non-list values without changing membership", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-members-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const updated = await handlers.invoke({ directory, action: "workspace.update", payload: { id: workspace.result.id, memberIDs: "not-a-list" } })
+    assert.equal(updated.ok, false)
+    assert.equal(updated.error?.code, "invalid_input")
+    const next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.workspaces[workspace.result.id].memberIDs, [agent.result.id])
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

@@ -29,6 +29,35 @@ import type {
 type Ctx = any
 type Json = Record<string, any>
 
+function invalidInput(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "invalid_input" })
+}
+
+function rpcInput(value: unknown): { directory: string; action?: string; payload?: Json } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidInput("RPC input must be an object.")
+  const input = value as Record<string, unknown>
+  if (typeof input.directory !== "string" || input.directory.length === 0) throw invalidInput("directory must be a non-empty string.")
+  if (input.action !== undefined && typeof input.action !== "string") throw invalidInput("action must be a string.")
+  if (input.payload !== undefined && (!input.payload || typeof input.payload !== "object" || Array.isArray(input.payload))) {
+    throw invalidInput("payload must be an object.")
+  }
+  return { directory: input.directory, action: input.action as string | undefined, payload: input.payload as Json | undefined }
+}
+
+function stringList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) throw invalidInput(`${field} must be a list of strings.`)
+  const items: string[] = []
+  for (const item of value) {
+    if (typeof item !== "string") throw invalidInput(`${field} must be a list of strings.`)
+    items.push(item)
+  }
+  return [...new Set(items)]
+}
+
+function errorResult(error: any): { ok: false; error: { code: string; message: string } } {
+  return { ok: false, error: { code: error?.code ?? "error", message: error?.message ?? String(error) } }
+}
+
 function id(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 20)}`
 }
@@ -82,7 +111,7 @@ export class EnsembleV2Service {
   constructor(ctx: Ctx) {
     this.ctx = ctx
     this.catalog = new Catalog(ctx, () => {
-      if (this.registration) void this.registration.events.emit("changed", { version: this.store.snapshot().version }).catch(() => undefined)
+      this.emitChanged(this.store.snapshot().version)
     })
   }
 
@@ -124,12 +153,20 @@ export class EnsembleV2Service {
   }
 
   handlers(): {
-    snapshot: (input: { directory: string }) => Promise<Snapshot>
-    invoke: (input: { directory: string; action: string; payload?: Json }) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
+    snapshot: (input: unknown) => Promise<Snapshot>
+    invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
-      snapshot: ({ directory }) => this.snapshot(directory),
-      invoke: ({ directory, action, payload }) => this.invoke(directory, action, payload ?? {}),
+      snapshot: async (input) => this.snapshot(rpcInput(input).directory),
+      invoke: async (input) => {
+        try {
+          const request = rpcInput(input)
+          if (!request.action) throw invalidInput("action is required.")
+          return await this.invoke(request.directory, request.action, request.payload ?? {})
+        } catch (error: any) {
+          return errorResult(error)
+        }
+      },
     }
   }
 
@@ -237,7 +274,7 @@ export class EnsembleV2Service {
       this.pump()
       return { ok: true, result: jsonSafe(result) }
     } catch (error: any) {
-      return { ok: false, error: { code: error?.code ?? "error", message: error?.message ?? String(error) } }
+      return errorResult(error)
     }
   }
 
@@ -522,7 +559,7 @@ export class EnsembleV2Service {
       agent.backupModels = payload.backupModels
     }
     if (payload.skillbox !== undefined) {
-      const next = [...new Set(payload.skillbox.map(String))]
+      const next = stringList(payload.skillbox, "skillbox")
       if (next.length !== agent.skillbox.length || next.some((skill) => !agent.skillbox.includes(skill))) behavioral = true
       agent.skillbox = next
     }
@@ -741,7 +778,7 @@ export class EnsembleV2Service {
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     if (payload.name !== undefined) workspace.name = String(payload.name).trim() || workspace.name
     if (payload.memberIDs !== undefined) {
-      const members = [...new Set(payload.memberIDs.map(String))]
+      const members = stringList(payload.memberIDs, "memberIDs")
       if (members.length === 0) throw Object.assign(new Error("Choose at least one member."), { code: "invalid_members" })
       workspace.memberIDs = members
     }
