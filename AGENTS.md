@@ -1,6 +1,6 @@
 # Ensemble agent instructions
 
-Ensemble extends OpenCode's TUI with persistent agent teams. The repository now contains a developer-preview implementation on the integration branch. Keep changes within approved tickets and preserve the extension boundaries below.
+Ensemble extends OpenCode's TUI with persistent agent teams. Keep changes within approved tickets and preserve the extension boundaries below.
 
 ## Compatibility boundaries
 
@@ -9,6 +9,12 @@ Ensemble extends OpenCode's TUI with persistent agent teams. The repository now 
 - Verify compatibility against the target OpenCode release; distinguish documented behavior from tested behavior.
 - Surface unsupported requirements before implementation. Do not silently adopt private APIs, core patches, or weaker Skillbox enforcement.
 - Keep credentials, conversation content, and runtime memories out of the repository and public issues.
+
+## Development
+
+- Before changing TUI behavior, diagnosing location divergence, or editing host integration, read [the runtime guide](docs/agents/opencode-tui-runtime.md).
+- Use patch/direct file edits; for necessary multi-site scripted edits, inspect a temporary script and run it once. See the guide's editing discipline.
+- Run `npm run verify` after source changes and before handoff; report live checks separately, including skips.
 
 ## Agent skills
 

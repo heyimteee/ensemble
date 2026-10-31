@@ -15,6 +15,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 ## Working agreements
 
 - [Agent instructions](../AGENTS.md)
+- [OpenCode/OpenTUI runtime guide](agents/opencode-tui-runtime.md): host contracts, source navigation, and verification
 - [Issue tracker](agents/issue-tracker.md)
 - [Labels](agents/triage-labels.md)
 - [Domain document conventions](agents/domain.md)
