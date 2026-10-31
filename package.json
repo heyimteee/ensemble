@@ -15,6 +15,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "verify": "npm run check && npm test",
+    "doctor": "node --experimental-strip-types src/v2/doctor-cli.ts",
     "test": "node --test --experimental-strip-types src/v2/*.test.ts src/v2/tui/*.test.ts",
     "test:watch": "node --test --watch --experimental-strip-types src/v2/*.test.ts src/v2/tui/*.test.ts",
     "test:live": "bash scripts/live-check.sh",
