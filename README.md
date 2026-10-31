@@ -90,6 +90,22 @@ npm test
 
 The unit suite covers routing, config discovery, workspace canonicalization, message sequencing, streaming, direct-chat queues, recovery, approvals, scheduling, init, reset, and reassignment races. `npm run test:live` boots an isolated OpenCode server and TUI to verify the packaged plugin, empty state, agent creation, direct chat, leader help, and composer completions. Live checks are recorded in [docs/verification/2026-10-30.md](docs/verification/2026-10-30.md).
 
+### Runtime diagnosis
+
+```sh
+npm run doctor -- /path/to/project /path/to/another-project
+npm run doctor -- --json --service-file /path/to/service.json /path/to/project
+npm run doctor -- --server http://127.0.0.1:4096 /path/to/project
+```
+
+The doctor compares rosters, workspaces, member IDs, leaders, session bindings, and `.ensemble/config.json` membership. It exits `0` on agreement, `1` on divergence, or `2` on usage, connection, snapshot, or config-read failure. For a JSON-only stream without npm's script banner, use `npm run --silent doctor -- --json <directory> [...]`.
+
+By default it reads `$XDG_STATE_HOME/opencode/service.json`, or `~/.local/state/opencode/service.json` when `XDG_STATE_HOME` is unset. `--service-file` overrides that path. `OPENCODE_PASSWORD` overrides the descriptor password. `--server` alone bypasses the descriptor and uses only `OPENCODE_PASSWORD`; it never sends an unrelated local password to the override URL. Combine `--server` with `--service-file` only for the same service. Descriptor PID/version/ID are reported metadata, not verified host identity. Credentials, conversation text, and memories are omitted from output.
+
+**Snapshot-only, not an absolute no-write guarantee:** the doctor never calls `invoke`, writes files, repairs data, or changes service lifecycle. OpenCode may reconcile and persist workspace state while answering `snapshot`. Reports include this caveat. Bindings are created lazily and retained for former members, so their absence alone (or a retained former-member binding) is not a defect.
+
+Every requested directory is queried on the **one selected service**, sequentially. Cross-location differences can reveal stale snapshots or concurrent changes, but this command does not discover or compare separate service processes. Config is read after each snapshot, so this is not an atomic pre-reconciliation view. Review remediation manually; the command does not apply it.
+
 ## Documentation
 
 - [v2 implementation notes](docs/implementation.md)
