@@ -111,14 +111,14 @@ Message {
 - `$`, `@`, and `/` open an inline bordered completion popup above the composer. The composer stays focused; typing filters the list, `↑/↓` move, `Enter` inserts an agent/file token or runs a command, and `Esc` closes. No host completion dialog opens.
 - Agent and file completion insert stable references in place. Slash selection executes through the same command path as a typed `/command`.
 - Workspace creation and editing share a centered wizard: Directory → Name → Members → Leader → Synthesis. Editing an existing workspace uses Members → Leader → Synthesis. The leader step lists every member selected in the previous step and preselects the current leader when still selected.
-- Agent creation uses a centered wizard: Name → Title → Role → Model → Variant. `Ctrl+←` / `Ctrl+→` move between steps, `Enter` advances or submits, and `Shift+Enter` adds a newline in text steps. Normal left/right move the caret. Next/Back do not validate; the final submit validates and jumps to the first invalid step with an inline error.
+- Agent creation uses a centered wizard: Name → Title → Role → Model → Variant. `Ctrl+←` / `Ctrl+→` move between steps (Cmd on macOS), `Enter` advances or submits, and `Shift+Enter` adds a newline in text steps. Normal left/right move the caret. Next/Back do not validate; the final submit validates and jumps to the first invalid step with an inline error.
 - Agent name, title, and role fields are wrapping textareas. Workspace and agent drafts remain in the modal while navigating; `Esc` cancels the wizard.
 - Modal panels use an opaque raised surface and a double focus border. The page bars dim while a modal is open.
 - Rail agent names are predictable: selected agents use the success/accent color, every unselected agent uses normal text. Agent identity colors are not shuffled per row.
 - Focused panes and the composer use a white/contrast focus border; inactive panes use the muted border token.
-- The transcript is a rich Markdown scrollbox. Finalized messages have a colored author line and render as Markdown with tables, fenced code, headings, and lists. The entire scrollbox is keyed on a finalized-message version and remounted on finalization with viewport culling disabled, which avoids the plugin runtime's stale-scrollbox behavior. The live reply is a separate colored, wrapped block; when it finalizes it moves into the rich history.
+- The transcript is one stable rich Markdown scrollbox. Finalized messages keep stable identity and render in place with a colored author line, full Markdown scopes, tables, fenced code, headings, quotes, and links. The live reply is a separate colored, wrapped block; when it finalizes it moves into the stable history without remounting the transcript. Snapshot and chat-context polls are serialized so stale responses cannot repaint older text.
 - The transcript preserves scroll position when the user has scrolled up and stays pinned to the bottom when already there. A floating `↓ bottom` button and `End` jump to the newest message. `PageUp` / `PageDown` scroll by a page.
-- All chrome uses OpenCode semantic theme tokens: text, muted/faint metadata, borders, focus, and feedback colors. Chat author lines use stable per-agent categorical colors; the rail remains one selected color and white unselected agents.
+- All chrome uses OpenCode semantic theme tokens: text, muted/faint metadata, borders, focus, and feedback colors. Chat author lines use stable per-agent categorical colors; the rail remains one selected color and white unselected agents. All Ctrl shortcuts become Cmd on macOS, and shortcut labels follow the platform.
 - The top bar shows the workspace, directory, and familiar `git:(branch*) ↑N ↓N` metadata when the directory is a repository. Git status is read with stderr suppressed; non-git directories show no git segment.
 - `I` is bound as `shift+i` and appears in the footer and help. `/init` and `Ctrl+G` remain available.
 - The composer is a wrapping textarea inside the chat column. It grows to eight lines, then scrolls internally. `Enter` sends, `Shift+Enter` adds a newline, and completions stay above the composer. Its border uses the focus token while active and the muted border token otherwise.
@@ -141,7 +141,7 @@ handoffs/            typed Markdown handoffs
 init.json            AGENTS.md block version
 ```
 
-`I` or `/init` runs native `/init` in a temporary workspace session, waits for the agent to update `AGENTS.md`, then places the versioned `<!-- ensemble:start v1 -->` block at the top. Existing content outside the markers is preserved. Init failures leave no partial block.
+`I` or `/init` runs native `/init` in a temporary workspace session, waits for the agent to update `AGENTS.md`, then places the versioned `<!-- ensemble:start v2 -->` block at the top. Existing content outside the markers is preserved. Init failures leave no partial block.
 
 Reset is available through `/reset-ensemble` and `Ctrl+Shift+Delete`, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
@@ -255,11 +255,22 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 | #34 | Semantic theme, focus borders, layout, git metadata, and `I` |
 | #35 | v3 acceptance and verification |
 
+## v4 reliability, shortcuts, and team rules
+
+- One process-level service registry owns a single Ensemble service/store, with reference-counted location setup and changes broadcast to every RPC registration. Stores also merge roster/membership/binding updates and reconcile every workspace config when snapshots are read.
+- Direct-chat assistant messages use the same `agent` transcript role as group replies.
+- Markdown styling covers heading levels, strong, italic, strikethrough, inline/block code, links, lists, quotes, images, and syntax token scopes. Styling failures are reported instead of silently downgrading.
+- `Ctrl` bindings are translated to `Cmd` on macOS. Shortcut labels use `Cmd` on macOS and `Ctrl` elsewhere.
+- `~ ?` opens a searchable shortcut reference with fuzzy filtering, a scrollable list, and all archive/delete/reset/scroll/wizard shortcuts.
+- The versioned team contract is v2. It explicitly defines `$Name` chat mentions, `@path` file references, and Ensemble tools as the work-dispatch mechanism.
+- Agent replies that write `@KnownAgent` are display-normalized to `$KnownAgent`; a system note clarifies that a mention does not dispatch work.
+- The shared service is the root fix for the stale-location lost update: Jessy's profile and binding remained in storage, but one location held a workspace row without her. Both locations now reconcile to three members.
+
 ## Known limitations
 
 - The composer completes agents on `$`, files on `@`, and Ensemble commands on `/`; arbitrary native OpenCode slash commands are not proxied into the group chat.
 - Rich Markdown has no per-line color API; author identity colors are separate rows above each message. Clickable links are not implemented.
-- The transcript remounts its scrollbox when a finalized message changes. This keeps the plugin runtime reliable but resets any transient culling state; scroll position is restored deliberately.
+- Multiple OpenCode locations synchronize roster, workspace membership, and bindings through the shared service/store plus config reconciliation. Messages and active runs remain owned by the instance handling them.
 - Direct chats read the native OpenCode session context and render it in the Ensemble transcript; `o` opens the native session route. There is no separate Ensemble DM store, search, or export.
 - Some host dialog closes leave stale cells until the next full repaint; the page remains usable.
 - No npm package, versioning policy, or license has been selected.

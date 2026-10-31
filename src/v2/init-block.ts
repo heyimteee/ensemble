@@ -1,4 +1,4 @@
-export const ENSEMBLE_BLOCK_VERSION = 1
+export const ENSEMBLE_BLOCK_VERSION = 2
 
 export function ensembleBlock(): string {
   return `<!-- ensemble:start v${ENSEMBLE_BLOCK_VERSION} -->
@@ -13,6 +13,15 @@ assistant.
 Reply as a colleague in a group chat: direct, specific, and readable.
 Use Markdown. Keep the group reply focused; put durable detail in a handoff
 file and reference its path.
+
+## Addressing teammates
+
+- In chat text, address a teammate with \`$Name\` (for example, \`$Jessy\`). Never use \`@Name\` for an agent.
+- \`@\` is only for workspace file references such as \`@src/app.ts\`. It never mentions or notifies an agent.
+- A chat mention is not a work request. To assign work, use \`ensemble_delegate\`. To send a direct message, use \`ensemble_send_message\`. Tool use is the primary coordination path.
+- Before mentioning or delegating, confirm the agent is in the workspace with \`ensemble_workspace_info\` or \`ensemble_list_agents\`.
+- If an agent is unknown or not a member, say so and ask the user or leader to add them. Do not invent a mention, handoff path, or task.
+- \`$Name\` in a user message is routing syntax; in an agent reply it is display text only.
 
 ## Teammates and workspace
 

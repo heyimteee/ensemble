@@ -26,6 +26,7 @@ export class V2Store {
   }
 
   async load(): Promise<void> {
+    this.state = createInitialState()
     const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
     if (meta && typeof meta === "object") {
       this.state.version = Number(meta.version ?? 0)
@@ -87,6 +88,41 @@ export class V2Store {
     if (this.state.ui.activeWorkspaceID && !this.state.workspaces[this.state.ui.activeWorkspaceID]) {
       this.state.ui.activeWorkspaceID = undefined
     }
+  }
+
+  async sync(): Promise<boolean> {
+    const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
+    const version = Number((meta as any)?.version ?? 0)
+    if (version <= this.state.version) return false
+    for (const { value } of await this.scanAll("v2/agent/")) {
+      const agent = value as Agent
+      if (agent?.id) this.state.agents[agent.id] = agent
+    }
+    for (const { value } of await this.scanAll("v2/workspace/")) {
+      const workspace = value as Workspace
+      if (!workspace?.id) continue
+      const current = this.state.workspaces[workspace.id]
+      if (!current) {
+        this.state.workspaces[workspace.id] = workspace
+        continue
+      }
+      current.name = workspace.name
+      current.directory = workspace.directory
+      current.leaderID = workspace.leaderID
+      current.memberIDs = [...workspace.memberIDs]
+      current.synthesis = workspace.synthesis
+      current.archived = workspace.archived
+      current.paused = workspace.paused
+      current.configVersion = workspace.configVersion
+      current.lastActiveAt = Math.max(current.lastActiveAt, workspace.lastActiveAt)
+    }
+    for (const { value } of await this.scanAll("v2/binding/")) {
+      const binding = value as SessionBinding
+      if (binding?.workspaceID && binding?.agentID) this.state.bindings[bindingKey(binding.workspaceID, binding.agentID)] = binding
+    }
+    this.state.version = version
+    this.state.updatedAt = Number((meta as any)?.updatedAt ?? this.state.updatedAt)
+    return true
   }
 
   snapshot(): SnapshotState {

@@ -181,3 +181,10 @@ function wrapLine(value: string, width: number): string[] {
   if (line) lines.push(line)
   return lines.length > 0 ? lines : [""]
 }
+
+
+export function transcriptRole(role: string): "user" | "agent" | "system" {
+  if (role === "user") return "user"
+  if (role === "system") return "system"
+  return "agent"
+}

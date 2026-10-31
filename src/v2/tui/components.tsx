@@ -1,7 +1,9 @@
-import { For, Show } from "solid-js"
+import { For, Show, createSignal } from "solid-js"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState, Subtask } from "../types.ts"
 import type { Palette } from "./theme.ts"
-import { agentName, busyCount, missingSkills, short, unreadCount } from "./format.ts"
+import { agentName, busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
+import { platformLabel } from "./platform.ts"
+import { helpGroups, shortcutGroups } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
@@ -140,30 +142,35 @@ export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cu
   )
 }
 
-const shortcutGroups: Array<{ title: string; entries: Array<[string, string]> }> = [
-  { title: "Leader", entries: [["~", "Leader key"], ["~ ?", "This help"], ["~ q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },
-  { title: "Navigation", entries: [["h / l", "Previous / next column"], ["j / k", "Next / previous item"], ["Enter", "Open selected chat"], ["i", "Focus composer"], ["Esc", "Leave composer"]] },
-  { title: "Workspaces", entries: [["n", "New workspace"], ["g", "Edit members and leader"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume"], ["I", "Init Ensemble in this workspace"]] },
-  { title: "Chat", entries: [["$Name", "Mention an agent"], ["@path", "Reference a workspace file"], ["/command", "Ensemble commands"], ["PageUp / PageDown", "Scroll transcript"]] },
-  { title: "Subtasks", entries: [["d", "Delegate"], ["t", "Reassign"], ["Enter", "Open result"], ["r", "Retry"], ["R", "Restart"], ["x", "Cancel"], ["o", "Open native session"]] },
-  { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive agent"], ["Ctrl+Shift+A", "Delete agent"]] },
-  { title: "Settings", entries: [["Tab", "Cycle tab"], ["e", "Edit"], ["b", "Add backup"], ["Ctrl+↑ / Ctrl+↓", "Move backup"], ["Backspace", "Remove backup"], ["Ctrl+S", "Save"], ["Space", "Toggle skill"], ["Ctrl+F", "Filter skills"]] },
-]
-
-export function HelpView(props: { colors: Palette }) {
+function HelpEntries(props: { colors: Palette; groups: Array<{ title: string; entries: Array<[string, string]> }> }) {
   return (
-    <scrollbox flexGrow={1} stickyScroll stickyStart="top" width="100%">
-      <box flexDirection="column">
-        <text fg={props.colors.accent}>Keyboard shortcuts</text>
-        <For each={shortcutGroups}>{(group) => (
-          <>
-            <text fg={props.colors.leader}>{group.title}</text>
-            <For each={group.entries}>{(entry) => <text fg={props.colors.text}>{entry[0].padEnd(16)} {entry[1]}</text>}</For>
-          </>
-        )}</For>
-        <text fg={props.colors.muted}>~ is disabled while the composer or a dialog is active.</text>
+    <box flexDirection="column">
+      <For each={props.groups}>{(group) => (
+        <>
+          <text fg={props.colors.leader}>{group.title}</text>
+          <For each={group.entries}>{(entry) => <text fg={props.colors.text}>{platformLabel(entry[0]).padEnd(16)} {platformLabel(entry[1])}</text>}</For>
+        </>
+      )}</For>
+      <Show when={props.groups.length === 0}><text fg={props.colors.muted}>No matching shortcuts.</text></Show>
+      <text fg={props.colors.muted}>~ is disabled while the composer or a dialog is active.</text>
+    </box>
+  )
+}
+
+export function HelpView(props: { colors: Palette; scrollRef?: (value: any) => void }) {
+  const [query, setQuery] = createSignal("")
+  return (
+    <box flexGrow={1} flexDirection="column" minHeight={0}>
+      <text fg={props.colors.accent} flexShrink={0}>Keyboard shortcuts</text>
+      <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.focus} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
+        <input ref={(value: any) => queueMicrotask(() => value?.focus?.())} placeholder="search shortcuts by key or action…" onInput={(value: string) => setQuery(value)} />
       </box>
-    </scrollbox>
+      <scrollbox ref={(value: any) => props.scrollRef?.(value)} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
+        <Show when={query()} keyed fallback={<HelpEntries colors={props.colors} groups={shortcutGroups} />}>
+          <HelpEntries colors={props.colors} groups={helpGroups(query())} />
+        </Show>
+      </scrollbox>
+    </box>
   )
 }
 
@@ -190,29 +197,29 @@ export function SettingsView(props: {
           <text>Name: {props.agent!.name}</text>
           <text>Title: {props.agent!.title}</text>
           <text>Role: {short(props.agent!.role || "(empty)", 100)}</text>
-          <text fg={props.colors.muted}>e edits a field · Ctrl+S saves</text>
+          <text fg={props.colors.muted}>{platformLabel("e edits a field · Ctrl+S saves")}</text>
         </Show>
         <Show when={props.tab === "models"}>
           <text>Main: {props.agent!.mainModel.providerID}/{props.agent!.mainModel.modelID}{props.agent!.mainModel.variant ? `#${props.agent!.mainModel.variant}` : ""}</text>
           <For each={props.agent!.backupModels}>{(model, index) => <text fg={props.backupCursor === index() ? props.colors.good : props.colors.muted}>{props.backupCursor === index() ? "› " : "  "}Backup {index() + 1}: {model.providerID}/{model.modelID}</text>}</For>
-          <text fg={props.colors.muted}>e main · b add · ctrl+↑/↓ move · backspace remove</text>
+          <text fg={props.colors.muted}>{platformLabel("e main · b add · Ctrl+↑/↓ move · Backspace remove")}</text>
         </Show>
         <Show when={props.tab === "memories"}>
           <For each={props.memories}>{(memory, index) => (
             <text fg={props.memoryCursor === index() ? props.colors.good : props.colors.text}>[{memory.origin}/{memory.scope}] {short(memory.text, 80)} · {memory.source}</text>
           )}</For>
           <Show when={props.memories.length === 0}><text fg={props.colors.muted}>No memories.</text></Show>
-          <text fg={props.colors.muted}>e add · Ctrl+D delete · Ctrl+P promote</text>
+          <text fg={props.colors.muted}>{platformLabel("e add · Ctrl+D delete · Ctrl+P promote")}</text>
         </Show>
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
-          <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · Ctrl+F</text>
+          <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}</text>
           <For each={props.skills.slice(0, 40)}>{(skill, index) => (
             <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{props.agent!.skillbox.includes(skill.id) ? "[x]" : "[ ]"} {skill.name} ({skill.id})</text>
           )}</For>
           <text fg={props.colors.muted}>Space toggles · empty means no optional skills</text>
         </Show>
-        <text fg={props.colors.muted}>Ctrl+S save · Esc cancel</text>
+        <text fg={props.colors.muted}>{platformLabel("Ctrl+S save · Esc cancel")}</text>
       </box>
     </Show>
   )

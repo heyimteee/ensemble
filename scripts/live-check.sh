@@ -102,7 +102,17 @@ if ! grep -q "Keyboard shortcuts" <<<"$HELP"; then
   tmux capture-pane -p -t "$TUI" >&2 || true
   exit 1
 fi
-
+if ! grep -q "Ctrl+Shift+W" <<<"$HELP"; then
+  echo "live-check: shortcut help omitted workspace delete" >&2
+  exit 1
+fi
+tmux send-keys -t "$TUI" 'delete workspace'; sleep 0.5
+SEARCHED=$(tmux capture-pane -p -t "$TUI")
+if ! grep -q "Ctrl+Shift+W" <<<"$SEARCHED" || grep -q "Leader key" <<<"$SEARCHED"; then
+  echo "live-check: shortcut search did not filter" >&2
+  tmux capture-pane -p -t "$TUI" >&2 || true
+  exit 1
+fi
 tmux send-keys -t "$TUI" Escape; sleep 0.5
 
 printf 'live fixture\n' > "$BASE/project/notes.md"
@@ -136,7 +146,7 @@ if [ "$MODELS" -gt 0 ]; then
     tmux capture-pane -p -t "$TUI" >&2 || true
     exit 1
   fi
-  if ! grep -q "Direct chat with LiveAgent" <<<"$AGENT_SCREEN"; then
+  if ! grep -q "LiveAgent · direct" <<<"$AGENT_SCREEN"; then
     echo "live-check: creating an agent did not open a direct chat" >&2
     tmux capture-pane -p -t "$TUI" >&2 || true
     exit 1

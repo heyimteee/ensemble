@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { ageLabel, agentColor, fuzzyMatch, markdownText, missingSkills, renderMarkdownLines, resultForTask, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
+import { ageLabel, agentColor, fuzzyMatch, markdownText, missingSkills, renderMarkdownLines, resultForTask, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
 import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
 
 const agent = (patch: Partial<Agent> = {}): Agent => ({
@@ -82,4 +82,12 @@ test("renderMarkdownLines preserves headings, bullets, code, and tables", () => 
   assert.ok(lines.some((line) => line.includes("Nova") && line.includes("2")))
   assert.ok(lines.some((line) => line.trimStart().startsWith("const x = 1")))
   assert.deepEqual(renderMarkdownLines("", 10), [" "])
+})
+
+
+test("direct assistant messages use the rich agent transcript role", () => {
+  assert.equal(transcriptRole("assistant"), "agent")
+  assert.equal(transcriptRole("assistant"), "agent")
+  assert.equal(transcriptRole("user"), "user")
+  assert.equal(transcriptRole("system"), "system")
 })

@@ -7,7 +7,7 @@ import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, writeAg
 import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, onboardingPrompt } from "./init-block.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
-import { unknownMentions, visibleRecipients } from "./routing.ts"
+import { normalizeAgentMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type {
   Agent,
@@ -62,7 +62,7 @@ function sameModels(a: ModelRef[], b: ModelRef[]): boolean {
 export class EnsembleV2Service {
   readonly ctx: Ctx
   private store!: V2Store
-  private registration: any
+  private readonly registrations = new Set<any>()
   private retryRegistration: any
   private stopped = false
   private pumping = false
@@ -88,7 +88,7 @@ export class EnsembleV2Service {
 
   async start(): Promise<() => Promise<void>> {
     this.store = new V2Store(this.ctx, (state) => {
-      if (this.registration) void this.registration.events.emit("changed", { version: state.version }).catch(() => undefined)
+      this.emitChanged(state.version)
     })
     await this.store.load()
     await this.ensureInterruptedApprovals()
@@ -134,7 +134,17 @@ export class EnsembleV2Service {
   }
 
   attach(registration: any): void {
-    this.registration = registration
+    if (registration) this.registrations.add(registration)
+  }
+
+  detach(registration: any): void {
+    if (registration) this.registrations.delete(registration)
+  }
+
+  private emitChanged(version: number): void {
+    for (const registration of this.registrations) {
+      void registration?.events?.emit?.("changed", { version })?.catch?.(() => undefined)
+    }
   }
 
   private async migrateV1(): Promise<void> {
@@ -200,12 +210,14 @@ export class EnsembleV2Service {
   }
 
   private async snapshot(directory: string): Promise<Snapshot> {
+    await this.store.sync()
     try {
       await this.discoverWorkspace(directory)
       this.lastConfigError = undefined
     } catch (error: any) {
       this.lastConfigError = error?.message ?? String(error)
     }
+    await this.reconcileWorkspaceConfigs()
     if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
@@ -219,6 +231,7 @@ export class EnsembleV2Service {
   }
 
   private async invoke(directory: string, action: string, payload: Json): Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }> {
+    await this.store.sync()
     try {
       const result = await this.dispatch(directory, action, payload)
       this.pump()
@@ -611,6 +624,32 @@ export class EnsembleV2Service {
       resolved.push(matches[0].id)
     }
     return [...new Set(resolved)]
+  }
+
+  private async reconcileWorkspaceConfigs(): Promise<void> {
+    const state = this.store.snapshot()
+    for (const workspace of Object.values(state.workspaces)) {
+      if (workspace.archived) continue
+      const config = readWorkspaceConfig(workspace.directory)
+      if (!config) continue
+      try {
+        const members = this.resolveAgentNames(config.members, state.agents)
+        const leaderID = this.resolveAgentNames([config.leader], state.agents)[0]
+        if (!members.includes(leaderID)) continue
+        const changed = workspace.name !== config.name || workspace.leaderID !== leaderID || workspace.synthesis !== config.synthesis || workspace.paused !== config.paused || workspace.memberIDs.join("\0") !== members.join("\0")
+        if (!changed) continue
+        workspace.name = config.name
+        workspace.leaderID = leaderID
+        workspace.memberIDs = members
+        workspace.synthesis = config.synthesis
+        workspace.paused = config.paused
+        workspace.configVersion = config.version
+        workspace.lastActiveAt = now()
+        await this.store.saveWorkspace(workspace)
+      } catch {
+        // Keep the last good state for workspaces whose config names cannot be resolved.
+      }
+    }
   }
 
   private async discoverWorkspace(directory: string): Promise<Workspace | undefined> {
@@ -1780,9 +1819,11 @@ export class EnsembleV2Service {
         await this.ensureInterruptedApproval(currentTask)
         return
       }
-      const text = result?.text || "Work completed."
+      const mention = normalizeAgentMentions(result?.text || "Work completed.", workspace.memberIDs.map((id) => current.agents[id]).filter((item): item is Agent => Boolean(item)))
+      const reply = mention.text
+      if (mention.changed) await this.appendMessage(workspace, { author: "system", text: `Mention syntax normalized: ${mention.names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; use ensemble_delegate or ensemble_send_message.`, kind: "system", taskID: task.id })
       if (currentTask.approvalID) {
-        await this.finalizeStream(live, text, false, globalEpoch, workspaceEpoch, task.workspaceID)
+        await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
         currentTask.activeRunID = undefined
         await this.store.saveSubtask(currentTask)
         return
@@ -1793,7 +1834,7 @@ export class EnsembleV2Service {
         currentTask.awaitingChildren = true
         currentTask.state = "working"
         await this.store.saveSubtask(currentTask)
-        await this.finalizeStream(live, text, false, globalEpoch, workspaceEpoch, task.workspaceID)
+        await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
         await this.maybeSynthesize(currentTask.id)
         return
       }
@@ -1801,7 +1842,7 @@ export class EnsembleV2Service {
       currentTask.outcome = "succeeded"
       currentTask.runSummary = result?.tools.length ? `${result.tools.length} tool call${result.tools.length === 1 ? "" : "s"}` : "no tool calls"
       currentTask.repliedAt = now()
-      const message = await this.finalizeStream(live, text, false, globalEpoch, workspaceEpoch, task.workspaceID)
+      const message = await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
       currentTask.resultMessageID = message?.id
       await this.store.saveSubtask(currentTask)
       if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID)

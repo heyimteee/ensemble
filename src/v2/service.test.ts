@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { SharedEnsemble } from "./shared-service.ts"
 import { V2Store } from "./store.ts"
 
 type Handlers = {
@@ -11,8 +12,8 @@ type Handlers = {
   invoke: (input: { directory: string; action: string; payload?: any }) => Promise<any>
 }
 
-function fakeContext() {
-  const values = new Map<string, unknown>()
+function fakeContext(sharedValues?: Map<string, unknown>) {
+  const values = sharedValues ?? new Map<string, unknown>()
   const removedSessions: string[] = []
   const interruptedSessions: string[] = []
   const movedSessions: Array<{ sessionID: string; directory: string }> = []
@@ -1088,7 +1089,7 @@ test("session creation failures mark a subtask failed with an explanation", asyn
 test("disabling synthesis closes a parent task when children reply", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx, tools } = fakeContext()
-  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 50)) }
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -1103,13 +1104,13 @@ test("disabling synthesis closes a parent task when children reply", async () =>
       const binding = Object.values(next.state.bindings)[0] as any
       if (!binding) return false
       sessionID = binding.sessionID
-      return true
+      const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
+      return parent?.state === "working" && Object.values(next.state.runs).some((run: any) => run.status === "running")
     })
     await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
-      return parent?.state === "replied"
+      return (next.state.messages[workspace.result.id] ?? []).some((message: any) => message.text === "Delegated subtasks completed.")
     }, 3000)
     const after = await handlers.snapshot({ directory })
     assert.ok(after.state.messages[workspace.result.id].some((message: any) => message.text === "Delegated subtasks completed."))
@@ -1304,7 +1305,7 @@ test("init runs native /init then places the versioned block at the top", async 
     assert.equal(init.ok, true)
     assert.ok(commands.some((entry) => entry.name === "init"))
     const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
-    assert.ok(content.startsWith("<!-- ensemble:start v1 -->"))
+    assert.ok(content.startsWith("<!-- ensemble:start v2 -->"))
     assert.ok(content.includes("# Repo"))
     assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1)
   } finally {
@@ -1544,6 +1545,112 @@ test("streaming deltas accumulate into the live reply and reconcile with the fin
     assert.equal(reply.text, "OK")
     assert.equal(reply.streaming, false)
     assert.equal(reply.interrupted, false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+
+test("the shared registry keeps one service and one store across locations", async () => {
+  const values = new Map<string, unknown>()
+  const first = fakeContext(values)
+  const second = fakeContext(values)
+  const shared = new SharedEnsemble()
+  const one = await shared.acquire(first.ctx)
+  const two = await shared.acquire(second.ctx)
+  try {
+    assert.equal(one.service, two.service)
+    const directory = mkdtempSync(join(tmpdir(), "ensemble-shared-"))
+    const created = await one.service.handlers().invoke({ directory, action: "agent.create", payload: { name: "Jessy" } })
+    assert.equal(created.ok, true)
+    const seen = await two.service.handlers().snapshot({ directory })
+    assert.ok(seen.state.agents[created.result.id])
+  } finally {
+    await one.release()
+    await two.release()
+  }
+})
+
+test("config discovery restores a member missing from a stale workspace row", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-jessy-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const clark = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Clark" } })
+    const angkasa = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Angkasa" } })
+    const jessy = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Jessy" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "Vera", directory, memberIDs: [clark.result.id, angkasa.result.id], leaderID: clark.result.id } })
+    writeFileSync(join(directory, ".ensemble", "config.json"), JSON.stringify({
+      version: 1,
+      id: workspace.result.id,
+      name: "Vera",
+      leader: "Clark",
+      members: ["Clark", "Angkasa", "Jessy"],
+      synthesis: true,
+      paused: false,
+    }))
+    const next = await handlers.snapshot({ directory })
+    const restored = next.state.workspaces[workspace.result.id]
+    assert.ok(restored.memberIDs.includes(jessy.result.id))
+    assert.deepEqual(restored.memberIDs, [clark.result.id, angkasa.result.id, jessy.result.id])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+
+test("separate service instances converge over shared storage", async () => {
+  const values = new Map<string, unknown>()
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-converge-"))
+  const first = fakeContext(values)
+  const second = fakeContext(values)
+  const a = new EnsembleV2Service(first.ctx)
+  const b = new EnsembleV2Service(second.ctx)
+  const stopA = await a.start()
+  const stopB = await b.start()
+  try {
+    const clark = await a.handlers().invoke({ directory, action: "agent.create", payload: { name: "Clark" } })
+    const angkasa = await a.handlers().invoke({ directory, action: "agent.create", payload: { name: "Angkasa" } })
+    const jessy = await a.handlers().invoke({ directory, action: "agent.create", payload: { name: "Jessy" } })
+    const workspace = await a.handlers().invoke({ directory, action: "workspace.create", payload: { name: "Vera", directory, memberIDs: [clark.result.id, angkasa.result.id], leaderID: clark.result.id } })
+    await a.handlers().invoke({ directory, action: "workspace.update", payload: { id: workspace.result.id, memberIDs: [clark.result.id, angkasa.result.id, jessy.result.id], leaderID: clark.result.id } })
+    const seen = await b.handlers().snapshot({ directory })
+    assert.deepEqual(seen.state.workspaces[workspace.result.id].memberIDs, [clark.result.id, angkasa.result.id, jessy.result.id])
+    await b.handlers().invoke({ directory, action: "workspace.activate", payload: { id: workspace.result.id } })
+    const again = await a.handlers().snapshot({ directory })
+    assert.deepEqual(again.state.workspaces[workspace.result.id].memberIDs, [clark.result.id, angkasa.result.id, jessy.result.id])
+  } finally {
+    await stopA()
+    await stopB()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+
+test("agent replies normalize @KnownAgent and add a no-dispatch warning", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-mention-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).context = async () => ({ data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "@Jessy please introduce yourself." }] }] })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const clark = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Clark" } })
+    const jessy = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Jessy" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "Vera", directory, memberIDs: [clark.result.id, jessy.result.id], leaderID: clark.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Coordinate" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const next = await handlers.snapshot({ directory })
+    const messages = next.state.messages[workspace.result.id]
+    assert.ok(messages.some((message: any) => message.author === "agent" && message.text === "$Jessy please introduce yourself."))
+    assert.ok(messages.some((message: any) => message.author === "system" && message.text.includes("Chat mentions do not assign work")))
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

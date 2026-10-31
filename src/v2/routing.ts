@@ -51,3 +51,16 @@ export function visibleRecipients(text: string, workspace: Workspace, agents: Re
   const mentioned = parseMentions(text, workspace, agents).filter((agentID) => agents[agentID] && !agents[agentID].archived)
   return mentioned.length > 0 ? mentioned : [workspace.leaderID]
 }
+
+export function normalizeAgentMentions(text: string, agents: Agent[]): { text: string; changed: boolean; names: string[] } {
+  let output = text
+  const names: string[] = []
+  for (const agent of agents) {
+    const pattern = new RegExp(`(^|[\\s([{])@${escapeRegExp(agent.name)}(?=$|[\\s.,!?;:)\\]}])`, "gi")
+    output = output.replace(pattern, (_match, prefix: string) => {
+      names.push(agent.name)
+      return `${prefix}$${agent.name}`
+    })
+  }
+  return { text: output, changed: names.length > 0, names: [...new Set(names)] }
+}

@@ -7,10 +7,13 @@ import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, TaskBoard, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
-import { agentColor, fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { agentColor, fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { palette } from "./theme.ts"
 import { pickerWindow, toggleSelected } from "./picker.ts"
+import { markdownStyles } from "./syntax.ts"
+import { navModifier, platformBind, platformLabel } from "./platform.ts"
 import { readGitState, type GitState } from "./git.ts"
+import { normalizeAgentMentions } from "../routing.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat" | "tasks"
@@ -95,19 +98,16 @@ async function invoke(context: any, action: string, payload: any = {}): Promise<
 export function EnsembleV2App() {
   const context = usePlugin()
   const colors = palette(context.theme as any)
+  const platformLayer = (factory: () => any) => context.keymap.layer(() => {
+    const value = factory()
+    return { ...value, commands: value.commands?.map((command: any) => typeof command.bind === "string" ? { ...command, bind: platformBind(command.bind) } : command) }
+  })
   const syntaxStyle = (() => {
     try {
-      const theme = context.theme as any
-      return SyntaxStyle.fromStyles({
-        default: { fg: theme.text.base },
-        keyword: { fg: theme.syntax?.keyword ?? theme.text.action?.primary?.base ?? theme.text.base },
-        string: { fg: theme.syntax?.string ?? theme.text.feedback?.success?.base ?? theme.text.base },
-        comment: { fg: theme.syntax?.comment ?? theme.text.muted, italic: true },
-        number: { fg: theme.syntax?.number ?? theme.text.base },
-        "markup.heading": { fg: theme.markdown?.heading ?? theme.hue?.accent?.[200] ?? theme.text.base, bold: true },
-        "markup.raw": { fg: theme.markdown?.code ?? theme.text.feedback?.info?.base ?? theme.text.base },
-      }, (context.renderer as any).nativeScene)
-    } catch {
+      return SyntaxStyle.fromStyles(markdownStyles(context.theme), (context.renderer as any).nativeScene)
+    } catch (error) {
+      console.error("ensemble: markdown styling unavailable", error)
+      try { context.ui.toast.show({ title: "Ensemble", message: "Rich Markdown styling unavailable; using plain text.", variant: "warning" }) } catch {}
       return undefined
     }
   })()
@@ -143,16 +143,15 @@ export function EnsembleV2App() {
   const [textPrompt, setTextPrompt] = createSignal<TextPromptState | null>(null)
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
-  const [transcriptVersion, setTranscriptVersion] = createSignal(0)
   const [atBottom, setAtBottom] = createSignal(true)
   let composerRef: any
   let textPromptRef: any
   let wizardRef: any
   let transcriptScrollRef: any
-  let lastFinalizedKey = ""
-  let lastChatKey = ""
-  let savedScrollTop = 0
-  let restoreScroll = false
+  let helpScrollRef: any
+  const lineCache = new Map<string, ChatLine>()
+  let refreshSeq = 0
+  let chatSeq = 0
   const [restored, setRestored] = createSignal(false)
   let lastSavedHistory = ""
   let lastConfigError = ""
@@ -206,33 +205,53 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? (state()?.messages[workspace.id] ?? []).slice(-40) : []
   })
+  const stableLines = (lines: ChatLine[]): ChatLine[] => {
+    const seen = new Set<string>()
+    const next = lines.map((line) => {
+      seen.add(line.id)
+      const previous = lineCache.get(line.id)
+      if (previous
+        && previous.author === line.author
+        && previous.role === line.role
+        && previous.text === line.text
+        && previous.kind === line.kind
+        && previous.streaming === line.streaming
+        && previous.interrupted === line.interrupted
+        && previous.agentID === line.agentID) return previous
+      const value = { ...line }
+      lineCache.set(line.id, value)
+      return value
+    })
+    for (const id of lineCache.keys()) if (!seen.has(id)) lineCache.delete(id)
+    return next
+  }
   const chatLines = createMemo<ChatLine[]>(() => {
     if (surface()?.kind === "agent") {
       const messages = (chatContext()?.messages ?? []).slice(-40).map((message: ChatMessage) => ({
         id: message.id,
         author: message.author,
-        role: message.role,
-        text: message.text,
+        role: transcriptRole(message.role),
+        text: message.role === "assistant" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
         agentID: surfaceAgent()?.id,
         createdAt: message.createdAt,
       }))
       const live = liveDm()
       if (live && chatContext()?.sessionID === live.sessionID) {
-        messages.push({ id: "live", author: surfaceAgent()?.name ?? "Agent", role: "assistant" as const, text: live.text, agentID: surfaceAgent()?.id, createdAt: Date.now(), streaming: true })
+        messages.push({ id: "live", author: surfaceAgent()?.name ?? "Agent", role: "agent" as const, text: live.text, agentID: surfaceAgent()?.id, createdAt: Date.now(), streaming: true })
       }
-      return messages
+      return stableLines(messages)
     }
-    return groupMessages().map((message) => ({
+    return stableLines(groupMessages().map((message) => ({
       id: message.id,
       author: message.author === "user" ? "You" : message.author === "system" ? "Ensemble" : state()?.agents[message.agentID ?? ""]?.name ?? "Unknown agent",
       role: message.author === "user" ? "user" as const : message.author === "system" ? "system" as const : "agent" as const,
       agentID: message.agentID,
-      text: message.text,
+      text: message.author === "agent" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
       kind: message.kind,
       streaming: message.streaming,
       interrupted: message.interrupted,
       createdAt: message.createdAt,
-    }))
+    })))
   })
   const finalizedLines = createMemo(() => chatLines().filter((message) => !message.streaming))
   const liveLine = createMemo(() => chatLines().find((message) => message.streaming))
@@ -251,13 +270,6 @@ export function EnsembleV2App() {
   const emptyChat = () => surface()?.kind === "agent"
     ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}\n\nSend a direct message. It goes to this agent's native OpenCode session.`
     : "Group chat\n\nSay something to your team. $Name mentions an agent; @path references a file."
-  const bumpTranscript = () => {
-    const box = transcriptScrollRef
-    const pinned = atBottom()
-    savedScrollTop = Number(box?.scrollTop ?? 0)
-    restoreScroll = !pinned
-    setTranscriptVersion((value) => value + 1)
-  }
   const syncTranscriptScroll = () => {
     const box = transcriptScrollRef
     if (!box) { setAtBottom(true); return }
@@ -321,12 +333,15 @@ export function EnsembleV2App() {
   const refreshChat = async () => {
     const value = surface()
     if (value?.kind !== "agent") { setChatContext(null); return }
+    const seq = ++chatSeq
     try {
       const next = await invoke(context, "chat.context", { agentID: value.agentID, workspaceID: value.workspaceID })
+      if (seq !== chatSeq) return
+      const current = surface()
+      if (current?.kind !== "agent" || current.agentID !== value.agentID || current.workspaceID !== value.workspaceID) return
       setChatContext(next)
-      const key = (next.messages ?? []).map((message: any) => `${message.id}:${String(message.text ?? "").length}`).join("|")
-      if (key !== lastChatKey) { lastChatKey = key; bumpTranscript() }
     } catch (error: any) {
+      if (seq !== chatSeq) return
       setChatContext(null)
       setStatus(`Chat unavailable: ${error?.message ?? error}`)
     }
@@ -357,12 +372,12 @@ export function EnsembleV2App() {
   }
 
   const refresh = async () => {
+    const seq = ++refreshSeq
     try {
       const next = await callRpc(context, "snapshot", { directory: directoryOf(context) })
+      if (seq !== refreshSeq) return
       setSnapshot(next)
       syncTranscriptScroll()
-      const finalizedKey = Object.values(next.state.messages ?? {}).flat().filter((message: any) => !message.streaming).map((message: any) => `${message.id}:${String(message.text ?? "").length}`).join("|")
-      if (finalizedKey !== lastFinalizedKey) { lastFinalizedKey = finalizedKey; bumpTranscript() }
       try { (context.renderer as any)?.requestRender?.() } catch {}
       if (next.configError && next.configError !== lastConfigError) {
         lastConfigError = next.configError
@@ -940,7 +955,7 @@ export function EnsembleV2App() {
       context.ui.toast.show({ title: "Leader", message: `Unknown shortcut: ${sequence || name}`, variant: "warning" })
     }
     keyInput.on("keypress", onKey)
-    context.keymap.layer(() => ({
+    platformLayer(() => ({
       mode: "global", priority: 120,
       enabled: () => isOurRoute() && !isModal() && leaderMode(),
       commands: [
@@ -950,7 +965,7 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.help", "ensemble.v2.leave", "ensemble.v2.cancel"],
     }))
-    context.keymap.layer(() => ({
+    platformLayer(() => ({
       mode: "global", priority: 100,
       enabled: () => isOurRoute() && !isModal() && !leaderMode() && !composerActive(),
       commands: [
@@ -992,13 +1007,13 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.leader", "ensemble.v2.left", "ensemble.v2.right", "ensemble.v2.down", "ensemble.v2.up", "ensemble.v2.enter", "ensemble.v2.compose", "ensemble.v2.new.agent", "ensemble.v2.new.workspace", "ensemble.v2.workspace.edit", "ensemble.v2.settings", "ensemble.v2.approvals", "ensemble.v2.search", "ensemble.v2.scroll.up", "ensemble.v2.scroll.down", "ensemble.v2.scroll.bottom", "ensemble.v2.init", "ensemble.v2.init.alt", "ensemble.v2.pause", "ensemble.v2.native", "ensemble.v2.delegate", "ensemble.v2.reassign", "ensemble.v2.retry", "ensemble.v2.restart", "ensemble.v2.cancel.task", "ensemble.v2.workspace.next", "ensemble.v2.workspace.prev", "ensemble.v2.agent.next", "ensemble.v2.agent.prev", "ensemble.v2.workspace.archive", "ensemble.v2.workspace.delete", "ensemble.v2.agent.archive", "ensemble.v2.agent.delete", "ensemble.v2.reset", "ensemble.v2.back"],
     }))
-    context.keymap.layer(() => ({
+    platformLayer(() => ({
       mode: "global", priority: 130,
       enabled: () => isOurRoute() && composerActive() && !modal(),
       commands: [{ id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } }],
       bindings: ["ensemble.v2.composer.cancel"],
     }))
-    context.keymap.layer(() => ({
+    platformLayer(() => ({
       mode: "global", priority: 140,
       enabled: () => isOurRoute() && composerActive() && completion() !== null && !modal(),
       commands: [
@@ -1009,7 +1024,7 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
     }))
-    context.keymap.layer(() => ({
+    platformLayer(() => ({
       mode: "global", priority: 160,
       enabled: () => isOurRoute() && wizard() !== null && !leaderMode(),
       commands: [
@@ -1019,7 +1034,7 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.wizard.prev", "ensemble.v2.wizard.next", "ensemble.v2.wizard.cancel"],
     }))
-    context.keymap.layer(() => ({
+    platformLayer(() => ({
       mode: "global", priority: 110,
       enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode(),
       commands: [
@@ -1040,7 +1055,7 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.tab", "ensemble.v2.edit", "ensemble.v2.backup.add", "ensemble.v2.backup.up", "ensemble.v2.backup.down", "ensemble.v2.backup.remove", "ensemble.v2.save", "ensemble.v2.skill", "ensemble.v2.filter", "ensemble.v2.memory.delete", "ensemble.v2.memory.promote", "ensemble.v2.settings.up", "ensemble.v2.settings.down", "ensemble.v2.settings.back"],
     }))
-    context.keymap.layer(() => ({
+    platformLayer(() => ({
       mode: "global", priority: 110,
       enabled: () => isOurRoute() && !modal() && approvalsOpen() && !leaderMode(),
       commands: [
@@ -1051,11 +1066,15 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.approval.up", "ensemble.v2.approval.down", "ensemble.v2.resolve", "ensemble.v2.approvals.back"],
     }))
-    context.keymap.layer(() => ({
+    platformLayer(() => ({
       mode: "global", priority: 110,
       enabled: () => isOurRoute() && !modal() && helpOpen() && !leaderMode(),
-      commands: [{ id: "ensemble.v2.help.back", title: "Ensemble: Close help", bind: "escape", run: () => setHelpOpen(false) }],
-      bindings: ["ensemble.v2.help.back"],
+      commands: [
+        { id: "ensemble.v2.help.up", title: "Ensemble: Help page up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); helpScrollRef?.scrollBy?.(-10) } },
+        { id: "ensemble.v2.help.down", title: "Ensemble: Help page down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); helpScrollRef?.scrollBy?.(10) } },
+        { id: "ensemble.v2.help.back", title: "Ensemble: Close help", bind: "escape", run: () => setHelpOpen(false) },
+      ],
+      bindings: ["ensemble.v2.help.up", "ensemble.v2.help.down", "ensemble.v2.help.back"],
     }))
     return () => { clearInterval(timer); keyInput.off("keypress", onKey); stopData() }
   })
@@ -1528,8 +1547,7 @@ export function EnsembleV2App() {
                         </box>
                       }>
                         <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
-                          <Show when={transcriptVersion()} keyed>
-                            <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (!value) return; queueMicrotask(() => { if (restoreScroll) { value.scrollTop = savedScrollTop; restoreScroll = false; syncTranscriptScroll() } else { value.scrollTop = Number(value.scrollHeight ?? 0); setAtBottom(true) } }) }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
+                          <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (value) queueMicrotask(() => syncTranscriptScroll()) }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
                               <box flexDirection="column" width="100%" paddingRight={1}>
                                 <For each={finalizedLines()}>{(message) => (
                                   <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
@@ -1542,8 +1560,7 @@ export function EnsembleV2App() {
                                   </box>
                                 )}</For>
                               </box>
-                            </scrollbox>
-                          </Show>
+                          </scrollbox>
                           <Show when={liveLine()}>
                             <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} flexDirection="column">
                               <text fg={chatAuthorColor(liveLine()!)} bg={colors.panel} width="100%" truncate>{liveLine()!.author} · streaming…</text>
@@ -1587,7 +1604,7 @@ export function EnsembleV2App() {
                   <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} state={state()} onResolve={resolveApproval} />
                 </Show>
               }>
-                <HelpView colors={colors} />
+                <HelpView colors={colors} scrollRef={(value: any) => { helpScrollRef = value }} />
               </Show>
             }>
               <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={agentMemories()} memoryCursor={memoryCursor()} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} skillCatalog={skills()} />
@@ -1648,7 +1665,7 @@ export function EnsembleV2App() {
             </Show>
           </Show>
           <Show when={wizard()?.error}><text fg={colors.bad} bg={colors.panel} width="100%" truncate>{wizard()!.error}</text></Show>
-          <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{`ctrl+← back · ctrl+→ next · enter ${wizard() && wizardFinal(wizard()!) ? "submit" : "continue"} · esc cancel`}</text>
+          <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{`${navModifier()}+← back · ${navModifier()}+→ next · enter ${wizard() && wizardFinal(wizard()!) ? "submit" : "continue"} · esc cancel`}</text>
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={picker() || textPrompt() || wizard() ? 0.35 : 1}>
