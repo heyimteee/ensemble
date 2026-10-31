@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { SyntaxStyle } from "@opentui/core"
-import { usePlugin } from "@opencode/plugin/tui"
+import { usePlugin, type Plugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
@@ -12,6 +12,7 @@ import { palette } from "./theme.ts"
 import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { navModifier, platformBind, platformLabel } from "./platform.ts"
+import { wizardFilterText } from "./wizard.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 
@@ -84,7 +85,7 @@ function directoryOf(context: any): string {
   return context.location?.directory ?? context.data.location.default().directory
 }
 
-async function callRpc(context: any, method: string, input: any): Promise<any> {
+async function callRpc<T = any>(context: any, method: string, input: any): Promise<T> {
   const response = await context.client.rpc.call({ rpcID: "ensemble.v2", method, location: { directory: directoryOf(context) }, input })
   return response?.output ?? response
 }
@@ -98,9 +99,10 @@ async function invoke(context: any, action: string, payload: any = {}): Promise<
 export function EnsembleV2App() {
   const context = usePlugin()
   const colors = palette(context.theme as any)
-  const platformLayer = (factory: () => any) => context.keymap.layer(() => {
+  type KeymapLayerFactory = Parameters<Plugin.Context["keymap"]["layer"]>[0]
+  const platformLayer = (factory: KeymapLayerFactory) => context.keymap.layer(() => {
     const value = factory()
-    return { ...value, commands: value.commands?.map((command: any) => typeof command.bind === "string" ? { ...command, bind: platformBind(command.bind) } : command) }
+    return { ...value, commands: value.commands?.map((command) => typeof command.bind === "string" ? { ...command, bind: platformBind(command.bind) } : command) }
   })
   const syntaxStyle = (() => {
     try {
@@ -167,7 +169,7 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? workspace.memberIDs.map((id) => state()?.agents[id]).filter((agent): agent is Agent => Boolean(agent)) : rosterAgents()
   })
-  const surfaceAgent = createMemo(() => surface()?.kind === "agent" ? state()?.agents[surface()!.agentID] : undefined)
+  const surfaceAgent = createMemo(() => { const value = surface(); return value?.kind === "agent" ? state()?.agents[value.agentID] : undefined })
   const selectedAgent = createMemo(() => surface()?.kind === "agent" ? surfaceAgent() : undefined)
   const activeTasks = createMemo(() => {
     const workspace = activeWorkspace()
@@ -227,7 +229,7 @@ export function EnsembleV2App() {
   }
   const chatLines = createMemo<ChatLine[]>(() => {
     if (surface()?.kind === "agent") {
-      const messages = (chatContext()?.messages ?? []).slice(-40).map((message: ChatMessage) => ({
+      const messages: ChatLine[] = (chatContext()?.messages ?? []).slice(-40).map((message: ChatMessage) => ({
         id: message.id,
         author: message.author,
         role: transcriptRole(message.role),
@@ -374,7 +376,7 @@ export function EnsembleV2App() {
   const refresh = async () => {
     const seq = ++refreshSeq
     try {
-      const next = await callRpc(context, "snapshot", { directory: directoryOf(context) })
+      const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
       if (seq !== refreshSeq) return
       setSnapshot(next)
       syncTranscriptScroll()
@@ -385,7 +387,7 @@ export function EnsembleV2App() {
       }
       if (!next.configError) lastConfigError = ""
       const directory = directoryOf(context)
-      const workspace = Object.values(next.state.workspaces ?? {}).find((item) => !item.archived && item.directory === directory) as Workspace | undefined
+      const workspace = Object.values(next.state.workspaces ?? {}).find((item) => !item.archived && item.directory === directory)
       const history = next.state.ui?.history?.[directory]
       const historyWorkspace = history?.workspaceID && next.state.workspaces[history.workspaceID] && !next.state.workspaces[history.workspaceID].archived ? history.workspaceID : undefined
       const currentWorkspace = workspaceID()
@@ -488,11 +490,12 @@ export function EnsembleV2App() {
     if (!draft) return
     let created: Workspace | undefined
     await run("Create workspace", async () => {
-      created = await invoke(context, "workspace.create", { name: draft.name.trim(), directory: draft.directory.trim(), memberIDs: draft.memberIDs, leaderID: draft.leaderID, synthesis: draft.synthesis })
-      setWorkspaceID(created.id)
-      setSurface({ kind: "workspace", workspaceID: created.id })
+      const workspace: Workspace = await invoke(context, "workspace.create", { name: draft.name.trim(), directory: draft.directory.trim(), memberIDs: draft.memberIDs, leaderID: draft.leaderID, synthesis: draft.synthesis })
+      created = workspace
+      setWorkspaceID(workspace.id)
+      setSurface({ kind: "workspace", workspaceID: workspace.id })
       setFocusArea("chat")
-      await invoke(context, "workspace.activate", { id: created.id })
+      await invoke(context, "workspace.activate", { id: workspace.id })
     })
     if (created) {
       await offerMoveHome(created, draft.memberIDs)
@@ -1338,7 +1341,7 @@ export function EnsembleV2App() {
   const saveWizardText = (): WizardState | undefined => {
     const state = wizard()
     const step = wizardStep()
-    if (!state || !step || step.kind !== "text") return state
+    if (!state || !step || step.kind !== "text") return state ?? undefined
     const value = String(wizardRef?.plainText ?? "")
     return patchWizard((next) => {
       if (step.key === "directoryPath") {
@@ -1457,9 +1460,10 @@ export function EnsembleV2App() {
     if (name === "backspace") { event?.preventDefault?.(); setWizard({ ...state, query: state.query.slice(0, -1), cursor: 0 }); return }
     if ((name === "space" || sequence === " ") && step.kind === "multi") { event?.preventDefault?.(); wizardToggle(); return }
     if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") { event?.preventDefault?.(); wizardSelect(); return }
-    if (sequence.length === 1 && sequence >= " " && !ctrl && !event?.meta && !event?.super) {
+    const filterText = wizardFilterText(event)
+    if (filterText) {
       event?.preventDefault?.()
-      setWizard({ ...state, query: `${state.query}${sequence}`, cursor: 0 })
+      setWizard({ ...state, query: `${state.query}${filterText}`, cursor: 0 })
     }
   }
 
@@ -1555,7 +1559,7 @@ export function EnsembleV2App() {
                                     <Show when={message.role === "agent" && syntaxStyle} fallback={
                                       <text fg={message.role === "system" ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                     }>
-                                      <markdown content={message.text || " "} syntaxStyle={syntaxStyle} width="100%" fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />
+                                      {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
                                     </Show>
                                   </box>
                                 )}</For>
