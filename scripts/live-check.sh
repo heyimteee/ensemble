@@ -1,252 +1,131 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Live TUI harness. Loads this repository as a local OpenCode plugin in an
-# isolated config/data/state directory, then checks the plugin page and leader key.
-# Requires opencode and tmux. Linux-only by design.
+# Real-runtime live TUI acceptance check. Loads this repository as a local
+# OpenCode plugin in isolated config/data/state/home directories and exercises
+# the plugin page, leader help, agent/workspace wizards, composer completions,
+# and the snapshot/invoke RPC surface. Requires opencode and tmux.
 
-if ! command -v opencode >/dev/null 2>&1; then
-  echo "live-check: opencode is not installed; skipping"
-  exit 0
-fi
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "live-check: tmux is not installed; skipping"
-  exit 0
-fi
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$SCRIPT_DIR/lib/live-harness.sh"
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BASE="${TMPDIR:-/tmp}/opencode/ensemble-live-$$"
-SERVE="ensemble-live-serve-$$"
-TUI="ensemble-live-tui-$$"
-mkdir -p "$BASE/config/opencode" "$BASE/project" "$BASE/data" "$BASE/state"
-git init -q "$BASE/project" 2>/dev/null || true
-cat > "$BASE/config/opencode/opencode.json" <<EOF
-{
-  "\$schema": "https://opencode.ai/config.json",
-  "plugins": ["$ROOT"]
-}
-EOF
+live_require_runtime
+live_require_node
+command -v fd >/dev/null 2>&1 || live_skip "fd is unavailable (required for real file-completion coverage)"
+live_setup "real"
+ENSEMBLE_LIVE_TUI_WIDTH=120
+ENSEMBLE_LIVE_TUI_HEIGHT=40
 
-cleanup() {
-  tmux kill-session -t "$TUI" 2>/dev/null || true
-  tmux kill-session -t "$SERVE" 2>/dev/null || true
-  rm -rf "$BASE"
-}
-trap cleanup EXIT
+live_write_plugin_config
+live_start_server
+live_check_plugin
+live_start_tui
+live_wait_for_native_tui
+live_open_ensemble
 
-tmux new-session -d -s "$SERVE" -x 120 -y 20 -c "$BASE/project" \
-  -e XDG_CONFIG_HOME="$BASE/config" -e XDG_DATA_HOME="$BASE/data" -e XDG_STATE_HOME="$BASE/state" \
-  "opencode serve --hostname 127.0.0.1 --port 0 --print-logs 2>$BASE/server.log"
+live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page"
+live_require_text "$LIVE_TUI_SESSION" "No currently opened session" 10 "empty chat state"
+live_require_text "$LIVE_TUI_SESSION" "I init" 10 "I init shortcut"
+live_require_text "$LIVE_TUI_SESSION" "git:(" 10 "git metadata"
+live_check_help
 
-URL=""
-for _ in $(seq 1 200); do
-  PANE=$(tmux capture-pane -p -t "$SERVE" 2>/dev/null || true)
-  URL=$(sed -n 's/^server listening on //p' <<<"$PANE" | head -1)
-  [ -n "$URL" ] && break
-  sleep 0.1
-done
-if [ -z "$URL" ]; then
-  echo "live-check: server did not start" >&2
-  tail -20 "$BASE/server.log" >&2 || true
-  exit 1
-fi
-
-PASS=$(tmux capture-pane -p -t "$SERVE" | sed -n 's/^server password //p' | head -1)
-if [ -z "$PASS" ]; then
-  echo "live-check: could not read the server password" >&2
-  exit 1
-fi
-
-tmux new-session -d -s "$TUI" -x 120 -y 40 -c "$BASE/project" \
-  -e XDG_CONFIG_HOME="$BASE/config" -e XDG_DATA_HOME="$BASE/data" -e XDG_STATE_HOME="$BASE/state" \
-  -e OPENCODE_PASSWORD="$PASS" \
-  "opencode --server $URL --print-logs 2>$BASE/tui.log; sleep 300"
-sleep 5
-tmux send-keys -t "$TUI" '/ensemble'; sleep 0.5
-tmux send-keys -t "$TUI" Enter; sleep 0.5
-tmux send-keys -t "$TUI" Enter; sleep 2
-
-SCREEN=$(tmux capture-pane -p -t "$TUI")
-if ! grep -q "ENSEMBLE" <<<"$SCREEN"; then
-  echo "live-check: the Ensemble page did not open" >&2
-  tail -30 "$BASE/tui.log" >&2 || true
-  exit 1
-fi
-
-EMPTY=$(tmux capture-pane -p -t "$TUI")
-if ! grep -q "No currently opened session" <<<"$EMPTY"; then
-  echo "live-check: empty chat state was not shown" >&2
-  exit 1
-fi
-if ! grep -q "I init" <<<"$EMPTY"; then
-  echo "live-check: the visible I init shortcut was not shown" >&2
-  exit 1
-fi
-if ! grep -q "git:(" <<<"$EMPTY"; then
-  echo "live-check: git metadata was not shown" >&2
-  tmux capture-pane -p -t "$TUI" >&2 || true
-  exit 1
-fi
-
-PLUGINS=$(curl -s -u "opencode:$PASS" "$URL/api/plugin")
-if ! grep -q "ensemble.v2" <<<"$PLUGINS"; then
-  echo "live-check: ensemble.v2 is not active" >&2
-  exit 1
-fi
-
-tmux send-keys -t "$TUI" '~'; sleep 0.5
-tmux send-keys -t "$TUI" '?'; sleep 1.5
-HELP=$(tmux capture-pane -p -t "$TUI")
-if ! grep -q "Keyboard shortcuts" <<<"$HELP"; then
-  echo "live-check: leader help did not open" >&2
-  tmux capture-pane -p -t "$TUI" >&2 || true
-  exit 1
-fi
-if ! grep -q "Ctrl+Shift+W" <<<"$HELP"; then
-  echo "live-check: shortcut help omitted workspace delete" >&2
-  exit 1
-fi
-tmux send-keys -t "$TUI" 'delete workspace'; sleep 0.5
-SEARCHED=$(tmux capture-pane -p -t "$TUI")
-if ! grep -q "Ctrl+Shift+W" <<<"$SEARCHED" || grep -q "Leader key" <<<"$SEARCHED"; then
-  echo "live-check: shortcut search did not filter" >&2
-  tmux capture-pane -p -t "$TUI" >&2 || true
-  exit 1
-fi
-tmux send-keys -t "$TUI" Escape; sleep 0.5
-
-printf 'live fixture\n' > "$BASE/project/notes.md"
-python3 - "$URL" "$PASS" "$BASE/project" > "$BASE/snapshot.json" <<'PY'
-import base64, json, sys, urllib.parse, urllib.request
-url, password, directory = sys.argv[1:4]
-auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
-body = json.dumps({"input": {"directory": directory}}).encode()
-location = urllib.parse.quote(directory, safe="")
-request = urllib.request.Request(f"{url}/api/rpc/ensemble.v2/snapshot?location%5Bdirectory%5D={location}", data=body, headers={"Authorization": auth, "Content-Type": "application/json"}, method="POST")
-print(json.dumps(json.load(urllib.request.urlopen(request, timeout=20))["output"]))
-PY
-MODELS=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["models"]))' "$BASE/snapshot.json")
-if [ "$MODELS" -gt 0 ]; then
-  tmux send-keys -t "$TUI" 'a'; sleep 1
-  tmux send-keys -t "$TUI" 'LiveAgent'; sleep 0.3
-  tmux send-keys -t "$TUI" Enter; sleep 0.8
-  tmux send-keys -t "$TUI" 'Engineering'; sleep 0.3
-  tmux send-keys -t "$TUI" Enter; sleep 0.8
-  tmux send-keys -t "$TUI" 'Reviews changes and keeps the build green.'; sleep 0.3
-  tmux send-keys -t "$TUI" Enter; sleep 1
-  tmux send-keys -t "$TUI" Enter; sleep 1
-  VARIANT=$(tmux capture-pane -p -t "$TUI")
-  if grep -q "Reasoning effort" <<<"$VARIANT"; then
-    tmux send-keys -t "$TUI" Enter; sleep 1
+printf 'live fixture\n' >"$LIVE_PROJECT/notes.md"
+MODELS=$(live_snapshot_value '.models.length')
+if [[ "$MODELS" -gt 0 ]]; then
+  live_key "$LIVE_TUI_SESSION" "a"
+  live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
+  live_type "$LIVE_TUI_SESSION" "LiveAgent"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
+  live_type "$LIVE_TUI_SESSION" "Engineering"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
+  live_type "$LIVE_TUI_SESSION" "Reviews changes and keeps the build green."
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_any_text "$LIVE_TUI_SESSION" 20 "reasoning step or direct chat" "Reasoning effort" "LiveAgent · direct"
+  if live_capture_contains "$LIVE_TUI_SESSION" "Reasoning effort"; then
+    live_key "$LIVE_TUI_SESSION" Enter
   fi
-  sleep 2
-  AGENT_SCREEN=$(tmux capture-pane -p -t "$TUI")
-  if ! grep -q "LiveAgent" <<<"$AGENT_SCREEN"; then
-    echo "live-check: creating an agent did not update the roster" >&2
-    tmux capture-pane -p -t "$TUI" >&2 || true
-    exit 1
-  fi
-  if ! grep -q "LiveAgent · direct" <<<"$AGENT_SCREEN"; then
-    echo "live-check: creating an agent did not open a direct chat" >&2
-    tmux capture-pane -p -t "$TUI" >&2 || true
-    exit 1
+  live_require_text "$LIVE_TUI_SESSION" "LiveAgent · direct" 20 "direct chat opened"
+  live_require_text "$LIVE_TUI_SESSION" "LiveAgent" 10 "agent roster entry"
+
+  live_key "$LIVE_TUI_SESSION" "n"
+  live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "workspace wizard"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step"
+  live_type "$LIVE_TUI_SESSION" "live"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "workspace members step"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Workspace leader" 10 "workspace leader step"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Leader synthesis" 10 "workspace synthesis step"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "#live" 20 "workspace created and opened"
+  if live_try_text "$LIVE_TUI_SESSION" "Move LiveAgent into #live" 5; then
+    live_key "$LIVE_TUI_SESSION" Escape
+    live_require_absence "$LIVE_TUI_SESSION" "Move LiveAgent into #live" 10 "move-home prompt dismissed"
   fi
 
-  tmux send-keys -t "$TUI" 'n'; sleep 1
-  tmux send-keys -t "$TUI" Enter; sleep 0.6
-  tmux send-keys -t "$TUI" 'live'; sleep 0.3
-  tmux send-keys -t "$TUI" Enter; sleep 0.6
-  tmux send-keys -t "$TUI" Enter; sleep 0.6
-  tmux send-keys -t "$TUI" Enter; sleep 0.6
-  tmux send-keys -t "$TUI" Enter; sleep 3
-  WORKSPACE_SCREEN=$(tmux capture-pane -p -t "$TUI")
-  if ! grep -q "#live" <<<"$WORKSPACE_SCREEN"; then
-    echo "live-check: workspace wizard did not create and open #live" >&2
-    tmux capture-pane -p -t "$TUI" >&2 || true
-    exit 1
-  fi
-  if grep -q "Move LiveAgent into #live" <<<"$WORKSPACE_SCREEN"; then
-    tmux send-keys -t "$TUI" Escape; sleep 0.5
-  fi
-  python3 - "$URL" "$PASS" "$BASE/project" "$BASE/ids.json" <<'PY'
-import base64, json, sys, urllib.parse, urllib.request
-url, password, directory, output = sys.argv[1:5]
-auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
-location = urllib.parse.quote(directory, safe="")
-body = json.dumps({"input": {"directory": directory}}).encode()
-request = urllib.request.Request(f"{url}/api/rpc/ensemble.v2/snapshot?location%5Bdirectory%5D={location}", data=body, headers={"Authorization": auth, "Content-Type": "application/json"}, method="POST")
-state = json.load(urllib.request.urlopen(request, timeout=20))["output"]["state"]
-agent = next(agent for agent in state["agents"].values() if agent["name"] == "LiveAgent")
-workspace = next(workspace for workspace in state["workspaces"].values() if workspace["name"] == "live")
-json.dump({"agent": agent["id"], "workspace": workspace["id"]}, open(output, "w"))
-PY
-  sleep 2
-  tmux send-keys -t "$TUI" 'i'; sleep 0.5
-  tmux send-keys -t "$TUI" 'A long message that wraps across the composer width before opening a completion. '; sleep 0.5
-  tmux send-keys -t "$TUI" '$'; sleep 1
-  POPUP=$(tmux capture-pane -p -t "$TUI")
-  if ! grep -q "\$ agents" <<<"$POPUP"; then
-    echo "live-check: inline agent popup did not open above the composer" >&2
-    tmux capture-pane -p -t "$TUI" >&2 || true
-    exit 1
-  fi
-  tmux send-keys -t "$TUI" Enter; sleep 0.5
-  tmux send-keys -t "$TUI" ' review '; sleep 0.3
-  tmux send-keys -t "$TUI" '@'; sleep 1
-  FILE_POPUP=$(tmux capture-pane -p -t "$TUI")
-  if ! grep -q "@ files" <<<"$FILE_POPUP"; then
-    echo "live-check: inline file popup did not open above the composer" >&2
-    tmux capture-pane -p -t "$TUI" >&2 || true
-    exit 1
-  fi
-  tmux send-keys -t "$TUI" 'notes'; sleep 0.5
-  tmux send-keys -t "$TUI" Enter; sleep 0.5
-  COMPOSER=$(tmux capture-pane -p -t "$TUI")
-  if ! grep -q '\$LiveAgent' <<<"$COMPOSER" || ! grep -q '@notes.md' <<<"$COMPOSER"; then
-    echo "live-check: composer completions did not insert \$agent and @file" >&2
-    tmux capture-pane -p -t "$TUI" >&2 || true
-    exit 1
-  fi
-  tmux send-keys -t "$TUI" C-u; sleep 0.3
-  tmux send-keys -t "$TUI" 'ping'; sleep 0.3
-  tmux send-keys -t "$TUI" Enter; sleep 1
-  PING=$(tmux capture-pane -p -t "$TUI")
-  if ! grep -q "→ LiveAgent: ping" <<<"$PING"; then
-    echo "live-check: composer Enter did not send the message" >&2
-    tmux capture-pane -p -t "$TUI" >&2 || true
-    exit 1
-  fi
-  tmux send-keys -t "$TUI" 'i'; sleep 0.3
-  tmux send-keys -t "$TUI" '/'; sleep 1
-  COMMAND=$(tmux capture-pane -p -t "$TUI")
-  if ! grep -q "/ commands" <<<"$COMMAND"; then
-    echo "live-check: slash command palette did not open" >&2
-    exit 1
-  fi
-  tmux send-keys -t "$TUI" Escape; sleep 0.5
-  tmux send-keys -t "$TUI" Escape; sleep 0.5
+  live_wait_for 20 "created agent and workspace in snapshot" \
+    live_snapshot_has_agent_named "LiveAgent" \
+    || live_fail "snapshot never contained LiveAgent"
+  live_wait_for 20 "created workspace in snapshot" \
+    live_snapshot_has_workspace_named "live" \
+    || live_fail "snapshot never contained workspace live"
 
-  python3 - "$URL" "$PASS" "$BASE/project" "$BASE/ids.json" <<'PY'
-import base64, json, sys, urllib.parse, urllib.request
-url, password, directory, input_path = sys.argv[1:5]
-auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
-location = urllib.parse.quote(directory, safe="")
-ids = json.load(open(input_path))
-def invoke(action, payload):
-    body = json.dumps({"input": {"directory": directory, "action": action, "payload": payload}}).encode()
-    request = urllib.request.Request(f"{url}/api/rpc/ensemble.v2/invoke?location%5Bdirectory%5D={location}", data=body, headers={"Authorization": auth, "Content-Type": "application/json"}, method="POST")
-    return json.load(urllib.request.urlopen(request, timeout=20))["output"]
-invoke("workspace.delete", {"id": ids["workspace"], "deleteNativeSessions": True})
-invoke("agent.delete", {"id": ids["agent"], "deleteNativeSessions": True})
-PY
+  SNAPSHOT_OUTPUT=$(live_snapshot | live_snapshot_output)
+  IDS=$("$LIVE_NODE_BIN" -e '
+    const output = JSON.parse(process.argv[1]);
+    const agents = Object.values(output.state?.agents ?? {});
+    const workspaces = Object.values(output.state?.workspaces ?? {});
+    const agent = agents.find((item) => item.name === "LiveAgent" && !item.archived);
+    const workspace = workspaces.find((item) => item.name === "live" && !item.archived);
+    if (!agent || !workspace) process.exit(1);
+    process.stdout.write(JSON.stringify({ agent: agent.id, workspace: workspace.id }));
+  ' "$SNAPSHOT_OUTPUT")
+  AGENT_ID=$("$LIVE_NODE_BIN" -e 'process.stdout.write(JSON.parse(process.argv[1]).agent)' "$IDS")
+  WORKSPACE_ID=$("$LIVE_NODE_BIN" -e 'process.stdout.write(JSON.parse(process.argv[1]).workspace)' "$IDS")
+
+  live_key "$LIVE_TUI_SESSION" "i"
+  live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
+  live_type "$LIVE_TUI_SESSION" "A long message that wraps across the composer width before opening a completion. "
+  live_type "$LIVE_TUI_SESSION" '$'
+  live_require_text "$LIVE_TUI_SESSION" '$ agents' 10 "inline agent completion"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_type "$LIVE_TUI_SESSION" " review "
+  live_type "$LIVE_TUI_SESSION" '@'
+  live_require_text "$LIVE_TUI_SESSION" '@ files' 10 "inline file completion"
+  live_type "$LIVE_TUI_SESSION" "notes"
+  live_require_text "$LIVE_TUI_SESSION" "notes.md" 10 "file completion results"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" '$LiveAgent' 10 "agent mention inserted"
+  live_require_text "$LIVE_TUI_SESSION" '@notes.md' 10 "file mention inserted"
+  live_key "$LIVE_TUI_SESSION" C-u
+  live_type "$LIVE_TUI_SESSION" "ping"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "→ LiveAgent: ping" 15 "group message sent"
+
+  live_key "$LIVE_TUI_SESSION" "i"
+  live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
+  live_type "$LIVE_TUI_SESSION" "/"
+  live_require_text "$LIVE_TUI_SESSION" "/ commands" 10 "slash command palette"
+  live_key "$LIVE_TUI_SESSION" Escape
+  live_require_absence "$LIVE_TUI_SESSION" "/ commands" 10 "slash command palette closed"
+  live_key "$LIVE_TUI_SESSION" Escape
+  live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer closed"
+
+  live_invoke "workspace.delete" "{\"id\":\"$WORKSPACE_ID\",\"deleteNativeSessions\":true}" >/dev/null
+  live_invoke "agent.delete" "{\"id\":\"$AGENT_ID\",\"deleteNativeSessions\":true}" >/dev/null
+else
+  live_log "no models available; agent/workspace/composer coverage skipped explicitly"
 fi
 
-tmux send-keys -t "$TUI" '~'; sleep 0.3
-tmux send-keys -t "$TUI" 'q'; sleep 1
-HOME_SCREEN=$(tmux capture-pane -p -t "$TUI")
-if ! grep -q "Ask anything" <<<"$HOME_SCREEN"; then
-  echo "live-check: leaving Ensemble did not return to the native TUI" >&2
-  exit 1
-fi
+live_key "$LIVE_TUI_SESSION" '~'
+live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before leaving"
+live_key "$LIVE_TUI_SESSION" 'q'
+live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after leaving Ensemble"
 
-echo "live-check: passed ($URL)"
+live_log "live-check passed ($LIVE_SERVER_URL)"
