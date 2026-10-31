@@ -1,12 +1,13 @@
 # Contributing to Ensemble
 
-Ensemble is in developer preview. The server and TUI parts load directly from TypeScript; there is no build step. Run `npm test` for the core suite. See [implementation notes](docs/implementation.md) for local loading.
+Ensemble is in developer preview. The server and TUI parts load directly from TypeScript; there is no build step. Install locked dependencies with `npm ci` and run `npm run verify` before handoff. See [implementation notes](docs/implementation.md) for local loading.
 
 ## Before starting
 
 1. Read [AGENTS.md](AGENTS.md), the [glossary](GLOSSARY.md), and the relevant specification and issue comments.
 2. Follow the [issue tracker workflow](docs/agents/issue-tracker.md). Choose an approved ticket whose blockers are complete.
 3. Keep changes within the ticket's acceptance criteria. Raise compatibility gaps and changes of scope before implementing them.
+4. For TUI or host integration work and location-divergence diagnosis, read the [runtime guide](docs/agents/opencode-tui-runtime.md), including verification scope and editing discipline.
 
 ## Changes and verification
 
