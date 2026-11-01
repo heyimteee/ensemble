@@ -246,10 +246,10 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
   return { agents, workspaces, bindings }
 }
 
-async function fetchSnapshot(url: string, password: string | undefined, directory: string, fetchImpl: typeof fetch): Promise<DoctorSnapshot> {
+async function fetchDiagnostic(url: string, password: string | undefined, directory: string, fetchImpl: typeof fetch): Promise<DoctorSnapshot> {
   const headers: Record<string, string> = { "content-type": "application/json" }
   if (password) headers.authorization = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`
-  const target = `${url}/api/rpc/ensemble.v2/snapshot?location%5Bdirectory%5D=${encodeURIComponent(directory)}`
+  const target = `${url}/api/rpc/ensemble.v2/diagnostic?location%5Bdirectory%5D=${encodeURIComponent(directory)}`
   let response: Response
   try {
     response = await fetchImpl(target, {
@@ -263,13 +263,13 @@ async function fetchSnapshot(url: string, password: string | undefined, director
     throw new DoctorError("snapshot_failed", `Could not reach the OpenCode service for ${directory}.`)
   }
   if (!response.ok) {
-    throw new DoctorError("snapshot_failed", `Snapshot request for ${directory} failed with HTTP ${response.status}.`)
+    throw new DoctorError("snapshot_failed", `Diagnostic request for ${directory} failed with HTTP ${response.status}.`)
   }
   let body: any
   try {
     body = await response.json()
   } catch {
-    throw new DoctorError("snapshot_invalid", `Snapshot response for ${directory} was not JSON.`)
+    throw new DoctorError("snapshot_invalid", `Diagnostic response for ${directory} was not JSON.`)
   }
   return normalizeSnapshot(body?.output, directory)
 }
@@ -309,7 +309,7 @@ export async function runDoctor(argv: string[], options: DoctorRunOptions = {}):
   }))]
   const locations: DoctorLocationInput[] = []
   for (const directory of directories) {
-    const snapshot = await fetchSnapshot(url, password, directory, fetchImpl)
+    const snapshot = await fetchDiagnostic(url, password, directory, fetchImpl)
     const config = readLocationConfig(directory)
     locations.push({
       directory,
@@ -347,13 +347,13 @@ Service resolution:
    Credentials are never printed.
 
 Read-only:
-  The doctor calls only the snapshot RPC for each directory. It never calls invoke and
-  never writes storage or .ensemble/config.json. OpenCode may reconcile state while
-  answering snapshot; the doctor itself does not request changes.
+  The doctor calls only the read-only diagnostic RPC for each directory. It never calls invoke,
+  snapshot, or any mutating method, and it never writes storage or .ensemble/config.json.
+  The diagnostic read does not trigger workspace discovery or config reconciliation.
 
 Cross-location comparison:
    Every directory is queried on the one selected service. This does not discover or
-   compare separate processes. Snapshots are sequential, not atomic; differences may
+   compare separate processes. Reads are sequential, not atomic; differences may
    reflect concurrent activity. Bindings are lazy and retained for former members.
 
 Exit codes:

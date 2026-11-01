@@ -294,7 +294,7 @@ test("CLI uses the default descriptor, password override, snapshot-only wire con
     assert.equal(healthy.code, 0)
     const report = JSON.parse(healthy.stdout)
     assert.equal(report.ok, true)
-    assert.match(report.caveats.join(" "), /reconcile and persist/)
+    assert.match(report.caveats.join(" "), /diagnostic|read-only|discovery|reconciliation/i)
     assert.equal(report.locations[0].agents[0].name, "Clark")
     assert.equal(readFileSync(join(directory, ".ensemble", "config.json"), "utf8"), before)
     writeConfig(directory, ["Clark", "Jessy"])
@@ -319,7 +319,7 @@ test("CLI uses the default descriptor, password override, snapshot-only wire con
     for (const request of requests) {
       assert.equal(request.method, "POST")
       const url = new URL(request.url!, "http://fixture")
-      assert.equal(url.pathname, "/api/rpc/ensemble.v2/snapshot")
+      assert.equal(url.pathname, "/api/rpc/ensemble.v2/diagnostic")
       assert.equal(url.searchParams.get("location[directory]"), directory)
       assert.deepEqual(JSON.parse(request.body), { input: { directory } })
       assert.equal(request.auth, `Basic ${Buffer.from(`opencode:${PASSWORD}`).toString("base64")}`)

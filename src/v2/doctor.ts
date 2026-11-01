@@ -224,29 +224,29 @@ const remediation: Record<string, string> = {
   binding_field_mismatch:
     "A binding field disagrees with its workspace or kind. Reopen the workspace in Ensemble so the binding is recreated.",
   cross_location_agent_missing:
-    "Two service instances disagree about the agent roster. Identify the stale process from its service id/pid, restart it, and reopen the workspace so storage reconciles.",
+    "The queried service reports agents differently across the compared locations. Confirm the canonical roster and reopen the affected locations; only restart a stale process if you have verified it from the reported service id/pid.",
   cross_location_agent_name_differ:
-    "Two service instances report different agent names. Identify the stale process from its service id/pid, restart it, and reopen the workspace so storage reconciles.",
+    "The queried service reports different agent names across locations. Reopen the affected locations so state converges; only restart a stale process if you have verified it from the reported service id/pid.",
   cross_location_agent_archived_differ:
-    "Two service instances disagree about whether an agent is archived. Restart the stale process and reopen the workspace so storage reconciles.",
+    "The queried service disagrees about whether an agent is archived across locations. Reopen the affected locations so state converges; only restart a stale process if you have verified it from the reported service id/pid.",
   cross_location_workspace_missing:
-    "Two service instances disagree about which workspaces exist. Identify the stale process from its service id/pid, restart it, and reopen the workspace so storage reconciles.",
+    "The queried service reports different workspaces across locations. Reopen the affected locations; only restart a stale process if you have verified it from the reported service id/pid.",
   cross_location_workspace_name_differ:
-    "Two service instances report different workspace names. Identify the stale process, restart it, and reopen the workspace so config reconciliation runs.",
+    "The queried service reports different workspace names across locations. Correct names via the workspace UI or .ensemble/config.json and reopen the affected locations; only restart a stale process if verified.",
   cross_location_workspace_directory_differ:
-    "Two service instances bind the workspace to different directories. Confirm the canonical directory, then reopen the workspace so storage and config agree.",
+    "The queried service binds the workspace to different directories across locations. Confirm the canonical directory, then reopen the workspace so storage and config agree.",
   cross_location_workspace_members_differ:
-    "Two service instances report different workspace members. Identify the stale process, restart it, and reopen the workspace so .ensemble/config.json reconciles storage.",
+    "The queried service reports different workspace members across locations. Reconcile .ensemble/config.json or membership in Ensemble and reopen the affected locations.",
   cross_location_workspace_leader_differ:
-    "Two service instances report different workspace leaders. Identify the stale process, restart it, and reopen the workspace so .ensemble/config.json reconciles storage.",
+    "The queried service reports different workspace leaders across locations. Reconcile the leader in Ensemble or .ensemble/config.json and reopen the affected locations.",
   cross_location_workspace_archived_differ:
-    "Two service instances disagree about whether a workspace is archived. Restart the stale process and reopen the workspace so storage reconciles.",
+    "The queried service disagrees about whether a workspace is archived across locations. Reopen the affected locations so state converges.",
   cross_location_binding_missing:
-    "Two service instances disagree about session bindings. Reopen the agent in this workspace so the missing native session binding is created, then rerun the doctor.",
+    "The queried service disagrees about session bindings across locations. Reopen the agent in this workspace so the missing native session binding is created, then rerun the doctor.",
   cross_location_binding_session_differ:
-    "Two service instances report different session IDs for the same binding. Identify the stale process, restart it, and reopen the workspace so bindings converge.",
+    "The queried service reports different session IDs for the same binding across locations. Reopen the affected locations so bindings converge; only restart a stale process if you have verified it from the reported service id/pid.",
   cross_location_binding_field_differ:
-    "Two service instances report different binding fields. Restart the stale process and reopen the workspace so bindings converge.",
+    "The queried service reports different binding fields across locations. Reopen the affected locations so bindings converge; only restart a stale process if you have verified it from the reported service id/pid.",
 }
 
 const membershipCodes = {
@@ -679,8 +679,8 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
   return {
     ok: mismatches.length === 0,
     caveats: [
-      "Snapshot-only diagnosis: the doctor never calls invoke or writes files, but OpenCode may reconcile and persist state while answering snapshot.",
-      "Snapshots are sequential, not atomic. One selected service is queried for every directory; this does not discover separate service processes.",
+      "Read-only diagnostic: the doctor calls only the diagnostic RPC and never calls invoke, snapshot, or mutating methods; it never writes files.",
+      "Diagnostic reads do not trigger workspace discovery or config reconciliation. Reads are sequential, not atomic. One selected service is queried for every directory; this does not discover separate service processes.",
       "Session bindings are lazy and may be retained for former members; their absence alone is not a defect.",
     ],
     locations: reports,

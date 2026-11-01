@@ -19,8 +19,21 @@ export const EnsembleV2Rpc = Rpc.define({
           models: { type: "array", items: { type: "object", additionalProperties: true } },
           skills: { type: "array", items: { type: "object", additionalProperties: true } },
           directory: { type: "string" },
+          configError: { type: "string" },
         },
         required: ["state", "models", "skills", "directory"],
+        additionalProperties: false,
+      },
+    },
+    diagnostic: {
+      input: directory,
+      output: {
+        type: "object",
+        properties: {
+          state: { type: "object", additionalProperties: true },
+          directory: { type: "string" },
+        },
+        required: ["state", "directory"],
         additionalProperties: false,
       },
     },

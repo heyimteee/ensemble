@@ -617,11 +617,11 @@ live_snapshot_value() {
 
 live_redact() {
   local secret="${LIVE_SERVER_PASSWORD:-}"
-  if [[ -z "$secret" ]]; then
-    cat
-  else
-    awk -v secret="$secret" '{ while (pos = index($0, secret)) $0 = substr($0, 1, pos - 1) "[redacted]" substr($0, pos + length(secret)); print }'
+  if [[ -n "$secret" ]]; then
+    awk -v secret="$secret" '{ while (pos = index($0, secret)) $0 = substr($0, 1, pos - 1) "[redacted]" substr($0, pos + length(secret)); print }' | grep -v -i -E 'password|secret|token|key' || true
+    return 0
   fi
+  grep -v -i -E 'password|secret|token|key' || true
 }
 
 live_dump_context() {

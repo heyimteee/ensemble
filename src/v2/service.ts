@@ -154,10 +154,12 @@ export class EnsembleV2Service {
 
   handlers(): {
     snapshot: (input: unknown) => Promise<Snapshot>
+    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string }>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
       snapshot: async (input) => this.snapshot(rpcInput(input).directory),
+      diagnostic: async (input) => this.diagnostic(rpcInput(input).directory),
       invoke: async (input) => {
         try {
           const request = rpcInput(input)
@@ -264,6 +266,16 @@ export class EnsembleV2Service {
       skills: this.catalog.skillOptions,
       directory,
       configError: this.lastConfigError,
+    }
+  }
+
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string }> {
+    await this.store.sync()
+    const state = this.store.snapshot()
+    state.runs = Object.fromEntries(this.activeRuns)
+    return {
+      state: jsonSafe(state),
+      directory,
     }
   }
 
