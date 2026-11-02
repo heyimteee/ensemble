@@ -250,7 +250,7 @@ export type Snapshot = {
         workspaceID?: Id
         agentID?: Id
         taskID?: Id
-        column?: "rail" | "chat" | "tasks"
+        column?: "rail" | "chat"
       }>
     }
     runs: Record<Id, Run>

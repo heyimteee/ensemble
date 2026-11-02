@@ -1,7 +1,7 @@
 import { For, Show, createSignal } from "solid-js"
-import type { Agent, Approval, Memory, SkillOption, SnapshotState, Subtask } from "../types.ts"
+import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import type { Palette } from "./theme.ts"
-import { agentName, busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
+import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
 import { platformLabel } from "./platform.ts"
 import { helpGroups, helpKeyLabel, shortcutGroups } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
@@ -39,7 +39,6 @@ export function Rail(props: {
   pendingApprovals: number
   width: number
   filter: string
-  leaderGlyph: string
 }) {
   return (
     <box width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
@@ -66,7 +65,7 @@ export function Rail(props: {
             </Show>
             <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>
               {selected ? "› " : "  "}{item.kind === "workspace" ? `#${item.title}` : item.title}
-              {leader ? ` · leader ${props.leaderGlyph}` : ""}
+              {leader ? " · leader" : ""}
               {item.detail ? ` · ${item.detail}` : ""}
               {workspace?.paused ? " ⏸" : ""}
               {busy > 0 ? ` ◐${busy}` : ""}
@@ -83,50 +82,6 @@ export function Rail(props: {
   )
 }
 
-
-export function TaskBoard(props: {
-  colors: Palette
-  tasks: Subtask[]
-  state: SnapshotState | null
-  cursor: number
-  activeCount: number
-  focus: boolean
-  width: number
-}) {
-  const groups = () => [
-    { title: "PENDING", tasks: props.tasks.filter((task) => task.state === "pending") },
-    { title: "WORKING", tasks: props.tasks.filter((task) => task.state === "working") },
-    { title: "REPLIED", tasks: props.tasks.filter((task) => task.state === "replied") },
-  ]
-  return (
-    <box width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
-      <text fg={props.focus ? props.colors.focus : props.colors.accent} bg={props.colors.bg} width="100%" truncate>SUBTASKS {props.activeCount > 0 ? `· ${props.activeCount} working` : ""}</text>
-      <TaskGroups colors={props.colors} groups={groups()} state={props.state} cursor={props.cursor} focus={props.focus} />
-      <text> </text>
-      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result</text>
-      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>r retry · R restart · x cancel · o native</text>
-    </box>
-  )
-}
-
-function TaskGroups(props: { colors: Palette; groups: Array<{ title: string; tasks: Subtask[] }>; state: SnapshotState | null; cursor: number; focus: boolean }) {
-  return (
-    <For each={props.groups}>{(group, groupIndex) => {
-      const base = props.groups.slice(0, groupIndex()).reduce((sum, item) => sum + item.tasks.length, 0)
-      return (
-        <>
-          <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{group.title} ({group.tasks.length})</text>
-          <For each={group.tasks}>{(task, index) => (
-            <text fg={props.cursor === base + index() ? (props.focus ? props.colors.good : props.colors.warn) : task.state === "working" ? props.colors.warn : props.colors.text} bg={props.colors.bg} width="100%" truncate>
-              {props.cursor === base + index() ? "› " : "  "}{task.state === "working" ? "◐ " : task.state === "replied" ? "● " : "○ "}
-              {short(task.title, 18)} · {agentName(props.state, task.assigneeID)}{task.interrupted ? " · interrupted" : ""}
-            </text>
-          )}</For>
-        </>
-      )
-    }}</For>
-  )
-}
 
 export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cursor: number; state: SnapshotState | null; onResolve: (approval: Approval) => Promise<void> }) {
   return (

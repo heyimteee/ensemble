@@ -48,6 +48,7 @@ live_open_ensemble
 
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page"
 live_assert_text "$LIVE_TUI_SESSION" "○───○───○" "one-shot empty-state mark"
+live_assert_absence "$LIVE_TUI_SESSION" "SUBTASKS" "right-hand task board retired"
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
 live_type "$LIVE_TUI_SESSION" "FakeAgent"

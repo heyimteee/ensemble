@@ -5,21 +5,23 @@ import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
-import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, TaskBoard, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
-import { agentColor, fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { agentColor, agentName, fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { palette } from "./theme.ts"
 import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
-import { EMPTY_MARK, composerCaret, leaderGlyph, motionActive as motionShouldRun, streamingFrame } from "./motion.ts"
+import { EMPTY_MARK, composerCaret, motionActive as motionShouldRun, streamingFrame } from "./motion.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
+import { deriveWorkStatus } from "../queue.ts"
+import { orderedWorkItems, splitLiveFinalized, workRowText, workSummary } from "./workrows.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
-type FocusArea = "rail" | "chat" | "tasks"
+type FocusArea = "rail" | "chat"
 type PickerState = {
   mode: "members" | "leader" | "workspace" | "choice"
   title: string
@@ -161,7 +163,6 @@ export function EnsembleV2App() {
   const [result, setResult] = createSignal<ResultState | null>(null)
   const [skillFilterEditing, setSkillFilterEditing] = createSignal(false)
   const [motionFrame, setMotionFrame] = createSignal(0)
-  const [recentID, setRecentID] = createSignal<string | null>(null)
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
   const [atBottom, setAtBottom] = createSignal(true)
@@ -169,8 +170,6 @@ export function EnsembleV2App() {
   let textPromptRef: any
   let wizardRef: any
   let resultScrollRef: any
-  let revealTimer: ReturnType<typeof setTimeout> | undefined
-  let lastRevealedID: string | null = null
   let transcriptScrollRef: any
   let helpScrollRef: any
   const lineCache = new Map<string, ChatLine>()
@@ -197,14 +196,12 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? Object.values(state()?.subtasks ?? {}).filter((task) => task.workspaceID === workspace.id) : []
   })
-  const orderedTasks = createMemo(() => {
-    const tasks = activeTasks()
-    return [
-      ...tasks.filter((task) => task.state === "pending").sort((a, b) => a.createdAt - b.createdAt),
-      ...tasks.filter((task) => task.state === "working").sort((a, b) => a.createdAt - b.createdAt),
-      ...tasks.filter((task) => task.state === "replied").sort((a, b) => a.createdAt - b.createdAt),
-    ]
-  })
+  // Inline work list (ticket #56): the right-hand task board is gone, so the
+  // group chat surface carries every subtask for the active workspace with
+  // its assigned agent and derived lifecycle state, including distinct
+  // failed/cancelled terminal rows. Active work sorts first (oldest first);
+  // terminal rows are capped to the most recent so history never crowds chat.
+  const orderedTasks = createMemo(() => orderedWorkItems(activeTasks(), Date.now()))
   const selectedTask = createMemo(() => orderedTasks()[taskCursor()])
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
@@ -279,13 +276,16 @@ export function EnsembleV2App() {
       createdAt: message.createdAt,
     })))
   })
-  const finalizedLines = createMemo(() => chatLines().filter((message) => !message.streaming))
-  const liveLine = createMemo(() => chatLines().find((message) => message.streaming))
-  const liveLines = createMemo(() => {
-    const live = liveLine()
-    if (!live) return []
-    return renderMarkdownLines(live.text || "…", Math.max(16, messageWidth())).slice(-5)
-  })
+  const splitTranscript = createMemo(() => splitLiveFinalized(chatLines()))
+  const finalizedLines = createMemo(() => splitTranscript().finalized)
+  // Active-work surface: every streaming message renders its own live row
+  // with per-item text, so concurrent work stays watchable. Finalization
+  // flips streaming off, which moves that id from this list into the
+  // finalized transcript — one id renders in exactly one place, so live
+  // items fold into the transcript in place with no duplicates or stale
+  // lines. The transcript scrollbox keeps a stable identity throughout.
+  const liveMessages = createMemo(() => splitTranscript().live)
+  const liveText = (text: string) => renderMarkdownLines(text || "…", Math.max(16, messageWidth())).slice(-5)
   const chatAuthorColor = (line: ChatLine) => {
     if (line.role === "user") return colors.good
     if (line.role === "system") return colors.muted
@@ -331,8 +331,9 @@ export function EnsembleV2App() {
   })
   const viewWidth = () => Math.max(60, renderSize().width - 2)
   const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
-  const taskWidth = () => Math.max(28, Math.min(38, Math.floor(viewWidth() * 0.3)))
-  const messageWidth = () => Math.max(20, viewWidth() - railWidth() - taskWidth() - 10)
+  // Two-column layout (ticket #56): the task board is gone and the chat
+  // reclaims its width. Only the rail is subtracted now.
+  const messageWidth = () => Math.max(20, viewWidth() - railWidth() - 10)
   const viewHeight = () => renderSize().height
   const messageHeight = () => Math.max(6, viewHeight() - 14)
   const pickerGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 16)
@@ -432,7 +433,10 @@ export function EnsembleV2App() {
         }
         if (!restored()) {
           setRestored(true)
-          if (history?.column) setFocusArea(history.column)
+          // The task column is gone (ticket #56); a persisted "tasks" focus
+          // from an older session lands on the chat surface, which now owns
+          // the inline work rows.
+          if (history?.column) setFocusArea(history.column === ("tasks" as string) ? "chat" : history.column)
           const taskID = history?.taskID ?? uiState.taskID
           if (taskID) {
             const index = orderedTasks().findIndex((task) => task.id === taskID)
@@ -484,8 +488,8 @@ export function EnsembleV2App() {
     }
   }
 
-  const focusLeft = () => setFocusArea((area) => area === "tasks" ? "chat" : area === "chat" ? "rail" : "rail")
-  const focusRight = () => setFocusArea((area) => area === "rail" ? "chat" : area === "chat" ? "tasks" : "tasks")
+  const focusLeft = () => setFocusArea("rail")
+  const focusRight = () => setFocusArea("chat")
   const moveRail = (delta: number) => {
     const length = railItems().length
     if (length === 0) return
@@ -932,8 +936,11 @@ export function EnsembleV2App() {
     await run("Delete agent", async () => { await invoke(context, "agent.delete", { id: agent.id, deleteNativeSessions: Boolean(deleteNativeSessions) }); setSurface(null) })
   }
 
+  // Task actions stay keyboard-first from the inline work rows: with no task
+  // column, j/k in the chat surface moves the work selection and the
+  // d/t/enter/r/R/x/o bindings below act on the selected row.
   const moveCursor = (delta: number) => {
-    if (focusArea() === "tasks") moveTask(delta)
+    if (focusArea() === "chat") moveTask(delta)
     else if (focusArea() === "rail") moveRail(delta)
   }
 
@@ -943,8 +950,7 @@ export function EnsembleV2App() {
     else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredSkills().length - 1), cursor + delta)))
   }
 
-  const motionOn = () => motionShouldRun({ busy: isBusy(), live: liveLine() !== undefined, composerActive: composerActive() })
-  const leaderMark = () => leaderGlyph(motionOn(), motionFrame())
+  const motionOn = () => motionShouldRun({ busy: isBusy(), live: liveMessages().length > 0, composerActive: composerActive() })
 
   // Idle-quiescent frame clock: 4 fps only while motion is active (busy,
   // live streaming, or composing); otherwise the still frame (tick 0).
@@ -955,21 +961,6 @@ export function EnsembleV2App() {
     const timer = setInterval(() => setMotionFrame((frame) => (frame + 1) % 120), 250)
     onCleanup(() => clearInterval(timer))
   })
-
-  // Gentle new-message reveal: the newest finalized line renders highlighted
-  // (color only, so the text — and the live assertions — never change) and
-  // settles to the normal row after 1.5 s with no layout shift.
-  createEffect(() => {
-    const lines = finalizedLines()
-    const last = lines[lines.length - 1]
-    if (last && last.id !== lastRevealedID) {
-      lastRevealedID = last.id
-      setRecentID(last.id)
-      if (revealTimer) clearTimeout(revealTimer)
-      revealTimer = setTimeout(() => { setRecentID((current) => current === last.id ? null : current) }, 1500)
-    }
-  })
-  onCleanup(() => { if (revealTimer) clearTimeout(revealTimer) })
 
   createEffect(() => {
     if (!restored()) return
@@ -1036,7 +1027,7 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.right", title: "Ensemble: Column right", bind: "l", run: () => focusRight() },
         { id: "ensemble.v2.down", title: "Ensemble: Down", bind: "j", run: () => moveCursor(1) },
         { id: "ensemble.v2.up", title: "Ensemble: Up", bind: "k", run: () => moveCursor(-1) },
-        { id: "ensemble.v2.enter", title: "Ensemble: Open chat", bind: "enter", run: () => { if (focusArea() === "rail") void enterRail().catch(showError); else if (focusArea() === "tasks") void openResult().catch(showError) } },
+        { id: "ensemble.v2.enter", title: "Ensemble: Open chat / work result", bind: "enter", run: () => { if (focusArea() === "rail") void enterRail().catch(showError); else void openResult().catch(showError) } },
         { id: "ensemble.v2.compose", title: "Ensemble: Compose", bind: "i", run: () => startCompose() },
         { id: "ensemble.v2.new.agent", title: "Ensemble: New agent", bind: "a", run: () => void createAgent().catch(showError) },
         { id: "ensemble.v2.new.workspace", title: "Ensemble: New workspace", bind: "n", run: () => void createWorkspace().catch(showError) },
@@ -1726,7 +1717,7 @@ export function EnsembleV2App() {
         </Show>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} leaderGlyph={leaderMark()} />
+          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
           <box flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={focusArea() === "chat" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <text fg={focusArea() === "chat" ? colors.focus : colors.muted} bg={colors.bg} width="100%" flexShrink={0} truncate>{surfaceTitle()}</text>
             <Show when={settingsAgentID()} fallback={
@@ -1740,7 +1731,7 @@ export function EnsembleV2App() {
                     </box>
                   }>
                     <>
-                      <Show when={finalizedLines().length > 0 || liveLine()} fallback={
+                      <Show when={finalizedLines().length > 0 || liveMessages().length > 0 || (surface()?.kind === "workspace" && orderedTasks().length > 0)} fallback={
                         <box flexDirection="column" padding={1} flexGrow={1}>
                           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{surface()?.kind === "agent" ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}` : "Group chat"}</text>
                           <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? "Send a direct message. It goes to this agent's native OpenCode session." : "Say something to your team. $Name mentions an agent; @path references a file."}</text>
@@ -1752,7 +1743,7 @@ export function EnsembleV2App() {
                               <box flexDirection="column" width="100%" paddingRight={1}>
                                 <For each={finalizedLines()}>{(message) => (
                                   <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                    <text fg={recentID() === message.id ? colors.good : chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{message.author}{message.queued ? " · queued" : ""}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.interrupted ? " · interrupted" : ""}</text>
+                                    <text fg={chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{message.author}{message.queued ? " · queued" : ""}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.interrupted ? " · interrupted" : ""}</text>
                                     <Show when={message.role === "agent" && syntaxStyle} fallback={
                                       <text fg={message.role === "system" ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                     }>
@@ -1762,11 +1753,24 @@ export function EnsembleV2App() {
                                 )}</For>
                               </box>
                           </scrollbox>
-                          <Show when={liveLine()}>
-                            <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} flexDirection="column">
-                              <text fg={chatAuthorColor(liveLine()!)} bg={colors.panel} width="100%" truncate>{liveLine()!.author} · streaming… {streamingFrame(motionFrame())}</text>
-                              <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{liveLines().join("\n") || "…"}</text>
+                          <Show when={surface()?.kind === "workspace" && orderedTasks().length > 0}>
+                            <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
+                              <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{workSummary(activeTasks(), Date.now())}</text>
+                              <For each={orderedTasks()}>{(task, index) => (
+                                <text fg={taskCursor() === index() ? (focusArea() === "chat" ? colors.good : colors.warn) : (deriveWorkStatus(task, Date.now()) === "working" || deriveWorkStatus(task, Date.now()) === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
+                                  {taskCursor() === index() ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now())}{(deriveWorkStatus(task, Date.now()) === "working" || deriveWorkStatus(task, Date.now()) === "retrying") ? ` ${streamingFrame(motionFrame())}` : ""}
+                                </text>
+                              )}</For>
+                              <text fg={colors.faint} bg={colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result · r retry · R restart · x cancel · o native</text>
                             </box>
+                          </Show>
+                          <Show when={liveMessages().length > 0}>
+                            <For each={liveMessages()}>{(live) => (
+                              <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} flexDirection="column">
+                                <text fg={chatAuthorColor(live)} bg={colors.panel} width="100%" truncate>{live.author} · streaming… {streamingFrame(motionFrame())}</text>
+                                <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{liveText(live.text).join("\n") || "…"}</text>
+                              </box>
+                            )}</For>
                           </Show>
                           <Show when={!atBottom()}>
                             <box position="absolute" bottom={1} right={1} zIndex={40} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} onMouseDown={() => jumpToBottom()}>
@@ -1811,7 +1815,6 @@ export function EnsembleV2App() {
               <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={agentMemories()} memoryCursor={memoryCursor()} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} filterEditing={skillFilterEditing()} skillCatalog={skills()} />
             </Show>
           </box>
-          <TaskBoard colors={colors} tasks={orderedTasks()} state={state()} cursor={taskCursor()} activeCount={activeCount()} focus={focusArea() === "tasks"} width={taskWidth()} />
         </box>
       <Show when={picker()?.mode} keyed>
         <>
@@ -1900,8 +1903,8 @@ export function EnsembleV2App() {
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
-        <text fg={colors.muted} bg={colors.bg} width="100%" truncate>h/l columns · j/k select · enter open · i compose · a agent · n workspace · g members · I init · v approvals</text>
-        <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : "~ leader · / search · p pause · s settings · o native"}</text>
+        <text fg={colors.muted} bg={colors.bg} width="100%" truncate>h/l column · j/k work · enter result · i compose · a agent · n workspace · g members · I init · v approvals</text>
+        <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : "d delegate · t reassign · r retry · R restart · x cancel · o native · ~ leader · / search · p pause · s settings"}</text>
       </box>
     </box>
   )

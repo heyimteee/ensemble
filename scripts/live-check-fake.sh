@@ -58,6 +58,8 @@ live_open_ensemble
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page"
 live_require_text "$LIVE_TUI_SESSION" "No currently opened session" 10 "empty chat state"
 live_assert_text "$LIVE_TUI_SESSION" "○───○───○" "one-shot empty-state mark"
+# Ticket #56: the right-hand task board is retired; nothing renders it.
+live_assert_absence "$LIVE_TUI_SESSION" "SUBTASKS" "right-hand task board retired"
 live_require_text "$LIVE_TUI_SESSION" "I init" 10 "I init shortcut"
 live_require_text "$LIVE_TUI_SESSION" "git:(" 10 "git metadata"
 live_check_help
@@ -152,21 +154,37 @@ synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synth
 leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')
 [[ "$leader_name" == '"FakeAgent"' ]] || live_fail "unexpected roster leader (got $leader_name)"
 
-# Durable queue at this layer: a group message creates leader work that runs
-# to replied with no further TUI action, and the snapshot exposes the derived
-# lifecycle facts (ticket #54; the work-row UI itself belongs to ticket #56).
+# Inline work progress at this layer (ticket #56): group messages create
+# leader work that starts with no further TUI action — no navigation, no
+# native session — and runs to replied. Each work row shows its assigned
+# agent with a loading state while active and replied when done; the live
+# reply area is the active-work surface with per-item streaming text. A
+# second message proves multiple live items each finalize without
+# duplicates or stale lines.
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on group surface"
-live_type "$LIVE_TUI_SESSION" "fake-queue-probe"
+live_type "$LIVE_TUI_SESSION" "fake-queue-alpha"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "fake-queue-probe" 15 "group message posted"
-queue_states=""
-for _ in $(seq 1 60); do
-  queue_states=$(live_snapshot_value 'Object.values(output.state.subtasks).map(function (t) { return t.state })')
-  [[ "$queue_states" == *replied* ]] && break
+live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message posted"
+live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "inline work section"
+live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · working" 15 "work row loading state with assignee"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for second message"
+live_type "$LIVE_TUI_SESSION" "fake-queue-beta"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "fake-queue-beta" 15 "second group message posted"
+queue_replied=0
+for _ in $(seq 1 120); do
+  queue_replied=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state === "replied" }).length')
+  [[ "$queue_replied" == "2" ]] && break
   sleep 0.5
 done
-[[ "$queue_states" == *replied* ]] || live_fail "group work did not run to replied with no further action (got $queue_states)"
+[[ "$queue_replied" == "2" ]] || live_fail "group work did not run to replied with no further action (got $queue_replied replied)"
+live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · replied" 15 "work row replied with assignee"
+live_assert_text "$LIVE_TUI_SESSION" "fake-queue-alpha" "first work row"
+live_assert_text "$LIVE_TUI_SESSION" "fake-queue-beta" "second work row"
+live_assert_count "$LIVE_TUI_SESSION" "· FakeAgent · replied" 2 "two replied work rows, no duplicates"
+live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization of group work"
 queue_status=$(live_snapshot_value 'Object.values(output.state.subtasks).map(function (t) { return t.status })')
 [[ "$queue_status" == *replied* ]] || live_fail "derived work status not exposed in snapshot (got $queue_status)"
 queue_key=$(live_snapshot_value 'Object.values(output.state.subtasks).map(function (t) { return typeof t.queueKey })')
@@ -220,5 +238,7 @@ live_key "$LIVE_TUI_SESSION" 'q'
 live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "stale heading after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "stale code after leaving Ensemble"
+live_assert_absence "$LIVE_TUI_SESSION" "fake-queue-beta" "stale work row after leaving Ensemble"
+live_assert_absence "$LIVE_TUI_SESSION" "WORK ·" "stale work section after leaving Ensemble"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"
