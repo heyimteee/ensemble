@@ -108,6 +108,15 @@ export class EnsembleV2Service {
     this.lastDmAt = Math.max(now(), this.lastDmAt + 1)
     return this.lastDmAt
   }
+  /**
+   * The DM clock is in-memory only, so it must be re-seeded from the maximum
+   * stored DM `createdAt` whenever transcripts (re)load. Otherwise a restart
+   * could mint a `createdAt` that ties with a stored row and fall back to id
+   * order. The clock never moves backwards: pruning only removes rows.
+   */
+  private refreshDmClock(): void {
+    this.lastDmAt = Math.max(this.lastDmAt, this.store.dmMaxCreatedAt())
+  }
   private readonly liveBySession = new Map<string, { message: Message; lastSave: number; buffer: string }>()
   private globalEpoch = 0
   private lastConfigError: string | undefined
@@ -126,6 +135,7 @@ export class EnsembleV2Service {
       this.emitChanged(state.version)
     })
     await this.store.load()
+    this.refreshDmClock()
     await this.ensureInterruptedApprovals()
     this.retryRegistration = await this.ctx.session.hook("retry", (event: any) => {
       if (!this.profileForSession(event.sessionID)) return
@@ -256,6 +266,7 @@ export class EnsembleV2Service {
 
   private async snapshot(directory: string): Promise<Snapshot> {
     await this.store.sync()
+    this.refreshDmClock()
     try {
       await this.discoverWorkspace(directory)
       this.lastConfigError = undefined
@@ -279,6 +290,7 @@ export class EnsembleV2Service {
 
   private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string }> {
     await this.store.sync()
+    this.refreshDmClock()
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     return {
@@ -289,6 +301,7 @@ export class EnsembleV2Service {
 
   private async invoke(directory: string, action: string, payload: Json): Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }> {
     await this.store.sync()
+    this.refreshDmClock()
     try {
       const result = await this.dispatch(directory, action, payload)
       this.pump()
@@ -477,6 +490,7 @@ export class EnsembleV2Service {
     await this.ctx.session.move({ sessionID: home.sessionID, directory: workspace.directory })
     await this.store.removeBinding("home", agent.id)
     await this.store.moveDmTranscript("home", agent.id, workspace.id)
+    this.refreshDmClock()
     await this.store.saveBinding({ workspaceID: workspace.id, agentID: agent.id, sessionID: home.sessionID, kind: "workspace", directory: workspace.directory, agentVersion: agent.version, updatedAt: now() })
     agent.homeSessionID = undefined
     await this.store.saveAgent(agent)
@@ -898,6 +912,7 @@ export class EnsembleV2Service {
     await this.ctx.storage.remove("v2/meta").catch(() => undefined)
     await this.ctx.storage.remove("ensemble.state").catch(() => undefined)
     await this.store.reset()
+    this.refreshDmClock()
     return { ok: true }
   }
 

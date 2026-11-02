@@ -136,3 +136,62 @@ test("pruning a workspace removes its dm transcripts", async () => {
   await store.pruneWorkspace("w")
   assert.equal(store.snapshot().dmTranscripts["w:a"], undefined)
 })
+
+test("sync picks up dm lines written by another store through the shared ingest", async () => {
+  const ctx = fakeContext()
+  const writer = new V2Store(ctx)
+  await writer.load()
+  await writer.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
+  const reader = new V2Store(ctx)
+  await reader.load()
+  assert.deepEqual(reader.snapshot().dmTranscripts["home:a"].map((item) => item.text), ["one"])
+  await writer.saveDmMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
+  const changed = await reader.sync()
+  assert.equal(changed, true)
+  assert.deepEqual(reader.snapshot().dmTranscripts["home:a"].map((item) => item.text), ["one", "two"])
+})
+
+test("moving a dm transcript copies before deleting and is idempotent", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
+  await store.saveDmMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
+  await store.moveDmTranscript("home", "a", "w")
+  assert.deepEqual(store.snapshot().dmTranscripts["w:a"].map((item) => item.text), ["one", "two"])
+  assert.equal(store.snapshot().dmTranscripts["home:a"], undefined)
+  // Retry after completion is a no-op and keeps the transcript intact.
+  await store.moveDmTranscript("home", "a", "w")
+  assert.deepEqual(store.snapshot().dmTranscripts["w:a"].map((item) => item.text), ["one", "two"])
+})
+
+test("moving an empty dm transcript is a no-op", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.moveDmTranscript("home", "a", "w")
+  assert.equal(store.snapshot().dmTranscripts["home:a"], undefined)
+  assert.equal(store.snapshot().dmTranscripts["w:a"], undefined)
+  await store.moveDmTranscript("home", "a", "w")
+  assert.equal(store.snapshot().dmTranscripts["w:a"], undefined)
+})
+
+test("retrying a move after an interruption between phases loses nothing", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
+  await store.saveDmMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
+  // Simulate a crash after phase 1 (new keys written) before phase 2
+  // (old keys deleted): both copies exist in storage.
+  for (const { key, value } of await (store as any).scanAll("v2/dm/home/a/")) {
+    const id = key.split("/").at(-1)
+    await ctx.storage.set(`v2/dm/w/a/${id}`, { ...(value as object), bindingKey: "w:a" })
+  }
+  await store.moveDmTranscript("home", "a", "w")
+  const snapshot = store.snapshot()
+  assert.deepEqual(snapshot.dmTranscripts["w:a"].map((item) => item.text), ["one", "two"])
+  assert.equal(snapshot.dmTranscripts["home:a"], undefined)
+  const remaining = await (store as any).scanAll("v2/dm/home/a/")
+  assert.equal(remaining.length, 0)
+})
