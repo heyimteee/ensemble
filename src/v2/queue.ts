@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import type { Subtask } from "./types.ts"
+import type { Subtask, WorkKind } from "./types.ts"
 
 /**
  * Durable coordination queue mechanics, adapted from OpenBot's `work/queue.ts`
@@ -19,8 +19,16 @@ import type { Subtask } from "./types.ts"
  *   work is failed with its reason preserved rather than retried forever.
  * - OpenBot reaps with `REAP_OLDER_THAN_MS = 24h` for idempotency retention.
  *   Ensemble keeps finished rows for the same 24h (`FINISHED_RETENTION_MS`)
- *   before retention-bounded cleanup; the idempotency key stays valid for the
- *   row's lifetime.
+ *   before retention-bounded cleanup. Duplicate suppression honors the row
+ *   lifetime: resubmitting the same work while its row exists (live or
+ *   terminal) returns the existing item instead of executing twice, for all
+ *   work kinds. Retention expiry ends suppression naturally. Intentional
+ *   re-asks stay explicit: `task.retry`/`task.restart` re-queue the same row,
+ *   and asking from a different parent/run is a different unit of work by
+ *   construction (the run prefix differs).
+ * - Relay and failure-notice legs are messages keyed by the hop correlation,
+ *   not work rows: control legs never enter the queue and never consume the
+ *   asking run's fan-out budget.
  * - OpenBot sweeps on a 2s poll plus Postgres `LISTEN`. Ensemble is a
  *   single-process service, so there is no cross-replica sweep: stale leases
  *   are reaped on every schedule pass and on snapshot/diagnostic reads (the
@@ -39,20 +47,19 @@ export function isTerminalWorkStatus(status: DerivedWorkStatus): boolean {
   return status === "replied" || status === "failed" || status === "cancelled"
 }
 
-function stoppedReason(error: string | undefined): boolean {
-  if (!error) return false
-  return /cancel|discard|archiv|delet|paused/i.test(error)
-}
-
 /**
  * The single canonical derivation of a work item's visible lifecycle.
  * Persisted `state`/`outcome` are write-through caches for older readers;
  * this function is the source of truth. Pure: no I/O, no clock reads —
  * the caller passes `now`.
+ *
+ * Cancellation is structural: only an explicit `stoppedAt` marker reads
+ * cancelled. Free-form error text is never substring-matched, so a failure
+ * whose reason mentions "cancel" or "paused" still reads failed.
  */
 export function deriveWorkStatus(task: Subtask, now: number): DerivedWorkStatus {
   if (task.state === "replied") {
-    if (task.stoppedAt !== undefined || stoppedReason(task.error)) return "cancelled"
+    if (task.stoppedAt !== undefined) return "cancelled"
     return task.outcome === "succeeded" ? "replied" : "failed"
   }
   if (task.attempts >= MAX_ATTEMPTS) return "failed"
@@ -62,18 +69,42 @@ export function deriveWorkStatus(task: Subtask, now: number): DerivedWorkStatus 
   return "pending"
 }
 
-function hashPart(value: string): string {
+/** Stable short hash for idempotency-key segments. Never interpolate raw ids. */
+export function stableHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32)
 }
 
+/** Boundary validation for the domain union. Unknown values are rejected. */
+export function parseWorkKind(value: unknown): WorkKind | undefined {
+  if (value === "delegation" || value === "handoff" || value === "turn") return value
+  return undefined
+}
+
 /**
- * Idempotency key for a unit of delegated work. Same workspace, same kind,
- * same parent, same assignee, same typed instruction → same key, so a
- * resubmitted delegation executes once, not twice.
+ * Hashed run prefix for idempotency keys. The asking run's subtask id scopes
+ * the key, but only as a hash — raw parent ids never appear in stored keys.
+ * A root (user-level) ask hashes its own constant prefix.
+ */
+export function runPrefixHash(parentID?: string): string {
+  return stableHash(`run:${parentID ?? "root"}`)
+}
+
+function canonicalField(value: string | undefined): string {
+  return (value ?? "").trim()
+}
+
+/**
+ * Idempotency key for a unit of delegated/turn work. Segments, in order:
+ * actor scope (creator agent id, or "user"), workspace scope, work kind, the
+ * hashed run prefix (never the raw parent id), the addressed recipient, and
+ * a hash of the canonical task/constraints/expected/instruction body.
+ * Resubmitting the same work (same key, row still retained) executes once,
+ * not twice, for live and terminal rows alike.
  */
 export function workKey(input: {
+  actor: string
   workspaceID: string
-  kind: string
+  kind: WorkKind
   parentID?: string
   assigneeID: string
   title: string
@@ -81,8 +112,28 @@ export function workKey(input: {
   constraints?: string
   expected?: string
 }): string {
-  const body = hashPart(
-    [input.assigneeID, input.title, input.instruction, input.constraints ?? "", input.expected ?? ""].join("\0"),
+  const run = runPrefixHash(input.parentID)
+  const body = stableHash(
+    [input.assigneeID, canonicalField(input.title), canonicalField(input.instruction), canonicalField(input.constraints), canonicalField(input.expected)].join("\0"),
   )
-  return `work:${input.workspaceID}:${input.kind}:${input.parentID ?? "root"}:${body}`
+  return `work:${input.workspaceID}:${input.kind}:${input.actor}:${run}:${input.assigneeID}:${body}`
+}
+
+/**
+ * Correlation id for the relay/failure-notice legs of one unit of work.
+ * Derived from the work key (outside the fan-out prefix), so control legs
+ * trace back to the hop without consuming the run's budget.
+ */
+export function correlationIDForKey(kind: "handoff" | "turn", key: string): string {
+  return `${kind}_${stableHash(`correlation:${key}`)}`
+}
+
+/**
+ * Claim-fencing verdict for a freshly persisted claim. The claimant wins only
+ * when the stored row still names its run: another writer overwrote the claim
+ * (or the row is gone), so this run must stand down instead of double-running
+ * the work. Pure: the caller performs the storage re-read.
+ */
+export function claimWon(stored: Subtask | undefined, runID: string): boolean {
+  return stored?.claimedBy === runID
 }

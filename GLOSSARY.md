@@ -19,7 +19,7 @@ _Avoid_: Channel, room, group (when referring to this concept).
 
 **Leader**: The workspace member responsible for receiving unaddressed messages, coordinating work, and delegating subtasks. Leadership does not confer additional permissions.
 
-**Mention**: An explicit recipient reference introduced with `@` and associated with an agent's lasting identity. `!` is accepted as an alias.
+**Mention**: An explicit recipient reference introduced with `$` and associated with an agent's lasting identity. `!` is accepted as an alias. `@` is reserved for workspace file references only.
 
 **Direct conversation**: A private conversation between the user and one agent, separate from a workspace group chat.
 

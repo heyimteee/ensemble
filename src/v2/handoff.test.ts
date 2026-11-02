@@ -48,15 +48,23 @@ test("missing frontmatter markers are refused", () => {
   assert.equal(parsed.ok, false)
 })
 
-test("handoff idempotency key ignores the asking turn", () => {
-  const first = handoffWorkKey({ workspaceID: "w", recipientID: "sage", task: "Summarize", constraints: "Short", expected: "Para" })
-  const second = handoffWorkKey({ workspaceID: "w", recipientID: "sage", task: "Summarize", constraints: "Short", expected: "Para" })
+test("handoff idempotency key scopes actor, run prefix, and recipient", () => {
+  const base = { actor: "nova", workspaceID: "w", recipientID: "sage", task: "Summarize", constraints: "Short", expected: "Para" }
+  const first = handoffWorkKey(base)
+  const second = handoffWorkKey(base)
   assert.equal(first, second)
   assert.ok(first.startsWith("handoff:w:"))
-  const otherTask = handoffWorkKey({ workspaceID: "w", recipientID: "sage", task: "Different", constraints: "Short", expected: "Para" })
+  assert.ok(!first.includes("parent"))
+  const otherTask = handoffWorkKey({ ...base, task: "Different" })
   assert.notEqual(first, otherTask)
-  const otherRecipient = handoffWorkKey({ workspaceID: "w", recipientID: "nova", task: "Summarize", constraints: "Short", expected: "Para" })
+  const otherRecipient = handoffWorkKey({ ...base, recipientID: "nova" })
   assert.notEqual(first, otherRecipient)
+  // The asking run scopes the key as a hash, never raw: a resubmission from
+  // the same run dedupes, while a different run is a different unit of work.
+  const fromRun = handoffWorkKey({ ...base, parentID: "task_parent" })
+  assert.notEqual(first, fromRun)
+  assert.equal(fromRun, handoffWorkKey({ ...base, parentID: "task_parent" }))
+  assert.ok(!fromRun.includes("task_parent"))
 })
 
 function stateWithAgents() {

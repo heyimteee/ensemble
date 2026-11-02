@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto"
 import type { Agent, SnapshotState, Workspace } from "./types.ts"
+import { runPrefixHash, stableHash } from "./queue.ts"
 
 /**
  * Typed handoff protocol helpers (ticket #55), adapted from OpenBot's
@@ -10,17 +10,25 @@ import type { Agent, SnapshotState, Workspace } from "./types.ts"
  *   kind and a derived lifecycle; the hop key is `hop:<runHash>:<bodyHash>`
  *   with `relay:`/`notice:` legs keyed on the hop. Ensemble persists one
  *   subtask row per unit of work, so the handoff hop IS a subtask with
- *   `workKind: "handoff"` and the same idempotency-key mechanics. There is no
- *   parallel table and no second leg: the recipient's run posts its reply in
- *   the asking workspace transcript, which is the relay, attributed via the
- *   message `agentID`. Failure exhaustion posts a visible notice in the same
- *   transcript. One source of truth; no join, no drift.
+ *   `workKind: "handoff"` and the same idempotency-key mechanics
+ *   (`handoff:<workspace>:<actor>:<runHash>:<recipient>:<bodyHash>`; the run
+ *   prefix is hashed, never raw). There is no parallel table and no second
+ *   leg: the recipient's run posts its reply in the asking workspace
+ *   transcript, which is the relay, attributed via the message `agentID`.
+ *   Failure exhaustion posts a visible notice in the same transcript. Relay
+ *   and notice legs are messages keyed by the hop correlation — not work
+ *   rows — so control legs never consume the run's fan-out budget. One
+ *   source of truth; no join, no drift.
  * - Agent mentions in chat use `$Name` (or `!Name`); `@` is reserved for
  *   workspace file references only. All copy built here follows that rule.
  */
 
 export const HANDOFF_MARKER = "ensemble: handoff"
 export const HANDOFF_CORRELATION_PREFIX = "handoff"
+
+/** Spec handoff caps: chains stop after one hop, and one run fans out at most three hops. */
+export const HANDOFF_MAX_DEPTH = 1
+export const HANDOFF_MAX_PER_RUN = 3
 
 export type HandoffFileData = {
   task: string
@@ -78,29 +86,34 @@ export function parseHandoffFile(content: string): HandoffParse {
   }
 }
 
-function hashPart(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 32)
-}
-
 /**
- * Idempotency key for one handoff hop. Scoped to the workspace, the
- * recipient, and the typed instruction — not to the asking turn — so a
- * retried or resubmitted handoff delivers once, including against terminal
- * rows (registration is the effect; re-registering posts nothing twice).
+ * Idempotency key for one handoff hop. Segments, in order: workspace scope,
+ * the asking actor (sender), the hashed run prefix (never the raw parent
+ * id), the addressed recipient, and a hash of the canonical typed
+ * instruction. A retried or resubmitted handoff from the same run delivers
+ * once — including against terminal rows, for the row's lifetime — while an
+ * ask from a different run is a different unit of work. Relay and
+ * failure-notice legs are messages keyed by the hop correlation, not work
+ * rows, so control legs never consume the run's fan-out budget.
  */
 export function handoffWorkKey(input: {
+  actor: string
   workspaceID: string
+  parentID?: string
   recipientID: string
   task: string
   constraints?: string
   expected?: string
 }): string {
-  const body = hashPart([input.recipientID, input.task, input.constraints ?? "", input.expected ?? ""].join("\0"))
-  return `handoff:${input.workspaceID}:${body}`
+  const run = runPrefixHash(input.parentID)
+  const body = stableHash(
+    [input.recipientID, (input.task ?? "").trim(), (input.constraints ?? "").trim(), (input.expected ?? "").trim()].join("\0"),
+  )
+  return `handoff:${input.workspaceID}:${input.actor}:${run}:${input.recipientID}:${body}`
 }
 
 export function newCorrelationID(): string {
-  return `${HANDOFF_CORRELATION_PREFIX}_${hashPart(`${Date.now()}\0${Math.random()}`)}`
+  return `${HANDOFF_CORRELATION_PREFIX}_${stableHash(`${Date.now()}\0${Math.random()}`)}`
 }
 
 export type HandoffRecipient =

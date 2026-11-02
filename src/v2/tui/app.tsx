@@ -18,6 +18,7 @@ import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit }
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus } from "../queue.ts"
+import { shouldApplySnapshot } from "../snapshot-guard.ts"
 import { orderedWorkItems, splitLiveFinalized, workRowText, workSummary } from "./workrows.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
@@ -175,6 +176,10 @@ export function EnsembleV2App() {
   const lineCache = new Map<string, ChatLine>()
   let refreshSeq = 0
   let chatSeq = 0
+  // Highest snapshot store version applied so far. Out-of-order RPC
+  // responses (250ms poll overlapping an event-triggered refresh) must not
+  // repaint older state over newer: stale versions are dropped.
+  let lastAppliedVersion: number | undefined = undefined
   const [restored, setRestored] = createSignal(false)
   let lastSavedHistory = ""
   let lastConfigError = ""
@@ -407,6 +412,8 @@ export function EnsembleV2App() {
     try {
       const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
       if (seq !== refreshSeq) return
+      if (!shouldApplySnapshot(lastAppliedVersion, next.state.version)) return
+      lastAppliedVersion = next.state.version
       setSnapshot(next)
       syncTranscriptScroll()
       try { (context.renderer as any)?.requestRender?.() } catch {}
@@ -976,6 +983,17 @@ export function EnsembleV2App() {
     const stopData = context.data.listen(({ details }: any) => {
       const type = typeof details?.type === "string" ? details.type : ""
       if (type === "session.text.delta" || type === "session.idle" || type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") handleNativeEvent(details)
+      // Durable writes emit the `changed` event with the affected scope
+      // (workspace, subtask, correlation, kind); the UI invalidates and
+      // refreshes on it — no navigation required. An event that is not newer
+      // than the applied snapshot is already visible, so it skips the fetch.
+      // The 250ms poll below stays as a fallback.
+      if (type === "rpc.ensemble.v2.changed") {
+        const eventVersion = typeof details?.version === "number" ? details.version : typeof details?.data?.version === "number" ? details.data.version : undefined
+        if (eventVersion !== undefined && lastAppliedVersion !== undefined && eventVersion <= lastAppliedVersion) return
+        void refresh()
+        return
+      }
       if (type.startsWith("rpc.ensemble.v2.")) void refresh()
     })
     const keyInput = context.renderer.keyInput

@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
+import { workKey } from "./queue.ts"
 import { V2Store } from "./store.ts"
 
 type Handlers = {
@@ -2105,6 +2106,47 @@ test("resubmitting the same delegation executes once", async () => {
     const after = await handlers.snapshot({ directory })
     const children = Object.values(after.state.subtasks).filter((task: any) => task.title === "Child")
     assert.equal(children.length, 1)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("terminal rows still suppress resubmission until retention expires, with retry as the explicit re-ask", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
+  const shared = new Map<string, unknown>()
+  const seed = new V2Store(fakeContext(shared).ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "n", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveAgent({ id: "s", name: "Sage", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "n", memberIDs: ["n", "s"], synthesis: false, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  // A retained terminal row for the exact work the user path would create.
+  const at = Date.now()
+  const retainedKey = workKey({ actor: "user", workspaceID: "w", kind: "delegation", parentID: undefined, assigneeID: "n", title: "Coordinate", instruction: "Coordinate" })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "n", title: "Coordinate", instruction: "Coordinate", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1, repliedAt: at, finishedAt: at, queueKey: retainedKey, workKind: "delegation" })
+  const { ctx } = fakeContext(shared)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    // The same ask dedupes against the retained terminal row: one row, no
+    // second execution. The user line is still posted, so nothing is silent.
+    const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "Coordinate" } })
+    assert.deepEqual(sent.result.recipients, ["n"])
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.title === "Coordinate").length, 1)
+    assert.equal((after.state.subtasks as any).t?.outcome, "succeeded")
+    // Intentional re-asks stay explicit: task.retry re-queues the same row,
+    // which then runs exactly once through the normal queue path.
+    const retried = await handlers.invoke({ directory, action: "task.retry", payload: { id: "t" } })
+    assert.equal(retried.result.id, "t")
+    assert.equal(retried.result.state, "pending")
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks as any).t?.state === "replied" && (next.state.subtasks as any).t?.attempts === 2
+    })
+    const rerun = await handlers.snapshot({ directory })
+    assert.equal(Object.values(rerun.state.subtasks).filter((task: any) => task.title === "Coordinate").length, 1)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

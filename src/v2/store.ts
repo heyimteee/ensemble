@@ -1,5 +1,5 @@
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
-import { workKey } from "./queue.ts"
+import { parseWorkKind, workKey } from "./queue.ts"
 import type {
   Agent,
   Approval,
@@ -83,10 +83,14 @@ export class V2Store {
     for (const subtask of Object.values(this.state.subtasks)) {
       // Backfill the idempotency key for pre-v5.3 rows so resubmitted work
       // still dedupes. In-memory only; it persists on the next save.
+      // Unknown legacy kinds coerce to delegation (the pre-union default).
+      const kind = parseWorkKind(subtask.workKind) ?? "delegation"
+      subtask.workKind = kind
       if (!subtask.queueKey && subtask.assigneeID) {
         subtask.queueKey = workKey({
+          actor: subtask.creatorAgentID ?? subtask.creatorType,
           workspaceID: subtask.workspaceID,
-          kind: subtask.workKind ?? "delegation",
+          kind,
           parentID: subtask.parentID,
           assigneeID: subtask.assigneeID,
           title: subtask.title,
@@ -95,7 +99,6 @@ export class V2Store {
           expected: subtask.expected,
         })
       }
-      if (!subtask.workKind) subtask.workKind = "delegation"
       if (subtask.state === "working") {
         // Restart recovery: re-queue interruptible work without duplicating
         // it. Attempts and the idempotency key are kept so the retried work
@@ -226,11 +229,35 @@ export class V2Store {
     // Coordination state: a second location/service view must see the same
     // queue. Subtasks, messages, approvals, memories, and the DM queue merge
     // by id; deletions do not propagate (matches agent/binding behavior).
+    //
+    // Single-process claim boundary: claim ownership (`claimedBy`,
+    // `leaseUntil`, `activeRunID`) is process-local — the owning process
+    // drives the bound native session and renews the lease by heartbeat.
+    // `sync()` therefore never overwrites a locally held claim with a
+    // storage row's claim fields: another process (or a stale row) cannot
+    // steal this process's claim through a merge. When this process holds no
+    // claim, the storage row's claim fields are adopted so a foreign live
+    // claim stays visible and this instance will not double-claim it while
+    // its lease is fresh — always re-check ownership before running (see
+    // `claimWon` in queue.ts). Two processes actively pumping against one
+    // store is unsupported: `SharedEnsemble` keeps one service per process
+    // and `sync()` exists to converge cross-location views of that service.
     // Runs stay instance-owned: they track live native sessions, which only
     // the owning process can drive.
     for (const { value } of await this.scanAll("v2/subtask/")) {
       const subtask = value as Subtask
-      if (subtask?.id) this.state.subtasks[subtask.id] = subtask
+      if (!subtask?.id) continue
+      const current = this.state.subtasks[subtask.id]
+      if (!current) {
+        this.state.subtasks[subtask.id] = subtask
+        continue
+      }
+      if (current.claimedBy !== undefined) {
+        const { claimedBy: _claimed, leaseUntil: _lease, activeRunID: _run, ...rest } = subtask
+        Object.assign(current, rest)
+        continue
+      }
+      this.state.subtasks[subtask.id] = subtask
     }
     for (const { value } of await this.scanAll("v2/message/")) {
       const message = value as Message
@@ -326,6 +353,17 @@ export class V2Store {
     this.state.subtasks[subtask.id] = subtask
     await this.ctx.storage.set(`v2/subtask/${subtask.id}`, subtask)
     await this.bump()
+  }
+
+  /**
+   * Direct storage re-read of one subtask row, bypassing the in-memory
+   * snapshot. Used for claim fencing: after persisting a claim, the runner
+   * verifies the stored row still names its run before starting work, so a
+   * racing writer cannot be double-claimed silently.
+   */
+  async readSubtask(id: string): Promise<Subtask | undefined> {
+    const stored = await this.ctx.storage.get(`v2/subtask/${id}`).catch(() => undefined)
+    return (stored as Subtask | undefined)?.id ? (stored as Subtask) : undefined
   }
 
   async removeSubtask(id: string): Promise<void> {

@@ -274,24 +274,32 @@ test("handoff depth and per-run caps are refused visibly", async () => {
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
-    await handlers.invoke({ directory, action: "settings.update", payload: { maxDepth: 1, maxDelegations: 1 } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
     // The store binding lands before the run registers its session: wait for
-    // the parent run itself, otherwise the delegation would read no asking
-    // run and the child would lose its parent link (and depth).
+    // the parent run itself, otherwise the handoff would read no asking run.
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
       if (!parent) return false
       return Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === parent.id && run.status === "running")
     })
+    // Handoff-specific caps (not the generic delegation settings): one run
+    // fans out at most three hops. The first three asks from the top-level
+    // run land; the fourth is refused without queueing.
+    for (const [index, task] of ["First work", "Second work", "Third work"].entries()) {
+      const path = handoffFile(directory, `ask-${index}.md`, `---\nensemble: handoff\ntask: ${task}\n---\n# Handoff\n`)
+      const asked = await tools.get("handoff").execute({ task, summary: "", path, to: "Sage" }, { sessionID: novaSession })
+      assert.match(asked.content, /Handed to \$Sage/)
+    }
+    const cappedPath = handoffFile(directory, "ask-capped.md", "---\nensemble: handoff\ntask: Fourth work\n---\n# Handoff\n")
+    const capped = await tools.get("handoff").execute({ task: "Fourth work", summary: "", path: cappedPath, to: "Sage" }, { sessionID: novaSession })
+    assert.match(capped.content, /the handoff limit is 3 per run/)
+    // Depth: chains stop after one hop. Delegate a child, then ask from
+    // inside it (asking depth 1): refused without queueing.
     const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID: novaSession })
     assert.match(delegated.content, /Delegated to Sage/)
-    // Hold the child run open, then ask from inside it: depth 1 meets maxDepth 1.
     const sageSession = await bindingSessionID(handlers, directory, sage.id)
-    // The store binding lands before the run registers its session, so wait
-    // for the run itself: otherwise the handoff would read no asking run.
     let childID = ""
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
@@ -300,14 +308,11 @@ test("handoff depth and per-run caps are refused visibly", async () => {
       childID = child.id
       return Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === childID && run.status === "running")
     })
-    const path = handoffFile(directory, "deep.md", "---\nensemble: handoff\ntask: Deep work\n---\n# Handoff\n")
-    const deep = await tools.get("handoff").execute({ task: "Deep work", summary: "", path, to: "Nova" }, { sessionID: sageSession })
-    assert.match(deep.content, /delegation depth limit/)
-    // The asking turn already has one child: the per-run cap refuses a second.
-    const capped = await tools.get("handoff").execute({ task: "Other work", summary: "", path, to: "Sage" }, { sessionID: novaSession })
-    assert.match(capped.content, /delegation limit/)
+    const deepPath = handoffFile(directory, "deep.md", "---\nensemble: handoff\ntask: Deep work\n---\n# Handoff\n")
+    const deep = await tools.get("handoff").execute({ task: "Deep work", summary: "", path: deepPath, to: "Nova" }, { sessionID: sageSession })
+    assert.match(deep.content, /the handoff depth limit is 1/)
     const after = await handlers.snapshot({ directory })
-    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 0)
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 3)
     const texts = ((after.state.messages[workspace.id] ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handoff refused")))
   } finally {
