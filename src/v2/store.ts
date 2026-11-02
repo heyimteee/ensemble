@@ -78,18 +78,7 @@ export class V2Store {
       const entry = value as DmQueueEntry
       if (entry?.id) this.state.dmQueue[entry.id] = entry
     }
-    for (const { value } of await this.scanAll("v2/dm/")) {
-      const message = value as ChatMessage & { bindingKey: string }
-      if (!message?.id || !message?.bindingKey) continue
-      const list = (this.state.dmTranscripts[message.bindingKey] ??= [])
-      if (!list.some((item) => item.id === message.id)) {
-        const { bindingKey: _dropped, ...rest } = message
-        list.push(rest)
-      }
-    }
-    for (const list of Object.values(this.state.dmTranscripts)) {
-      list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    }
+    await this.mergeDmScan()
     for (const subtask of Object.values(this.state.subtasks)) {
       if (subtask.state === "working") {
         subtask.state = "pending"
@@ -116,12 +105,61 @@ export class V2Store {
 
   async moveDmTranscript(fromWorkspaceKey: string, agentID: string, toWorkspaceKey: string): Promise<void> {
     const fromKey = bindingKey(fromWorkspaceKey, agentID)
-    const messages = this.state.dmTranscripts[fromKey] ?? []
-    for (const message of messages) {
+    const toKey = bindingKey(toWorkspaceKey, agentID)
+    if (fromKey === toKey) return
+    // Authoritative source is storage: union the stored from-prefix rows with
+    // any in-memory lines so a retry after an interruption converges instead
+    // of losing messages. Phase 1 writes every new key; phase 2 deletes old
+    // keys. A crash between phases leaves both copies; retrying the move
+    // overwrites the new keys by id and then deletes the old keys, so the
+    // worst case is a transient duplicate across bindings, never loss.
+    const seen = new Map<string, ChatMessage>()
+    for (const { value } of await this.scanAll(`v2/dm/${fromWorkspaceKey}/${agentID}/`)) {
+      const stored = value as ChatMessage & { bindingKey?: string }
+      if (stored?.id) {
+        const { bindingKey: _dropped, ...rest } = stored
+        seen.set(stored.id, rest as ChatMessage)
+      }
+    }
+    for (const message of this.state.dmTranscripts[fromKey] ?? []) {
+      if (message?.id && !seen.has(message.id)) seen.set(message.id, { ...message })
+    }
+    for (const message of seen.values()) {
       await this.saveDmMessage(toWorkspaceKey, agentID, { ...message, queued: false })
     }
+    // Phase 2 runs only after every new key is durable.
     delete this.state.dmTranscripts[fromKey]
     await this.removePrefix(`v2/dm/${fromWorkspaceKey}/${agentID}/`)
+  }
+
+  /** Highest stored DM `createdAt` across all transcripts (0 when empty). */
+  dmMaxCreatedAt(): number {
+    let max = 0
+    for (const list of Object.values(this.state.dmTranscripts)) {
+      for (const message of list) {
+        if (typeof message?.createdAt === "number" && message.createdAt > max) max = message.createdAt
+      }
+    }
+    return max
+  }
+
+  /**
+   * Shared `v2/dm/` scan → dedupe-by-id → deterministic-sort ingest used by
+   * both the initial load and sync paths so they cannot drift apart.
+   */
+  private async mergeDmScan(): Promise<void> {
+    for (const { value } of await this.scanAll("v2/dm/")) {
+      const message = value as ChatMessage & { bindingKey: string }
+      if (!message?.id || !message?.bindingKey) continue
+      const list = (this.state.dmTranscripts[message.bindingKey] ??= [])
+      if (!list.some((item) => item.id === message.id)) {
+        const { bindingKey: _dropped, ...rest } = message
+        list.push(rest)
+      }
+    }
+    for (const list of Object.values(this.state.dmTranscripts)) {
+      list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    }
   }
 
   async pruneDmForAgent(agentID: string): Promise<void> {
@@ -165,16 +203,7 @@ export class V2Store {
       const binding = value as SessionBinding
       if (binding?.workspaceID && binding?.agentID) this.state.bindings[bindingKey(binding.workspaceID, binding.agentID)] = binding
     }
-    for (const { value } of await this.scanAll("v2/dm/")) {
-      const message = value as ChatMessage & { bindingKey: string }
-      if (!message?.id || !message?.bindingKey) continue
-      const list = (this.state.dmTranscripts[message.bindingKey] ??= [])
-      if (!list.some((item) => item.id === message.id)) {
-        const { bindingKey: _dropped, ...rest } = message
-        list.push(rest)
-        list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      }
-    }
+    await this.mergeDmScan()
     this.state.version = version
     this.state.updatedAt = Number((meta as any)?.updatedAt ?? this.state.updatedAt)
     return true

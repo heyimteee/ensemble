@@ -1822,6 +1822,46 @@ test("a direct message survives restart via the load path and never duplicates",
   }
 })
 
+test("a new direct message after restart orders after stored lines even when the wall clock lags", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
+  const values = new Map<string, unknown>()
+  const first = fakeContext(values)
+  const service = new EnsembleV2Service(first.ctx)
+  const stop = await service.start()
+  let agentID = ""
+  try {
+    const agent = await service.handlers().invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    agentID = agent.result.id
+    await service.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "First" } })
+  } finally {
+    await stop()
+  }
+  // Simulate a restart where the stored transcript carries a timestamp ahead
+  // of the wall clock (e.g. previous clock skew or a future-dated seed).
+  const future = Date.now() + 60_000
+  for (const [key, value] of [...values.entries()]) {
+    if (key.startsWith("v2/dm/") && value && typeof value === "object") {
+      values.set(key, { ...(value as Record<string, unknown>), createdAt: future })
+    }
+  }
+  const second = fakeContext(values)
+  const restarted = new EnsembleV2Service(second.ctx)
+  const stopRestarted = await restarted.start()
+  try {
+    const sent = await restarted.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "Second" } })
+    assert.equal(sent.ok, true)
+    const context = await restarted.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
+    assert.equal(context.ok, true)
+    const lines = (context.result.messages as any[]).filter((message) => message.role === "user")
+    assert.deepEqual(lines.map((message) => message.text), ["First", "Second"])
+    assert.ok(lines[1].createdAt > lines[0].createdAt)
+    assert.ok(lines[1].createdAt > future)
+  } finally {
+    await stopRestarted()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("a queued direct message stays visible as queued, then sent", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
   const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
