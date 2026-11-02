@@ -19,13 +19,18 @@ export function composerCaret(focused: boolean, tick: number): string {
   return tick % 2 === 0 ? "▌" : " "
 }
 
-/** Leader marker: pulses while active, rests on the still frame when idle. */
-export const LEADER_FRAMES = ["●", "○"] as const
-
-export function leaderGlyph(active: boolean, tick: number): string {
-  if (!active) return LEADER_FRAMES[1]
-  return tick % 2 === 0 ? LEADER_FRAMES[0] : LEADER_FRAMES[1]
-}
+/**
+ * Motion correction (ticket #56): the only animated indicators are the
+ * working/streaming frames and the composer caret. The rail leader pulse and
+ * the one-shot new-message reveal were removed as decorative motion.
+ *
+ * Screenshot-unavailable assumption: the screenshots identifying the
+ * decorative animations were unavailable during research, so the removal set
+ * is interpreted as the rail leader pulse (`leaderGlyph` here) and the
+ * newest-message reveal highlight (the `recentID` tint in app.tsx). Confirm
+ * the target set before changing any other motion; functional motion
+ * (working frames, composer caret, status transitions) is kept regardless.
+ */
 
 export type MotionState = { busy: boolean; live: boolean; composerActive: boolean }
 

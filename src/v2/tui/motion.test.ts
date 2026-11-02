@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { EMPTY_MARK, LEADER_FRAMES, STREAMING_FRAMES, composerCaret, leaderGlyph, motionActive, streamingFrame } from "./motion.ts"
+import { EMPTY_MARK, STREAMING_FRAMES, composerCaret, motionActive, streamingFrame } from "./motion.ts"
 
 test("streaming frames cycle deterministically through a fixed sequence", () => {
   assert.deepEqual([...STREAMING_FRAMES], ["◐", "◑", "◒", "◓"])
@@ -24,15 +24,6 @@ test("composer caret blinks only while focused and keeps a constant width", () =
   assert.equal(composerCaret(false, 0), " ")
   assert.equal(composerCaret(false, 1), " ")
   assert.equal(composerCaret(false, 0).length, composerCaret(true, 0).length)
-})
-
-test("leader marker pulses while active and rests on a still frame when idle", () => {
-  assert.deepEqual([...LEADER_FRAMES], ["●", "○"])
-  assert.equal(leaderGlyph(true, 0), "●")
-  assert.equal(leaderGlyph(true, 1), "○")
-  assert.equal(leaderGlyph(true, 2), "●")
-  assert.equal(leaderGlyph(false, 0), "○")
-  assert.equal(leaderGlyph(false, 99), "○")
 })
 
 test("motion is active only while busy, live, or composing", () => {
