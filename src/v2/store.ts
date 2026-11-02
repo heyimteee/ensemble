@@ -1,4 +1,5 @@
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
+import { workKey } from "./queue.ts"
 import type {
   Agent,
   Approval,
@@ -80,10 +81,30 @@ export class V2Store {
     }
     await this.mergeDmScan()
     for (const subtask of Object.values(this.state.subtasks)) {
+      // Backfill the idempotency key for pre-v5.3 rows so resubmitted work
+      // still dedupes. In-memory only; it persists on the next save.
+      if (!subtask.queueKey && subtask.assigneeID) {
+        subtask.queueKey = workKey({
+          workspaceID: subtask.workspaceID,
+          kind: subtask.workKind ?? "delegation",
+          parentID: subtask.parentID,
+          assigneeID: subtask.assigneeID,
+          title: subtask.title,
+          instruction: subtask.instruction,
+          constraints: subtask.constraints,
+          expected: subtask.expected,
+        })
+      }
+      if (!subtask.workKind) subtask.workKind = "delegation"
       if (subtask.state === "working") {
+        // Restart recovery: re-queue interruptible work without duplicating
+        // it. Attempts and the idempotency key are kept so the retried work
+        // resumes its budget instead of starting a second copy.
         subtask.state = "pending"
         subtask.interrupted = true
         subtask.activeRunID = undefined
+        subtask.claimedBy = undefined
+        subtask.leaseUntil = undefined
         subtask.error = "Ensemble restarted while this subtask was working."
       }
     }
@@ -197,7 +218,40 @@ export class V2Store {
       current.archived = workspace.archived
       current.paused = workspace.paused
       current.configVersion = workspace.configVersion
+      // Another location may have appended messages; never move nextSeq
+      // backwards or sequence keys would collide.
+      current.nextSeq = Math.max(current.nextSeq, workspace.nextSeq)
       current.lastActiveAt = Math.max(current.lastActiveAt, workspace.lastActiveAt)
+    }
+    // Coordination state: a second location/service view must see the same
+    // queue. Subtasks, messages, approvals, memories, and the DM queue merge
+    // by id; deletions do not propagate (matches agent/binding behavior).
+    // Runs stay instance-owned: they track live native sessions, which only
+    // the owning process can drive.
+    for (const { value } of await this.scanAll("v2/subtask/")) {
+      const subtask = value as Subtask
+      if (subtask?.id) this.state.subtasks[subtask.id] = subtask
+    }
+    for (const { value } of await this.scanAll("v2/message/")) {
+      const message = value as Message
+      if (!message?.workspaceID || !message?.id) continue
+      const list = (this.state.messages[message.workspaceID] ??= [])
+      if (!list.some((item) => item.id === message.id)) list.push(message)
+    }
+    for (const list of Object.values(this.state.messages)) {
+      list.sort((a, b) => a.seq - b.seq)
+    }
+    for (const { value } of await this.scanAll("v2/approval/")) {
+      const approval = value as Approval
+      if (approval?.id) this.state.approvals[approval.id] = approval
+    }
+    for (const { value } of await this.scanAll("v2/memory/")) {
+      const memory = value as Memory
+      if (memory?.id) this.state.memories[memory.id] = memory
+    }
+    for (const { value } of await this.scanAll("v2/dmqueue/")) {
+      const entry = value as DmQueueEntry
+      if (entry?.id) this.state.dmQueue[entry.id] = entry
     }
     for (const { value } of await this.scanAll("v2/binding/")) {
       const binding = value as SessionBinding

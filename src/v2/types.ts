@@ -122,6 +122,29 @@ export type Subtask = {
   createdAt: number
   startedAt?: number
   repliedAt?: number
+  /**
+   * Durable coordination queue fields (v5.3, ticket #54). The subtask row is
+   * the work item: no parallel table, one source of truth. `error` doubles
+   * as the last error and `repliedAt` mirrors `finishedAt` for older
+   * readers; `deriveWorkStatus` in queue.ts is the canonical lifecycle
+   * derivation and never trusts `state` alone.
+   */
+  /** Unit of work: "delegation" (default), "handoff", or "turn". */
+  workKind?: string
+  /** Idempotency key: resubmitting the same work executes once, not twice. */
+  queueKey?: string
+  /** Run currently holding the lease, if any. */
+  claimedBy?: string
+  /** Wall-clock expiry of the current claim; expiry re-queues the work. */
+  leaseUntil?: number
+  /** Wall-clock deadline for the work item; expiry fails it with reason. */
+  deadlineAt?: number
+  /** Earliest wall-clock time the work may be claimed again after a retry. */
+  retryAfter?: number
+  /** When the work reached a terminal state. */
+  finishedAt?: number
+  /** When the work was stopped/cancelled. */
+  stoppedAt?: number
 }
 
 export type SessionBinding = {

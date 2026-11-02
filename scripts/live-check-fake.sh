@@ -152,6 +152,27 @@ synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synth
 leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')
 [[ "$leader_name" == '"FakeAgent"' ]] || live_fail "unexpected roster leader (got $leader_name)"
 
+# Durable queue at this layer: a group message creates leader work that runs
+# to replied with no further TUI action, and the snapshot exposes the derived
+# lifecycle facts (ticket #54; the work-row UI itself belongs to ticket #56).
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on group surface"
+live_type "$LIVE_TUI_SESSION" "fake-queue-probe"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "fake-queue-probe" 15 "group message posted"
+queue_states=""
+for _ in $(seq 1 60); do
+  queue_states=$(live_snapshot_value 'Object.values(output.state.subtasks).map(function (t) { return t.state })')
+  [[ "$queue_states" == *replied* ]] && break
+  sleep 0.5
+done
+[[ "$queue_states" == *replied* ]] || live_fail "group work did not run to replied with no further action (got $queue_states)"
+queue_status=$(live_snapshot_value 'Object.values(output.state.subtasks).map(function (t) { return t.status })')
+[[ "$queue_status" == *replied* ]] || live_fail "derived work status not exposed in snapshot (got $queue_status)"
+queue_key=$(live_snapshot_value 'Object.values(output.state.subtasks).map(function (t) { return typeof t.queueKey })')
+[[ "$queue_key" == *string* ]] || live_fail "idempotency key not exposed in snapshot (got $queue_key)"
+live_log "group work ran to replied with derived status ($queue_status)"
+
 # In-house overlays: the single-choice picker, the multiline text prompt, and
 # the confirm modal replace every interactive native dialog. The settings
 # "Edit field" flow proves picker select plus prompt submit (the draft goes

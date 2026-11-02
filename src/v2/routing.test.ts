@@ -46,3 +46,9 @@ test("unknown mentions are reported instead of falling back to the leader", () =
   assert.deepEqual(unknownMentions("$Ghost take a look", workspaceOf(), agents), ["$Ghost"])
   assert.deepEqual(unknownMentions("Do the thing", workspaceOf(), agents), [])
 })
+
+test("recipient resolution uses explicit naming only, never activity or frequency", () => {
+  assert.deepEqual(visibleRecipients("$Sage $Sage $Sage take this", workspaceOf(), agents), ["s"])
+  assert.deepEqual(visibleRecipients("Sage take this", workspaceOf(), agents), ["n"])
+  assert.deepEqual(visibleRecipients("thanks Sage, great work everybody", workspaceOf(), agents), ["n"])
+})

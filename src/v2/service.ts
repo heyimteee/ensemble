@@ -8,6 +8,7 @@ import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, onboardingPrompt } from "./init-
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, unknownMentions, visibleRecipients } from "./routing.ts"
+import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, workKey } from "./queue.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type {
@@ -96,7 +97,9 @@ export class EnsembleV2Service {
   private retryRegistration: any
   private stopped = false
   private pumping = false
+  private repump = false
   private readonly running = new Set<Promise<void>>()
+  private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   private readonly runBySession = new Map<string, string>()
   private readonly activeRuns = new Map<string, Run>()
   private readonly directBusy = new Set<string>()
@@ -163,6 +166,8 @@ export class EnsembleV2Service {
     return async () => {
       this.stopped = true
       this.catalogAbort?.abort()
+      for (const timer of this.timers) clearTimeout(timer)
+      this.timers.clear()
       await this.retryRegistration?.dispose?.().catch(() => undefined)
       await Promise.allSettled([...this.running])
     }
@@ -264,6 +269,28 @@ export class EnsembleV2Service {
     if (workspace) await this.appendMessage(workspace, { author: "system", text: `Interrupted work needs a decision: ${subtask.title}`, kind: "approval", taskID: subtask.id })
   }
 
+  private defer(ms: number, fn: () => void): void {
+    const timer = setTimeout(() => {
+      this.timers.delete(timer)
+      if (!this.stopped) fn()
+    }, ms)
+    if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
+      ;(timer as unknown as { unref: () => void }).unref()
+    }
+    this.timers.add(timer)
+  }
+
+  /**
+   * Schedule work after every mutation that creates or changes it. Agent
+   * tool calls (`ensemble_delegate`, handoff registration, agent-to-agent
+   * sends) bypass the RPC `invoke` path, so they must schedule explicitly —
+   * otherwise agent-created work sits pending until an unrelated user action
+   * happens to pump the queue.
+   */
+  private schedule(): void {
+    this.pump()
+  }
+
   private async snapshot(directory: string): Promise<Snapshot> {
     await this.store.sync()
     this.refreshDmClock()
@@ -275,8 +302,13 @@ export class EnsembleV2Service {
     }
     await this.reconcileWorkspaceConfigs()
     if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
+    // Read-path reap: reset expired claims and retire exhausted work so the
+    // derived lifecycle stays honest between scheduler passes. This never
+    // spawns runs — starting work happens only in pump() via schedule().
+    await this.reapAndRetire()
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
+    this.overlayWorkStatus(state)
     const payload: Snapshot = {
       state: jsonSafe(state),
       models: this.catalog.modelOptions,
@@ -291,11 +323,25 @@ export class EnsembleV2Service {
   private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string }> {
     await this.store.sync()
     this.refreshDmClock()
+    await this.reapAndRetire()
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
+    this.overlayWorkStatus(state)
     return {
       state: jsonSafe(state),
       directory,
+    }
+  }
+
+  /**
+   * Expose the derived lifecycle facts the work-row UI (ticket #56) needs on
+   * every subtask in the snapshot representation. Additive only: stored
+   * `state`/`outcome` are untouched.
+   */
+  private overlayWorkStatus(state: SnapshotState): void {
+    const at = Date.now()
+    for (const task of Object.values(state.subtasks)) {
+      ;(task as Subtask & { status?: string }).status = deriveWorkStatus(task, at)
     }
   }
 
@@ -967,6 +1013,7 @@ export class EnsembleV2Service {
   }
 
   private async cancelSubtasks(matches: (subtask: Subtask) => boolean, reason: string): Promise<void> {
+    const at = now()
     const state = this.store.snapshot()
     for (const subtask of Object.values(state.subtasks)) {
       if (!matches(subtask)) continue
@@ -976,7 +1023,12 @@ export class EnsembleV2Service {
       subtask.error = reason
       subtask.activeRunID = undefined
       subtask.approvalID = undefined
-      subtask.repliedAt = now()
+      subtask.claimedBy = undefined
+      subtask.leaseUntil = undefined
+      subtask.retryAfter = undefined
+      subtask.repliedAt = at
+      subtask.finishedAt = at
+      subtask.stoppedAt = at
       await this.store.saveSubtask(subtask)
       await this.settlePendingApprovals(subtask.id, reason)
     }
@@ -1053,7 +1105,14 @@ export class EnsembleV2Service {
     return { recipients }
   }
 
-  private async createSubtask(input: {
+  private findWorkByKey(workspaceID: string, key: string, includeTerminal: boolean): Subtask | undefined {
+    const at = now()
+    const candidates = Object.values(this.store.snapshot().subtasks).filter((task) => task.workspaceID === workspaceID && task.queueKey === key)
+    if (includeTerminal) return candidates[0]
+    return candidates.find((task) => !isTerminalWorkStatus(deriveWorkStatus(task, at)))
+  }
+
+  private async createWorkItem(input: {
     workspace: Workspace
     parentID?: string
     assigneeID: string
@@ -1065,7 +1124,25 @@ export class EnsembleV2Service {
     expected?: string
     mode?: "research" | "edit"
     stage?: "initial" | "synthesis"
-  }): Promise<Subtask> {
+    kind?: string
+  }): Promise<{ subtask: Subtask; deduped: boolean }> {
+    const kind = input.kind ?? "delegation"
+    const key = workKey({
+      workspaceID: input.workspace.id,
+      kind,
+      parentID: input.parentID,
+      assigneeID: input.assigneeID,
+      title: input.title,
+      instruction: input.instruction,
+      constraints: input.constraints,
+      expected: input.expected,
+    })
+    // Idempotency: resubmitting the same work while it is still live returns
+    // the existing item instead of executing twice. Finished rows do not
+    // block new work — re-asking completed work is legitimate new work, and
+    // only in-flight duplication (retries, double delivery) is suppressed.
+    const existing = this.findWorkByKey(input.workspace.id, key, false)
+    if (existing) return { subtask: existing, deduped: true }
     const at = now()
     const subtask: Subtask = {
       id: id("task"),
@@ -1086,6 +1163,9 @@ export class EnsembleV2Service {
       awaitingChildren: false,
       attempts: 0,
       createdAt: at,
+      workKind: kind,
+      queueKey: key,
+      deadlineAt: at + DEADLINE_MS,
     }
     await this.store.saveSubtask(subtask)
     await this.appendMessage(input.workspace, {
@@ -1094,7 +1174,23 @@ export class EnsembleV2Service {
       kind: "task",
       taskID: subtask.id,
     })
-    return subtask
+    return { subtask, deduped: false }
+  }
+
+  private async createSubtask(input: {
+    workspace: Workspace
+    parentID?: string
+    assigneeID: string
+    creatorType: "user" | "agent"
+    creatorAgentID?: string
+    title: string
+    instruction: string
+    constraints?: string
+    expected?: string
+    mode?: "research" | "edit"
+    stage?: "initial" | "synthesis"
+  }): Promise<Subtask> {
+    return (await this.createWorkItem(input)).subtask
   }
 
   private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean }): Promise<Message> {
@@ -1173,7 +1269,13 @@ export class EnsembleV2Service {
     subtask.interrupted = false
     subtask.approvalID = undefined
     subtask.activeRunID = undefined
+    subtask.claimedBy = undefined
+    subtask.leaseUntil = undefined
+    subtask.retryAfter = undefined
     subtask.repliedAt = undefined
+    subtask.finishedAt = undefined
+    subtask.stoppedAt = undefined
+    subtask.deadlineAt = now() + DEADLINE_MS
     await this.store.saveSubtask(subtask)
   }
 
@@ -1201,12 +1303,18 @@ export class EnsembleV2Service {
     if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
     await this.stopSubtaskRun(subtask)
     await this.settlePendingApprovals(subtask.id, "Subtask cancelled by the user.")
+    const at = now()
     subtask.state = "replied"
     subtask.outcome = "failed"
     subtask.error = "Cancelled by user."
     subtask.activeRunID = undefined
     subtask.approvalID = undefined
-    subtask.repliedAt = now()
+    subtask.claimedBy = undefined
+    subtask.leaseUntil = undefined
+    subtask.retryAfter = undefined
+    subtask.repliedAt = at
+    subtask.finishedAt = at
+    subtask.stoppedAt = at
     await this.store.saveSubtask(subtask)
     return subtask
   }
@@ -1226,7 +1334,13 @@ export class EnsembleV2Service {
     subtask.interrupted = false
     subtask.approvalID = undefined
     subtask.activeRunID = undefined
+    subtask.claimedBy = undefined
+    subtask.leaseUntil = undefined
+    subtask.retryAfter = undefined
     subtask.repliedAt = undefined
+    subtask.finishedAt = undefined
+    subtask.stoppedAt = undefined
+    subtask.deadlineAt = now() + DEADLINE_MS
     await this.store.saveSubtask(subtask)
     return subtask
   }
@@ -1258,23 +1372,34 @@ export class EnsembleV2Service {
       if (approval.kind === "interrupted" && approval.subtaskID) {
         const subtask = state.subtasks[approval.subtaskID]
         if (subtask) {
+          const at = now()
           subtask.state = "replied"
           subtask.outcome = "failed"
           subtask.error = "Interrupted work discarded by the user."
           subtask.interrupted = false
           subtask.approvalID = undefined
-          subtask.repliedAt = now()
+          subtask.claimedBy = undefined
+          subtask.leaseUntil = undefined
+          subtask.retryAfter = undefined
+          subtask.repliedAt = at
+          subtask.finishedAt = at
+          subtask.stoppedAt = at
           await this.store.saveSubtask(subtask)
         }
       }
       if (approval.kind === "ask_person" && approval.subtaskID) {
         const subtask = state.subtasks[approval.subtaskID]
         if (subtask) {
+          const at = now()
           subtask.state = "replied"
           subtask.outcome = "failed"
           subtask.error = "User rejected the request."
           subtask.approvalID = undefined
-          subtask.repliedAt = now()
+          subtask.claimedBy = undefined
+          subtask.leaseUntil = undefined
+          subtask.retryAfter = undefined
+          subtask.repliedAt = at
+          subtask.finishedAt = at
           await this.store.saveSubtask(subtask)
         }
       }
@@ -1292,6 +1417,12 @@ export class EnsembleV2Service {
         subtask.approvalID = undefined
         subtask.interrupted = false
         subtask.activeRunID = undefined
+        subtask.claimedBy = undefined
+        subtask.leaseUntil = undefined
+        subtask.retryAfter = undefined
+        subtask.finishedAt = undefined
+        subtask.stoppedAt = undefined
+        subtask.deadlineAt = now() + DEADLINE_MS
         subtask.instruction += `\n\nUser answer: ${approval.resolution ?? "Approved."}`
         await this.store.saveSubtask(subtask)
       }
@@ -1578,8 +1709,9 @@ export class EnsembleV2Service {
     const found = this.toolSession(state, context.sessionID)
     if (input.workspaceID && found.workspace && input.workspaceID !== found.workspace.id) return { content: "Cross-workspace reads require ensemble_share approval." }
     const workspaceID = found.workspace?.id ?? input.workspaceID
+    const at = Date.now()
     const tasks = Object.values(state.subtasks).filter((task) => !workspaceID || task.workspaceID === workspaceID)
-    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, outcome: task.outcome, assignee: task.assigneeID, parent: task.parentID, resultMessageID: task.resultMessageID }))) }
+    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, assignee: task.assigneeID, parent: task.parentID, resultMessageID: task.resultMessageID }))) }
   }
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
@@ -1593,6 +1725,7 @@ export class EnsembleV2Service {
       if (!workspace) return { content: "Workspace not found." }
       if (workspace.id !== found.workspace.id) return { content: "Cross-workspace posts require ensemble_share approval." }
       await this.appendMessage(workspace, { author: "agent", agentID: found.agent.id, text, kind: "text" })
+      this.schedule()
       return { content: `Posted to #${workspace.name}.` }
     }
     if (input.kind === "agent") {
@@ -1600,6 +1733,7 @@ export class EnsembleV2Service {
       if (!target || target.archived) return { content: "Agent not found." }
       const workspaceID = found.workspace.memberIDs.includes(target.id) ? found.workspace.id : undefined
       const result = await this.chatSend(target.id, workspaceID, text)
+      this.schedule()
       return { content: result.queued ? `Queued a direct message for ${target.name}.` : `Sent a direct message to ${target.name}.` }
     }
     return { content: "kind must be workspace or agent." }
@@ -1618,7 +1752,49 @@ export class EnsembleV2Service {
     if (!content.includes("ensemble: handoff")) return { content: "The handoff file is missing ensemble frontmatter." }
     const target = input.to ? Object.values(state.agents).find((agent) => agent.id === input.to || agent.name.toLowerCase() === String(input.to).toLowerCase()) : undefined
     const path = relative(found.workspace.directory, absolute)
+    const run = this.runForSession(state, context.sessionID)
+    // The handoff registration is a durable terminal work item: it carries an
+    // idempotency key and lifecycle timestamps, but it never spawns a run —
+    // the file plus the chat line are the delivery. Re-registering the same
+    // handoff returns the existing record instead of posting twice.
+    const key = workKey({
+      workspaceID: found.workspace.id,
+      kind: "handoff",
+      // No parentID in the key: a handoff registration is idempotent across
+      // turns. The caller's run (if any) is still recorded as parentID on
+      // the row for correlation.
+      assigneeID: target?.id ?? found.agent.id,
+      title: String(input.task),
+      instruction: `${String(input.summary)}\n${path}`,
+    })
+    const duplicate = this.findWorkByKey(found.workspace.id, key, true)
+    if (duplicate) return { content: `Already registered handoff at ${path}.` }
+    const at = now()
+    const record: Subtask = {
+      id: id("task"),
+      workspaceID: found.workspace.id,
+      parentID: run?.subtaskID,
+      creatorType: "agent",
+      creatorAgentID: found.agent.id,
+      assigneeID: target?.id ?? found.agent.id,
+      title: `Handoff: ${String(input.task)}`,
+      instruction: `${String(input.summary)} (${path})`,
+      mode: "research",
+      state: "replied",
+      stage: "initial",
+      outcome: "succeeded",
+      interrupted: false,
+      awaitingChildren: false,
+      attempts: 0,
+      createdAt: at,
+      repliedAt: at,
+      finishedAt: at,
+      workKind: "handoff",
+      queueKey: key,
+    }
+    await this.store.saveSubtask(record)
     await this.appendMessage(found.workspace, { author: "agent", agentID: found.agent.id, text: `Handoff: ${String(input.task)} — ${String(input.summary)} (${path})${target ? ` → ${target.name}` : ""}`, kind: "text" })
+    this.schedule()
     return { content: `Registered handoff at ${path}.` }
   }
 
@@ -1629,14 +1805,32 @@ export class EnsembleV2Service {
     const { workspace, agent } = found
     const run = this.runForSession(state, context.sessionID)
     const subtask = run ? state.subtasks[run.subtaskID] : undefined
-    if (workspace.paused) return { content: "This workspace is paused." }
-    if (workspace.leaderID !== agent.id) return { content: "Only the workspace leader can delegate subtasks." }
+    // Every refusal below is posted to the group chat as well as returned to
+    // the caller: a tool-result string alone is invisible from the board's
+    // perspective, which read as silently missing delegation state.
+    if (workspace.paused) {
+      await this.appendMessage(workspace, { author: "system", text: `Delegation refused: workspace ${workspace.name} is paused.`, kind: "system" })
+      return { content: "This workspace is paused." }
+    }
+    if (workspace.leaderID !== agent.id) {
+      await this.appendMessage(workspace, { author: "system", text: `Delegation refused: only the workspace leader (${this.agentName(workspace.leaderID)}) can delegate subtasks.`, kind: "system" })
+      return { content: "Only the workspace leader can delegate subtasks." }
+    }
     const target = Object.values(state.agents).find((item) => item.name.toLowerCase() === String(input.assignee).toLowerCase() || item.id === input.assignee)
-    if (!target || target.archived) return { content: "That agent is unavailable." }
-    if (subtask && this.delegationDepth(state, subtask.id) >= state.settings.maxDepth) return { content: `The delegation depth limit is ${state.settings.maxDepth}.` }
+    if (!target || target.archived) {
+      await this.appendMessage(workspace, { author: "system", text: `Delegation refused: ${String(input.assignee)} is not available.`, kind: "system" })
+      return { content: "That agent is unavailable." }
+    }
+    if (subtask && this.delegationDepth(state, subtask.id) >= state.settings.maxDepth) {
+      await this.appendMessage(workspace, { author: "system", text: `Delegation refused: the delegation depth limit is ${state.settings.maxDepth}.`, kind: "system" })
+      return { content: `The delegation depth limit is ${state.settings.maxDepth}.` }
+    }
     if (subtask) {
       const children = Object.values(state.subtasks).filter((item) => item.parentID === subtask.id)
-      if (children.length >= state.settings.maxDelegations) return { content: `The delegation limit is ${state.settings.maxDelegations}.` }
+      if (children.length >= state.settings.maxDelegations) {
+        await this.appendMessage(workspace, { author: "system", text: `Delegation refused: the delegation limit is ${state.settings.maxDelegations}.`, kind: "system" })
+        return { content: `The delegation limit is ${state.settings.maxDelegations}.` }
+      }
     }
     if (!workspace.memberIDs.includes(target.id)) {
       const approval: Approval = {
@@ -1655,7 +1849,7 @@ export class EnsembleV2Service {
       await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact ${target.name}`, kind: "approval", taskID: subtask?.id })
       return { content: `Approval required before contacting ${target.name}.` }
     }
-    await this.createSubtask({
+    const { deduped } = await this.createWorkItem({
       workspace,
       parentID: subtask?.id,
       assigneeID: target.id,
@@ -1667,6 +1861,8 @@ export class EnsembleV2Service {
       expected: input.expected ? String(input.expected) : undefined,
       mode: input.mode === "edit" ? "edit" : "research",
     })
+    this.schedule()
+    if (deduped) return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.` }
     return { content: `Delegated to ${target.name}. The reply will arrive in the group chat.` }
   }
 
@@ -1693,6 +1889,7 @@ export class EnsembleV2Service {
       await this.store.saveSubtask(subtask)
     }
     await this.appendMessage(found.workspace, { author: "system", text: `Approval needed: ${input.question}`, kind: "approval", taskID: subtask?.id })
+    this.schedule()
     return { content: "Waiting for the user's answer in the approval inbox." }
   }
 
@@ -1771,12 +1968,76 @@ export class EnsembleV2Service {
     return this.runForSession(this.store.snapshot(), sessionID)?.agentID
   }
 
+  /**
+   * Reap stale leases, retire exhausted work, and purge long-finished rows.
+   * Runs on every schedule pass and on snapshot/diagnostic reads so the
+   * derived lifecycle stays honest between scheduler passes. Never spawns
+   * runs — starting work happens only in pump().
+   */
+  private async reapAndRetire(): Promise<void> {
+    const at = now()
+    const state = this.store.snapshot()
+    for (const task of Object.values(state.subtasks)) {
+      if (task.state === "replied") continue
+      if (task.attempts >= MAX_ATTEMPTS || (task.deadlineAt !== undefined && at >= task.deadlineAt)) {
+        task.state = "replied"
+        task.outcome = "failed"
+        task.error ??= task.attempts >= MAX_ATTEMPTS
+          ? `Gave up after ${task.attempts} attempts.`
+          : "The work deadline passed before it could finish."
+        task.activeRunID = undefined
+        task.approvalID = undefined
+        task.claimedBy = undefined
+        task.leaseUntil = undefined
+        task.retryAfter = undefined
+        task.repliedAt = at
+        task.finishedAt = at
+        await this.store.saveSubtask(task)
+        await this.settlePendingApprovals(task.id, task.error)
+        const workspace = this.store.snapshot().workspaces[task.workspaceID]
+        if (workspace) await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${task.error}`, kind: "system", taskID: task.id })
+        continue
+      }
+      // A claim whose lease expired without a live owner goes back to the
+      // queue with its attempt budget intact. Claims held by a live run in
+      // this process are never reaped — the run's heartbeat owns them.
+      if (task.claimedBy && (task.leaseUntil === undefined || task.leaseUntil <= at) && !this.activeRuns.has(task.claimedBy)) {
+        task.claimedBy = undefined
+        task.leaseUntil = undefined
+        task.activeRunID = undefined
+        if (task.state === "working") task.state = "pending"
+        await this.store.saveSubtask(task)
+      }
+    }
+    await this.purgeFinishedWork(at)
+  }
+
+  private async purgeFinishedWork(at: number): Promise<void> {
+    const state = this.store.snapshot()
+    for (const task of Object.values(state.subtasks)) {
+      if (task.state !== "replied") continue
+      // Only rows with a known terminal timestamp are eligible. Legacy rows
+      // without one are never purged on age suspicion alone.
+      const finished = task.finishedAt ?? task.repliedAt
+      if (finished === undefined || at - finished < FINISHED_RETENTION_MS) continue
+      await this.store.removeSubtask(task.id)
+    }
+  }
+
   private pump(): void {
-    if (this.stopped || this.pumping) return
+    // A schedule request that lands mid-pass must not be dropped: atomic
+    // claim means the in-flight pass already snapshotted state, so re-run
+    // after it instead of losing the new work.
+    if (this.stopped || this.pumping) {
+      this.repump = true
+      return
+    }
     this.pumping = true
     void (async () => {
       try {
+        await this.reapAndRetire()
         const state = this.store.snapshot()
+        const at = now()
         const running = [...this.activeRuns.values()].filter((run) => run.status === "running")
         let slots = state.settings.maxActiveRuns - running.length
         if (slots <= 0) return
@@ -1789,7 +2050,7 @@ export class EnsembleV2Service {
             .filter(Boolean) as string[],
         )
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID)
+          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at))
           .sort((a, b) => a.createdAt - b.createdAt)
         for (const task of pending) {
           if (slots <= 0) break
@@ -1811,6 +2072,10 @@ export class EnsembleV2Service {
         }
       } finally {
         this.pumping = false
+        if (this.repump) {
+          this.repump = false
+          this.pump()
+        }
       }
     })()
   }
@@ -1846,21 +2111,44 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     const task = state.subtasks[taskID]
     if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
+    // Do not run work the queue has retired: the next reapAndRetire pass (or
+    // the current one) records the terminal state with its reason preserved.
+    if (task.attempts >= MAX_ATTEMPTS) return
+    if (task.deadlineAt !== undefined && now() >= task.deadlineAt) return
+    if (task.retryAfter !== undefined && now() < task.retryAfter) return
     const workspace = state.workspaces[task.workspaceID]
     const agent = state.agents[task.assigneeID]
     if (!workspace || !agent) return
     const runID = id("run")
     const globalEpoch = this.globalEpoch
     const workspaceEpoch = this.workspaceEpoch.get(task.workspaceID) ?? 0
+    const at = now()
     task.state = "working"
     task.outcome = "pending"
     task.attempts++
-    task.startedAt = now()
+    task.startedAt = at
     task.interrupted = false
     task.activeRunID = runID
+    task.claimedBy = runID
+    task.leaseUntil = at + LEASE_MS
+    task.deadlineAt ??= at + DEADLINE_MS
+    task.retryAfter = undefined
     await this.store.saveSubtask(task)
+    // Heartbeat: renew the lease while this run owns the claim. If the
+    // process dies, the lease expires and another pass re-queues the work;
+    // if the claim was reaped, renewal stops touching the row.
+    const heartbeat = setInterval(() => {
+      const current = this.store.snapshot().subtasks[task.id]
+      if (!current || current.claimedBy !== runID) return
+      current.leaseUntil = now() + LEASE_MS
+      void this.store.saveSubtask(current)
+    }, HEARTBEAT_MS)
+    if (typeof (heartbeat as unknown as { unref?: () => void }).unref === "function") {
+      ;(heartbeat as unknown as { unref: () => void }).unref()
+    }
     const binding = await this.ensureBinding(workspace, agent)
     if (!binding) {
+      clearInterval(heartbeat)
       await this.failTask(task, "Could not create a native session.")
       return
     }
@@ -1910,6 +2198,8 @@ export class EnsembleV2Service {
         currentTask.state = "pending"
         currentTask.interrupted = true
         currentTask.activeRunID = undefined
+        currentTask.claimedBy = undefined
+        currentTask.leaseUntil = undefined
         currentTask.error = errorText
         await this.store.saveSubtask(currentTask)
         await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
@@ -1922,11 +2212,15 @@ export class EnsembleV2Service {
       if (currentTask.approvalID) {
         await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
         currentTask.activeRunID = undefined
+        currentTask.claimedBy = undefined
+        currentTask.leaseUntil = undefined
         await this.store.saveSubtask(currentTask)
         return
       }
       const children = Object.values(current.subtasks).filter((item) => item.parentID === currentTask.id)
       currentTask.activeRunID = undefined
+      currentTask.claimedBy = undefined
+      currentTask.leaseUntil = undefined
       if (children.length > 0 && currentTask.stage === "initial") {
         currentTask.awaitingChildren = true
         currentTask.state = "working"
@@ -1935,10 +2229,12 @@ export class EnsembleV2Service {
         await this.maybeSynthesize(currentTask.id)
         return
       }
+      const finishedAt = now()
       currentTask.state = "replied"
       currentTask.outcome = "succeeded"
       currentTask.runSummary = result?.tools.length ? `${result.tools.length} tool call${result.tools.length === 1 ? "" : "s"}` : "no tool calls"
-      currentTask.repliedAt = now()
+      currentTask.repliedAt = finishedAt
+      currentTask.finishedAt = finishedAt
       const message = await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
       currentTask.resultMessageID = message?.id
       await this.store.saveSubtask(currentTask)
@@ -1946,11 +2242,35 @@ export class EnsembleV2Service {
     } catch (error: any) {
       const current = this.store.snapshot()
       const currentTask = current.subtasks[task.id]
-      if (currentTask?.activeRunID === runID) await this.failTask(currentTask, error?.message ?? String(error))
-      await this.finalizeStream(live, error?.message ?? String(error), true, globalEpoch, workspaceEpoch, task.workspaceID)
+      const failureText = error?.message ?? String(error)
+      if (currentTask?.activeRunID === runID) {
+        // Transient failure: retry inside the attempt budget and deadline
+        // with backoff (fast first retry, slower later ones). Exhausted or
+        // overdue work fails with its reason preserved.
+        if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
+          const delayMs = currentTask.attempts <= 1 ? 5_000 : 60_000
+          currentTask.state = "pending"
+          currentTask.outcome = "pending"
+          currentTask.error = failureText
+          currentTask.activeRunID = undefined
+          currentTask.claimedBy = undefined
+          currentTask.leaseUntil = undefined
+          currentTask.retryAfter = now() + delayMs
+          await this.store.saveSubtask(currentTask)
+          await this.finalizeStream(live, failureText, true, globalEpoch, workspaceEpoch, task.workspaceID)
+          this.defer(delayMs, () => this.schedule())
+        } else {
+          await this.failTask(currentTask, failureText)
+          await this.finalizeStream(live, failureText, true, globalEpoch, workspaceEpoch, task.workspaceID)
+        }
+      } else {
+        await this.finalizeStream(live, failureText, true, globalEpoch, workspaceEpoch, task.workspaceID)
+      }
     } finally {
+      clearInterval(heartbeat)
       this.liveBySession.delete(binding.sessionID)
       if (live?.streaming) await this.finalizeStream(live, live.text || "Reply interrupted.", true, globalEpoch, workspaceEpoch, task.workspaceID)
+      await this.releaseClaim(task.id, runID)
       run.status = "completed"
       this.activeRuns.delete(runID)
       this.runBySession.delete(binding.sessionID)
@@ -1990,12 +2310,26 @@ export class EnsembleV2Service {
     return { sessionID: created.id }
   }
 
+  private async releaseClaim(taskID: string, runID: string): Promise<void> {
+    const current = this.store.snapshot().subtasks[taskID]
+    if (current && current.claimedBy === runID) {
+      current.claimedBy = undefined
+      current.leaseUntil = undefined
+      await this.store.saveSubtask(current)
+    }
+  }
+
   private async failTask(task: Subtask, error: string): Promise<void> {
+    const at = now()
     task.state = "replied"
     task.outcome = "failed"
     task.error = error
     task.activeRunID = undefined
-    task.repliedAt = now()
+    task.claimedBy = undefined
+    task.leaseUntil = undefined
+    task.retryAfter = undefined
+    task.repliedAt = at
+    task.finishedAt = at
     await this.store.saveSubtask(task)
     const workspace = this.store.snapshot().workspaces[task.workspaceID]
     if (workspace) await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${error}`, kind: "system", taskID: task.id })
@@ -2016,11 +2350,14 @@ export class EnsembleV2Service {
       parent.awaitingChildren = false
       parent.outcome = "pending"
       parent.assigneeID = workspace.leaderID
+      parent.deadlineAt = now() + DEADLINE_MS
       await this.store.saveSubtask(parent)
     } else {
+      const at = now()
       parent.state = "replied"
       parent.outcome = "succeeded"
-      parent.repliedAt = now()
+      parent.repliedAt = at
+      parent.finishedAt = at
       await this.store.saveSubtask(parent)
       await this.appendMessage(workspace, { author: "system", text: "Delegated subtasks completed.", kind: "system", taskID: parent.id })
     }
