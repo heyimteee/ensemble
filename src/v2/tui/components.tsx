@@ -26,6 +26,7 @@ export type ChatLine = {
   streaming?: boolean
   interrupted?: boolean
   queued?: boolean
+  correlationID?: string
   createdAt: number
 }
 

@@ -1899,6 +1899,41 @@ test("a queued direct message stays visible as queued, then sent", async () => {
   }
 })
 
+test("a queued direct message can be removed by key before it sends", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 250)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const first = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "First" } })
+    assert.equal(first.result.queued, false)
+    const queued = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "While busy" } })
+    assert.equal(queued.result.queued, true)
+    const removed = await handlers.invoke({ directory, action: "chat.removeQueued", payload: { agentID: "a", id: queued.result.id } })
+    assert.equal(removed.ok, true)
+    assert.equal(removed.result.removed, 1)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.values(after.state.dmQueue).filter((entry: any) => entry.status === "queued").length, 0)
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    const lines = (context.result.messages as any[]).filter((message) => message.role === "user")
+    assert.deepEqual(lines.map((message) => message.text), ["First"])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test("unmentioned group messages create work only for the workspace leader", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-route-"))
   const { ctx } = fakeContext()
@@ -1920,7 +1955,7 @@ test("unmentioned group messages create work only for the workspace leader", asy
     const tasks = Object.values(next.state.subtasks) as any[]
     assert.equal(tasks.length, 1)
     assert.equal(tasks[0].assigneeID, nova.result.id)
-    assert.ok(next.state.messages[workspace.result.id].some((message: any) => message.author === "system" && message.text === `→ Nova: Do the thing`))
+    assert.ok(next.state.messages[workspace.result.id].some((message: any) => message.author === "system" && message.text === `→ Assigned to $Nova: Do the thing`))
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

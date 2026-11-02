@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { ageLabel, agentColor, fuzzyMatch, markdownText, missingSkills, renderMarkdownLines, resultForTask, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
+import { ageLabel, agentColor, answerHeader, askingLine, assignmentLine, fuzzyMatch, isAssignmentEvent, markdownText, missingSkills, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, short, systemLine, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
 import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
 
 const agent = (patch: Partial<Agent> = {}): Agent => ({
@@ -90,4 +90,41 @@ test("direct assistant messages use the rich agent transcript role", () => {
   assert.equal(transcriptRole("assistant"), "agent")
   assert.equal(transcriptRole("user"), "user")
   assert.equal(transcriptRole("system"), "system")
+})
+
+test("slice C attribution lines name the agent exactly once", () => {
+  assert.equal(assignmentLine("Nova", "Do the thing"), "→ Assigned to $Nova: Do the thing")
+  assert.equal(askingLine("Nova"), "Asking $Nova…")
+  assert.equal(answerHeader("Nova"), "Answer from $Nova")
+  const long = `t${"i".repeat(100)}`
+  assert.equal(assignmentLine("Nova", long), `→ Assigned to $Nova: ${long}`)
+})
+
+test("slice C system lines use the glyph grammar", () => {
+  assert.equal(systemLine("routine", "Leader will synthesize"), "◷ Leader will synthesize")
+  assert.equal(systemLine("failure", "Handoff failed"), "✕ Handoff failed")
+  assert.equal(systemLine("notice", "Mention normalized"), "ⓘ Mention normalized")
+})
+
+test("slice C queued suffix carries the remove affordance", () => {
+  assert.equal(queuedSuffix(false), " · queued")
+  assert.equal(queuedSuffix(true), " · queued · [x remove]")
+})
+
+test("slice C user text stays verbatim while agent text strips markdown", () => {
+  assert.deepEqual(renderVerbatimLines("Use *asterisks* literally `code`", 40), ["Use *asterisks* literally `code`"])
+  assert.deepEqual(renderVerbatimLines("a b c d", 3), ["a b", "c d"])
+  assert.ok(!renderVerbatimLines("", 10)[0].includes("•"))
+})
+
+test("slice C relay answers link by correlation instead of double-rendering", () => {
+  const turn = subtask({ id: "turn", workKind: "turn", assigneeID: "a", turn: { correlationID: "corr-1", askerKind: "user", answeredByID: "a" } })
+  const other = subtask({ id: "other", workKind: "delegation", assigneeID: "a" })
+  assert.equal(relayTaskForMessage({ correlationID: "corr-1", agentID: "a" }, [other, turn])?.id, "turn")
+  assert.equal(relayTaskForMessage({ correlationID: "nope", agentID: "a" }, [turn]), undefined)
+  assert.equal(relayTaskForMessage({ agentID: "a" }, [turn]), undefined)
+  const handoff = subtask({ id: "hop", workKind: "handoff", assigneeID: "a", handoff: { correlationID: "corr-2", senderID: "b", recipientID: "a", depth: 1, answeredByID: "a" } })
+  assert.equal(relayTaskForMessage({ correlationID: "corr-2", agentID: "a" }, [handoff])?.id, "hop")
+  assert.equal(isAssignmentEvent({ kind: "task", taskID: "turn" }), true)
+  assert.equal(isAssignmentEvent({ kind: "text" }), false)
 })

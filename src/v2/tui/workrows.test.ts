@@ -4,6 +4,7 @@ import type { Subtask } from "../types.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
+  activityDetailForTask,
   activityFrameForKind,
   activityLine,
   activityVerb,
@@ -161,12 +162,12 @@ test("activity lines name the agent with the default verb", () => {
 
 test("activity selection dedups agents oldest-first and caps with overflow", () => {
   const entries = [
-    { key: "b", label: "Ana", createdAt: 2 },
-    { key: "a", label: "Clark", createdAt: 1 },
-    { key: "b", label: "Ana", createdAt: 3 },
-    { key: "c", label: "Bo", createdAt: 4 },
-    { key: "d", label: "Dee", createdAt: 5 },
-    { key: "e", label: "Eli", createdAt: 6 },
+    { key: "b", label: "Ana", createdAt: 2, verb: ACTIVITY_DEFAULT_VERB, kind: "checking" as const },
+    { key: "a", label: "Clark", createdAt: 1, verb: ACTIVITY_DEFAULT_VERB, kind: "checking" as const },
+    { key: "b", label: "Ana", createdAt: 3, verb: ACTIVITY_DEFAULT_VERB, kind: "checking" as const },
+    { key: "c", label: "Bo", createdAt: 4, verb: ACTIVITY_DEFAULT_VERB, kind: "checking" as const },
+    { key: "d", label: "Dee", createdAt: 5, verb: ACTIVITY_DEFAULT_VERB, kind: "checking" as const },
+    { key: "e", label: "Eli", createdAt: 6, verb: ACTIVITY_DEFAULT_VERB, kind: "checking" as const },
   ]
   const selected = selectActivityAgents(entries, MAX_VISIBLE_ACTIVITY)
   assert.deepEqual(selected.shown, ["Clark", "Ana", "Bo"])
@@ -188,6 +189,19 @@ test("activity groups split live agents from queued-only agents", () => {
   const groups = splitActivityGroups(items, keyFor, labelFor, 1000)
   assert.deepEqual(groups.live.map((entry) => entry.label), ["Clark"])
   assert.deepEqual(groups.queued.map((entry) => entry.label), ["Ana"])
+})
+
+test("activity groups mark in-flight peer turns with the asking variant", () => {
+  const keyFor = (item: Subtask) => item.assigneeID ?? "unassigned"
+  const labelFor = (item: Subtask) => (item.assigneeID === "a" ? "Clark" : "Ana")
+  const items = [
+    task({ id: "turn", workKind: "turn", assigneeID: "a", state: "working", claimedBy: "r", leaseUntil: 9999, attempts: 1, createdAt: 2, turn: { correlationID: "c1", askerKind: "user" } }),
+    task({ id: "delegation", workKind: "delegation", assigneeID: "b", state: "working", claimedBy: "r", leaseUntil: 9999, attempts: 1, createdAt: 1 }),
+  ]
+  const groups = splitActivityGroups(items, keyFor, labelFor, 1000)
+  assert.equal(groups.live.find((entry) => entry.label === "Clark")?.verb, "Asking $Clark…")
+  assert.equal(groups.live.find((entry) => entry.label === "Clark")?.kind, "asking")
+  assert.equal(groups.live.find((entry) => entry.label === "Ana")?.verb, ACTIVITY_DEFAULT_VERB)
 })
 
 test("live/finalized split keeps concurrent live rows distinct and folds finalize in place", () => {
@@ -242,6 +256,20 @@ test("activity frames route verb kinds to the named sets", () => {
   assert.equal(activityFrameForKind("writing", 1), "▹")
   assert.equal(activityFrameForKind("running", 3, { ENSEMBLE_REDUCED_MOTION: "1" }), "▸")
   assert.equal(activityFrameForKind("waiting", 1, { NO_COLOR: "1" }), "○")
+})
+
+test("slice C asking and thinking verbs use their named frames", () => {
+  assert.equal(activityFrameForKind("asking", 0), "◐")
+  assert.equal(activityFrameForKind("asking", 1), "◑")
+  assert.equal(activityFrameForKind("asking", 2, { ENSEMBLE_REDUCED_MOTION: "1" }), "◐")
+  assert.equal(activityFrameForKind("thinking", 0), "·  ")
+  assert.equal(activityFrameForKind("thinking", 1), "˙  ")
+  assert.equal(activityFrameForKind("thinking", 0, { ENSEMBLE_REDUCED_MOTION: "1" }), "·  ")
+  assert.equal(activityDetailForTask(task({ workKind: "turn", assigneeID: "a" }), "Nova").verb, "Asking $Nova…")
+  assert.equal(activityDetailForTask(task({ workKind: "turn", assigneeID: "a" }), "Nova").kind, "asking")
+  assert.equal(activityDetailForTask(task({ workKind: "handoff", assigneeID: "a" }), "Nova").kind, "asking")
+  assert.equal(activityDetailForTask(task({ workKind: "delegation", assigneeID: "a" }), "Nova").verb, ACTIVITY_DEFAULT_VERB)
+  assert.equal(activityDetailForTask(task({ workKind: "delegation", assigneeID: "a" }), "Nova").kind, "checking")
 })
 
 test("queued activity lines stay static across ticks", () => {

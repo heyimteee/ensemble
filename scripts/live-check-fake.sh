@@ -174,33 +174,47 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message posted"
 live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "ephemeral work block mounts while active"
 live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · working" 15 "work row loading state with assignee"
-live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "per-agent activity line while live"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 # Slice B: live activity lines animate across the named working frames
-# (◐◑◒◓) — observe at least two distinct frames on the activity line while
-# work is in flight, proving the 4 fps clock ticks while busy.
+# (◐◑◒◓). Bursts finalize in about half a second on this fixture, so a slow
+# capture cadence after further requires observes a single tick. Collect at
+# 0.15 s from the moment live work is known (the WORK row) across both
+# delegation bursts instead: the loop subsumes the "activity line while live"
+# wait, and zero frames means the line never rendered.
 live_log "observing working-frame animation across ticks"
 seen_frames=0
 seen_which=""
-for _ in $(seq 1 12); do
-  pane=$(live_capture "$LIVE_TUI_SESSION")
-  for frame in "◐" "◑" "◒" "◓"; do
-    if grep -qF -- "${frame} FakeAgent · checking the details" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
-      seen_which="${seen_which}${frame}"
-      seen_frames=$((seen_frames + 1))
-    fi
+collect_work_frames() {
+  local rounds="${1:-16}" _ pane frame
+  for _ in $(seq 1 "$rounds"); do
+    pane=$(live_capture "$LIVE_TUI_SESSION")
+    for frame in "◐" "◑" "◒" "◓"; do
+      if grep -qF -- "${frame} FakeAgent · checking the details" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
+        seen_which="${seen_which}${frame}"
+        seen_frames=$((seen_frames + 1))
+      fi
+    done
+    [[ "$seen_frames" -ge 2 ]] && return 0
+    sleep 0.15
   done
-  [[ "$seen_frames" -ge 2 ]] && break
-  sleep 0.3
-done
-[[ "$seen_frames" -ge 2 ]] || live_fail "activity line did not animate across working frames (saw: $seen_which)"
-live_log "activity line animated across working frames ($seen_which)"
+  return 1
+}
+collect_work_frames 16 || true
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph while work is live"
+# Slice C: the assignment event is a durable transcript line, so it is
+# asserted after the timing-sensitive animation observation, not before it.
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: fake-queue-alpha" 15 "assignment line for the delegation"
+live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: fake-queue-alpha" 1 "assignment emitted exactly once"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for second message"
 live_type "$LIVE_TUI_SESSION" "fake-queue-beta"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "fake-queue-beta" 15 "second group message posted"
+# Second burst, same collector: combined frames across both bursts must show
+# the clock ticking; a single static frame in both fails below.
+collect_work_frames 16 || true
+[[ "$seen_frames" -ge 2 ]] || live_fail "activity line did not animate across working frames (saw: $seen_which)"
+live_log "activity line animated across working frames ($seen_which)"
 queue_replied=0
 for _ in $(seq 1 120); do
   queue_replied=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state === "replied" }).length')
@@ -238,8 +252,14 @@ live_require_absence "$LIVE_TUI_SESSION" "\$ agents" 10 "completion accepted"
 live_type "$LIVE_TUI_SESSION" "peer-check"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
+# Slice C: the assignment event names the owner; while the peer turn is in
+# flight the live row reads `Asking $Name…` instead of the generic verb.
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 15 "assignment line for the peer turn"
+live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "peer assignment emitted exactly once"
+live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "assignment emitted exactly once"
 live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "work block mounts fresh for the new burst"
-live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "activity line for the peer burst"
+live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
+live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking row exactly once, no duplicate turn row"
 live_assert_count "$LIVE_TUI_SESSION" "· FakeAgent · working" 1 "fresh burst lists only its own active row"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
 peer_replied=0
@@ -254,6 +274,13 @@ live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 3 "two delegatio
 live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts after the peer burst"
 live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · working" "no active rows remain after the peer burst"
 live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
+# Slice C: the relayed answer lands headed `Answer from $Name` (correlation
+# link, not a second independent turn); the asking row is gone with it, and
+# the transcript carries no per-message timestamps.
+live_require_text "$LIVE_TUI_SESSION" "Answer from \$FakeAgent" 15 "relayed answer headed Answer from"
+live_assert_count "$LIVE_TUI_SESSION" "Answer from \$FakeAgent" 1 "relay answer rendered once, not duplicated"
+live_assert_absence "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" "asking row unmounts when the answer lands"
+live_capture_matches "$LIVE_TUI_SESSION" "[0-9]{2}:[0-9]{2}" && live_fail "transcript shows per-message timestamps"
 live_assert_absence "$LIVE_TUI_SESSION" "Peer turn refused" "no refusal for the valid mention"
 live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "agent addressing stays \$Name, never @Name"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization of peer turn"
@@ -267,6 +294,86 @@ live_log "idle screen is quiescent across 1.5 s"
 peer_attr=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; var turn = Object.values(output.state.subtasks).find(function (t) { return t.workKind === "turn" }); if (!turn || !turn.turn) return "no-turn"; var answers = (output.state.messages[ws.id] || []).filter(function (m) { return m.correlationID === turn.turn.correlationID && m.agentID === turn.assigneeID }); return turn.turn.askerKind + "|" + (turn.turn.answeredByID === turn.assigneeID) + "|" + answers.length })()')
 [[ "$peer_attr" == '"user|true|1"' ]] || live_fail "peer turn attribution wrong (got $peer_attr)"
 live_log "peer turn ran to completed with asking/answered attribution ($peer_attr)"
+
+# Slice C second probe (asking exactly-once): another mention proves the
+# assignment → asking → answer flow repeats with one line per leg and no
+# duplicates across bursts. The `fake-rich-fixture` trigger makes this turn's
+# reply stream the long fixture, widening the live window for the asserts.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for attribution probe"
+live_type "$LIVE_TUI_SESSION" "$"
+live_require_text "$LIVE_TUI_SESSION" "\$ agents" 10 "agent completion for attribution probe"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "\$ agents" 10 "attribution completion accepted"
+live_type "$LIVE_TUI_SESSION" "peer-asking-probe fake-rich-fixture"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 15 "assignment line for the attribution probe"
+live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 1 "probe assignment emitted exactly once"
+live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the probe turn is in flight"
+live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "probe asking row exactly once"
+# Slice C third probe (direct surface): the `!Name` alias needs no completion
+# popup, so it posts in one shot while the probe turn is still streaming its
+# long reply — per-agent serialization parks it as pending, giving a wide,
+# race-free window for the direct-surface check.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for direct-surface probe"
+live_type "$LIVE_TUI_SESSION" "!FakeAgent peer-direct-probe fake-rich-fixture"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 20 "assignment line for the direct-surface probe"
+live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 1 "direct probe assignment emitted exactly once"
+live_key "$LIVE_TUI_SESSION" "z"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 10 "direct surface for the assignment check"
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 20 "assignment line on the direct surface"
+live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 1 "direct probe assignment exactly once on the direct surface"
+live_key "$LIVE_TUI_SESSION" "w"
+live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "back on the group surface"
+# Both probes run to replied with no further action. The long fixture replies
+# scroll older headers out of the viewport, so the exactly-once proof is the
+# snapshot (three turns, three correlation-linked answers) plus the durable
+# per-assignment counts above; the pane proves the latest header renders.
+probe_replied=0
+for _ in $(seq 1 120); do
+  probe_replied=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.state === "replied" }).length')
+  [[ "$probe_replied" == "3" ]] && break
+  sleep 0.5
+done
+[[ "$probe_replied" == "3" ]] || live_fail "probe turns did not run to replied (got $probe_replied replied)"
+live_require_text "$LIVE_TUI_SESSION" "Answer from \$FakeAgent" 15 "latest relayed answer headed Answer from"
+relay_answers=$(live_snapshot_value '(function () { var turns = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" }); var n = 0; for (var i = 0; i < turns.length; i++) { var c = turns[i].turn && turns[i].turn.correlationID; if (!c) continue; var ws = output.state.messages[turns[i].workspaceID] || []; for (var j = 0; j < ws.length; j++) { if (ws[j].correlationID === c && ws[j].agentID === turns[i].assigneeID) n++; } } return turns.length + "|" + n })()')
+[[ "$relay_answers" == '"3|3"' ]] || live_fail "relay answers not exactly one per turn (got $relay_answers)"
+live_assert_absence "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" "asking row unmounts when the answers land"
+live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 5 "every terminal outcome announced once"
+live_log "probes repeated assignment, asking, and answer exactly once each ($relay_answers)"
+
+# Slice C direct surface (verbatim + queued): user text renders literally
+# while agent text stays Markdown, and parked user-owned input shows
+# `· queued · [x remove]` with removal by key.
+live_key "$LIVE_TUI_SESSION" "z"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 10 "direct surface for verbatim probe"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on DM surface"
+live_type "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
+live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
+live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "verbatim reply finalized in place"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
+live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 10 "DM live line while streaming"
+live_key "$LIVE_TUI_SESSION" "i"
+live_type "$LIVE_TUI_SESSION" "fake-queued-probe"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "· queued" 15 "parked user line flagged queued"
+live_require_text "$LIVE_TUI_SESSION" "[x remove]" 15 "remove affordance on the parked line"
+live_assert_count "$LIVE_TUI_SESSION" "fake-queued-probe" 1 "queued line rendered exactly once"
+live_key "$LIVE_TUI_SESSION" "x"
+live_require_absence "$LIVE_TUI_SESSION" "fake-queued-probe" 15 "queued line removed by key"
+live_require_absence "$LIVE_TUI_SESSION" "[x remove]" 10 "affordance gone with the line"
+live_log "verbatim user text and queued-line removal verified on the direct surface"
+live_key "$LIVE_TUI_SESSION" "w"
+live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored after DM probes"
 
 # In-house overlays: the single-choice picker, the multiline text prompt, and
 # the confirm modal replace every interactive native dialog. The settings
