@@ -198,13 +198,15 @@ test("sender waits on the handoff with a visible wait and no double-queue", asyn
     const sageSession = await bindingSessionID(handlers, directory, sage.result.id)
     const refused = await tools.get("delegate").execute({ assignee: "Nova", title: "Same work", instruction: "Check" }, { sessionID: sageSession })
     assert.match(refused.content, /Only the workspace leader/)
-    // Both legs run to replied with exactly one hop row and one relay.
+    // Both legs run to replied with exactly one explicit hop row and one
+    // relay. Ticket #71 completion handoffs are separate terminal
+    // deliveries and never count as extra fan-out.
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      return Object.values(next.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.state === "replied").length === 1
+      return Object.values(next.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true && task.state === "replied").length === 1
     }, 15000)
     const after = await handlers.snapshot({ directory })
-    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 1)
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true).length, 1)
     const relayed = ((after.state.messages[workspace.result.id] ?? []) as any[]).filter(
       (message) => message.correlationID === hop.handoff.correlationID && message.agentID === sage.result.id && !message.streaming,
     )

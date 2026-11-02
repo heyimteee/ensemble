@@ -693,4 +693,51 @@ reduced_idle_second=$(live_capture "$LIVE_TUI_SESSION")
 [[ "$reduced_idle_first" == "$reduced_idle_second" ]] || live_fail "reduced-motion idle TUI kept ticking between captures"
 live_log "reduced-motion idle screen is quiescent across 1.5 s"
 
+# Ticket #71: mandatory completion handoff plus batched review. Two
+# non-leader members do parallel peer turns; each finished turn hands to the
+# workspace leader automatically (`Handed to $FakeAgent`), and the two
+# pending completions coalesce into one `Review 2 completions` batch turn.
+live_invoke "agent.create" '{"name":"Helper"}' >/dev/null
+live_invoke "agent.create" '{"name":"Scout"}' >/dev/null
+fake_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "FakeAgent" }).id' | tr -d '"')
+helper_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "Helper" }).id' | tr -d '"')
+scout_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "Scout" }).id' | tr -d '"')
+ws_id=$(live_snapshot_value 'Object.keys(output.state.workspaces)[0]' | tr -d '"')
+[[ -n "$fake_id" && -n "$helper_id" && -n "$scout_id" && -n "$ws_id" ]] || live_fail "ticket #71 setup did not create both members (got $fake_id/$helper_id/$scout_id/$ws_id)"
+live_invoke "workspace.update" "{\"id\":\"$ws_id\",\"memberIDs\":[\"$fake_id\",\"$helper_id\",\"$scout_id\"]}" >/dev/null
+members=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].memberIDs.length')
+[[ "$members" == "3" ]] || live_fail "ticket #71 workspace update did not add both members (got $members)"
+# The `!Name` alias posts without a completion popup. One message names both
+# members, so a single fan-out creates both peer turns atomically and they
+# run in parallel on their own agents — both completions land inside the
+# batch quiet window instead of racing it.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for completion probes"
+live_type "$LIVE_TUI_SESSION" "!Helper !Scout joint-task"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: !Helper !Scout joint-task" 15 "assignment line for the Helper turn"
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Scout: !Helper !Scout joint-task" 15 "assignment line for the Scout turn"
+# Each finished non-leader turn hands to the leader automatically.
+live_require_text "$LIVE_TUI_SESSION" "Handed to \$FakeAgent" 30 "completion handoff to the leader"
+handed=0
+for _ in $(seq 1 60); do
+  handed=$(live_capture "$LIVE_TUI_SESSION" | grep -cF 'Handed to $FakeAgent' || true)
+  [[ "$handed" == "2" ]] && break
+  sleep 0.5
+done
+[[ "$handed" == "2" ]] || live_fail "expected one completion handoff per finished turn (got $handed)"
+live_log "both non-leader turns handed to the leader"
+# Both pending completions coalesce into a single batch review turn.
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: Review 2 completions" 30 "batch review assigned to the leader"
+batch_items=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks); var batch = tasks.find(function (t) { return t.handoff && t.handoff.batch === true; }); return batch ? batch.handoff.itemIDs.length : 0 })()')
+[[ "$batch_items" == "2" ]] || live_fail "batch review did not consolidate both completions (got $batch_items)"
+batch_listing=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks); var batch = tasks.find(function (t) { return t.handoff && t.handoff.batch === true; }); return batch ? batch.instruction : "" })()')
+[[ "$batch_listing" == *"joint-task"* ]] || live_fail "batch review listing misses the completed task"
+[[ "$batch_listing" == *'$Helper'* && "$batch_listing" == *'$Scout'* ]] || live_fail "batch review listing misses a sender"
+live_require_text "$LIVE_TUI_SESSION" "Review 2 completions" 30 "batch review presented in the transcript"
+live_assert_absence "$LIVE_TUI_SESSION" "@Helper" "completion addressing stays \$Name, never @Name"
+live_assert_absence "$LIVE_TUI_SESSION" "@Scout" "completion addressing stays \$Name, never @Name"
+live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "completion addressing stays \$Name, never @Name"
+live_log "ticket #71 completion handoff and batch review verified live"
+
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

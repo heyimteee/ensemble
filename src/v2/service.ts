@@ -8,9 +8,9 @@ import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, onboardingPrompt } from "./init-
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
-import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, workKey } from "./queue.ts"
+import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey } from "./queue.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
-import { HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, handoffAckText, handoffDuplicateText, handoffFailureText, handoffWorkKey, newCorrelationID, parseHandoffFile, resolveHandoffRecipient } from "./handoff.ts"
+import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionWorkKey, groupCompletionCandidates, handoffAckText, handoffDuplicateText, handoffFailureText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { V2Store, bindingKey } from "./store.ts"
@@ -525,6 +525,7 @@ export class EnsembleV2Service {
       "</ensemble_persona>",
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
       "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
+      "End-of-turn handoff (mandatory): every non-leader turn must end with a handoff to another member — hand off explicitly with ensemble_handoff, or the server hands your finished turn to the workspace leader automatically and the group shows `Handed to $Name`. The leader may end turns normally or hand off voluntarily. A batch review turn lists every pending completion: decide each item with ensemble_review (delegate, start, end, or dismiss) — the batch closes only when every item is decided; non-leaders hand it onward to the leader.",
       "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
       "",
       ensembleBlock(),
@@ -2102,6 +2103,30 @@ export class EnsembleV2Service {
         execute: async (input: Json, context: any) => this.toolDelegate(input, context),
       })
       editor.add({
+        name: "review",
+        options: { namespace: "ensemble", codemode: false },
+        description: "Decide each item in a batch review turn (delegate, start, end, or dismiss). The batch closes only when every item is decided; non-leader reviewers hand it onward to the leader.",
+        input: {
+          type: "object",
+          properties: {
+            batch: { type: "string" },
+            decisions: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: { item: { type: "string" }, action: { type: "string" }, assignee: { type: "string" }, note: { type: "string" } },
+                required: ["item", "action"],
+                additionalProperties: false,
+              },
+            },
+            hand_to: { type: "string" },
+          },
+          required: ["batch", "decisions"],
+          additionalProperties: false,
+        },
+        execute: async (input: Json, context: any) => this.toolReview(input, context),
+      })
+      editor.add({
         name: "ask_person",
         options: { namespace: "ensemble", codemode: false },
         description: "Ask the user for a judgment call and pause this subtask until they answer.",
@@ -2464,6 +2489,457 @@ export class EnsembleV2Service {
     return { content: `Handed to $${recipient.name} for ${task} (ref ${correlationID}). Your turn stays open until the answer arrives here — do not call ensemble_delegate after a handoff (leader-only; would double-queue).` }
   }
 
+  /**
+   * Ticket #71 mandatory completion handoff (server-enforced). A non-leader
+   * turn that reaches its success finalize without an explicit handoff hop
+   * cannot finish silently: the server queues one completion hop carrying
+   * the finished content to the workspace leader, and the group shows
+   * `Handed to $Leader`. Leader turns may end normally; completion and batch
+   * hops never re-handoff (they are terminal deliveries, so chains cannot
+   * duplicate work); an explicit handoff satisfies the obligation.
+   * Returns the queued hop, or undefined when no hop was needed.
+   */
+  private async ensureCompletionHandoff(
+    finished: Subtask,
+    replyText: string,
+    children: Subtask[],
+  ): Promise<Subtask | undefined> {
+    const state = this.store.snapshot()
+    const workspace = state.workspaces[finished.workspaceID]
+    if (!workspace || workspace.archived || workspace.paused) return undefined
+    const finisherID = finished.assigneeID
+    if (!finisherID || finisherID === workspace.leaderID) return undefined
+    if (finished.handoff?.completion === true || finished.handoff?.batch === true) return undefined
+    if (children.some((child) => child.workKind === "handoff" && child.handoff?.completion !== true)) return undefined
+    const leader = state.agents[workspace.leaderID]
+    if (!leader || leader.archived || !workspace.memberIDs.includes(leader.id)) return undefined
+    const finisher = state.agents[finisherID]
+    const prior = finished.handoff?.chain ?? (finished.handoff ? [finished.handoff.senderID] : [])
+    const route = checkCompletionRoute({ chain: prior, senderID: finisherID, candidateID: leader.id, leaderID: leader.id })
+    if (route.decision === "terminate") {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: completionClosedText(finisher?.name ?? finisherID, finished.title, `the completion chain depth limit is ${COMPLETION_CHAIN_MAX}`),
+        kind: "system",
+        taskID: finished.id,
+      })
+      return undefined
+    }
+    const recipient = state.agents[route.to] ?? leader
+    const key = completionWorkKey({ workspaceID: workspace.id, finishedTaskID: finished.id, recipientID: recipient.id })
+    const duplicate = this.findWorkByKey(workspace.id, key)
+    if (duplicate) return duplicate
+    const at = now()
+    const correlationID = correlationIDForKey("handoff", key)
+    const content = replyText.trim() || "Work completed."
+    const chain = [...prior, finisherID]
+    const hop: Subtask = {
+      id: id("task"),
+      workspaceID: workspace.id,
+      parentID: finished.id,
+      creatorType: "agent",
+      creatorAgentID: finisherID,
+      assigneeID: recipient.id,
+      title: finished.title,
+      instruction: `${finished.title}\n\n${content}`,
+      mode: finished.mode,
+      state: "pending",
+      stage: "initial",
+      outcome: "pending",
+      interrupted: false,
+      awaitingChildren: false,
+      attempts: 0,
+      createdAt: at,
+      workKind: "handoff",
+      queueKey: key,
+      deadlineAt: at + DEADLINE_MS,
+      // Park inside the batch quiet window so pending completions for one
+      // recipient consolidate into a single review turn instead of racing it.
+      retryAfter: at + COMPLETION_QUIET_WINDOW_MS,
+      handoff: {
+        correlationID,
+        senderID: finisherID,
+        recipientID: recipient.id,
+        depth: chain.length,
+        parentID: finished.id,
+        completion: true,
+        chain,
+      },
+    }
+    await this.store.saveSubtask(hop)
+    this.noteWorkChanged(hop)
+    await this.appendMessage(workspace, {
+      author: "agent",
+      agentID: finisherID,
+      text: handoffAckText(recipient.name, finished.title, correlationID),
+      kind: "text",
+      taskID: hop.id,
+      correlationID,
+    })
+    this.defer(COMPLETION_QUIET_WINDOW_MS, () => {
+      void this.maybeConsolidateCompletionBatch(workspace.id, recipient.id).finally(() => this.schedule())
+    })
+    this.schedule()
+    return hop
+  }
+
+  /**
+   * Ticket #71 batched review. Pending completion handoffs for one recipient
+   * coalesce into a single consolidated review turn after the quiet window
+   * (or a later trigger when the recipient is free — the batch itself runs
+   * through the normal queue). The review lists sender, task title, outcome,
+   * and handoff path per item; grouped items wait for the batch and never
+   * race it as direct hops. A second trigger with new arrivals extends the
+   * open batch instead of opening another.
+   */
+  private async maybeConsolidateCompletionBatch(workspaceID: string, recipientID: string): Promise<void> {
+    const state = this.store.snapshot()
+    const workspace = state.workspaces[workspaceID]
+    const recipient = state.agents[recipientID]
+    if (!workspace || workspace.archived || workspace.paused || !recipient || recipient.archived) return
+    if (!workspace.memberIDs.includes(recipientID)) return
+    const ids = groupCompletionCandidates(Object.values(state.subtasks), workspaceID, recipientID)
+    if (ids.length < 2) return
+    const openBatch = Object.values(state.subtasks).find(
+      (task) =>
+        task.workspaceID === workspaceID &&
+        task.workKind === "handoff" &&
+        task.assigneeID === recipientID &&
+        task.handoff?.batch === true &&
+        task.state !== "replied",
+    )
+    if (openBatch?.handoff) {
+      const merged = [...(openBatch.handoff.itemIDs ?? [])]
+      for (const itemID of ids) {
+        const item = this.store.snapshot().subtasks[itemID]
+        if (!item) continue
+        item.parentID = openBatch.id
+        if (item.handoff) item.handoff.batchedIn = openBatch.id
+        await this.store.saveSubtask(item)
+        if (!merged.includes(item.id)) merged.push(item.id)
+      }
+      openBatch.handoff.itemIDs = merged
+      openBatch.title = batchReviewTitle(merged.length)
+      await this.store.saveSubtask(openBatch)
+      this.noteWorkChanged(openBatch)
+      this.schedule()
+      return
+    }
+    const live = this.store.snapshot()
+    const items = ids.map((itemID) => live.subtasks[itemID]).filter((item) => Boolean(item))
+    if (items.length < 2) return
+    const at = now()
+    const correlationID = newCorrelationID()
+    const chain = [...new Set(items.flatMap((item) => item.handoff?.chain ?? []))]
+    const listing = items.map((item) => ({
+      id: item.id,
+      senderName: live.agents[item.handoff?.senderID ?? ""]?.name ?? "Unknown agent",
+      title: item.title,
+      outcome: item.outcome,
+      path: item.handoff?.path,
+    }))
+    const batch: Subtask = {
+      id: id("task"),
+      workspaceID,
+      creatorType: "agent",
+      creatorAgentID: items[0]?.handoff?.senderID,
+      assigneeID: recipientID,
+      title: batchReviewTitle(ids.length),
+      instruction: batchReviewText(listing, recipient.name),
+      mode: "research",
+      state: "pending",
+      stage: "initial",
+      outcome: "pending",
+      interrupted: false,
+      awaitingChildren: false,
+      attempts: 0,
+      createdAt: at,
+      workKind: "handoff",
+      queueKey: `batch:${workspaceID}:${recipientID}:${stableHash(ids.join("\0"))}`,
+      deadlineAt: at + DEADLINE_MS,
+      handoff: {
+        correlationID,
+        senderID: items[0]?.handoff?.senderID ?? recipientID,
+        recipientID,
+        depth: chain.length + 1,
+        completion: true,
+        batch: true,
+        chain,
+        itemIDs: [...ids],
+      },
+    }
+    await this.store.saveSubtask(batch)
+    for (const item of items) {
+      item.parentID = batch.id
+      if (item.handoff) item.handoff.batchedIn = batch.id
+      await this.store.saveSubtask(item)
+    }
+    this.noteWorkChanged(batch)
+    await this.appendMessage(workspace, {
+      author: "system",
+      text: `→ Assigned to $${recipient.name}: ${batch.title}`,
+      kind: "task",
+      taskID: batch.id,
+      correlationID,
+    })
+    this.schedule()
+  }
+
+  /** Grouped completions wait for their open batch review — never race it. */
+  private batchBlocked(state: SnapshotState, task: Subtask): boolean {
+    const batchedIn = task.handoff?.batchedIn
+    if (!batchedIn) return false
+    const batch = state.subtasks[batchedIn]
+    return !!batch && batch.state !== "replied"
+  }
+
+  /**
+   * Ticket #71 structured per-item review. The batch recipient acts per item
+   * (`delegate`, `start`, `end`, `dismiss`); `delegate` stays leader-only so
+   * mandatory handoff never becomes delegate-after-handoff by another name.
+   * The batch closes only when every item is acted on or dismissed: the
+   * leader ends it, a non-leader hands it onward (default leader).
+   */
+  private async toolReview(input: Json, context: any): Promise<{ content: string }> {
+    const state = this.store.snapshot()
+    const found = this.requireToolSession(state, context.sessionID)
+    if (!found) return { content: "This session is not bound to an Ensemble workspace." }
+    const { workspace, agent: reviewer } = found
+    const batchID = typeof input.batch === "string" ? input.batch.trim() : ""
+    const batch = batchID ? state.subtasks[batchID] : undefined
+    if (!batch || batch.workspaceID !== workspace.id || batch.workKind !== "handoff" || batch.handoff?.batch !== true) {
+      return { content: "That batch review was not found in this workspace." }
+    }
+    if (batch.state === "replied") return { content: "That batch review is already closed." }
+    if (batch.assigneeID !== reviewer.id) {
+      const owner = batch.assigneeID ? this.agentName(batch.assigneeID) : "its recipient"
+      return { content: `Only $${owner} can review this batch.` }
+    }
+    const parsed = parseReviewDecisions(input)
+    if (!parsed.ok) return { content: parsed.reason }
+    const itemIDs = batch.handoff.itemIDs ?? []
+    const lines: string[] = []
+    for (const decision of parsed.decisions) {
+      if (!itemIDs.includes(decision.item)) {
+        lines.push(`${decision.item}: refused — not part of this batch.`)
+        continue
+      }
+      const item = this.store.snapshot().subtasks[decision.item]
+      if (!item || item.handoff?.batchedIn !== batch.id || item.handoff?.decided !== undefined) {
+        lines.push(`${decision.item}: refused — already decided or no longer in this batch.`)
+        continue
+      }
+      lines.push(await this.applyReviewDecision(workspace, batch, item, reviewer, decision))
+    }
+    const latest = this.store.snapshot()
+    const current = latest.subtasks[batch.id]
+    const decidedBy: Record<string, string | undefined> = {}
+    for (const itemID of current?.handoff?.itemIDs ?? []) {
+      decidedBy[itemID] = latest.subtasks[itemID]?.handoff?.decided
+    }
+    if (current && batchAllDecided(current.handoff?.itemIDs ?? [], decidedBy)) {
+      lines.push(await this.closeBatchReview(workspace, current, reviewer, typeof input.hand_to === "string" ? input.hand_to : undefined))
+    } else {
+      const decided = Object.values(decidedBy).filter((value) => value !== undefined).length
+      lines.push(`Batch stays open: ${decided} of ${itemIDs.length} decided.`)
+    }
+    return { content: lines.join("\n") }
+  }
+
+  private async applyReviewDecision(
+    workspace: Workspace,
+    batch: Subtask,
+    item: Subtask,
+    reviewer: Agent,
+    decision: ReviewDecision,
+  ): Promise<string> {
+    const at = now()
+    const note = decision.note ? ` (note: ${decision.note})` : ""
+    if (decision.action === "delegate") {
+      // Delegate stays leader-only: a non-leader review cannot assign work
+      // to a third agent, so mandatory handoff never smuggles in
+      // delegate-after-handoff.
+      if (reviewer.id !== workspace.leaderID) {
+        return `${item.id} (${item.title}): refused — only the workspace leader ($${this.agentName(workspace.leaderID)}) can delegate subtasks.`
+      }
+      const ref = (decision.assignee ?? "").trim()
+      const target = Object.values(this.store.snapshot().agents).find((agent) => agent.id === ref || agent.name.toLowerCase() === ref.toLowerCase())
+      if (!target || target.archived || !workspace.memberIDs.includes(target.id)) {
+        return `${item.id} (${item.title}): refused — ${ref || "no assignee"} is not available.`
+      }
+      const created = await this.createWorkItem({
+        workspace,
+        parentID: batch.id,
+        assigneeID: target.id,
+        creatorType: "agent",
+        creatorAgentID: reviewer.id,
+        title: item.title,
+        instruction: item.instruction,
+        constraints: item.constraints,
+        expected: decision.note ?? item.expected,
+      })
+      item.state = "replied"
+      item.outcome = "succeeded"
+      item.repliedAt = at
+      item.finishedAt = at
+      if (item.handoff) {
+        item.handoff.decided = "delegated"
+        item.handoff.answeredByID = reviewer.id
+      }
+      await this.store.saveSubtask(item)
+      this.noteWorkChanged(item)
+      this.schedule()
+      return `${item.id} (${item.title}): delegated to $${target.name}${note}${created.deduped ? " (already queued)" : ""}.`
+    }
+    if (decision.action === "start") {
+      item.assigneeID = reviewer.id
+      item.state = "pending"
+      item.outcome = "pending"
+      item.error = undefined
+      item.retryAfter = undefined
+      item.activeRunID = undefined
+      item.claimedBy = undefined
+      item.leaseUntil = undefined
+      if (item.handoff) {
+        item.handoff.decided = "started"
+        item.handoff.batchedIn = undefined
+      }
+      await this.store.saveSubtask(item)
+      this.noteWorkChanged(item)
+      this.schedule()
+      return `${item.id} (${item.title}): started — assigned to $${reviewer.name}${note}.`
+    }
+    item.state = "replied"
+    item.repliedAt = at
+    item.finishedAt = at
+    if (item.handoff) {
+      item.handoff.answeredByID = reviewer.id
+      item.handoff.decided = decision.action === "dismiss" ? "dismissed" : "ended"
+    }
+    if (decision.action === "dismiss") {
+      item.outcome = "succeeded"
+      item.stoppedAt = at
+    } else {
+      item.outcome = "succeeded"
+    }
+    await this.store.saveSubtask(item)
+    this.noteWorkChanged(item)
+    return `${item.id} (${item.title}): ${decision.action === "dismiss" ? "dismissed" : "ended"}${note}.`
+  }
+
+  /**
+   * Batch closure: only when every item is acted on or dismissed. The leader
+   * ends the batch; a non-leader hands it onward (default leader) under the
+   * same loop guards, so mandatory handoff cannot loop forever.
+   */
+  private async closeBatchReview(workspace: Workspace, batch: Subtask, reviewer: Agent, handTo?: string): Promise<string> {
+    const itemIDs = batch.handoff?.itemIDs ?? []
+    if (reviewer.id === workspace.leaderID) {
+      const at = now()
+      batch.state = "replied"
+      batch.outcome = "succeeded"
+      batch.awaitingChildren = false
+      batch.repliedAt = at
+      batch.finishedAt = at
+      await this.store.saveSubtask(batch)
+      this.noteWorkChanged(batch)
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: `Review closed: ${batch.title} — ${itemIDs.length} decided.`,
+        kind: "system",
+        taskID: batch.id,
+      })
+      if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+      return "Batch closed: every item decided."
+    }
+    let candidateID = workspace.leaderID
+    const ref = (handTo ?? "").trim()
+    if (ref) {
+      const target = Object.values(this.store.snapshot().agents).find((agent) => agent.id === ref || agent.name.toLowerCase() === ref.toLowerCase())
+      if (target && !target.archived && workspace.memberIDs.includes(target.id)) candidateID = target.id
+    }
+    const prior = batch.handoff?.chain ?? []
+    const route = checkCompletionRoute({ chain: prior, senderID: reviewer.id, candidateID, leaderID: workspace.leaderID })
+    const at = now()
+    batch.state = "replied"
+    batch.outcome = "succeeded"
+    batch.awaitingChildren = false
+    batch.repliedAt = at
+    batch.finishedAt = at
+    await this.store.saveSubtask(batch)
+    this.noteWorkChanged(batch)
+    if (route.decision === "terminate") {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: completionClosedText(reviewer.name, batch.title, `the completion chain depth limit is ${COMPLETION_CHAIN_MAX}`),
+        kind: "system",
+        taskID: batch.id,
+      })
+      if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+      return "Batch closed: the onward chain reached its depth cap, so the batch ends here."
+    }
+    const target = this.store.snapshot().agents[route.to]
+    const summary = itemIDs
+      .map((itemID) => {
+        const item = this.store.snapshot().subtasks[itemID]
+        return item ? `- ${item.title} (${item.handoff?.decided ?? "undecided"})` : undefined
+      })
+      .filter(Boolean)
+      .join("\n")
+    const chain = [...prior, reviewer.id]
+    const key = completionWorkKey({ workspaceID: workspace.id, finishedTaskID: batch.id, recipientID: route.to })
+    if (!this.findWorkByKey(workspace.id, key)) {
+      const correlationID = correlationIDForKey("handoff", key)
+      const hop: Subtask = {
+        id: id("task"),
+        workspaceID: workspace.id,
+        parentID: batch.id,
+        creatorType: "agent",
+        creatorAgentID: reviewer.id,
+        assigneeID: route.to,
+        title: `Review follow-up: ${batch.title}`,
+        instruction: `Review follow-up: ${batch.title}\n\nDecided by $${reviewer.name}:\n${summary}`,
+        mode: "research",
+        state: "pending",
+        stage: "initial",
+        outcome: "pending",
+        interrupted: false,
+        awaitingChildren: false,
+        attempts: 0,
+        createdAt: at,
+        workKind: "handoff",
+        queueKey: key,
+        deadlineAt: at + DEADLINE_MS,
+        retryAfter: at + COMPLETION_QUIET_WINDOW_MS,
+        handoff: {
+          correlationID,
+          senderID: reviewer.id,
+          recipientID: route.to,
+          depth: chain.length,
+          parentID: batch.id,
+          completion: true,
+          chain,
+        },
+      }
+      await this.store.saveSubtask(hop)
+      this.noteWorkChanged(hop)
+      await this.appendMessage(workspace, {
+        author: "agent",
+        agentID: reviewer.id,
+        text: handoffAckText(target?.name ?? route.to, batch.title, correlationID),
+        kind: "text",
+        taskID: hop.id,
+        correlationID,
+      })
+      this.defer(COMPLETION_QUIET_WINDOW_MS, () => {
+        void this.maybeConsolidateCompletionBatch(workspace.id, route.to).finally(() => this.schedule())
+      })
+      this.schedule()
+    }
+    if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+    return `Batch handed to $${target?.name ?? route.to}: every item decided.`
+  }
+
   private async toolDelegate(input: Json, context: any): Promise<{ content: string }> {
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
@@ -2729,7 +3205,7 @@ export class EnsembleV2Service {
             .filter(Boolean) as string[],
         )
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at))
+          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)
         for (const task of pending) {
           if (slots <= 0) break
@@ -2976,6 +3452,15 @@ export class EnsembleV2Service {
       currentTask.activeRunID = undefined
       currentTask.claimedBy = undefined
       currentTask.leaseUntil = undefined
+      // Ticket #71 mandatory completion handoff: a non-leader turn that ends
+      // without an explicit handoff cannot finish silently — the server hands
+      // the finished content onward (default: the workspace leader) as the
+      // turn finalizes. An explicit handoff satisfies the obligation;
+      // completion and batch hops never re-handoff. The auto hop is a
+      // post-turn delivery, not a wait: only explicit children hold the turn
+      // in `awaitingChildren` (ticket #70), so a grouped completion can never
+      // wedge its finisher while it waits for batch review.
+      await this.ensureCompletionHandoff(currentTask, reply, children)
       if (children.length > 0 && currentTask.stage === "initial") {
         currentTask.awaitingChildren = true
         currentTask.state = "working"
@@ -3129,6 +3614,9 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     const parent = state.subtasks[parentID]
     if (!parent || parent.stage === "synthesis" || parent.state === "replied") return
+    // Ticket #71: batch reviews close only via the review tool once every
+    // item is acted on or dismissed — never by child completion.
+    if (parent.handoff?.batch === true) return
     const children = Object.values(state.subtasks).filter((item) => item.parentID === parentID)
     if (children.length === 0 || children.some((child) => child.state !== "replied")) return
     const workspace = state.workspaces[parent.workspaceID]

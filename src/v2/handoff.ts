@@ -30,6 +30,165 @@ export const HANDOFF_CORRELATION_PREFIX = "handoff"
 export const HANDOFF_MAX_DEPTH = 1
 export const HANDOFF_MAX_PER_RUN = 3
 
+/**
+ * Ticket #71 mandatory completion handoff: every non-leader turn ends with a
+ * handoff to another member (explicit, or automatic default to the workspace
+ * leader). Completion chains are loop-guarded separately from the explicit
+ * single-hop cap above: at most COMPLETION_CHAIN_MAX holders, no immediate
+ * back-and-forth, repeated recipients reroute to the leader, and the depth
+ * cap terminates the chain. Pending completions for one recipient coalesce
+ * after COMPLETION_QUIET_WINDOW_MS into a single batch review turn.
+ */
+export const COMPLETION_CHAIN_MAX = 3
+export const COMPLETION_QUIET_WINDOW_MS = 1_000
+
+/** Per-item review actions for a batch review turn (ticket #71). */
+export const REVIEW_ACTIONS = ["delegate", "start", "end", "dismiss"] as const
+export type ReviewAction = (typeof REVIEW_ACTIONS)[number]
+
+export type ReviewDecision = {
+  item: string
+  action: ReviewAction
+  assignee?: string
+  note?: string
+}
+
+export type CompletionRoute =
+  | { decision: "route"; to: string }
+  | { decision: "reroute"; to: string; reason: "ping-pong" | "repeated-recipient" }
+  | { decision: "terminate"; reason: "depth-cap" }
+
+/**
+ * Loop-guard routing for a completion handoff. The default candidate is the
+ * workspace leader; the leader stays the accountable end of the line (routing
+ * home is never a ping-pong refusal), while any other repeating candidate
+ * reroutes to the leader. Past the chain cap the handoff terminates instead
+ * of queueing. Pure.
+ */
+export function checkCompletionRoute(input: {
+  chain: string[]
+  senderID: string
+  candidateID: string
+  leaderID: string
+}): CompletionRoute {
+  const chain = input.chain ?? []
+  if (chain.length + 1 > COMPLETION_CHAIN_MAX) return { decision: "terminate", reason: "depth-cap" }
+  const previous = chain.length > 0 ? chain[chain.length - 1] : undefined
+  if (input.candidateID !== input.leaderID) {
+    if (previous !== undefined && input.candidateID === previous) return { decision: "reroute", to: input.leaderID, reason: "ping-pong" }
+    if (chain.includes(input.candidateID)) return { decision: "reroute", to: input.leaderID, reason: "repeated-recipient" }
+  }
+  return { decision: "route", to: input.candidateID }
+}
+
+/**
+ * Idempotency key for one mandatory completion handoff: exactly one hop per
+ * finished task per recipient for the row's lifetime. Pure.
+ */
+export function completionWorkKey(input: { workspaceID: string; finishedTaskID: string; recipientID: string }): string {
+  return `completion:${input.workspaceID}:${input.finishedTaskID}:${input.recipientID}`
+}
+
+export type CompletionCandidate = {
+  id: string
+  workspaceID: string
+  state: string
+  workKind?: string
+  assigneeID?: string
+  createdAt: number
+  handoff?: { completion?: boolean; batch?: boolean; batchedIn?: string }
+}
+
+/**
+ * Pending unbatched completion handoffs for one recipient, oldest first.
+ * Only live completion hops count — replied rows, grouped items, batch
+ * reviews, and other work kinds never consolidate. Pure.
+ */
+export function groupCompletionCandidates(
+  tasks: CompletionCandidate[],
+  workspaceID: string,
+  recipientID: string,
+): string[] {
+  return tasks
+    .filter(
+      (task) =>
+        task.workspaceID === workspaceID &&
+        task.state === "pending" &&
+        task.workKind === "handoff" &&
+        task.assigneeID === recipientID &&
+        task.handoff?.completion === true &&
+        task.handoff?.batch !== true &&
+        !task.handoff?.batchedIn,
+    )
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((task) => task.id)
+}
+
+export type CompletionItem = {
+  id: string
+  senderName: string
+  title: string
+  outcome: string
+  path?: string
+}
+
+export function batchReviewTitle(count: number): string {
+  return `Review ${count} completion${count === 1 ? "" : "s"}`
+}
+
+/**
+ * Consolidated review listing: one line per pending completion with sender,
+ * task title, outcome, and handoff path, plus the per-item action grammar.
+ * Agents use `$Name`; `@` is file-only. Pure.
+ */
+export function batchReviewText(items: CompletionItem[], reviewerName: string): string {
+  const lines = items.map((item) => {
+    const path = item.path ? ` (@${item.path})` : ""
+    return `- $${item.senderName} — ${item.title} (${item.outcome}, ref ${item.id})${path}`
+  })
+  return [
+    `$${reviewerName}, ${batchReviewTitle(items.length).toLowerCase()} before continuing:`,
+    ...lines,
+    `Act per item with ensemble_review: delegate (name an assignee), start, end, or dismiss. The batch closes only when every item is acted on or dismissed.${items.length > 0 ? "" : ""}`,
+  ].join("\n")
+}
+
+/**
+ * Structured per-item decisions for the review tool. `delegate` names an
+ * assignee; `start`/`end`/`dismiss` take an optional note. Duplicate items
+ * and unknown actions are refused. Pure.
+ */
+export function parseReviewDecisions(input: unknown): { ok: true; decisions: ReviewDecision[] } | { ok: false; reason: string } {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, reason: "Review decisions must be an object with a decisions list." }
+  const raw = (input as { decisions?: unknown }).decisions
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, reason: "Review decisions must name at least one item." }
+  const seen = new Set<string>()
+  const decisions: ReviewDecision[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return { ok: false, reason: "Each review decision must name an item and an action." }
+    const { item, action, assignee, note } = entry as Record<string, unknown>
+    if (typeof item !== "string" || !item.trim()) return { ok: false, reason: "Each review decision must name an item." }
+    if (typeof action !== "string" || !(REVIEW_ACTIONS as readonly string[]).includes(action)) {
+      return { ok: false, reason: `Unknown review action "${String(action)}"; use delegate, start, end, or dismiss.` }
+    }
+    if (seen.has(item)) return { ok: false, reason: `Item "${item}" is decided twice; decide each item once.` }
+    seen.add(item)
+    if (action === "delegate" && (typeof assignee !== "string" || !assignee.trim())) {
+      return { ok: false, reason: `Delegating item "${item}" must name an assignee.` }
+    }
+    const decision: ReviewDecision = { item, action: action as ReviewAction }
+    if (typeof assignee === "string" && assignee.trim()) decision.assignee = assignee.trim()
+    if (typeof note === "string" && note.trim()) decision.note = note.trim()
+    decisions.push(decision)
+  }
+  return { ok: true, decisions }
+}
+
+/** The batch closes only when every consolidated item carries a disposition. Pure. */
+export function batchAllDecided(itemIDs: string[], decidedBy: Record<string, string | undefined>): boolean {
+  return itemIDs.every((id) => decidedBy[id] !== undefined)
+}
+
 export type HandoffFileData = {
   task: string
   summary?: string
@@ -161,6 +320,15 @@ export function handoffDuplicateText(recipientName: string, task: string): strin
 
 export function handoffFailureText(recipientName: string, reason: string, correlationID: string): string {
   return `Handoff to $${recipientName} failed: ${reason} (ref ${correlationID}).`
+}
+
+/**
+ * Ticket #71 chain-cap notice: the mandatory completion handoff terminates
+ * instead of queueing, so the chain cannot loop forever. The finished reply
+ * already in the transcript stands as the record. `$Name`, never `@Name`.
+ */
+export function completionClosedText(finisherName: string, title: string, reason: string): string {
+  return `Completion closed for $${finisherName}: ${title} — ${reason}. The finished reply above stands as the record.`
 }
 
 /**

@@ -122,7 +122,9 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
       return Object.values(next.state.subtasks).some((task: any) => task.workKind === "handoff" && task.state === "replied")
     })
     const after = await handlers.snapshot({ directory })
-    const hops = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff")
+    // Explicit hops only: the recipient's mandatory completion handoff to
+    // the leader (ticket #71) is a separate terminal delivery.
+    const hops = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true)
     assert.equal(hops.length, 1)
     const hop = hops[0] as any
     assert.equal(hop.assigneeID, sage.id)
@@ -142,7 +144,7 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
     const again = await tools.get("handoff").execute({ task: "Summarize the deploy", summary: "Short version", path, to: "Sage" }, { sessionID })
     assert.match(again.content, /Already handed to \$Sage/)
     const terminal = await handlers.snapshot({ directory })
-    assert.equal(Object.values(terminal.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 1)
+    assert.equal(Object.values(terminal.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true).length, 1)
     // task_status exposes the typed handoff record and the derived status.
     const status = await tools.get("task_status").execute({}, { sessionID })
     const rows = JSON.parse(status.content)
@@ -312,7 +314,9 @@ test("handoff depth and per-run caps are refused visibly", async () => {
     const deep = await tools.get("handoff").execute({ task: "Deep work", summary: "", path: deepPath, to: "Nova" }, { sessionID: sageSession })
     assert.match(deep.content, /the handoff depth limit is 1/)
     const after = await handlers.snapshot({ directory })
-    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 3)
+    // Explicit hops only: completion handoffs (ticket #71) are separate
+    // terminal deliveries, never extra fan-out under the per-run budget.
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true).length, 3)
     const texts = ((after.state.messages[workspace.id] ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handoff refused")))
   } finally {

@@ -116,6 +116,29 @@ export type HandoffInfo = {
   path?: string
   /** Agent that produced the relayed answer, set when the hop replies. */
   answeredByID?: string
+  /**
+   * Ticket #71: this hop carries a finished turn (mandatory completion
+   * handoff). Completion hops never auto-handoff again — they are terminal
+   * deliveries, so chains cannot duplicate work.
+   */
+  completion?: boolean
+  /**
+   * Ordered holder chain for loop guards (agent ids, oldest first). The
+   * next hop appends its sender before routing.
+   */
+  chain?: string[]
+  /**
+   * Ticket #71: this hop consolidates pending completions into one review
+   * turn. Item ids live in `itemIDs`; the batch closes only via the review
+   * tool once every item is acted on or dismissed.
+   */
+  batch?: boolean
+  /** Item ids consolidated into a batch review. Present only on batch tasks. */
+  itemIDs?: string[]
+  /** Batch review this completion is grouped into. Present only on items. */
+  batchedIn?: string
+  /** Per-item disposition set by the review tool. Present only on decided items. */
+  decided?: HandoffDecision
 }
 
 export type TurnInfo = {
@@ -183,6 +206,8 @@ export type Subtask = {
   /** Peer-turn record (ticket #57). Present only on workKind "turn". */
   turn?: TurnInfo
 }
+
+export type HandoffDecision = "delegated" | "started" | "ended" | "dismissed"
 
 export type SessionBinding = {
   workspaceID: Id
