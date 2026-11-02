@@ -25,6 +25,7 @@ export type ChatLine = {
   kind?: string
   streaming?: boolean
   interrupted?: boolean
+  queued?: boolean
   createdAt: number
 }
 

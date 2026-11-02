@@ -115,3 +115,24 @@ test("messages are ordered by sequence after reload", async () => {
   assert.deepEqual(loaded.snapshot().messages.w.map((item) => item.seq), [1, 2])
   assert.deepEqual(loaded.snapshot().messages.w.map((item) => item.text), ["two", "one"])
 })
+
+test("dm transcripts persist per binding and reload in order", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.saveDmMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
+  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
+  await store.saveDmMessage("w", "a", { id: "dm_3", role: "user", author: "You", text: "work", createdAt: 3 })
+  const loaded = new V2Store(ctx)
+  await loaded.load()
+  assert.deepEqual(loaded.snapshot().dmTranscripts["home:a"].map((item) => item.text), ["one", "two"])
+  assert.deepEqual(loaded.snapshot().dmTranscripts["w:a"].map((item) => item.text), ["work"])
+})
+
+test("pruning a workspace removes its dm transcripts", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.saveWorkspace(workspace())
+  await store.saveDmMessage("w", "a", { id: "dm_1", role: "user", author: "You", text: "hi", createdAt: 1 })
+  await store.pruneWorkspace("w")
+  assert.equal(store.snapshot().dmTranscripts["w:a"], undefined)
+})

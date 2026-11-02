@@ -8,6 +8,7 @@ import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, onboardingPrompt } from "./init-
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, unknownMentions, visibleRecipients } from "./routing.ts"
+import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type {
   Agent,
@@ -102,6 +103,11 @@ export class EnsembleV2Service {
   private readonly homeBindingPromises = new Map<string, Promise<{ sessionID: string; directory: string }>>()
   private readonly bindingPromises = new Map<string, Promise<{ sessionID: string } | undefined>>()
   private readonly workspaceEpoch = new Map<string, number>()
+  private lastDmAt = 0
+  private dmNow(): number {
+    this.lastDmAt = Math.max(now(), this.lastDmAt + 1)
+    return this.lastDmAt
+  }
   private readonly liveBySession = new Map<string, { message: Message; lastSave: number; buffer: string }>()
   private globalEpoch = 0
   private lastConfigError: string | undefined
@@ -407,22 +413,18 @@ export class EnsembleV2Service {
     const agent = state.agents[agentID]
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     const target = await this.ensureChatSession(agent, workspaceID)
-    const messages = listData(await this.ctx.session.context({ sessionID: target.sessionID }))
-    const mapped = messages.flatMap((message: any) => {
-      if (message?.type !== "user" && message?.type !== "assistant") return []
-      const text = Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n").trim() : ""
-      if (!text) return []
-      return [{
-        id: String(message.id ?? id("chat")),
-        role: message.type === "user" ? "user" as const : "assistant" as const,
-        author: message.type === "user" ? "You" : agent.name,
-        text,
-        createdAt: Number(message.time?.created ?? 0),
-      }]
-    })
+    const key = bindingKey(target.bindingKeyID, agent.id)
+    const queuedIDs = new Set(
+      Object.values(state.dmQueue)
+        .filter((entry) => entry.id && entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID))
+        .map((entry) => entry.id),
+    )
+    const stored = (state.dmTranscripts[key] ?? []).map((message) => ({ ...message, queued: queuedIDs.has(message.id) || message.queued === true }))
+    const native = mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
+    const messages = mergeDmTranscript(stored, native)
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
     const queued = Object.values(state.dmQueue).filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID)).length
-    return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages: mapped, queued }
+    return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages, queued }
   }
 
   private async chatSend(agentID: string, workspaceID: string | undefined, text: string): Promise<any> {
@@ -432,16 +434,19 @@ export class EnsembleV2Service {
     const agent = state.agents[agentID]
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     const target = await this.ensureChatSession(agent, workspaceID)
+    const workspaceKey = target.bindingKeyID
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
+    const line = { id: id("dm"), role: "user" as const, author: "You", text: value, createdAt: this.dmNow(), queued: busy }
+    await this.store.saveDmMessage(workspaceKey, agent.id, line)
     if (busy) {
       const entry: DmQueueEntry = {
-        id: id("dm"),
+        id: line.id,
         agentID,
-        workspaceID: target.bindingKeyID === "home" ? undefined : target.bindingKeyID,
+        workspaceID: workspaceKey === "home" ? undefined : workspaceKey,
         directory: target.directory,
         text: value,
         status: "queued",
-        createdAt: now(),
+        createdAt: line.createdAt,
       }
       await this.store.saveDmQueueEntry(entry)
       return { queued: true, id: entry.id }
@@ -455,9 +460,9 @@ export class EnsembleV2Service {
     }
     void this.ctx.session.wait({ sessionID: target.sessionID }).catch(() => undefined).finally(() => {
       this.directBusy.delete(target.sessionID)
-      void this.flushDmQueue(agent.id, target.bindingKeyID === "home" ? undefined : target.bindingKeyID)
+      void this.flushDmQueue(agent.id, workspaceKey === "home" ? undefined : workspaceKey)
     })
-    return { queued: false }
+    return { queued: false, id: line.id }
   }
 
   private async moveHomeSession(agentID: string, workspaceID: string): Promise<any> {
@@ -471,6 +476,7 @@ export class EnsembleV2Service {
     if (!home) return { moved: false }
     await this.ctx.session.move({ sessionID: home.sessionID, directory: workspace.directory })
     await this.store.removeBinding("home", agent.id)
+    await this.store.moveDmTranscript("home", agent.id, workspace.id)
     await this.store.saveBinding({ workspaceID: workspace.id, agentID: agent.id, sessionID: home.sessionID, kind: "workspace", directory: workspace.directory, agentVersion: agent.version, updatedAt: now() })
     agent.homeSessionID = undefined
     await this.store.saveAgent(agent)
@@ -480,8 +486,9 @@ export class EnsembleV2Service {
   private async flushDmQueue(agentID: string, workspaceID?: string): Promise<void> {
     const state = this.store.snapshot()
     if (workspaceID && !state.workspaces[workspaceID]) return
+    const workspaceKey = workspaceID ?? "home"
     const entries = Object.values(state.dmQueue)
-      .filter((entry) => entry.agentID === agentID && entry.status === "queued" && (entry.workspaceID ?? "home") === (workspaceID ?? "home"))
+      .filter((entry) => entry.agentID === agentID && entry.status === "queued" && (entry.workspaceID ?? "home") === workspaceKey)
       .sort((a, b) => a.createdAt - b.createdAt)
     for (const entry of entries) {
       try {
@@ -499,6 +506,8 @@ export class EnsembleV2Service {
         entry.status = "failed"
       }
       await this.store.saveDmQueueEntry(entry)
+      const stored = (this.store.snapshot().dmTranscripts[bindingKey(workspaceKey, agentID)] ?? []).find((message) => message.id === entry.id)
+      if (stored) await this.store.saveDmMessage(workspaceKey, agentID, { ...stored, queued: false })
     }
   }
 
@@ -638,6 +647,7 @@ export class EnsembleV2Service {
       if (run.agentID === agentID) await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
     }
     await this.cancelAgentSubtasks(agentID, "Agent deleted.")
+    await this.store.pruneDmForAgent(agentID)
     for (const workspace of Object.values(state.workspaces)) {
       if (workspace.memberIDs.includes(agentID)) {
         workspace.memberIDs = workspace.memberIDs.filter((member) => member !== agentID)
@@ -1514,12 +1524,33 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     const found = this.toolSession(state, context.sessionID)
     if (!found.workspace) return { content: "This session is not bound to an Ensemble workspace." }
-    return { content: JSON.stringify({ workspace: found.workspace.name, directory: found.workspace.directory, leader: found.workspace.leaderID, members: found.workspace.memberIDs, paused: found.workspace.paused }) }
+    const leader = state.agents[found.workspace.leaderID]
+    return {
+      content: JSON.stringify({
+        workspace: found.workspace.name,
+        directory: found.workspace.directory,
+        leader: { id: found.workspace.leaderID, name: leader?.name ?? found.workspace.leaderID },
+        members: found.workspace.memberIDs.map((memberID) => ({ id: memberID, name: state.agents[memberID]?.name ?? memberID })),
+        paused: found.workspace.paused,
+        synthesis: found.workspace.synthesis,
+      }),
+    }
   }
 
   private toolListWorkspaces(): { content: string } {
     const state = this.store.snapshot()
-    return { content: JSON.stringify(Object.values(state.workspaces).map((workspace) => ({ id: workspace.id, name: workspace.name, directory: workspace.directory, leader: workspace.leaderID, members: workspace.memberIDs, paused: workspace.paused }))) }
+    return {
+      content: JSON.stringify(
+        Object.values(state.workspaces).map((workspace) => ({
+          id: workspace.id,
+          name: workspace.name,
+          directory: workspace.directory,
+          leader: { id: workspace.leaderID, name: state.agents[workspace.leaderID]?.name ?? workspace.leaderID },
+          members: workspace.memberIDs.map((memberID) => ({ id: memberID, name: state.agents[memberID]?.name ?? memberID })),
+          paused: workspace.paused,
+        })),
+      ),
+    }
   }
 
   private toolListAgents(): { content: string } {

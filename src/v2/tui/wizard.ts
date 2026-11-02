@@ -28,6 +28,21 @@ export function wizardNavHint(final: boolean): string {
   return `${WIZARD_NAV_LABELS.next} next · ${WIZARD_NAV_LABELS.back} back · enter ${final ? "submit" : "continue"} · esc cancel`
 }
 
+export type WizardEnterAction = "select" | "continue" | "submit" | "text"
+
+/**
+ * What Enter does on a wizard step. Text steps keep Enter = continue inside
+ * the field (Shift+Enter adds a line); every non-text step owns Enter —
+ * selecting the focused option, continuing a list step, or submitting the
+ * final step — and never reaches the composer completion popup.
+ */
+export function wizardEnterAction(kind: string, final: boolean): WizardEnterAction {
+  if (kind === "text") return "text"
+  if (final) return "submit"
+  if (kind === "multi") return "continue"
+  return "select"
+}
+
 export type WizardModelSource = {
   providerID: string
   modelID: string

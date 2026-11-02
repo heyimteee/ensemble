@@ -1657,8 +1657,7 @@ test("agent replies normalize @KnownAgent and add a no-dispatch warning", async 
   }
 })
 
-test("rpc boundary rejects snapshot input without a directory", async () => {
-  const { ctx } = fakeContext()
+test("rpc boundary rejects snapshot input without a directory", async () => {  const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -1763,6 +1762,183 @@ test("snapshot explains an empty or failed model catalog without leaking credent
       await failingStop()
     }
   } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a direct message is stored durably and renders exactly once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sent = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: agent.result.id, text: "Hello DM" } })
+    assert.equal(sent.ok, true)
+    assert.equal(sent.result.queued, false)
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: agent.result.id } })
+    const userLines = (context.result.messages as any[]).filter((message) => message.role === "user")
+    assert.equal(userLines.length, 1)
+    assert.equal(userLines[0].text, "Hello DM")
+    assert.equal(userLines[0].author, "You")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a direct message survives restart via the load path and never duplicates", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
+  const values = new Map<string, unknown>()
+  const first = fakeContext(values)
+  const service = new EnsembleV2Service(first.ctx)
+  const stop = await service.start()
+  let agentID = ""
+  try {
+    const agent = await service.handlers().invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    agentID = agent.result.id
+    await service.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "Persist me" } })
+  } finally {
+    await stop()
+  }
+  const second = fakeContext(values)
+  ;(second.ctx.session as any).context = async () => ({
+    data: [
+      { type: "user", time: { created: Date.now() }, content: [{ type: "text", text: "Persist me" }] },
+      { type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "OK" }] },
+    ],
+  })
+  const restarted = new EnsembleV2Service(second.ctx)
+  const stopRestarted = await restarted.start()
+  try {
+    const context = await restarted.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
+    assert.equal(context.ok, true)
+    const texts = (context.result.messages as any[]).map((message) => message.text)
+    assert.deepEqual(texts, ["Persist me", "OK"])
+  } finally {
+    await stopRestarted()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a queued direct message stays visible as queued, then sent", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 250)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const first = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "First" } })
+    assert.equal(first.result.queued, false)
+    const queued = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "While busy" } })
+    assert.equal(queued.result.queued, true)
+    const during = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    const lines = (during.result.messages as any[]).filter((message) => message.role === "user")
+    assert.deepEqual(lines.map((message) => message.text), ["First", "While busy"])
+    assert.equal(lines[1].queued, true)
+    await waitFor(async () => {
+      const next = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+      const items = (next.result.messages as any[]).filter((message) => message.role === "user")
+      return items.length === 2 && items.every((message) => message.queued !== true)
+    }, 4000)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("unmentioned group messages create work only for the workspace leader", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-route-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Do the thing" } })
+    assert.equal(sent.ok, true)
+    assert.deepEqual(sent.result.recipients, [nova.result.id])
+    const next = await handlers.snapshot({ directory })
+    const tasks = Object.values(next.state.subtasks) as any[]
+    assert.equal(tasks.length, 1)
+    assert.equal(tasks[0].assigneeID, nova.result.id)
+    assert.ok(next.state.messages[workspace.result.id].some((message: any) => message.author === "system" && message.text === `→ Nova: Do the thing`))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("mentioned group messages go only to the mentioned active members", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-route-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id, echo.result.id], leaderID: nova.result.id },
+    })
+    const single = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "$Sage take this" } })
+    assert.deepEqual(single.result.recipients, [sage.result.id])
+    const fanout = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "$Sage and $Echo pair up" } })
+    assert.deepEqual([...fanout.result.recipients].sort(), [sage.result.id, echo.result.id].sort())
+    const next = await handlers.snapshot({ directory })
+    const assignees = (Object.values(next.state.subtasks) as any[]).map((task) => task.assigneeID).sort()
+    assert.deepEqual(assignees, [echo.result.id, sage.result.id, sage.result.id].sort())
+    assert.ok(!assignees.includes(nova.result.id))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("unmentioned routing ignores recent activity and stays with the leader", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-route-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "$Sage you take this one" } })
+    const afterMention = await handlers.snapshot({ directory })
+    assert.equal(afterMention.state.workspaces[workspace.result.id].leaderID, nova.result.id)
+    const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "No mention here" } })
+    assert.deepEqual(sent.result.recipients, [nova.result.id])
+    const next = await handlers.snapshot({ directory })
+    const latest = (Object.values(next.state.subtasks) as any[]).sort((a, b) => a.createdAt - b.createdAt).at(-1)
+    assert.equal(latest.assigneeID, nova.result.id)
+  } finally {
+    await stop()
     rmSync(directory, { recursive: true, force: true })
   }
 })

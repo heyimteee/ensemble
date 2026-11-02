@@ -2,6 +2,7 @@ import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
 import type {
   Agent,
   Approval,
+  ChatMessage,
   Memory,
   Message,
   SessionBinding,
@@ -77,6 +78,18 @@ export class V2Store {
       const entry = value as DmQueueEntry
       if (entry?.id) this.state.dmQueue[entry.id] = entry
     }
+    for (const { value } of await this.scanAll("v2/dm/")) {
+      const message = value as ChatMessage & { bindingKey: string }
+      if (!message?.id || !message?.bindingKey) continue
+      const list = (this.state.dmTranscripts[message.bindingKey] ??= [])
+      if (!list.some((item) => item.id === message.id)) {
+        const { bindingKey: _dropped, ...rest } = message
+        list.push(rest)
+      }
+    }
+    for (const list of Object.values(this.state.dmTranscripts)) {
+      list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    }
     for (const subtask of Object.values(this.state.subtasks)) {
       if (subtask.state === "working") {
         subtask.state = "pending"
@@ -88,6 +101,38 @@ export class V2Store {
     if (this.state.ui.activeWorkspaceID && !this.state.workspaces[this.state.ui.activeWorkspaceID]) {
       this.state.ui.activeWorkspaceID = undefined
     }
+  }
+
+  async saveDmMessage(workspaceKey: string, agentID: string, message: ChatMessage): Promise<void> {
+    const key = bindingKey(workspaceKey, agentID)
+    const list = (this.state.dmTranscripts[key] ??= [])
+    const index = list.findIndex((item) => item.id === message.id)
+    if (index >= 0) list[index] = { ...message }
+    else list.push({ ...message })
+    list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    await this.ctx.storage.set(`v2/dm/${workspaceKey}/${agentID}/${message.id}`, { ...message, bindingKey: key })
+    await this.bump()
+  }
+
+  async moveDmTranscript(fromWorkspaceKey: string, agentID: string, toWorkspaceKey: string): Promise<void> {
+    const fromKey = bindingKey(fromWorkspaceKey, agentID)
+    const messages = this.state.dmTranscripts[fromKey] ?? []
+    for (const message of messages) {
+      await this.saveDmMessage(toWorkspaceKey, agentID, { ...message, queued: false })
+    }
+    delete this.state.dmTranscripts[fromKey]
+    await this.removePrefix(`v2/dm/${fromWorkspaceKey}/${agentID}/`)
+  }
+
+  async pruneDmForAgent(agentID: string): Promise<void> {
+    for (const { key } of await this.scanAll("v2/dm/")) {
+      const parts = key.split("/")
+      if (parts[3] === agentID) await this.ctx.storage.remove(key)
+    }
+    for (const key of Object.keys(this.state.dmTranscripts)) {
+      if (key.endsWith(`:${agentID}`)) delete this.state.dmTranscripts[key]
+    }
+    await this.bump()
   }
 
   async sync(): Promise<boolean> {
@@ -119,6 +164,16 @@ export class V2Store {
     for (const { value } of await this.scanAll("v2/binding/")) {
       const binding = value as SessionBinding
       if (binding?.workspaceID && binding?.agentID) this.state.bindings[bindingKey(binding.workspaceID, binding.agentID)] = binding
+    }
+    for (const { value } of await this.scanAll("v2/dm/")) {
+      const message = value as ChatMessage & { bindingKey: string }
+      if (!message?.id || !message?.bindingKey) continue
+      const list = (this.state.dmTranscripts[message.bindingKey] ??= [])
+      if (!list.some((item) => item.id === message.id)) {
+        const { bindingKey: _dropped, ...rest } = message
+        list.push(rest)
+        list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      }
     }
     this.state.version = version
     this.state.updatedAt = Number((meta as any)?.updatedAt ?? this.state.updatedAt)
@@ -258,8 +313,12 @@ export class V2Store {
     for (const id of memoryIDs) delete this.state.memories[id]
     for (const id of approvalIDs) delete this.state.approvals[id]
     for (const id of dmQueueIDs) delete this.state.dmQueue[id]
+    for (const key of Object.keys(this.state.dmTranscripts)) {
+      if (key === workspaceID || key.startsWith(`${workspaceID}:`)) delete this.state.dmTranscripts[key]
+    }
     await this.removePrefix(`v2/message/${workspaceID}/`)
     await this.removePrefix(`v2/binding/${workspaceID}/`)
+    await this.removePrefix(`v2/dm/${workspaceID}/`)
     for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
     for (const id of memoryIDs) await this.ctx.storage.remove(`v2/memory/${id}`)
     for (const id of approvalIDs) await this.ctx.storage.remove(`v2/approval/${id}`)
@@ -284,6 +343,11 @@ export class V2Store {
     if (parts[1] === "approval" && parts[2]) delete this.state.approvals[parts[2]]
     if (parts[1] === "binding" && parts[2] && parts[3]) delete this.state.bindings[`${parts[2]}:${parts[3]}`]
     if (parts[1] === "dmqueue" && parts[2]) delete this.state.dmQueue[parts[2]]
+    if (parts[1] === "dm" && parts[2] && parts[3] && parts[4]) {
+      const key = `${parts[2]}:${parts[3]}`
+      this.state.dmTranscripts[key] = (this.state.dmTranscripts[key] ?? []).filter((message) => message.id !== parts[4])
+      if (this.state.dmTranscripts[key].length === 0) delete this.state.dmTranscripts[key]
+    }
     if (parts[1] === "message" && parts[2]) {
       const sequence = parts[3]
       this.state.messages[parts[2]] = (this.state.messages[parts[2]] ?? []).filter((message) => String(message.seq).padStart(8, "0") !== sequence)
@@ -292,7 +356,7 @@ export class V2Store {
   }
 
   async reset(): Promise<void> {
-    for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/"]) {
+    for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
       await this.removePrefix(prefix)
     }
     await this.ctx.storage.remove("v2/meta")
