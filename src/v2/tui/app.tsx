@@ -13,13 +13,15 @@ import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
+import { EMPTY_MARK, composerCaret, leaderGlyph, motionActive as motionShouldRun, streamingFrame } from "./motion.ts"
+import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat" | "tasks"
 type PickerState = {
-  mode: "members" | "leader" | "workspace"
+  mode: "members" | "leader" | "workspace" | "choice"
   title: string
   candidates: Array<{ id: string; label: string }>
   selected: Set<string>
@@ -34,6 +36,18 @@ type TextPromptState = {
   value: string
   placeholder: string
   resolve: (value: string | undefined) => void
+}
+
+type ConfirmState = {
+  title: string
+  message: string
+  resolve: (value: boolean | undefined) => void
+}
+
+type ResultState = {
+  title: string
+  text: string
+  resolve: () => void
 }
 
 type WizardOption = { id: string; label: string; detail?: string }
@@ -143,12 +157,20 @@ export function EnsembleV2App() {
   const [completion, setCompletion] = createSignal<Completion | null>(null)
   const [picker, setPicker] = createSignal<PickerState | null>(null)
   const [textPrompt, setTextPrompt] = createSignal<TextPromptState | null>(null)
+  const [confirm, setConfirm] = createSignal<ConfirmState | null>(null)
+  const [result, setResult] = createSignal<ResultState | null>(null)
+  const [skillFilterEditing, setSkillFilterEditing] = createSignal(false)
+  const [motionFrame, setMotionFrame] = createSignal(0)
+  const [recentID, setRecentID] = createSignal<string | null>(null)
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
   const [atBottom, setAtBottom] = createSignal(true)
   let composerRef: any
   let textPromptRef: any
   let wizardRef: any
+  let resultScrollRef: any
+  let revealTimer: ReturnType<typeof setTimeout> | undefined
+  let lastRevealedID: string | null = null
   let transcriptScrollRef: any
   let helpScrollRef: any
   const lineCache = new Map<string, ChatLine>()
@@ -315,6 +337,8 @@ export function EnsembleV2App() {
   const messageHeight = () => Math.max(6, viewHeight() - 14)
   const pickerGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 16)
   const promptGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 14)
+  const confirmGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 10)
+  const resultGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 18)
   const wizardHeight = 20
   const wizardGeometry = () => overlayGeometry(viewWidth(), viewHeight(), wizardHeight)
 
@@ -325,12 +349,7 @@ export function EnsembleV2App() {
   const isModal = () => modal() || helpOpen() || approvalsOpen() || Boolean(settingsAgentID())
   const isBusy = () => busy() || chatContext()?.busy === true
 
-  const modalWrap = async <T,>(fn: () => Promise<T>): Promise<T> => {
-    const previous = leaderMode()
-    setLeaderMode(false)
-    setModal(true)
-    try { return await fn() } finally { setModal(false); setLeaderMode(previous) }
-  }
+  const overlayOpen = () => picker() !== null || textPrompt() !== null || wizard() !== null || confirm() !== null || result() !== null
 
   const run = async (label: string, action: () => Promise<void>) => {
     if (busy()) return
@@ -480,18 +499,17 @@ export function EnsembleV2App() {
 
   const chooseModel = async (current?: ModelOption): Promise<ModelOption | undefined> => {
     if (models().length === 0) throw new Error("No models are available.")
-    const value = await modalWrap(() => context.ui.dialog.select({
-      title: "Model",
-      current: current ? `${current.providerID}/${current.modelID}` : undefined,
-      options: models().map((model) => ({ title: `${model.name} · ${model.providerID}/${model.modelID}`, value: `${model.providerID}/${model.modelID}` })),
-      search: (query, options) => options.filter((option) => fuzzyMatch(query, option.title)),
-    }))
+    const value = await openChoice(
+      "Model",
+      models().map((model) => ({ title: `${model.name} · ${model.providerID}/${model.modelID}`, value: `${model.providerID}/${model.modelID}` })),
+      current ? `${current.providerID}/${current.modelID}` : undefined,
+    )
     return value ? models().find((model) => `${model.providerID}/${model.modelID}` === value) : undefined
   }
 
   const chooseVariant = async (model: ModelOption, current?: string) => {
     if (model.variants.length === 0) return undefined
-    return (await modalWrap(() => context.ui.dialog.select({ title: "Reasoning effort", current, options: model.variants.map((variant) => ({ title: variant, value: variant })) }))) ?? undefined
+    return (await openChoice("Reasoning effort", model.variants.map((variant) => ({ title: variant, value: variant })), current)) ?? undefined
   }
 
   const createWorkspace = async () => {
@@ -536,7 +554,7 @@ export function EnsembleV2App() {
     for (const agentID of members) {
       const binding = Object.values(state()?.bindings ?? {}).find((item) => item.agentID === agentID && item.kind === "home")
       if (!binding) continue
-      const move = await modalWrap(() => context.ui.dialog.confirm({ title: `Move ${state()?.agents[agentID]?.name} into #${workspace.name}?`, message: "This moves the homeless direct-chat session into the workspace." }))
+      const move = await openConfirm(`Move ${state()?.agents[agentID]?.name} into #${workspace.name}?`, "This moves the homeless direct-chat session into the workspace.")
       if (move) await invoke(context, "agent.moveHome", { agentID, workspaceID: workspace.id })
     }
   }
@@ -674,9 +692,9 @@ export function EnsembleV2App() {
   }
 
   const resetEnsemble = async () => {
-    const answer = await modalWrap(() => context.ui.dialog.prompt({ title: "Reset Ensemble", description: "This deletes all Ensemble data and bound native sessions. Type RESET.", placeholder: "RESET" }))
+    const answer = await openTextPrompt("Reset Ensemble", { description: "This deletes all Ensemble data and bound native sessions. Type RESET.", placeholder: "RESET" })
     if (answer !== "RESET") return
-    const handoffs = await modalWrap(() => context.ui.dialog.confirm({ title: "Delete handoff files too?", message: "No preserves .ensemble/handoffs. Yes removes them." }))
+    const handoffs = await openConfirm("Delete handoff files too?", "No preserves .ensemble/handoffs. Yes removes them.")
     await run("Reset Ensemble", async () => {
       await invoke(context, "ensemble.reset", { confirmation: "RESET", deleteHandoffs: Boolean(handoffs) })
       setSurface(null)
@@ -751,18 +769,18 @@ export function EnsembleV2App() {
   const delegateSelected = async () => {
     const task = selectedTask(); const workspace = activeWorkspace()
     if (!task || !workspace) return
-    const target = await modalWrap(() => context.ui.dialog.select({ title: "Delegate subtask", options: activeAgents().map((agent) => ({ title: agent.name, value: agent.id })) }))
+    const target = await openChoice("Delegate subtask", activeAgents().map((agent) => ({ title: agent.name, value: agent.id })))
     if (!target) return
-    const title = (await modalWrap(() => context.ui.dialog.prompt({ title: "Subtask title", value: task.title })))?.trim()
+    const title = (await openTextPrompt("Subtask title", { value: task.title }))?.trim()
     if (!title) return
-    const instruction = (await modalWrap(() => context.ui.dialog.prompt({ title: "Instruction", value: task.instruction })))?.trim()
+    const instruction = (await openTextPrompt("Instruction", { value: task.instruction }))?.trim()
     if (!instruction) return
     await run("Delegate subtask", async () => { await invoke(context, "task.delegate", { workspaceID: workspace.id, parentID: task.id, assigneeID: target, title, instruction, mode: task.mode }) })
   }
 
   const reassignSelected = async () => {
     const task = selectedTask(); if (!task) return
-    const target = await modalWrap(() => context.ui.dialog.select({ title: "Reassign subtask", options: activeAgents().map((agent) => ({ title: agent.name, value: agent.id })) }))
+    const target = await openChoice("Reassign subtask", activeAgents().map((agent) => ({ title: agent.name, value: agent.id })))
     if (target) await run("Reassign subtask", async () => { await invoke(context, "task.reassign", { id: task.id, assigneeID: target }) })
   }
 
@@ -770,7 +788,7 @@ export function EnsembleV2App() {
     const task = selectedTask(); if (!task) return
     const result = resultForTask(state(), task)
     if (!result) { context.ui.toast.show({ title: "Ensemble", message: "No result yet.", variant: "warning" }); return }
-    await modalWrap(() => context.ui.dialog.alert({ title: task.title, message: result.text }))
+    await openResultModal(task.title, result.text)
   }
 
   const retrySelected = async () => { const task = selectedTask(); if (task) await run("Retry subtask", async () => { await invoke(context, "task.retry", { id: task.id }) }) }
@@ -797,7 +815,7 @@ export function EnsembleV2App() {
 
   const closeSettings = async () => {
     if (dirty()) {
-      const discard = await modalWrap(() => context.ui.dialog.confirm({ title: "Discard changes?", message: "This agent has unsaved settings." }))
+      const discard = await openConfirm("Discard changes?", "This agent has unsaved settings.")
       if (!discard) return
     }
     setSettingsAgentID(null); setDraft(null); setDirty(false)
@@ -838,16 +856,16 @@ export function EnsembleV2App() {
   const editField = async () => {
     const agent = draft(); if (!agent) return
     if (settingsTab() === "general") {
-      const field = (await modalWrap(() => context.ui.dialog.select({ title: "Edit field", options: [{ title: "Name", value: "name" }, { title: "Title", value: "title" }, { title: "Role", value: "role" }, { title: "Color", value: "color" }] }))) as string | undefined
+      const field = (await openChoice("Edit field", [{ title: "Name", value: "name" }, { title: "Title", value: "title" }, { title: "Role", value: "role" }, { title: "Color", value: "color" }])) as string | undefined
       if (!field) return
-      const value = await modalWrap(() => context.ui.dialog.prompt({ title: field, value: agent[field as "name" | "title" | "role" | "color"] }))
+      const value = await openTextPrompt(field, { value: agent[field as "name" | "title" | "role" | "color"] })
       if (value !== undefined) { setDraft({ ...agent, [field]: value } as Agent); setDirty(true) }
     } else if (settingsTab() === "models") {
       const model = await chooseModel(); if (!model) return
       const variant = await chooseVariant(model)
       setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); setDirty(true)
     } else if (settingsTab() === "memories") {
-      const text = await modalWrap(() => context.ui.dialog.prompt({ title: "Add memory", placeholder: "The team uses pnpm." }))
+      const text = await openTextPrompt("Add memory", { placeholder: "The team uses pnpm." })
       if (text?.trim()) await run("Add memory", async () => { await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text: text.trim(), source: "user" }) })
     } else if (settingsTab() === "skillbox") toggleSkill()
   }
@@ -864,11 +882,11 @@ export function EnsembleV2App() {
 
   const resolveApproval = async (approval: Approval) => {
     const options = approval.kind === "interrupted" ? [{ title: "Resume work", value: "approve" }, { title: "Discard", value: "reject" }] : approval.kind === "ask_person" ? [{ title: "Answer", value: "approve" }, { title: "Reject", value: "reject" }] : [{ title: "Approve", value: "approve" }, { title: "Reject", value: "reject" }]
-    const value = await modalWrap(() => context.ui.dialog.select({ title: approval.title, options }))
+    const value = await openChoice(approval.title, options)
     if (!value) return
     let resolution: string | undefined
     if (value === "approve" && approval.kind === "ask_person") {
-      resolution = (await modalWrap(() => context.ui.dialog.prompt({ title: "Your answer", placeholder: "What should the agent do?" })))?.trim()
+      resolution = (await openTextPrompt("Your answer", { placeholder: "What should the agent do?" }))?.trim()
       if (!resolution) return
     }
     await run("Resolve approval", async () => { await invoke(context, "approval.resolve", { id: approval.id, approve: value === "approve", resolution }) })
@@ -885,31 +903,32 @@ export function EnsembleV2App() {
     openAgent(list[(index + delta + list.length) % list.length])
   }
   const searchWorkspaces = async () => {
-    const query = await modalWrap(() => context.ui.dialog.prompt({ title: "Search workspaces", value: workspaceFilter(), placeholder: "name or directory" }))
-    if (query !== undefined) { setWorkspaceFilter(query.trim()); setRailCursor(0) }
+    // Workspace search stays inside Ensemble surfaces: the workspace picker
+    // filters inline and opens the chosen workspace.
+    await pickWorkspace()
   }
 
   const archiveWorkspace = async () => {
     const workspace = activeWorkspace(); if (!workspace) return
-    if (!(await modalWrap(() => context.ui.dialog.confirm({ title: `Archive #${workspace.name}?`, message: "History is preserved." })))) return
+    if (!(await openConfirm(`Archive #${workspace.name}?`, "History is preserved."))) return
     await run("Archive workspace", async () => { await invoke(context, "workspace.archive", { id: workspace.id }); setSurface(null); setWorkspaceID(null) })
   }
   const deleteWorkspace = async () => {
     const workspace = activeWorkspace(); if (!workspace) return
-    if (!(await modalWrap(() => context.ui.dialog.confirm({ title: `Delete #${workspace.name}?`, message: "Removes workspace data." })))) return
-    const deleteNativeSessions = await modalWrap(() => context.ui.dialog.confirm({ title: "Delete native sessions too?", message: "No preserves them for inspection." }))
+    if (!(await openConfirm(`Delete #${workspace.name}?`, "Removes workspace data."))) return
+    const deleteNativeSessions = await openConfirm("Delete native sessions too?", "No preserves them for inspection.")
     await run("Delete workspace", async () => { await invoke(context, "workspace.delete", { id: workspace.id, deleteNativeSessions: Boolean(deleteNativeSessions) }); setSurface(null); setWorkspaceID(null) })
   }
   const archiveSelectedAgent = async () => {
     const agent = selectedAgent(); if (!agent) return
     const workspace = activeWorkspace()
-    if (!(await modalWrap(() => context.ui.dialog.confirm({ title: `Archive ${agent.name}?`, message: "History is preserved." })))) return
+    if (!(await openConfirm(`Archive ${agent.name}?`, "History is preserved."))) return
     await run("Archive agent", async () => { await invoke(context, "agent.archive", { id: agent.id }); setSurface(null) })
   }
   const deleteSelectedAgent = async () => {
     const agent = selectedAgent(); if (!agent) return
-    if (!(await modalWrap(() => context.ui.dialog.confirm({ title: `Delete ${agent.name}?`, message: "Removes the agent profile and memory." })))) return
-    const deleteNativeSessions = await modalWrap(() => context.ui.dialog.confirm({ title: "Delete native sessions too?", message: "No preserves them for inspection." }))
+    if (!(await openConfirm(`Delete ${agent.name}?`, "Removes the agent profile and memory."))) return
+    const deleteNativeSessions = await openConfirm("Delete native sessions too?", "No preserves them for inspection.")
     await run("Delete agent", async () => { await invoke(context, "agent.delete", { id: agent.id, deleteNativeSessions: Boolean(deleteNativeSessions) }); setSurface(null) })
   }
 
@@ -923,6 +942,34 @@ export function EnsembleV2App() {
     else if (settingsTab() === "models") setBackupCursor((cursor) => Math.max(0, Math.min(Math.max(0, (draft()?.backupModels.length ?? 1) - 1), cursor + delta)))
     else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredSkills().length - 1), cursor + delta)))
   }
+
+  const motionOn = () => motionShouldRun({ busy: isBusy(), live: liveLine() !== undefined, composerActive: composerActive() })
+  const leaderMark = () => leaderGlyph(motionOn(), motionFrame())
+
+  // Idle-quiescent frame clock: 4 fps only while motion is active (busy,
+  // live streaming, or composing); otherwise the still frame (tick 0).
+  // The interval is created and cleared with the effect, so no animation
+  // loop is left running after finalize, unmount, or route-leave.
+  createEffect(() => {
+    if (!isOurRoute() || !motionOn()) { setMotionFrame(0); return }
+    const timer = setInterval(() => setMotionFrame((frame) => (frame + 1) % 120), 250)
+    onCleanup(() => clearInterval(timer))
+  })
+
+  // Gentle new-message reveal: the newest finalized line renders highlighted
+  // (color only, so the text — and the live assertions — never change) and
+  // settles to the normal row after 1.5 s with no layout shift.
+  createEffect(() => {
+    const lines = finalizedLines()
+    const last = lines[lines.length - 1]
+    if (last && last.id !== lastRevealedID) {
+      lastRevealedID = last.id
+      setRecentID(last.id)
+      if (revealTimer) clearTimeout(revealTimer)
+      revealTimer = setTimeout(() => { setRecentID((current) => current === last.id ? null : current) }, 1500)
+    }
+  })
+  onCleanup(() => { if (revealTimer) clearTimeout(revealTimer) })
 
   createEffect(() => {
     if (!restored()) return
@@ -959,6 +1006,9 @@ export function EnsembleV2App() {
         }
         return
       }
+      if (confirm()) { handleConfirmKey(event); return }
+      if (result()) { handleResultKey(event); return }
+      if (skillFilterEditing()) { handleSkillFilterKey(event); return }
       if (!leaderMode()) return
       const name = String(event?.name ?? ""); const sequence = String(event?.sequence ?? "")
       if (name === "escape" || name === "q" || name === "?" || sequence === "?") return
@@ -979,7 +1029,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 100,
-      enabled: () => isOurRoute() && !isModal() && !leaderMode() && !composerActive() && wizard() === null,
+      enabled: () => isOurRoute() && !isModal() && !leaderMode() && !composerActive() && wizard() === null && !skillFilterEditing(),
       commands: [
         { id: "ensemble.v2.leader", title: "Ensemble: Leader key", bind: "~", run: () => setLeaderMode(true) },
         { id: "ensemble.v2.left", title: "Ensemble: Column left", bind: "h", run: () => focusLeft() },
@@ -1051,7 +1101,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode() && wizard() === null,
+      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode() && wizard() === null && !skillFilterEditing(),
       commands: [
         { id: "ensemble.v2.tab", title: "Ensemble: Settings tab", bind: "tab", run: () => { const tabs: SettingsTab[] = ["general", "models", "memories", "skillbox"]; setSettingsTab(tabs[(tabs.indexOf(settingsTab()) + 1) % tabs.length]) } },
         { id: "ensemble.v2.edit", title: "Ensemble: Edit", bind: "e", run: () => void editField().catch(showError) },
@@ -1061,7 +1111,7 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.backup.remove", title: "Ensemble: Remove backup", bind: "backspace", enabled: () => settingsTab() === "models", run: () => removeBackup() },
         { id: "ensemble.v2.save", title: "Ensemble: Save", bind: "ctrl+s", run: () => void saveSettings().catch(showError) },
         { id: "ensemble.v2.skill", title: "Ensemble: Toggle skill", bind: "space", enabled: () => settingsTab() === "skillbox", run: () => toggleSkill() },
-        { id: "ensemble.v2.filter", title: "Ensemble: Filter skills", bind: "ctrl+f", enabled: () => settingsTab() === "skillbox", run: async () => { const query = await modalWrap(() => context.ui.dialog.prompt({ title: "Filter skills", value: skillFilter() })); if (query !== undefined) { setSkillFilter(query); setSkillCursor(0) } } },
+        { id: "ensemble.v2.filter", title: "Ensemble: Filter skills", bind: "ctrl+f", enabled: () => settingsTab() === "skillbox", run: () => { setSkillFilterEditing(true); setSkillCursor(0) } },
         { id: "ensemble.v2.memory.delete", title: "Ensemble: Delete memory", bind: "ctrl+d", enabled: () => settingsTab() === "memories", run: () => void deleteMemory().catch(showError) },
         { id: "ensemble.v2.memory.promote", title: "Ensemble: Promote memory", bind: "ctrl+p", enabled: () => settingsTab() === "memories", run: () => void promoteMemory().catch(showError) },
         { id: "ensemble.v2.settings.up", title: "Ensemble: Up", bind: "up", run: () => moveSettingsCursor(-1) },
@@ -1113,6 +1163,8 @@ export function EnsembleV2App() {
   }
 
   const openPicker = (mode: PickerState["mode"], options: { selected?: string[]; candidates?: string[] } = {}): Promise<string[] | undefined> => new Promise((resolve) => {
+    // Overlays never steal Enter/focus while a wizard owns the keyboard.
+    if (wizard()) { resolve(undefined); return }
     const candidates = mode === "workspace"
       ? workspaces().map((workspace) => ({ id: workspace.id, label: `#${workspace.name} · ${workspaceLabel(workspace.directory)}` }))
       : mode === "leader"
@@ -1152,7 +1204,7 @@ export function EnsembleV2App() {
         if (state.selected.size === 0) { context.ui.toast.show({ title: "Ensemble", message: "Choose at least one member.", variant: "warning" }); return }
         finishPicker([...state.selected])
       } else {
-        const item = pickerItems()[state.cursor]
+        const item = singleChoiceValue(pickerItems(), state.cursor)
         if (item) finishPicker([item.id])
       }
       return
@@ -1171,6 +1223,7 @@ export function EnsembleV2App() {
   }
 
   const openTextPrompt = (title: string, options: { description?: string; value?: string; placeholder?: string } = {}): Promise<string | undefined> => new Promise((resolve) => {
+    if (wizard()) { resolve(undefined); return }
     setModal(true)
     setTextPrompt({
       title,
@@ -1180,6 +1233,98 @@ export function EnsembleV2App() {
       resolve,
     })
   })
+
+  const openChoice = (title: string, options: Array<{ title: string; value: string }>, current?: string): Promise<string | undefined> => new Promise((resolve) => {
+    if (wizard()) { resolve(undefined); return }
+    const previous = leaderMode()
+    setLeaderMode(false)
+    setModal(true)
+    setCompletion(null)
+    setPicker({
+      mode: "choice",
+      title,
+      candidates: options.map((option) => ({ id: option.value, label: option.title })),
+      selected: new Set(current !== undefined ? [current] : []),
+      cursor: Math.max(0, options.findIndex((option) => option.value === current)),
+      query: "",
+      resolve: (value) => { setLeaderMode(previous); resolve(value?.[0]) },
+    })
+  })
+
+  const openConfirm = (title: string, message: string): Promise<boolean | undefined> => new Promise((resolve) => {
+    if (wizard()) { resolve(undefined); return }
+    const previous = leaderMode()
+    setLeaderMode(false)
+    setModal(true)
+    setCompletion(null)
+    setComposerActive(false)
+    try { composerRef?.blur?.() } catch {}
+    setConfirm({
+      title,
+      message,
+      resolve: (value) => { setConfirm(null); setModal(false); setLeaderMode(previous); resolve(value) },
+    })
+  })
+
+  const finishConfirm = (value: boolean | undefined) => {
+    const state = confirm()
+    if (!state) return
+    state.resolve(value)
+  }
+
+  const handleConfirmKey = (event: any) => {
+    const action = confirmKeyAction(String(event?.name ?? ""), String(event?.sequence ?? ""))
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    if (!action) return
+    finishConfirm(action === "confirm")
+  }
+
+  const openResultModal = (title: string, text: string): Promise<void> => new Promise((resolve) => {
+    if (wizard()) { resolve(); return }
+    const previous = leaderMode()
+    setLeaderMode(false)
+    setModal(true)
+    setCompletion(null)
+    setComposerActive(false)
+    try { composerRef?.blur?.() } catch {}
+    setResult({
+      title,
+      text,
+      resolve: () => { setResult(null); setModal(false); setLeaderMode(previous); resolve() },
+    })
+  })
+
+  const finishResultModal = () => {
+    const state = result()
+    if (!state) return
+    state.resolve()
+  }
+
+  const handleResultKey = (event: any) => {
+    const action = resultKeyAction(String(event?.name ?? ""))
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    if (!action) return
+    if (action === "dismiss") { finishResultModal(); return }
+    const delta = action === "up" ? -3 : action === "down" ? 3 : action === "pageUp" ? -messageHeight() : messageHeight()
+    try { resultScrollRef?.scrollBy?.(delta) } catch {}
+  }
+
+  const handleSkillFilterKey = (event: any) => {
+    const next = skillFilterEdit(skillFilter(), {
+      name: String(event?.name ?? ""),
+      sequence: String(event?.sequence ?? ""),
+      ctrl: Boolean(event?.ctrl),
+      meta: Boolean(event?.meta),
+      super: Boolean(event?.super),
+    })
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    setSkillFilter(next.query)
+    setSkillCursor(0)
+    if (next.done) setSkillFilterEditing(false)
+  }
 
   const directoryChoices = (): WizardOption[] => {
     const current = directoryOf(context)
@@ -1564,7 +1709,7 @@ export function EnsembleV2App() {
 
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor={colors.bg} padding={1} gap={1}>
-      <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={picker() || textPrompt() || wizard() ? 0.35 : 1}>
+      <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={overlayOpen() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
           <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · ? help · q leave · esc cancel" : `${status()}`}</text>
@@ -1580,8 +1725,8 @@ export function EnsembleV2App() {
           </box>
         </Show>
       </box>
-        <box flexDirection="row" flexGrow={1} gap={1} opacity={picker() || textPrompt() || wizard() ? 0.35 : 1}>
-          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
+        <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
+          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} leaderGlyph={leaderMark()} />
           <box flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={focusArea() === "chat" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <text fg={focusArea() === "chat" ? colors.focus : colors.muted} bg={colors.bg} width="100%" flexShrink={0} truncate>{surfaceTitle()}</text>
             <Show when={settingsAgentID()} fallback={
@@ -1591,6 +1736,7 @@ export function EnsembleV2App() {
                     <box flexDirection="column" padding={1} flexGrow={1}>
                       <text fg={colors.accent} bg={colors.bg} width="100%" truncate>No currently opened session</text>
                       <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">Select an agent for a direct chat or a workspace for the group chat. Use j/k then Enter.</text>
+                      <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{EMPTY_MARK}</text>
                     </box>
                   }>
                     <>
@@ -1598,6 +1744,7 @@ export function EnsembleV2App() {
                         <box flexDirection="column" padding={1} flexGrow={1}>
                           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{surface()?.kind === "agent" ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}` : "Group chat"}</text>
                           <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? "Send a direct message. It goes to this agent's native OpenCode session." : "Say something to your team. $Name mentions an agent; @path references a file."}</text>
+                          <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{EMPTY_MARK}</text>
                         </box>
                       }>
                         <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
@@ -1605,7 +1752,7 @@ export function EnsembleV2App() {
                               <box flexDirection="column" width="100%" paddingRight={1}>
                                 <For each={finalizedLines()}>{(message) => (
                                   <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                    <text fg={chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{message.author}{message.queued ? " · queued" : ""}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.interrupted ? " · interrupted" : ""}</text>
+                                    <text fg={recentID() === message.id ? colors.good : chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{message.author}{message.queued ? " · queued" : ""}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.interrupted ? " · interrupted" : ""}</text>
                                     <Show when={message.role === "agent" && syntaxStyle} fallback={
                                       <text fg={message.role === "system" ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                     }>
@@ -1617,7 +1764,7 @@ export function EnsembleV2App() {
                           </scrollbox>
                           <Show when={liveLine()}>
                             <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} flexDirection="column">
-                              <text fg={chatAuthorColor(liveLine()!)} bg={colors.panel} width="100%" truncate>{liveLine()!.author} · streaming…</text>
+                              <text fg={chatAuthorColor(liveLine()!)} bg={colors.panel} width="100%" truncate>{liveLine()!.author} · streaming… {streamingFrame(motionFrame())}</text>
                               <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{liveLines().join("\n") || "…"}</text>
                             </box>
                           </Show>
@@ -1651,7 +1798,7 @@ export function EnsembleV2App() {
                       <box flexShrink={0} border borderStyle="single" borderColor={composerActive() ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? "COMPOSER · enter send · esc cancel" : "i compose · $ agent · @ file · / command"}</text>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? `COMPOSER${composerCaret(composerActive(), motionFrame())} · enter send · esc cancel` : "i compose · $ agent · @ file · / command"}</text>
                     </>
                   </Show>
                 }>
@@ -1661,7 +1808,7 @@ export function EnsembleV2App() {
                 <HelpView colors={colors} scrollRef={(value: any) => { helpScrollRef = value }} />
               </Show>
             }>
-              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={agentMemories()} memoryCursor={memoryCursor()} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} skillCatalog={skills()} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={agentMemories()} memoryCursor={memoryCursor()} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} filterEditing={skillFilterEditing()} skillCatalog={skills()} />
             </Show>
           </box>
           <TaskBoard colors={colors} tasks={orderedTasks()} state={state()} cursor={taskCursor()} activeCount={activeCount()} focus={focusArea() === "tasks"} width={taskWidth()} />
@@ -1685,6 +1832,30 @@ export function EnsembleV2App() {
               <textarea ref={(value: any) => { textPromptRef = value; queueMicrotask(() => value?.focus?.()) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
             </box>
             <text fg={colors.faint} bg={colors.panel} width="100%" truncate>enter submit · shift+enter newline · esc cancel</text>
+            </box>
+          </box>
+        </>
+      </Show>
+      <Show when={confirm()} keyed>
+        <>
+          <box position="absolute" top={confirmGeometry().top} left={confirmGeometry().left} width={confirmGeometry().width} zIndex={100} height={10} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+            <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
+            <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{confirm()!.title}</text>
+            <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{confirm()!.message}</text>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>enter yes · esc no</text>
+            </box>
+          </box>
+        </>
+      </Show>
+      <Show when={result()} keyed>
+        <>
+          <box position="absolute" top={resultGeometry().top} left={resultGeometry().left} width={resultGeometry().width} zIndex={100} height={18} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+            <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
+            <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{result()!.title}</text>
+            <scrollbox ref={(value: any) => { resultScrollRef = value }} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
+              <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{result()!.text || " "}</text>
+            </scrollbox>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>↑/↓ scroll · pgup/pgdn · enter/esc dismiss</text>
             </box>
           </box>
         </>
@@ -1728,7 +1899,7 @@ export function EnsembleV2App() {
           </box>
         </box>
       </Show>
-      <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={picker() || textPrompt() || wizard() ? 0.35 : 1}>
+      <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
         <text fg={colors.muted} bg={colors.bg} width="100%" truncate>h/l columns · j/k select · enter open · i compose · a agent · n workspace · g members · I init · v approvals</text>
         <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : "~ leader · / search · p pause · s settings · o native"}</text>
       </box>
