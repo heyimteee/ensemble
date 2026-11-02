@@ -5,13 +5,32 @@ import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./form
 import { capLineText, capSkills, settingsTabLine, skillAssigned, skillRowLabel, skillToggleMark } from "./skills.ts"
 import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
 import {
+  backupRowLabel,
+  generalFieldRows,
+  memoriesEmptyLine,
+  memoriesNoMatchLine,
+  modelSummary,
+  modelsEmptyLine,
+  railAgentLabel,
+  railGroupLine,
+  settingsCursorMark,
+  settingsDivider,
+  settingsFieldRow,
+  settingsHeader,
+  settingsNoAgentLine,
+  settingsSaveFooter,
+  settingsSectionHeader,
+  settingsTabFooter,
+  skillboxEmptyLine,
+  skillsUnavailableLine,
+} from "./settings.ts"
+import {
   approvalResolvingSuffix,
   approvalsEmptyLine,
   helpEmptyLine,
   pickerEmptyLine,
   pickerFooter,
   railEmptyLine,
-  skillsEmptyLine,
 } from "./chrome.ts"
 import { platformLabel } from "./platform.ts"
 import { helpGroups, helpKeyLabel, shortcutGroups } from "./help.ts"
@@ -24,6 +43,8 @@ export type RailItem = {
   id: string
   title: string
   detail?: string
+  /** Agent-list description: the agent's title, rendered after the name. */
+  description?: string
   group?: string
 }
 
@@ -57,7 +78,11 @@ export function Rail(props: {
     <box width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
       <For each={props.items}>{(item, index) => {
         const previous = index() > 0 ? props.items[index() - 1] : undefined
-        const kindHeader = item.kind !== previous?.kind ? item.kind.toUpperCase() + "S" : ""
+        const kindHeader = item.kind !== previous?.kind
+          ? railGroupLine(item.kind, props.items.filter((entry) => entry.kind === item.kind).length)
+          : ""
+        const agentCount = props.items.filter((entry) => entry.kind === "agent").length
+        const workspaceCount = props.items.length - agentCount
         const groupHeader = item.group && item.group !== previous?.group ? item.group : ""
         const selected = props.cursor === index()
         // Slice E single-cursor rule: the `›` position marker renders only on
@@ -69,7 +94,7 @@ export function Rail(props: {
         const busy = workspace ? busyCount(props.state, workspace.id) : 0
         return (
           <>
-            <Show when={kindHeader === "WORKSPACES"}>
+            <Show when={kindHeader === railGroupLine("workspace", workspaceCount)}>
               <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>────────</text>
             </Show>
             <Show when={kindHeader}>
@@ -79,7 +104,7 @@ export function Rail(props: {
               <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
             </Show>
             <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>
-              {selected && props.cursorVisible ? "› " : "  "}{item.kind === "workspace" ? `#${item.title}` : item.title}
+              {settingsCursorMark(selected && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : railAgentLabel(item.title, item.description ?? "")}
               {leader ? " · leader" : ""}
               {item.detail ? ` · ${item.detail}` : ""}
               {workspace?.paused ? " ⏸" : ""}
@@ -165,45 +190,57 @@ export function SettingsView(props: {
 }) {
   const missing = () => props.agent ? missingSkills(props.agent, props.skillCatalog) : []
   const capped = () => capSkills(props.skills)
+  // Slice G section counts: the header names the section, the body carries
+  // the rows. Backup depth comes from the draft; the rest is already props.
+  const sectionCounts = () => ({
+    memories: props.memoryTotal,
+    backups: props.agent?.backupModels.length ?? 0,
+    assigned: props.agent?.skillbox.length ?? 0,
+    catalog: props.skillCatalog.length,
+  })
   return (
-    <Show when={props.agent} fallback={<text fg={props.colors.muted}>Select an agent and press s.</text>}>
+    <Show when={props.agent} fallback={<text fg={props.colors.muted}>{settingsNoAgentLine()}</text>}>
       <box flexDirection="column">
-        <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>{props.agent!.name} · settings {props.dirty ? "· UNSAVED" : ""}{props.agent!.pendingSettings ? " · pending next task" : ""}</text>
+        <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>{settingsHeader(props.agent!.name, props.dirty, props.agent!.pendingSettings)}</text>
         <text fg={props.colors.muted}>{settingsTabLine(props.tab, props.memoryTotal, props.agent!.skillbox.length, props.skillCatalog.length)}</text>
+        <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{settingsDivider()}</text>
+        <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsSectionHeader(props.tab, sectionCounts())}</text>
+        <box border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" paddingLeft={1} paddingRight={1}>
         <Show when={props.tab === "general"}>
-          <text>Name: {props.agent!.name}</text>
-          <text>Title: {props.agent!.title}</text>
-          <text>Role: {short(props.agent!.role || "(empty)", 100)}</text>
-          <text fg={props.colors.muted}>{platformLabel("e edits a field · Ctrl+S saves")}</text>
+          <For each={generalFieldRows(props.agent!, props.agent!.mainModel)}>{([label, value]) => (
+            <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsFieldRow(label, value)}</text>
+          )}</For>
         </Show>
         <Show when={props.tab === "models"}>
-          <text>Main: {props.agent!.mainModel.providerID}/{props.agent!.mainModel.modelID}{props.agent!.mainModel.variant ? `#${props.agent!.mainModel.variant}` : ""}</text>
-          <For each={props.agent!.backupModels}>{(model, index) => <text fg={props.backupCursor === index() ? props.colors.good : props.colors.muted}>{props.backupCursor === index() ? "› " : "  "}Backup {index() + 1}: {model.providerID}/{model.modelID}</text>}</For>
-          <text fg={props.colors.muted}>{platformLabel("e main · b add · Ctrl+↑/↓ move · Backspace remove")}</text>
+          <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(false)}(•) {settingsFieldRow("Main", modelSummary(props.agent!.mainModel))}</text>
+          <For each={props.agent!.backupModels}>{(model, index) => <text fg={props.backupCursor === index() ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.backupCursor === index())}( ) {settingsFieldRow(backupRowLabel(index(), model), modelSummary(model))}</text>}</For>
+          <Show when={props.agent!.backupModels.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{modelsEmptyLine()}</text></Show>
         </Show>
         <Show when={props.tab === "memories"}>
           <text fg={props.colors.muted}>Filter: {props.memoryFilter || "(none)"} · {platformLabel("/ filter · Ctrl+F")}{props.memoryFilterEditing ? " · typing… enter done · esc cancel" : ""}</text>
           <For each={props.memories}>{(memory, index) => (
             <box flexDirection="column">
-              <text fg={props.memoryCursor === index() ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" wrapMode="word">{props.memoryCursor === index() ? "› " : "  "}{memory.text}</text>
+              <text fg={props.memoryCursor === index() ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" wrapMode="word">{settingsCursorMark(props.memoryCursor === index())}{memory.text}</text>
               <text fg={memoryNeedsReview(memory) ? props.colors.warn : props.colors.muted} bg={props.colors.bg} width="100%" truncate>    {memoryProvenanceLine(memory)}{memoryNeedsReview(memory) ? " ◆" : ""}</text>
             </box>
           )}</For>
-          <Show when={props.memoryTotal === 0}><text fg={props.colors.muted}>No memories yet. e adds one.</text></Show>
-          <Show when={props.memoryTotal > 0 && props.memories.length === 0}><text fg={props.colors.muted}>No matching memories — refine filter.</text></Show>
-          <text fg={props.colors.muted}>{platformLabel("e edit · n new · Ctrl+D delete · Ctrl+P promote · / filter")}</text>
+          <Show when={props.memoryTotal === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{memoriesEmptyLine()}</text></Show>
+          <Show when={props.memoryTotal > 0 && props.memories.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{memoriesNoMatchLine()}</text></Show>
         </Show>
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
           <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}{props.filterEditing ? " · typing… enter done · esc cancel" : ""}</text>
-          <Show when={props.skills.length === 0}><text fg={props.colors.muted}>{skillsEmptyLine()}</text></Show>
+          <Show when={props.skillCatalog.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillsUnavailableLine()}</text></Show>
+<Show when={props.skillCatalog.length > 0 && props.skills.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillboxEmptyLine()}</text></Show>
           <For each={capped().visible}>{(skill, index) => (
-            <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{props.skillCursor === index() ? "› " : "  "}{skillToggleMark(skillAssigned(props.agent!.skillbox, skill.id))} {skillRowLabel(skill)}</text>
+            <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{settingsCursorMark(props.skillCursor === index())}{skillToggleMark(skillAssigned(props.agent!.skillbox, skill.id))} {skillRowLabel(skill)}</text>
           )}</For>
           <Show when={capped().overflow > 0}><text fg={props.colors.faint}>{capLineText(capped().overflow)}</text></Show>
-          <text fg={props.colors.muted}>Space toggles · empty means no optional skills</text>
         </Show>
-        <text fg={props.colors.muted}>{platformLabel("Ctrl+S save · Esc cancel")}</text>
+        </box>
+        <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{settingsDivider()}</text>
+        <text fg={props.colors.muted}>{platformLabel(settingsTabFooter(props.tab))}</text>
+        <text fg={props.colors.muted}>{platformLabel(settingsSaveFooter())}</text>
       </box>
     </Show>
   )
