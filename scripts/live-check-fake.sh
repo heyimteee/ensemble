@@ -548,6 +548,58 @@ else
   live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
 fi
 
+# Slice G (ticket #69) settings stylization: one designed language across all
+# four tabs — section header, aligned label/value columns, descriptions and
+# counts, selection marker, action footer — plus the agent list and the
+# model picker. Earlier blocks prove save/dirty and approval flows; this
+# block proves the styled grammar with no behavior change.
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings header names the agent"
+live_assert_text "$LIVE_TUI_SESSION" "AGENTS (1)" "agent list names its count"
+live_assert_text "$LIVE_TUI_SESSION" "WORKSPACES (1)" "workspace list names its count"
+live_assert_text "$LIVE_TUI_SESSION" "FakeAgent — Engineering" "agent list names the title description"
+live_assert_text "$LIVE_TUI_SESSION" "Identity — name" "general section header"
+live_assert_text "$LIVE_TUI_SESSION" "Name       FakeAgent" "general label/value alignment"
+live_assert_text "$LIVE_TUI_SESSION" "Title      Engineering" "title row aligns with name row"
+live_assert_text "$LIVE_TUI_SESSION" "Model      ensemble-fake/ensemble-fake-model" "general model summary"
+live_assert_text "$LIVE_TUI_SESSION" "› General" "settings tab cursor"
+live_assert_text "$LIVE_TUI_SESSION" "e edits a field" "general action footer"
+live_assert_text "$LIVE_TUI_SESSION" "Ctrl+S save · Esc cancel" "shared save footer"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "Main + backups — main + 0 backups" 10 "models section header with counts"
+live_assert_text "$LIVE_TUI_SESSION" "(•)" "main slot fill mark"
+live_assert_text "$LIVE_TUI_SESSION" "Main       ensemble-fake/ensemble-fake-model" "main row aligns and names provider/model"
+live_assert_text "$LIVE_TUI_SESSION" "No backups yet. b adds one." "models empty state names the fix"
+live_assert_text "$LIVE_TUI_SESSION" "b add" "models action footer names add"
+# Model picker from the models tab: provider grouping, variant info, search
+# with a match count, and the current-selection fill mark. (The picker
+# overlay renders word gaps as non-breaking spaces, hence NBSP.)
+live_key "$LIVE_TUI_SESSION" "e"
+live_require_text "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "model picker names variant depth"
+live_assert_text "$LIVE_TUI_SESSION" "Ensemble${NBSP}Fake${NBSP}Model${NBSP}—${NBSP}ensemble-fake/ensemble-fake-model" "model picker groups provider/model"
+live_assert_text "$LIVE_TUI_SESSION" "1${NBSP}matches" "model picker names its search count"
+live_assert_text "$LIVE_TUI_SESSION" "(•)${NBSP}Ensemble" "model picker marks the current selection"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "model picker closed"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings kept with no dirty draft"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "Saved knowledge — Memories (1)" 10 "memories section header with count"
+live_assert_text "$LIVE_TUI_SESSION" "› v2fake-live-memory" "memories selection marker on the row"
+live_assert_text "$LIVE_TUI_SESSION" "manual · project · reviewed" "memories provenance line kept"
+live_assert_text "$LIVE_TUI_SESSION" "Ctrl+D delete" "memories action footer"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "› Skillbox" 10 "skillbox tab active with cursor"
+live_assert_text "$LIVE_TUI_SESSION" "Optional skills — Skillbox (" "skillbox section header with counts"
+live_assert_text "$LIVE_TUI_SESSION" "Space toggles" "skillbox action footer"
+if live_capture_contains "$LIVE_TUI_SESSION" "[ ]"; then
+  live_assert_text "$LIVE_TUI_SESSION" "[ ]" "skillbox fill-not-tick rows kept"
+else
+  live_assert_text "$LIVE_TUI_SESSION" "No skills available from the host." "skillbox unavailable state names the catalog miss"
+fi
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed with bindings intact"
+live_log "slice G settings stylization verified across all four tabs"
+
 live_check_help
 
 live_key "$LIVE_TUI_SESSION" '~'

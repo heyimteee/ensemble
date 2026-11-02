@@ -27,6 +27,7 @@ import {
   resultFooter,
 } from "./chrome.ts"
 import { SKILL_VISIBLE_LIMIT } from "./skills.ts"
+import { modelPickerLabel, sortModelsByProvider } from "./settings.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue, filterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
@@ -264,6 +265,8 @@ export function EnsembleV2App() {
       kind: "agent" as const,
       id: agent.id,
       title: agent.name,
+      // Slice G agent list: the roster row carries the title description.
+      description: agent.title,
       detail: activeWorkspace() && !activeWorkspace()!.memberIDs.includes(agent.id) ? "guest" : "",
     }))
     const workspaceItems: RailItem[] = workspaces().filter((workspace) => !query || workspace.name.toLowerCase().includes(query) || workspace.directory.toLowerCase().includes(query)).map((workspace) => ({
@@ -688,11 +691,13 @@ export function EnsembleV2App() {
     setTaskCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
   }
 
-  const chooseModel = async (current?: ModelOption): Promise<ModelOption | undefined> => {
+  const chooseModel = async (current?: Pick<ModelOption, "providerID" | "modelID">): Promise<ModelOption | undefined> => {
     if (models().length === 0) throw new Error("No models are available.")
+    // Slice G model picker: providers group, rows read `name — provider/model
+    // · N variants`, and the current selection keeps the (•) fill mark.
     const value = await openChoice(
       "Model",
-      models().map((model) => ({ title: `${model.name} · ${model.providerID}/${model.modelID}`, value: `${model.providerID}/${model.modelID}` })),
+      sortModelsByProvider(models()).map((model) => ({ title: modelPickerLabel(model), value: `${model.providerID}/${model.modelID}` })),
       current ? `${current.providerID}/${current.modelID}` : undefined,
     )
     return value ? models().find((model) => `${model.providerID}/${model.modelID}` === value) : undefined
@@ -1082,7 +1087,9 @@ export function EnsembleV2App() {
       const value = await openTextPrompt(field, { value: agent[field as "name" | "title" | "role" | "color"] })
       if (value !== undefined) { setDraft({ ...agent, [field]: value } as Agent); setDirty(true) }
     } else if (settingsTab() === "models") {
-      const model = await chooseModel(); if (!model) return
+      // Slice G selection clarity: the picker opens on the current main
+      // model, so the (•) fill mark names the active selection.
+      const model = await chooseModel(agent.mainModel); if (!model) return
       const variant = await chooseVariant(model)
       setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); setDirty(true)
     } else if (settingsTab() === "memories") {
