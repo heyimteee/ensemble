@@ -11,8 +11,8 @@ import { agentColor, fuzzyMatch, missingSkills, renderMarkdownLines, resultForTa
 import { palette } from "./theme.ts"
 import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
-import { navModifier, platformBind, platformLabel } from "./platform.ts"
-import { wizardFilterText } from "./wizard.ts"
+import { platformBind, platformLabel } from "./platform.ts"
+import { wizardFilterText, wizardModelEmptyHint, wizardModelOptions, wizardNavHint, overlayGeometry, sameWizardOptions, WIZARD_NAV_BINDINGS } from "./wizard.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 
@@ -299,15 +299,22 @@ export function EnsembleV2App() {
     const agent = draft() ?? selectedAgent()
     return agent ? missingSkills(agent, skills()) : []
   })
-  const viewWidth = () => Math.max(60, (context.renderer.width ?? 120) - 2)
+  const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
+  onMount(() => {
+    const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
+    ;(context.renderer as any).on?.("resize", update)
+    onCleanup(() => (context.renderer as any).off?.("resize", update))
+  })
+  const viewWidth = () => Math.max(60, renderSize().width - 2)
   const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
   const taskWidth = () => Math.max(28, Math.min(38, Math.floor(viewWidth() * 0.3)))
   const messageWidth = () => Math.max(20, viewWidth() - railWidth() - taskWidth() - 10)
-  const viewHeight = () => context.renderer.height ?? 40
+  const viewHeight = () => renderSize().height
   const messageHeight = () => Math.max(6, viewHeight() - 14)
   const pickerWidth = () => Math.max(48, Math.min(96, Math.floor(viewWidth() * 0.7)))
   const pickerTop = () => Math.max(1, Math.floor((viewHeight() - 16) / 2))
   const pickerLeft = () => Math.max(1, Math.floor((viewWidth() - pickerWidth()) / 2))
+  const wizardGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 20)
 
   const isOurRoute = () => {
     const route = context.ui.router.current()
@@ -1027,12 +1034,15 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
     }))
-    platformLayer(() => ({
+    // The wizard layer is deliberately NOT wrapped in platformLayer: Cmd chords
+    // are never delivered by stock macOS terminals, so its navigation uses raw
+    // Ctrl+letter binds that are true on every platform.
+    context.keymap.layer(() => ({
       mode: "global", priority: 160,
       enabled: () => isOurRoute() && wizard() !== null && !leaderMode(),
       commands: [
-        { id: "ensemble.v2.wizard.prev", title: "Ensemble: Previous wizard step", bind: "ctrl+left", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardPrev() } },
-        { id: "ensemble.v2.wizard.next", title: "Ensemble: Next wizard step", bind: "ctrl+right", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardNext() } },
+        { id: "ensemble.v2.wizard.prev", title: "Ensemble: Previous wizard step", bind: WIZARD_NAV_BINDINGS.back, run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardPrev() } },
+        { id: "ensemble.v2.wizard.next", title: "Ensemble: Next wizard step", bind: WIZARD_NAV_BINDINGS.next, run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardNext() } },
         { id: "ensemble.v2.wizard.cancel", title: "Ensemble: Cancel wizard", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardCancel() } },
       ],
       bindings: ["ensemble.v2.wizard.prev", "ensemble.v2.wizard.next", "ensemble.v2.wizard.cancel"],
@@ -1226,6 +1236,23 @@ export function EnsembleV2App() {
     next.cursor = Math.max(0, Math.min(next.cursor, Math.max(0, length - 1)))
     return next
   }
+
+  // The model catalog can be cold or refresh late; keep the open wizard's model
+  // options in step with the latest snapshot instead of freezing them at open.
+  createEffect(() => {
+    const options = wizardModelOptions(models())
+    const state = wizard()
+    if (!state || state.flow !== "agent") return
+    const step = state.steps.find((item) => item.key === "model")
+    if (!step || sameWizardOptions(step.options ?? [], options)) return
+    const draft = { ...state.draft }
+    if (!draft.modelKey && options[0]) {
+      draft.modelKey = options[0].id
+      const model = models().find((item) => `${item.providerID}/${item.modelID}` === options[0].id)
+      draft.variant = model?.variants[0] ?? "none"
+    }
+    setWizard(rebuildWizard({ ...state, draft, modelOptions: options }))
+  })
 
   const patchWizard = (mutate: (state: WizardState) => WizardState): WizardState | undefined => {
     const current = wizard()
@@ -1484,7 +1511,7 @@ export function EnsembleV2App() {
       query: "",
       cursor: 0,
       directoryOptions: flow === "workspace" ? directoryChoices() : [],
-      modelOptions: models().map((item) => ({ id: `${item.providerID}/${item.modelID}`, label: `${item.name} · ${item.providerID}/${item.modelID}` })),
+      modelOptions: wizardModelOptions(models()),
       resolve,
       edit,
     }
@@ -1640,26 +1667,30 @@ export function EnsembleV2App() {
         </>
       </Show>
       <Show when={wizard()}>
-        <box position="absolute" top={Math.max(1, Math.floor((viewHeight() - 20) / 2))} left={pickerLeft()} width={pickerWidth()} height={20} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+        <box position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={20} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
           <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{wizard()!.title} · step {wizard()!.index + 1} / {wizard()!.steps.length}</text>
           <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
           <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
           <Show when={wizardStep()?.kind === "text"} fallback={
             <box flexDirection="column" height={9}>
               <text fg={colors.faint} bg={colors.panel} width="100%" truncate>search: {wizard()!.query || "type to filter"} · {wizardItems().length} options</text>
-              <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
-                <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
-                  const state = wizard()
-                  const step = wizardStep()
-                  const items = wizardItems()
-                  if (!state || !step) return ""
-                  const offset = pickerWindow(wizardCursor(), items.length, 8).start
-                  const item = items[offset + slot]
-                  if (!item) return ""
-                  const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
-                  return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.label}${item.detail ? ` · ${item.detail}` : ""}`
-                })()}</text>
-              )}</For>
+              <Show when={wizardItems().length === 0 && wizardStep()?.key === "model"} fallback={
+                <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
+                  <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
+                    const state = wizard()
+                    const step = wizardStep()
+                    const items = wizardItems()
+                    if (!state || !step) return ""
+                    const offset = pickerWindow(wizardCursor(), items.length, 8).start
+                    const item = items[offset + slot]
+                    if (!item) return ""
+                    const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
+                    return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.label}${item.detail ? ` · ${item.detail}` : ""}`
+                  })()}</text>
+                )}</For>
+              }>
+                <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
+              </Show>
             </box>
           }>
             <Show when={wizardStepKey()} keyed>
@@ -1669,7 +1700,9 @@ export function EnsembleV2App() {
             </Show>
           </Show>
           <Show when={wizard()?.error}><text fg={colors.bad} bg={colors.panel} width="100%" truncate>{wizard()!.error}</text></Show>
-          <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{`${navModifier()}+← back · ${navModifier()}+→ next · enter ${wizard() && wizardFinal(wizard()!) ? "submit" : "continue"} · esc cancel`}</text>
+          <box width="100%" flexDirection="row" justifyContent="center" flexShrink={0}>
+            <text fg={colors.faint} bg={colors.panel} truncate>{wizardNavHint(Boolean(wizard() && wizardFinal(wizard()!)))}</text>
+          </box>
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={picker() || textPrompt() || wizard() ? 0.35 : 1}>

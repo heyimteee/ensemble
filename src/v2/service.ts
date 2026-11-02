@@ -260,13 +260,15 @@ export class EnsembleV2Service {
     if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
-    return {
+    const payload: Snapshot = {
       state: jsonSafe(state),
       models: this.catalog.modelOptions,
       skills: this.catalog.skillOptions,
       directory,
-      configError: this.lastConfigError,
     }
+    if (this.lastConfigError) payload.configError = this.lastConfigError
+    if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
+    return payload
   }
 
   private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string }> {

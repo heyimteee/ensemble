@@ -234,6 +234,7 @@ export type Snapshot = {
   skills: SkillOption[]
   directory: string
   configError?: string
+  modelsError?: string
 }
 
 export type SnapshotState = Snapshot["state"]

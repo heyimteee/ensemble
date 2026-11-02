@@ -1727,3 +1727,40 @@ test("workspace member updates reject non-list values without changing membershi
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("snapshot explains an empty or failed model catalog without leaking credentials", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-models-error-"))
+  try {
+    const { ctx } = fakeContext()
+    ctx.model.list = async () => []
+    const emptyService = new EnsembleV2Service(ctx)
+    const emptyStop = await emptyService.start()
+    try {
+      const handlers = emptyService.handlers()
+      await waitFor(async () => Boolean((await handlers.snapshot({ directory })).modelsError))
+      const snapshot = await handlers.snapshot({ directory })
+      assert.deepEqual(snapshot.models, [])
+      assert.ok(snapshot.modelsError)
+      assert.match(snapshot.modelsError!, /no models/i)
+    } finally {
+      await emptyStop()
+    }
+
+    const failing = fakeContext()
+    failing.ctx.model.list = async () => { throw new Error("unauthorized password=hunter2") }
+    const failingService = new EnsembleV2Service(failing.ctx)
+    const failingStop = await failingService.start()
+    try {
+      const handlers = failingService.handlers()
+      await waitFor(async () => Boolean((await handlers.snapshot({ directory })).modelsError))
+      const snapshot = await handlers.snapshot({ directory })
+      assert.ok(snapshot.modelsError)
+      assert.match(snapshot.modelsError!, /model list failed/i)
+      assert.equal(snapshot.modelsError!.includes("hunter2"), false)
+    } finally {
+      await failingStop()
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
