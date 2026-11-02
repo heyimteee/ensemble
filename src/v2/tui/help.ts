@@ -1,4 +1,12 @@
 import { fuzzyMatch } from "./format.ts"
+import { isMacPlatform, platformLabel } from "./platform.ts"
+import { WIZARD_NAV_LABELS } from "./wizard.ts"
+
+/** Help keys that must not be rewritten to Cmd: the universal wizard pair. */
+export function helpKeyLabel(key: string, mac = isMacPlatform()): string {
+  if (key === WIZARD_NAV_LABELS.back || key === WIZARD_NAV_LABELS.next) return key
+  return platformLabel(key, mac)
+}
 
 export const shortcutGroups: Array<{ title: string; entries: Array<[string, string]> }> = [
   { title: "Leader", entries: [["~", "Leader key"], ["~ ?", "This searchable help"], ["~ q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },

@@ -20,9 +20,12 @@ export function wizardFilterText(event: WizardFilterKey | undefined): string | u
  */
 export const WIZARD_NAV_BINDINGS = { back: "ctrl+p", next: "ctrl+n" } as const
 
+/** Labels for the universal pair, identical on every platform. */
+export const WIZARD_NAV_LABELS = { back: "Ctrl+P", next: "Ctrl+N" } as const
+
 /** Footer labels for the universal pair; true on every platform. */
 export function wizardNavHint(final: boolean): string {
-  return `Ctrl+P back · Ctrl+N next · enter ${final ? "submit" : "continue"} · esc cancel`
+  return `${WIZARD_NAV_LABELS.next} next · ${WIZARD_NAV_LABELS.back} back · enter ${final ? "submit" : "continue"} · esc cancel`
 }
 
 export type WizardModelSource = {
@@ -42,6 +45,12 @@ export function wizardModelOptions(models: readonly WizardModelSource[]): Wizard
 
 export function sameWizardOptions(a: readonly WizardNavOption[], b: readonly WizardNavOption[]): boolean {
   return a.length === b.length && a.every((option, index) => option.id === b[index].id && option.label === b[index].label)
+}
+
+/** Keeps a still-valid model choice, otherwise falls back to the first option. */
+export function wizardModelKeyFor(currentKey: string, options: readonly WizardNavOption[]): string {
+  if (currentKey && options.some((option) => option.id === currentKey)) return currentKey
+  return options[0]?.id ?? ""
 }
 
 /** Explains an empty model step instead of showing a bare "0 options". */

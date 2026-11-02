@@ -1747,7 +1747,7 @@ test("snapshot explains an empty or failed model catalog without leaking credent
     }
 
     const failing = fakeContext()
-    failing.ctx.model.list = async () => { throw new Error("unauthorized password=hunter2") }
+    failing.ctx.model.list = async () => { throw new Error("unauthorized password=hunter2 Authorization: Bearer sk-live-ABC123456") }
     const failingService = new EnsembleV2Service(failing.ctx)
     const failingStop = await failingService.start()
     try {
@@ -1757,6 +1757,8 @@ test("snapshot explains an empty or failed model catalog without leaking credent
       assert.ok(snapshot.modelsError)
       assert.match(snapshot.modelsError!, /model list failed/i)
       assert.equal(snapshot.modelsError!.includes("hunter2"), false)
+      assert.equal(snapshot.modelsError!.includes("sk-live-ABC123456"), false)
+      assert.equal(snapshot.modelsError!.includes("Bearer sk-live"), false)
     } finally {
       await failingStop()
     }

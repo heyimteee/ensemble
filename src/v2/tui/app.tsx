@@ -12,7 +12,7 @@ import { palette } from "./theme.ts"
 import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
-import { wizardFilterText, wizardModelEmptyHint, wizardModelOptions, wizardNavHint, overlayGeometry, sameWizardOptions, WIZARD_NAV_BINDINGS } from "./wizard.ts"
+import { wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, overlayGeometry, sameWizardOptions, WIZARD_NAV_BINDINGS } from "./wizard.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 
@@ -302,8 +302,8 @@ export function EnsembleV2App() {
   const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
   onMount(() => {
     const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
-    ;(context.renderer as any).on?.("resize", update)
-    onCleanup(() => (context.renderer as any).off?.("resize", update))
+    context.renderer.on("resize", update)
+    onCleanup(() => context.renderer.off("resize", update))
   })
   const viewWidth = () => Math.max(60, renderSize().width - 2)
   const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
@@ -311,10 +311,10 @@ export function EnsembleV2App() {
   const messageWidth = () => Math.max(20, viewWidth() - railWidth() - taskWidth() - 10)
   const viewHeight = () => renderSize().height
   const messageHeight = () => Math.max(6, viewHeight() - 14)
-  const pickerWidth = () => Math.max(48, Math.min(96, Math.floor(viewWidth() * 0.7)))
-  const pickerTop = () => Math.max(1, Math.floor((viewHeight() - 16) / 2))
-  const pickerLeft = () => Math.max(1, Math.floor((viewWidth() - pickerWidth()) / 2))
-  const wizardGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 20)
+  const pickerGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 16)
+  const promptGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 14)
+  const wizardHeight = 20
+  const wizardGeometry = () => overlayGeometry(viewWidth(), viewHeight(), wizardHeight)
 
   const isOurRoute = () => {
     const route = context.ui.router.current()
@@ -1246,9 +1246,10 @@ export function EnsembleV2App() {
     const step = state.steps.find((item) => item.key === "model")
     if (!step || sameWizardOptions(step.options ?? [], options)) return
     const draft = { ...state.draft }
-    if (!draft.modelKey && options[0]) {
-      draft.modelKey = options[0].id
-      const model = models().find((item) => `${item.providerID}/${item.modelID}` === options[0].id)
+    const key = wizardModelKeyFor(draft.modelKey, options)
+    if (key !== draft.modelKey) {
+      draft.modelKey = key
+      const model = models().find((item) => `${item.providerID}/${item.modelID}` === key)
       draft.variant = model?.variants[0] ?? "none"
     }
     setWizard(rebuildWizard({ ...state, draft, modelOptions: options }))
@@ -1645,7 +1646,7 @@ export function EnsembleV2App() {
         </box>
       <Show when={picker()?.mode} keyed>
         <>
-          <box position="absolute" top={pickerTop()} left={pickerLeft()} width={pickerWidth()} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column">
+          <box position="absolute" top={pickerGeometry().top} left={pickerGeometry().left} width={pickerGeometry().width} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column">
             <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={110}>
               <PickerOverlay colors={colors} title={() => picker()!.title} query={() => picker()!.query} items={() => pickerItems()} cursor={() => picker()!.cursor} multiple={() => picker()!.mode === "members"} />
             </box>
@@ -1654,7 +1655,7 @@ export function EnsembleV2App() {
       </Show>
       <Show when={textPrompt()} keyed>
         <>
-          <box position="absolute" top={Math.max(1, Math.floor((viewHeight() - 14) / 2))} left={pickerLeft()} width={pickerWidth()} zIndex={100} height={14} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+          <box position="absolute" top={promptGeometry().top} left={promptGeometry().left} width={promptGeometry().width} zIndex={100} height={14} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{textPrompt()!.title}</text>
             <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{textPrompt()!.description}</text>
@@ -1667,14 +1668,14 @@ export function EnsembleV2App() {
         </>
       </Show>
       <Show when={wizard()}>
-        <box position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={20} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+        <box position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
           <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{wizard()!.title} · step {wizard()!.index + 1} / {wizard()!.steps.length}</text>
           <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
           <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
           <Show when={wizardStep()?.kind === "text"} fallback={
             <box flexDirection="column" height={9}>
               <text fg={colors.faint} bg={colors.panel} width="100%" truncate>search: {wizard()!.query || "type to filter"} · {wizardItems().length} options</text>
-              <Show when={wizardItems().length === 0 && wizardStep()?.key === "model"} fallback={
+              <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
                 <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
                   <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
                     const state = wizard()

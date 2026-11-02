@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { WIZARD_NAV_BINDINGS, overlayGeometry, sameWizardOptions, wizardFilterText, wizardModelEmptyHint, wizardModelOptions, wizardNavHint } from "./wizard.ts"
+import { WIZARD_NAV_BINDINGS, overlayGeometry, sameWizardOptions, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint } from "./wizard.ts"
 import { platformBind } from "./platform.ts"
 
 test("wizard filter appends printable characters without modifiers", () => {
@@ -22,8 +22,7 @@ test("wizard navigation uses one universal Ctrl pair with truthful labels", () =
   assert.equal(WIZARD_NAV_BINDINGS.back, "ctrl+p")
   assert.equal(WIZARD_NAV_BINDINGS.next, "ctrl+n")
   const hint = wizardNavHint(false)
-  assert.match(hint, /Ctrl\+P back/)
-  assert.match(hint, /Ctrl\+N next/)
+  assert.ok(hint.startsWith("Ctrl+N next · Ctrl+P back"), hint)
   assert.doesNotMatch(hint, /Cmd/)
   assert.match(hint, /enter continue/)
   assert.match(wizardNavHint(true), /enter submit/)
@@ -58,6 +57,11 @@ test("wizard model options derive from the live catalog", () => {
   ])
   assert.equal(sameWizardOptions(first, first), true)
   assert.equal(sameWizardOptions(first, second), false)
+  // A still-valid choice survives a refresh; a missing choice falls back safely.
+  assert.equal(wizardModelKeyFor("fake/m2", second), "fake/m2")
+  assert.equal(wizardModelKeyFor("", second), "fake/m1")
+  assert.equal(wizardModelKeyFor("gone/model", second), "fake/m1")
+  assert.equal(wizardModelKeyFor("fake/m1", []), "")
 })
 
 test("an empty model step explains why instead of showing a bare zero", () => {
