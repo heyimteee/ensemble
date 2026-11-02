@@ -361,12 +361,6 @@ export function EnsembleV2App() {
   })
   const splitTranscript = createMemo(() => splitLiveFinalized(chatLines()))
   const finalizedLines = createMemo(() => splitTranscript().finalized)
-  // Review fix (finding 4): ids staggering on this paint — newly mounted
-  // transcript rows only, capped, one tick, static when idle or reduced.
-  // Re-evaluates per poll/chunk but never re-triggers (mount-once guard).
-  const staggeringIds = createMemo<Set<string>>(() =>
-    updateStagger(staggerState, finalizedLines().map((line) => line.id), motionFrame(), motionOn(), process.env),
-  )
   // Active-work surface: every streaming message renders its own live row
   // with per-item text, so concurrent work stays watchable. Finalization
   // flips streaming off, which moves that id from this list into the
@@ -1216,6 +1210,17 @@ export function EnsembleV2App() {
       },
       process.env,
     )
+
+  // Review fix (finding 4): ids staggering on this paint — newly mounted
+  // transcript rows only, capped, one tick, static when idle or reduced.
+  // Re-evaluates per poll/chunk but never re-triggers (mount-once guard).
+  // Ordering: this memo calls motionOn(), so it must stay below the motionOn
+  // definition — Solid evaluates memos eagerly at creation, and a memo placed
+  // above a later `const` it calls crashes the route with a temporal-dead-zone
+  // error (see app-order.test.ts, which pins this declaration order).
+  const staggeringIds = createMemo<Set<string>>(() =>
+    updateStagger(staggerState, finalizedLines().map((line) => line.id), motionFrame(), motionOn(), process.env),
+  )
 
   // Idle-quiescent frame clock (slice B): one 4 fps interval per
   // motion-active epoch. Snapshot polls re-run this effect ~4×/s, so the
