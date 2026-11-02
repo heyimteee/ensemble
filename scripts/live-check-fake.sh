@@ -120,6 +120,36 @@ live_assert_count "$LIVE_TUI_SESSION" "quoted line one" 1 "quoted line"
 live_assert_count "$LIVE_TUI_SESSION" "table cell marker" 1 "table cell"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "streaming block after finalization"
 
+# The durable direct-message user line renders exactly once next to the reply.
+live_assert_text "$LIVE_TUI_SESSION" "fake-rich-fixture" "DM user line"
+live_assert_count "$LIVE_TUI_SESSION" "fake-rich-fixture" 1 "DM user line exactly once"
+
+# Workspace wizard: Enter owns every non-text step, including the
+# leader-synthesis yes/no choice, and never opens a completion surface.
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_text "$LIVE_TUI_SESSION" "New workspace" 10 "workspace wizard"
+live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "directory step"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step"
+live_type "$LIVE_TUI_SESSION" "LiveSite"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "members step"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Workspace leader" 10 "leader step"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Leader synthesis" 10 "synthesis choice step"
+live_assert_text "$LIVE_TUI_SESSION" "Yes — let the leader synthesize" "synthesis yes option"
+live_key "$LIVE_TUI_SESSION" Enter
+live_assert_absence "$LIVE_TUI_SESSION" "\$ agents" "no completion popup from wizard Enter"
+live_require_text "$LIVE_TUI_SESSION" "Move FakeAgent into" 15 "move-home confirm"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "workspace created"
+live_require_text "$LIVE_TUI_SESSION" "leader FakeAgent" 15 "leader visible on group surface"
+synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synthesis')
+[[ "$synthesis" == "true" ]] || live_fail "synthesis choice did not persist as Yes (got $synthesis)"
+leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')
+[[ "$leader_name" == '"FakeAgent"' ]] || live_fail "unexpected roster leader (got $leader_name)"
+
 live_check_help
 
 live_key "$LIVE_TUI_SESSION" '~'

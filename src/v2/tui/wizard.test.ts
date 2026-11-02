@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { WIZARD_NAV_BINDINGS, overlayGeometry, sameWizardOptions, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint } from "./wizard.ts"
+import { WIZARD_NAV_BINDINGS, overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint } from "./wizard.ts"
 import { platformBind } from "./platform.ts"
 
 test("wizard filter appends printable characters without modifiers", () => {
@@ -70,4 +70,18 @@ test("an empty model step explains why instead of showing a bare zero", () => {
   const explained = wizardModelEmptyHint("OpenCode reported no models for this project.")
   assert.match(explained, /No models available/)
   assert.match(explained, /OpenCode reported no models/)
+})
+
+test("enter owns selection, continue, and submit on non-text steps", () => {
+  assert.equal(wizardEnterAction("choice", false), "select")
+  assert.equal(wizardEnterAction("pick", false), "select")
+  assert.equal(wizardEnterAction("multi", false), "continue")
+  assert.equal(wizardEnterAction("choice", true), "submit")
+  assert.equal(wizardEnterAction("pick", true), "submit")
+  assert.equal(wizardEnterAction("multi", true), "submit")
+})
+
+test("text steps keep enter for continue handled by the field", () => {
+  assert.equal(wizardEnterAction("text", false), "text")
+  assert.equal(wizardEnterAction("text", true), "text")
 })

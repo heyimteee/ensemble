@@ -12,7 +12,7 @@ import { palette } from "./theme.ts"
 import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
-import { wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, overlayGeometry, sameWizardOptions, WIZARD_NAV_BINDINGS } from "./wizard.ts"
+import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 
@@ -219,6 +219,7 @@ export function EnsembleV2App() {
         && previous.kind === line.kind
         && previous.streaming === line.streaming
         && previous.interrupted === line.interrupted
+        && previous.queued === line.queued
         && previous.agentID === line.agentID) return previous
       const value = { ...line }
       lineCache.set(line.id, value)
@@ -235,6 +236,7 @@ export function EnsembleV2App() {
         role: transcriptRole(message.role),
         text: message.role === "assistant" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
         agentID: surfaceAgent()?.id,
+        queued: message.queued,
         createdAt: message.createdAt,
       }))
       const live = liveDm()
@@ -651,7 +653,7 @@ export function EnsembleV2App() {
 
   const slashCommands = [
     ["workspace", "switch workspace"], ["agent", "mention an agent"], ["settings", "agent settings"], ["approvals", "approval inbox"],
-    ["pause", "pause workspace"], ["resume", "resume workspace"], ["init", "initialize Ensemble in this workspace"], ["help", "shortcut help"],
+    ["pause", "pause workspace"], ["resume", "resume workspace"], ["init", "initialize workspace files (initialisation, not routing)"], ["help", "shortcut help"],
     ["native", "open native session"], ["delegate", "delegate selected subtask"], ["retry", "retry selected subtask"], ["restart", "restart selected subtask"],
     ["cancel", "cancel selected subtask"], ["reset-ensemble", "delete all Ensemble data"], ["leave", "leave Ensemble"],
   ] as const
@@ -977,7 +979,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 100,
-      enabled: () => isOurRoute() && !isModal() && !leaderMode() && !composerActive(),
+      enabled: () => isOurRoute() && !isModal() && !leaderMode() && !composerActive() && wizard() === null,
       commands: [
         { id: "ensemble.v2.leader", title: "Ensemble: Leader key", bind: "~", run: () => setLeaderMode(true) },
         { id: "ensemble.v2.left", title: "Ensemble: Column left", bind: "h", run: () => focusLeft() },
@@ -995,8 +997,8 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.scroll.up", title: "Ensemble: Scroll transcript up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); transcriptScrollRef?.scrollBy?.(-messageHeight()) } },
         { id: "ensemble.v2.scroll.down", title: "Ensemble: Scroll transcript down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); transcriptScrollRef?.scrollBy?.(messageHeight()) } },
         { id: "ensemble.v2.scroll.bottom", title: "Ensemble: Scroll transcript to bottom", bind: "end", enabled: () => !composerActive(), run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); jumpToBottom() } },
-        { id: "ensemble.v2.init", title: "Ensemble: Init workspace", bind: "shift+i", run: () => void initEnsemble().catch(showError) },
-        { id: "ensemble.v2.init.alt", title: "Ensemble: Init workspace (alternate)", bind: "ctrl+g", run: () => void initEnsemble().catch(showError) },
+        { id: "ensemble.v2.init", title: "Ensemble: Init workspace files (initialisation, not routing)", bind: "shift+i", run: () => void initEnsemble().catch(showError) },
+        { id: "ensemble.v2.init.alt", title: "Ensemble: Init workspace files, alternate binding (initialisation, not routing)", bind: "ctrl+g", run: () => void initEnsemble().catch(showError) },
         { id: "ensemble.v2.pause", title: "Ensemble: Pause workspace", bind: "p", run: () => void togglePause().catch(showError) },
         { id: "ensemble.v2.native", title: "Ensemble: Native session", bind: "o", run: () => openNative() },
         { id: "ensemble.v2.delegate", title: "Ensemble: Delegate", bind: "d", run: () => void delegateSelected().catch(showError) },
@@ -1019,13 +1021,13 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 130,
-      enabled: () => isOurRoute() && composerActive() && !modal(),
+      enabled: () => isOurRoute() && composerActive() && !modal() && wizard() === null,
       commands: [{ id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } }],
       bindings: ["ensemble.v2.composer.cancel"],
     }))
     platformLayer(() => ({
       mode: "global", priority: 140,
-      enabled: () => isOurRoute() && composerActive() && completion() !== null && !modal(),
+      enabled: () => isOurRoute() && composerActive() && completion() !== null && !modal() && wizard() === null,
       commands: [
         { id: "ensemble.v2.completion.up", title: "Ensemble: Previous completion", bind: "up", run: () => moveCompletion(-1) },
         { id: "ensemble.v2.completion.down", title: "Ensemble: Next completion", bind: "down", run: () => moveCompletion(1) },
@@ -1049,7 +1051,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode(),
+      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode() && wizard() === null,
       commands: [
         { id: "ensemble.v2.tab", title: "Ensemble: Settings tab", bind: "tab", run: () => { const tabs: SettingsTab[] = ["general", "models", "memories", "skillbox"]; setSettingsTab(tabs[(tabs.indexOf(settingsTab()) + 1) % tabs.length]) } },
         { id: "ensemble.v2.edit", title: "Ensemble: Edit", bind: "e", run: () => void editField().catch(showError) },
@@ -1070,7 +1072,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && approvalsOpen() && !leaderMode(),
+      enabled: () => isOurRoute() && !modal() && approvalsOpen() && !leaderMode() && wizard() === null,
       commands: [
         { id: "ensemble.v2.approval.up", title: "Ensemble: Previous approval", bind: "up", run: () => setApprovalCursor((cursor) => Math.max(0, cursor - 1)) },
         { id: "ensemble.v2.approval.down", title: "Ensemble: Next approval", bind: "down", run: () => setApprovalCursor((cursor) => Math.min(Math.max(0, pendingApprovals().length - 1), cursor + 1)) },
@@ -1081,7 +1083,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && helpOpen() && !leaderMode(),
+      enabled: () => isOurRoute() && !modal() && helpOpen() && !leaderMode() && wizard() === null,
       commands: [
         { id: "ensemble.v2.help.up", title: "Ensemble: Help page up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); helpScrollRef?.scrollBy?.(-10) } },
         { id: "ensemble.v2.help.down", title: "Ensemble: Help page down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); helpScrollRef?.scrollBy?.(10) } },
@@ -1487,7 +1489,17 @@ export function EnsembleV2App() {
     if (name === "down") { event?.preventDefault?.(); wizardMove(1); return }
     if (name === "backspace") { event?.preventDefault?.(); setWizard({ ...state, query: state.query.slice(0, -1), cursor: 0 }); return }
     if ((name === "space" || sequence === " ") && step.kind === "multi") { event?.preventDefault?.(); wizardToggle(); return }
-    if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") { event?.preventDefault?.(); wizardSelect(); return }
+    if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") {
+      const action = wizardEnterAction(step.kind, wizardFinal(state))
+      if (action === "text") return
+      event?.preventDefault?.()
+      event?.stopPropagation?.()
+      closeCompletion()
+      if (wizardItems().length === 0) return
+      if (action === "continue") { advanceWizard(state); return }
+      wizardSelect()
+      return
+    }
     const filterText = wizardFilterText(event)
     if (filterText) {
       event?.preventDefault?.()
@@ -1517,9 +1529,17 @@ export function EnsembleV2App() {
       edit,
     }
     state.steps = makeWizardSteps(state)
+    // An open wizard owns the keyboard: close the composer completion popup,
+    // blur the composer, and gate the competing key layers (each layer's
+    // `enabled` additionally requires `wizard() === null`) so Enter can never
+    // open the completion popup or another search surface while the wizard
+    // is open.
     setModal(true)
     setTextPrompt(null)
     setPicker(null)
+    setCompletion(null)
+    setComposerActive(false)
+    try { composerRef?.blur?.() } catch {}
     setWizard(state)
   })
 
@@ -1537,7 +1557,9 @@ export function EnsembleV2App() {
       return `${surfaceAgent()?.name ?? "Agent"} · direct${workspace ? ` · #${workspace.name}` : " · homeless"}`
     }
     const workspace = state()?.workspaces[current.workspaceID]
-    return workspace ? `#${workspace.name} · ${workspaceLabel(workspace.directory)}` : "Workspace"
+    if (!workspace) return "Workspace"
+    const leader = state()?.agents[workspace.leaderID]?.name ?? workspace.leaderID
+    return `#${workspace.name} · ${workspaceLabel(workspace.directory)} · leader ${leader}`
   }
 
   return (
@@ -1583,7 +1605,7 @@ export function EnsembleV2App() {
                               <box flexDirection="column" width="100%" paddingRight={1}>
                                 <For each={finalizedLines()}>{(message) => (
                                   <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                    <text fg={chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{message.author}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.interrupted ? " · interrupted" : ""}</text>
+                                    <text fg={chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{message.author}{message.queued ? " · queued" : ""}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.interrupted ? " · interrupted" : ""}</text>
                                     <Show when={message.role === "agent" && syntaxStyle} fallback={
                                       <text fg={message.role === "system" ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                     }>

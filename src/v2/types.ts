@@ -192,6 +192,7 @@ export type ChatMessage = {
   author: string
   text: string
   createdAt: number
+  queued?: boolean
 }
 
 export type ChatContext = {
@@ -217,6 +218,7 @@ export type Snapshot = {
     approvals: Record<Id, Approval>
     settings: Settings
     dmQueue: Record<Id, DmQueueEntry>
+    dmTranscripts: Record<string, ChatMessage[]>
     ui: {
       activeWorkspaceID?: Id
       activeAgentID?: Id
