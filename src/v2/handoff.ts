@@ -152,11 +152,11 @@ export function resolveHandoffRecipient(
 }
 
 export function handoffAckText(recipientName: string, task: string, correlationID: string): string {
-  return `Handed to $${recipientName} for ${task} (ref ${correlationID}). The answer will arrive here.`
+  return `Handed to $${recipientName} for ${task} (ref ${correlationID}). Your turn stays open until the answer arrives here — do not call ensemble_delegate after a handoff (leader-only; would double-queue).`
 }
 
 export function handoffDuplicateText(recipientName: string, task: string): string {
-  return `Already handed to $${recipientName} for ${task}; the answer will arrive here.`
+  return `Already handed to $${recipientName} for ${task}; your turn stays open until the answer arrives here.`
 }
 
 export function handoffFailureText(recipientName: string, reason: string, correlationID: string): string {

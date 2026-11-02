@@ -39,6 +39,7 @@ import {
   TRANSCRIPT_WINDOW,
   activityFrameForKind,
   hasActiveWork,
+  isActivityStale,
   isNeedsYouTask,
   orderedWorkItems,
   queuedActivityFrame,
@@ -430,11 +431,19 @@ export function EnsembleV2App() {
         (task) => task.assigneeID ?? "unassigned",
         (task) => agentName(state(), task.assigneeID),
         Date.now(),
+        {
+          pendingApprovalIDs: pendingApprovalIDs(),
+          nativeBlockedIDs: nativeBlockedSubtaskIDs(),
+          agentNameFor: (agentID) => agentName(state(), agentID),
+        },
       )
       live.push(...groups.live)
       queued = groups.queued.map((entry) => entry.label)
     }
     for (const liveLine of liveMessages()) {
+      // Leaked streaming rows never wedge the activity line: a live row
+      // older than the staleness bound with no finalize is stuck, not live.
+      if (isActivityStale({ createdAt: liveLine.createdAt }, Date.now())) continue
       if (!live.some((entry) => entry.key === (liveLine.agentID ?? `author:${liveLine.author}`))) {
         // Streaming text arriving with no task-backed line: the agent is
         // composing, so the thinking shimmer applies (brief §4).
