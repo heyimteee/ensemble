@@ -16,6 +16,13 @@ Ensemble extends OpenCode's TUI with persistent agent teams. Keep changes within
 - Use patch/direct file edits; for necessary multi-site scripted edits, inspect a temporary script and run it once. See the guide's editing discipline.
 - Run `npm run verify` after source changes and before handoff; report live checks separately, including skips.
 
+## End-of-turn handoff (mandatory, ticket #71)
+
+- Every non-leader agent turn must end with a handoff to another workspace member: explicit via `ensemble_handoff`, or automatic server default to the workspace leader carrying the finished task content. The group shows `Handed to $Recipient`. Leader turns may end normally or hand off voluntarily.
+- Multiple pending completion handoffs for one recipient coalesce into one consolidated batch review turn after a short quiet window (~1s) or when the recipient is free. Decide each item with `ensemble_review` (`delegate` | `start` | `end` | `dismiss`); the batch closes only when every item is acted on or dismissed. Non-leader recipients hand the batch onward (default leader); the leader may end it.
+- Loop guards apply: maximum handoff chain depth, no immediate back-and-forth to the previous sender, repeated-recipient detection, forced leader or termination fallback at the cap. Mandatory handoff never calls `ensemble_delegate` after a handoff (leader-only; would double-queue) and never queues duplicate work.
+- Mention syntax throughout: `$Name` (or `!Name` alias) for agents; `@` is file-only and never addresses an agent.
+
 ## Agent skills
 
 ### Issue tracker

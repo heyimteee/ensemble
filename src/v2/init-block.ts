@@ -50,6 +50,27 @@ When work continues with another agent:
 Never claim a handoff path that does not exist. Use native file tools to
 write the file; do not paste a full report into the group chat.
 
+## End-of-turn handoff (mandatory)
+
+Every non-leader turn must end with a handoff to another member: hand off
+explicitly with \`ensemble_handoff\`, or the server hands your finished turn
+to the workspace leader automatically and the group shows \`Handed to $Name\`.
+The leader may end turns normally or hand off voluntarily.
+
+When several completions reach you at once, they coalesce into one batch
+review turn after a short quiet window (~1s) or when you are free. The
+review lists sender, task title, outcome, and handoff path per item. Decide
+each item with \`ensemble_review\` (\`delegate\`, \`start\`, \`end\`, or
+\`dismiss\`); the batch closes only when every item is acted on or dismissed.
+Non-leader recipients hand the batch onward (default leader); the leader
+may end it.
+
+Loop guards: handoff chains stop at the depth cap, immediate back-and-forth
+to the previous sender is rejected, repeated recipients reroute to the
+leader, and the cap forces a leader or termination fallback. Mandatory
+handoff never calls \`ensemble_delegate\` after a handoff and never queues
+duplicate work.
+
 ## Tools
 
 | Tool | Use | Scope |
@@ -60,6 +81,7 @@ write the file; do not paste a full report into the group chat.
 | \`ensemble_task_status\` | Pending, working, replied subtasks | read-only, any session |
 | \`ensemble_send_message\` | Post to the group or queue an agent DM | Ensemble-bound sessions |
 | \`ensemble_handoff\` | Queue a typed hop to a teammate; the answer is relayed here (no delegate needed afterwards) | Ensemble-bound sessions |
+| \`ensemble_review\` | Decide each item in a batch review (delegate, start, end, dismiss); the batch closes only when every item is decided | Batch recipient |
 | \`ensemble_delegate\` | Create a typed subtask for a teammate | Ensemble leader only (peers use handoff) |
 | \`ensemble_ask_person\` | Pause for a user decision | Ensemble-bound sessions |
 | \`ensemble_remember\` | Save project/workspace/global memory | Ensemble-bound sessions |

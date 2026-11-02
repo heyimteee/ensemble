@@ -123,8 +123,18 @@ test("a $mention peer turn runs to completed with asking/answered attribution an
     assert.equal(turn.turn?.askerKind, "user")
     assert.ok(turn.turn?.correlationID)
     assert.equal(turn.turn?.answeredByID, sage.id)
-    // No leader fallback: Nova never runs for a $Sage mention.
-    assert.ok(!Object.values(after.state.subtasks).some((task: any) => task.assigneeID === nova.id))
+    // No leader fallback for the turn itself: Nova never takes over a $Sage
+    // mention — the only leader work is the mandatory completion handoff
+    // (ticket #71) carrying Sage's finished reply.
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.assigneeID === nova.id && task.handoff?.completion === true)
+    })
+    const completed = await handlers.snapshot({ directory })
+    assert.ok(!Object.values(completed.state.subtasks).some((task: any) => task.assigneeID === nova.id && task.handoff?.completion !== true))
+    const completion = Object.values(completed.state.subtasks).find((task: any) => task.assigneeID === nova.id && task.handoff?.completion === true) as any
+    assert.ok(completion)
+    assert.ok(completion.instruction.includes("OK"))
     const messages = (after.state.messages[workspace.id] ?? []) as any[]
     const texts = messages.map((message) => message.text)
     assert.ok(texts.includes("$Sage please summarize"))

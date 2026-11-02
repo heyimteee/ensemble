@@ -910,7 +910,9 @@ test("outside-roster approvals create the delegated child once", async () => {
     const again = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true } })
     assert.equal(again.ok, true)
     const final = await handlers.snapshot({ directory })
-    assert.equal(Object.values(final.state.subtasks).filter((task: any) => task.title === "Child").length, 1)
+    // The approved hop is created once; the recipient's mandatory completion
+    // handoff (ticket #71) is a separate terminal delivery under its own key.
+    assert.equal(Object.values(final.state.subtasks).filter((task: any) => task.title === "Child" && task.handoff?.completion !== true).length, 1)
   } finally {
     await stop()
   }
@@ -2274,7 +2276,9 @@ test("restart recovery re-queues claimed work without duplicating it", async () 
       return (next.state.subtasks as any).t?.state === "replied"
     })
     const after = await handlers.snapshot({ directory })
-    assert.equal(Object.keys(after.state.subtasks).length, 1)
+    // The recovered work item is not duplicated; its mandatory completion
+    // handoff to the leader (ticket #71) is a separate terminal delivery.
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.title === "Child" && task.handoff?.completion !== true).length, 1)
     assert.equal(after.state.subtasks.t.attempts, 3)
     assert.equal(after.state.subtasks.t.outcome, "succeeded")
   } finally {
