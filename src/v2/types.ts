@@ -201,6 +201,10 @@ export type ApprovalKind =
   | "promote_memory"
   | "cross_project"
   | "interrupted"
+  | "native"
+
+/** Where an approval came from: the host permission system or an Ensemble product decision. */
+export type ApprovalSource = "native" | "agent" | "workspace" | "memory"
 
 export type Approval = {
   id: Id
@@ -208,6 +212,8 @@ export type Approval = {
   subtaskID?: Id
   agentID?: Id
   kind: ApprovalKind
+  /** Origin layer; older rows omit it and derive from kind. New rows always set it. */
+  source?: ApprovalSource
   title: string
   detail: string
   payload?: Record<string, unknown>
@@ -215,6 +221,20 @@ export type Approval = {
   createdAt: number
   resolvedAt?: number
   resolution?: string
+}
+
+/**
+ * Resolve the origin layer for an approval. Native permission mirrors are
+ * the only rows that gate a live native session; every other kind is an
+ * Ensemble product decision that gates only its dependent work.
+ */
+export function approvalSource(approval: Approval): ApprovalSource {
+  if (approval.source) return approval.source
+  if (approval.kind === "native") return "native"
+  if (approval.kind === "ask_person") return "agent"
+  if (approval.kind === "outside_roster") return "workspace"
+  if (approval.kind === "interrupted") return "workspace"
+  return "memory"
 }
 
 export type Run = {

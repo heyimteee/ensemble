@@ -124,3 +124,19 @@ export function dmEmptyDetail(): string {
 export function approvalResolvingSuffix(resolving: boolean): string {
   return resolving ? " · Resolving…" : ""
 }
+
+/** Inbox origin tag: native host blocks read differently from product decisions. Pure. */
+export function approvalSourceTag(source: string): string {
+  switch (source) {
+    case "native":
+      return "Native"
+    case "agent":
+      return "Agent"
+    case "workspace":
+      return "Workspace"
+    case "memory":
+      return "Memory"
+    default:
+      return "Workspace"
+  }
+}

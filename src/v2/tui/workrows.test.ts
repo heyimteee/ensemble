@@ -344,3 +344,11 @@ test("work summary counts active work only and names the empty state", () => {
   assert.ok(!summary.includes("replied"))
   assert.ok(!summary.includes("failed"))
 })
+
+test("ticket68: native-blocked tasks read as needs-you without an approvalID", async () => {
+  const { isNeedsYouTask } = await import("./workrows.ts")
+  const plain = { id: "t", interrupted: false } as any
+  assert.equal(isNeedsYouTask(plain, new Set(), new Set(["t"])), true)
+  assert.equal(isNeedsYouTask(plain, new Set(), new Set(["other"])), false)
+  assert.equal(isNeedsYouTask(plain, new Set(["ap"]), new Set(["t"])), true)
+})

@@ -86,10 +86,11 @@ export function needsYouSuffix(): string {
   return " · needs you · v to resolve"
 }
 
-/** True while the task waits on the user: interrupted, or gated on a still-pending approval. */
-export function isNeedsYouTask(task: Subtask, pendingApprovalIDs: ReadonlySet<string>): boolean {
+/** True while the task waits on the user: interrupted, gated on a still-pending approval, or blocked by a native permission mirror. */
+export function isNeedsYouTask(task: Subtask, pendingApprovalIDs: ReadonlySet<string>, nativeBlockedSubtaskIDs: ReadonlySet<string> = new Set()): boolean {
   if (task.interrupted) return true
   if (task.approvalID && pendingApprovalIDs.has(task.approvalID)) return true
+  if (nativeBlockedSubtaskIDs.has(task.id)) return true
   return false
 }
 

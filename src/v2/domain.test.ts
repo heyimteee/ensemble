@@ -121,7 +121,7 @@ test("store allocates message sequence numbers without overwriting concurrent ap
   assert.equal(loaded.snapshot().workspaces.w.nextSeq, 4)
 })
 
-test("startup marks working subtasks as interrupted instead of replaying them", async () => {
+test("startup requeues working subtasks without minting an approval", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.saveWorkspace(workspace("w", "a", ["a"]))
@@ -144,7 +144,7 @@ test("startup marks working subtasks as interrupted instead of replaying them", 
   await loaded.load()
   const task = loaded.snapshot().subtasks.t1
   assert.equal(task.state, "pending")
-  assert.equal(task.interrupted, true)
+  assert.equal(task.interrupted, false)
   assert.equal(task.activeRunID, undefined)
 })
 
