@@ -97,6 +97,9 @@ live_require_absence "$LIVE_TUI_SESSION" "streaming…" 15 "onboarding finalizat
 # fixture, then observe the live block before it is finalized in place.
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
+# Slice B: the COMPOSER hint is focus-border-only — no blink glyph anywhere.
+live_assert_text "$LIVE_TUI_SESSION" "COMPOSER · enter send · esc cancel" "static composer hint"
+live_assert_absence "$LIVE_TUI_SESSION" "▌" "no composer blink glyph"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "per-agent activity line while live"
@@ -173,6 +176,26 @@ live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "ephemeral work block mounts 
 live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · working" 15 "work row loading state with assignee"
 live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "per-agent activity line while live"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
+# Slice B: live activity lines animate across the named working frames
+# (◐◑◒◓) — observe at least two distinct frames on the activity line while
+# work is in flight, proving the 4 fps clock ticks while busy.
+live_log "observing working-frame animation across ticks"
+seen_frames=0
+seen_which=""
+for _ in $(seq 1 12); do
+  pane=$(live_capture "$LIVE_TUI_SESSION")
+  for frame in "◐" "◑" "◒" "◓"; do
+    if grep -qF -- "${frame} FakeAgent · checking the details" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
+      seen_which="${seen_which}${frame}"
+      seen_frames=$((seen_frames + 1))
+    fi
+  done
+  [[ "$seen_frames" -ge 2 ]] && break
+  sleep 0.3
+done
+[[ "$seen_frames" -ge 2 ]] || live_fail "activity line did not animate across working frames (saw: $seen_which)"
+live_log "activity line animated across working frames ($seen_which)"
+live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph while work is live"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for second message"
 live_type "$LIVE_TUI_SESSION" "fake-queue-beta"
@@ -234,6 +257,13 @@ live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
 live_assert_absence "$LIVE_TUI_SESSION" "Peer turn refused" "no refusal for the valid mention"
 live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "agent addressing stays \$Name, never @Name"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization of peer turn"
+# Slice B idle-quiescence: nothing is busy/live/composing now, so no motion
+# timers run — two captures 1.5 s apart must be byte-identical still frames.
+idle_first=$(live_capture "$LIVE_TUI_SESSION")
+sleep 1.5
+idle_second=$(live_capture "$LIVE_TUI_SESSION")
+[[ "$idle_first" == "$idle_second" ]] || live_fail "idle TUI kept ticking between captures"
+live_log "idle screen is quiescent across 1.5 s"
 peer_attr=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; var turn = Object.values(output.state.subtasks).find(function (t) { return t.workKind === "turn" }); if (!turn || !turn.turn) return "no-turn"; var answers = (output.state.messages[ws.id] || []).filter(function (m) { return m.correlationID === turn.turn.correlationID && m.agentID === turn.assigneeID }); return turn.turn.askerKind + "|" + (turn.turn.answeredByID === turn.assigneeID) + "|" + answers.length })()')
 [[ "$peer_attr" == '"user|true|1"' ]] || live_fail "peer turn attribution wrong (got $peer_attr)"
 live_log "peer turn ran to completed with asking/answered attribution ($peer_attr)"
@@ -287,5 +317,39 @@ live_assert_absence "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "stale heading a
 live_assert_absence "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "stale code after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "fake-queue-beta" "stale work row after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "WORK ·" "stale work section after leaving Ensemble"
+
+# Slice B reduced-motion run: restart the TUI with ENSEMBLE_REDUCED_MOTION=1
+# and prove live work renders static frame-0 glyphs only — the working
+# activity line stays on ◐, and no non-zero motion codepoint (◑◒◓◌▹▌)
+# appears across sustained captures while work is in flight.
+live_log "restarting TUI under ENSEMBLE_REDUCED_MOTION=1"
+"$LIVE_TMUX_BIN" kill-session -t "$LIVE_TUI_SESSION" 2>/dev/null || true
+live_tmux_env_add "ENSEMBLE_REDUCED_MOTION=1"
+live_start_tui
+live_wait_for_native_tui
+live_open_ensemble
+live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page under reduced motion"
+live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored under reduced motion"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER · enter send · esc cancel" 10 "static composer hint under reduced motion"
+live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
+live_type "$LIVE_TUI_SESSION" "fake-motion-static"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "◐ FakeAgent · checking the details…" 15 "frame-0 activity line under reduced motion"
+for _ in $(seq 1 8); do
+  pane=$(live_capture "$LIVE_TUI_SESSION")
+  for glyph in "◑" "◒" "◓" "◌" "▹" "▌"; do
+    grep -qF -- "$glyph" <<<"$pane" && live_fail "reduced-motion run animated (saw $glyph)"
+  done
+  sleep 0.3
+done
+live_log "reduced-motion run stayed on frame-0 glyphs while live"
+live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 30 "reduced-motion work announced once"
+live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts under reduced motion"
+reduced_idle_first=$(live_capture "$LIVE_TUI_SESSION")
+sleep 1.5
+reduced_idle_second=$(live_capture "$LIVE_TUI_SESSION")
+[[ "$reduced_idle_first" == "$reduced_idle_second" ]] || live_fail "reduced-motion idle TUI kept ticking between captures"
+live_log "reduced-motion idle screen is quiescent across 1.5 s"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

@@ -13,7 +13,7 @@ import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
-import { EMPTY_MARK, composerCaret, motionActive as motionShouldRun, streamingFrame } from "./motion.ts"
+import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
@@ -22,12 +22,15 @@ import { shouldApplySnapshot } from "../snapshot-guard.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
+  activityFrameForKind,
   hasActiveWork,
   orderedWorkItems,
+  queuedActivityFrame,
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
   terminalAnnouncements,
+  workRowFrame,
   workRowText,
   workSummary,
   type ActivityEntry,
@@ -1028,16 +1031,46 @@ export function EnsembleV2App() {
     else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredSkills().length - 1), cursor + delta)))
   }
 
-  const motionOn = () => motionShouldRun({ busy: isBusy(), live: liveMessages().length > 0, composerActive: composerActive() })
+  // Slice B motion gate: the 4 fps clock runs only while something is in
+  // flight (busy, live streaming text, task-backed activity lines, or the
+  // ephemeral WORK block) or composing — and never under reduced motion
+  // (`ENSEMBLE_REDUCED_MOTION`/`NO_COLOR`), where every animated cell pins
+  // to its frame-0 glyph. Idle screens hold tick 0 with no interval.
+  const motionOn = () =>
+    shouldRunMotion(
+      {
+        busy: isBusy(),
+        live: liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
+        composerActive: composerActive(),
+      },
+      process.env,
+    )
 
-  // Idle-quiescent frame clock: 4 fps only while motion is active (busy,
-  // live streaming, or composing); otherwise the still frame (tick 0).
-  // The interval is created and cleared with the effect, so no animation
-  // loop is left running after finalize, unmount, or route-leave.
+  // Idle-quiescent frame clock (slice B): one 4 fps interval per
+  // motion-active epoch. Snapshot polls re-run this effect ~4×/s, so the
+  // interval is reconciled by boolean transition only — never cleared and
+  // recreated while motion stays active. Cleanup clears it on
+  // finalize/unmount/route-leave, and the still frame (tick 0) holds
+  // whenever motion is off, including reduced motion.
+  let clockTimer: ReturnType<typeof setInterval> | undefined;
+  let clockRunning = false;
+  const syncClock = () => {
+    const want = isOurRoute() ? motionOn() : false
+    if (want === clockRunning) return
+    clockRunning = want
+    if (clockTimer !== undefined) { clearInterval(clockTimer); clockTimer = undefined }
+    if (want) {
+      clockTimer = setInterval(() => setMotionFrame((frame) => (frame + 1) % 120), 250)
+    } else {
+      setMotionFrame(0)
+    }
+  };
+  onCleanup(() => {
+    if (clockTimer !== undefined) { clearInterval(clockTimer); clockTimer = undefined }
+    clockRunning = false
+  })
   createEffect(() => {
-    if (!isOurRoute() || !motionOn()) { setMotionFrame(0); return }
-    const timer = setInterval(() => setMotionFrame((frame) => (frame + 1) % 120), 250)
-    onCleanup(() => clearInterval(timer))
+    syncClock()
   })
 
   createEffect(() => {
@@ -1050,6 +1083,10 @@ export function EnsembleV2App() {
     const timer = setInterval(() => {
       if (surface()?.kind === "agent") void refreshChat()
       void refresh().then(() => syncTranscriptScroll()).catch(() => undefined)
+      // Reconcile the motion clock on the same proven tick: snapshot polls
+      // are the heartbeat that effect reactivity alone cannot guarantee, so
+      // the 4 fps interval starts the same cycle its epoch begins.
+      syncClock()
     }, 250)
     const stopData = context.data.listen(({ details }: any) => {
       const type = typeof details?.type === "string" ? details.type : ""
@@ -1851,14 +1888,14 @@ export function EnsembleV2App() {
                             <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1}>
                               <For each={liveActivity().shown}>{(label) => (
                                 <box flexDirection="row" width="100%">
-                                  <text fg={colors.muted} bg={colors.bg}>{`${streamingFrame(motionFrame())} `}</text>
+                                  <text fg={colors.muted} bg={colors.bg}>{`${activityFrameForKind("checking", motionFrame(), process.env)} `}</text>
                                   <text fg={agentColorForLabel(label)} bg={colors.bg}>{label}</text>
                                   <text fg={colors.muted} bg={colors.bg}>{` · ${ACTIVITY_DEFAULT_VERB}`}</text>
                                 </box>
                               )}</For>
                               <For each={liveActivity().queued}>{(label) => (
                                 <box flexDirection="row" width="100%">
-                                  <text fg={colors.muted} bg={colors.bg}>○ </text>
+                                  <text fg={colors.muted} bg={colors.bg}>{`${queuedActivityFrame()} `}</text>
                                   <text fg={agentColorForLabel(label)} bg={colors.bg}>{label}</text>
                                   <text fg={colors.muted} bg={colors.bg}> · queued</text>
                                 </box>
@@ -1873,7 +1910,7 @@ export function EnsembleV2App() {
                               <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{workSummary(activeTasks(), Date.now())}</text>
                               <For each={orderedTasks()}>{(task, index) => (
                                 <text fg={taskCursor() === index() ? (focusArea() === "chat" ? colors.good : colors.warn) : (deriveWorkStatus(task, Date.now()) === "working" || deriveWorkStatus(task, Date.now()) === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
-                                  {taskCursor() === index() ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now())}{(deriveWorkStatus(task, Date.now()) === "working" || deriveWorkStatus(task, Date.now()) === "retrying") ? ` ${streamingFrame(motionFrame())}` : ""}
+                                  {taskCursor() === index() ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now())}{` ${workRowFrame(deriveWorkStatus(task, Date.now()), motionFrame(), process.env)}`}
                                 </text>
                               )}</For>
                               <text fg={colors.faint} bg={colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result · r retry · R restart · x cancel · o native</text>
@@ -1909,7 +1946,7 @@ export function EnsembleV2App() {
                       <box flexShrink={0} border borderStyle="single" borderColor={composerActive() ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? `COMPOSER${composerCaret(composerActive(), motionFrame())} · enter send · esc cancel` : "i compose · $ agent · @ file · / command"}</text>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? "COMPOSER · enter send · esc cancel" : "i compose · $ agent · @ file · / command"}</text>
                     </>
                   </Show>
                 }>

@@ -1,5 +1,6 @@
 import { deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
 import type { Subtask } from "../types.ts"
+import { effectiveTick, queuedFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { short } from "./format.ts"
 
 /**
@@ -34,6 +35,56 @@ export function workStatusLabel(status: DerivedWorkStatus): string {
 export function workRowText(task: Subtask, agentLabel: string, now: number): string {
   const status = deriveWorkStatus(task, now)
   return `${workGlyph(status)} ${short(task.title || "(untitled)", 60)} · ${agentLabel} · ${status}`
+}
+
+/**
+ * Animated liveness suffix for a WORK row at a tick (brief §4). Working and
+ * retrying rows cycle the working spinner; pending rows alternate the calmer
+ * waiting frames; terminal rows are static (they never render in the block —
+ * see `orderedWorkItems` — but the helper stays total). Under reduced motion
+ * the tick collapses to frame 0, so pending still reads `○` and working
+ * still reads `◐`. Pure.
+ */
+export function workRowFrame(status: DerivedWorkStatus, tick: number, env: NodeJS.ProcessEnv = process.env): string {
+  const frame = effectiveTick(tick, env)
+  switch (status) {
+    case "working":
+    case "retrying":
+      return workingFrame(frame)
+    case "pending":
+      return waitingFrame(frame)
+    default:
+      return workGlyph(status)
+  }
+}
+
+/**
+ * Frame for an activity verb kind at a tick (brief §4). Tool-kind verbs
+ * (reading/searching/running/writing) nudge the tool chevron; `waiting`
+ * alternates the calm waiting frames; `checking`/`wrapping` and the default
+ * use the working spinner. Queued-behind-live lines never call this — they
+ * render the static `queuedFrame()`. Under reduced motion every kind pins to
+ * its frame 0. Pure.
+ */
+export function activityFrameForKind(kind: ActivityVerbKind, tick: number, env: NodeJS.ProcessEnv = process.env): string {
+  const frame = effectiveTick(tick, env)
+  switch (kind) {
+    case "reading":
+    case "searching":
+    case "running":
+    case "writing":
+      return toolFrame(frame)
+    case "waiting":
+      return waitingFrame(frame)
+    case "checking":
+    case "wrapping":
+      return workingFrame(frame)
+  }
+}
+
+/** Static mark for queued-behind-live activity lines. Never animated. */
+export function queuedActivityFrame(): string {
+  return queuedFrame()
 }
 
 /** Active work first: working/retrying, then pending, oldest first. Terminal rows never render here. */
