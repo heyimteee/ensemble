@@ -4,16 +4,19 @@ import type { Subtask } from "../types.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
+  activityFrameForKind,
   activityLine,
   activityVerb,
   hasActiveWork,
   orderedWorkItems,
+  queuedActivityFrame,
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
   terminalAnnouncement,
   terminalAnnouncements,
   workGlyph,
+  workRowFrame,
   workRowText,
   workStatusLabel,
   workSummary,
@@ -197,6 +200,52 @@ test("live/finalized split keeps concurrent live rows distinct and folds finaliz
   assert.deepEqual(folded.finalized.map((item) => item.id), ["a", "b", "c"])
   const ids = [...folded.finalized, ...folded.live].map((item) => item.id)
   assert.deepEqual([...new Set(ids)], ids)
+})
+
+test("work row frames use the named sets per status, not one generic frame", () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5, 6, 7].map((tick) => workRowFrame("working", tick)),
+    ["◐", "◑", "◒", "◓", "◐", "◑", "◒", "◓"],
+  )
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5, 6, 7].map((tick) => workRowFrame("retrying", tick)),
+    ["◐", "◑", "◒", "◓", "◐", "◑", "◒", "◓"],
+  )
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5, 6, 7].map((tick) => workRowFrame("pending", tick)),
+    ["○", "◌", "○", "◌", "○", "◌", "○", "◌"],
+  )
+  // Terminal rows are static final glyphs, never animation frames.
+  assert.equal(workRowFrame("replied", 3), "●")
+  assert.equal(workRowFrame("failed", 3), "✕")
+  assert.equal(workRowFrame("cancelled", 3), "⊘")
+})
+
+test("work row frames are constant-width and pin to frame 0 under reduced motion", () => {
+  for (let tick = 0; tick < 8; tick++) {
+    assert.equal([...workRowFrame("working", tick)].length, 1)
+    assert.equal([...workRowFrame("pending", tick)].length, 1)
+  }
+  assert.equal(workRowFrame("working", 3, { ENSEMBLE_REDUCED_MOTION: "1" }), "◐")
+  assert.equal(workRowFrame("pending", 1, { NO_COLOR: "1" }), "○")
+})
+
+test("activity frames route verb kinds to the named sets", () => {
+  assert.equal(activityFrameForKind("checking", 0), "◐")
+  assert.equal(activityFrameForKind("checking", 1), "◑")
+  assert.equal(activityFrameForKind("wrapping", 2), "◒")
+  assert.equal(activityFrameForKind("waiting", 0), "○")
+  assert.equal(activityFrameForKind("waiting", 1), "◌")
+  assert.equal(activityFrameForKind("reading", 0), "▸")
+  assert.equal(activityFrameForKind("searching", 1), "▹")
+  assert.equal(activityFrameForKind("running", 0), "▸")
+  assert.equal(activityFrameForKind("writing", 1), "▹")
+  assert.equal(activityFrameForKind("running", 3, { ENSEMBLE_REDUCED_MOTION: "1" }), "▸")
+  assert.equal(activityFrameForKind("waiting", 1, { NO_COLOR: "1" }), "○")
+})
+
+test("queued activity lines stay static across ticks", () => {
+  for (let tick = 0; tick < 8; tick++) assert.equal(queuedActivityFrame(), "○")
 })
 
 test("work summary counts active work only and names the empty state", () => {
