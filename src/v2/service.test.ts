@@ -680,7 +680,7 @@ test("archiving a workspace interrupts its active native run", async () => {
   }
 })
 
-test("creating an agent inside a workspace leaves it homeless until explicitly added", async () => {
+test("creating an agent inside a workspace leaves it with no workspace until explicitly added", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
@@ -1407,7 +1407,7 @@ test("reset removes ensemble state, config, and bound sessions but preserves han
   }
 })
 
-test("adding an agent can move its homeless direct-chat session into a workspace", async () => {
+test("adding an agent can move its no-workspace direct-chat session into a workspace", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
   const { ctx, movedSessions } = fakeContext()
@@ -1504,7 +1504,7 @@ test("the streaming poller cannot write after reset", async () => {
 })
 
 
-test("parallel direct-chat opens create only one homeless session", async () => {
+test("parallel direct-chat opens create only one no-workspace session", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
   const { ctx, createdSessionIDs } = fakeContext()
