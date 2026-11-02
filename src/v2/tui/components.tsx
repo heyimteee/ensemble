@@ -1,11 +1,13 @@
 import { For, Show, createSignal } from "solid-js"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
+import { approvalSource } from "../types.ts"
 import type { Palette } from "./theme.ts"
 import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
 import { capLineText, capSkills, settingsTabLine, skillAssigned, skillRowLabel, skillToggleMark } from "./skills.ts"
 import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
 import {
   approvalResolvingSuffix,
+  approvalSourceTag,
   approvalsEmptyLine,
   helpEmptyLine,
   pickerEmptyLine,
@@ -105,7 +107,7 @@ export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cu
       <Show when={props.approvals.length === 0}><text fg={props.colors.muted}>{approvalsEmptyLine()}</text></Show>
       <For each={props.approvals}>{(approval, index) => (
         <box flexDirection="column">
-          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}{approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id)}</text>
+          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}[{approvalSourceTag(approvalSource(approval))}] {approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id)}</text>
           <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
         </box>
       )}</For>

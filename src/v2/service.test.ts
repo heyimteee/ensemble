@@ -163,7 +163,7 @@ test("unknown mentions fail clearly instead of silently reaching the leader", as
   }
 })
 
-test("interrupted work waits for an explicit resume approval", async () => {
+test("restart recovery requeues working subtasks without an approval gate", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
@@ -216,17 +216,18 @@ test("interrupted work waits for an explicit resume approval", async () => {
   const stop = await service.start()
   const handlers = service.handlers()
   try {
+    // Nothing on startup mints an approval: the snapshot may already show
+    // the requeued task claimed by a fresh run, but no decision is ever owed.
     const snapshot = await handlers.snapshot({ directory })
-    const task = snapshot.state.subtasks.t
-    assert.equal(task.state, "pending")
-    assert.equal(task.interrupted, true)
-    const approvals = Object.values(snapshot.state.approvals) as any[]
-    assert.equal(approvals.length, 1)
-    assert.equal(approvals[0].kind, "interrupted")
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(Object.values(snapshot.state.approvals).length, 0)
+    assert.equal(snapshot.state.subtasks.t.interrupted, false)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.subtasks.t.state === "replied"
+    })
     const after = await handlers.snapshot({ directory })
-    assert.equal(after.state.subtasks.t.attempts, 1)
-    assert.equal(after.state.subtasks.t.state, "pending")
+    assert.equal(after.state.subtasks.t.outcome, "succeeded")
+    assert.equal(Object.values(after.state.approvals).length, 0)
   } finally {
     await stop()
   }
@@ -300,7 +301,7 @@ test("approving interrupted work resumes it exactly once", async () => {
   await seed.saveAgent({
     id: "a", name: "Nova", title: "", role: "",
     mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [],
-    color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1,
+    color: "cyan", archived: false, pendingSettings: false, version: 1, updatedAt: 1, createdAt: 1,
   })
   await seed.saveWorkspace({
     id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true,
@@ -308,8 +309,13 @@ test("approving interrupted work resumes it exactly once", async () => {
   })
   await seed.saveSubtask({
     id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Interrupted", instruction: "Do work",
-    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false,
-    awaitingChildren: false, attempts: 1, createdAt: 1,
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: true,
+    approvalID: "ap", awaitingChildren: false, attempts: 1, createdAt: 1,
+  })
+  await seed.saveApproval({
+    id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "interrupted", source: "workspace",
+    title: "Resume interrupted work: Interrupted", detail: "The run stopped before it could reply.",
+    payload: { subtaskID: "t" }, status: "pending", createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
@@ -937,7 +943,8 @@ test("discarding interrupted work marks it failed without running", async () => 
   await seed.load()
   await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
   await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
-  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Interrupted", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Interrupted", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: true, approvalID: "ap", awaitingChildren: false, attempts: 1, createdAt: 1 })
+  await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "interrupted", source: "workspace", title: "Resume interrupted work: Interrupted", detail: "The run stopped before it could reply.", payload: { subtaskID: "t" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -2387,6 +2394,231 @@ test("task_status exposes the derived lifecycle facts", async () => {
     assert.ok(child.queueKey)
     assert.ok("leaseUntil" in child)
     assert.ok("deadlineAt" in child)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket68: an order with no native block produces no approval and answers", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-68-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Do the thing" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const after = await handlers.snapshot({ directory })
+    const task = Object.values(after.state.subtasks)[0] as any
+    assert.equal(task.outcome, "succeeded")
+    assert.equal(Object.values(after.state.approvals).filter((approval: any) => approval.status === "pending").length, 0)
+    assert.ok(after.state.messages[workspace.result.id].some((message: any) => message.author === "agent" && message.text === "OK"))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket68: restart recovery requeues dead work without a phantom approval", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-68-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Stale", instruction: "Do work", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.subtasks.t.interrupted, false)
+    assert.equal(Object.values(snapshot.state.approvals).filter((approval: any) => approval.status === "pending").length, 0)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.subtasks.t.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks.t.outcome, "succeeded")
+    assert.equal(Object.values(after.state.approvals).filter((approval: any) => approval.status === "pending").length, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket68: a native permission request gates work and resolves through the host", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-68-"))
+  const { ctx, tools, emitEvent } = fakeContext()
+  const replies: any[] = []
+  ;(ctx as any).permission = { reply: async (input: any) => { replies.push(input) } }
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 400)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Run it" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    emitEvent({ type: "permission.asked", data: { sessionID, id: "perm_1", action: "shell", resources: ["echo hi"] } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.approvals).some((approval: any) => approval.status === "pending" && approval.kind === "native")
+    })
+    const blocked = await handlers.snapshot({ directory })
+    const native = Object.values(blocked.state.approvals).find((approval: any) => approval.kind === "native") as any
+    assert.equal(native.source, "native")
+    assert.equal(native.payload.permissionID, "perm_1")
+    assert.equal(native.payload.sessionID, sessionID)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Follow-up" } })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const held = await handlers.snapshot({ directory })
+    const followup = Object.values(held.state.subtasks).find((task: any) => task.title === "Follow-up") as any
+    assert.ok(followup)
+    assert.equal(followup.state, "pending")
+    emitEvent({ type: "permission.replied", data: { sessionID, requestID: "perm_1", reply: "once" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.approvals[native.id] as any)?.status === "approved"
+    })
+    assert.equal(replies.length, 0)
+    const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: native.id, approve: true } })
+    assert.equal(resolved.ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.title === "Run it" && task.state === "replied")
+    }, 3000)
+    const done = await handlers.snapshot({ directory })
+    assert.equal((done.state.subtasks[Object.values(done.state.subtasks).find((task: any) => task.title === "Run it")!.id] as any).outcome, "succeeded")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket68: resolving a native approval replies on the native session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-68-"))
+  const { ctx, emitEvent } = fakeContext()
+  const replies: any[] = []
+  ;(ctx as any).permission = { reply: async (input: any) => { replies.push(input) } }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Hello" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    emitEvent({ type: "permission.asked", data: { sessionID, id: "perm_9", action: "read", resources: ["/etc/hosts"] } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.approvals).some((approval: any) => approval.status === "pending" && approval.kind === "native")
+    })
+    const before = await handlers.snapshot({ directory })
+    const native = Object.values(before.state.approvals).find((approval: any) => approval.kind === "native") as any
+    const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: native.id, approve: false } })
+    assert.equal(resolved.ok, true)
+    assert.equal(resolved.result.status, "rejected")
+    assert.equal(replies.length, 1)
+    assert.equal(replies[0].sessionID, sessionID)
+    assert.equal(replies[0].requestID, "perm_9")
+    assert.equal(replies[0].decision, "reject")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket68: ask_person parks the run until the user answers", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-68-"))
+  const { ctx, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 400)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Decide this" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    const asked = await tools.get("ask_person").execute({ question: "Which API?" }, { sessionID })
+    assert.match(asked.content, /Waiting/)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).every((task: any) => task.activeRunID === undefined)
+    }, 3000)
+    const parked = await handlers.snapshot({ directory })
+    const task = Object.values(parked.state.subtasks)[0] as any
+    assert.equal(task.state, "working")
+    assert.ok(task.approvalID)
+    const approval = parked.state.approvals[task.approvalID] as any
+    assert.equal(approval.kind, "ask_person")
+    assert.equal(approval.source, "agent")
+    assert.equal(approval.status, "pending")
+    assert.equal(task.resultMessageID, undefined)
+    const agentMessages = parked.state.messages[workspace.result.id].filter((message: any) => message.author === "agent")
+    assert.ok(agentMessages.every((message: any) => message.text !== "OK"))
+    const answered = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: approval.id, approve: true, resolution: "Use v2" } })
+    assert.equal(answered.ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((item: any) => item.state === "replied")
+    }, 3000)
+    const done = await handlers.snapshot({ directory })
+    const finished = Object.values(done.state.subtasks)[0] as any
+    assert.equal(finished.outcome, "succeeded")
+    assert.match(finished.instruction, /Use v2/)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket68: settling work rejects stale product approvals of every kind", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-68-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Work", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 1 })
+  await seed.saveApproval({ id: "out", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "outside_roster", title: "Contact", detail: "Check", status: "pending", createdAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const cancelled = await handlers.invoke({ directory, action: "task.cancel", payload: { id: "t" } })
+    assert.equal(cancelled.ok, true)
+    const after = await handlers.snapshot({ directory })
+    assert.equal((after.state.approvals.out as any).status, "rejected")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

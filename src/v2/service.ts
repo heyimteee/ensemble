@@ -143,7 +143,11 @@ export class EnsembleV2Service {
     })
     await this.store.load()
     this.refreshDmClock()
-    await this.ensureInterruptedApprovals()
+    // Restart recovery lives in the store load path: rows left `working`
+    // across a restart return to `pending` with their attempt budget intact
+    // and no approval minted. A pending decision (ask_person and friends)
+    // survives on the row's approvalID; anything else is just retried.
+    // Approvals are never synthesized for dead work.
     this.retryRegistration = await this.ctx.session.hook("retry", (event: any) => {
       if (!this.profileForSession(event.sessionID)) return
       if (availabilityFailure(event.error)) event.decision = { retry: false }
@@ -163,6 +167,17 @@ export class EnsembleV2Service {
       try {
         for await (const event of this.ctx.event.subscribe({ types: ["session.text.delta", "session.idle"], signal: this.catalogAbort!.signal })) {
           await this.handleStreamEvent(event as any)
+        }
+      } catch {}
+    })()
+    // Native permission mirror (ticket #68): project `permission.asked`
+    // blocks on Ensemble-bound sessions into `native` approvals and resolve
+    // `permission.replied` outcomes locally. User resolution replies on the
+    // host so the run is genuinely gated. Unknown sessions fail open.
+    void (async () => {
+      try {
+        for await (const event of this.ctx.event.subscribe({ types: ["permission.asked", "permission.replied"], signal: this.catalogAbort!.signal })) {
+          await this.handlePermissionEvent(event as any)
         }
       } catch {}
     })()
@@ -256,40 +271,113 @@ export class EnsembleV2Service {
     }
   }
 
-  private async ensureInterruptedApprovals(): Promise<void> {
-    const state = this.store.snapshot()
-    for (const subtask of Object.values(state.subtasks)) {
-      if (!subtask.interrupted || subtask.state !== "pending" || subtask.approvalID) continue
-      await this.ensureInterruptedApproval(subtask)
+  /**
+   * Mirror of the host permission lifecycle for Ensemble-bound sessions.
+   *
+   * Supported plugin API surface (verified against installed
+   * `@opencode/plugin@2.2.1` + `@opencode/client` promise types):
+   * - events `permission.asked` (`data`: `sessionID`, `id`, `action`,
+   *   `resources`, `source?`, `message?`) and `permission.replied` (`data`:
+   *   `sessionID`, `requestID`, `reply: once|always|reject`) via
+   *   `ctx.event.subscribe({ types: [...] })`;
+   * - `ctx.permission.reply({ sessionID, requestID, decision, message? })`
+   *   with `decision: once|always|reject` (PermissionReplyInput). The user
+   *   resolve path always offers `once` (least privilege) or `reject`.
+   * `ctx.permission.list/get` exist but are not needed: the mirror is purely
+   * event-driven, so a restart never resurrects an already-answered host
+   * request as a phantom approval.
+   */
+  private async handlePermissionEvent(event: any): Promise<void> {
+    const data = event?.data ?? event
+    if (event?.type === "permission.asked") {
+      const sessionID = String(data?.sessionID ?? "")
+      const permissionID = String(data?.id ?? "")
+      const action = String(data?.action ?? "permission")
+      if (!sessionID || !permissionID) return
+      const owner = this.ownerForSession(sessionID)
+      if (!owner) return
+      const state = this.store.snapshot()
+      const duplicate = Object.values(state.approvals).some(
+        (approval) => approval.status === "pending" && approval.kind === "native" && approval.payload?.permissionID === permissionID,
+      )
+      if (duplicate) return
+      const resources = Array.isArray(data?.resources) ? data.resources.map(String) : []
+      const approval: Approval = {
+        id: id("approval"),
+        workspaceID: owner.workspaceID,
+        subtaskID: owner.subtaskID,
+        agentID: owner.agentID,
+        kind: "native",
+        source: "native",
+        title: `Native permission: ${action}`,
+        detail: resources.length > 0 ? `${action} ${resources.join(" ")}`.slice(0, 280) : String(data?.message ?? action),
+        payload: { permissionID, sessionID, action, resources },
+        status: "pending",
+        createdAt: now(),
+      }
+      await this.store.saveApproval(approval)
+      const workspace = owner.workspaceID ? state.workspaces[owner.workspaceID] : undefined
+      // Native approvals deliberately do NOT set subtask.approvalID: the host
+      // already blocks the live session, and pump gating below holds future
+      // runs. The row is the inbox mirror plus the host-reply path.
+      if (workspace) await this.appendMessage(workspace, { author: "system", text: `Native permission needs a decision: ${action}`, kind: "approval", taskID: owner.subtaskID })
+      return
+    }
+    if (event?.type === "permission.replied") {
+      const requestID = String(data?.requestID ?? "")
+      if (!requestID) return
+      const state = this.store.snapshot()
+      const approval = Object.values(state.approvals).find(
+        (item) => item.status === "pending" && item.kind === "native" && item.payload?.permissionID === requestID,
+      )
+      if (!approval) return
+      const reply = String(data?.reply ?? "")
+      approval.status = reply === "reject" ? "rejected" : "approved"
+      approval.resolvedAt = now()
+      approval.resolution = `Host permission ${reply}.`
+      await this.store.saveApproval(approval)
+      this.schedule()
     }
   }
 
-  private async ensureInterruptedApproval(subtask: Subtask): Promise<void> {
-    if (subtask.approvalID) return
+  /**
+   * Resolve the Ensemble owner of a native session: the live run first,
+   * then any stored binding (current or historical). Unknown sessions fail
+   * open — no approval is minted for sessions Ensemble does not own.
+   */
+  private ownerForSession(sessionID: string): { workspaceID?: string; agentID?: string; subtaskID?: string } | undefined {
+    const run = this.runForSession(this.store.snapshot(), sessionID)
+    if (run) return { workspaceID: run.workspaceID, agentID: run.agentID, subtaskID: run.subtaskID }
     const state = this.store.snapshot()
-    const existing = Object.values(state.approvals).find((approval) => approval.status === "pending" && approval.kind === "interrupted" && approval.subtaskID === subtask.id)
-    if (existing) {
-      subtask.approvalID = existing.id
-      await this.store.saveSubtask(subtask)
-      return
+    const binding = Object.values(state.bindings).find((item) => item.sessionID === sessionID || (item.history ?? []).includes(sessionID))
+    if (!binding) return undefined
+    return { workspaceID: binding.workspaceID, agentID: binding.agentID }
+  }
+
+  /** True while the host waits on a user decision for this session. */
+  private pendingNativeForSession(sessionID: string): boolean {
+    return Object.values(this.store.snapshot().approvals).some(
+      (approval) => approval.status === "pending" && approval.kind === "native" && approval.payload?.sessionID === sessionID,
+    )
+  }
+
+  /** Drop native mirrors for a session that no longer exists (binding replaced/removed). */
+  private async settleNativeForSession(sessionID: string, reason: string): Promise<void> {
+    const state = this.store.snapshot()
+    for (const approval of Object.values(state.approvals)) {
+      if (approval.status !== "pending" || approval.kind !== "native" || approval.payload?.sessionID !== sessionID) continue
+      approval.status = "rejected"
+      approval.resolution = reason
+      approval.resolvedAt = now()
+      await this.store.saveApproval(approval)
     }
-    const approval: Approval = {
-      id: id("approval"),
-      workspaceID: subtask.workspaceID,
-      subtaskID: subtask.id,
-      agentID: subtask.assigneeID,
-      kind: "interrupted",
-      title: `Resume interrupted work: ${subtask.title}`,
-      detail: subtask.error ?? "The run stopped before it could reply.",
-      payload: { subtaskID: subtask.id },
-      status: "pending",
-      createdAt: now(),
-    }
-    await this.store.saveApproval(approval)
-    subtask.approvalID = approval.id
-    await this.store.saveSubtask(subtask)
-    const workspace = state.workspaces[subtask.workspaceID]
-    if (workspace) await this.appendMessage(workspace, { author: "system", text: `Interrupted work needs a decision: ${subtask.title}`, kind: "approval", taskID: subtask.id })
+  }
+
+  /** Reply on the host permission request. Fail-open: a gone request still resolves locally. */
+  private async replyNativePermission(sessionID: string, requestID: string, decision: "once" | "reject", message?: string): Promise<void> {
+    const reply = this.ctx?.permission?.reply
+    if (typeof reply !== "function") return
+    await reply.call(this.ctx.permission, { sessionID, requestID, decision, ...(message ? { message } : {}) })
   }
 
   private defer(ms: number, fn: () => void): void {
@@ -1085,11 +1173,27 @@ export class EnsembleV2Service {
     }
   }
 
+  /**
+   * Settle every pending approval tied to finished work. Used on explicit
+   * user transitions (cancel/retry/reassign/reap): the decision is moot, so
+   * nothing lingers — including `outside_roster` and `cross_project` rows,
+   * which previously went stale.
+   */
   private async settlePendingApprovals(subtaskID: string, resolution: string): Promise<void> {
+    await this.settleLinkedApprovals(subtaskID, resolution, new Set())
+  }
+
+  /**
+   * Settle pending approvals tied to one subtask, except kinds in `exclude`.
+   * Terminal run paths use this with native excluded: only the host (via
+   * `permission.replied`) or an explicit user resolve settles a native
+   * mirror, since the host request may still be live after our run ends.
+   */
+  private async settleLinkedApprovals(subtaskID: string, resolution: string, exclude: ReadonlySet<Approval["kind"]>): Promise<void> {
     const state = this.store.snapshot()
     for (const approval of Object.values(state.approvals)) {
       if (approval.status !== "pending" || approval.subtaskID !== subtaskID) continue
-      if (approval.kind !== "ask_person" && approval.kind !== "interrupted") continue
+      if (exclude.has(approval.kind)) continue
       approval.status = "rejected"
       approval.resolution = resolution
       approval.resolvedAt = now()
@@ -1557,7 +1661,7 @@ export class EnsembleV2Service {
       if (approval.status === requested) return approval
       throw Object.assign(new Error("Approval was already resolved differently."), { code: "already_resolved" })
     }
-    if (approval.subtaskID && (approval.kind === "ask_person" || approval.kind === "interrupted" || approval.kind === "outside_roster")) {
+    if (approval.subtaskID && (approval.kind === "ask_person" || approval.kind === "interrupted" || approval.kind === "outside_roster" || approval.kind === "cross_project")) {
       const subtask = state.subtasks[approval.subtaskID]
       if (!subtask || subtask.state === "replied") {
         approval.status = "rejected"
@@ -1566,6 +1670,23 @@ export class EnsembleV2Service {
         await this.store.saveApproval(approval)
         return approval
       }
+    }
+    // Native mirrors are never stale-guarded: the host request may still be
+    // live after our run ended, so an explicit resolve always replies.
+    if (approval.kind === "native") {
+      const sessionID = String(approval.payload?.sessionID ?? "")
+      const requestID = String(approval.payload?.permissionID ?? approval.payload?.requestID ?? "")
+      approval.status = requested
+      approval.resolvedAt = now()
+      approval.resolution = payload.resolution
+      await this.store.saveApproval(approval)
+      // Least privilege: approve grants once; reject denies. Fail-open when
+      // the host already dropped the request — the row still resolves.
+      if (sessionID && requestID) {
+        await this.replyNativePermission(sessionID, requestID, payload.approve ? "once" : "reject", typeof payload.resolution === "string" ? payload.resolution : undefined).catch(() => undefined)
+      }
+      this.schedule()
+      return approval
     }
     approval.status = requested
     approval.resolvedAt = now()
@@ -1856,6 +1977,7 @@ export class EnsembleV2Service {
       workspaceID: memory.workspaceID,
       agentID: memory.agentID,
       kind: "promote_memory",
+      source: "memory",
       title: `Promote memory for ${this.agentName(memory.agentID)}`,
       detail: memory.text,
       payload: { memoryID: memory.id },
@@ -2091,6 +2213,7 @@ export class EnsembleV2Service {
           subtaskID: run?.subtaskID,
           agentID: found.agent.id,
           kind: "outside_roster",
+          source: "workspace",
           title: `${found.agent.name} wants to ask ${agent.name} in the group chat`,
           detail: text,
           payload: {
@@ -2177,6 +2300,7 @@ export class EnsembleV2Service {
           subtaskID: run?.subtaskID,
           agentID: found.agent.id,
           kind: "outside_roster",
+          source: "workspace",
           title: `${found.agent.name} wants to contact ${target.name}`,
           detail: text,
           payload: { agentID: target.id, text, correlationID },
@@ -2238,6 +2362,7 @@ export class EnsembleV2Service {
         subtaskID: run?.subtaskID,
         agentID: sender.id,
         kind: "outside_roster",
+        source: "workspace",
         title: `${sender.name} wants to hand off to ${recipient.name}`,
         detail: task,
         payload: { assigneeID: recipient.id, title: task, instruction: summary ? `${task}\n\n${summary} (${path})` : `${task} (${path})`, constraints, expected, mode: "research", handoff: true, correlationID, path, depth: (run ? this.delegationDepth(state, run.subtaskID) : 0) + 1, parentID: run?.subtaskID, senderID: sender.id },
@@ -2357,6 +2482,7 @@ export class EnsembleV2Service {
         subtaskID: subtask?.id,
         agentID: agent.id,
         kind: "outside_roster",
+        source: "workspace",
         title: `${agent.name} wants to contact ${target.name}`,
         detail: String(input.instruction),
         payload: { assigneeID: target.id, title: input.title, instruction: input.instruction, constraints: input.constraints, expected: input.expected, mode: input.mode },
@@ -2396,6 +2522,7 @@ export class EnsembleV2Service {
       subtaskID: subtask?.id,
       agentID: found.agent.id,
       kind: "ask_person",
+      source: "agent",
       title: `${found.agent.name} needs your input`,
       detail: String(input.question),
       status: "pending",
@@ -2440,6 +2567,7 @@ export class EnsembleV2Service {
         workspaceID: workspace.id,
         agentID: found.agent.id,
         kind: "promote_memory",
+        source: "memory",
         title: `Promote learned knowledge for ${this.agentName(found.agent.id)}`,
         detail: text,
         payload: { memoryID: memory.id },
@@ -2463,6 +2591,7 @@ export class EnsembleV2Service {
       subtaskID: run?.subtaskID,
       agentID: found.agent.id,
       kind: "cross_project",
+      source: "memory",
       title: input.scope === "private_transcript" ? "Share private transcript content" : "Share knowledge across projects",
       detail: String(input.text),
       payload: { text: input.text, scope: input.scope },
@@ -2587,6 +2716,9 @@ export class EnsembleV2Service {
           if (busyAgents.has(bindingKey(task.workspaceID, task.assigneeID!))) continue
           const existingBinding = this.store.binding(task.workspaceID, task.assigneeID!)
           if (existingBinding && this.directBusy.has(existingBinding.sessionID)) continue
+          // A session with an unresolved native permission holds its agent:
+          // never start new work behind a host block.
+          if (existingBinding && this.pendingNativeForSession(existingBinding.sessionID)) continue
           if (task.mode === "edit" && busyEditDirs.has(workspace.directory)) continue
           busyAgents.add(bindingKey(task.workspaceID, task.assigneeID!))
           if (task.mode === "edit") busyEditDirs.add(workspace.directory)
@@ -2688,6 +2820,22 @@ export class EnsembleV2Service {
       await this.failTask(task, "Could not create a native session.")
       return
     }
+    if (this.pendingNativeForSession(binding.sessionID)) {
+      // The host waits on a user decision for this session: do not pile
+      // another prompt behind it. Requeue with a short backoff; the
+      // permission reply (host event or user resolve) reschedules.
+      clearInterval(heartbeat)
+      task.state = "pending"
+      task.outcome = "pending"
+      task.error = "Waiting for a native permission decision."
+      task.activeRunID = undefined
+      task.claimedBy = undefined
+      task.leaseUntil = undefined
+      task.retryAfter = now() + 10_000
+      await this.store.saveSubtask(task)
+      this.defer(10_000, () => this.schedule())
+      return
+    }
     if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) {
       await this.ctx.session.remove({ sessionID: binding.sessionID }).catch(() => undefined)
       await this.store.removeBinding(task.workspaceID, agent.id).catch(() => undefined)
@@ -2747,31 +2895,59 @@ export class EnsembleV2Service {
       }
       const current = this.store.snapshot()
       const currentTask = current.subtasks[task.id]
-      if (!currentTask || currentTask.activeRunID !== runID) return
+      // A terminal state always wins over a late run result: a rejection (or
+      // any other settle) that landed while the native session was finishing
+      // must not be clobbered by the leftover reply.
+      if (!currentTask || currentTask.activeRunID !== runID || currentTask.state === "replied") return
       if (result?.failure) {
+        // No shadow approvals: a failed native run is retried inside its
+        // attempt budget (backoff, no approval) or fails terminally. Only a
+        // proven host block — the native permission mirror — ever gates.
         const uncertain = result.tools.length > 0
         const errorText = uncertain ? "A tool outcome is uncertain. Review the native session before retrying." : result.failure.message ?? "All models failed."
-        currentTask.state = "pending"
-        currentTask.interrupted = true
+        const linked = currentTask.approvalID ? current.approvals[currentTask.approvalID] : undefined
         currentTask.activeRunID = undefined
         currentTask.claimedBy = undefined
         currentTask.leaseUntil = undefined
-        currentTask.error = errorText
-        await this.store.saveSubtask(currentTask)
+        if (linked?.status === "pending") {
+          // A decision is still owed: park the run, keep the question open.
+          await this.finalizeStream(live, "Paused — waiting for your answer in the approvals inbox.", true, globalEpoch, workspaceEpoch, task.workspaceID)
+          await this.store.saveSubtask(currentTask)
+          return
+        }
+        if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
+          const delayMs = currentTask.attempts <= 1 ? 5_000 : 60_000
+          currentTask.state = "pending"
+          currentTask.outcome = "pending"
+          currentTask.error = errorText
+          currentTask.retryAfter = now() + delayMs
+          await this.store.saveSubtask(currentTask)
+          await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
+          this.defer(delayMs, () => this.schedule())
+          return
+        }
+        await this.failTask(currentTask, errorText)
         await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
-        await this.ensureInterruptedApproval(currentTask)
         return
       }
       const mention = normalizeAgentMentions(result?.text || "Work completed.", workspace.memberIDs.map((id) => current.agents[id]).filter((item): item is Agent => Boolean(item)))
       const reply = mention.text
       if (mention.changed) await this.appendMessage(workspace, { author: "system", text: `Mention syntax normalized: ${mention.names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; use ensemble_delegate or ensemble_send_message.`, kind: "system", taskID: task.id })
       if (currentTask.approvalID) {
-        await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
-        currentTask.activeRunID = undefined
-        currentTask.claimedBy = undefined
-        currentTask.leaseUntil = undefined
-        await this.store.saveSubtask(currentTask)
-        return
+        const linked = current.approvals[currentTask.approvalID]
+        if (linked?.status === "pending") {
+          // A product decision is still owed: park the run WITHOUT
+          // finalizing the partial output as the answer. The reply lands
+          // only after the user answers and the re-queued run completes.
+          await this.finalizeStream(live, "Paused — waiting for your answer in the approvals inbox.", true, globalEpoch, workspaceEpoch, task.workspaceID)
+          currentTask.activeRunID = undefined
+          currentTask.claimedBy = undefined
+          currentTask.leaseUntil = undefined
+          await this.store.saveSubtask(currentTask)
+          return
+        }
+        // Resolved meanwhile: drop the stale link and finish normally.
+        currentTask.approvalID = undefined
       }
       const children = Object.values(current.subtasks).filter((item) => item.parentID === currentTask.id)
       currentTask.activeRunID = undefined
@@ -2804,6 +2980,11 @@ export class EnsembleV2Service {
       currentTask.resultMessageID = message?.id
       await this.store.saveSubtask(currentTask)
       this.noteWorkChanged(currentTask)
+      // Dependent product decisions that outlived the work are superseded —
+      // nothing may linger while an answer is already visible. Native
+      // mirrors are excluded: only the host or an explicit resolve settles
+      // them, since the host request may still be live after our run ends.
+      await this.settleLinkedApprovals(currentTask.id, "Superseded: the linked work finished.", new Set(["native"]))
       if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID)
     } catch (error: any) {
       const current = this.store.snapshot()
@@ -2867,6 +3048,9 @@ export class EnsembleV2Service {
     if (!created?.id) return undefined
     const binding = { workspaceID: workspace.id, agentID: agent.id, sessionID: created.id, history: existing ? [...(existing.history ?? []), existing.sessionID] : [], agentVersion: agent.version, updatedAt: now() }
     await this.store.saveBinding(binding)
+    // The replaced session is gone: any native mirror for it can never be
+    // answered by the host, so settle it instead of lingering.
+    if (existing && existing.sessionID !== created.id) await this.settleNativeForSession(existing.sessionID, "Session ended before the permission was answered.")
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
     const current = this.store.snapshot().agents[agent.id]
     if (current?.pendingSettings) {
@@ -2891,6 +3075,7 @@ export class EnsembleV2Service {
     task.outcome = "failed"
     task.error = error
     task.activeRunID = undefined
+    task.approvalID = undefined
     task.claimedBy = undefined
     task.leaseUntil = undefined
     task.retryAfter = undefined
@@ -2898,6 +3083,10 @@ export class EnsembleV2Service {
     task.finishedAt = at
     await this.store.saveSubtask(task)
     this.noteWorkChanged(task)
+    // Dead work surfaces as a failure, not a phantom continue prompt: settle
+    // linked product decisions as superseded. Native mirrors are excluded —
+    // only the host or an explicit resolve settles them.
+    await this.settleLinkedApprovals(task.id, "Superseded: the linked work finished.", new Set(["native"]))
     const workspace = this.store.snapshot().workspaces[task.workspaceID]
     // A handoff that cannot be delivered produces a failure notice in the
     // conversation that asked, attributed to the intended recipient.

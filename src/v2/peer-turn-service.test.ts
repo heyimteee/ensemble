@@ -294,7 +294,7 @@ test("per-agent serialization holds under parallel user peer turns", async () =>
   }
 })
 
-test("restart recovery resumes an interrupted peer turn without duplicating it", async () => {
+test("restart recovery resumes a peer turn without an approval gate", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const shared = new Map<string, unknown>()
   const first = fakeContext(shared)
@@ -315,10 +315,9 @@ test("restart recovery resumes an interrupted peer turn without duplicating it",
   const handlers = service.handlers()
   try {
     const loaded = await handlers.snapshot({ directory })
-    assert.equal(loaded.state.subtasks.t.state, "pending")
-    assert.equal(loaded.state.subtasks.t.attempts, 2)
+    assert.ok(loaded.state.subtasks.t.attempts >= 2)
     assert.equal(loaded.state.subtasks.t.turn?.correlationID, "peer_seed")
-    await handlers.invoke({ directory, action: "approval.resolve", payload: { id: (Object.values(loaded.state.approvals) as any[])[0].id, approve: true } })
+    assert.equal(Object.values(loaded.state.approvals).filter((approval: any) => approval.status === "pending").length, 0)
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       return next.state.subtasks.t.state === "replied"

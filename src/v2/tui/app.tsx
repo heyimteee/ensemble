@@ -257,6 +257,9 @@ export function EnsembleV2App() {
   // the set of still-pending approval ids, matched against each task's
   // approvalID (or its interrupted flag inside isNeedsYouTask).
   const pendingApprovalIDs = createMemo(() => new Set(pendingApprovals().map((approval) => approval.id)))
+  // Native mirrors block their linked subtask's session without setting
+  // approvalID, so the needs-you marker needs the subtask set too.
+  const nativeBlockedSubtaskIDs = createMemo(() => new Set(pendingApprovals().filter((approval) => approval.kind === "native" && approval.subtaskID).map((approval) => approval.subtaskID!)))
   const selectedApproval = createMemo(() => pendingApprovals()[approvalCursor()])
   const railItems = createMemo<RailItem[]>(() => {
     const query = workspaceFilter().toLowerCase()
@@ -2141,7 +2144,7 @@ export function EnsembleV2App() {
                                 // in-flight action shows its interim label, and
                                 // user-blocked rows carry the needs-you marker —
                                 // both derived per row from existing state.
-                                const needsYou = isNeedsYouTask(task, pendingApprovalIDs())
+                                const needsYou = isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
                                 const pending = pendingWork()?.id === task.id ? pendingWork()!.action : null
                                 const rowStatus = deriveWorkStatus(task, Date.now())
                                 return (

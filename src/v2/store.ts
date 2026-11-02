@@ -101,10 +101,12 @@ export class V2Store {
       }
       if (subtask.state === "working") {
         // Restart recovery: re-queue interruptible work without duplicating
-        // it. Attempts and the idempotency key are kept so the retried work
-        // resumes its budget instead of starting a second copy.
+        // it and without minting an approval. Attempts and the idempotency
+        // key are kept so the retried work resumes its budget instead of
+        // starting a second copy. Rows that still carry an approvalID keep
+        // waiting on that real pending decision; everything else retries.
         subtask.state = "pending"
-        subtask.interrupted = true
+        subtask.interrupted = false
         subtask.activeRunID = undefined
         subtask.claimedBy = undefined
         subtask.leaseUntil = undefined

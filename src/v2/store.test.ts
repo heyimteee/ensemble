@@ -176,7 +176,7 @@ test("load recovers claimed work without duplicating it and backfills queue keys
   await loaded.load()
   const recovered = loaded.snapshot().subtasks.t
   assert.equal(recovered.state, "pending")
-  assert.equal(recovered.interrupted, true)
+  assert.equal(recovered.interrupted, false)
   assert.equal(recovered.claimedBy, undefined)
   assert.equal(recovered.leaseUntil, undefined)
   assert.equal(recovered.activeRunID, undefined)
