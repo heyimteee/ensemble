@@ -14,6 +14,7 @@ import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
 import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
+import { SKILL_VISIBLE_LIMIT } from "./skills.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
@@ -395,8 +396,8 @@ export function EnsembleV2App() {
     return Object.values(state()?.memories ?? {}).filter((memory) => !memory.deletedAt && memory.agentID === agent.id)
   })
   const filteredSkills = createMemo(() => {
-    const query = skillFilter().toLowerCase()
-    return skills().filter((skill) => !query || skill.id.toLowerCase().includes(query) || skill.name.toLowerCase().includes(query))
+    const query = skillFilter().trim().toLowerCase()
+    return skills().filter((skill) => !query || skill.id.toLowerCase().includes(query) || skill.name.toLowerCase().includes(query) || (skill.description ?? "").toLowerCase().includes(query))
   })
   const selectedMissingSkills = createMemo(() => {
     const agent = draft() ?? selectedAgent()
@@ -1028,7 +1029,7 @@ export function EnsembleV2App() {
   const moveSettingsCursor = (delta: number) => {
     if (settingsTab() === "memories") setMemoryCursor((cursor) => Math.max(0, Math.min(Math.max(0, agentMemories().length - 1), cursor + delta)))
     else if (settingsTab() === "models") setBackupCursor((cursor) => Math.max(0, Math.min(Math.max(0, (draft()?.backupModels.length ?? 1) - 1), cursor + delta)))
-    else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredSkills().length - 1), cursor + delta)))
+    else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, Math.min(filteredSkills().length, SKILL_VISIBLE_LIMIT) - 1), cursor + delta)))
   }
 
   // Slice B motion gate: the 4 fps clock runs only while something is in

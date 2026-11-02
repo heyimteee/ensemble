@@ -307,6 +307,39 @@ memory_text=$(live_snapshot_value 'Object.values(output.state.memories).map(func
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
 
+# Slice D (ticket #61): the Skillbox tab is a searchable skill palette with
+# `name — description` rows, inline filtering, fill-not-tick assignment, and
+# an explicit overflow line past the viewport cap (cap overflow itself is
+# unit-covered: the host catalog here is too small to page).
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings reopened for skillbox"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "› Skillbox" 10 "skillbox tab active with cursor"
+live_key "$LIVE_TUI_SESSION" "C-f"
+live_require_text "$LIVE_TUI_SESSION" "typing… enter done · esc cancel" 10 "skill filter editing"
+live_type "$LIVE_TUI_SESSION" "zzz-no-such-skill"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "No matching skills" 10 "empty palette names the miss"
+live_key "$LIVE_TUI_SESSION" "C-f"
+live_key_repeat "$LIVE_TUI_SESSION" "BSpace" 20
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "typing… enter done · esc cancel" 10 "filter editing submitted"
+if live_capture_contains "$LIVE_TUI_SESSION" "[ ]"; then
+  live_key "$LIVE_TUI_SESSION" "Space"
+  live_require_text "$LIVE_TUI_SESSION" "[x]" 10 "fill mark shows the assignment"
+  live_require_text "$LIVE_TUI_SESSION" "UNSAVED" 10 "skill toggle dirties the draft"
+  live_key "$LIVE_TUI_SESSION" Escape
+  live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "skill draft discards via confirm"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed after skill discard"
+else
+  live_log "host skill catalog is empty; toggle covered by unit tests"
+  live_key "$LIVE_TUI_SESSION" Escape
+  live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
+fi
+
 live_check_help
 
 live_key "$LIVE_TUI_SESSION" '~'

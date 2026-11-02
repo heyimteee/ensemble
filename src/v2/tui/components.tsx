@@ -2,6 +2,7 @@ import { For, Show, createSignal } from "solid-js"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import type { Palette } from "./theme.ts"
 import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
+import { capLineText, capSkills, settingsTabLine, skillAssigned, skillRowLabel, skillToggleMark } from "./skills.ts"
 import { platformLabel } from "./platform.ts"
 import { helpGroups, helpKeyLabel, shortcutGroups } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
@@ -146,11 +147,12 @@ export function SettingsView(props: {
   skillCatalog: SkillOption[]
 }) {
   const missing = () => props.agent ? missingSkills(props.agent, props.skillCatalog) : []
+  const capped = () => capSkills(props.skills)
   return (
     <Show when={props.agent} fallback={<text fg={props.colors.muted}>Select an agent and press s.</text>}>
       <box flexDirection="column">
         <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>{props.agent!.name} · settings {props.dirty ? "· UNSAVED" : ""}{props.agent!.pendingSettings ? " · pending next task" : ""}</text>
-        <text fg={props.colors.muted}>General · Models · Memories · Skillbox (Tab)</text>
+        <text fg={props.colors.muted}>{settingsTabLine(props.tab, props.memories.length, props.agent!.skillbox.length, props.skillCatalog.length)}</text>
         <Show when={props.tab === "general"}>
           <text>Name: {props.agent!.name}</text>
           <text>Title: {props.agent!.title}</text>
@@ -172,9 +174,11 @@ export function SettingsView(props: {
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
           <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}{props.filterEditing ? " · typing… enter done · esc cancel" : ""}</text>
-          <For each={props.skills.slice(0, 40)}>{(skill, index) => (
-            <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{props.agent!.skillbox.includes(skill.id) ? "[x]" : "[ ]"} {skill.name} ({skill.id})</text>
+          <Show when={props.skills.length === 0}><text fg={props.colors.muted}>No matching skills</text></Show>
+          <For each={capped().visible}>{(skill, index) => (
+            <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{props.skillCursor === index() ? "› " : "  "}{skillToggleMark(skillAssigned(props.agent!.skillbox, skill.id))} {skillRowLabel(skill)}</text>
           )}</For>
+          <Show when={capped().overflow > 0}><text fg={props.colors.faint}>{capLineText(capped().overflow)}</text></Show>
           <text fg={props.colors.muted}>Space toggles · empty means no optional skills</text>
         </Show>
         <text fg={props.colors.muted}>{platformLabel("Ctrl+S save · Esc cancel")}</text>
