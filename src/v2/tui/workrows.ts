@@ -229,7 +229,7 @@ export function activityLine(agentLabel: string, verb: string, frame: string): s
 /** Max visible activity lines; the rest collapse into a `+N more` overflow line. */
 export const MAX_VISIBLE_ACTIVITY = 3
 
-export type ActivityEntry = { key: string; label: string; createdAt: number; verb: string; kind: ActivityVerbKind }
+export type ActivityEntry = { key: string; label: string; agentID?: string; createdAt: number; verb: string; kind: ActivityVerbKind }
 
 /**
  * Per-agent live display for one active task (slice C): peer-turn and
@@ -276,7 +276,7 @@ export function splitActivityGroups(
     if (isTerminalWorkStatus(status)) continue
     const label = labelFor(task)
     const detail = activityDetailForTask(task, label)
-    const entry: ActivityEntry = { key: keyFor(task), label, createdAt: task.createdAt, verb: detail.verb, kind: detail.kind }
+    const entry: ActivityEntry = { key: keyFor(task), label, agentID: task.assigneeID, createdAt: task.createdAt, verb: detail.verb, kind: detail.kind }
     const bucket = status === "pending" ? queuedByKey : liveByKey
     const previous = bucket.get(entry.key)
     if (!previous || entry.createdAt < previous.createdAt) bucket.set(entry.key, entry)

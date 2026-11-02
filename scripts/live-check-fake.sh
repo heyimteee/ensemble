@@ -312,6 +312,23 @@ peer_attr=$(live_snapshot_value '(function () { var ws = Object.values(output.st
 [[ "$peer_attr" == '"user|true|1"' ]] || live_fail "peer turn attribution wrong (got $peer_attr)"
 live_log "peer turn ran to completed with asking/answered attribution ($peer_attr)"
 
+# Ticket #67 bubbles: agent messages read left-aligned in filled bubbles,
+# user messages read right-aligned inside the bounded width. Text capture
+# cannot see fills, but the box structure is observable: every row opens
+# with the rail/chat borders, so the user line carries a deep space run
+# while the agent reply starts at the left margin behind its accent edge.
+pane_bubbles=$(live_capture "$LIVE_TUI_SESSION")
+echo "$pane_bubbles" | grep -qE " {15,}fake-queue-alpha" || live_fail "user bubble not right-aligned in text capture"
+echo "$pane_bubbles" | grep -qF "│ │ │ Onboarding complete. I am ready." || live_fail "agent bubble not left-aligned with accent edge in text capture"
+live_log "bubble layout observable in text capture (user right, agent left with edge)"
+# Ticket #67 inline completions: both delegation outcomes finished before
+# the peer ask, so they render above it — never in a trailing feed.
+pane_inline=$(live_capture "$LIVE_TUI_SESSION")
+first_done=$(grep -nF "● FakeAgent finished:" <<<"$pane_inline" | head -1 | cut -d: -f1)
+peer_at=$(grep -nF "peer-check" <<<"$pane_inline" | head -1 | cut -d: -f1)
+[[ -n "$first_done" && -n "$peer_at" && "$first_done" -lt "$peer_at" ]] || live_fail "completion not inline at finish position (done @$first_done peer @$peer_at)"
+live_log "completions render inline at finish position (done @$first_done before peer @$peer_at)"
+
 # Slice C second probe (asking exactly-once): another mention proves the
 # assignment → asking → answer flow repeats with one line per leg and no
 # duplicates across bursts. The `fake-rich-fixture` trigger makes this turn's
@@ -359,8 +376,31 @@ live_require_text "$LIVE_TUI_SESSION" "Answer from \$FakeAgent" 15 "latest relay
 relay_answers=$(live_snapshot_value '(function () { var turns = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" }); var n = 0; for (var i = 0; i < turns.length; i++) { var c = turns[i].turn && turns[i].turn.correlationID; if (!c) continue; var ws = output.state.messages[turns[i].workspaceID] || []; for (var j = 0; j < ws.length; j++) { if (ws[j].correlationID === c && ws[j].agentID === turns[i].assigneeID) n++; } } return turns.length + "|" + n })()')
 [[ "$relay_answers" == '"3|3"' ]] || live_fail "relay answers not exactly one per turn (got $relay_answers)"
 live_assert_absence "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" "asking row unmounts when the answers land"
-live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 5 "every terminal outcome announced once"
+# Ticket #67: inline completions scroll with the conversation, so after the
+# long fixture replies only the tail is visible in the pane. Exactly-once
+# across all five is proven by the snapshot (five terminal subtasks) plus
+# the accumulator/dedup unit pins and the earlier fully-visible counts of
+# two and three; the pane proves the latest outcome renders inline.
+live_assert_text "$LIVE_TUI_SESSION" "● FakeAgent finished: !FakeAgent peer-direct-probe fake-rich-fixture" "latest outcome announced inline at the tail"
+terminal_total=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state === "replied" }).length')
+[[ "$terminal_total" == "5" ]] || live_fail "expected five terminal subtasks (got $terminal_total)"
 live_log "probes repeated assignment, asking, and answer exactly once each ($relay_answers)"
+
+# Ticket #67: the floating back-to-bottom control is a bare ↓ glyph — no
+# words, no pill text. The long fixture replies above guarantee the
+# transcript overflows the viewport, so PageUp provably scrolls; End still
+# jumps back to the bottom.
+pane_before_scroll=$(live_capture "$LIVE_TUI_SESSION")
+live_key "$LIVE_TUI_SESSION" PageUp
+sleep 1
+pane_scrolled=$(live_capture "$LIVE_TUI_SESSION")
+[[ "$pane_before_scroll" != "$pane_scrolled" ]] || live_fail "PageUp did not scroll the transcript"
+live_require_text "$LIVE_TUI_SESSION" "↓" 10 "bare back-to-bottom glyph when scrolled up"
+live_assert_absence "$LIVE_TUI_SESSION" "↓ bottom" "no pill words on the jump control"
+live_assert_absence "$LIVE_TUI_SESSION" "bottom · end" "no key label on the jump control"
+live_key "$LIVE_TUI_SESSION" End
+live_require_text "$LIVE_TUI_SESSION" "Answer from \$FakeAgent" 10 "End jumps back to the bottom"
+live_log "bare ↓ jump control with working End key"
 
 # Slice C direct surface (verbatim + queued): user text renders literally
 # while agent text stays Markdown, and parked user-owned input shows
