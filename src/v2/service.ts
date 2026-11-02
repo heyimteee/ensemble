@@ -1826,7 +1826,9 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     const memory = state.memories[payload.id]
     if (!memory || memory.deletedAt) throw Object.assign(new Error("Memory not found."), { code: "not_found" })
-    memory.text = String(payload.text ?? memory.text).trim()
+    const text = String(payload.text ?? memory.text).trim()
+    if (!text) throw Object.assign(new Error("Memory text is required."), { code: "empty" })
+    memory.text = text
     memory.updatedAt = now()
     memory.history.push({ at: now(), action: "edited", by: "user" })
     await this.store.saveMemory(memory)

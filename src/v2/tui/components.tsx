@@ -3,6 +3,7 @@ import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../typ
 import type { Palette } from "./theme.ts"
 import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
 import { capLineText, capSkills, settingsTabLine, skillAssigned, skillRowLabel, skillToggleMark } from "./skills.ts"
+import { memoryCountLabel, memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
 import { platformLabel } from "./platform.ts"
 import { helpGroups, helpKeyLabel, shortcutGroups } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
@@ -140,6 +141,9 @@ export function SettingsView(props: {
   dirty: boolean
   memories: Memory[]
   memoryCursor: number
+  memoryFilter: string
+  memoryFilterEditing: boolean
+  memoryTotal: number
   backupCursor: number
   skills: SkillOption[]
   skillCursor: number
@@ -153,7 +157,7 @@ export function SettingsView(props: {
     <Show when={props.agent} fallback={<text fg={props.colors.muted}>Select an agent and press s.</text>}>
       <box flexDirection="column">
         <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>{props.agent!.name} · settings {props.dirty ? "· UNSAVED" : ""}{props.agent!.pendingSettings ? " · pending next task" : ""}</text>
-        <text fg={props.colors.muted}>{settingsTabLine(props.tab, props.memories.length, props.agent!.skillbox.length, props.skillCatalog.length)}</text>
+        <text fg={props.colors.muted}>{settingsTabLine(props.tab, props.memoryTotal, props.agent!.skillbox.length, props.skillCatalog.length)}</text>
         <Show when={props.tab === "general"}>
           <text>Name: {props.agent!.name}</text>
           <text>Title: {props.agent!.title}</text>
@@ -166,11 +170,16 @@ export function SettingsView(props: {
           <text fg={props.colors.muted}>{platformLabel("e main · b add · Ctrl+↑/↓ move · Backspace remove")}</text>
         </Show>
         <Show when={props.tab === "memories"}>
+          <text fg={props.colors.muted}>Filter: {props.memoryFilter || "(none)"} · {platformLabel("/ filter · Ctrl+F")}{props.memoryFilterEditing ? " · typing… enter done · esc cancel" : ""}</text>
           <For each={props.memories}>{(memory, index) => (
-            <text fg={props.memoryCursor === index() ? props.colors.good : props.colors.text}>[{memory.origin}/{memory.scope}] {short(memory.text, 80)} · {memory.source}</text>
+            <box flexDirection="column">
+              <text fg={props.memoryCursor === index() ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" wrapMode="word">{props.memoryCursor === index() ? "› " : "  "}{memory.text}</text>
+              <text fg={memoryNeedsReview(memory) ? props.colors.warn : props.colors.muted} bg={props.colors.bg} width="100%" truncate>    {memoryProvenanceLine(memory)}{memoryNeedsReview(memory) ? " ◆" : ""}</text>
+            </box>
           )}</For>
-          <Show when={props.memories.length === 0}><text fg={props.colors.muted}>No memories.</text></Show>
-          <text fg={props.colors.muted}>{platformLabel("e add · Ctrl+D delete · Ctrl+P promote")}</text>
+          <Show when={props.memoryTotal === 0}><text fg={props.colors.muted}>No memories yet. e adds one.</text></Show>
+          <Show when={props.memoryTotal > 0 && props.memories.length === 0}><text fg={props.colors.muted}>No matching memories — refine filter.</text></Show>
+          <text fg={props.colors.muted}>{platformLabel("e edit · n new · Ctrl+D delete · Ctrl+P promote · / filter")}</text>
         </Show>
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
