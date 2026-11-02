@@ -19,7 +19,8 @@
     "test": "node --test --experimental-strip-types src/v2/*.test.ts src/v2/tui/*.test.ts",
     "test:watch": "node --test --watch --experimental-strip-types src/v2/*.test.ts src/v2/tui/*.test.ts",
     "test:live": "bash scripts/live-check.sh",
-    "test:live:fake": "bash scripts/live-check-fake.sh"
+    "test:live:fake": "bash scripts/live-check-fake.sh",
+    "test:live:fake:empty": "bash scripts/live-check-fake-empty.sh"
   },
   "engines": {
     "node": ">=26.4.0"

@@ -65,6 +65,12 @@ live_check_help
 # offers a Reasoning effort step. Select the first model and first variant.
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
+live_assert_text "$LIVE_TUI_SESSION" "Ctrl+P back" "wizard nav hint back"
+live_assert_text "$LIVE_TUI_SESSION" "Ctrl+N next" "wizard nav hint next"
+live_key "$LIVE_TUI_SESSION" "C-n"
+live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "wizard next via Ctrl+N"
+live_key "$LIVE_TUI_SESSION" "C-p"
+live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "wizard back via Ctrl+P"
 live_type "$LIVE_TUI_SESSION" "FakeAgent"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
