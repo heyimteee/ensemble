@@ -9,6 +9,7 @@ import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, workKey } from "./queue.ts"
+import { handoffAckText, handoffDuplicateText, handoffFailureText, handoffWorkKey, newCorrelationID, parseHandoffFile, resolveHandoffRecipient } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type {
@@ -398,7 +399,7 @@ export class EnsembleV2Service {
       agent.role || "You are a focused teammate.",
       "</ensemble_persona>",
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
-      "For handoffs, write durable detail to a Markdown file under .ensemble/handoffs and call ensemble_handoff with its path. Keep the chat reply short.",
+      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. Keep the chat reply short; the answer arrives back in the group chat.",
       "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
       "",
       ensembleBlock(),
@@ -486,7 +487,7 @@ export class EnsembleV2Service {
     return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages, queued }
   }
 
-  private async chatSend(agentID: string, workspaceID: string | undefined, text: string): Promise<any> {
+  private async chatSend(agentID: string, workspaceID: string | undefined, text: string, envelope?: { fromID?: string; correlationID?: string }): Promise<any> {
     const value = String(text ?? "").trim()
     if (!value) throw Object.assign(new Error("Message is empty."), { code: "empty" })
     const state = this.store.snapshot()
@@ -495,7 +496,8 @@ export class EnsembleV2Service {
     const target = await this.ensureChatSession(agent, workspaceID)
     const workspaceKey = target.bindingKeyID
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
-    const line = { id: id("dm"), role: "user" as const, author: "You", text: value, createdAt: this.dmNow(), queued: busy }
+    const correlationID = envelope?.correlationID ?? newCorrelationID()
+    const line = { id: id("dm"), role: "user" as const, author: "You", text: value, createdAt: this.dmNow(), queued: busy, correlationID }
     await this.store.saveDmMessage(workspaceKey, agent.id, line)
     if (busy) {
       const entry: DmQueueEntry = {
@@ -506,9 +508,11 @@ export class EnsembleV2Service {
         text: value,
         status: "queued",
         createdAt: line.createdAt,
+        fromID: envelope?.fromID,
+        correlationID,
       }
       await this.store.saveDmQueueEntry(entry)
-      return { queued: true, id: entry.id }
+      return { queued: true, id: entry.id, correlationID }
     }
     this.directBusy.add(target.sessionID)
     try {
@@ -521,7 +525,7 @@ export class EnsembleV2Service {
       this.directBusy.delete(target.sessionID)
       void this.flushDmQueue(agent.id, workspaceKey === "home" ? undefined : workspaceKey)
     })
-    return { queued: false, id: line.id }
+    return { queued: false, id: line.id, correlationID }
   }
 
   private async moveHomeSession(agentID: string, workspaceID: string): Promise<any> {
@@ -1193,7 +1197,7 @@ export class EnsembleV2Service {
     return (await this.createWorkItem(input)).subtask
   }
 
-  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean }): Promise<Message> {
+  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; correlationID?: string }): Promise<Message> {
     return this.store.appendMessage(workspace.id, {
       id: id("msg"),
       author: input.author,
@@ -1203,6 +1207,7 @@ export class EnsembleV2Service {
       taskID: input.taskID,
       streaming: input.streaming,
       interrupted: input.interrupted,
+      correlationID: input.correlationID,
       createdAt: now(),
     })
   }
@@ -1430,17 +1435,84 @@ export class EnsembleV2Service {
     if (approval.kind === "outside_roster" && approval.payload) {
       const workspace = approval.workspaceID ? state.workspaces[approval.workspaceID] : undefined
       if (workspace) {
-        await this.createSubtask({
-          workspace,
-          assigneeID: String(approval.payload.assigneeID ?? ""),
-          creatorType: "agent",
-          creatorAgentID: approval.agentID,
-          title: String(approval.payload.title ?? "Outside-roster task"),
-          instruction: String(approval.payload.instruction ?? approval.detail),
-          constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
-          expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
-          mode: approval.payload.mode === "edit" ? "edit" : "research",
-        })
+        if (approval.payload.handoff) {
+          // Approved cross-boundary handoff: the hop is the effect. It runs
+          // through the same queue, lease, and retry machinery as any hop.
+          const recipientID = String(approval.payload.assigneeID ?? "")
+          const hopTask = String(approval.payload.title ?? approval.detail ?? "Handoff")
+          const hopKey = handoffWorkKey({
+            workspaceID: workspace.id,
+            recipientID,
+            task: hopTask,
+            constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
+            expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
+          })
+          const correlationID = typeof approval.payload.correlationID === "string" && approval.payload.correlationID ? String(approval.payload.correlationID) : newCorrelationID()
+          if (!this.findWorkByKey(workspace.id, hopKey, true)) {
+            const at = now()
+            const hop: Subtask = {
+              id: id("task"),
+              workspaceID: workspace.id,
+              parentID: typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID,
+              creatorType: "agent",
+              creatorAgentID: approval.agentID,
+              assigneeID: recipientID,
+              title: hopTask,
+              instruction: String(approval.payload.instruction ?? approval.detail),
+              constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
+              expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
+              mode: "research",
+              state: "pending",
+              stage: "initial",
+              outcome: "pending",
+              interrupted: false,
+              awaitingChildren: false,
+              attempts: 0,
+              createdAt: at,
+              workKind: "handoff",
+              queueKey: hopKey,
+              deadlineAt: at + DEADLINE_MS,
+              handoff: {
+                correlationID,
+                senderID: typeof approval.payload.senderID === "string" ? String(approval.payload.senderID) : (approval.agentID ?? ""),
+                recipientID,
+                depth: typeof approval.payload.depth === "number" ? approval.payload.depth : 1,
+                parentID: typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID,
+                path: typeof approval.payload.path === "string" ? String(approval.payload.path) : undefined,
+              },
+            }
+            await this.store.saveSubtask(hop)
+            const recipientName = state.agents[recipientID]?.name ?? recipientID
+            await this.appendMessage(workspace, {
+              author: "agent",
+              agentID: approval.agentID,
+              text: handoffAckText(recipientName, hopTask, correlationID),
+              kind: "text",
+              taskID: hop.id,
+              correlationID,
+            })
+            this.schedule()
+          }
+        } else if (approval.payload.assigneeID) {
+          await this.createSubtask({
+            workspace,
+            assigneeID: String(approval.payload.assigneeID ?? ""),
+            creatorType: "agent",
+            creatorAgentID: approval.agentID,
+            title: String(approval.payload.title ?? "Outside-roster task"),
+            instruction: String(approval.payload.instruction ?? approval.detail),
+            constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
+            expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
+            mode: approval.payload.mode === "edit" ? "edit" : "research",
+          })
+        } else if (approval.payload.agentID && approval.payload.text) {
+          // Approved cross-boundary direct message: send once with the
+          // envelope correlation approved by the user.
+          await this.chatSend(String(approval.payload.agentID), undefined, String(approval.payload.text), {
+            fromID: approval.agentID,
+            correlationID: typeof approval.payload.correlationID === "string" && approval.payload.correlationID ? String(approval.payload.correlationID) : undefined,
+          })
+        }
       }
     }
     if (approval.kind === "promote_memory" && approval.payload?.memoryID) {
@@ -1604,7 +1676,7 @@ export class EnsembleV2Service {
       editor.add({
         name: "handoff",
         options: { namespace: "ensemble", codemode: false },
-        description: "Validate a handoff Markdown file and post its path to the group chat.",
+        description: "Hand off a typed task to another workspace member; the answer is relayed back into the group chat.",
         input: {
           type: "object",
           properties: { task: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" } },
@@ -1711,7 +1783,7 @@ export class EnsembleV2Service {
     const workspaceID = found.workspace?.id ?? input.workspaceID
     const at = Date.now()
     const tasks = Object.values(state.subtasks).filter((task) => !workspaceID || task.workspaceID === workspaceID)
-    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, assignee: task.assigneeID, parent: task.parentID, resultMessageID: task.resultMessageID }))) }
+    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, assignee: task.assigneeID, parent: task.parentID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff }))) }
   }
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
@@ -1729,12 +1801,37 @@ export class EnsembleV2Service {
       return { content: `Posted to #${workspace.name}.` }
     }
     if (input.kind === "agent") {
-      const target = Object.values(state.agents).find((agent) => agent.id === input.id || agent.name.toLowerCase() === String(input.id).toLowerCase())
+      const rawID = String(input.id ?? "").trim()
+      if (!rawID) return { content: "Agent not found." }
+      const target = state.agents[rawID] ?? Object.values(state.agents).find((agent) => agent.name.toLowerCase() === rawID.toLowerCase())
       if (!target || target.archived) return { content: "Agent not found." }
+      const correlationID = typeof input.correlationID === "string" && input.correlationID.trim() ? String(input.correlationID).trim().slice(0, 80) : newCorrelationID()
+      // Cross-boundary contact follows the existing approval model: reaching
+      // an agent outside the workspace roster needs user consent, exactly
+      // like delegate's outside_roster path. Member DMs stay direct.
+      if (target.id !== found.agent.id && !found.workspace.memberIDs.includes(target.id)) {
+        const run = this.runForSession(state, context.sessionID)
+        const approval: Approval = {
+          id: id("approval"),
+          workspaceID: found.workspace.id,
+          subtaskID: run?.subtaskID,
+          agentID: found.agent.id,
+          kind: "outside_roster",
+          title: `${found.agent.name} wants to contact ${target.name}`,
+          detail: text,
+          payload: { agentID: target.id, text, correlationID },
+          status: "pending",
+          createdAt: now(),
+        }
+        await this.store.saveApproval(approval)
+        await this.appendMessage(found.workspace, { author: "system", text: `Approval needed: contact $${target.name}`, kind: "approval", taskID: run?.subtaskID })
+        return { content: `Approval required before contacting ${target.name}.` }
+      }
       const workspaceID = found.workspace.memberIDs.includes(target.id) ? found.workspace.id : undefined
-      const result = await this.chatSend(target.id, workspaceID, text)
+      const result = await this.chatSend(target.id, workspaceID, text, { fromID: found.agent.id, correlationID })
       this.schedule()
-      return { content: result.queued ? `Queued a direct message for ${target.name}.` : `Sent a direct message to ${target.name}.` }
+      if (result.queued) return { content: `Queued a direct message for ${target.name} (ref ${correlationID}).` }
+      return { content: `Sent a direct message to ${target.name} (ref ${correlationID}).` }
     }
     return { content: "kind must be workspace or agent." }
   }
@@ -1743,59 +1840,115 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
+    const { workspace, agent: sender } = found
+    const fail = async (reason: string): Promise<{ content: string }> => {
+      await this.appendMessage(workspace, { author: "system", text: `Handoff refused: ${reason}`, kind: "system" })
+      return { content: reason }
+    }
+    if (workspace.paused) return fail(`workspace ${workspace.name} is paused.`)
     const rawPath = String(input.path ?? "")
-    const absolute = resolve(found.workspace.directory, rawPath)
-    const handoffs = resolve(handoffDirectory(found.workspace.directory))
-    if (absolute !== handoffs && !absolute.startsWith(`${handoffs}${sep}`)) return { content: "The handoff path must be inside .ensemble/handoffs/." }
-    if (!existsSync(absolute) || !statSync(absolute).isFile()) return { content: "The handoff file does not exist." }
+    const absolute = resolve(workspace.directory, rawPath)
+    const handoffs = resolve(handoffDirectory(workspace.directory))
+    if (absolute !== handoffs && !absolute.startsWith(`${handoffs}${sep}`)) {
+      return fail("The handoff path must be inside .ensemble/handoffs/.")
+    }
+    if (!existsSync(absolute) || !statSync(absolute).isFile()) return fail("The handoff file does not exist.")
     const content = readFileSync(absolute, "utf8")
-    if (!content.includes("ensemble: handoff")) return { content: "The handoff file is missing ensemble frontmatter." }
-    const target = input.to ? Object.values(state.agents).find((agent) => agent.id === input.to || agent.name.toLowerCase() === String(input.to).toLowerCase()) : undefined
-    const path = relative(found.workspace.directory, absolute)
+    const parsed = parseHandoffFile(content)
+    if (!parsed.ok) return fail(parsed.reason)
+    const task = parsed.data.task || String(input.task ?? "").trim()
+    if (!task) return fail("The handoff file must include a non-empty task field.")
+    const summary = parsed.data.summary ?? (typeof input.summary === "string" ? input.summary.trim() : "") ?? ""
+    const constraints = parsed.data.constraints
+    const expected = parsed.data.expected
+    const recipientRef = (typeof input.to === "string" && input.to.trim()) || parsed.data.to || ""
+    if (!recipientRef) return fail("The handoff must name a recipient; no recipient was given.")
+    const resolved = resolveHandoffRecipient(state, workspace, recipientRef)
+    if (resolved.status === "unknown") return fail(`No agent matches "${resolved.ref}".`)
+    if (resolved.status === "ambiguous") return fail(`"${resolved.ref}" matches more than one agent; name one explicitly.`)
+    if (resolved.status === "archived") return fail(`${resolved.agent.name} is archived and cannot receive handoffs.`)
+    const recipient = resolved.agent
+    const path = relative(workspace.directory, absolute)
+    if (!workspace.memberIDs.includes(recipient.id)) {
+      const run = this.runForSession(state, context.sessionID)
+      const correlationID = parsed.data.correlationID || newCorrelationID()
+      const approval: Approval = {
+        id: id("approval"),
+        workspaceID: workspace.id,
+        subtaskID: run?.subtaskID,
+        agentID: sender.id,
+        kind: "outside_roster",
+        title: `${sender.name} wants to hand off to ${recipient.name}`,
+        detail: task,
+        payload: { assigneeID: recipient.id, title: task, instruction: summary ? `${task}\n\n${summary} (${path})` : `${task} (${path})`, constraints, expected, mode: "research", handoff: true, correlationID, path, depth: (run ? this.delegationDepth(state, run.subtaskID) : 0) + 1, parentID: run?.subtaskID, senderID: sender.id },
+        status: "pending",
+        createdAt: now(),
+      }
+      await this.store.saveApproval(approval)
+      await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${recipient.name}`, kind: "approval", taskID: run?.subtaskID })
+      return { content: `Approval required before contacting ${recipient.name}.` }
+    }
     const run = this.runForSession(state, context.sessionID)
-    // The handoff registration is a durable terminal work item: it carries an
-    // idempotency key and lifecycle timestamps, but it never spawns a run —
-    // the file plus the chat line are the delivery. Re-registering the same
-    // handoff returns the existing record instead of posting twice.
-    const key = workKey({
-      workspaceID: found.workspace.id,
-      kind: "handoff",
-      // No parentID in the key: a handoff registration is idempotent across
-      // turns. The caller's run (if any) is still recorded as parentID on
-      // the row for correlation.
-      assigneeID: target?.id ?? found.agent.id,
-      title: String(input.task),
-      instruction: `${String(input.summary)}\n${path}`,
-    })
-    const duplicate = this.findWorkByKey(found.workspace.id, key, true)
-    if (duplicate) return { content: `Already registered handoff at ${path}.` }
+    const askingDepth = run ? this.delegationDepth(state, run.subtaskID) : 0
+    if (askingDepth >= state.settings.maxDepth) {
+      return fail(`the delegation depth limit is ${state.settings.maxDepth}.`)
+    }
+    if (run) {
+      const siblings = Object.values(state.subtasks).filter((item) => item.parentID === run.subtaskID)
+      if (siblings.length >= state.settings.maxDelegations) {
+        return fail(`the delegation limit is ${state.settings.maxDelegations}.`)
+      }
+    }
+    // Idempotency spans terminal rows: the handoff hop is the effect, so a
+    // retried or resubmitted handoff returns the existing record instead of
+    // executing twice.
+    const key = handoffWorkKey({ workspaceID: workspace.id, recipientID: recipient.id, task, constraints, expected })
+    const duplicate = this.findWorkByKey(workspace.id, key, true)
+    if (duplicate) return { content: handoffDuplicateText(recipient.name, task) }
     const at = now()
-    const record: Subtask = {
+    const correlationID = parsed.data.correlationID || newCorrelationID()
+    const hop: Subtask = {
       id: id("task"),
-      workspaceID: found.workspace.id,
+      workspaceID: workspace.id,
       parentID: run?.subtaskID,
       creatorType: "agent",
-      creatorAgentID: found.agent.id,
-      assigneeID: target?.id ?? found.agent.id,
-      title: `Handoff: ${String(input.task)}`,
-      instruction: `${String(input.summary)} (${path})`,
+      creatorAgentID: sender.id,
+      assigneeID: recipient.id,
+      title: task,
+      instruction: summary ? `${task}\n\n${summary} (${path})` : `${task} (${path})`,
+      constraints,
+      expected,
       mode: "research",
-      state: "replied",
+      state: "pending",
       stage: "initial",
-      outcome: "succeeded",
+      outcome: "pending",
       interrupted: false,
       awaitingChildren: false,
       attempts: 0,
       createdAt: at,
-      repliedAt: at,
-      finishedAt: at,
       workKind: "handoff",
       queueKey: key,
+      deadlineAt: at + DEADLINE_MS,
+      handoff: {
+        correlationID,
+        senderID: sender.id,
+        recipientID: recipient.id,
+        depth: askingDepth + 1,
+        parentID: run?.subtaskID,
+        path,
+      },
     }
-    await this.store.saveSubtask(record)
-    await this.appendMessage(found.workspace, { author: "agent", agentID: found.agent.id, text: `Handoff: ${String(input.task)} — ${String(input.summary)} (${path})${target ? ` → ${target.name}` : ""}`, kind: "text" })
+    await this.store.saveSubtask(hop)
+    await this.appendMessage(workspace, {
+      author: "agent",
+      agentID: sender.id,
+      text: handoffAckText(recipient.name, task, correlationID),
+      kind: "text",
+      taskID: hop.id,
+      correlationID,
+    })
     this.schedule()
-    return { content: `Registered handoff at ${path}.` }
+    return { content: `Handed to $${recipient.name} for ${task} (ref ${correlationID}). The answer will arrive in the group chat.` }
   }
 
   private async toolDelegate(input: Json, context: any): Promise<{ content: string }> {
@@ -1995,7 +2148,12 @@ export class EnsembleV2Service {
         await this.store.saveSubtask(task)
         await this.settlePendingApprovals(task.id, task.error)
         const workspace = this.store.snapshot().workspaces[task.workspaceID]
-        if (workspace) await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${task.error}`, kind: "system", taskID: task.id })
+        if (workspace && task.workKind === "handoff" && task.handoff) {
+          const recipientName = this.store.snapshot().agents[task.handoff.recipientID]?.name ?? "Unknown agent"
+          await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, task.error ?? "the work could not be delivered.", task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
+        } else if (workspace) {
+          await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${task.error}`, kind: "system", taskID: task.id })
+        }
         continue
       }
       // A claim whose lease expired without a live owner goes back to the
@@ -2165,7 +2323,7 @@ export class EnsembleV2Service {
     let attemptStartedAt = now()
     try {
       await this.ctx.session.instructions.entry.put({ sessionID: binding.sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-      live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true })
+      live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true, correlationID: task.handoff?.correlationID })
       this.liveBySession.set(binding.sessionID, { message: live, lastSave: 0, buffer: "" })
       await this.ctx.session.instructions.entry.put({
         sessionID: binding.sessionID,
@@ -2182,7 +2340,7 @@ export class EnsembleV2Service {
         }
         await this.ctx.session.switchModel({ sessionID: binding.sessionID, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } }).catch(() => undefined)
         attemptStartedAt = now()
-        await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task), delivery: "steer" })
+        await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : undefined), delivery: "steer" })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
         const messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)
@@ -2235,6 +2393,12 @@ export class EnsembleV2Service {
       currentTask.runSummary = result?.tools.length ? `${result.tools.length} tool call${result.tools.length === 1 ? "" : "s"}` : "no tool calls"
       currentTask.repliedAt = finishedAt
       currentTask.finishedAt = finishedAt
+      // The recipient's finalized reply in the asking workspace transcript IS
+      // the relay: it is attributed via the message agentID and linked by
+      // correlation. Record who answered for task_status observability.
+      if (currentTask.workKind === "handoff" && currentTask.handoff) {
+        currentTask.handoff.answeredByID = currentTask.assigneeID
+      }
       const message = await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
       currentTask.resultMessageID = message?.id
       await this.store.saveSubtask(currentTask)
@@ -2332,7 +2496,14 @@ export class EnsembleV2Service {
     task.finishedAt = at
     await this.store.saveSubtask(task)
     const workspace = this.store.snapshot().workspaces[task.workspaceID]
-    if (workspace) await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${error}`, kind: "system", taskID: task.id })
+    // A handoff that cannot be delivered produces a failure notice in the
+    // conversation that asked, attributed to the intended recipient.
+    if (workspace && task.workKind === "handoff" && task.handoff) {
+      const recipientName = this.store.snapshot().agents[task.handoff.recipientID]?.name ?? "Unknown agent"
+      await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, error, task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
+    } else if (workspace) {
+      await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${error}`, kind: "system", taskID: task.id })
+    }
     if (task.parentID) await this.maybeSynthesize(task.parentID)
   }
 

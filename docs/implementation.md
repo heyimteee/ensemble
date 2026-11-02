@@ -163,7 +163,7 @@ Write tools are registered globally but refuse outside an Ensemble-bound session
 - `ensemble_remember`
 - `ensemble_share`
 
-`ensemble_send_message` posts to the group or queues an agent DM; it does not create work. `ensemble_handoff` validates a Markdown file under `.ensemble/handoffs/` and posts its path. `ensemble_delegate` remains the work-creating tool.
+`ensemble_send_message` posts to the group or sends a direct agent message (member DMs deliver with an envelope carrying addressing, correlation, ordering, and delivery state; cross-boundary contact requires an `outside_roster` approval). `ensemble_handoff` validates a typed Markdown file under `.ensemble/handoffs/` as structured frontmatter and creates a handoff hop: a queued unit of work routed to the named recipient, acknowledged in the group chat, retried within its attempt budget and deadline, and relayed back into the asking conversation (or failed visibly there). `ensemble_delegate` remains the leader-only work-creating tool.
 
 ## Subtasks
 

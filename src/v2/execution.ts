@@ -56,11 +56,16 @@ export function memoryContext(memories: Memory[]): string {
   return ["<ensemble_memory>", ...memories.map((memory) => `- [${memory.scope}] ${memory.text}`), "</ensemble_memory>"].join("\n")
 }
 
-export function promptForTask(task: Subtask): string {
+export function promptForTask(task: Subtask, senderName?: string): string {
   if (task.stage === "synthesis") {
     return `Synthesize the completed subtasks into one clear answer for the user.\n\nOriginal request: ${task.instruction}`
   }
-  return [task.instruction, task.constraints ? `Constraints: ${task.constraints}` : "", task.expected ? `Expected: ${task.expected}` : ""].filter(Boolean).join("\n\n")
+  const body = [task.instruction, task.constraints ? `Constraints: ${task.constraints}` : "", task.expected ? `Expected: ${task.expected}` : ""].filter(Boolean).join("\n\n")
+  if (task.workKind === "handoff" && senderName) {
+    const ref = task.handoff?.correlationID ? ` (ref ${task.handoff.correlationID})` : ""
+    return `$${senderName} has asked you to help with this${ref}.\n\n${body}\n\nAnswer in this conversation as yourself.`
+  }
+  return body
 }
 
 export function contextForTask(state: SnapshotState, task: Subtask, workspace: Workspace, agent: Agent): string {
@@ -73,6 +78,9 @@ export function contextForTask(state: SnapshotState, task: Subtask, workspace: W
   return [
     `<ensemble_persona name="${agent.name}">\n${agent.role}\n</ensemble_persona>`,
     memoryContext(memories),
+    task.workKind === "handoff" && task.handoff
+      ? `<ensemble_handoff from="${state.agents[task.handoff.senderID]?.name ?? task.handoff.senderID}" ref="${task.handoff.correlationID}" depth="${task.handoff.depth}">\nThis turn is a handoff hop. Answer in this conversation as yourself; the reply is relayed to the asking conversation.\n</ensemble_handoff>`
+      : "",
     `<ensemble_workspace name="${workspace.name}" directory="${workspace.directory}">`,
     `Leader: ${state.agents[workspace.leaderID]?.name ?? workspace.leaderID}`,
     `Members: ${workspace.memberIDs.map((memberID) => state.agents[memberID]?.name ?? memberID).join(", ")}`,
