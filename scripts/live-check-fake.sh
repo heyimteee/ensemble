@@ -109,6 +109,14 @@ live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization"
 live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "activity line unmounts after finalize"
 
+# Ticket #70 determinism: rich Markdown lays out over several frames, so an
+# instant assert can catch a partial render — a different missing element per
+# run. Settle with a bounded poll until every marker co-occurs in one
+# capture; the asserts below are unchanged, only the observation is stable.
+live_require_all_text "$LIVE_TUI_SESSION" 20 "settled rich reply" \
+  "Rich Markdown Fixture" "bold text" "italic text" "alpha item" "ordered one" \
+  "quoted line one" "inline code" "RICH_CODE_MARKER" "Ensemble repository" "table cell marker"
+
 # All rich Markdown elements must be rendered by the finalized message.
 live_assert_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "heading"
 live_assert_text "$LIVE_TUI_SESSION" "bold text" "bold emphasis"
@@ -189,7 +197,7 @@ collect_work_frames() {
   for _ in $(seq 1 "$rounds"); do
     pane=$(live_capture "$LIVE_TUI_SESSION")
     for frame in "◐" "◑" "◒" "◓"; do
-      if grep -qF -- "${frame} FakeAgent · checking the details" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
+      if grep -qF -- "${frame} FakeAgent · working" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
         seen_which="${seen_which}${frame}"
         seen_frames=$((seen_frames + 1))
       fi
@@ -668,7 +676,7 @@ live_require_text "$LIVE_TUI_SESSION" "COMPOSER · enter send · esc cancel" 10 
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "◐ FakeAgent · checking the details…" 15 "frame-0 activity line under reduced motion"
+live_require_text "$LIVE_TUI_SESSION" "◐ FakeAgent · working…" 15 "frame-0 activity line under reduced motion"
 for _ in $(seq 1 8); do
   pane=$(live_capture "$LIVE_TUI_SESSION")
   for glyph in "◑" "◒" "◓" "◌" "▹" "▌"; do

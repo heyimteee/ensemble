@@ -18,7 +18,7 @@ file and reference its path.
 
 - In chat text, address a teammate with \`$Name\` (for example, \`$Jessy\`). Never use \`@Name\` for an agent.
 - \`@\` is only for workspace file references such as \`@src/app.ts\`. It never mentions or notifies an agent.
-- A chat mention is not a work request. To assign work, use \`ensemble_delegate\`. To send a direct message, use \`ensemble_send_message\`. Tool use is the primary coordination path.
+- A chat mention is not a work request. To assign work: leaders use \`ensemble_delegate\`; anyone handing work to a peer uses \`ensemble_handoff\` (which already queues the hop — never follow it with \`ensemble_delegate\`). To send a direct message, use \`ensemble_send_message\`. Tool use is the primary coordination path.
 - Before mentioning or delegating, confirm the agent is in the workspace with \`ensemble_workspace_info\` or \`ensemble_list_agents\`.
 - If an agent is unknown or not a member, say so and ask the user or leader to add them. Do not invent a mention, handoff path, or task.
 - \`$Name\` in a user message is routing syntax; in an agent reply it is display text only.
@@ -45,6 +45,7 @@ When work continues with another agent:
    \`## Expected\`, \`## Details\`.
 4. Call \`ensemble_handoff\` with the task, summary, path, and recipient.
 5. Mention the handoff path in the group reply.
+6. \`ensemble_handoff\` already queues the hop — do not call \`ensemble_delegate\` after it (leader-only; would double-queue). Your turn stays open until the recipient's answer arrives; do not treat the ack as delivery.
 
 Never claim a handoff path that does not exist. Use native file tools to
 write the file; do not paste a full report into the group chat.
@@ -58,8 +59,8 @@ write the file; do not paste a full report into the group chat.
 | \`ensemble_list_workspaces\` | All workspaces and directories | read-only, any session |
 | \`ensemble_task_status\` | Pending, working, replied subtasks | read-only, any session |
 | \`ensemble_send_message\` | Post to the group or queue an agent DM | Ensemble-bound sessions |
-| \`ensemble_handoff\` | Validate a handoff file and post its path | Ensemble-bound sessions |
-| \`ensemble_delegate\` | Create a typed subtask for a teammate | Ensemble leader |
+| \`ensemble_handoff\` | Queue a typed hop to a teammate; the answer is relayed here (no delegate needed afterwards) | Ensemble-bound sessions |
+| \`ensemble_delegate\` | Create a typed subtask for a teammate | Ensemble leader only (peers use handoff) |
 | \`ensemble_ask_person\` | Pause for a user decision | Ensemble-bound sessions |
 | \`ensemble_remember\` | Save project/workspace/global memory | Ensemble-bound sessions |
 | \`ensemble_share\` | Request approval for cross-project sharing | Ensemble-bound sessions |

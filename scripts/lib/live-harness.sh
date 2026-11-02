@@ -319,6 +319,31 @@ live_try_text() {
   live_poll_for "$seconds" live_capture_contains "$session" "$text"
 }
 
+# True when every listed marker co-occurs in ONE pane capture. Rich Markdown
+# lays out over several frames, so instant asserts after the first marker can
+# catch a partial render (a different missing element per run). Polling for
+# co-occurrence first settles the layout without weakening any assertion.
+live_capture_all_text() {
+  local session="$1"
+  shift
+  local pane
+  pane=$(live_capture "$session")
+  local text
+  for text in "$@"; do
+    grep -qF -- "$text" <<<"$pane" || return 1
+  done
+  return 0
+}
+
+# Bounded settle window: wait until every marker is visible together, then
+# return so the caller's instant asserts/counts observe the settled layout.
+live_require_all_text() {
+  local session="$1" seconds="$2" description="$3"
+  shift 3
+  live_wait_for "$seconds" "$description" live_capture_all_text "$session" "$@" \
+    || live_fail "TUI did not settle: $description"
+}
+
 live_assert_text() {
   local session="$1" text="$2" description="${3:-$text}"
   live_capture_contains "$session" "$text" || live_fail "TUI does not show: $description"

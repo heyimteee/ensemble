@@ -140,7 +140,10 @@ export function activityFrameForKind(kind: ActivityVerbKind, tick: number, env: 
     case "asking":
     case "checking":
     case "wrapping":
+    case "working":
       return workingFrame(frame)
+    case "retrying":
+      return waitingFrame(frame)
   }
 }
 
@@ -192,10 +195,38 @@ export function terminalAnnouncements(
     })
 }
 
-/** Per-agent live activity verbs (brief §3.2). Unknown activity uses the default; never invent tool names. */
+/** Per-agent live activity verbs (brief §3.2, ticket #70). The generic
+ * default is reserved for genuinely unknown activity — never the universal
+ * verb. Working reads `working…` (with detail when available), agent waits
+ * read `Waiting for $Name…`, user waits read `waiting for you…`, backoff
+ * reads `retrying…`; never invent tool names. */
 export const ACTIVITY_DEFAULT_VERB = "checking the details…"
 
-export type ActivityVerbKind = "checking" | "reading" | "searching" | "running" | "writing" | "waiting" | "wrapping" | "asking" | "thinking"
+/** After this long without a heartbeat/lease, a live line is stuck, not live. */
+export const ACTIVITY_STALE_AFTER_MS = 120_000
+
+export type ActivityVerbKind = "checking" | "reading" | "searching" | "running" | "writing" | "waiting" | "wrapping" | "asking" | "thinking" | "working" | "retrying"
+
+/** Visible wait for another agent. `$Name` grammar throughout, never `@`. */
+export function waitingForLine(agentName: string): string {
+  return `Waiting for $${agentName}…`
+}
+
+/** Visible wait for the user (approval-gated or native-blocked). */
+export function waitingForYouLine(): string {
+  return "waiting for you…"
+}
+
+/** Live work verb: detail when known, honest `working…` otherwise. */
+export function workingLine(detail?: string): string {
+  const target = detail?.trim()
+  return target ? `working on ${target}…` : "working…"
+}
+
+/** Backoff verb: parked work never poses as live work. */
+export function retryingLine(): string {
+  return "retrying…"
+}
 
 /** Build a present-participle verb phrase. Detail-less tool verbs fall back to the default. */
 export function activityVerb(kind: ActivityVerbKind, detail?: string): string {
@@ -219,6 +250,10 @@ export function activityVerb(kind: ActivityVerbKind, detail?: string): string {
       return target ? askingLine(target) : ACTIVITY_DEFAULT_VERB
     case "thinking":
       return ACTIVITY_DEFAULT_VERB
+    case "working":
+      return workingLine(detail)
+    case "retrying":
+      return retryingLine()
   }
 }
 
@@ -233,13 +268,79 @@ export const MAX_VISIBLE_ACTIVITY = 3
 export type ActivityEntry = { key: string; label: string; agentID?: string; createdAt: number; verb: string; kind: ActivityVerbKind }
 
 /**
+ * Per-agent live display for one active task (slice C + ticket #70):
+ * approval-gated and native-blocked work reads as waiting-for-user, a
+ * parent awaiting children reads `Waiting for $Name…`, peer-turn and
+ * handoff hops in flight keep the `Asking $Name…` variant, backoff reads
+ * `retrying…`, live work reads `working…`, and the generic default is
+ * reserved for genuinely unknown activity. Pure.
+ *
+ * `children` carries the task's non-terminal children (callers derive them
+ * from the snapshot); `agentNameFor` resolves a child assignee to a display
+ * name for the waiting line. Stale claims never reach here — see
+ * `isActivityTaskStale` and the `splitActivityGroups` filter below.
+ */
+export type ActivityStateContext = {
+  now: number
+  pendingApprovalIDs: ReadonlySet<string>
+  nativeBlockedIDs: ReadonlySet<string>
+  children: Subtask[]
+  agentNameFor: (agentID?: string) => string
+}
+
+export function activityStateForTask(
+  task: Subtask,
+  ctx: ActivityStateContext,
+): { verb: string; kind: ActivityVerbKind } {
+  if (isNeedsYouTask(task, ctx.pendingApprovalIDs, ctx.nativeBlockedIDs)) {
+    return { verb: waitingForYouLine(), kind: "waiting" }
+  }
+  const liveChildren = ctx.children.filter(
+    (child) => child.parentID === task.id && !isTerminalWorkStatus(deriveWorkStatus(child, ctx.now)),
+  )
+  if (task.awaitingChildren || liveChildren.length > 0) {
+    const firstAssignee = liveChildren.map((child) => child.assigneeID).find((id) => id !== undefined)
+    const name = firstAssignee ? ctx.agentNameFor(firstAssignee) : undefined
+    if (name) return { verb: waitingForLine(name), kind: "waiting" }
+    return { verb: ACTIVITY_DEFAULT_VERB, kind: "checking" }
+  }
+  if (deriveWorkStatus(task, ctx.now) === "retrying") return { verb: retryingLine(), kind: "retrying" }
+  if (task.workKind === "turn" || task.workKind === "handoff") {
+    return { verb: askingLine(ctx.agentNameFor(task.assigneeID)), kind: "asking" }
+  }
+  if (deriveWorkStatus(task, ctx.now) === "working") return { verb: workingLine(), kind: "working" }
+  return { verb: ACTIVITY_DEFAULT_VERB, kind: "checking" }
+}
+
+/**
  * Per-agent live display for one active task (slice C): peer-turn and
  * handoff work in flight renders the `Asking $Name…` variant; all other
  * live work keeps the default checking verb. Pure.
+ *
+ * Kept for existing callers; new code prefers `activityStateForTask`,
+ * which threads approval/native-blocked sets and child waits so blocked
+ * work never poses as live work.
  */
 export function activityDetailForTask(task: Subtask, label: string): { verb: string; kind: ActivityVerbKind } {
   if (task.workKind === "turn" || task.workKind === "handoff") return { verb: askingLine(label), kind: "asking" }
   return { verb: ACTIVITY_DEFAULT_VERB, kind: "checking" }
+}
+
+/** True while a task-backed activity claim has lapsed: claimed but the
+ * lease expired (the heartbeat owns live claims), so the line is stuck,
+ * not live. Unclaimed pending work is queued, never stale. Pure. */
+export function isActivityTaskStale(task: Subtask, now: number): boolean {
+  const status = deriveWorkStatus(task, now)
+  if (status !== "working" && status !== "retrying") return false
+  if (!task.claimedBy) return false
+  return task.leaseUntil === undefined || task.leaseUntil <= now
+}
+
+/** True while a streaming/transcript live row is older than the staleness
+ * bound with no finalize — a leaked row that must never wedge the
+ * activity line. Pure. */
+export function isActivityStale(entry: { createdAt: number }, now: number): boolean {
+  return now - entry.createdAt > ACTIVITY_STALE_AFTER_MS
 }
 
 /**
@@ -262,21 +363,48 @@ export function selectActivityAgents(
 /**
  * Split active agents into live (working/retrying) and queued-only (pending
  * with no live work), oldest first, deduplicated. Terminal work contributes
- * to neither — it is announced, not listed. Pure.
+ * to neither — it is announced, not listed. Stale claims (lapsed leases)
+ * contribute to neither either: a stuck line is hidden from the activity
+ * surface instead of hanging forever; the WORK block still lists the row
+ * with its derived status, so nothing silently drops. Pure.
+ *
+ * `opts` threads the ticket #68 native-blocked set plus the pending
+ * approval set so blocked work derives as waiting-for-user, and an
+ * assignee-name resolver so parents awaiting children name who they wait
+ * on. Callers without that context keep the legacy checking behavior.
  */
 export function splitActivityGroups(
   tasks: Subtask[],
   keyFor: (task: Subtask) => string,
   labelFor: (task: Subtask) => string,
   now: number,
+  opts: {
+    pendingApprovalIDs?: ReadonlySet<string>
+    nativeBlockedIDs?: ReadonlySet<string>
+    agentNameFor?: (agentID?: string) => string
+  } = {},
 ): { live: ActivityEntry[]; queued: ActivityEntry[] } {
+  const pendingApprovalIDs = opts.pendingApprovalIDs ?? new Set<string>()
+  const nativeBlockedIDs = opts.nativeBlockedIDs ?? new Set<string>()
+  const agentNameFor = opts.agentNameFor ?? ((agentID?: string) => {
+    const found = tasks.find((task) => task.assigneeID === agentID)
+    return found ? labelFor(found) : "Unknown agent"
+  })
   const liveByKey = new Map<string, ActivityEntry>()
   const queuedByKey = new Map<string, ActivityEntry>()
   for (const task of tasks) {
     const status = deriveWorkStatus(task, now)
     if (isTerminalWorkStatus(status)) continue
+    if (isActivityTaskStale(task, now)) continue
     const label = labelFor(task)
-    const detail = activityDetailForTask(task, label)
+    const children = tasks.filter((child) => child.parentID === task.id)
+    const detail = activityStateForTask(task, {
+      now,
+      pendingApprovalIDs,
+      nativeBlockedIDs,
+      children,
+      agentNameFor,
+    })
     const entry: ActivityEntry = { key: keyFor(task), label, agentID: task.assigneeID, createdAt: task.createdAt, verb: detail.verb, kind: detail.kind }
     const bucket = status === "pending" ? queuedByKey : liveByKey
     const previous = bucket.get(entry.key)

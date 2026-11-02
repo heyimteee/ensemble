@@ -94,6 +94,20 @@ function sameModels(a: ModelRef[], b: ModelRef[]): boolean {
   return a.length === b.length && a.every((model, index) => sameModel(model, b[index]))
 }
 
+/**
+ * Newest still-open task assigned to the sender in the workspace, if any.
+ * Ticket #70 parentless-hop anchor: a handoff issued from a session with
+ * no live run parents its hop here so the sender's turn stays in
+ * `awaitingChildren` until the hop is delivered/answered. Pure.
+ */
+export function newestOpenSenderTaskID(state: SnapshotState, workspaceID: string, senderID: string): string | undefined {
+  const open = Object.values(state.subtasks).filter(
+    (task) => task.workspaceID === workspaceID && task.assigneeID === senderID && task.state !== "replied",
+  )
+  open.sort((a, b) => b.createdAt - a.createdAt)
+  return open[0]?.id
+}
+
 export class EnsembleV2Service {
   readonly ctx: Ctx
   private store!: V2Store
@@ -510,7 +524,7 @@ export class EnsembleV2Service {
       agent.role || "You are a focused teammate.",
       "</ensemble_persona>",
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
-      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. Keep the chat reply short; the answer arrives back in the group chat.",
+      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
       "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
       "",
       ensembleBlock(),
@@ -2059,7 +2073,7 @@ export class EnsembleV2Service {
       editor.add({
         name: "handoff",
         options: { namespace: "ensemble", codemode: false },
-        description: "Hand off a typed task to another workspace member; the answer is relayed back into the group chat.",
+        description: "Queue a typed hop to a teammate; the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate.",
         input: {
           type: "object",
           properties: { task: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" } },
@@ -2071,7 +2085,7 @@ export class EnsembleV2Service {
       editor.add({
         name: "delegate",
         options: { namespace: "ensemble", codemode: false },
-        description: "Delegate a typed subtask to another workspace member and record it on the board.",
+        description: "Delegate a typed subtask to another workspace member and record it on the board. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
         input: {
           type: "object",
           properties: {
@@ -2374,7 +2388,16 @@ export class EnsembleV2Service {
       return { content: `Approval required before contacting ${recipient.name}.` }
     }
     const run = this.runForSession(state, context.sessionID)
-    const askingDepth = run ? this.delegationDepth(state, run.subtaskID) : 0
+    // Parentless-hop hole (ticket #70): a handoff called from a session
+    // with no live run would orphan the hop (parentID undefined), so the
+    // sender's turn could finalize before the answer arrives. Anchor the
+    // hop to the sender's newest open task in the workspace instead — the
+    // runTask children check then holds the sender in `awaitingChildren`
+    // with a visible `Waiting for $Name…` line until the hop is
+    // delivered/answered. No second delegate is needed (leader-only;
+    // would double-queue under a separate key).
+    const askingSubtaskID = run?.subtaskID ?? newestOpenSenderTaskID(state, workspace.id, sender.id)
+    const askingDepth = askingSubtaskID ? this.delegationDepth(state, askingSubtaskID) : 0
     // Handoff-specific caps (spec #53): chains stop after one hop, and one
     // run fans out at most HANDOFF_MAX_PER_RUN hops. Only handoff hops count
     // toward the per-run budget — relay/failure-notice legs are messages,
@@ -2382,8 +2405,8 @@ export class EnsembleV2Service {
     if (askingDepth >= HANDOFF_MAX_DEPTH) {
       return fail(`the handoff depth limit is ${HANDOFF_MAX_DEPTH}.`)
     }
-    if (run) {
-      const hops = Object.values(state.subtasks).filter((item) => item.parentID === run.subtaskID && item.workKind === "handoff")
+    if (askingSubtaskID) {
+      const hops = Object.values(state.subtasks).filter((item) => item.parentID === askingSubtaskID && item.workKind === "handoff")
       if (hops.length >= HANDOFF_MAX_PER_RUN) {
         return fail(`the handoff limit is ${HANDOFF_MAX_PER_RUN} per run.`)
       }
@@ -2391,7 +2414,7 @@ export class EnsembleV2Service {
     // Idempotency spans terminal rows for the row's lifetime: the handoff hop
     // is the effect, so a retried or resubmitted handoff from the same run
     // returns the existing record instead of executing twice.
-    const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: run?.subtaskID, recipientID: recipient.id, task, constraints, expected })
+    const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: askingSubtaskID, recipientID: recipient.id, task, constraints, expected })
     const duplicate = this.findWorkByKey(workspace.id, key)
     if (duplicate) return { content: handoffDuplicateText(recipient.name, task) }
     const at = now()
@@ -2399,7 +2422,7 @@ export class EnsembleV2Service {
     const hop: Subtask = {
       id: id("task"),
       workspaceID: workspace.id,
-      parentID: run?.subtaskID,
+      parentID: askingSubtaskID,
       creatorType: "agent",
       creatorAgentID: sender.id,
       assigneeID: recipient.id,
@@ -2423,7 +2446,7 @@ export class EnsembleV2Service {
         senderID: sender.id,
         recipientID: recipient.id,
         depth: askingDepth + 1,
-        parentID: run?.subtaskID,
+        parentID: askingSubtaskID,
         path,
       },
     }
@@ -2438,7 +2461,7 @@ export class EnsembleV2Service {
       correlationID,
     })
     this.schedule()
-    return { content: `Handed to $${recipient.name} for ${task} (ref ${correlationID}). The answer will arrive in the group chat.` }
+    return { content: `Handed to $${recipient.name} for ${task} (ref ${correlationID}). Your turn stays open until the answer arrives here — do not call ensemble_delegate after a handoff (leader-only; would double-queue).` }
   }
 
   private async toolDelegate(input: Json, context: any): Promise<{ content: string }> {
@@ -2932,7 +2955,7 @@ export class EnsembleV2Service {
       }
       const mention = normalizeAgentMentions(result?.text || "Work completed.", workspace.memberIDs.map((id) => current.agents[id]).filter((item): item is Agent => Boolean(item)))
       const reply = mention.text
-      if (mention.changed) await this.appendMessage(workspace, { author: "system", text: `Mention syntax normalized: ${mention.names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; use ensemble_delegate or ensemble_send_message.`, kind: "system", taskID: task.id })
+      if (mention.changed) await this.appendMessage(workspace, { author: "system", text: `Mention syntax normalized: ${mention.names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; leaders assign with ensemble_delegate, peers with ensemble_handoff.`, kind: "system", taskID: task.id })
       if (currentTask.approvalID) {
         const linked = current.approvals[currentTask.approvalID]
         if (linked?.status === "pending") {

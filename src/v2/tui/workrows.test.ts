@@ -205,7 +205,10 @@ test("activity groups mark in-flight peer turns with the asking variant", () => 
   const groups = splitActivityGroups(items, keyFor, labelFor, 1000)
   assert.equal(groups.live.find((entry) => entry.label === "Clark")?.verb, "Asking $Clark…")
   assert.equal(groups.live.find((entry) => entry.label === "Clark")?.kind, "asking")
-  assert.equal(groups.live.find((entry) => entry.label === "Ana")?.verb, ACTIVITY_DEFAULT_VERB)
+  // Ticket #70: live delegation work names itself instead of hiding behind
+  // the generic checking default (reserved for genuinely unknown activity).
+  assert.equal(groups.live.find((entry) => entry.label === "Ana")?.verb, "working…")
+  assert.equal(groups.live.find((entry) => entry.label === "Ana")?.kind, "working")
 })
 
 test("live/finalized split keeps concurrent live rows distinct and folds finalize in place", () => {
