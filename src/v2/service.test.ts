@@ -1013,9 +1013,9 @@ test("agent tools delegate, ask, remember, and share while a run is active", asy
     const cross = await tools.get("send_message").execute({ kind: "workspace", id: otherWorkspace.result.id, text: "Nope" }, toolContext)
     assert.match(cross.content, /Cross-workspace/)
     mkdirSync(join(directory, ".ensemble", "handoffs"), { recursive: true })
-    writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-1.md"), "---\nensemble: handoff\n---\n# Handoff\n")
+    writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-1.md"), "---\nensemble: handoff\ntask: task\n---\n# Handoff\n")
     const handoff = await tools.get("handoff").execute({ task: "task", summary: "summary", path: ".ensemble/handoffs/task-nova-sage-1.md", to: "Sage" }, toolContext)
-    assert.match(handoff.content, /Registered handoff/)
+    assert.match(handoff.content, /Handed to \$Sage/)
     const snapshot = await handlers.snapshot({ directory })
     assert.ok(Object.values(snapshot.state.memories).some((memory: any) => memory.text === "Use pnpm"))
     const kinds = Object.values(snapshot.state.approvals).map((approval: any) => approval.kind)
@@ -2164,7 +2164,7 @@ test("exhausted attempts fail with the reason preserved", async () => {
   }
 })
 
-test("handoff registration persists a durable terminal work item and dedupes", async () => {
+test("handoff creates a pending typed hop with correlation and dedupes resubmission", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
@@ -2188,19 +2188,27 @@ test("handoff registration persists a durable terminal work item and dedupes", a
       return true
     })
     mkdirSync(join(directory, ".ensemble", "handoffs"), { recursive: true })
-    writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-1.md"), "---\nensemble: handoff\n---\n# Handoff\n")
+    writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-1.md"), "---\nensemble: handoff\ntask: task\n---\n# Handoff\n")
     const input = { task: "task", summary: "summary", path: ".ensemble/handoffs/task-nova-sage-1.md", to: "Sage" }
     const first = await tools.get("handoff").execute(input, { sessionID })
-    assert.match(first.content, /Registered handoff/)
+    assert.match(first.content, /Handed to \$Sage/)
     const second = await tools.get("handoff").execute(input, { sessionID })
-    assert.match(second.content, /Already registered/)
+    assert.match(second.content, /Already handed to \$Sage/)
     const after = await handlers.snapshot({ directory })
     const handoffs = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff")
     assert.equal(handoffs.length, 1)
-    assert.equal((handoffs[0] as any).state, "replied")
-    assert.equal((handoffs[0] as any).outcome, "succeeded")
+    // The hop runs through the queue immediately: pending, claimed working,
+    // or retrying are all valid in-flight reads; it must not be a terminal
+    // registration row anymore.
+    assert.ok(["pending", "working", "retrying"].includes((handoffs[0] as any).state))
+    assert.equal((handoffs[0] as any).assigneeID, sage.result.id)
+    assert.equal((handoffs[0] as any).creatorAgentID, nova.result.id)
     assert.ok((handoffs[0] as any).queueKey)
-    assert.ok((handoffs[0] as any).finishedAt)
+    assert.ok((handoffs[0] as any).deadlineAt)
+    assert.ok(((handoffs[0] as any).handoff as any)?.correlationID)
+    assert.equal(((handoffs[0] as any).handoff as any)?.recipientID, sage.result.id)
+    assert.equal(((handoffs[0] as any).handoff as any)?.senderID, nova.result.id)
+    assert.ok((after.state.messages[workspace.result.id] as any[]).some((message: any) => message.text.includes("Handed to $Sage")))
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

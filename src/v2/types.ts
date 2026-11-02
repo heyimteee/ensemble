@@ -90,11 +90,30 @@ export type Message = {
   streaming?: boolean
   interrupted?: boolean
   createdAt: number
+  /** Correlation ID linking handoff ask/ack/relay/notice legs. */
+  correlationID?: string
 }
 
 export type SubtaskState = "pending" | "working" | "replied"
 export type SubtaskOutcome = "succeeded" | "failed" | "pending"
 export type SubtaskStage = "initial" | "synthesis"
+
+export type HandoffInfo = {
+  /** Stable correlation ID carried from ask through relay/notice legs. */
+  correlationID: string
+  /** Agent that asked for the handoff. */
+  senderID: string
+  /** Agent that must do the work (real routing, never cosmetic). */
+  recipientID: string
+  /** Chain depth of this hop (asking depth + 1), bounded by maxDepth. */
+  depth: number
+  /** Id of the asking run's subtask, if the ask came from inside a run. */
+  parentID?: string
+  /** Tool input path of the handoff file, relative to the workspace. */
+  path?: string
+  /** Agent that produced the relayed answer, set when the hop replies. */
+  answeredByID?: string
+}
 
 export type Subtask = {
   id: Id
@@ -145,6 +164,8 @@ export type Subtask = {
   finishedAt?: number
   /** When the work was stopped/cancelled. */
   stoppedAt?: number
+  /** Typed handoff record (ticket #55). Present only on workKind "handoff". */
+  handoff?: HandoffInfo
 }
 
 export type SessionBinding = {
@@ -200,6 +221,10 @@ export type DmQueueEntry = {
   text: string
   status: "queued" | "sent" | "failed"
   createdAt: number
+  /** Sender of a direct agent-to-agent message (envelope addressing). */
+  fromID?: Id
+  /** Correlation ID carried through queue/relay legs (envelope correlation). */
+  correlationID?: string
 }
 
 export type Settings = {
@@ -216,6 +241,8 @@ export type ChatMessage = {
   text: string
   createdAt: number
   queued?: boolean
+  /** Correlation ID of a direct agent-to-agent envelope, when present. */
+  correlationID?: string
 }
 
 export type ChatContext = {
