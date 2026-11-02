@@ -37,7 +37,7 @@ export function singleChoiceValue<Item>(items: readonly Item[], cursor: number):
   return items[cursor]
 }
 
-export type SkillFilterKey = {
+export type FilterKey = {
   name?: string
   sequence?: string
   ctrl?: boolean
@@ -45,14 +45,15 @@ export type SkillFilterKey = {
   super?: boolean
 }
 
-export type SkillFilterEdit = { query: string; done: boolean; cancelled: boolean }
+export type FilterEdit = { query: string; done: boolean; cancelled: boolean }
 
 /**
- * Inline skill-filter editing: printable keys append, backspace deletes,
- * Enter submits, Escape cancels. Modifier chords and multi-character
- * sequences are ignored so terminal chords never corrupt the filter.
+ * Inline filter editing shared by the skill palette and the memories tab:
+ * printable keys append, backspace deletes, Enter submits, Escape cancels.
+ * Modifier chords and multi-character sequences are ignored so terminal
+ * chords never corrupt the filter.
  */
-export function skillFilterEdit(query: string, key: SkillFilterKey | undefined): SkillFilterEdit {
+export function filterEdit(query: string, key: FilterKey | undefined): FilterEdit {
   const name = String(key?.name ?? "")
   const sequence = String(key?.sequence ?? "")
   if (name === "escape") return { query, done: true, cancelled: true }

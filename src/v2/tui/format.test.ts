@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { ageLabel, agentColor, answerHeader, askingLine, assignmentLine, fuzzyMatch, isAssignmentEvent, markdownText, missingSkills, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, short, systemLine, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
+import { ageLabel, agentColor, answerHeader, askingLine, assignmentLine, fuzzyMatch, headerQueuedSuffix, isAssignmentEvent, markdownText, missingSkills, queuedRemovable, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, short, systemLine, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
 import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
 
 const agent = (patch: Partial<Agent> = {}): Agent => ({
@@ -109,6 +109,19 @@ test("slice C system lines use the glyph grammar", () => {
 test("slice C queued suffix carries the remove affordance", () => {
   assert.equal(queuedSuffix(false), " · queued")
   assert.equal(queuedSuffix(true), " · queued · [x remove]")
+})
+
+test("review fix: queued remove is a direct-surface affordance only", () => {
+  assert.equal(queuedRemovable("user", "agent"), true)
+  assert.equal(queuedRemovable("user", "workspace"), false)
+  assert.equal(queuedRemovable("agent", "agent"), false)
+  assert.equal(queuedRemovable("system", "agent"), false)
+  assert.equal(headerQueuedSuffix({ queued: true, role: "user" }, "agent"), " · queued · [x remove]")
+  // A queued group row is impossible by construction (Message carries no
+  // queued flag), and even a stray bit never offers a dead affordance.
+  assert.equal(headerQueuedSuffix({ queued: true, role: "user" }, "workspace"), " · queued")
+  assert.equal(headerQueuedSuffix({ queued: false, role: "user" }, "agent"), "")
+  assert.equal(headerQueuedSuffix({ role: "user" }, "agent"), "")
 })
 
 test("slice C user text stays verbatim while agent text strips markdown", () => {

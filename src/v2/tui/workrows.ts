@@ -9,11 +9,16 @@ import { askingLine, short } from "./format.ts"
  * WORK block carries only active subtasks for the workspace with their
  * assigned agent and derived lifecycle state. Terminal outcomes never render
  * here — they are announced once as transcript system lines (see
- * terminalAnnouncement). Attribution lines (`→ Assigned to $Agent` events,
- * `Asking $Agent…` live variants, `Answer from $Agent` relay headers) are
- * defined in format.ts and wired through activityDetailForTask below and the
- * transcript render in app.tsx.
+ * terminalAnnouncement). Attribution lines (`→ Assigned to $AgentName: <title>`
+ * events, `Asking $AgentName…` live variants, `Answer from $AgentName` relay
+ * headers) are defined in format.ts and wired through activityDetailForTask
+ * below and the transcript render in app.tsx.
  */
+
+/** Shared transcript window: both the DM and group surfaces keep the most
+ * recent N rows. One documented bound so neither surface can drift and grow
+ * scrolling cost; raising it re-verifies overlay centering and wrap width. */
+export const TRANSCRIPT_WINDOW = 40
 
 const GLYPHS: Record<DerivedWorkStatus, string> = {
   pending: "○",
@@ -33,9 +38,59 @@ export function workStatusLabel(status: DerivedWorkStatus): string {
 }
 
 /** One inline row: `{glyph} {title} · {agent} · {status}`. Pure. */
-export function workRowText(task: Subtask, agentLabel: string, now: number): string {
+export function workRowText(
+  task: Subtask,
+  agentLabel: string,
+  now: number,
+  opts: { pending?: PendingWorkAction | null; needsYou?: boolean } = {},
+): string {
   const status = deriveWorkStatus(task, now)
-  return `${workGlyph(status)} ${short(task.title || "(untitled)", 60)} · ${agentLabel} · ${status}`
+  const segment = opts.pending ? pendingWorkLabel(opts.pending) : status
+  const row = `${workGlyph(status)} ${short(task.title || "(untitled)", 60)} · ${agentLabel} · ${segment}`
+  if (!opts.needsYou) return row
+  return `${NEEDS_YOU_MARK} ${row}${needsYouSuffix()}`
+}
+
+/**
+ * In-flight work-action labels (brief §2.8/`Stopping…` pattern, ticket
+ * acceptance row 19): while a Stop/Cancel (or analogous retry/restart) RPC
+ * is in flight the row shows the interim label instead of the derived
+ * status, until the terminal state arrives. Callers clear the pending action
+ * in a finally so no row can stick on the interim label. Pure.
+ */
+export type PendingWorkAction = "stop" | "cancel" | "retry" | "restart"
+
+export function pendingWorkLabel(action: PendingWorkAction): string {
+  switch (action) {
+    case "stop":
+      return "Stopping…"
+    case "cancel":
+      return "Cancelling…"
+    case "retry":
+      return "Retrying…"
+    case "restart":
+      return "Restarting…"
+  }
+}
+
+/**
+ * Distinct attention marker for work blocked on the user (brief §2.2/`needs
+ * you` amber override): interrupted runs and approval-gated work (ask_person
+ * and friends) render `◆` + `· needs you · v to resolve`, visually distinct
+ * from plain pending `○`. Derived from existing interruption/approval state
+ * only — no new coordination semantics. Pure.
+ */
+export const NEEDS_YOU_MARK = "◆"
+
+export function needsYouSuffix(): string {
+  return " · needs you · v to resolve"
+}
+
+/** True while the task waits on the user: interrupted, or gated on a still-pending approval. */
+export function isNeedsYouTask(task: Subtask, pendingApprovalIDs: ReadonlySet<string>): boolean {
+  if (task.interrupted) return true
+  if (task.approvalID && pendingApprovalIDs.has(task.approvalID)) return true
+  return false
 }
 
 /**

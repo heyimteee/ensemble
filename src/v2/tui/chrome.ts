@@ -42,7 +42,7 @@ export type FooterContext = {
 }
 
 /** Global footer line 1: context-aware navigation hints, never naming hidden work. */
-export function footerLine1(context: FooterContext): string {
+export function footerLine1(context: { focus: ChromeFocus; hasWork: boolean }): string {
   switch (context.focus) {
     case "composer":
       return "enter send · esc cancel · $ agent · @ file · / command"

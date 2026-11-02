@@ -240,6 +240,24 @@ export function queuedSuffix(removable: boolean): string {
   return removable ? " · queued · [x remove]" : " · queued"
 }
 
+/** Which transcript surface a line renders on. Only direct (DM) surfaces own
+ * parked user input; group messages (`Message`) carry no queued flag at all,
+ * so a queued group row is impossible by construction. */
+export type TranscriptSurface = "agent" | "workspace"
+
+/** The `[x remove]` affordance renders on direct surfaces only. Group rows
+ * keep the plain `· queued` flag even if a line carried the bit, so no dead
+ * affordance is ever offered where `x` keeps its cancel-task binding. */
+export function queuedRemovable(role: "user" | "agent" | "system", surface: TranscriptSurface): boolean {
+  return role === "user" && surface === "agent"
+}
+
+/** Header suffix for a transcript line on a surface: empty unless queued. */
+export function headerQueuedSuffix(line: { queued?: boolean; role: "user" | "agent" | "system" }, surface: TranscriptSurface): string {
+  if (!line.queued) return ""
+  return queuedSuffix(queuedRemovable(line.role, surface))
+}
+
 /** True for the persisted per-assignment event (kind task with a task link). */
 export function isAssignmentEvent(message: { kind?: string; taskID?: string }): boolean {
   return message.kind === "task" && Boolean(message.taskID)

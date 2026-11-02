@@ -2,19 +2,22 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import {
   EMPTY_MARK,
-  STREAMING_FRAMES,
+  STAGGER_CAP,
+  STAGGER_STEP_MS,
   THINKING_FRAMES,
   TOOL_FRAMES,
   WAITING_FRAMES,
   WORKING_FRAMES,
+  createStaggerState,
   effectiveTick,
   isReducedMotion,
   motionActive,
   queuedFrame,
   shouldRunMotion,
-  streamingFrame,
+  staggerDelayMs,
   thinkingFrame,
   toolFrame,
+  updateStagger,
   waitingFrame,
   workingFrame,
 } from "./motion.ts"
@@ -27,8 +30,6 @@ test("named frame sets match the brief's normative glyphs", () => {
   assert.deepEqual([...TOOL_FRAMES], ["▸", "▹"])
   assert.deepEqual([...THINKING_FRAMES], ["·  ", "˙  ", " ⋮ ", "·  "])
   assert.equal(queuedFrame(), "○")
-  // Legacy alias keeps compiling and resolves to the working set.
-  assert.deepEqual([...STREAMING_FRAMES], [...WORKING_FRAMES])
 })
 
 test("each frame set is constant-width (no reflow)", () => {
@@ -56,7 +57,6 @@ test("frames cycle deterministically with modular wrap", () => {
   assert.equal(toolFrame(-1), "▹")
   assert.equal(thinkingFrame(0), "·  ")
   assert.equal(thinkingFrame(4), thinkingFrame(0))
-  assert.equal(streamingFrame(1), workingFrame(1))
 })
 
 test("tick 120 is a still frame for every animated set", () => {
@@ -110,4 +110,48 @@ test("motion clock runs only while active and never under reduced motion", () =>
 
 test("empty states show a one-shot static mark", () => {
   assert.equal(EMPTY_MARK, "○───○───○")
+})
+
+test("review fix: first-paint stagger budget is capped at 6 lines x 40ms", () => {
+  assert.equal(STAGGER_CAP, 6)
+  assert.equal(STAGGER_STEP_MS, 40)
+  assert.equal(staggerDelayMs(0, {}), 0)
+  assert.equal(staggerDelayMs(1, {}), 40)
+  assert.equal(staggerDelayMs(5, {}), 200)
+  assert.equal(staggerDelayMs(6, {}), 200)
+  assert.equal(staggerDelayMs(39, {}), 200)
+  assert.equal(staggerDelayMs(-1, {}), 0)
+  assert.equal(staggerDelayMs(3, { ENSEMBLE_REDUCED_MOTION: "1" }), 0)
+  assert.equal(staggerDelayMs(3, { NO_COLOR: "1" }), 0)
+})
+
+test("review fix: stagger animates only on mount, capped, never per poll or chunk", () => {
+  const state = createStaggerState()
+  // First paint of three new rows: all stagger, in order.
+  const first = updateStagger(state, ["a", "b", "c"], 7, true, {})
+  assert.deepEqual([...first], ["a", "b", "c"])
+  // Same tick re-evaluation (snapshot poll / streaming chunk): no re-trigger,
+  // same set still staggering — the animation continues, never restarts.
+  const repoll = updateStagger(state, ["a", "b", "c"], 7, true, {})
+  assert.deepEqual([...repoll], ["a", "b", "c"])
+  // Next tick: the entrance is over, rows render full.
+  assert.deepEqual([...updateStagger(state, ["a", "b", "c"], 8, true, {})], [])
+  // Re-mounted later (same tick or not): never re-animates.
+  assert.deepEqual([...updateStagger(state, ["a", "b", "c"], 9, true, {})], [])
+  // Cap: only the first 6 of a 10-row burst stagger; the rest mount full.
+  const burst = createStaggerState()
+  const staggered = updateStagger(burst, ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9"], 1, true, {})
+  assert.deepEqual([...staggered], ["r0", "r1", "r2", "r3", "r4", "r5"])
+  // Departed rows are pruned so the guard stays bounded by the window.
+  assert.deepEqual([...updateStagger(burst, ["r9"], 2, true, {})], [])
+})
+
+test("review fix: stagger is static when motion is off or reduced", () => {
+  const idle = createStaggerState()
+  assert.deepEqual([...updateStagger(idle, ["a", "b"], 3, false, {})], [])
+  // Idle rows are still marked seen: a later live tick does not stagger them.
+  assert.deepEqual([...updateStagger(idle, ["a", "b"], 4, true, {})], [])
+  const reduced = createStaggerState()
+  assert.deepEqual([...updateStagger(reduced, ["a", "b"], 3, true, { ENSEMBLE_REDUCED_MOTION: "1" })], [])
+  assert.deepEqual([...updateStagger(reduced, ["a", "b"], 4, true, {})], [])
 })

@@ -229,6 +229,21 @@ live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts when 
 live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · working" "no active rows remain in the block"
 live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · replied" "no finished rows remain in the block"
 live_assert_absence "$LIVE_TUI_SESSION" "· checking the details…" "no activity lines when idle"
+# Review fixes (findings 2–3): no interim label can stick after completion,
+# and no needs-you marker appears without user-blocked work in this flow.
+live_assert_absence "$LIVE_TUI_SESSION" "Stopping…" "no stuck stop label after terminal"
+live_assert_absence "$LIVE_TUI_SESSION" "Cancelling…" "no stuck cancel label after terminal"
+live_assert_absence "$LIVE_TUI_SESSION" "Retrying…" "no stuck retry label after terminal"
+live_assert_absence "$LIVE_TUI_SESSION" "Restarting…" "no stuck restart label after terminal"
+live_assert_absence "$LIVE_TUI_SESSION" "needs you" "no needs-you marker without blocked work"
+# Review fix (finding 4): stagger is glyph/color-only with no text marker, so
+# text anchors stay stable; finalization order is unaffected and each row
+# renders exactly once (no per-chunk re-animation duplicates). Deterministic
+# pane-order check — no timing involved.
+pane_order=$(live_capture "$LIVE_TUI_SESSION")
+alpha_at=$(grep -nF "fake-queue-alpha" <<<"$pane_order" | head -1 | cut -d: -f1)
+beta_at=$(grep -nF "fake-queue-beta" <<<"$pane_order" | head -1 | cut -d: -f1)
+[[ -n "$alpha_at" && -n "$beta_at" && "$alpha_at" -lt "$beta_at" ]] || live_fail "transcript order changed by stagger (alpha @$alpha_at beta @$beta_at)"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization of group work"
 queue_status=$(live_snapshot_value 'Object.values(output.state.subtasks).map(function (t) { return t.status })')
 [[ "$queue_status" == *replied* ]] || live_fail "derived work status not exposed in snapshot (got $queue_status)"
@@ -256,12 +271,14 @@ live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
 # flight the live row reads `Asking $Name…` instead of the generic verb.
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 15 "assignment line for the peer turn"
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "peer assignment emitted exactly once"
-live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "assignment emitted exactly once"
 live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "work block mounts fresh for the new burst"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
 live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking row exactly once, no duplicate turn row"
 live_assert_count "$LIVE_TUI_SESSION" "· FakeAgent · working" 1 "fresh burst lists only its own active row"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
+# Review fix (finding 1): queued rows are DM-only by construction, so the
+# group surface never offers `[x remove]` — `x` there keeps cancelling work.
+live_assert_absence "$LIVE_TUI_SESSION" "[x remove]" "no dead remove affordance on the group surface"
 peer_replied=0
 for _ in $(seq 1 120); do
   peer_replied=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.state === "replied" }).length')
