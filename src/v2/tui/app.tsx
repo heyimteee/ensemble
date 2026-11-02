@@ -19,7 +19,19 @@ import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus } from "../queue.ts"
 import { shouldApplySnapshot } from "../snapshot-guard.ts"
-import { orderedWorkItems, splitLiveFinalized, workRowText, workSummary } from "./workrows.ts"
+import {
+  ACTIVITY_DEFAULT_VERB,
+  MAX_VISIBLE_ACTIVITY,
+  hasActiveWork,
+  orderedWorkItems,
+  selectActivityAgents,
+  splitActivityGroups,
+  splitLiveFinalized,
+  terminalAnnouncements,
+  workRowText,
+  workSummary,
+  type ActivityEntry,
+} from "./workrows.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat"
@@ -290,7 +302,66 @@ export function EnsembleV2App() {
   // items fold into the transcript in place with no duplicates or stale
   // lines. The transcript scrollbox keeps a stable identity throughout.
   const liveMessages = createMemo(() => splitTranscript().live)
-  const liveText = (text: string) => renderMarkdownLines(text || "…", Math.max(16, messageWidth())).slice(-5)
+  // Slice A (#64): the WORK block is ephemeral — it mounts only while active
+  // (non-terminal) work exists. `orderedTasks` is already active-only, so the
+  // block condition is non-emptiness on the workspace surface. Terminal
+  // outcomes render once as transcript system lines, and per-agent activity
+  // lines replace the raw streaming dump: no streamed body text anywhere.
+  const showWorkBlock = createMemo(
+    () => surface()?.kind === "workspace" && hasActiveWork(activeTasks(), Date.now()),
+  )
+  const workAnnouncements = createMemo(() => {
+    if (surface()?.kind !== "workspace") return []
+    return terminalAnnouncements(activeTasks(), (task) => agentName(state(), task.assigneeID), Date.now())
+  })
+  const liveActivity = createMemo(() => {
+    const live: ActivityEntry[] = []
+    let queued: string[] = []
+    if (surface()?.kind === "workspace") {
+      const groups = splitActivityGroups(
+        activeTasks(),
+        (task) => task.assigneeID ?? "unassigned",
+        (task) => agentName(state(), task.assigneeID),
+        Date.now(),
+      )
+      live.push(...groups.live)
+      queued = groups.queued.map((entry) => entry.label)
+    }
+    for (const liveLine of liveMessages()) {
+      if (!live.some((entry) => entry.key === (liveLine.agentID ?? `author:${liveLine.author}`))) {
+        live.push({
+          key: liveLine.agentID ?? `author:${liveLine.author}`,
+          label: liveLine.author,
+          createdAt: liveLine.createdAt,
+        })
+      }
+    }
+    const selected = selectActivityAgents(live, MAX_VISIBLE_ACTIVITY)
+    const queuedShown =
+      selected.shown.length > 0
+        ? queued.filter((label) => !selected.shown.includes(label)).slice(0, MAX_VISIBLE_ACTIVITY)
+        : []
+    return {
+      shown: selected.shown,
+      queued: queuedShown,
+      overflow:
+        selected.overflow + (selected.shown.length > 0 ? Math.max(0, queued.length - queuedShown.length) : 0),
+    }
+  })
+  const agentColorForLabel = (label: string) => {
+    const agents = rosterAgents()
+    const index = agents.findIndex((item) => item.name === label)
+    return agentColor(index >= 0 ? agents[index] : undefined, colors.muted as string, Math.max(0, index), colors.categorical)
+  }
+  const hasChatContent = createMemo(
+    () =>
+      finalizedLines().length > 0 ||
+      liveMessages().length > 0 ||
+      workAnnouncements().length > 0 ||
+      (showWorkBlock() ?? false) ||
+      liveActivity().shown.length > 0 ||
+      liveActivity().queued.length > 0,
+  )
   const chatAuthorColor = (line: ChatLine) => {
     if (line.role === "user") return colors.good
     if (line.role === "system") return colors.muted
@@ -1749,7 +1820,7 @@ export function EnsembleV2App() {
                     </box>
                   }>
                     <>
-                      <Show when={finalizedLines().length > 0 || liveMessages().length > 0 || (surface()?.kind === "workspace" && orderedTasks().length > 0)} fallback={
+                      <Show when={hasChatContent()} fallback={
                         <box flexDirection="column" padding={1} flexGrow={1}>
                           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{surface()?.kind === "agent" ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}` : "Group chat"}</text>
                           <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? "Send a direct message. It goes to this agent's native OpenCode session." : "Say something to your team. $Name mentions an agent; @path references a file."}</text>
@@ -1769,9 +1840,35 @@ export function EnsembleV2App() {
                                     </Show>
                                   </box>
                                 )}</For>
+                                <For each={workAnnouncements()}>{(announcement) => (
+                                  <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
+                                    <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{announcement.text}</text>
+                                  </box>
+                                )}</For>
                               </box>
                           </scrollbox>
-                          <Show when={surface()?.kind === "workspace" && orderedTasks().length > 0}>
+                          <Show when={liveActivity().shown.length > 0 || liveActivity().queued.length > 0 || liveActivity().overflow > 0}>
+                            <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1}>
+                              <For each={liveActivity().shown}>{(label) => (
+                                <box flexDirection="row" width="100%">
+                                  <text fg={colors.muted} bg={colors.bg}>{`${streamingFrame(motionFrame())} `}</text>
+                                  <text fg={agentColorForLabel(label)} bg={colors.bg}>{label}</text>
+                                  <text fg={colors.muted} bg={colors.bg}>{` · ${ACTIVITY_DEFAULT_VERB}`}</text>
+                                </box>
+                              )}</For>
+                              <For each={liveActivity().queued}>{(label) => (
+                                <box flexDirection="row" width="100%">
+                                  <text fg={colors.muted} bg={colors.bg}>○ </text>
+                                  <text fg={agentColorForLabel(label)} bg={colors.bg}>{label}</text>
+                                  <text fg={colors.muted} bg={colors.bg}> · queued</text>
+                                </box>
+                              )}</For>
+                              <Show when={liveActivity().overflow > 0}>
+                                <text fg={colors.faint} bg={colors.bg} width="100%" truncate>· +{liveActivity().overflow} more</text>
+                              </Show>
+                            </box>
+                          </Show>
+                          <Show when={showWorkBlock()}>
                             <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
                               <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{workSummary(activeTasks(), Date.now())}</text>
                               <For each={orderedTasks()}>{(task, index) => (
@@ -1781,14 +1878,6 @@ export function EnsembleV2App() {
                               )}</For>
                               <text fg={colors.faint} bg={colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result · r retry · R restart · x cancel · o native</text>
                             </box>
-                          </Show>
-                          <Show when={liveMessages().length > 0}>
-                            <For each={liveMessages()}>{(live) => (
-                              <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} flexDirection="column">
-                                <text fg={chatAuthorColor(live)} bg={colors.panel} width="100%" truncate>{live.author} · streaming… {streamingFrame(motionFrame())}</text>
-                                <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{liveText(live.text).join("\n") || "…"}</text>
-                              </box>
-                            )}</For>
                           </Show>
                           <Show when={!atBottom()}>
                             <box position="absolute" bottom={1} right={1} zIndex={40} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} onMouseDown={() => jumpToBottom()}>
@@ -1922,7 +2011,7 @@ export function EnsembleV2App() {
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
         <text fg={colors.muted} bg={colors.bg} width="100%" truncate>h/l column · j/k work · enter result · i compose · a agent · n workspace · g members · I init · v approvals</text>
-        <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : "d delegate · t reassign · r retry · R restart · x cancel · o native · ~ leader · / search · p pause · s settings"}</text>
+        <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : showWorkBlock() ? "d delegate · t reassign · r retry · R restart · x cancel · o native · ~ leader · / search · p pause · s settings" : "~ leader · / search · p pause · s settings"}</text>
       </box>
     </box>
   )

@@ -99,11 +99,12 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "streaming…" 15 "live streaming block"
-live_require_any_text "$LIVE_TUI_SESSION" 15 "animated streaming frame" "streaming… ◐" "streaming… ◑" "streaming… ◒" "streaming… ◓"
-live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "streamed rich reply"
+live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "per-agent activity line while live"
+live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
+live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "finalized rich reply"
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization"
+live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "activity line unmounts after finalize"
 
 # All rich Markdown elements must be rendered by the finalized message.
 live_assert_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "heading"
@@ -117,7 +118,7 @@ live_assert_text "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "fenced code"
 live_assert_text "$LIVE_TUI_SESSION" "Ensemble repository" "link text"
 live_assert_text "$LIVE_TUI_SESSION" "table cell marker" "table cell"
 
-# Finalization must replace the streaming block, not leave a duplicate behind.
+# Finalization must fold the live row into the transcript, not leave a duplicate behind.
 live_assert_count "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 1 "rich reply heading"
 live_assert_count "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" 1 "fenced code marker"
 live_assert_count "$LIVE_TUI_SESSION" "quoted line one" 1 "quoted line"
@@ -154,20 +155,24 @@ synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synth
 leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')
 [[ "$leader_name" == '"FakeAgent"' ]] || live_fail "unexpected roster leader (got $leader_name)"
 
-# Inline work progress at this layer (ticket #56): group messages create
-# leader work that starts with no further TUI action — no navigation, no
-# native session — and runs to replied. Each work row shows its assigned
-# agent with a loading state while active and replied when done; the live
-# reply area is the active-work surface with per-item streaming text. A
-# second message proves multiple live items each finalize without
-# duplicates or stale lines.
+# Inline work progress at this layer (ticket #56, slice A ticket #64): group
+# messages create leader work that starts with no further TUI action — no
+# navigation, no native session — and runs to replied. While active, the
+# ephemeral WORK block lists exactly the active rows with the assigned agent,
+# and a per-agent activity line shows what each agent is doing; no raw
+# streamed body text appears anywhere. Each terminal outcome is announced
+# once as a transcript system line, finished rows never remain in the block,
+# and the block unmounts when all work is terminal. A second message proves
+# multiple live items each finalize without duplicates or stale lines.
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on group surface"
 live_type "$LIVE_TUI_SESSION" "fake-queue-alpha"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message posted"
-live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "inline work section"
+live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "ephemeral work block mounts while active"
 live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · working" 15 "work row loading state with assignee"
+live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "per-agent activity line while live"
+live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for second message"
 live_type "$LIVE_TUI_SESSION" "fake-queue-beta"
@@ -180,10 +185,13 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [[ "$queue_replied" == "2" ]] || live_fail "group work did not run to replied with no further action (got $queue_replied replied)"
-live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · replied" 15 "work row replied with assignee"
-live_assert_text "$LIVE_TUI_SESSION" "fake-queue-alpha" "first work row"
-live_assert_text "$LIVE_TUI_SESSION" "fake-queue-beta" "second work row"
-live_assert_count "$LIVE_TUI_SESSION" "· FakeAgent · replied" 2 "two replied work rows, no duplicates"
+live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-alpha" 15 "terminal announcement for first work"
+live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-beta" 15 "terminal announcement for second work"
+live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal outcome announced exactly once"
+live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts when all work is terminal"
+live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · working" "no active rows remain in the block"
+live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · replied" "no finished rows remain in the block"
+live_assert_absence "$LIVE_TUI_SESSION" "· checking the details…" "no activity lines when idle"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization of group work"
 queue_status=$(live_snapshot_value 'Object.values(output.state.subtasks).map(function (t) { return t.status })')
 [[ "$queue_status" == *replied* ]] || live_fail "derived work status not exposed in snapshot (got $queue_status)"
@@ -191,10 +199,13 @@ queue_key=$(live_snapshot_value 'Object.values(output.state.subtasks).map(functi
 [[ "$queue_key" == *string* ]] || live_fail "idempotency key not exposed in snapshot (got $queue_key)"
 live_log "group work ran to replied with derived status ($queue_status)"
 
-# Peer turn at this layer (ticket #57): a `$Name` group mention creates a
-# durable peer turn through the same queue — queued, working, then replied —
-# with the asking mention and the answering agent both visible in order. The
-# recipient's reply is the relay: exactly one answer row, no second leg.
+# Peer turn at this layer (ticket #57, slice A ticket #64): a `$Name` group
+# mention creates a durable peer turn through the same queue — queued,
+# working, then replied — with the asking mention and the answering agent
+# both visible in order. The new burst mounts a fresh WORK block with only
+# its own row; the terminal outcome is announced once and the block
+# unmounts. The recipient's reply is the relay: exactly one answer row, no
+# second leg.
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for peer turn"
 live_type "$LIVE_TUI_SESSION" "$"
@@ -204,7 +215,10 @@ live_require_absence "$LIVE_TUI_SESSION" "\$ agents" 10 "completion accepted"
 live_type "$LIVE_TUI_SESSION" "peer-check"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
-live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "inline work section for peer turn"
+live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "work block mounts fresh for the new burst"
+live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "activity line for the peer burst"
+live_assert_count "$LIVE_TUI_SESSION" "· FakeAgent · working" 1 "fresh burst lists only its own active row"
+live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
 peer_replied=0
 for _ in $(seq 1 120); do
   peer_replied=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.state === "replied" }).length')
@@ -212,8 +226,10 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [[ "$peer_replied" == "1" ]] || live_fail "peer turn did not run to replied with no further action (got $peer_replied replied)"
-live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · replied" 15 "peer work row replied with assignee"
-live_assert_count "$LIVE_TUI_SESSION" "· FakeAgent · replied" 3 "two delegation rows plus one peer row, no duplicates"
+live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished:" 15 "peer turn announced once"
+live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 3 "two delegation rows plus one peer row, no duplicates"
+live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts after the peer burst"
+live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · working" "no active rows remain after the peer burst"
 live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
 live_assert_absence "$LIVE_TUI_SESSION" "Peer turn refused" "no refusal for the valid mention"
 live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "agent addressing stays \$Name, never @Name"
