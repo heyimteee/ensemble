@@ -9,7 +9,10 @@ function listData(value: any): any[] {
 function sanitizeCatalogError(error: unknown): string {
   const raw = String((error as any)?.message ?? error ?? "unknown error")
     .replace(/[\r\n\t]+/g, " ")
-    .replace(/(password|authorization|api[_-]?key|token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [redacted]")
+    .replace(/\/\/[^/\s:@]+:[^/\s@]+@/g, "//[redacted]@")
+    .replace(/\bsk-[A-Za-z0-9._-]{8,}/g, "[redacted]")
+    .replace(/(password|authorization|api[_-]?key|token)\s*[:=]?\s*\S+/gi, "$1=[redacted]")
     .trim()
   return raw.slice(0, 200) || "unknown error"
 }
@@ -21,6 +24,7 @@ export class Catalog {
   private skills: SkillOption[] = []
   private promise: Promise<void> | undefined
   private failure: string | undefined
+  private generation = 0
   lastRefreshedAt = 0
 
   constructor(ctx: any, onChange?: () => void) {
@@ -43,6 +47,7 @@ export class Catalog {
 
   refresh(): Promise<void> {
     if (this.promise) return this.promise
+    const generation = ++this.generation
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, 10_000) })
     const work = (async () => {
@@ -50,6 +55,8 @@ export class Catalog {
         this.ctx.model.list().then((value: any) => ({ value, error: undefined as unknown }), (error: unknown) => ({ value: [], error })),
         this.ctx.skill.list().catch(() => []),
       ])
+      // A timed-out earlier attempt must not clobber a newer refresh.
+      if (generation !== this.generation) return
       this.models = listData(modelsResult.value).map((model: any) => ({
         providerID: model.providerID,
         modelID: model.id ?? model.modelID,

@@ -3,7 +3,7 @@ import type { Agent, Approval, Memory, SkillOption, SnapshotState, Subtask } fro
 import type { Palette } from "./theme.ts"
 import { agentName, busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
 import { platformLabel } from "./platform.ts"
-import { helpGroups, shortcutGroups } from "./help.ts"
+import { helpGroups, helpKeyLabel, shortcutGroups } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
@@ -148,7 +148,7 @@ function HelpEntries(props: { colors: Palette; groups: Array<{ title: string; en
       <For each={props.groups}>{(group) => (
         <>
           <text fg={props.colors.leader}>{group.title}</text>
-          <For each={group.entries}>{(entry) => <text fg={props.colors.text}>{platformLabel(entry[0]).padEnd(16)} {platformLabel(entry[1])}</text>}</For>
+          <For each={group.entries}>{(entry) => <text fg={props.colors.text}>{helpKeyLabel(entry[0]).padEnd(16)} {platformLabel(entry[1])}</text>}</For>
         </>
       )}</For>
       <Show when={props.groups.length === 0}><text fg={props.colors.muted}>No matching shortcuts.</text></Show>
