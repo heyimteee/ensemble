@@ -99,10 +99,11 @@ Message {
 - Multiple known mentions create one task per recipient.
 - No mention routes only to the leader.
 - Unknown `$Name`/`!Name` values fail with a clear `unknown_member` error instead of silently falling back.
+- Archived mentions are refused loudly instead of routing to the leader; one refused peer never aborts the remaining recipients.
 - `i` focuses an inline bottom composer. `$` opens an agent picker and inserts a stable `$Name` reference; `@` opens a workspace file picker; `/` opens the Ensemble command palette. `m` is the keyboard shortcut for the agent picker.
 - File references are resolved inside the workspace and appended to the subtask instruction. `@` is not a mention.
 - Agent replies and task cards appear in the same transcript.
-- Group replies subscribe to the native `session.text.delta` event. The service maps `sessionID` to the active run, appends deltas to one live message row, throttles persistence, and reconciles with the final assistant text when the run completes. Direct chats consume the same native delta event in the TUI and clear the live block on `session.execution.succeeded`, then reload the committed native transcript.
+- Group replies subscribe to the native `session.text.delta` event. The service maps `sessionID` to the active run, appends deltas to one live message row, throttles persistence, and reconciles with the final assistant text when the run completes. The live slot registers before the opening row persists, so a delta that lands in between is buffered, never dropped. Direct chats consume the same native delta event in the TUI and clear the live block on `session.execution.succeeded`, then reload the committed native transcript.
 - Direct chats render the native OpenCode transcript in the center column and stream deltas into a live assistant block. `o` opens that native session as a normal OpenCode route.
 - Selecting an agent opens its DM; selecting a workspace opens the group chat. The empty state appears when no chat is open.
 
@@ -163,7 +164,7 @@ Write tools are registered globally but refuse outside an Ensemble-bound session
 - `ensemble_remember`
 - `ensemble_share`
 
-`ensemble_send_message` posts to the group or sends a direct agent message (member DMs deliver with an envelope carrying addressing, correlation, ordering, and delivery state; cross-boundary contact requires an `outside_roster` approval). `ensemble_handoff` validates a typed Markdown file under `.ensemble/handoffs/` as structured frontmatter and creates a handoff hop: a queued unit of work routed to the named recipient, acknowledged in the group chat, retried within its attempt budget and deadline, and relayed back into the asking conversation (or failed visibly there). `ensemble_delegate` remains the leader-only work-creating tool.
+`ensemble_send_message` posts to the group or sends a direct agent message (member DMs deliver with an envelope carrying addressing, correlation, ordering, and delivery state; cross-boundary contact requires an `outside_roster` approval). A group post that names `$Name`/`!Name` mentions also creates one peer turn per named member: a durable `turn` work item through the same queue, lease, retry, and recovery machinery as delegations, with per-agent serialization, depth and per-run caps, idempotency, and visible per-recipient refusals (unknown/archived/outside-roster mentions never abort the remaining peers). The recipient's reply in the asking transcript is the relay, attributed via `answeredByID` and linked by correlationID, with no second leg. `ensemble_handoff` validates a typed Markdown file under `.ensemble/handoffs/` as structured frontmatter and creates a handoff hop: a queued unit of work routed to the named recipient, acknowledged in the group chat, retried within its attempt budget and deadline, and relayed back into the asking conversation (or failed visibly there). `ensemble_delegate` remains the leader-only work-creating tool.
 
 ## Subtasks
 

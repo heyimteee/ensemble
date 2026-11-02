@@ -115,6 +115,17 @@ export type HandoffInfo = {
   answeredByID?: string
 }
 
+export type TurnInfo = {
+  /** Stable correlation ID carried from the ask through the answer. */
+  correlationID: string
+  /** Who asked: a user message or an agent group-chat post. */
+  askerKind: "user" | "agent"
+  /** Agent that asked, when the ask came from inside a run or an agent post. */
+  askerID?: string
+  /** Agent that produced the answer, set when the turn replies. */
+  answeredByID?: string
+};
+
 export type Subtask = {
   id: Id
   workspaceID: Id
@@ -166,6 +177,8 @@ export type Subtask = {
   stoppedAt?: number
   /** Typed handoff record (ticket #55). Present only on workKind "handoff". */
   handoff?: HandoffInfo
+  /** Peer-turn record (ticket #57). Present only on workKind "turn". */
+  turn?: TurnInfo
 }
 
 export type SessionBinding = {

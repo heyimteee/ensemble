@@ -7,8 +7,9 @@ import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, writeAg
 import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, onboardingPrompt } from "./init-block.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
-import { normalizeAgentMentions, unknownMentions, visibleRecipients } from "./routing.ts"
+import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, workKey } from "./queue.ts"
+import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { handoffAckText, handoffDuplicateText, handoffFailureText, handoffWorkKey, newCorrelationID, parseHandoffFile, resolveHandoffRecipient } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { V2Store, bindingKey } from "./store.ts"
@@ -121,7 +122,7 @@ export class EnsembleV2Service {
   private refreshDmClock(): void {
     this.lastDmAt = Math.max(this.lastDmAt, this.store.dmMaxCreatedAt())
   }
-  private readonly liveBySession = new Map<string, { message: Message; lastSave: number; buffer: string }>()
+  private readonly liveBySession = new Map<string, { message: Message | undefined; lastSave: number; buffer: string }>()
   private globalEpoch = 0
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
@@ -1081,32 +1082,112 @@ export class EnsembleV2Service {
     if (workspace.paused) throw Object.assign(new Error("This workspace is paused. Resume it before sending work."), { code: "workspace_paused" })
     const text = String(payload.text ?? "").trim()
     if (!text) throw Object.assign(new Error("Message is empty."), { code: "empty" })
-    const unknown = unknownMentions(text, workspace, state.agents)
-    if (unknown.length > 0) {
-      const available = workspace.memberIDs.map((memberID) => state.agents[memberID]?.name).filter(Boolean).join(", ")
-      throw Object.assign(new Error(`Unknown workspace member${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. Members: ${available}`), { code: "unknown_member" })
+    const explicitIDs = Array.isArray(payload.recipientIDs) ? [...new Set(payload.recipientIDs.map(String))] : []
+    if (explicitIDs.length > 0) {
+      const valid: string[] = []
+      await this.appendMessage(workspace, { author: "user", text, kind: "text" })
+      for (const agentID of explicitIDs) {
+        const agent = state.agents[agentID]
+        if (agent && !agent.archived && workspace.memberIDs.includes(agentID)) {
+          valid.push(agentID)
+          continue
+        }
+        const reason = agent?.archived ? `${agent.name} is archived and cannot take turns.` : "no workspace member matches that ID."
+        await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent?.name ?? agentID, reason), kind: "system" })
+      }
+      if (valid.length === 0) {
+        const available = workspace.memberIDs.map((memberID) => state.agents[memberID]?.name).filter(Boolean).join(", ")
+        throw Object.assign(new Error(`Unknown workspace member${explicitIDs.length > 1 ? "s" : ""}: ${explicitIDs.join(", ")}. Members: ${available}`), { code: "unknown_member" })
+      }
+      for (const agentID of valid) {
+        await this.createSubtask({
+          workspace,
+          assigneeID: agentID,
+          creatorType: "user",
+          title: text.slice(0, 80),
+          instruction: text,
+          mode: payload.mode === "edit" ? "edit" : "research",
+        })
+      }
+      this.schedule()
+      const current = this.store.snapshot().workspaces[workspace.id]
+      if (current) {
+        current.lastActiveAt = now()
+        await this.store.saveWorkspace(current)
+      }
+      return { recipients: valid }
     }
+    // Group-chat peer turns: explicit `$Name`/`!Name` mentions name the
+    // recipients and replace the default leader routing. One refused peer
+    // never aborts the rest; only a message with no valid addressee fails.
+    const mentioned = parseMentions(text, workspace, state.agents).filter((agentID) => {
+      const agent = state.agents[agentID]
+      return agent && !agent.archived && workspace.memberIDs.includes(agentID)
+    })
+    const archivedRefs = archivedMentionRefs(text, state.agents)
+    const archivedTokens = new Set(archivedRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]))
+    const unknown = unknownMentions(text, workspace, state.agents).filter((token) => !archivedTokens.has(token.toLowerCase()))
     const references = workspaceFileReferences(text, workspace.directory)
     const instruction = references.length > 0 ? `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}` : text
-    const recipientIDs = Array.isArray(payload.recipientIDs) ? payload.recipientIDs.map(String).filter((agentID: string) => workspace.memberIDs.includes(agentID) && state.agents[agentID] && !state.agents[agentID].archived) : []
-    const recipients = recipientIDs.length > 0 ? [...new Set(recipientIDs)] : visibleRecipients(text, workspace, state.agents)
+    if (mentioned.length === 0 && archivedRefs.length === 0 && unknown.length === 0) {
+      // No addressee named: the leader takes the turn, exactly as before.
+      const recipients = visibleRecipients(text, workspace, state.agents)
+      await this.appendMessage(workspace, { author: "user", text, kind: "text" })
+      for (const agentID of recipients) {
+        await this.createSubtask({
+          workspace,
+          assigneeID: agentID,
+          creatorType: "user",
+          title: text.slice(0, 80),
+          instruction,
+          mode: payload.mode === "edit" ? "edit" : "research",
+        })
+      }
+      this.schedule()
+      const current = this.store.snapshot().workspaces[workspace.id]
+      if (current) {
+        current.lastActiveAt = now()
+        await this.store.saveWorkspace(current)
+      }
+      return { recipients }
+    }
     await this.appendMessage(workspace, { author: "user", text, kind: "text" })
-    for (const agentID of recipients) {
-      await this.createSubtask({
+    for (const agent of archivedRefs) {
+      await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, `${agent.name} is archived and cannot take turns.`), kind: "system" })
+    }
+    for (const token of unknown) {
+      await this.appendMessage(workspace, { author: "system", text: peerRefusalText(bareMentionToken(token), "no workspace member matches."), kind: "system" })
+    }
+    if (mentioned.length === 0) {
+      const bad = [...archivedRefs.map((agent) => `$${agent.name}`), ...unknown]
+      const available = workspace.memberIDs.map((memberID) => state.agents[memberID]?.name).filter(Boolean).join(", ")
+      throw Object.assign(new Error(`Unknown workspace member${bad.length > 1 ? "s" : ""}: ${bad.join(", ") || "no valid recipient"}. Members: ${available}`), { code: "unknown_member" })
+    }
+    // Per-message fan-out stays inside the per-run cap (handoff maxPerRun
+    // parity): extras are refused visibly, never queued silently.
+    const cap = state.settings.maxDelegations
+    const accepted = mentioned.slice(0, Math.max(1, cap))
+    for (const agentID of mentioned.slice(accepted.length)) {
+      const agent = state.agents[agentID]
+      await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent?.name ?? agentID, `the delegation limit is ${cap}.`), kind: "system" })
+    }
+    for (const agentID of accepted) {
+      await this.createPeerTurn({
         workspace,
         assigneeID: agentID,
-        creatorType: "user",
+        askerKind: "user",
         title: text.slice(0, 80),
         instruction,
         mode: payload.mode === "edit" ? "edit" : "research",
       })
     }
+    this.schedule()
     const current = this.store.snapshot().workspaces[workspace.id]
     if (current) {
       current.lastActiveAt = now()
       await this.store.saveWorkspace(current)
     }
-    return { recipients }
+    return { recipients: accepted }
   }
 
   private findWorkByKey(workspaceID: string, key: string, includeTerminal: boolean): Subtask | undefined {
@@ -1129,6 +1210,7 @@ export class EnsembleV2Service {
     mode?: "research" | "edit"
     stage?: "initial" | "synthesis"
     kind?: string
+    turn?: { correlationID: string; askerKind: "user" | "agent"; askerID?: string }
   }): Promise<{ subtask: Subtask; deduped: boolean }> {
     const kind = input.kind ?? "delegation"
     const key = workKey({
@@ -1171,14 +1253,53 @@ export class EnsembleV2Service {
       queueKey: key,
       deadlineAt: at + DEADLINE_MS,
     }
+    if (input.turn) {
+      subtask.turn = { ...input.turn }
+    }
     await this.store.saveSubtask(subtask)
     await this.appendMessage(input.workspace, {
       author: "system",
       text: `→ ${this.agentName(subtask.assigneeID)}: ${subtask.title}`,
       kind: "task",
       taskID: subtask.id,
+      correlationID: input.turn?.correlationID,
     })
     return { subtask, deduped: false }
+  }
+
+  /**
+   * One group-chat peer turn: a durable work item through the same queue,
+   * lease, retry, and recovery machinery as delegations. The recipient's
+   * reply in the asking transcript IS the relay — no second leg is queued —
+   * attributed via the message agentID and linked by correlationID.
+   */
+  private async createPeerTurn(input: {
+    workspace: Workspace
+    parentID?: string
+    assigneeID: string
+    askerKind: "user" | "agent"
+    askerID?: string
+    creatorType?: "user" | "agent"
+    title: string
+    instruction: string
+    constraints?: string
+    expected?: string
+    mode?: "research" | "edit"
+  }): Promise<{ subtask: Subtask; deduped: boolean }> {
+    return this.createWorkItem({
+      workspace: input.workspace,
+      parentID: input.parentID,
+      assigneeID: input.assigneeID,
+      creatorType: input.creatorType ?? (input.askerKind === "agent" ? "agent" : "user"),
+      creatorAgentID: input.askerID,
+      title: input.title,
+      instruction: input.instruction,
+      constraints: input.constraints,
+      expected: input.expected,
+      mode: input.mode,
+      kind: "turn",
+      turn: { correlationID: newCorrelationID(), askerKind: input.askerKind, askerID: input.askerID },
+    })
   }
 
   private async createSubtask(input: {
@@ -1435,7 +1556,61 @@ export class EnsembleV2Service {
     if (approval.kind === "outside_roster" && approval.payload) {
       const workspace = approval.workspaceID ? state.workspaces[approval.workspaceID] : undefined
       if (workspace) {
-        if (approval.payload.handoff) {
+        if (approval.payload.peerTurn) {
+          // Approved cross-boundary peer turn: the turn is the effect. It
+          // runs through the same queue, lease, and retry machinery as any
+          // member turn, with the approved correlation carried through.
+          const recipientID = String(approval.payload.assigneeID ?? "")
+          const turnTitle = String(approval.payload.title ?? approval.detail)
+          const parentID = typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID
+          const turnKey = workKey({
+            workspaceID: workspace.id,
+            kind: "turn",
+            parentID,
+            assigneeID: recipientID,
+            title: turnTitle,
+            instruction: String(approval.payload.instruction ?? approval.detail),
+            constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
+            expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
+          })
+          const correlationID = typeof approval.payload.correlationID === "string" && approval.payload.correlationID ? String(approval.payload.correlationID) : newCorrelationID()
+          if (!this.findWorkByKey(workspace.id, turnKey, true)) {
+            const at = now()
+            const turn: Subtask = {
+              id: id("task"),
+              workspaceID: workspace.id,
+              parentID,
+              creatorType: "agent",
+              creatorAgentID: approval.agentID,
+              assigneeID: recipientID,
+              title: turnTitle,
+              instruction: String(approval.payload.instruction ?? approval.detail),
+              constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
+              expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
+              mode: "research",
+              state: "pending",
+              stage: "initial",
+              outcome: "pending",
+              interrupted: false,
+              awaitingChildren: false,
+              attempts: 0,
+              createdAt: at,
+              workKind: "turn",
+              queueKey: turnKey,
+              deadlineAt: at + DEADLINE_MS,
+              turn: { correlationID, askerKind: "agent", askerID: approval.agentID },
+            }
+            await this.store.saveSubtask(turn)
+            await this.appendMessage(workspace, {
+              author: "system",
+              text: `→ ${this.agentName(recipientID)}: ${turnTitle}`,
+              kind: "task",
+              taskID: turn.id,
+              correlationID,
+            })
+            this.schedule()
+          }
+        } else if (approval.payload.handoff) {
           // Approved cross-boundary handoff: the hop is the effect. It runs
           // through the same queue, lease, and retry machinery as any hop.
           const recipientID = String(approval.payload.assigneeID ?? "")
@@ -1783,7 +1958,7 @@ export class EnsembleV2Service {
     const workspaceID = found.workspace?.id ?? input.workspaceID
     const at = Date.now()
     const tasks = Object.values(state.subtasks).filter((task) => !workspaceID || task.workspaceID === workspaceID)
-    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, assignee: task.assigneeID, parent: task.parentID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff }))) }
+    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, assignee: task.assigneeID, parent: task.parentID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
   }
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
@@ -1797,8 +1972,107 @@ export class EnsembleV2Service {
       if (!workspace) return { content: "Workspace not found." }
       if (workspace.id !== found.workspace.id) return { content: "Cross-workspace posts require ensemble_share approval." }
       await this.appendMessage(workspace, { author: "agent", agentID: found.agent.id, text, kind: "text" })
+      // Agent-to-agent asks from the group chat: `$Name`/`!Name` mentions in
+      // an agent post create peer turns through the same queue, caps, and
+      // approvals as user mentions. Reply text alone never creates turns, so
+      // answers cannot fan out into loops. Self-mentions are skipped.
+      const mentionIDs = parseMentions(text, workspace, state.agents).filter((agentID) => {
+        const agent = state.agents[agentID]
+        return agent && !agent.archived && workspace.memberIDs.includes(agentID) && agentID !== found.agent.id
+      })
+      const archivedRefs = archivedMentionRefs(text, state.agents).filter((agent) => agent.id !== found.agent.id)
+      const outsideRefs = outsideMentionRefs(text, state.agents, workspace.memberIDs, found.agent.id)
+      const excludedTokens = new Set([
+        ...archivedRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]),
+        ...outsideRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]),
+      ])
+      const unknown = unknownMentions(text, workspace, state.agents).filter((token) => !excludedTokens.has(token.toLowerCase()))
+      for (const agent of archivedRefs) {
+        await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, `${agent.name} is archived and cannot take turns.`), kind: "system" })
+      }
+      for (const token of unknown) {
+        await this.appendMessage(workspace, { author: "system", text: peerRefusalText(bareMentionToken(token), "no workspace member matches."), kind: "system" })
+      }
+      const run = this.runForSession(state, context.sessionID)
+      const askingDepth = run ? this.delegationDepth(state, run.subtaskID) : 0
+      // Outside-roster contact follows the existing approval model: the user
+      // consents first, then the approved turn runs through the same queue.
+      for (const agent of outsideRefs) {
+        const correlationID = newCorrelationID()
+        const approval: Approval = {
+          id: id("approval"),
+          workspaceID: workspace.id,
+          subtaskID: run?.subtaskID,
+          agentID: found.agent.id,
+          kind: "outside_roster",
+          title: `${found.agent.name} wants to ask ${agent.name} in the group chat`,
+          detail: text,
+          payload: {
+            peerTurn: true,
+            assigneeID: agent.id,
+            title: text.slice(0, 80),
+            instruction: text,
+            mode: "research",
+            correlationID,
+            parentID: run?.subtaskID,
+            senderID: found.agent.id,
+            depth: askingDepth + 1,
+          },
+          status: "pending",
+          createdAt: now(),
+        }
+        await this.store.saveApproval(approval)
+        await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${agent.name}`, kind: "approval", taskID: run?.subtaskID })
+      }
+      const created: string[] = []
+      const refused: string[] = []
+      const refusalNotes: string[] = []
+      const noteRefusal = (name: string, reason: string): void => {
+        refused.push(name)
+        refusalNotes.push(peerRefusalText(name, reason))
+      }
+      for (const agent of archivedRefs) noteRefusal(agent.name, `${agent.name} is archived and cannot take turns.`)
+      for (const token of unknown) noteRefusal(bareMentionToken(token), "no workspace member matches.")
+      for (const agent of outsideRefs) refused.push(agent.name)
+      for (const agentID of mentionIDs) {
+        const agent = state.agents[agentID]
+        if (!agent) continue
+        if (askingDepth >= state.settings.maxDepth) {
+          const reason = `the delegation depth limit is ${state.settings.maxDepth}.`
+          await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, reason), kind: "system" })
+          noteRefusal(agent.name, reason)
+          continue
+        }
+        if (run) {
+          const siblings = Object.values(this.store.snapshot().subtasks).filter((item) => item.parentID === run.subtaskID)
+          if (siblings.length >= state.settings.maxDelegations) {
+            const reason = `the delegation limit is ${state.settings.maxDelegations}.`
+            await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, reason), kind: "system" })
+            noteRefusal(agent.name, reason)
+            continue
+          }
+        }
+        const { deduped } = await this.createPeerTurn({
+          workspace,
+          parentID: run?.subtaskID,
+          assigneeID: agentID,
+          askerKind: "agent",
+          askerID: found.agent.id,
+          title: text.slice(0, 80),
+          instruction: text,
+          mode: "research",
+        })
+        created.push(agent.name)
+        void deduped
+      }
       this.schedule()
-      return { content: `Posted to #${workspace.name}.` }
+      if (created.length === 0 && outsideRefs.length === 0) {
+        const detail = refusalNotes.length > 0 ? ` ${refusalNotes[0]}` : ""
+        return { content: refused.length > 0 ? `Posted to #${workspace.name}. No peer turns created (${refused.length} refused).${detail}` : `Posted to #${workspace.name}.` }
+      }
+      const asked = created.length > 0 ? ` Asked $${created.join(", $")}; the answer will arrive here.` : ""
+      const pendingNote = outsideRefs.length > 0 ? ` Approval required before contacting $${outsideRefs.map((agent) => agent.name).join(", $")}.` : ""
+      return { content: `Posted to #${workspace.name}.${asked}${pendingNote}` }
     }
     if (input.kind === "agent") {
       const rawID = String(input.id ?? "").trim()
@@ -2151,6 +2425,9 @@ export class EnsembleV2Service {
         if (workspace && task.workKind === "handoff" && task.handoff) {
           const recipientName = this.store.snapshot().agents[task.handoff.recipientID]?.name ?? "Unknown agent"
           await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, task.error ?? "the work could not be delivered.", task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
+        } else if (workspace && task.workKind === "turn" && task.turn) {
+          const recipientName = this.store.snapshot().agents[task.assigneeID ?? ""]?.name ?? "Unknown agent"
+          await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${task.error ?? "the work could not be delivered."} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
         } else if (workspace) {
           await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${task.error}`, kind: "system", taskID: task.id })
         }
@@ -2246,6 +2523,9 @@ export class EnsembleV2Service {
     const delta = String(data.delta ?? "")
     if (!delta) return
     live.buffer += delta
+    // The opening row is persisted just after registration; a delta that
+    // lands in between stays buffered and is flushed below, never dropped.
+    if (!live.message) return
     live.message.text = live.buffer
     live.message.streaming = true
     if (now() - live.lastSave > 120) {
@@ -2318,13 +2598,27 @@ export class EnsembleV2Service {
     const run: Run = { id: runID, subtaskID: task.id, workspaceID: task.workspaceID, agentID: task.assigneeID, sessionID: binding.sessionID, status: "running", startedAt: now() }
     this.activeRuns.set(runID, run)
     this.runBySession.set(binding.sessionID, runID)
+    // Register the live slot before the persistence awaits below so a
+    // streaming delta that lands in between is buffered, not dropped. The
+    // opening row fills the slot in just after it persists.
+    this.liveBySession.set(binding.sessionID, { message: undefined, lastSave: now(), buffer: "" })
     await this.store.saveAgent(agent)
     let live: Message | undefined
     let attemptStartedAt = now()
     try {
       await this.ctx.session.instructions.entry.put({ sessionID: binding.sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-      live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true, correlationID: task.handoff?.correlationID })
-      this.liveBySession.set(binding.sessionID, { message: live, lastSave: 0, buffer: "" })
+      live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true, correlationID: task.handoff?.correlationID ?? task.turn?.correlationID })
+      const slot = this.liveBySession.get(binding.sessionID)
+      if (slot) {
+        slot.message = live
+        if (slot.buffer) {
+          live.text = slot.buffer
+          slot.lastSave = now()
+          await this.store.saveMessage(live).catch(() => undefined)
+        }
+      } else {
+        this.liveBySession.set(binding.sessionID, { message: live, lastSave: 0, buffer: "" })
+      }
       await this.ctx.session.instructions.entry.put({
         sessionID: binding.sessionID,
         key: "ensemble.v2.context",
@@ -2340,7 +2634,7 @@ export class EnsembleV2Service {
         }
         await this.ctx.session.switchModel({ sessionID: binding.sessionID, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } }).catch(() => undefined)
         attemptStartedAt = now()
-        await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : undefined), delivery: "steer" })
+        await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined), delivery: "steer" })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
         const messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)
@@ -2398,6 +2692,9 @@ export class EnsembleV2Service {
       // correlation. Record who answered for task_status observability.
       if (currentTask.workKind === "handoff" && currentTask.handoff) {
         currentTask.handoff.answeredByID = currentTask.assigneeID
+      }
+      if (currentTask.workKind === "turn" && currentTask.turn) {
+        currentTask.turn.answeredByID = currentTask.assigneeID
       }
       const message = await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
       currentTask.resultMessageID = message?.id
@@ -2501,6 +2798,9 @@ export class EnsembleV2Service {
     if (workspace && task.workKind === "handoff" && task.handoff) {
       const recipientName = this.store.snapshot().agents[task.handoff.recipientID]?.name ?? "Unknown agent"
       await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, error, task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
+    } else if (workspace && task.workKind === "turn" && task.turn) {
+      const recipientName = this.store.snapshot().agents[task.assigneeID ?? ""]?.name ?? "Unknown agent"
+      await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${error} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
     } else if (workspace) {
       await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${error}`, kind: "system", taskID: task.id })
     }

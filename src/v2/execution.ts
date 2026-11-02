@@ -65,6 +65,11 @@ export function promptForTask(task: Subtask, senderName?: string): string {
     const ref = task.handoff?.correlationID ? ` (ref ${task.handoff.correlationID})` : ""
     return `$${senderName} has asked you to help with this${ref}.\n\n${body}\n\nAnswer in this conversation as yourself.`
   }
+  if (task.workKind === "turn" && task.turn) {
+    const asker = senderName ? `$${senderName}` : "the group chat"
+    const ref = ` (ref ${task.turn.correlationID})`
+    return `${asker} asked in the group chat${ref}:\n\n${body}\n\nAnswer in this conversation as yourself.`
+  }
   return body
 }
 
@@ -80,6 +85,9 @@ export function contextForTask(state: SnapshotState, task: Subtask, workspace: W
     memoryContext(memories),
     task.workKind === "handoff" && task.handoff
       ? `<ensemble_handoff from="${state.agents[task.handoff.senderID]?.name ?? task.handoff.senderID}" ref="${task.handoff.correlationID}" depth="${task.handoff.depth}">\nThis turn is a handoff hop. Answer in this conversation as yourself; the reply is relayed to the asking conversation.\n</ensemble_handoff>`
+      : "",
+    task.workKind === "turn" && task.turn
+      ? `<ensemble_peer_turn ref="${task.turn.correlationID}">\nThis turn is a group-chat peer turn. Answer in this conversation as yourself; the reply lands in the asking transcript, attributed to you.\n</ensemble_peer_turn>`
       : "",
     `<ensemble_workspace name="${workspace.name}" directory="${workspace.directory}">`,
     `Leader: ${state.agents[workspace.leaderID]?.name ?? workspace.leaderID}`,

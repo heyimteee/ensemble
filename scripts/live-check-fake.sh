@@ -191,6 +191,37 @@ queue_key=$(live_snapshot_value 'Object.values(output.state.subtasks).map(functi
 [[ "$queue_key" == *string* ]] || live_fail "idempotency key not exposed in snapshot (got $queue_key)"
 live_log "group work ran to replied with derived status ($queue_status)"
 
+# Peer turn at this layer (ticket #57): a `$Name` group mention creates a
+# durable peer turn through the same queue — queued, working, then replied —
+# with the asking mention and the answering agent both visible in order. The
+# recipient's reply is the relay: exactly one answer row, no second leg.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for peer turn"
+live_type "$LIVE_TUI_SESSION" "$"
+live_require_text "$LIVE_TUI_SESSION" "\$ agents" 10 "agent completion for mention"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "\$ agents" 10 "completion accepted"
+live_type "$LIVE_TUI_SESSION" "peer-check"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
+live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "inline work section for peer turn"
+peer_replied=0
+for _ in $(seq 1 120); do
+  peer_replied=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.state === "replied" }).length')
+  [[ "$peer_replied" == "1" ]] && break
+  sleep 0.5
+done
+[[ "$peer_replied" == "1" ]] || live_fail "peer turn did not run to replied with no further action (got $peer_replied replied)"
+live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · replied" 15 "peer work row replied with assignee"
+live_assert_count "$LIVE_TUI_SESSION" "· FakeAgent · replied" 3 "two delegation rows plus one peer row, no duplicates"
+live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
+live_assert_absence "$LIVE_TUI_SESSION" "Peer turn refused" "no refusal for the valid mention"
+live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "agent addressing stays \$Name, never @Name"
+live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization of peer turn"
+peer_attr=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; var turn = Object.values(output.state.subtasks).find(function (t) { return t.workKind === "turn" }); if (!turn || !turn.turn) return "no-turn"; var answers = (output.state.messages[ws.id] || []).filter(function (m) { return m.correlationID === turn.turn.correlationID && m.agentID === turn.assigneeID }); return turn.turn.askerKind + "|" + (turn.turn.answeredByID === turn.assigneeID) + "|" + answers.length })()')
+[[ "$peer_attr" == '"user|true|1"' ]] || live_fail "peer turn attribution wrong (got $peer_attr)"
+live_log "peer turn ran to completed with asking/answered attribution ($peer_attr)"
+
 # In-house overlays: the single-choice picker, the multiline text prompt, and
 # the confirm modal replace every interactive native dialog. The settings
 # "Edit field" flow proves picker select plus prompt submit (the draft goes
