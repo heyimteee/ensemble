@@ -181,8 +181,39 @@ test("load recovers claimed work without duplicating it and backfills queue keys
   assert.equal(recovered.leaseUntil, undefined)
   assert.equal(recovered.activeRunID, undefined)
   assert.equal(recovered.attempts, 2)
-  assert.ok(recovered.queueKey?.startsWith("work:w:delegation:root:"))
+  assert.ok(recovered.queueKey?.startsWith("work:w:delegation:user:"))
   assert.equal(Object.keys(loaded.snapshot().subtasks).length, 1)
+})
+
+test("sync never overwrites a locally held claim but still merges other fields", async () => {
+  const ctx = fakeContext()
+  const owner = new V2Store(ctx)
+  await owner.load()
+  await owner.saveWorkspace(workspace())
+  await owner.saveSubtask(subtask({ id: "t", queueKey: "work:w:delegation:user:run:body", workKind: "delegation", claimedBy: "run_local", leaseUntil: Date.now() + 60_000, title: "Local" }))
+  const writer = new V2Store(ctx)
+  await writer.load()
+  // Another writer edits the title and stamps its own claim on the same row.
+  await writer.saveSubtask(subtask({ id: "t", queueKey: "work:w:delegation:user:run:body", workKind: "delegation", claimedBy: "run_foreign", leaseUntil: Date.now() + 60_000, title: "Foreign" }))
+  const changed = await owner.sync()
+  assert.equal(changed, true)
+  const merged = owner.snapshot().subtasks.t
+  assert.equal(merged.title, "Foreign")
+  assert.equal(merged.claimedBy, "run_local")
+})
+
+test("sync adopts a foreign claim when this instance holds none", async () => {
+  const ctx = fakeContext()
+  const idle = new V2Store(ctx)
+  await idle.load()
+  await idle.saveWorkspace(workspace())
+  await idle.saveSubtask(subtask({ id: "t", queueKey: "work:w:delegation:user:run:body", workKind: "delegation" }))
+  const writer = new V2Store(ctx)
+  await writer.load()
+  await writer.saveSubtask(subtask({ id: "t", queueKey: "work:w:delegation:user:run:body", workKind: "delegation", claimedBy: "run_foreign", leaseUntil: Date.now() + 60_000 }))
+  const changed = await idle.sync()
+  assert.equal(changed, true)
+  assert.equal(idle.snapshot().subtasks.t.claimedBy, "run_foreign")
 })
 
 test("sync picks up dm lines written by another store through the shared ingest", async () => {

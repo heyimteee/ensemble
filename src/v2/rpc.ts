@@ -70,7 +70,13 @@ export const EnsembleV2Rpc = Rpc.define({
     changed: {
       schema: {
         type: "object",
-        properties: { version: { type: "number" } },
+        properties: {
+          version: { type: "number" },
+          workspaceID: { type: "string" },
+          subtaskID: { type: "string" },
+          correlationID: { type: "string" },
+          kind: { type: "string" },
+        },
         required: ["version"],
         additionalProperties: false,
       },

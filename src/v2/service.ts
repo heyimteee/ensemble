@@ -8,10 +8,11 @@ import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, onboardingPrompt } from "./init-
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
-import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, workKey } from "./queue.ts"
+import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, workKey } from "./queue.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
-import { handoffAckText, handoffDuplicateText, handoffFailureText, handoffWorkKey, newCorrelationID, parseHandoffFile, resolveHandoffRecipient } from "./handoff.ts"
+import { HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, handoffAckText, handoffDuplicateText, handoffFailureText, handoffWorkKey, newCorrelationID, parseHandoffFile, resolveHandoffRecipient } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
+import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type {
   Agent,
@@ -27,6 +28,7 @@ import type {
   SessionBinding,
   SnapshotState,
   Subtask,
+  WorkKind,
   Workspace,
 } from "./types.ts"
 
@@ -122,7 +124,7 @@ export class EnsembleV2Service {
   private refreshDmClock(): void {
     this.lastDmAt = Math.max(this.lastDmAt, this.store.dmMaxCreatedAt())
   }
-  private readonly liveBySession = new Map<string, { message: Message | undefined; lastSave: number; buffer: string }>()
+  private readonly liveBySession = new Map<string, LiveSlot>()
   private globalEpoch = 0
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
@@ -203,10 +205,29 @@ export class EnsembleV2Service {
     if (registration) this.registrations.delete(registration)
   }
 
-  private emitChanged(version: number): void {
+  private emitChanged(
+    version: number,
+    scope?: { workspaceID?: string; subtaskID?: string; correlationID?: string; kind?: string },
+  ): void {
     for (const registration of this.registrations) {
-      void registration?.events?.emit?.("changed", { version })?.catch?.(() => undefined)
+      void registration?.events?.emit?.("changed", { version, ...scope })?.catch?.(() => undefined)
     }
+  }
+
+  /**
+   * Scoped change notification for work-lifecycle transitions. The TUI
+   * subscribes to the `changed` event and refreshes; the payload carries the
+   * affected scope (workspace, subtask, correlation, kind) so the UI can tell
+   * a work transition apart from an unrelated write. The 250ms snapshot poll
+   * remains as a fallback.
+   */
+  private noteWorkChanged(task: Subtask): void {
+    this.emitChanged(this.store.snapshot().version, {
+      workspaceID: task.workspaceID,
+      subtaskID: task.id,
+      correlationID: task.handoff?.correlationID ?? task.turn?.correlationID,
+      kind: task.workKind,
+    })
   }
 
   private async migrateV1(): Promise<void> {
@@ -1035,6 +1056,7 @@ export class EnsembleV2Service {
       subtask.finishedAt = at
       subtask.stoppedAt = at
       await this.store.saveSubtask(subtask)
+      this.noteWorkChanged(subtask)
       await this.settlePendingApprovals(subtask.id, reason)
     }
   }
@@ -1092,7 +1114,11 @@ export class EnsembleV2Service {
           valid.push(agentID)
           continue
         }
-        const reason = agent?.archived ? `${agent.name} is archived and cannot take turns.` : "no workspace member matches that ID."
+        const reason = agent?.archived
+          ? `${agent.name} is archived and cannot take turns.`
+          : agent
+            ? `${agent.name} is not a workspace member; add them to the workspace before mentioning.`
+            : "no workspace member matches that ID."
         await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent?.name ?? agentID, reason), kind: "system" })
       }
       if (valid.length === 0) {
@@ -1120,16 +1146,23 @@ export class EnsembleV2Service {
     // Group-chat peer turns: explicit `$Name`/`!Name` mentions name the
     // recipients and replace the default leader routing. One refused peer
     // never aborts the rest; only a message with no valid addressee fails.
+    // Deliberate product rule: the user is the authorizer, so a user post
+    // naming a roster agent outside the workspace fails loudly with a clear
+    // message and no leader fallback. Agent posts follow the existing
+    // approval model instead (contact needs user consent; see toolSendMessage
+    // and the handoff path).
     const mentioned = parseMentions(text, workspace, state.agents).filter((agentID) => {
       const agent = state.agents[agentID]
       return agent && !agent.archived && workspace.memberIDs.includes(agentID)
     })
     const archivedRefs = archivedMentionRefs(text, state.agents)
     const archivedTokens = new Set(archivedRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]))
-    const unknown = unknownMentions(text, workspace, state.agents).filter((token) => !archivedTokens.has(token.toLowerCase()))
+    const outsideRefs = outsideMentionRefs(text, state.agents, workspace.memberIDs, "")
+    const outsideTokens = new Set(outsideRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]))
+    const unknown = unknownMentions(text, workspace, state.agents).filter((token) => !archivedTokens.has(token.toLowerCase()) && !outsideTokens.has(token.toLowerCase()))
     const references = workspaceFileReferences(text, workspace.directory)
     const instruction = references.length > 0 ? `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}` : text
-    if (mentioned.length === 0 && archivedRefs.length === 0 && unknown.length === 0) {
+    if (mentioned.length === 0 && archivedRefs.length === 0 && unknown.length === 0 && outsideRefs.length === 0) {
       // No addressee named: the leader takes the turn, exactly as before.
       const recipients = visibleRecipients(text, workspace, state.agents)
       await this.appendMessage(workspace, { author: "user", text, kind: "text" })
@@ -1158,8 +1191,11 @@ export class EnsembleV2Service {
     for (const token of unknown) {
       await this.appendMessage(workspace, { author: "system", text: peerRefusalText(bareMentionToken(token), "no workspace member matches."), kind: "system" })
     }
+    for (const agent of outsideRefs) {
+      await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, `${agent.name} is not a workspace member; add them to the workspace before mentioning.`), kind: "system" })
+    }
     if (mentioned.length === 0) {
-      const bad = [...archivedRefs.map((agent) => `$${agent.name}`), ...unknown]
+      const bad = [...archivedRefs.map((agent) => `$${agent.name}`), ...unknown, ...outsideRefs.map((agent) => `$${agent.name}`)]
       const available = workspace.memberIDs.map((memberID) => state.agents[memberID]?.name).filter(Boolean).join(", ")
       throw Object.assign(new Error(`Unknown workspace member${bad.length > 1 ? "s" : ""}: ${bad.join(", ") || "no valid recipient"}. Members: ${available}`), { code: "unknown_member" })
     }
@@ -1190,11 +1226,17 @@ export class EnsembleV2Service {
     return { recipients: accepted }
   }
 
-  private findWorkByKey(workspaceID: string, key: string, includeTerminal: boolean): Subtask | undefined {
-    const at = now()
-    const candidates = Object.values(this.store.snapshot().subtasks).filter((task) => task.workspaceID === workspaceID && task.queueKey === key)
-    if (includeTerminal) return candidates[0]
-    return candidates.find((task) => !isTerminalWorkStatus(deriveWorkStatus(task, at)))
+  /**
+   * Idempotency lookup for one unit of work. Suppression honors the row
+   * lifetime: a matching row suppresses resubmission while it is retained
+   * (live or terminal; finished rows purge after 24h retention). Intentional
+   * re-asks stay explicit — `task.retry`/`task.restart` re-queue the same
+   * row, and asking from a different parent/run hashes a different key.
+   */
+  private findWorkByKey(workspaceID: string, key: string): Subtask | undefined {
+    return Object.values(this.store.snapshot().subtasks).find(
+      (task) => task.workspaceID === workspaceID && task.queueKey === key,
+    )
   }
 
   private async createWorkItem(input: {
@@ -1210,10 +1252,11 @@ export class EnsembleV2Service {
     mode?: "research" | "edit"
     stage?: "initial" | "synthesis"
     kind?: string
-    turn?: { correlationID: string; askerKind: "user" | "agent"; askerID?: string }
+    turn?: { correlationID?: string; askerKind: "user" | "agent"; askerID?: string }
   }): Promise<{ subtask: Subtask; deduped: boolean }> {
-    const kind = input.kind ?? "delegation"
+    const kind: WorkKind = parseWorkKind(input.kind ?? "delegation") ?? (() => { throw invalidInput(`Unknown work kind: ${String(input.kind)}.`) })()
     const key = workKey({
+      actor: input.creatorAgentID ?? input.creatorType,
       workspaceID: input.workspace.id,
       kind,
       parentID: input.parentID,
@@ -1223,11 +1266,10 @@ export class EnsembleV2Service {
       constraints: input.constraints,
       expected: input.expected,
     })
-    // Idempotency: resubmitting the same work while it is still live returns
-    // the existing item instead of executing twice. Finished rows do not
-    // block new work — re-asking completed work is legitimate new work, and
-    // only in-flight duplication (retries, double delivery) is suppressed.
-    const existing = this.findWorkByKey(input.workspace.id, key, false)
+    // Idempotency: resubmitting the same work returns the existing item
+    // instead of executing twice — while its row is retained, live or
+    // terminal. Retention expiry ends suppression naturally.
+    const existing = this.findWorkByKey(input.workspace.id, key)
     if (existing) return { subtask: existing, deduped: true }
     const at = now()
     const subtask: Subtask = {
@@ -1254,15 +1296,20 @@ export class EnsembleV2Service {
       deadlineAt: at + DEADLINE_MS,
     }
     if (input.turn) {
-      subtask.turn = { ...input.turn }
+      // The turn correlation derives from the work key (outside the fan-out
+      // prefix) unless the caller approves an explicit one: control legs
+      // trace back to the hop without consuming the run's budget.
+      const correlationID = input.turn.correlationID ?? correlationIDForKey("turn", key)
+      subtask.turn = { correlationID, askerKind: input.turn.askerKind, askerID: input.turn.askerID }
     }
     await this.store.saveSubtask(subtask)
+    this.noteWorkChanged(subtask)
     await this.appendMessage(input.workspace, {
       author: "system",
       text: `→ ${this.agentName(subtask.assigneeID)}: ${subtask.title}`,
       kind: "task",
       taskID: subtask.id,
-      correlationID: input.turn?.correlationID,
+      correlationID: subtask.turn?.correlationID,
     })
     return { subtask, deduped: false }
   }
@@ -1280,6 +1327,7 @@ export class EnsembleV2Service {
     askerKind: "user" | "agent"
     askerID?: string
     creatorType?: "user" | "agent"
+    correlationID?: string
     title: string
     instruction: string
     constraints?: string
@@ -1298,7 +1346,7 @@ export class EnsembleV2Service {
       expected: input.expected,
       mode: input.mode,
       kind: "turn",
-      turn: { correlationID: newCorrelationID(), askerKind: input.askerKind, askerID: input.askerID },
+      turn: { correlationID: input.correlationID, askerKind: input.askerKind, askerID: input.askerID },
     })
   }
 
@@ -1403,6 +1451,7 @@ export class EnsembleV2Service {
     subtask.stoppedAt = undefined
     subtask.deadlineAt = now() + DEADLINE_MS
     await this.store.saveSubtask(subtask)
+    this.noteWorkChanged(subtask)
   }
 
   private async retryTask(subtaskID: string): Promise<Subtask> {
@@ -1442,6 +1491,7 @@ export class EnsembleV2Service {
     subtask.finishedAt = at
     subtask.stoppedAt = at
     await this.store.saveSubtask(subtask)
+    this.noteWorkChanged(subtask)
     return subtask
   }
 
@@ -1564,6 +1614,7 @@ export class EnsembleV2Service {
           const turnTitle = String(approval.payload.title ?? approval.detail)
           const parentID = typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID
           const turnKey = workKey({
+            actor: approval.agentID ?? "agent",
             workspaceID: workspace.id,
             kind: "turn",
             parentID,
@@ -1573,8 +1624,8 @@ export class EnsembleV2Service {
             constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
             expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
           })
-          const correlationID = typeof approval.payload.correlationID === "string" && approval.payload.correlationID ? String(approval.payload.correlationID) : newCorrelationID()
-          if (!this.findWorkByKey(workspace.id, turnKey, true)) {
+          const correlationID = typeof approval.payload.correlationID === "string" && approval.payload.correlationID ? String(approval.payload.correlationID) : correlationIDForKey("turn", turnKey)
+          if (!this.findWorkByKey(workspace.id, turnKey)) {
             const at = now()
             const turn: Subtask = {
               id: id("task"),
@@ -1601,6 +1652,7 @@ export class EnsembleV2Service {
               turn: { correlationID, askerKind: "agent", askerID: approval.agentID },
             }
             await this.store.saveSubtask(turn)
+            this.noteWorkChanged(turn)
             await this.appendMessage(workspace, {
               author: "system",
               text: `→ ${this.agentName(recipientID)}: ${turnTitle}`,
@@ -1615,15 +1667,19 @@ export class EnsembleV2Service {
           // through the same queue, lease, and retry machinery as any hop.
           const recipientID = String(approval.payload.assigneeID ?? "")
           const hopTask = String(approval.payload.title ?? approval.detail ?? "Handoff")
+          const hopParentID = typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID
+          const hopSenderID = typeof approval.payload.senderID === "string" ? String(approval.payload.senderID) : (approval.agentID ?? "")
           const hopKey = handoffWorkKey({
+            actor: hopSenderID,
             workspaceID: workspace.id,
+            parentID: hopParentID,
             recipientID,
             task: hopTask,
             constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
             expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
           })
-          const correlationID = typeof approval.payload.correlationID === "string" && approval.payload.correlationID ? String(approval.payload.correlationID) : newCorrelationID()
-          if (!this.findWorkByKey(workspace.id, hopKey, true)) {
+          const correlationID = typeof approval.payload.correlationID === "string" && approval.payload.correlationID ? String(approval.payload.correlationID) : correlationIDForKey("handoff", hopKey)
+          if (!this.findWorkByKey(workspace.id, hopKey)) {
             const at = now()
             const hop: Subtask = {
               id: id("task"),
@@ -1657,6 +1713,7 @@ export class EnsembleV2Service {
               },
             }
             await this.store.saveSubtask(hop)
+            this.noteWorkChanged(hop)
             const recipientName = state.agents[recipientID]?.name ?? recipientID
             await this.appendMessage(workspace, {
               author: "agent",
@@ -2164,23 +2221,27 @@ export class EnsembleV2Service {
     }
     const run = this.runForSession(state, context.sessionID)
     const askingDepth = run ? this.delegationDepth(state, run.subtaskID) : 0
-    if (askingDepth >= state.settings.maxDepth) {
-      return fail(`the delegation depth limit is ${state.settings.maxDepth}.`)
+    // Handoff-specific caps (spec #53): chains stop after one hop, and one
+    // run fans out at most HANDOFF_MAX_PER_RUN hops. Only handoff hops count
+    // toward the per-run budget — relay/failure-notice legs are messages,
+    // not work rows, so control legs never consume it.
+    if (askingDepth >= HANDOFF_MAX_DEPTH) {
+      return fail(`the handoff depth limit is ${HANDOFF_MAX_DEPTH}.`)
     }
     if (run) {
-      const siblings = Object.values(state.subtasks).filter((item) => item.parentID === run.subtaskID)
-      if (siblings.length >= state.settings.maxDelegations) {
-        return fail(`the delegation limit is ${state.settings.maxDelegations}.`)
+      const hops = Object.values(state.subtasks).filter((item) => item.parentID === run.subtaskID && item.workKind === "handoff")
+      if (hops.length >= HANDOFF_MAX_PER_RUN) {
+        return fail(`the handoff limit is ${HANDOFF_MAX_PER_RUN} per run.`)
       }
     }
-    // Idempotency spans terminal rows: the handoff hop is the effect, so a
-    // retried or resubmitted handoff returns the existing record instead of
-    // executing twice.
-    const key = handoffWorkKey({ workspaceID: workspace.id, recipientID: recipient.id, task, constraints, expected })
-    const duplicate = this.findWorkByKey(workspace.id, key, true)
+    // Idempotency spans terminal rows for the row's lifetime: the handoff hop
+    // is the effect, so a retried or resubmitted handoff from the same run
+    // returns the existing record instead of executing twice.
+    const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: run?.subtaskID, recipientID: recipient.id, task, constraints, expected })
+    const duplicate = this.findWorkByKey(workspace.id, key)
     if (duplicate) return { content: handoffDuplicateText(recipient.name, task) }
     const at = now()
-    const correlationID = parsed.data.correlationID || newCorrelationID()
+    const correlationID = parsed.data.correlationID || correlationIDForKey("handoff", key)
     const hop: Subtask = {
       id: id("task"),
       workspaceID: workspace.id,
@@ -2213,6 +2274,7 @@ export class EnsembleV2Service {
       },
     }
     await this.store.saveSubtask(hop)
+    this.noteWorkChanged(hop)
     await this.appendMessage(workspace, {
       author: "agent",
       agentID: sender.id,
@@ -2420,6 +2482,7 @@ export class EnsembleV2Service {
         task.repliedAt = at
         task.finishedAt = at
         await this.store.saveSubtask(task)
+        this.noteWorkChanged(task)
         await this.settlePendingApprovals(task.id, task.error)
         const workspace = this.store.snapshot().workspaces[task.workspaceID]
         if (workspace && task.workKind === "handoff" && task.handoff) {
@@ -2572,6 +2635,12 @@ export class EnsembleV2Service {
     task.deadlineAt ??= at + DEADLINE_MS
     task.retryAfter = undefined
     await this.store.saveSubtask(task)
+    // Claim fencing: the claim is only real if the stored row still names
+    // this run. A racing writer overwrote it (or the row is gone), so stand
+    // down instead of double-running the work. Single-process deployment
+    // makes this a last-resort guard; see the sync() claim boundary.
+    if (!claimWon(await this.store.readSubtask(task.id), runID)) return
+    this.noteWorkChanged(task)
     // Heartbeat: renew the lease while this run owns the claim. If the
     // process dies, the lease expires and another pass re-queues the work;
     // if the claim was reaped, renewal stops touching the row.
@@ -2600,8 +2669,14 @@ export class EnsembleV2Service {
     this.runBySession.set(binding.sessionID, runID)
     // Register the live slot before the persistence awaits below so a
     // streaming delta that lands in between is buffered, not dropped. The
-    // opening row fills the slot in just after it persists.
-    this.liveBySession.set(binding.sessionID, { message: undefined, lastSave: now(), buffer: "" })
+    // opening row fills the slot in just after it persists. Single occupancy
+    // holds by construction (per-agent serialization: one session runs one
+    // run at a time); a leftover opening row is finalized as interrupted
+    // instead of leaking a stuck streaming row.
+    const registration = registerLiveSlot(this.liveBySession, binding.sessionID, now())
+    if (registration.orphaned) {
+      await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || registration.orphaned.message.text || "Reply interrupted.", true, globalEpoch, workspaceEpoch, task.workspaceID)
+    }
     await this.store.saveAgent(agent)
     let live: Message | undefined
     let attemptStartedAt = now()
@@ -2699,6 +2774,7 @@ export class EnsembleV2Service {
       const message = await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
       currentTask.resultMessageID = message?.id
       await this.store.saveSubtask(currentTask)
+      this.noteWorkChanged(currentTask)
       if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID)
     } catch (error: any) {
       const current = this.store.snapshot()
@@ -2792,6 +2868,7 @@ export class EnsembleV2Service {
     task.repliedAt = at
     task.finishedAt = at
     await this.store.saveSubtask(task)
+    this.noteWorkChanged(task)
     const workspace = this.store.snapshot().workspaces[task.workspaceID]
     // A handoff that cannot be delivered produces a failure notice in the
     // conversation that asked, attributed to the intended recipient.

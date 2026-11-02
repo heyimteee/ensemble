@@ -98,6 +98,9 @@ export type SubtaskState = "pending" | "working" | "replied"
 export type SubtaskOutcome = "succeeded" | "failed" | "pending"
 export type SubtaskStage = "initial" | "synthesis"
 
+/** Unit of work on the durable coordination queue. Never a free-form string. */
+export type WorkKind = "delegation" | "handoff" | "turn"
+
 export type HandoffInfo = {
   /** Stable correlation ID carried from ask through relay/notice legs. */
   correlationID: string
@@ -160,7 +163,7 @@ export type Subtask = {
    * derivation and never trusts `state` alone.
    */
   /** Unit of work: "delegation" (default), "handoff", or "turn". */
-  workKind?: string
+  workKind?: WorkKind
   /** Idempotency key: resubmitting the same work executes once, not twice. */
   queueKey?: string
   /** Run currently holding the lease, if any. */

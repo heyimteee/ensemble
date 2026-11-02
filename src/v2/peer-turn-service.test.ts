@@ -235,6 +235,36 @@ test("an archived member mention fails loudly instead of routing to the leader",
   }
 })
 
+test("a user mention of an outside-roster agent fails loudly with no leader fallback and no approval", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const { nova, workspace } = await setupPair(directory, ctx, handlers)
+    const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
+    assert.equal(echo.ok, true)
+    // The user is the authorizer: a user post naming a roster agent outside
+    // the workspace fails loudly (never a silent drop, never a leader
+    // fallback, never an approval round-trip).
+    const response = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Echo please advise" } })
+    assert.equal(response.ok, false)
+    assert.equal(response.error?.code, "unknown_member")
+    assert.match(response.error?.message ?? "", /\$Echo/)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.values(after.state.subtasks).length, 0)
+    assert.ok(!Object.values(after.state.subtasks).some((task: any) => task.assigneeID === nova.id))
+    assert.equal(Object.values(after.state.approvals).length, 0)
+    const texts = ((after.state.messages[workspace.id] ?? []) as any[]).map((message) => message.text)
+    assert.ok(texts.some((text) => text.includes("Peer turn refused: $Echo") && text.includes("not a workspace member")))
+    void nova
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("per-agent serialization holds under parallel user peer turns", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx } = fakeContext()
