@@ -73,8 +73,8 @@ Agent {
 }
 ```
 
-- New agents start homeless. Their native DM session lives under `~/.ensemble/agents/<id>/`.
-- Adding an agent to a workspace can move its homeless session with `session.move`; `g` edits members and the leader without recreating the workspace.
+- New agents start with no workspace. Their native DM session lives under `~/.ensemble/agents/<id>/`.
+- Adding an agent to a workspace can move its no-workspace session with `session.move`; `g` edits members and the leader without recreating the workspace.
 - Agent names are unique and case-insensitive.
 - General, Models, Memories, and Skillbox settings.
 - Main model and supported reasoning; ordered backups can be added, moved, and removed.
@@ -127,10 +127,10 @@ Message {
 
 ## Direct chats and sessions
 
-- Every agent has a direct chat. If the agent belongs to the active workspace, the DM uses that workspace’s native session; otherwise it uses a homeless session in `~/.ensemble/agents/<id>/`.
+- Every agent has a direct chat. If the agent belongs to the active workspace, the DM uses that workspace’s native session; otherwise it uses a no-workspace session in `~/.ensemble/agents/<id>/`.
 - Direct chat messages are queued while the agent is running and flushed when the native session becomes idle.
 - Native session transcripts are authoritative; Ensemble stores only queue and UI state.
-- Adding a homeless agent to a workspace can move its session with `session.move`; `/cd` is the human-facing equivalent in OpenCode 2.2.2.
+- Adding an agent with no workspace to a workspace can move its session with `session.move`; `/cd` is the human-facing equivalent in OpenCode 2.2.2.
 
 ## Configuration and init
 

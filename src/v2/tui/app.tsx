@@ -15,6 +15,17 @@ import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
 import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
+import {
+  chromeOwnsFocus,
+  confirmFooter,
+  dmEmptyDetail,
+  footerLine1,
+  footerLine2,
+  pickerEmptyLine,
+  promptFooter,
+  resolveChromeFocus,
+  resultFooter,
+} from "./chrome.ts"
 import { SKILL_VISIBLE_LIMIT } from "./skills.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
@@ -168,6 +179,7 @@ export function EnsembleV2App() {
   const [busy, setBusy] = createSignal(false)
   const [modal, setModal] = createSignal(false)
   const [approvalCursor, setApprovalCursor] = createSignal(0)
+  const [resolvingApprovalID, setResolvingApprovalID] = createSignal<string | null>(null)
   const [memoryCursor, setMemoryCursor] = createSignal(0)
   const [memoryFilter, setMemoryFilter] = createSignal("")
   const [memoryFilterEditing, setMemoryFilterEditing] = createSignal(false)
@@ -490,6 +502,14 @@ export function EnsembleV2App() {
 
   const overlayOpen = () => picker() !== null || textPrompt() !== null || wizard() !== null || confirm() !== null || result() !== null
 
+  // Slice E single-focus model (brief §2.10): exactly one focus-colored border
+  // renders at all times. Precedence is dialog, then composer, then the
+  // column — `focusArea` stays the persisted rail/chat column while the
+  // composer focus state derives from `composerActive`, so the two can never
+  // drift apart. Help/settings/approvals render inside the chat surface and
+  // inherit its border; only true overlays steal it.
+  const chromeFocus = () => resolveChromeFocus({ focusArea: focusArea(), composerActive: composerActive(), overlayOpen: overlayOpen() })
+
   const run = async (label: string, action: () => Promise<void>) => {
     if (busy()) return
     setBusy(true)
@@ -698,7 +718,7 @@ export function EnsembleV2App() {
     for (const agentID of members) {
       const binding = Object.values(state()?.bindings ?? {}).find((item) => item.agentID === agentID && item.kind === "home")
       if (!binding) continue
-      const move = await openConfirm(`Move ${state()?.agents[agentID]?.name} into #${workspace.name}?`, "This moves the homeless direct-chat session into the workspace.")
+      const move = await openConfirm(`Move ${state()?.agents[agentID]?.name} into #${workspace.name}?`, "This moves the direct-chat session with no workspace into the workspace.")
       if (move) await invoke(context, "agent.moveHome", { agentID, workspaceID: workspace.id })
     }
   }
@@ -1066,7 +1086,14 @@ export function EnsembleV2App() {
       resolution = (await openTextPrompt("Your answer", { placeholder: "What should the agent do?" }))?.trim()
       if (!resolution) return
     }
-    await run("Resolve approval", async () => { await invoke(context, "approval.resolve", { id: approval.id, approve: value === "approve", resolution }) })
+    // Slice E: the acted-on row shows `Resolving…` while its resolve RPC is
+    // in flight, then the inbox refreshes and the row leaves.
+    setResolvingApprovalID(approval.id)
+    try {
+      await run("Resolve approval", async () => { await invoke(context, "approval.resolve", { id: approval.id, approve: value === "approve", resolution }) })
+    } finally {
+      setResolvingApprovalID((current) => (current === approval.id ? null : current))
+    }
   }
 
   const cycleWorkspace = (delta: number) => {
@@ -1960,9 +1987,9 @@ export function EnsembleV2App() {
         </Show>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={focusArea() === "rail"} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
-          <box flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={focusArea() === "chat" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
-            <text fg={focusArea() === "chat" ? colors.focus : colors.muted} bg={colors.bg} width="100%" flexShrink={0} truncate>{surfaceTitle()}</text>
+          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
+          <box flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
+            <text fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" flexShrink={0} truncate>{surfaceTitle()}</text>
             <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
                 <Show when={approvalsOpen()} fallback={
@@ -1977,7 +2004,7 @@ export function EnsembleV2App() {
                       <Show when={hasChatContent()} fallback={
                         <box flexDirection="column" padding={1} flexGrow={1}>
                           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{surface()?.kind === "agent" ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}` : "Group chat"}</text>
-                          <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? "Send a direct message. It goes to this agent's native OpenCode session." : "Say something to your team. $Name mentions an agent; @path references a file. i to compose."}</text>
+                          <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? dmEmptyDetail() : "Say something to your team. $Name mentions an agent; @path references a file. i to compose."}</text>
                           <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{EMPTY_MARK}</text>
                         </box>
                       }>
@@ -2036,15 +2063,15 @@ export function EnsembleV2App() {
                             <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
                               <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{workSummary(activeTasks(), Date.now())}</text>
                               <For each={orderedTasks()}>{(task, index) => (
-                                <text fg={taskCursor() === index() ? (focusArea() === "chat" ? colors.good : colors.warn) : (deriveWorkStatus(task, Date.now()) === "working" || deriveWorkStatus(task, Date.now()) === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
-                                  {taskCursor() === index() ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now())}{` ${workRowFrame(deriveWorkStatus(task, Date.now()), motionFrame(), process.env)}`}
+                                <text fg={taskCursor() === index() ? (chromeOwnsFocus(chromeFocus(), "chat") ? colors.good : colors.warn) : (deriveWorkStatus(task, Date.now()) === "working" || deriveWorkStatus(task, Date.now()) === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
+                                  {taskCursor() === index() && chromeOwnsFocus(chromeFocus(), "chat") ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now())}{` ${workRowFrame(deriveWorkStatus(task, Date.now()), motionFrame(), process.env)}`}
                                 </text>
                               )}</For>
                               <text fg={colors.faint} bg={colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result · r retry · R restart · x cancel · o native</text>
                             </box>
                           </Show>
                           <Show when={!atBottom()}>
-                            <box position="absolute" bottom={1} right={1} zIndex={40} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} onMouseDown={() => jumpToBottom()}>
+                            <box position="absolute" bottom={1} right={1} zIndex={40} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} onMouseDown={() => jumpToBottom()}>
                               <text fg={colors.focus} bg={colors.panel}>↓ bottom · end</text>
                             </box>
                           </Show>
@@ -2070,14 +2097,14 @@ export function EnsembleV2App() {
                           )}</For>
                         </box>
                       </Show>
-                      <box flexShrink={0} border borderStyle="single" borderColor={composerActive() ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
+                      <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (stoppable() ? "COMPOSER · enter send · esc cancel · Ctrl+C stop" : "COMPOSER · enter send · esc cancel") : "i compose · $ agent · @ file · / command"}</text>
                     </>
                   </Show>
                 }>
-                  <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} state={state()} onResolve={resolveApproval} />
+                  <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} resolvingID={resolvingApprovalID()} state={state()} onResolve={resolveApproval} />
                 </Show>
               }>
                 <HelpView colors={colors} scrollRef={(value: any) => { helpScrollRef = value }} />
@@ -2105,7 +2132,7 @@ export function EnsembleV2App() {
             <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
               <textarea ref={(value: any) => { textPromptRef = value; queueMicrotask(() => value?.focus?.()) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
             </box>
-            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>enter submit · shift+enter newline · esc cancel</text>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{promptFooter()}</text>
             </box>
           </box>
         </>
@@ -2116,7 +2143,7 @@ export function EnsembleV2App() {
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{confirm()!.title}</text>
             <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{confirm()!.message}</text>
-            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>enter yes · esc no</text>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{confirmFooter()}</text>
             </box>
           </box>
         </>
@@ -2129,7 +2156,7 @@ export function EnsembleV2App() {
             <scrollbox ref={(value: any) => { resultScrollRef = value }} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
               <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{result()!.text || " "}</text>
             </scrollbox>
-            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>↑/↓ scroll · pgup/pgdn · enter/esc dismiss</text>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{resultFooter()}</text>
             </box>
           </box>
         </>
@@ -2143,6 +2170,7 @@ export function EnsembleV2App() {
             <box flexDirection="column" height={9}>
               <text fg={colors.faint} bg={colors.panel} width="100%" truncate>search: {wizard()!.query || "type to filter"} · {wizardItems().length} options</text>
               <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
+                <Show when={wizardItems().length === 0} fallback={
                 <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
                   <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
                     const state = wizard()
@@ -2156,6 +2184,9 @@ export function EnsembleV2App() {
                     return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.label}${item.detail ? ` · ${item.detail}` : ""}`
                   })()}</text>
                 )}</For>
+                }>
+                  <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{pickerEmptyLine()}</text>
+                </Show>
               }>
                 <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
               </Show>
@@ -2174,8 +2205,8 @@ export function EnsembleV2App() {
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
-        <text fg={colors.muted} bg={colors.bg} width="100%" truncate>h/l column · j/k work · enter result · i compose · a agent · n workspace · g members · I init · v approvals</text>
-        <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{selectedMissingSkills().length > 0 ? `! missing skills: ${selectedMissingSkills().join(", ")}` : showWorkBlock() ? "d delegate · t reassign · r retry · R restart · x cancel · o native · ~ leader · / search · p pause · s settings" : "~ leader · / search · p pause · s settings"}</text>
+        <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })}</text>
+        <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{footerLine2({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })}</text>
       </box>
     </box>
   )

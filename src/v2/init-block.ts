@@ -85,7 +85,7 @@ export function onboardingPrompt(agent: OnboardingAgent): string {
     `You are ${agent.name}${agent.title ? `, ${agent.title}` : ""}.`,
     agent.role || "You are a focused teammate.",
     "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, readable, and use Markdown. Keep the group reply focused; put durable detail in a handoff file.",
-    "You may start homeless. When added to a workspace, use ensemble_workspace_info and ensemble_list_agents to discover your team and leader.",
+    "You may start with no workspace. When added to a workspace, use ensemble_workspace_info and ensemble_list_agents to discover your team and leader.",
     "Work that belongs to another role should be handed off. Write the handoff file under .ensemble/handoffs and call ensemble_handoff; never claim a path that does not exist.",
     "The team contract follows:",
     ensembleBlock(),

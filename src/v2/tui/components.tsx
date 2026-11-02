@@ -3,7 +3,16 @@ import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../typ
 import type { Palette } from "./theme.ts"
 import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
 import { capLineText, capSkills, settingsTabLine, skillAssigned, skillRowLabel, skillToggleMark } from "./skills.ts"
-import { memoryCountLabel, memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
+import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
+import {
+  approvalResolvingSuffix,
+  approvalsEmptyLine,
+  helpEmptyLine,
+  pickerEmptyLine,
+  pickerFooter,
+  railEmptyLine,
+  skillsEmptyLine,
+} from "./chrome.ts"
 import { platformLabel } from "./platform.ts"
 import { helpGroups, helpKeyLabel, shortcutGroups } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
@@ -37,6 +46,7 @@ export function Rail(props: {
   items: RailItem[]
   cursor: number
   focus: boolean
+  cursorVisible: boolean
   activeWorkspaceID: string | null
   state: SnapshotState | null
   pendingApprovals: number
@@ -50,6 +60,8 @@ export function Rail(props: {
         const kindHeader = item.kind !== previous?.kind ? item.kind.toUpperCase() + "S" : ""
         const groupHeader = item.group && item.group !== previous?.group ? item.group : ""
         const selected = props.cursor === index()
+        // Slice E single-cursor rule: the `›` position marker renders only on
+        // the surface that owns the focus border, never on two surfaces at once.
         const agent = item.kind === "agent" ? props.state?.agents[item.id] : undefined
         const leader = item.kind === "agent" && props.state?.workspaces[props.activeWorkspaceID ?? ""]?.leaderID === item.id
         const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
@@ -67,7 +79,7 @@ export function Rail(props: {
               <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
             </Show>
             <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>
-              {selected ? "› " : "  "}{item.kind === "workspace" ? `#${item.title}` : item.title}
+              {selected && props.cursorVisible ? "› " : "  "}{item.kind === "workspace" ? `#${item.title}` : item.title}
               {leader ? " · leader" : ""}
               {item.detail ? ` · ${item.detail}` : ""}
               {workspace?.paused ? " ⏸" : ""}
@@ -77,7 +89,7 @@ export function Rail(props: {
           </>
         )
       }}</For>
-      <Show when={props.items.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>No agents or workspaces yet.</text></Show>
+      <Show when={props.items.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{railEmptyLine()}</text></Show>
       <text> </text>
       <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>APPROVALS {props.pendingApprovals > 0 ? `(${props.pendingApprovals})` : ""}</text>
       <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>v opens inbox</text>
@@ -86,18 +98,18 @@ export function Rail(props: {
 }
 
 
-export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cursor: number; state: SnapshotState | null; onResolve: (approval: Approval) => Promise<void> }) {
+export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cursor: number; resolvingID: string | null; state: SnapshotState | null; onResolve: (approval: Approval) => Promise<void> }) {
   return (
     <box flexDirection="column">
       <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>Approvals inbox</text>
-      <Show when={props.approvals.length === 0}><text fg={props.colors.muted}>Nothing waits for you.</text></Show>
+      <Show when={props.approvals.length === 0}><text fg={props.colors.muted}>{approvalsEmptyLine()}</text></Show>
       <For each={props.approvals}>{(approval, index) => (
         <box flexDirection="column">
-          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}{approval.title}</text>
+          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}{approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id)}</text>
           <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
         </box>
       )}</For>
-      <text fg={props.colors.muted}>↑/↓ select · Enter approve/decline · esc close</text>
+      <text fg={props.colors.muted}>↑/↓ select · Enter approve/decline · esc cancel</text>
     </box>
   )
 }
@@ -107,11 +119,11 @@ function HelpEntries(props: { colors: Palette; groups: Array<{ title: string; en
     <box flexDirection="column">
       <For each={props.groups}>{(group) => (
         <>
-          <text fg={props.colors.leader}>{group.title}</text>
+          <text fg={props.colors.muted}>{group.title}</text>
           <For each={group.entries}>{(entry) => <text fg={props.colors.text}>{helpKeyLabel(entry[0]).padEnd(16)} {platformLabel(entry[1])}</text>}</For>
         </>
       )}</For>
-      <Show when={props.groups.length === 0}><text fg={props.colors.muted}>No matching shortcuts.</text></Show>
+      <Show when={props.groups.length === 0}><text fg={props.colors.muted}>{helpEmptyLine()}</text></Show>
       <text fg={props.colors.muted}>~ is disabled while the composer or a dialog is active.</text>
     </box>
   )
@@ -121,8 +133,8 @@ export function HelpView(props: { colors: Palette; scrollRef?: (value: any) => v
   const [query, setQuery] = createSignal("")
   return (
     <box flexGrow={1} flexDirection="column" minHeight={0}>
-      <text fg={props.colors.accent} flexShrink={0}>Keyboard shortcuts</text>
-      <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.focus} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
+      <text fg={props.colors.text} flexShrink={0}>Keyboard shortcuts</text>
+      <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
         <input ref={(value: any) => queueMicrotask(() => value?.focus?.())} placeholder="search shortcuts by key or action…" onInput={(value: string) => setQuery(value)} />
       </box>
       <scrollbox ref={(value: any) => props.scrollRef?.(value)} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
@@ -184,7 +196,7 @@ export function SettingsView(props: {
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
           <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}{props.filterEditing ? " · typing… enter done · esc cancel" : ""}</text>
-          <Show when={props.skills.length === 0}><text fg={props.colors.muted}>No matching skills</text></Show>
+          <Show when={props.skills.length === 0}><text fg={props.colors.muted}>{skillsEmptyLine()}</text></Show>
           <For each={capped().visible}>{(skill, index) => (
             <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{props.skillCursor === index() ? "› " : "  "}{skillToggleMark(skillAssigned(props.agent!.skillbox, skill.id))} {skillRowLabel(skill)}</text>
           )}</For>
@@ -217,6 +229,7 @@ export function PickerOverlay(props: {
       <For each={slots}>{(slot) => (
         <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{(() => {
           const items = props.items()
+          if (items.length === 0 && slot === 0) return solid(pickerEmptyLine())
           const cursor = props.cursor()
           const offset = pickerWindow(cursor, items.length).start
           const item = items[offset + slot]
@@ -225,7 +238,7 @@ export function PickerOverlay(props: {
           return solid(`${offset + slot === cursor ? "›" : " "} ${marker}${item.label}`)
         })()}</text>
       )}</For>
-      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{solid(`↑/↓ move · ${props.multiple() ? "space toggle · " : ""}enter confirm · esc cancel`)}</text>
+      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{solid(pickerFooter(props.multiple()))}</text>
     </box>
   )
 }

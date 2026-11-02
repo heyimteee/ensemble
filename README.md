@@ -9,9 +9,9 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 ## What it does
 
 - **Three columns.** Agents sit above workspaces in the left rail, the selected chat is in the center with the composer pinned below it, and subtasks stay on the right.
-- **Direct chats and group chats.** Selecting an agent opens its DM; selecting a workspace opens the group chat. Each agent has one native session per workspace, plus a homeless DM under `~/.ensemble/agents/<id>/`.
+- **Direct chats and group chats.** Selecting an agent opens its DM; selecting a workspace opens the group chat. Each agent has one native session per workspace, plus a no-workspace DM under `~/.ensemble/agents/<id>/`.
 - **Workspaces are directories.** One workspace belongs to one project directory. Directory history restores the last chat, subtask, and focused column.
-- **New agents start homeless.** Creating an agent opens a direct chat in its own `.ensemble` home. Add it to a workspace with `g`; you can move its homeless session into the workspace.
+- **New agents start with no workspace.** Creating an agent opens a direct chat in its own `.ensemble` home. Add it to a workspace with `g`; you can move its no-workspace session into the workspace.
 - **The leader coordinates.** Unaddressed messages go to the workspace leader, who can answer or delegate typed subtasks.
 - **Subtasks have three states:** Pending, Working, Replied.
 - **Replies stream and stay readable.** Group and direct replies stream token by token, then settle into rich colored Markdown with author lines, tables, fenced code, headings, quotes, and links. The transcript keeps a stable scroll position, scrolls with `PageUp` / `PageDown`, and jumps to the newest reply with `End`.

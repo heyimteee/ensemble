@@ -375,6 +375,59 @@ live_log "verbatim user text and queued-line removal verified on the direct surf
 live_key "$LIVE_TUI_SESSION" "w"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored after DM probes"
 
+# Slice E (ticket #65) chrome walkthrough: one focus owner at a time, proven
+# through the context footer. Border colors do not survive `capture-pane`
+# text capture, so the footer — driven by the same single-owner resolver —
+# is the text-observable proxy; the exactly-one invariant itself is
+# unit-pinned in chrome.test.ts across all 8 focus/composer/overlay states.
+live_key "$LIVE_TUI_SESSION" "h"
+live_require_text "$LIVE_TUI_SESSION" "enter open" 10 "rail focus footer names the open action"
+live_assert_absence "$LIVE_TUI_SESSION" "enter result" "idle rail footer hides work results"
+live_key "$LIVE_TUI_SESSION" "l"
+live_require_absence "$LIVE_TUI_SESSION" "enter open" 10 "chat focus leaves the rail footer"
+live_assert_absence "$LIVE_TUI_SESSION" "enter result" "idle chat footer hides dead work keys"
+live_assert_text "$LIVE_TUI_SESSION" "g members" "idle chat footer keeps member actions"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "esc cancel · \$ agent" 10 "composer focus footer names send keys"
+live_assert_absence "$LIVE_TUI_SESSION" "enter result" "composer footer hides dead work keys"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "esc cancel · \$ agent" 10 "composer closed back to chat footer"
+live_log "slice E focus walkthrough shows context footers with no hidden-work hints"
+
+# Slice E help: tone-down keeps every shortcut searchable; the zero state
+# names the fix.
+live_key "$LIVE_TUI_SESSION" '~'
+live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before help"
+live_key "$LIVE_TUI_SESSION" '?'
+live_require_text "$LIVE_TUI_SESSION" "Keyboard shortcuts" 15 "searchable shortcut help"
+live_type "$LIVE_TUI_SESSION" "zzz-no-shortcut"
+live_require_text "$LIVE_TUI_SESSION" "No matching shortcuts" 10 "help zero state names the miss"
+live_assert_absence "$LIVE_TUI_SESSION" "Delete workspace" "help filter hid unrelated shortcuts"
+live_key_repeat "$LIVE_TUI_SESSION" "BSpace" 20
+live_require_text "$LIVE_TUI_SESSION" "Leader key" 10 "help filter cleared"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed"
+
+# Slice E settings frame: tab line keeps the live unfiltered memory total
+# with the active cursor (zero here — the memories flow below proves the
+# count at one plus edit and filter).
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings for tab check"
+live_assert_text "$LIVE_TUI_SESSION" "› General" "settings tab cursor"
+live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "settings tab keeps the live memory total"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
+
+# Slice E approvals: the empty inbox names that no action is needed. The
+# `Resolving…` pending row is unit-covered (no live fixture produces a
+# pending approval in the fake catalog); the inbox open/close path is live.
+live_key "$LIVE_TUI_SESSION" "v"
+live_require_text "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals inbox opens"
+live_require_text "$LIVE_TUI_SESSION" "Nothing waits for you." 10 "approvals empty state"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals closed"
+live_log "slice E help/settings/approvals chrome verified"
+
 # In-house overlays: the single-choice picker, the multiline text prompt, and
 # the confirm modal replace every interactive native dialog. The settings
 # "Edit field" flow proves picker select plus prompt submit (the draft goes
@@ -394,7 +447,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "UNSAVED" 10 "draft marked unsaved"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "in-house confirm modal"
-live_assert_text "$LIVE_TUI_SESSION" "enter yes · esc no" "confirm footer"
+live_assert_text "$LIVE_TUI_SESSION" "enter yes · esc cancel" "confirm footer"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "confirm accepted"
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed after discard"
