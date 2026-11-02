@@ -39,6 +39,7 @@ export function Rail(props: {
   pendingApprovals: number
   width: number
   filter: string
+  leaderGlyph: string
 }) {
   return (
     <box width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
@@ -65,7 +66,7 @@ export function Rail(props: {
             </Show>
             <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>
               {selected ? "› " : "  "}{item.kind === "workspace" ? `#${item.title}` : item.title}
-              {leader ? " · leader" : ""}
+              {leader ? ` · leader ${props.leaderGlyph}` : ""}
               {item.detail ? ` · ${item.detail}` : ""}
               {workspace?.paused ? " ⏸" : ""}
               {busy > 0 ? ` ◐${busy}` : ""}
@@ -186,6 +187,7 @@ export function SettingsView(props: {
   skills: SkillOption[]
   skillCursor: number
   skillFilter: string
+  filterEditing: boolean
   skillCatalog: SkillOption[]
 }) {
   const missing = () => props.agent ? missingSkills(props.agent, props.skillCatalog) : []
@@ -214,7 +216,7 @@ export function SettingsView(props: {
         </Show>
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
-          <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}</text>
+          <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}{props.filterEditing ? " · typing… enter done · esc cancel" : ""}</text>
           <For each={props.skills.slice(0, 40)}>{(skill, index) => (
             <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{props.agent!.skillbox.includes(skill.id) ? "[x]" : "[ ]"} {skill.name} ({skill.id})</text>
           )}</For>

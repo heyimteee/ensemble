@@ -57,6 +57,7 @@ live_open_ensemble
 
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page"
 live_require_text "$LIVE_TUI_SESSION" "No currently opened session" 10 "empty chat state"
+live_assert_text "$LIVE_TUI_SESSION" "○───○───○" "one-shot empty-state mark"
 live_require_text "$LIVE_TUI_SESSION" "I init" 10 "I init shortcut"
 live_require_text "$LIVE_TUI_SESSION" "git:(" 10 "git metadata"
 live_check_help
@@ -97,6 +98,7 @@ live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "streaming…" 15 "live streaming block"
+live_require_any_text "$LIVE_TUI_SESSION" 15 "animated streaming frame" "streaming… ◐" "streaming… ◑" "streaming… ◒" "streaming… ◓"
 live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "streamed rich reply"
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization"
@@ -149,6 +151,45 @@ synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synth
 [[ "$synthesis" == "true" ]] || live_fail "synthesis choice did not persist as Yes (got $synthesis)"
 leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')
 [[ "$leader_name" == '"FakeAgent"' ]] || live_fail "unexpected roster leader (got $leader_name)"
+
+# In-house overlays: the single-choice picker, the multiline text prompt, and
+# the confirm modal replace every interactive native dialog. The settings
+# "Edit field" flow proves picker select plus prompt submit (the draft goes
+# UNSAVED, then the discard confirm accepts and drops it); the memories flow
+# proves the prompt persists end to end through the snapshot. (The pre-existing
+# picker overlay renders word gaps as non-breaking spaces, hence NBSP.)
+NBSP=$'\u00a0'
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings"
+live_key "$LIVE_TUI_SESSION" "e"
+live_require_text "$LIVE_TUI_SESSION" "Edit${NBSP}field" 10 "in-house edit-field picker"
+live_assert_text "$LIVE_TUI_SESSION" "enter${NBSP}confirm${NBSP}·${NBSP}esc${NBSP}cancel" "picker footer"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "enter submit · shift+enter newline · esc cancel" 10 "in-house text prompt footer"
+live_type "$LIVE_TUI_SESSION" "X"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "UNSAVED" 10 "draft marked unsaved"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "in-house confirm modal"
+live_assert_text "$LIVE_TUI_SESSION" "enter yes · esc no" "confirm footer"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "confirm accepted"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed after discard"
+
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings reopened"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "No memories." 10 "memories tab"
+live_key "$LIVE_TUI_SESSION" "e"
+live_require_text "$LIVE_TUI_SESSION" "Add memory" 10 "in-house add-memory prompt"
+live_type "$LIVE_TUI_SESSION" "fake-live-memory"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "enter submit · shift+enter" 10 "prompt submitted"
+memory_text=$(live_snapshot_value 'Object.values(output.state.memories).map(function (m) { return m.text })')
+[[ "$memory_text" == '["fake-live-memory"]' ]] || live_fail "memory prompt did not persist (got $memory_text)"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
 
 live_check_help
 
