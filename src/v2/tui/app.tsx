@@ -7,14 +7,14 @@ import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
-import { agentColor, agentName, answerHeader, fuzzyMatch, missingSkills, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { agentColor, agentName, answerHeader, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import { palette } from "./theme.ts"
-import { pickerWindow, toggleSelected } from "./picker.ts"
+import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
-import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
+import { EMPTY_MARK, createStaggerState, shouldRunMotion, updateStagger } from "./motion.ts"
 import {
   chromeOwnsFocus,
   confirmFooter,
@@ -27,7 +27,7 @@ import {
   resultFooter,
 } from "./chrome.ts"
 import { SKILL_VISIBLE_LIMIT } from "./skills.ts"
-import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit } from "./overlays.ts"
+import { confirmKeyAction, resultKeyAction, singleChoiceValue, filterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
@@ -35,8 +35,10 @@ import { shouldApplySnapshot } from "../snapshot-guard.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
+  TRANSCRIPT_WINDOW,
   activityFrameForKind,
   hasActiveWork,
+  isNeedsYouTask,
   orderedWorkItems,
   queuedActivityFrame,
   selectActivityAgents,
@@ -48,6 +50,7 @@ import {
   workSummary,
   type ActivityEntry,
   type ActivityVerbKind,
+  type PendingWorkAction,
 } from "./workrows.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
@@ -180,6 +183,10 @@ export function EnsembleV2App() {
   const [modal, setModal] = createSignal(false)
   const [approvalCursor, setApprovalCursor] = createSignal(0)
   const [resolvingApprovalID, setResolvingApprovalID] = createSignal<string | null>(null)
+  // Review fix (finding 2): the work row with an in-flight Stop/Cancel (or
+  // retry/restart) action shows its interim label until the terminal state
+  // arrives; cleared in a finally so it can never stick.
+  const [pendingWork, setPendingWork] = createSignal<{ id: string; action: PendingWorkAction } | null>(null)
   const [memoryCursor, setMemoryCursor] = createSignal(0)
   const [memoryFilter, setMemoryFilter] = createSignal("")
   const [memoryFilterEditing, setMemoryFilterEditing] = createSignal(false)
@@ -206,6 +213,10 @@ export function EnsembleV2App() {
   let transcriptScrollRef: any
   let helpScrollRef: any
   const lineCache = new Map<string, ChatLine>()
+  // Review fix (finding 4): mount-once stagger tracker for the transcript.
+  // Lives with the component (never re-keyed), pruned to the window inside
+  // updateStagger; scroll/finalization stay untouched (see render).
+  const staggerState = createStaggerState()
   let refreshSeq = 0
   let chatSeq = 0
   // Highest snapshot store version applied so far. Out-of-order RPC
@@ -242,6 +253,10 @@ export function EnsembleV2App() {
   const selectedTask = createMemo(() => orderedTasks()[taskCursor()])
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
+  // Review fix (finding 3): needs-you derives from existing state only —
+  // the set of still-pending approval ids, matched against each task's
+  // approvalID (or its interrupted flag inside isNeedsYouTask).
+  const pendingApprovalIDs = createMemo(() => new Set(pendingApprovals().map((approval) => approval.id)))
   const selectedApproval = createMemo(() => pendingApprovals()[approvalCursor()])
   const railItems = createMemo<RailItem[]>(() => {
     const query = workspaceFilter().toLowerCase()
@@ -261,8 +276,16 @@ export function EnsembleV2App() {
   })
   const groupMessages = createMemo(() => {
     const workspace = activeWorkspace()
-    return workspace ? (state()?.messages[workspace.id] ?? []).slice(-40) : []
+    return workspace ? (state()?.messages[workspace.id] ?? []).slice(-TRANSCRIPT_WINDOW) : []
   })
+  // Review fix (finding 5): transcript rows memoize on primitives
+  // (author/role/text/kind/streaming/interrupted/queued/correlationID/
+  // agentID) — never object identity — so Solid reuses rows across snapshot
+  // polls and streaming chunks do not re-animate mounted rows. Documented
+  // limit: a text edit that keeps every compared primitive identical (only
+  // possible for fields outside this list, e.g. createdAt) reuses the old
+  // row; the compared set covers every rendered field, so this cannot hide a
+  // visible change. The cache is pruned to the transcript window.
   const stableLines = (lines: ChatLine[]): ChatLine[] => {
     const seen = new Set<string>()
     const next = lines.map((line) => {
@@ -287,7 +310,7 @@ export function EnsembleV2App() {
   }
   const chatLines = createMemo<ChatLine[]>(() => {
     if (surface()?.kind === "agent") {
-      const messages: ChatLine[] = (chatContext()?.messages ?? []).slice(-40).map((message: ChatMessage) => ({
+      const messages: ChatLine[] = (chatContext()?.messages ?? []).slice(-TRANSCRIPT_WINDOW).map((message: ChatMessage) => ({
         id: message.id,
         author: message.author,
         role: transcriptRole(message.role),
@@ -321,7 +344,7 @@ export function EnsembleV2App() {
         }
         messages.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       }
-      return stableLines(messages.slice(-40))
+      return stableLines(messages.slice(-TRANSCRIPT_WINDOW))
     }
     return stableLines(groupMessages().map((message) => ({
       id: message.id,
@@ -338,6 +361,12 @@ export function EnsembleV2App() {
   })
   const splitTranscript = createMemo(() => splitLiveFinalized(chatLines()))
   const finalizedLines = createMemo(() => splitTranscript().finalized)
+  // Review fix (finding 4): ids staggering on this paint — newly mounted
+  // transcript rows only, capped, one tick, static when idle or reduced.
+  // Re-evaluates per poll/chunk but never re-triggers (mount-once guard).
+  const staggeringIds = createMemo<Set<string>>(() =>
+    updateStagger(staggerState, finalizedLines().map((line) => line.id), motionFrame(), motionOn(), process.env),
+  )
   // Active-work surface: every streaming message renders its own live row
   // with per-item text, so concurrent work stays watchable. Finalization
   // flips streaming off, which moves that id from this list into the
@@ -436,7 +465,11 @@ export function EnsembleV2App() {
       if (relay) return answerHeader(line.author)
     }
     let header = line.author
-    if (line.queued) header += queuedSuffix(line.role === "user")
+    // Queued group rows are impossible by construction (group Messages carry
+    // no queued flag; only DM ChatMessages do), so the `[x remove]`
+    // affordance renders on direct surfaces only — `x` on the group surface
+    // keeps its cancel-task binding and never offers a dead remove.
+    if (line.queued) header += headerQueuedSuffix(line, surface()?.kind === "agent" ? "agent" : "workspace")
     if (line.kind === "task") header += " · task"
     if (line.kind === "approval") header += " · approval · v to resolve"
     if (line.interrupted) header += " · interrupted"
@@ -955,9 +988,28 @@ export function EnsembleV2App() {
     await openResultModal(task.title, result.text)
   }
 
-  const retrySelected = async () => { const task = selectedTask(); if (task) await run("Retry subtask", async () => { await invoke(context, "task.retry", { id: task.id }) }) }
-  const restartSelected = async () => { const task = selectedTask(); if (task) await run("Restart subtask", async () => { await invoke(context, "task.restart", { id: task.id }) }) }
-  const cancelSelected = async () => { const task = selectedTask(); if (task) await run("Cancel subtask", async () => { await invoke(context, "task.cancel", { id: task.id }) }) }
+  const retrySelected = async () => {
+    const task = selectedTask(); if (!task) return
+    setPendingWork({ id: task.id, action: "retry" })
+    try { await run("Retry subtask", async () => { await invoke(context, "task.retry", { id: task.id }) }) }
+    finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
+  }
+  const restartSelected = async () => {
+    const task = selectedTask(); if (!task) return
+    setPendingWork({ id: task.id, action: "restart" })
+    try { await run("Restart subtask", async () => { await invoke(context, "task.restart", { id: task.id }) }) }
+    finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
+  }
+  // Review fix (finding 2): the row shows `Stopping…`/`Cancelling…` (or the
+  // retry/restart analogue) while its RPC is in flight, until the terminal
+  // state arrives. The finally clears it on completion AND error, so no row
+  // can stick on the interim label.
+  const cancelSelected = async (action: PendingWorkAction = "cancel") => {
+    const task = selectedTask(); if (!task) return
+    setPendingWork({ id: task.id, action })
+    try { await run(action === "stop" ? "Stop subtask" : "Cancel subtask", async () => { await invoke(context, "task.cancel", { id: task.id }) }) }
+    finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
+  }
   // Slice C: on a direct surface with parked user-owned input, `x` removes
   // the oldest queued line (the inline `[x remove]` affordance); everywhere
   // else `x` keeps cancelling the selected subtask.
@@ -1314,7 +1366,7 @@ export function EnsembleV2App() {
       enabled: () => isOurRoute() && composerActive() && !modal() && wizard() === null,
       commands: [
         { id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } },
-        { id: "ensemble.v2.composer.stop", title: "Ensemble: Stop running work", bind: "ctrl+c", enabled: () => stoppable(), run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); void cancelSelected().catch(showError) } },
+        { id: "ensemble.v2.composer.stop", title: "Ensemble: Stop running work", bind: "ctrl+c", enabled: () => stoppable(), run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); void cancelSelected("stop").catch(showError) } },
       ],
       bindings: ["ensemble.v2.composer.cancel", "ensemble.v2.composer.stop"],
     }))
@@ -1392,12 +1444,18 @@ export function EnsembleV2App() {
 
   const showError = (error: any) => context.ui.toast.show({ title: "Ensemble", message: error?.message ?? String(error), variant: "error" })
 
+  // Review fix (finding 5): picker rows are value-compared, so the row
+  // array keeps identity across snapshot polls unless a value changed.
+  let pickerItemsPrev: PickerItem[] = []
   const pickerItems = createMemo<PickerItem[]>(() => {
     const state = picker()
     if (!state) return []
-    return state.candidates
+    const next = state.candidates
       .filter((item) => !state.query || fuzzyMatch(state.query, item.label))
       .map((item) => ({ id: item.id, label: item.label, selected: state.selected.has(item.id) }))
+    const stable = stablePickerItems(pickerItemsPrev, next)
+    pickerItemsPrev = stable as PickerItem[]
+    return pickerItemsPrev
   })
 
   const finishPicker = (value: string[] | undefined) => {
@@ -1558,7 +1616,7 @@ export function EnsembleV2App() {
   }
 
   const handleSkillFilterKey = (event: any) => {
-    const next = skillFilterEdit(skillFilter(), {
+    const next = filterEdit(skillFilter(), {
       name: String(event?.name ?? ""),
       sequence: String(event?.sequence ?? ""),
       ctrl: Boolean(event?.ctrl),
@@ -1573,7 +1631,7 @@ export function EnsembleV2App() {
   }
 
   const handleMemoryFilterKey = (event: any) => {
-    const next = skillFilterEdit(memoryFilter(), {
+    const next = filterEdit(memoryFilter(), {
       name: String(event?.name ?? ""),
       sequence: String(event?.sequence ?? ""),
       ctrl: Boolean(event?.ctrl),
@@ -2011,20 +2069,31 @@ export function EnsembleV2App() {
                         <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
                           <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (value) queueMicrotask(() => syncTranscriptScroll()) }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
                               <box flexDirection="column" width="100%" paddingRight={1}>
-                                <For each={finalizedLines()}>{(message) => (
+                                <For each={finalizedLines()}>{(message) => {
+                                  // Review fix (finding 4): first-paint stagger
+                                  // — newly arrived rows enter dim one tick
+                                  // then full (glyph/color only, no reflow),
+                                  // capped at 6, mount-once, static under
+                                  // reduced motion or idle. Identity stays
+                                  // id-keyed and the scrollbox untouched, so
+                                  // scroll and finalization are unaffected.
+                                  const stagger = staggeringIds().has(message.id)
+                                  const tone = (normal: typeof colors.text) => (stagger ? colors.faint : normal)
+                                  return (
                                   <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                    <text fg={message.queued ? colors.muted : chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{headerForLine(message)}</text>
+                                    <text fg={tone(message.queued ? colors.muted : chatAuthorColor(message))} bg={colors.bg} width="100%" truncate>{headerForLine(message)}</text>
                                     <Show when={message.role === "user"} fallback={
                                       <Show when={message.role === "agent" && syntaxStyle} fallback={
-                                        <text fg={message.role === "system" || message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
+                                        <text fg={tone(message.role === "system" || message.queued ? colors.muted : colors.text)} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                       }>
-                                        {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
+                                        {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={tone(colors.text)} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
                                       </Show>
                                     }>
-                                      <text fg={message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", Math.max(16, messageWidth())).join("\n")}</text>
+                                      <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.bg} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", Math.max(16, messageWidth())).join("\n")}</text>
                                     </Show>
                                   </box>
-                                )}</For>
+                                  )
+                                }}</For>
                                 <For each={workAnnouncements()}>{(announcement) => (
                                   <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
                                     <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{announcement.text}</text>
@@ -2062,11 +2131,20 @@ export function EnsembleV2App() {
                           <Show when={showWorkBlock()}>
                             <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
                               <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{workSummary(activeTasks(), Date.now())}</text>
-                              <For each={orderedTasks()}>{(task, index) => (
-                                <text fg={taskCursor() === index() ? (chromeOwnsFocus(chromeFocus(), "chat") ? colors.good : colors.warn) : (deriveWorkStatus(task, Date.now()) === "working" || deriveWorkStatus(task, Date.now()) === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
-                                  {taskCursor() === index() && chromeOwnsFocus(chromeFocus(), "chat") ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now())}{` ${workRowFrame(deriveWorkStatus(task, Date.now()), motionFrame(), process.env)}`}
+                              <For each={orderedTasks()}>{(task, index) => {
+                                // Review fixes (findings 2–3): the row with an
+                                // in-flight action shows its interim label, and
+                                // user-blocked rows carry the needs-you marker —
+                                // both derived per row from existing state.
+                                const needsYou = isNeedsYouTask(task, pendingApprovalIDs())
+                                const pending = pendingWork()?.id === task.id ? pendingWork()!.action : null
+                                const rowStatus = deriveWorkStatus(task, Date.now())
+                                return (
+                                <text fg={taskCursor() === index() ? (chromeOwnsFocus(chromeFocus(), "chat") ? colors.good : colors.warn) : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
+                                  {taskCursor() === index() && chromeOwnsFocus(chromeFocus(), "chat") ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })}{` ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
                                 </text>
-                              )}</For>
+                                )
+                              }}</For>
                               <text fg={colors.faint} bg={colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result · r retry · R restart · x cancel · o native</text>
                             </box>
                           </Show>
@@ -2205,7 +2283,7 @@ export function EnsembleV2App() {
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
-        <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })}</text>
+        <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false })}</text>
         <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{footerLine2({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })}</text>
       </box>
     </box>

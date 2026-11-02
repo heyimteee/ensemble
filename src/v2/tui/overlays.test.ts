@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit } from "./overlays.ts"
+import { confirmKeyAction, resultKeyAction, singleChoiceValue, filterEdit } from "./overlays.ts"
 
 test("confirm modal: enter or y confirms, escape or n cancels", () => {
   assert.equal(confirmKeyAction("return", "\r"), "confirm")
@@ -40,14 +40,14 @@ test("single-choice picker resolves the focused item", () => {
 })
 
 test("inline skill filter edits the query without a dialog", () => {
-  assert.deepEqual(skillFilterEdit("", { name: "", sequence: "a" }), { query: "a", done: false, cancelled: false })
-  assert.deepEqual(skillFilterEdit("ab", { name: "backspace", sequence: "" }), { query: "a", done: false, cancelled: false })
-  assert.deepEqual(skillFilterEdit("", { name: "backspace", sequence: "" }), { query: "", done: false, cancelled: false })
-  assert.deepEqual(skillFilterEdit("ab", { name: "return", sequence: "\r" }), { query: "ab", done: true, cancelled: false })
-  assert.deepEqual(skillFilterEdit("ab", { name: "escape", sequence: "" }), { query: "ab", done: true, cancelled: true })
+  assert.deepEqual(filterEdit("", { name: "", sequence: "a" }), { query: "a", done: false, cancelled: false })
+  assert.deepEqual(filterEdit("ab", { name: "backspace", sequence: "" }), { query: "a", done: false, cancelled: false })
+  assert.deepEqual(filterEdit("", { name: "backspace", sequence: "" }), { query: "", done: false, cancelled: false })
+  assert.deepEqual(filterEdit("ab", { name: "return", sequence: "\r" }), { query: "ab", done: true, cancelled: false })
+  assert.deepEqual(filterEdit("ab", { name: "escape", sequence: "" }), { query: "ab", done: true, cancelled: true })
 })
 
 test("inline skill filter ignores modifier chords and multi-character sequences", () => {
-  assert.deepEqual(skillFilterEdit("a", { name: "", sequence: "b", ctrl: true }), { query: "a", done: false, cancelled: false })
-  assert.deepEqual(skillFilterEdit("a", { name: "", sequence: "~?" }), { query: "a", done: false, cancelled: false })
+  assert.deepEqual(filterEdit("a", { name: "", sequence: "b", ctrl: true }), { query: "a", done: false, cancelled: false })
+  assert.deepEqual(filterEdit("a", { name: "", sequence: "~?" }), { query: "a", done: false, cancelled: false })
 })

@@ -43,10 +43,10 @@ test("slice E focus precedence is overlay over composer over column", () => {
 })
 
 test("slice E footer line 1 changes with focus and never names hidden work", () => {
-  const rail = footerLine1({ focus: "rail", hasWork: false, missingSkills: [] })
-  const chatIdle = footerLine1({ focus: "chat", hasWork: false, missingSkills: [] })
-  const chatWork = footerLine1({ focus: "chat", hasWork: true, missingSkills: [] })
-  const composer = footerLine1({ focus: "composer", hasWork: true, missingSkills: [] })
+  const rail = footerLine1({ focus: "rail", hasWork: false })
+  const chatIdle = footerLine1({ focus: "chat", hasWork: false })
+  const chatWork = footerLine1({ focus: "chat", hasWork: true })
+  const composer = footerLine1({ focus: "composer", hasWork: true })
   assert.ok(rail.includes("enter open"), "rail names its open action")
   assert.ok(!chatIdle.includes("enter result") && !chatIdle.includes("j/k work"), "idle chat hides work hints")
   assert.ok(chatWork.includes("j/k work") && chatWork.includes("enter result"), "active chat names work actions")

@@ -4,12 +4,16 @@ import type { Subtask } from "../types.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
+  NEEDS_YOU_MARK,
   activityDetailForTask,
   activityFrameForKind,
   activityLine,
   activityVerb,
   hasActiveWork,
+  isNeedsYouTask,
+  needsYouSuffix,
   orderedWorkItems,
+  pendingWorkLabel,
   queuedActivityFrame,
   selectActivityAgents,
   splitActivityGroups,
@@ -274,6 +278,54 @@ test("slice C asking and thinking verbs use their named frames", () => {
 
 test("queued activity lines stay static across ticks", () => {
   for (let tick = 0; tick < 8; tick++) assert.equal(queuedActivityFrame(), "○")
+})
+
+test("review fix: interim work labels name the in-flight action", () => {
+  assert.equal(pendingWorkLabel("stop"), "Stopping…")
+  assert.equal(pendingWorkLabel("cancel"), "Cancelling…")
+  assert.equal(pendingWorkLabel("retry"), "Retrying…")
+  assert.equal(pendingWorkLabel("restart"), "Restarting…")
+})
+
+test("review fix: pending work rows show the interim label until terminal", () => {
+  const running = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  assert.equal(
+    workRowText(running, "Nova", 1000, { pending: "cancel" }),
+    "◐ Check the build · Nova · Cancelling…",
+  )
+  assert.equal(
+    workRowText(running, "Nova", 1000, { pending: "stop" }),
+    "◐ Check the build · Nova · Stopping…",
+  )
+  assert.equal(
+    workRowText(task({ state: "pending" }), "Nova", 1000, { pending: "retry" }),
+    "○ Check the build · Nova · Retrying…",
+  )
+  // No pending action: the derived status renders as before.
+  assert.equal(workRowText(running, "Nova", 1000), "◐ Check the build · Nova · working")
+  assert.equal(workRowText(running, "Nova", 1000, { pending: null }), "◐ Check the build · Nova · working")
+})
+
+test("review fix: needs-you rows carry a distinct marker, never plain waiting", () => {
+  const running = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  assert.equal(
+    workRowText(running, "Nova", 1000, { needsYou: true }),
+    `◆ ◐ Check the build · Nova · working${needsYouSuffix()}`,
+  )
+  assert.ok(workRowText(running, "Nova", 1000, { needsYou: true }).includes("needs you"))
+  assert.ok(workRowText(running, "Nova", 1000, { needsYou: true }).includes("v to resolve"))
+  assert.ok(!workRowText(running, "Nova", 1000).includes(NEEDS_YOU_MARK))
+  // Interim + needs-you compose: the marker survives while stopping.
+  assert.ok(workRowText(running, "Nova", 1000, { needsYou: true, pending: "stop" }).includes("Stopping…"))
+})
+
+test("review fix: needs-you derives from existing interruption/approval state", () => {
+  const pending = task({ approvalID: "ap" })
+  assert.equal(isNeedsYouTask(task({ interrupted: true }), new Set()), true)
+  assert.equal(isNeedsYouTask(pending, new Set(["ap"])), true)
+  assert.equal(isNeedsYouTask(pending, new Set(["other"])), false)
+  assert.equal(isNeedsYouTask(task({}), new Set()), false)
+  assert.equal(isNeedsYouTask(task({ approvalID: "ap" }), new Set()), false)
 })
 
 test("work summary counts active work only and names the empty state", () => {
