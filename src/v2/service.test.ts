@@ -1982,3 +1982,267 @@ test("unmentioned routing ignores recent activity and stays with the leader", as
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("agent-created delegation starts work with no further RPC", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
+  const { ctx, tools } = fakeContext()
+  let releaseGate: (() => void) | undefined
+  const held = new Promise<void>((resolve) => { releaseGate = resolve })
+  let waits = 0
+  ;(ctx.session as any).wait = async () => {
+    waits++
+    if (waits === 1) await held
+    else await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const kaluna = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kaluna" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, kaluna.result.id], leaderID: nova.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Coordinate" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
+      return parent?.state === "working" && Object.values(next.state.runs).some((run: any) => run.status === "running")
+    })
+    const delegated = await tools.get("delegate").execute({ assignee: "Kaluna", title: "Child", instruction: "Check" }, { sessionID })
+    assert.match(delegated.content, /Delegated to Kaluna/)
+    // No further RPC: snapshots alone must show the child running to completion.
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const child = Object.values(next.state.subtasks).find((task: any) => task.title === "Child") as any
+      return child?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const child = Object.values(after.state.subtasks).find((task: any) => task.title === "Child") as any
+    assert.equal(child.outcome, "succeeded")
+    assert.ok(child.attempts >= 1)
+    assert.ok(child.queueKey)
+  } finally {
+    releaseGate?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("non-leader delegation refusal is visible in the group chat", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
+  const { ctx, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "$Sage take this" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings).find((item: any) => item.agentID === sage.result.id) as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    const before = await handlers.snapshot({ directory })
+    const taskCount = Object.keys(before.state.subtasks).length
+    const refused = await tools.get("delegate").execute({ assignee: "Nova", title: "Sneaky", instruction: "Check" }, { sessionID })
+    assert.match(refused.content, /Only the workspace leader/)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.keys(after.state.subtasks).length, taskCount)
+    const messages = after.state.messages[workspace.result.id] as any[]
+    assert.ok(messages.some((message) => message.author === "system" && /only the workspace leader/i.test(message.text)), "expected a visible refusal in the group chat")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("resubmitting the same delegation executes once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
+  const { ctx, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Coordinate" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
+      return parent?.state === "working" && Object.values(next.state.runs).some((run: any) => run.status === "running")
+    })
+    const first = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    assert.match(first.content, /Delegated to Sage/)
+    const second = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    assert.match(second.content, /Already delegated to Sage/)
+    const after = await handlers.snapshot({ directory })
+    const children = Object.values(after.state.subtasks).filter((task: any) => task.title === "Child")
+    assert.equal(children.length, 1)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("restart recovery re-queues claimed work without duplicating it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "n", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveAgent({ id: "s", name: "Sage", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "n", memberIDs: ["n", "s"], synthesis: false, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "agent", creatorAgentID: "n", assigneeID: "s", title: "Child", instruction: "Check", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 2, createdAt: 1, claimedBy: "run_old", leaseUntil: 1, queueKey: "work:w:delegation:root:seed", workKind: "delegation" })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks as any).t?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.keys(after.state.subtasks).length, 1)
+    assert.equal(after.state.subtasks.t.attempts, 3)
+    assert.equal(after.state.subtasks.t.outcome, "succeeded")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("exhausted attempts fail with the reason preserved", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Tired", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 5, error: "boom", createdAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks as any).t?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks.t.outcome, "failed")
+    assert.equal(after.state.subtasks.t.error, "boom")
+    assert.ok((after.state.messages.w as any[]).some((message) => message.text.includes("Subtask failed")))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("handoff registration persists a durable terminal work item and dedupes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Coordinate" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    mkdirSync(join(directory, ".ensemble", "handoffs"), { recursive: true })
+    writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-1.md"), "---\nensemble: handoff\n---\n# Handoff\n")
+    const input = { task: "task", summary: "summary", path: ".ensemble/handoffs/task-nova-sage-1.md", to: "Sage" }
+    const first = await tools.get("handoff").execute(input, { sessionID })
+    assert.match(first.content, /Registered handoff/)
+    const second = await tools.get("handoff").execute(input, { sessionID })
+    assert.match(second.content, /Already registered/)
+    const after = await handlers.snapshot({ directory })
+    const handoffs = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff")
+    assert.equal(handoffs.length, 1)
+    assert.equal((handoffs[0] as any).state, "replied")
+    assert.equal((handoffs[0] as any).outcome, "succeeded")
+    assert.ok((handoffs[0] as any).queueKey)
+    assert.ok((handoffs[0] as any).finishedAt)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("task_status exposes the derived lifecycle facts", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
+  const { ctx, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Coordinate" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings)[0] as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    const status = await tools.get("task_status").execute({}, { sessionID })
+    const rows = JSON.parse(status.content)
+    const child = rows.find((row: any) => row.title === "Child")
+    assert.ok(child)
+    assert.ok(["pending", "working", "retrying"].includes(child.status))
+    assert.equal(typeof child.attempts, "number")
+    assert.ok(child.queueKey)
+    assert.ok("leaseUntil" in child)
+    assert.ok("deadlineAt" in child)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
