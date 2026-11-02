@@ -7,7 +7,7 @@ import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
-import { agentColor, agentName, answerHeader, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import { palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
@@ -44,7 +44,6 @@ import {
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
-  terminalAnnouncements,
   workRowFrame,
   workRowText,
   workSummary,
@@ -52,6 +51,17 @@ import {
   type ActivityVerbKind,
   type PendingWorkAction,
 } from "./workrows.ts"
+import {
+  accumulateCompletions,
+  bubbleContentWidth,
+  bubbleHead,
+  bubbleSide,
+  isBubbledRole,
+  mergeTranscriptRows,
+  relayPartiesForTask,
+  unifiedAuthorColor,
+  type InlineCompletion,
+} from "./bubbles.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat"
@@ -380,10 +390,31 @@ export function EnsembleV2App() {
   // surface a run is abortable, so the composer names `Ctrl+C stop`; the hint
   // and the binding stay hidden otherwise.
   const stoppable = () => surface()?.kind === "workspace" && (showWorkBlock() ?? false)
-  const workAnnouncements = createMemo(() => {
-    if (surface()?.kind !== "workspace") return []
-    return terminalAnnouncements(activeTasks(), (task) => agentName(state(), task.assigneeID), Date.now())
+  // Ticket #67 muted inline completions: each terminal outcome persists once
+  // as a transcript row at its finish position. The accumulator folds newly
+  // terminal tasks in keyed by task ID and returns the same map reference
+  // when nothing new finished, so completions never regenerate per poll and
+  // one outcome can never render twice. Workspace-scoped: DM surfaces carry
+  // no completion feed.
+  const [completionMap, setCompletionMap] = createSignal(new Map<string, InlineCompletion>())
+  createEffect(() => {
+    if (surface()?.kind !== "workspace") {
+      if (completionMap().size > 0) setCompletionMap(new Map())
+      return
+    }
+    const snapshot = state()
+    const tasks = activeTasks()
+    const now = Date.now()
+    const previous = completionMap()
+    const next = accumulateCompletions(previous, tasks, (task) => agentName(snapshot, task.assigneeID), now)
+    if (next !== previous) setCompletionMap(next)
   })
+  // One time-ordered transcript window: conversation lines interleaved with
+  // inline completions by (finish/created) time. The scrollbox keeps a stable
+  // identity and the live/finalized partition stays intact upstream.
+  const mergedRows = createMemo(() =>
+    mergeTranscriptRows(finalizedLines(), [...completionMap().values()], TRANSCRIPT_WINDOW),
+  )
   const liveActivity = createMemo(() => {
     const live: ActivityEntry[] = []
     let queued: string[] = []
@@ -404,6 +435,7 @@ export function EnsembleV2App() {
         live.push({
           key: liveLine.agentID ?? `author:${liveLine.author}`,
           label: liveLine.author,
+          agentID: liveLine.agentID,
           createdAt: liveLine.createdAt,
           verb: ACTIVITY_DEFAULT_VERB,
           kind: "thinking",
@@ -415,7 +447,7 @@ export function EnsembleV2App() {
     for (const entry of live) if (!byLabel.has(entry.label)) byLabel.set(entry.label, entry)
     const shown = selected.shown.map((label) => {
       const entry = byLabel.get(label)
-      return { label, verb: entry?.verb ?? ACTIVITY_DEFAULT_VERB, kind: entry?.kind ?? ("checking" as ActivityVerbKind) }
+      return { label, agentID: entry?.agentID, verb: entry?.verb ?? ACTIVITY_DEFAULT_VERB, kind: entry?.kind ?? ("checking" as ActivityVerbKind) }
     })
     const queuedShown =
       shown.length > 0
@@ -428,37 +460,34 @@ export function EnsembleV2App() {
         selected.overflow + (shown.length > 0 ? Math.max(0, queued.length - queuedShown.length) : 0),
     }
   })
-  const agentColorForLabel = (label: string) => {
-    const agents = rosterAgents()
-    const index = agents.findIndex((item) => item.name === label)
-    return agentColor(index >= 0 ? agents[index] : undefined, colors.muted as string, Math.max(0, index), colors.categorical)
-  }
+  // Ticket #67 one author-color source: the transcript, activity lines, and
+  // relays all resolve through unifiedAuthorColor (ID first, roster-name
+  // fallback), so each agent reads as the same color everywhere.
+  const authorColor = (input: { agentID?: string; author: string; role: "user" | "agent" | "system" }) =>
+    unifiedAuthorColor(input, state()?.agents ?? {}, rosterAgents(), colors, colors.categorical)
   const hasChatContent = createMemo(
     () =>
       finalizedLines().length > 0 ||
       liveMessages().length > 0 ||
-      workAnnouncements().length > 0 ||
+      completionMap().size > 0 ||
       (showWorkBlock() ?? false) ||
       liveActivity().shown.length > 0 ||
       liveActivity().queued.length > 0,
   )
-  const chatAuthorColor = (line: ChatLine) => {
-    if (line.role === "user") return colors.good
-    if (line.role === "system") return colors.muted
-    const agent = line.agentID ? state()?.agents[line.agentID] : undefined
-    const index = rosterAgents().findIndex((item) => item.id === line.agentID)
-    return agentColor(agent, colors.accent as string, Math.max(0, index), colors.categorical)
-  }
-  // Slice C transcript header grammar (ticket #59, brief §2.2): every row
-  // keeps author attribution; relayed answers head `Answer from $Name` via
-  // the #55 correlation link; system/queued/task/approval/interrupted rows
-  // carry concise suffix flags. No per-message timestamps anywhere.
+  // Ticket #67 unified bubble header: every row keeps author attribution;
+  // relayed answers head `Answer from $Answerer · for $Asker|you` via the #55
+  // correlation link, naming both parties; system/queued/task/approval/
+  // interrupted rows carry concise suffix flags. No per-message timestamps.
   const headerForLine = (line: ChatLine): string => {
+    let head = line.author
     if (line.role === "agent" && line.correlationID) {
       const relay = relayTaskForMessage({ correlationID: line.correlationID, agentID: line.agentID }, activeTasks())
-      if (relay) return answerHeader(line.author)
+      if (relay) {
+        const parties = relayPartiesForTask(relay, (id) => agentName(state(), id))
+        if (parties) return bubbleHead(line.author, parties)
+      }
     }
-    let header = line.author
+    let header = head
     // Queued group rows are impossible by construction (group Messages carry
     // no queued flag; only DM ChatMessages do), so the `[x remove]`
     // affordance renders on direct surfaces only — `x` on the group surface
@@ -2074,7 +2103,19 @@ export function EnsembleV2App() {
                         <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
                           <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (value) queueMicrotask(() => syncTranscriptScroll()) }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
                               <box flexDirection="column" width="100%" paddingRight={1}>
-                                <For each={finalizedLines()}>{(message) => {
+                                <For each={mergedRows()}>{(row) => {
+                                  // Ticket #67 muted inline completions: one
+                                  // full-width muted system line per terminal
+                                  // outcome at its finish position — no
+                                  // border, no trailing feed, no regeneration.
+                                  if (row.completion) {
+                                    return (
+                                    <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
+                                      <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{row.completion.text}</text>
+                                    </box>
+                                    )
+                                  }
+                                  const message = row.message!
                                   // Review fix (finding 4): first-paint stagger
                                   // — newly arrived rows enter dim one tick
                                   // then full (glyph/color only, no reflow),
@@ -2084,26 +2125,50 @@ export function EnsembleV2App() {
                                   // scroll and finalization are unaffected.
                                   const stagger = staggeringIds().has(message.id)
                                   const tone = (normal: typeof colors.text) => (stagger ? colors.faint : normal)
-                                  return (
-                                  <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                    <text fg={tone(message.queued ? colors.muted : chatAuthorColor(message))} bg={colors.bg} width="100%" truncate>{headerForLine(message)}</text>
-                                    <Show when={message.role === "user"} fallback={
+                                  const side = bubbleSide(message.role)
+                                  // System, task, approval, assignment, and
+                                  // completion-adjacent lines stay full-width
+                                  // and unbubbled, visually distinct from the
+                                  // conversation.
+                                  if (!isBubbledRole(message.role)) {
+                                    return (
+                                    <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
+                                      <text fg={tone(message.queued ? colors.muted : authorColor({ agentID: message.agentID, author: message.author, role: message.role }))} bg={colors.bg} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "agent" && syntaxStyle} fallback={
                                         <text fg={tone(message.role === "system" || message.queued ? colors.muted : colors.text)} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                       }>
                                         {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={tone(colors.text)} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
                                       </Show>
-                                    }>
-                                      <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.bg} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", Math.max(16, messageWidth())).join("\n")}</text>
-                                    </Show>
+                                    </box>
+                                    )
+                                  }
+                                  // Ticket #67 bubbles: agent messages read
+                                  // left-aligned in filled blocks carrying the
+                                  // agent's categorical accent edge; user
+                                  // messages read right-aligned. Content wraps
+                                  // inside a bounded ~72% width. Inner rows
+                                  // paint the bubble fill so the block reads as
+                                  // one surface in text capture.
+                                  const accent = authorColor({ agentID: message.agentID, author: message.author, role: message.role })
+                                  const edge: Array<"top" | "right" | "bottom" | "left"> = side === "left" ? ["left"] : []
+                                  const wrapWidth = bubbleContentWidth(messageWidth())
+                                  return (
+                                  <box flexDirection="column" width="100%" marginTop={1}>
+                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={edge} borderColor={side === "left" ? accent : colors.panel} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} flexDirection="column">
+                                      <text fg={tone(message.queued ? colors.muted : accent)} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
+                                      <Show when={message.role === "user"} fallback={
+                                        <Show when={syntaxStyle} fallback={
+                                          <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
+                                        }>
+                                          {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={tone(colors.text)} bg={colors.panel} conceal tableOptions={{ widthMode: "content" }} />}
+                                        </Show>
+                                      }>
+                                        <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth).join("\n")}</text>
+                                      </Show>
+                                    </box>
                                   </box>
                                   )
                                 }}</For>
-                                <For each={workAnnouncements()}>{(announcement) => (
-                                  <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                    <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{announcement.text}</text>
-                                  </box>
-                                )}</For>
                               </box>
                           </scrollbox>
                           <Show when={liveActivity().shown.length > 0 || liveActivity().queued.length > 0 || liveActivity().overflow > 0}>
@@ -2113,18 +2178,18 @@ export function EnsembleV2App() {
                                   <text fg={colors.muted} bg={colors.bg}>{`${activityFrameForKind(entry.kind, motionFrame(), process.env)} `}</text>
                                   <Show when={entry.kind === "asking"} fallback={
                                     <>
-                                      <text fg={agentColorForLabel(entry.label)} bg={colors.bg}>{entry.label}</text>
+                                      <text fg={authorColor({ agentID: entry.agentID, author: entry.label, role: "agent" })} bg={colors.bg}>{entry.label}</text>
                                       <text fg={colors.muted} bg={colors.bg}>{` · ${entry.verb}`}</text>
                                     </>
                                   }>
-                                    <text fg={agentColorForLabel(entry.label)} bg={colors.bg}>{entry.verb}</text>
+                                    <text fg={authorColor({ agentID: entry.agentID, author: entry.label, role: "agent" })} bg={colors.bg}>{entry.verb}</text>
                                   </Show>
                                 </box>
                               )}</For>
                               <For each={liveActivity().queued}>{(label) => (
                                 <box flexDirection="row" width="100%">
                                   <text fg={colors.muted} bg={colors.bg}>{`${queuedActivityFrame()} `}</text>
-                                  <text fg={agentColorForLabel(label)} bg={colors.bg}>{label}</text>
+                                  <text fg={authorColor({ author: label, role: "agent" })} bg={colors.bg}>{label}</text>
                                   <text fg={colors.muted} bg={colors.bg}> · queued</text>
                                 </box>
                               )}</For>
@@ -2154,8 +2219,8 @@ export function EnsembleV2App() {
                             </box>
                           </Show>
                           <Show when={!atBottom()}>
-                            <box position="absolute" bottom={1} right={1} zIndex={40} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} onMouseDown={() => jumpToBottom()}>
-                              <text fg={colors.focus} bg={colors.panel}>↓ bottom · end</text>
+                            <box position="absolute" bottom={1} right={1} zIndex={40} onMouseDown={() => jumpToBottom()}>
+                              <text fg={colors.focus} bg={colors.bg}>↓</text>
                             </box>
                           </Show>
                         </box>
