@@ -296,7 +296,8 @@ live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings reopened"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
-live_require_text "$LIVE_TUI_SESSION" "No memories." 10 "memories tab"
+live_require_text "$LIVE_TUI_SESSION" "No memories yet. e adds one." 10 "memories empty state names the add action"
+live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "memories count renders at zero"
 live_key "$LIVE_TUI_SESSION" "e"
 live_require_text "$LIVE_TUI_SESSION" "Add memory" 10 "in-house add-memory prompt"
 live_type "$LIVE_TUI_SESSION" "fake-live-memory"
@@ -304,6 +305,36 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_absence "$LIVE_TUI_SESSION" "enter submit · shift+enter" 10 "prompt submitted"
 memory_text=$(live_snapshot_value 'Object.values(output.state.memories).map(function (m) { return m.text })')
 [[ "$memory_text" == '["fake-live-memory"]' ]] || live_fail "memory prompt did not persist (got $memory_text)"
+live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "memories count renders the live total"
+live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "memory provenance line"
+# Slice D edit-in-place: e reopens the fact in the in-house multiline prompt;
+# appending keeps one row (no delete/re-add) with origin and history intact.
+live_key "$LIVE_TUI_SESSION" "e"
+live_require_text "$LIVE_TUI_SESSION" "Edit memory" 10 "in-house edit-memory prompt"
+live_type "$LIVE_TUI_SESSION" " v2"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "enter submit · shift+enter" 10 "edit prompt submitted"
+memory_edited=$(live_snapshot_value 'Object.values(output.state.memories).map(function (m) { return m.text })')
+[[ "$memory_edited" == '["v2fake-live-memory"]' ]] || live_fail "memory edit did not persist (got $memory_edited)"
+memory_rows=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).length')
+[[ "$memory_rows" == '1' ]] || live_fail "edit re-added instead of updating in place (got $memory_rows rows)"
+memory_prov=$(live_snapshot_value '(function () { var m = Object.values(output.state.memories)[0]; return m.origin + "|" + m.scope + "|" + m.history.map(function (h) { return h.action }).join(",") })()')
+[[ "$memory_prov" == '"manual|project|created,edited"' ]] || live_fail "edit lost provenance history (got $memory_prov)"
+live_require_text "$LIVE_TUI_SESSION" "v2fake-live-memory" 10 "edited fact renders"
+live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count unchanged after edit"
+# Slice D inline filter: / narrows to zero with an explicit empty state,
+# clearing restores the row without touching the snapshot.
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "typing… enter done · esc cancel" 10 "memory filter editing"
+live_type "$LIVE_TUI_SESSION" "zzz-no-match"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "No matching memories" 10 "memory filter zero state"
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "typing… enter done · esc cancel" 10 "memory filter re-editing"
+live_key_repeat "$LIVE_TUI_SESSION" "BSpace" 12
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "provenance line restored after clearing filter"
+live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count survives filtering"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
 

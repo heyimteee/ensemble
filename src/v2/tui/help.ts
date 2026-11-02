@@ -16,7 +16,7 @@ export const shortcutGroups: Array<{ title: string; entries: Array<[string, stri
   { title: "Wizards", entries: [["Ctrl+P", "Previous step"], ["Ctrl+N", "Next step"], ["Enter", "Continue or submit"], ["Shift+Enter", "New line in a text field"], ["Esc", "Cancel the wizard"]] },
   { title: "Work", entries: [["d", "Delegate selected work"], ["t", "Reassign selected work"], ["Enter", "Open selected work result"], ["r", "Retry selected work"], ["R", "Restart selected work"], ["x", "Cancel selected work"], ["o", "Open native session"]] },
   { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive agent"], ["Ctrl+Shift+A", "Delete agent"]] },
-  { title: "Settings", entries: [["Tab", "Cycle tab"], ["e", "Edit"], ["b", "Add backup"], ["Ctrl+↑ / Ctrl+↓", "Move backup"], ["Backspace", "Remove backup"], ["Ctrl+S", "Save"], ["Space", "Toggle skill"], ["Ctrl+F", "Filter skills"]] },
+  { title: "Settings", entries: [["Tab", "Cycle tab"], ["e", "Edit"], ["n", "New memory"], ["b", "Add backup"], ["Ctrl+↑ / Ctrl+↓", "Move backup"], ["Backspace", "Remove backup"], ["Ctrl+S", "Save"], ["Space", "Toggle skill"], ["Ctrl+F", "Filter skills"], ["Ctrl+D", "Delete memory"], ["Ctrl+P", "Promote memory"], ["/", "Filter memories"]] },
 ]
 
 export function helpGroups(query: string): Array<{ title: string; entries: Array<[string, string]> }> {

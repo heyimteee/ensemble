@@ -795,6 +795,67 @@ test("agent and workspace creation reject invalid input", async () => {
   }
 })
 
+test("memory edit preserves provenance history and updatedAt semantics", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const memory = await handlers.invoke({ directory, action: "memory.add", payload: { agentID: agent.result.id, scope: "project", text: "Use pnpm" } })
+    const before = (await handlers.snapshot({ directory })).state.memories[memory.result.id]
+    const edited = await handlers.invoke({ directory, action: "memory.update", payload: { id: memory.result.id, text: "Use pnpm 9" } })
+    assert.equal(edited.result.text, "Use pnpm 9")
+    assert.equal(edited.result.origin, "manual")
+    assert.equal(edited.result.scope, "project")
+    assert.ok(edited.result.updatedAt >= before.updatedAt)
+    assert.deepEqual(edited.result.history.map((entry: any) => entry.action), ["created", "edited"])
+    // Empty edits are rejected; the stored fact is untouched.
+    const empty = await handlers.invoke({ directory, action: "memory.update", payload: { id: memory.result.id, text: "   " } })
+    assert.equal(empty.ok, false)
+    const kept = (await handlers.snapshot({ directory })).state.memories[memory.result.id]
+    assert.equal(kept.text, "Use pnpm 9")
+  } finally {
+    await stop()
+  }
+})
+
+test("memory delete and global-promotion approvals stay gated", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const memory = await handlers.invoke({ directory, action: "memory.add", payload: { agentID: agent.result.id, scope: "project", text: "Keep" } })
+    // Promotion creates a pending approval and leaves scope untouched.
+    const promotion = await handlers.invoke({ directory, action: "memory.promote", payload: { id: memory.result.id } })
+    assert.equal(promotion.ok, true)
+    const pending = (await handlers.snapshot({ directory })).state.approvals[promotion.result.id]
+    assert.equal(pending.status, "pending")
+    assert.equal(pending.kind, "promote_memory")
+    assert.equal((await handlers.snapshot({ directory })).state.memories[memory.result.id].scope, "project")
+    // Rejecting keeps project scope; approving flips to global.
+    await handlers.invoke({ directory, action: "approval.resolve", payload: { id: promotion.result.id, approve: false } })
+    assert.equal((await handlers.snapshot({ directory })).state.memories[memory.result.id].scope, "project")
+    const second = await handlers.invoke({ directory, action: "memory.promote", payload: { id: memory.result.id } })
+    await handlers.invoke({ directory, action: "approval.resolve", payload: { id: second.result.id, approve: true } })
+    assert.equal((await handlers.snapshot({ directory })).state.memories[memory.result.id].scope, "global")
+    // Delete soft-deletes with history; unknown ids stay not-found.
+    const deleted = await handlers.invoke({ directory, action: "memory.delete", payload: { id: memory.result.id } })
+    assert.equal(deleted.ok, true)
+    const tombstoned = (await handlers.snapshot({ directory })).state.memories[memory.result.id]
+    assert.ok(tombstoned.deletedAt)
+    assert.ok(tombstoned.history.some((entry: any) => entry.action === "deleted"))
+    const missing = await handlers.invoke({ directory, action: "memory.delete", payload: { id: "mem-missing" } })
+    assert.equal(missing.ok, false)
+  } finally {
+    await stop()
+  }
+})
+
 test("memory entries can be added, edited, promoted, and deleted", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()

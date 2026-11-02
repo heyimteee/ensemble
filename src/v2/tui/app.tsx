@@ -8,6 +8,7 @@ import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOptio
 import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
 import { agentColor, agentName, fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { filterMemories } from "./memories.ts"
 import { palette } from "./theme.ts"
 import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
@@ -166,6 +167,8 @@ export function EnsembleV2App() {
   const [modal, setModal] = createSignal(false)
   const [approvalCursor, setApprovalCursor] = createSignal(0)
   const [memoryCursor, setMemoryCursor] = createSignal(0)
+  const [memoryFilter, setMemoryFilter] = createSignal("")
+  const [memoryFilterEditing, setMemoryFilterEditing] = createSignal(false)
   const [skillCursor, setSkillCursor] = createSignal(0)
   const [skillFilter, setSkillFilter] = createSignal("")
   const [backupCursor, setBackupCursor] = createSignal(0)
@@ -398,6 +401,7 @@ export function EnsembleV2App() {
     const query = skillFilter().toLowerCase()
     return skills().filter((skill) => !query || skill.id.toLowerCase().includes(query) || skill.name.toLowerCase().includes(query))
   })
+  const filteredMemories = createMemo(() => filterMemories(agentMemories(), memoryFilter()))
   const selectedMissingSkills = createMemo(() => {
     const agent = draft() ?? selectedAgent()
     return agent ? missingSkills(agent, skills()) : []
@@ -950,8 +954,13 @@ export function EnsembleV2App() {
       const variant = await chooseVariant(model)
       setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); setDirty(true)
     } else if (settingsTab() === "memories") {
-      const text = await openTextPrompt("Add memory", { placeholder: "The team uses pnpm." })
-      if (text?.trim()) await run("Add memory", async () => { await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text: text.trim(), source: "user" }) })
+      const memories = filteredMemories()
+      if (memories.length === 0 && memoryFilter().trim() === "") {
+        const text = await openTextPrompt("Add memory", { placeholder: "The team uses pnpm." })
+        if (text?.trim()) await run("Add memory", async () => { await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text: text.trim(), source: "user" }) })
+      } else {
+        await editMemory()
+      }
     } else if (settingsTab() === "skillbox") toggleSkill()
   }
 
@@ -962,8 +971,25 @@ export function EnsembleV2App() {
     setDraft({ ...agent, skillbox: has ? agent.skillbox.filter((id) => id !== skill.id) : [...agent.skillbox, skill.id] }); setDirty(true)
   }
 
-  const deleteMemory = async () => { const memory = agentMemories()[memoryCursor()]; if (memory) await run("Delete memory", async () => { await invoke(context, "memory.delete", { id: memory.id }) }) }
-  const promoteMemory = async () => { const memory = agentMemories()[memoryCursor()]; if (memory) await run("Promote memory", async () => { await invoke(context, "memory.promote", { id: memory.id }) }) }
+  const deleteMemory = async () => { const memory = filteredMemories()[memoryCursor()]; if (memory) await run("Delete memory", async () => { await invoke(context, "memory.delete", { id: memory.id }) }) }
+  const promoteMemory = async () => { const memory = filteredMemories()[memoryCursor()]; if (memory) await run("Promote memory", async () => { await invoke(context, "memory.promote", { id: memory.id }) }) }
+
+  const addMemory = async () => {
+    const agent = draft(); if (!agent) return
+    const text = await openTextPrompt("Add memory", { placeholder: "The team uses pnpm." })
+    if (text?.trim()) {
+      await run("Add memory", async () => { await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text: text.trim(), source: "user" }) })
+      setMemoryCursor(Math.max(0, filteredMemories().length - 1))
+    }
+  }
+
+  const editMemory = async () => {
+    const memory = filteredMemories()[memoryCursor()]; if (!memory) return
+    const text = await openTextPrompt("Edit memory", { value: memory.text })
+    if (text === undefined) return
+    if (text.trim() === "" || text === memory.text) return
+    await run("Edit memory", async () => { await invoke(context, "memory.update", { id: memory.id, text: text.trim() }) })
+  }
 
   const resolveApproval = async (approval: Approval) => {
     const options = approval.kind === "interrupted" ? [{ title: "Resume work", value: "approve" }, { title: "Discard", value: "reject" }] : approval.kind === "ask_person" ? [{ title: "Answer", value: "approve" }, { title: "Reject", value: "reject" }] : [{ title: "Approve", value: "approve" }, { title: "Reject", value: "reject" }]
@@ -1026,7 +1052,7 @@ export function EnsembleV2App() {
   }
 
   const moveSettingsCursor = (delta: number) => {
-    if (settingsTab() === "memories") setMemoryCursor((cursor) => Math.max(0, Math.min(Math.max(0, agentMemories().length - 1), cursor + delta)))
+    if (settingsTab() === "memories") setMemoryCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredMemories().length - 1), cursor + delta)))
     else if (settingsTab() === "models") setBackupCursor((cursor) => Math.max(0, Math.min(Math.max(0, (draft()?.backupModels.length ?? 1) - 1), cursor + delta)))
     else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredSkills().length - 1), cursor + delta)))
   }
@@ -1126,6 +1152,7 @@ export function EnsembleV2App() {
       if (confirm()) { handleConfirmKey(event); return }
       if (result()) { handleResultKey(event); return }
       if (skillFilterEditing()) { handleSkillFilterKey(event); return }
+      if (memoryFilterEditing()) { handleMemoryFilterKey(event); return }
       if (!leaderMode()) return
       const name = String(event?.name ?? ""); const sequence = String(event?.sequence ?? "")
       if (name === "escape" || name === "q" || name === "?" || sequence === "?") return
@@ -1146,7 +1173,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 100,
-      enabled: () => isOurRoute() && !isModal() && !leaderMode() && !composerActive() && wizard() === null && !skillFilterEditing(),
+      enabled: () => isOurRoute() && !isModal() && !leaderMode() && !composerActive() && wizard() === null && !skillFilterEditing() && !memoryFilterEditing(),
       commands: [
         { id: "ensemble.v2.leader", title: "Ensemble: Leader key", bind: "~", run: () => setLeaderMode(true) },
         { id: "ensemble.v2.left", title: "Ensemble: Column left", bind: "h", run: () => focusLeft() },
@@ -1218,10 +1245,11 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode() && wizard() === null && !skillFilterEditing(),
+      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode() && wizard() === null && !skillFilterEditing() && !memoryFilterEditing(),
       commands: [
         { id: "ensemble.v2.tab", title: "Ensemble: Settings tab", bind: "tab", run: () => { const tabs: SettingsTab[] = ["general", "models", "memories", "skillbox"]; setSettingsTab(tabs[(tabs.indexOf(settingsTab()) + 1) % tabs.length]) } },
         { id: "ensemble.v2.edit", title: "Ensemble: Edit", bind: "e", run: () => void editField().catch(showError) },
+        { id: "ensemble.v2.memory.new", title: "Ensemble: New memory", bind: "n", enabled: () => settingsTab() === "memories", run: () => void addMemory().catch(showError) },
         { id: "ensemble.v2.backup.add", title: "Ensemble: Add backup", bind: "b", enabled: () => settingsTab() === "models", run: () => void addBackup().catch(showError) },
         { id: "ensemble.v2.backup.up", title: "Ensemble: Move backup up", bind: "ctrl+up", enabled: () => settingsTab() === "models", run: () => reorderBackup("up") },
         { id: "ensemble.v2.backup.down", title: "Ensemble: Move backup down", bind: "ctrl+down", enabled: () => settingsTab() === "models", run: () => reorderBackup("down") },
@@ -1229,13 +1257,15 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.save", title: "Ensemble: Save", bind: "ctrl+s", run: () => void saveSettings().catch(showError) },
         { id: "ensemble.v2.skill", title: "Ensemble: Toggle skill", bind: "space", enabled: () => settingsTab() === "skillbox", run: () => toggleSkill() },
         { id: "ensemble.v2.filter", title: "Ensemble: Filter skills", bind: "ctrl+f", enabled: () => settingsTab() === "skillbox", run: () => { setSkillFilterEditing(true); setSkillCursor(0) } },
+        { id: "ensemble.v2.memory.filter", title: "Ensemble: Filter memories", bind: "ctrl+f", enabled: () => settingsTab() === "memories", run: () => { setMemoryFilterEditing(true); setMemoryCursor(0) } },
+        { id: "ensemble.v2.memory.filter.slash", title: "Ensemble: Filter memories", bind: "/", enabled: () => settingsTab() === "memories", run: () => { setMemoryFilterEditing(true); setMemoryCursor(0) } },
         { id: "ensemble.v2.memory.delete", title: "Ensemble: Delete memory", bind: "ctrl+d", enabled: () => settingsTab() === "memories", run: () => void deleteMemory().catch(showError) },
         { id: "ensemble.v2.memory.promote", title: "Ensemble: Promote memory", bind: "ctrl+p", enabled: () => settingsTab() === "memories", run: () => void promoteMemory().catch(showError) },
         { id: "ensemble.v2.settings.up", title: "Ensemble: Up", bind: "up", run: () => moveSettingsCursor(-1) },
         { id: "ensemble.v2.settings.down", title: "Ensemble: Down", bind: "down", run: () => moveSettingsCursor(1) },
         { id: "ensemble.v2.settings.back", title: "Ensemble: Close settings", bind: "escape", run: () => void closeSettings() },
       ],
-      bindings: ["ensemble.v2.tab", "ensemble.v2.edit", "ensemble.v2.backup.add", "ensemble.v2.backup.up", "ensemble.v2.backup.down", "ensemble.v2.backup.remove", "ensemble.v2.save", "ensemble.v2.skill", "ensemble.v2.filter", "ensemble.v2.memory.delete", "ensemble.v2.memory.promote", "ensemble.v2.settings.up", "ensemble.v2.settings.down", "ensemble.v2.settings.back"],
+      bindings: ["ensemble.v2.tab", "ensemble.v2.edit", "ensemble.v2.memory.new", "ensemble.v2.backup.add", "ensemble.v2.backup.up", "ensemble.v2.backup.down", "ensemble.v2.backup.remove", "ensemble.v2.save", "ensemble.v2.skill", "ensemble.v2.filter", "ensemble.v2.memory.filter", "ensemble.v2.memory.filter.slash", "ensemble.v2.memory.delete", "ensemble.v2.memory.promote", "ensemble.v2.settings.up", "ensemble.v2.settings.down", "ensemble.v2.settings.back"],
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
@@ -1441,6 +1471,21 @@ export function EnsembleV2App() {
     setSkillFilter(next.query)
     setSkillCursor(0)
     if (next.done) setSkillFilterEditing(false)
+  }
+
+  const handleMemoryFilterKey = (event: any) => {
+    const next = skillFilterEdit(memoryFilter(), {
+      name: String(event?.name ?? ""),
+      sequence: String(event?.sequence ?? ""),
+      ctrl: Boolean(event?.ctrl),
+      meta: Boolean(event?.meta),
+      super: Boolean(event?.super),
+    })
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    setMemoryFilter(next.query)
+    setMemoryCursor(0)
+    if (next.done) setMemoryFilterEditing(false)
   }
 
   const directoryChoices = (): WizardOption[] => {
@@ -1956,7 +2001,7 @@ export function EnsembleV2App() {
                 <HelpView colors={colors} scrollRef={(value: any) => { helpScrollRef = value }} />
               </Show>
             }>
-              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={agentMemories()} memoryCursor={memoryCursor()} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} filterEditing={skillFilterEditing()} skillCatalog={skills()} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={filteredMemories()} memoryCursor={memoryCursor()} memoryFilter={memoryFilter()} memoryFilterEditing={memoryFilterEditing()} memoryTotal={agentMemories().length} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} filterEditing={skillFilterEditing()} skillCatalog={skills()} />
             </Show>
           </box>
         </box>
