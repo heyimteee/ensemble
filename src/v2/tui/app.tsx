@@ -7,7 +7,7 @@ import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
-import { agentColor, agentName, fuzzyMatch, missingSkills, renderMarkdownLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { agentColor, agentName, answerHeader, fuzzyMatch, missingSkills, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { palette } from "./theme.ts"
 import { pickerWindow, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
@@ -17,7 +17,7 @@ import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue, skillFilterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import { normalizeAgentMentions } from "../routing.ts"
-import { deriveWorkStatus } from "../queue.ts"
+import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { shouldApplySnapshot } from "../snapshot-guard.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
@@ -34,6 +34,7 @@ import {
   workRowText,
   workSummary,
   type ActivityEntry,
+  type ActivityVerbKind,
 } from "./workrows.ts"
 
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
@@ -259,6 +260,7 @@ export function EnsembleV2App() {
         && previous.streaming === line.streaming
         && previous.interrupted === line.interrupted
         && previous.queued === line.queued
+        && previous.correlationID === line.correlationID
         && previous.agentID === line.agentID) return previous
       const value = { ...line }
       lineCache.set(line.id, value)
@@ -276,13 +278,34 @@ export function EnsembleV2App() {
         text: message.role === "assistant" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
         agentID: surfaceAgent()?.id,
         queued: message.queued,
+        correlationID: message.correlationID,
         createdAt: message.createdAt,
       }))
       const live = liveDm()
       if (live && chatContext()?.sessionID === live.sessionID) {
         messages.push({ id: "live", author: surfaceAgent()?.name ?? "Agent", role: "agent" as const, text: live.text, agentID: surfaceAgent()?.id, createdAt: Date.now(), streaming: true })
       }
-      return stableLines(messages)
+      // Slice C: the relevant direct surface carries one assignment line per
+      // active assignment for this agent, so fan-out stays traceable without
+      // leaving the DM. Terminal work is announced in the group chat, never
+      // repeated here; each active assignment renders exactly once.
+      const agent = surfaceAgent()
+      if (agent) {
+        const now = Date.now()
+        for (const task of activeTasks().filter((item) => item.assigneeID === agent.id && !isTerminalWorkStatus(deriveWorkStatus(item, now))).sort((a, b) => a.createdAt - b.createdAt)) {
+          messages.push({
+            id: `assign-${task.id}`,
+            author: "Ensemble",
+            role: "system" as const,
+            text: `→ Assigned to $${agent.name}: ${task.title || "(untitled)"}`,
+            kind: "system",
+            correlationID: task.turn?.correlationID ?? task.handoff?.correlationID,
+            createdAt: task.createdAt,
+          })
+        }
+        messages.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      }
+      return stableLines(messages.slice(-40))
     }
     return stableLines(groupMessages().map((message) => ({
       id: message.id,
@@ -293,6 +316,7 @@ export function EnsembleV2App() {
       kind: message.kind,
       streaming: message.streaming,
       interrupted: message.interrupted,
+      correlationID: message.correlationID,
       createdAt: message.createdAt,
     })))
   })
@@ -313,6 +337,10 @@ export function EnsembleV2App() {
   const showWorkBlock = createMemo(
     () => surface()?.kind === "workspace" && hasActiveWork(activeTasks(), Date.now()),
   )
+  // Slice C stop affordance (brief §2.5): while active work runs on the group
+  // surface a run is abortable, so the composer names `Ctrl+C stop`; the hint
+  // and the binding stay hidden otherwise.
+  const stoppable = () => surface()?.kind === "workspace" && (showWorkBlock() ?? false)
   const workAnnouncements = createMemo(() => {
     if (surface()?.kind !== "workspace") return []
     return terminalAnnouncements(activeTasks(), (task) => agentName(state(), task.assigneeID), Date.now())
@@ -332,23 +360,33 @@ export function EnsembleV2App() {
     }
     for (const liveLine of liveMessages()) {
       if (!live.some((entry) => entry.key === (liveLine.agentID ?? `author:${liveLine.author}`))) {
+        // Streaming text arriving with no task-backed line: the agent is
+        // composing, so the thinking shimmer applies (brief §4).
         live.push({
           key: liveLine.agentID ?? `author:${liveLine.author}`,
           label: liveLine.author,
           createdAt: liveLine.createdAt,
+          verb: ACTIVITY_DEFAULT_VERB,
+          kind: "thinking",
         })
       }
     }
     const selected = selectActivityAgents(live, MAX_VISIBLE_ACTIVITY)
+    const byLabel = new Map<string, ActivityEntry>()
+    for (const entry of live) if (!byLabel.has(entry.label)) byLabel.set(entry.label, entry)
+    const shown = selected.shown.map((label) => {
+      const entry = byLabel.get(label)
+      return { label, verb: entry?.verb ?? ACTIVITY_DEFAULT_VERB, kind: entry?.kind ?? ("checking" as ActivityVerbKind) }
+    })
     const queuedShown =
-      selected.shown.length > 0
-        ? queued.filter((label) => !selected.shown.includes(label)).slice(0, MAX_VISIBLE_ACTIVITY)
+      shown.length > 0
+        ? queued.filter((label) => !shown.some((entry) => entry.label === label)).slice(0, MAX_VISIBLE_ACTIVITY)
         : []
     return {
-      shown: selected.shown,
+      shown,
       queued: queuedShown,
       overflow:
-        selected.overflow + (selected.shown.length > 0 ? Math.max(0, queued.length - queuedShown.length) : 0),
+        selected.overflow + (shown.length > 0 ? Math.max(0, queued.length - queuedShown.length) : 0),
     }
   })
   const agentColorForLabel = (label: string) => {
@@ -372,9 +410,25 @@ export function EnsembleV2App() {
     const index = rosterAgents().findIndex((item) => item.id === line.agentID)
     return agentColor(agent, colors.accent as string, Math.max(0, index), colors.categorical)
   }
+  // Slice C transcript header grammar (ticket #59, brief §2.2): every row
+  // keeps author attribution; relayed answers head `Answer from $Name` via
+  // the #55 correlation link; system/queued/task/approval/interrupted rows
+  // carry concise suffix flags. No per-message timestamps anywhere.
+  const headerForLine = (line: ChatLine): string => {
+    if (line.role === "agent" && line.correlationID) {
+      const relay = relayTaskForMessage({ correlationID: line.correlationID, agentID: line.agentID }, activeTasks())
+      if (relay) return answerHeader(line.author)
+    }
+    let header = line.author
+    if (line.queued) header += queuedSuffix(line.role === "user")
+    if (line.kind === "task") header += " · task"
+    if (line.kind === "approval") header += " · approval · v to resolve"
+    if (line.interrupted) header += " · interrupted"
+    return header
+  }
   const emptyChat = () => surface()?.kind === "agent"
     ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}\n\nSend a direct message. It goes to this agent's native OpenCode session.`
-    : "Group chat\n\nSay something to your team. $Name mentions an agent; @path references a file."
+    : "Group chat\n\nSay something to your team. $Name mentions an agent; @path references a file. i to compose."
   const syncTranscriptScroll = () => {
     const box = transcriptScrollRef
     if (!box) { setAtBottom(true); return }
@@ -879,6 +933,17 @@ export function EnsembleV2App() {
   const retrySelected = async () => { const task = selectedTask(); if (task) await run("Retry subtask", async () => { await invoke(context, "task.retry", { id: task.id }) }) }
   const restartSelected = async () => { const task = selectedTask(); if (task) await run("Restart subtask", async () => { await invoke(context, "task.restart", { id: task.id }) }) }
   const cancelSelected = async () => { const task = selectedTask(); if (task) await run("Cancel subtask", async () => { await invoke(context, "task.cancel", { id: task.id }) }) }
+  // Slice C: on a direct surface with parked user-owned input, `x` removes
+  // the oldest queued line (the inline `[x remove]` affordance); everywhere
+  // else `x` keeps cancelling the selected subtask.
+  const removeQueuedDm = async () => {
+    const value = surface()
+    if (value?.kind !== "agent") return
+    await run("Remove queued message", async () => {
+      await invoke(context, "chat.removeQueued", { agentID: value.agentID, workspaceID: value.workspaceID })
+      await refreshChat()
+    })
+  }
 
   const openNative = () => {
     const workspace = activeWorkspace()
@@ -1172,7 +1237,10 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.reassign", title: "Ensemble: Reassign", bind: "t", run: () => void reassignSelected().catch(showError) },
         { id: "ensemble.v2.retry", title: "Ensemble: Retry", bind: "r", run: () => void retrySelected().catch(showError) },
         { id: "ensemble.v2.restart", title: "Ensemble: Restart", bind: "shift+r", run: () => void restartSelected().catch(showError) },
-        { id: "ensemble.v2.cancel.task", title: "Ensemble: Cancel subtask", bind: "x", run: () => void cancelSelected().catch(showError) },
+        { id: "ensemble.v2.cancel.task", title: "Ensemble: Cancel subtask", bind: "x", run: () => {
+          if (surface()?.kind === "agent" && (chatContext()?.queued ?? 0) > 0) void removeQueuedDm().catch(showError)
+          else void cancelSelected().catch(showError)
+        } },
         { id: "ensemble.v2.workspace.next", title: "Ensemble: Next workspace", bind: "w", run: () => cycleWorkspace(1) },
         { id: "ensemble.v2.workspace.prev", title: "Ensemble: Previous workspace", bind: "shift+w", run: () => cycleWorkspace(-1) },
         { id: "ensemble.v2.agent.next", title: "Ensemble: Next agent", bind: "z", run: () => cycleAgent(1) },
@@ -1189,8 +1257,11 @@ export function EnsembleV2App() {
     platformLayer(() => ({
       mode: "global", priority: 130,
       enabled: () => isOurRoute() && composerActive() && !modal() && wizard() === null,
-      commands: [{ id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } }],
-      bindings: ["ensemble.v2.composer.cancel"],
+      commands: [
+        { id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } },
+        { id: "ensemble.v2.composer.stop", title: "Ensemble: Stop running work", bind: "ctrl+c", enabled: () => stoppable(), run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); void cancelSelected().catch(showError) } },
+      ],
+      bindings: ["ensemble.v2.composer.cancel", "ensemble.v2.composer.stop"],
     }))
     platformLayer(() => ({
       mode: "global", priority: 140,
@@ -1816,7 +1887,7 @@ export function EnsembleV2App() {
     if (!current) return "No chat open"
     if (current.kind === "agent") {
       const workspace = current.workspaceID ? state()?.workspaces[current.workspaceID] : undefined
-      return `${surfaceAgent()?.name ?? "Agent"} · direct${workspace ? ` · #${workspace.name}` : " · homeless"}`
+      return `${surfaceAgent()?.name ?? "Agent"} · direct${workspace ? ` · #${workspace.name}` : " · no workspace"}`
     }
     const workspace = state()?.workspaces[current.workspaceID]
     if (!workspace) return "Workspace"
@@ -1860,7 +1931,7 @@ export function EnsembleV2App() {
                       <Show when={hasChatContent()} fallback={
                         <box flexDirection="column" padding={1} flexGrow={1}>
                           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{surface()?.kind === "agent" ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}` : "Group chat"}</text>
-                          <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? "Send a direct message. It goes to this agent's native OpenCode session." : "Say something to your team. $Name mentions an agent; @path references a file."}</text>
+                          <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? "Send a direct message. It goes to this agent's native OpenCode session." : "Say something to your team. $Name mentions an agent; @path references a file. i to compose."}</text>
                           <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{EMPTY_MARK}</text>
                         </box>
                       }>
@@ -1869,11 +1940,15 @@ export function EnsembleV2App() {
                               <box flexDirection="column" width="100%" paddingRight={1}>
                                 <For each={finalizedLines()}>{(message) => (
                                   <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                    <text fg={chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{message.author}{message.queued ? " · queued" : ""}{message.kind === "task" ? " · task" : ""}{message.kind === "approval" ? " · approval · v to resolve" : ""}{message.interrupted ? " · interrupted" : ""}</text>
-                                    <Show when={message.role === "agent" && syntaxStyle} fallback={
-                                      <text fg={message.role === "system" ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
+                                    <text fg={message.queued ? colors.muted : chatAuthorColor(message)} bg={colors.bg} width="100%" truncate>{headerForLine(message)}</text>
+                                    <Show when={message.role === "user"} fallback={
+                                      <Show when={message.role === "agent" && syntaxStyle} fallback={
+                                        <text fg={message.role === "system" || message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
+                                      }>
+                                        {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
+                                      </Show>
                                     }>
-                                      {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
+                                      <text fg={message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", Math.max(16, messageWidth())).join("\n")}</text>
                                     </Show>
                                   </box>
                                 )}</For>
@@ -1886,11 +1961,17 @@ export function EnsembleV2App() {
                           </scrollbox>
                           <Show when={liveActivity().shown.length > 0 || liveActivity().queued.length > 0 || liveActivity().overflow > 0}>
                             <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1}>
-                              <For each={liveActivity().shown}>{(label) => (
+                              <For each={liveActivity().shown}>{(entry) => (
                                 <box flexDirection="row" width="100%">
-                                  <text fg={colors.muted} bg={colors.bg}>{`${activityFrameForKind("checking", motionFrame(), process.env)} `}</text>
-                                  <text fg={agentColorForLabel(label)} bg={colors.bg}>{label}</text>
-                                  <text fg={colors.muted} bg={colors.bg}>{` · ${ACTIVITY_DEFAULT_VERB}`}</text>
+                                  <text fg={colors.muted} bg={colors.bg}>{`${activityFrameForKind(entry.kind, motionFrame(), process.env)} `}</text>
+                                  <Show when={entry.kind === "asking"} fallback={
+                                    <>
+                                      <text fg={agentColorForLabel(entry.label)} bg={colors.bg}>{entry.label}</text>
+                                      <text fg={colors.muted} bg={colors.bg}>{` · ${entry.verb}`}</text>
+                                    </>
+                                  }>
+                                    <text fg={agentColorForLabel(entry.label)} bg={colors.bg}>{entry.verb}</text>
+                                  </Show>
                                 </box>
                               )}</For>
                               <For each={liveActivity().queued}>{(label) => (
@@ -1946,7 +2027,7 @@ export function EnsembleV2App() {
                       <box flexShrink={0} border borderStyle="single" borderColor={composerActive() ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? "COMPOSER · enter send · esc cancel" : "i compose · $ agent · @ file · / command"}</text>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (stoppable() ? "COMPOSER · enter send · esc cancel · Ctrl+C stop" : "COMPOSER · enter send · esc cancel") : "i compose · $ agent · @ file · / command"}</text>
                     </>
                   </Show>
                 }>

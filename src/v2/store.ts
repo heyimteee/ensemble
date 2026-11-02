@@ -127,6 +127,18 @@ export class V2Store {
     await this.bump()
   }
 
+  async removeDmMessage(workspaceKey: string, agentID: string, id: string): Promise<void> {
+    const key = bindingKey(workspaceKey, agentID)
+    const list = this.state.dmTranscripts[key]
+    if (list) {
+      const index = list.findIndex((item) => item.id === id)
+      if (index >= 0) list.splice(index, 1)
+      if (list.length === 0) delete this.state.dmTranscripts[key]
+    }
+    await this.ctx.storage.remove(`v2/dm/${workspaceKey}/${agentID}/${id}`)
+    await this.bump()
+  }
+
   async moveDmTranscript(fromWorkspaceKey: string, agentID: string, toWorkspaceKey: string): Promise<void> {
     const fromKey = bindingKey(fromWorkspaceKey, agentID)
     const toKey = bindingKey(toWorkspaceKey, agentID)

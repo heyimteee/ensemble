@@ -389,6 +389,7 @@ export class EnsembleV2Service {
       case "agent.moveHome": return this.moveHomeSession(payload.agentID, payload.workspaceID)
       case "chat.context": return this.chatContext(payload.agentID, payload.workspaceID)
       case "chat.send": return this.chatSend(payload.agentID, payload.workspaceID, payload.text)
+      case "chat.removeQueued": return this.removeQueuedDm(payload.agentID, payload.workspaceID, payload.id)
       case "workspace.create": return this.createWorkspace(directory, payload)
       case "workspace.update": return this.updateWorkspace(payload)
       case "workspace.activate": return this.activateWorkspace(payload.id)
@@ -548,6 +549,29 @@ export class EnsembleV2Service {
       void this.flushDmQueue(agent.id, workspaceKey === "home" ? undefined : workspaceKey)
     })
     return { queued: false, id: line.id, correlationID }
+  }
+
+  /**
+   * Slice C queued-line removal (ticket #59): drops a parked user-owned DM
+   * queue entry by key plus its queued transcript line, so the `· queued ·
+   * [x remove]` affordance has a working key behind it. Removing the oldest
+   * queued entry when no id is given keeps the keybinding total.
+   */
+  private async removeQueuedDm(agentID: string, workspaceID?: string, id?: string): Promise<any> {
+    const state = this.store.snapshot()
+    const agent = state.agents[agentID]
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    const target = await this.ensureChatSession(agent, workspaceID)
+    const workspaceKey = target.bindingKeyID
+    const queued = Object.values(state.dmQueue)
+      .filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (workspaceKey === "home" ? "home" : workspaceKey))
+      .sort((a, b) => a.createdAt - b.createdAt)
+    const targets = id ? queued.filter((entry) => entry.id === id) : queued.slice(0, 1)
+    for (const entry of targets) {
+      await this.store.removeDmQueueEntry(entry.id)
+      await this.store.removeDmMessage(workspaceKey, agent.id, entry.id)
+    }
+    return { removed: targets.length }
   }
 
   private async moveHomeSession(agentID: string, workspaceID: string): Promise<any> {
@@ -1306,7 +1330,10 @@ export class EnsembleV2Service {
     this.noteWorkChanged(subtask)
     await this.appendMessage(input.workspace, {
       author: "system",
-      text: `→ ${this.agentName(subtask.assigneeID)}: ${subtask.title}`,
+      // Slice C assignment event (ticket #59, brief §2.2 — verbatim): one
+      // system line per assignment, naming the owning agent. Idempotent
+      // resubmits return the existing row above without appending again.
+      text: `→ Assigned to $${this.agentName(subtask.assigneeID)}: ${subtask.title}`,
       kind: "task",
       taskID: subtask.id,
       correlationID: subtask.turn?.correlationID,

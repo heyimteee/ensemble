@@ -106,7 +106,7 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" C-u
   live_type "$LIVE_TUI_SESSION" "ping"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_text "$LIVE_TUI_SESSION" "→ LiveAgent: ping" 15 "group message sent"
+  live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$LiveAgent: ping" 15 "group message sent"
 
   live_key "$LIVE_TUI_SESSION" "i"
   live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"

@@ -1,17 +1,18 @@
 import { deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
 import type { Subtask } from "../types.ts"
-import { effectiveTick, queuedFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
-import { short } from "./format.ts"
+import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
+import { askingLine, short } from "./format.ts"
 
 /**
  * Inline work-row mapping for the group chat surface (ticket #56, slice A
- * ticket #64). The right-hand task board is gone; the WORK block carries only
- * active subtasks for the workspace with their assigned agent and derived
- * lifecycle state. Terminal outcomes never render here — they are announced
- * once as transcript system lines (see terminalAnnouncement). Plain
- * attribution only — the `Assigned to $Agent` / `Asking $Agent…` / `Answer
- * from $Agent` copy belongs to the v5.4 ticket and must not be introduced
- * here.
+ * ticket #64, slice C ticket #59). The right-hand task board is gone; the
+ * WORK block carries only active subtasks for the workspace with their
+ * assigned agent and derived lifecycle state. Terminal outcomes never render
+ * here — they are announced once as transcript system lines (see
+ * terminalAnnouncement). Attribution lines (`→ Assigned to $Agent` events,
+ * `Asking $Agent…` live variants, `Answer from $Agent` relay headers) are
+ * defined in format.ts and wired through activityDetailForTask below and the
+ * transcript render in app.tsx.
  */
 
 const GLYPHS: Record<DerivedWorkStatus, string> = {
@@ -61,10 +62,12 @@ export function workRowFrame(status: DerivedWorkStatus, tick: number, env: NodeJ
 /**
  * Frame for an activity verb kind at a tick (brief §4). Tool-kind verbs
  * (reading/searching/running/writing) nudge the tool chevron; `waiting`
- * alternates the calm waiting frames; `checking`/`wrapping` and the default
- * use the working spinner. Queued-behind-live lines never call this — they
- * render the static `queuedFrame()`. Under reduced motion every kind pins to
- * its frame 0. Pure.
+ * alternates the calm waiting frames; `checking`/`wrapping` and the peer-turn
+ * `asking` variant use the working spinner; `thinking` (streaming text
+ * arriving, OpenBot's gap-filler) uses the textual shimmer cells.
+ * Queued-behind-live lines never call this — they render the static
+ * `queuedFrame()`. Under reduced motion every kind pins to its frame 0.
+ * Pure.
  */
 export function activityFrameForKind(kind: ActivityVerbKind, tick: number, env: NodeJS.ProcessEnv = process.env): string {
   const frame = effectiveTick(tick, env)
@@ -76,6 +79,9 @@ export function activityFrameForKind(kind: ActivityVerbKind, tick: number, env: 
       return toolFrame(frame)
     case "waiting":
       return waitingFrame(frame)
+    case "thinking":
+      return thinkingFrame(frame)
+    case "asking":
     case "checking":
     case "wrapping":
       return workingFrame(frame)
@@ -133,7 +139,7 @@ export function terminalAnnouncements(
 /** Per-agent live activity verbs (brief §3.2). Unknown activity uses the default; never invent tool names. */
 export const ACTIVITY_DEFAULT_VERB = "checking the details…"
 
-export type ActivityVerbKind = "checking" | "reading" | "searching" | "running" | "writing" | "waiting" | "wrapping"
+export type ActivityVerbKind = "checking" | "reading" | "searching" | "running" | "writing" | "waiting" | "wrapping" | "asking" | "thinking"
 
 /** Build a present-participle verb phrase. Detail-less tool verbs fall back to the default. */
 export function activityVerb(kind: ActivityVerbKind, detail?: string): string {
@@ -153,6 +159,10 @@ export function activityVerb(kind: ActivityVerbKind, detail?: string): string {
       return target ? `waiting on ${target}…` : ACTIVITY_DEFAULT_VERB
     case "wrapping":
       return "wrapping up…"
+    case "asking":
+      return target ? askingLine(target) : ACTIVITY_DEFAULT_VERB
+    case "thinking":
+      return ACTIVITY_DEFAULT_VERB
   }
 }
 
@@ -164,7 +174,17 @@ export function activityLine(agentLabel: string, verb: string, frame: string): s
 /** Max visible activity lines; the rest collapse into a `+N more` overflow line. */
 export const MAX_VISIBLE_ACTIVITY = 3
 
-export type ActivityEntry = { key: string; label: string; createdAt: number }
+export type ActivityEntry = { key: string; label: string; createdAt: number; verb: string; kind: ActivityVerbKind }
+
+/**
+ * Per-agent live display for one active task (slice C): peer-turn and
+ * handoff work in flight renders the `Asking $Name…` variant; all other
+ * live work keeps the default checking verb. Pure.
+ */
+export function activityDetailForTask(task: Subtask, label: string): { verb: string; kind: ActivityVerbKind } {
+  if (task.workKind === "turn" || task.workKind === "handoff") return { verb: askingLine(label), kind: "asking" }
+  return { verb: ACTIVITY_DEFAULT_VERB, kind: "checking" }
+}
 
 /**
  * Oldest-live agents first, deduplicated by key, capped with an overflow
@@ -199,7 +219,9 @@ export function splitActivityGroups(
   for (const task of tasks) {
     const status = deriveWorkStatus(task, now)
     if (isTerminalWorkStatus(status)) continue
-    const entry: ActivityEntry = { key: keyFor(task), label: labelFor(task), createdAt: task.createdAt }
+    const label = labelFor(task)
+    const detail = activityDetailForTask(task, label)
+    const entry: ActivityEntry = { key: keyFor(task), label, createdAt: task.createdAt, verb: detail.verb, kind: detail.kind }
     const bucket = status === "pending" ? queuedByKey : liveByKey
     const previous = bucket.get(entry.key)
     if (!previous || entry.createdAt < previous.createdAt) bucket.set(entry.key, entry)

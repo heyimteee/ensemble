@@ -182,9 +182,86 @@ function wrapLine(value: string, width: number): string[] {
   return lines.length > 0 ? lines : [""]
 }
 
+/**
+ * Verbatim line breaking for user text (slice C): wraps on width without
+ * interpreting any Markdown — asterisks, backticks, and brackets survive
+ * literally. Never pass user text through renderMarkdownLines.
+ */
+export function renderVerbatimLines(value: string, width: number): string[] {
+  const raw = value.replace(/\r\n/g, "\n").split("\n")
+  const output: string[] = []
+  for (const line of raw) output.push(...wrapLine(line || " ", width))
+  return output
+}
+
 
 export function transcriptRole(role: string): "user" | "agent" | "system" {
   if (role === "user") return "user"
   if (role === "system") return "system"
   return "agent"
+}
+
+/**
+ * Slice C attribution grammar (ticket #59, brief §2.2 — verbatim strings).
+ * Every helper is pure and returns the exact line/header text; callers
+ * render it once per assignment/turn/answer and never re-derive it.
+ */
+
+/** One system line per assignment, naming the owning agent. */
+export function assignmentLine(agentName: string, title: string): string {
+  return `→ Assigned to $${agentName}: ${title || "(untitled)"}`
+}
+
+/** Live activity variant while a peer turn is in flight. */
+export function askingLine(agentName: string): string {
+  return `Asking $${agentName}…`
+}
+
+/** Header for a landed relayed answer, keeping author attribution. */
+export function answerHeader(agentName: string): string {
+  return `Answer from $${agentName}`
+}
+
+export type SystemLineKind = "routine" | "failure" | "notice"
+
+/**
+ * System-line glyph grammar (brief §2.2): routine/queue events use `◷`,
+ * failures use `✕`, notices use `ⓘ`. Terminal work announcements keep
+ * their own `●/✕/⊘` grammar in workrows.ts; this covers the rest.
+ */
+export function systemLine(kind: SystemLineKind, text: string): string {
+  if (kind === "failure") return `✕ ${text}`
+  if (kind === "notice") return `ⓘ ${text}`
+  return `◷ ${text}`
+}
+
+/** Queued suffix for parked user lines; user-owned lines add `[x remove]`. */
+export function queuedSuffix(removable: boolean): string {
+  return removable ? " · queued · [x remove]" : " · queued"
+}
+
+/** True for the persisted per-assignment event (kind task with a task link). */
+export function isAssignmentEvent(message: { kind?: string; taskID?: string }): boolean {
+  return message.kind === "task" && Boolean(message.taskID)
+}
+
+/**
+ * Correlation link for relayed answers (ticket #55 legs). A transcript
+ * message with a correlation ID that matches a turn/handoff subtask answered
+ * by the same agent IS the relay — render it once with the `Answer from`
+ * header, never as a second independent turn or an extra task row.
+ */
+export function relayTaskForMessage(
+  message: { correlationID?: string; agentID?: string },
+  tasks: Subtask[],
+): Subtask | undefined {
+  if (!message.correlationID) return undefined
+  return tasks.find((task) => {
+    if (task.workKind !== "turn" && task.workKind !== "handoff") return false
+    const correlation = task.turn?.correlationID ?? task.handoff?.correlationID
+    if (!correlation || correlation !== message.correlationID) return false
+    if (!message.agentID) return true
+    const answeredBy = task.turn?.answeredByID ?? task.handoff?.answeredByID
+    return message.agentID === (answeredBy ?? task.assigneeID)
+  })
 }
