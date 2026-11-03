@@ -104,11 +104,20 @@ test("ticket68: approval inbox tags distinguish native blocks from product decis
   assert.equal(approvalSourceTag("agent"), "Agent")
   assert.equal(approvalSourceTag("workspace"), "Workspace")
   assert.equal(approvalSourceTag("memory"), "Memory")
+  assert.equal(approvalSourceTag("unknown-source"), "Workspace")
+  // Every approval kind carries a source label: the native permission
+  // mirror reads Native; the agent question reads Agent; roster and
+  // cross-project sharing read Workspace; memory promotion reads Memory.
   assert.equal(approvalSource({ kind: "native" } as any), "native")
   assert.equal(approvalSource({ kind: "ask_person" } as any), "agent")
   assert.equal(approvalSource({ kind: "outside_roster" } as any), "workspace")
   assert.equal(approvalSource({ kind: "interrupted" } as any), "workspace")
   assert.equal(approvalSource({ kind: "promote_memory" } as any), "memory")
-  assert.equal(approvalSource({ kind: "cross_project" } as any), "memory")
+  assert.equal(approvalSource({ kind: "cross_project" } as any), "workspace")
+  // Legacy rows that stored the wrong cross-project source still read as
+  // workspace decisions, never as memory promotions.
+  assert.equal(approvalSource({ kind: "cross_project", source: "memory" } as any), "workspace")
+  assert.equal(approvalSource({ kind: "cross_project", source: "workspace" } as any), "workspace")
+  assert.equal(approvalSource({ kind: "promote_memory", source: "memory" } as any), "memory")
   assert.equal(approvalSource({ kind: "ask_person", source: "agent" } as any), "agent")
 })

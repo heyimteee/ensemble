@@ -1676,12 +1676,24 @@ export class EnsembleV2Service {
       if (approval.status === requested) return approval
       throw Object.assign(new Error("Approval was already resolved differently."), { code: "already_resolved" })
     }
-    if (approval.subtaskID && (approval.kind === "ask_person" || approval.kind === "interrupted" || approval.kind === "outside_roster" || approval.kind === "cross_project")) {
+    if (approval.subtaskID && (approval.kind === "ask_person" || approval.kind === "interrupted" || approval.kind === "outside_roster" || approval.kind === "cross_project" || approval.kind === "promote_memory")) {
       const subtask = state.subtasks[approval.subtaskID]
       if (!subtask || subtask.state === "replied") {
         approval.status = "rejected"
         approval.resolvedAt = now()
         approval.resolution = "Subtask is no longer waiting for this decision."
+        await this.store.saveApproval(approval)
+        return approval
+      }
+    }
+    // Promote rows carry no subtask: they go stale when the memory is
+    // already promoted or gone, so resolving must not re-apply.
+    if (approval.kind === "promote_memory") {
+      const memory = approval.payload?.memoryID ? state.memories[String(approval.payload.memoryID)] : undefined
+      if (!memory || memory.deletedAt || memory.scope === "global") {
+        approval.status = "rejected"
+        approval.resolvedAt = now()
+        approval.resolution = "Memory is no longer waiting for this decision."
         await this.store.saveApproval(approval)
         return approval
       }
@@ -3090,7 +3102,7 @@ export class EnsembleV2Service {
       subtaskID: run?.subtaskID,
       agentID: found.agent.id,
       kind: "cross_project",
-      source: "memory",
+      source: "workspace",
       title: input.scope === "private_transcript" ? "Share private transcript content" : "Share knowledge across projects",
       detail: String(input.text),
       payload: { text: input.text, scope: input.scope },

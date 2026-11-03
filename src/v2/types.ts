@@ -252,8 +252,13 @@ export type Approval = {
  * Resolve the origin layer for an approval. Native permission mirrors are
  * the only rows that gate a live native session; every other kind is an
  * Ensemble product decision that gates only its dependent work.
+ * Cross-project sharing is a workspace decision (it moves knowledge across
+ * projects), never a memory promotion; the kind mapping wins over legacy
+ * stored sources so old rows render correctly too.
  */
 export function approvalSource(approval: Approval): ApprovalSource {
+  if (approval.kind === "cross_project") return "workspace"
+  if (approval.kind === "promote_memory") return "memory"
   if (approval.source) return approval.source
   if (approval.kind === "native") return "native"
   if (approval.kind === "ask_person") return "agent"
