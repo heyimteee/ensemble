@@ -443,10 +443,13 @@ export class EnsembleV2Service {
     }
     await this.reconcileWorkspaceConfigs()
     if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
-    // Read-path reap: reset expired claims and retire exhausted work so the
-    // derived lifecycle stays honest between scheduler passes. This never
-    // spawns runs — starting work happens only in pump() via schedule().
+    // Read-path reconciliation: reset expired claims, retire exhausted work,
+    // repair waiting/stale rows, and settle streams whose task is already
+    // terminal. This never spawns runs — starting work happens only in
+    // pump() via schedule().
     await this.reapAndRetire()
+    await this.reconcileWaitingWork()
+    await this.settleTerminalStreams()
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
@@ -465,6 +468,8 @@ export class EnsembleV2Service {
     await this.store.sync()
     this.refreshDmClock()
     await this.reapAndRetire()
+    await this.reconcileWaitingWork()
+    await this.settleTerminalStreams()
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
@@ -3224,6 +3229,27 @@ export class EnsembleV2Service {
       const finished = task.finishedAt ?? task.repliedAt
       if (finished === undefined || at - finished < FINISHED_RETENTION_MS) continue
       await this.store.removeSubtask(task.id)
+    }
+  }
+
+  /**
+   * A message whose task is already terminal must never remain `streaming`:
+   * a late run result or a cancelled/approval-settled run can leave the row
+   * live, and the activity surface would then show a finished task as
+   * working. Settle it on the read path (idempotent, no run started).
+   */
+  private async settleTerminalStreams(): Promise<void> {
+    const state = this.store.snapshot()
+    for (const list of Object.values(state.messages)) {
+      for (const message of list) {
+        if (!message.streaming) continue
+        const task = message.taskID ? state.subtasks[message.taskID] : undefined
+        if (message.taskID && (!task || task.state === "replied")) {
+          const interrupted = task ? task.outcome !== "succeeded" : true
+          settleStreamMessage(message, message.text || (interrupted ? "Reply interrupted." : "Reply completed."), interrupted)
+          await this.store.saveMessage(message)
+        }
+      }
     }
   }
 

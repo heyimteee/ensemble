@@ -375,6 +375,7 @@ export function EnsembleV2App() {
       streaming: message.streaming,
       interrupted: message.interrupted,
       correlationID: message.correlationID,
+      taskID: message.taskID,
       createdAt: message.createdAt,
     })))
   })
@@ -386,7 +387,11 @@ export function EnsembleV2App() {
   // finalized transcript — one id renders in exactly one place, so live
   // items fold into the transcript in place with no duplicates or stale
   // lines. The transcript scrollbox keeps a stable identity throughout.
-  const liveMessages = createMemo(() => splitTranscript().live)
+  const liveMessages = createMemo(() => splitTranscript().live.filter((line) => {
+    if (!line.taskID) return true
+    const task = state()?.subtasks[line.taskID]
+    return Boolean(task && !isTerminalWorkStatus(deriveWorkStatus(task, Date.now())))
+  }))
   // Slice A (#64): the WORK block is ephemeral — it mounts only while active
   // (non-terminal) work exists. `orderedTasks` is already active-only, so the
   // block condition is non-emptiness on the workspace surface. Terminal
@@ -2177,8 +2182,8 @@ export function EnsembleV2App() {
                                   const wrapWidth = bubbleContentWidth(messageWidth(), BUBBLE_CHROME)
                                   return (
                                   <box flexDirection="column" width="100%" marginTop={1}>
-                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={side === "left" ? accent : message.queued ? colors.muted : colors.good} backgroundColor={colors.panel} padding={1} flexDirection="column">
-                                      <text fg={tone(message.queued ? colors.muted : accent)} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
+                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={side === "left" ? accent : message.queued ? colors.warn : colors.good} backgroundColor={colors.panel} padding={1} flexDirection="column">
+                                      <text fg={tone(message.queued ? colors.warn : accent)} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "user"} fallback={
                                         <Show when={syntaxStyle} fallback={
                                           <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
