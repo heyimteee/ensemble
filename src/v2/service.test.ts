@@ -2387,7 +2387,12 @@ test("handoff creates a pending typed hop with correlation and dedupes resubmiss
     assert.ok(((handoffs[0] as any).handoff as any)?.correlationID)
     assert.equal(((handoffs[0] as any).handoff as any)?.recipientID, sage.result.id)
     assert.equal(((handoffs[0] as any).handoff as any)?.senderID, nova.result.id)
-    assert.ok((after.state.messages[workspace.result.id] as any[]).some((message: any) => message.text.includes("Handed to $Sage")))
+    // Ticket #73: the group ack is a concise system line — policy and the
+    // ref stay in the tool result, never in an agent bubble.
+    const ack = (after.state.messages[workspace.result.id] as any[]).find((message: any) => message.text.includes("Handed to $Sage"))
+    assert.ok(ack)
+    assert.equal(ack.author, "system")
+    assert.equal(ack.text, "Handed to $Sage · summary")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

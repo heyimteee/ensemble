@@ -36,14 +36,17 @@ Use these tools to understand where you are and who you work with:
 
 ## Handoffs
 
-When work continues with another agent:
+When work continues with another agent, you are delegating: write the
+recipient a clear, self-authored instruction (what to do, with what
+context, and what good looks like) in your own words — never paste the
+user's message verbatim. \`task\` stays the short display title.
 
 1. Write \`.ensemble/handoffs/<task>-<from>-<to>-<timestamp>.md\`.
 2. Use YAML frontmatter: \`ensemble\`, \`version\`, \`workspace\`, \`task\`,
-   \`from\`, \`to\`, \`created\`.
-3. Use Markdown sections: \`# Handoff\`, \`## Task\`, \`## Constraints\`,
-   \`## Expected\`, \`## Details\`.
-4. Call \`ensemble_handoff\` with the task, summary, path, and recipient.
+   \`instruction\`, \`from\`, \`to\`, \`created\`.
+3. Use Markdown sections: \`# Handoff\`, \`## Task\`, \`## Instruction\`,
+   \`## Constraints\`, \`## Expected\`, \`## Details\`.
+4. Call \`ensemble_handoff\` with the task, instruction, summary, path, and recipient.
 5. Mention the handoff path in the group reply.
 6. \`ensemble_handoff\` already queues the hop — do not call \`ensemble_delegate\` after it (leader-only; would double-queue). Your turn stays open until the recipient's answer arrives; do not treat the ack as delivery.
 

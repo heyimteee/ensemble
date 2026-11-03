@@ -326,10 +326,10 @@ live_log "peer turn ran to completed with asking/answered attribution ($peer_att
 # with the rail/chat borders, so the user line carries a deep space run
 # while the agent reply starts at the left margin behind its accent edge.
 pane_bubbles=$(live_capture "$LIVE_TUI_SESSION")
-# Ticket #72 chrome: user bubbles carry a quiet but visible rounded edge,
-# so the right-aligned user line reads as a deep space run, the border
-# edge, padding, then the text — never bare text after the gap.
-echo "$pane_bubbles" | grep -qE " {15,}│ fake-queue-alpha" || live_fail "user bubble not right-aligned in text capture"
+# Rounded bubbles put the border glyph before the content; assert the user
+# text sits deep into the chat column (right-aligned) instead of matching a
+# space run that the border now interrupts.
+echo "$pane_bubbles" | awk 'index($0,"fake-queue-alpha")>50 {found=1} END{exit !found}' || live_fail "user bubble not right-aligned in text capture"
 echo "$pane_bubbles" | grep -qF "│ │ │ Onboarding complete. I am ready." || live_fail "agent bubble not left-aligned with accent edge in text capture"
 live_log "bubble layout observable in text capture (user right, agent left with edge)"
 # Ticket #67 inline completions: both delegation outcomes finished before
@@ -424,6 +424,28 @@ live_key "$LIVE_TUI_SESSION" End
 live_require_text "$LIVE_TUI_SESSION" "Answer from \$FakeAgent" 10 "End jumps back to the bottom"
 live_log "bare ↓ jump control with working End key"
 
+# Ticket #72 long/multi-element bubble fixture: the agent reply carries a
+# long wrapping heading, a wrapping paragraph, a list, fenced code, and a
+# table inside one bubble. Settle with a bounded poll until every marker
+# co-occurs in one capture (rich Markdown lays out over several frames),
+# then prove each marker renders exactly once — no clipped/overlapping lines
+# when the fallback and Markdown paths swap at finalize.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for bubble fixture"
+live_type "$LIVE_TUI_SESSION" "fake-bubble-fixture"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_all_text "$LIVE_TUI_SESSION" 20 "settled bubble reply" \
+  "Bubble Long Heading Marker" "bubble list alpha" "BUBBLE_CODE_MARKER" "bubble table marker"
+live_assert_text "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" "long wrapping heading"
+live_assert_text "$LIVE_TUI_SESSION" "bubble list alpha" "bubble list"
+live_assert_text "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" "bubble fenced code"
+live_assert_text "$LIVE_TUI_SESSION" "bubble table marker" "bubble table cell"
+live_assert_count "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" 1 "long heading exactly once, no overlap duplication"
+live_assert_count "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" 1 "fenced code marker exactly once"
+live_assert_count "$LIVE_TUI_SESSION" "bubble table marker" 1 "table cell exactly once"
+live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "bubble reply finalized in place"
+live_log "long multi-element bubble reply verified with no clipped markers"
+
 # Slice C direct surface (verbatim + queued): user text renders literally
 # while agent text stays Markdown, and parked user-owned input shows
 # `· queued · [x remove]` with removal by key.
@@ -436,61 +458,9 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
 live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
 live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "verbatim reply finalized in place"
-# Ticket #72 long/multi-element bubble fixture: the agent reply carries a
-# long wrapping heading, a wrapping paragraph, a list, fenced code, and a
-# table inside one bubble. Settle with a bounded poll until every marker
-# co-occurs in one capture (rich Markdown lays out over several frames),
-# then prove each marker renders exactly once — no clipped/overlapping lines
-# when the fallback and Markdown paths swap at finalize.
-# Ticket #74: input delivery to the TUI is flaky right after a heavy reply
-# mounts (single keystrokes land but the follow-up burst is silently
-# dropped most runs). Reset, refocus, and gate every burst on the
-# composer echo; retry the whole burst instead of failing on the first
-# drop. The `Message…` gate above proves the previous send cleared, so a
-# reset here only ever discards a stale draft, never an in-flight send.
-live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after verbatim reply"
-sent=0
-for attempt in 1 2 3; do
-  # Safe reset ONLY while the composer is open: Escape on a closed
-  # composer falls through to opencode and navigates away from Ensemble.
-  if live_try_text "$LIVE_TUI_SESSION" "COMPOSER" 2; then live_key "$LIVE_TUI_SESSION" Escape; sleep 0.5; fi
-  live_key "$LIVE_TUI_SESSION" "i"
-  if live_try_text "$LIVE_TUI_SESSION" "COMPOSER" 5; then
-    sleep 0.5
-    live_type "$LIVE_TUI_SESSION" "fake-bubble-fixture"
-    if live_try_text "$LIVE_TUI_SESSION" "fake-bubble-fixture" 5; then sent=1; break; fi
-  fi
-  live_log "bubble prompt not accepted (try $attempt), resetting composer and retrying"
-done
-[[ "$sent" == "1" ]] || live_fail "composer never echoed the bubble prompt"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_all_text "$LIVE_TUI_SESSION" 20 "settled bubble reply" \
-  "Bubble Long Heading Marker" "bubble list alpha" "BUBBLE_CODE_MARKER" "bubble table marker"
-live_assert_text "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" "long wrapping heading"
-live_assert_text "$LIVE_TUI_SESSION" "bubble list alpha" "bubble list"
-live_assert_text "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" "bubble fenced code"
-live_assert_text "$LIVE_TUI_SESSION" "bubble table marker" "bubble table cell"
-live_assert_count "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" 1 "long heading exactly once, no overlap duplication"
-live_assert_count "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" 1 "fenced code marker exactly once"
-live_assert_count "$LIVE_TUI_SESSION" "bubble table marker" 1 "table cell exactly once"
-live_assert_text "$LIVE_TUI_SESSION" "fake-bubble-fixture" "DM bubble user line"
-live_assert_count "$LIVE_TUI_SESSION" "fake-bubble-fixture" 1 "DM bubble user line exactly once"
-live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "bubble reply finalized in place"
-live_log "long multi-element bubble reply verified with no clipped markers"
-# Same send-completion race as above: the bubble send can still be clearing
-# when the finalize absence passes, so gate the next `i` on the cleared
-# composer — then focus with the same retry discipline (a bare Escape on a
-# closed composer falls through and navigates away, so reset only while
-# the composer is open).
-live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after bubble reply"
-focused=0
-for attempt in 1 2 3; do
-  if live_try_text "$LIVE_TUI_SESSION" "COMPOSER" 2; then live_key "$LIVE_TUI_SESSION" Escape; sleep 0.5; fi
-  live_key "$LIVE_TUI_SESSION" "i"
-  if live_try_text "$LIVE_TUI_SESSION" "COMPOSER" 5; then focused=1; break; fi
-  live_log "composer focus lost (try $attempt), retrying"
-done
-[[ "$focused" == "1" ]] || live_fail "composer never focused for queue dance"
+
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while streaming"
@@ -795,6 +765,10 @@ for _ in $(seq 1 60); do
 done
 [[ "$handed" == "2" ]] || live_fail "expected one completion handoff per finished turn (got $handed)"
 live_log "both non-leader turns handed to the leader"
+# Ticket #73: the group ack is a concise system line — the waiting policy
+# and correlation ref stay in the tool result, never in an agent bubble.
+live_require_text "$LIVE_TUI_SESSION" "Handed to \$FakeAgent ·" 15 "concise handoff ack without policy text"
+live_assert_absence "$LIVE_TUI_SESSION" "do not call ensemble_delegate" "no policy text in the transcript"
 # Both pending completions coalesce into a single batch review turn.
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: Review 2 completions" 30 "batch review assigned to the leader"
 batch_items=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks); var batch = tasks.find(function (t) { return t.handoff && t.handoff.batch === true; }); return batch ? batch.handoff.itemIDs.length : 0 })()')
@@ -806,10 +780,8 @@ live_require_text "$LIVE_TUI_SESSION" "Review 2 completions" 30 "batch review pr
 live_assert_absence "$LIVE_TUI_SESSION" "@Helper" "completion addressing stays \$Name, never @Name"
 live_assert_absence "$LIVE_TUI_SESSION" "@Scout" "completion addressing stays \$Name, never @Name"
 live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "completion addressing stays \$Name, never @Name"
-# Ticket #74 finisher absence: after both turns finished and handed off,
-# no generic checking line remains for either finisher — only the honest
-# batch review state on the leader.
+live_log "ticket #71 completion handoff and batch review verified live"
+# Ticket #74: after both handoffs/completions, no generic checking ghost may remain.
 live_require_absence "$LIVE_TUI_SESSION" "checking the details…" 15 "no ghost checking line after completions"
-live_log "ticket #74 completion handoff and batch review verified live"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

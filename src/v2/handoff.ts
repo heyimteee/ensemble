@@ -191,6 +191,8 @@ export function batchAllDecided(itemIDs: string[], decidedBy: Record<string, str
 
 export type HandoffFileData = {
   task: string
+  /** Recipient-facing brief, self-authored by the sender. Never the user's verbatim words. */
+  instruction?: string
   summary?: string
   constraints?: string
   expected?: string
@@ -236,6 +238,7 @@ export function parseHandoffFile(content: string): HandoffParse {
     ok: true,
     data: {
       task,
+      instruction: fields.instruction?.trim() || undefined,
       summary: fields.summary?.trim() || undefined,
       constraints: fields.constraints?.trim() || undefined,
       expected: fields.expected?.trim() || undefined,
@@ -251,9 +254,10 @@ export function parseHandoffFile(content: string): HandoffParse {
  * id), the addressed recipient, and a hash of the canonical typed
  * instruction. A retried or resubmitted handoff from the same run delivers
  * once — including against terminal rows, for the row's lifetime — while an
- * ask from a different run is a different unit of work. Relay and
- * failure-notice legs are messages keyed by the hop correlation, not work
- * rows, so control legs never consume the run's fan-out budget.
+ * ask from a different run is a different unit of work. A distinct tailored
+ * brief is a distinct unit of work. Relay and failure-notice legs are
+ * messages keyed by the hop correlation, not work rows, so control legs
+ * never consume the run's fan-out budget.
  */
 export function handoffWorkKey(input: {
   actor: string
@@ -261,12 +265,13 @@ export function handoffWorkKey(input: {
   parentID?: string
   recipientID: string
   task: string
+  instruction?: string
   constraints?: string
   expected?: string
 }): string {
   const run = runPrefixHash(input.parentID)
   const body = stableHash(
-    [input.recipientID, (input.task ?? "").trim(), (input.constraints ?? "").trim(), (input.expected ?? "").trim()].join("\0"),
+    [input.recipientID, (input.task ?? "").trim(), (input.instruction ?? "").trim(), (input.constraints ?? "").trim(), (input.expected ?? "").trim()].join("\0"),
   )
   return `handoff:${input.workspaceID}:${input.actor}:${run}:${input.recipientID}:${body}`
 }
@@ -312,6 +317,27 @@ export function resolveHandoffRecipient(
 
 export function handoffAckText(recipientName: string, task: string, correlationID: string): string {
   return `Handed to $${recipientName} for ${task} (ref ${correlationID}). Your turn stays open until the answer arrives here — do not call ensemble_delegate after a handoff (leader-only; would double-queue).`
+}
+
+/**
+ * Ticket #73 concise group acknowledgement. Posted as `author: "system"`,
+ * never as an agent bubble: a short `Handed to $Name · <label>` line with
+ * no policy sentence and no correlation ref. Policy and the ref stay in the
+ * tool result for the calling model. Pure. `$Name`, never `@Name`.
+ */
+export function handoffGroupAckText(recipientName: string, label: string): string {
+  return `Handed to $${recipientName} · ${label}`
+}
+
+/**
+ * Ticket #73 review framing for a single completion handoff. The leader
+ * receives review work — who finished what, with what outcome, and where —
+ * not a verbatim forward of the finished title and reply. Pure. `$Name`
+ * for agents, `@` for the file reference only.
+ */
+export function completionReviewInstruction(input: { finisherName: string; title: string; content: string; path?: string }): string {
+  const where = input.path ? ` (@${input.path})` : ""
+  return `$${input.finisherName} finished "${input.title}"${where}. Review the finished turn and decide what happens next:\n\n${input.content}`
 }
 
 export function handoffDuplicateText(recipientName: string, task: string): string {

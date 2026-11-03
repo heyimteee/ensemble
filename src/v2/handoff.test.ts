@@ -2,9 +2,11 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import {
   HANDOFF_MARKER,
+  completionReviewInstruction,
   handoffAckText,
   handoffDuplicateText,
   handoffFailureText,
+  handoffGroupAckText,
   handoffWorkKey,
   newDirectEnvelope,
   parseHandoffFile,
@@ -105,6 +107,66 @@ test("handoff copy uses $Name syntax and carries correlation", () => {
   assert.match(failure, /\$Sage/)
   assert.match(failure, /boom/)
   assert.ok(!failure.includes("@"))
+})
+
+// Ticket #73: the handoff file carries a recipient-facing instruction
+// distinct from the short display title.
+test("handoff file parses an instruction distinct from the task title", () => {
+  const parsed = parseHandoffFile(
+    "---\nensemble: handoff\ntask: Summarize the deploy\ninstruction: Read src/deploy.ts and list the three riskiest rollout steps for Sage to verify.\n---\n# Handoff\n",
+  )
+  assert.equal(parsed.ok, true)
+  assert.equal(parsed.ok && parsed.data.task, "Summarize the deploy")
+  assert.equal(
+    parsed.ok && parsed.data.instruction,
+    "Read src/deploy.ts and list the three riskiest rollout steps for Sage to verify.",
+  )
+  assert.notEqual(parsed.ok && parsed.data.instruction, parsed.ok && parsed.data.task)
+  // Instruction stays optional: legacy files without one still parse.
+  const legacy = parseHandoffFile("---\nensemble: handoff\ntask: Summarize the deploy\n---\n# Handoff\n")
+  assert.equal(legacy.ok, true)
+  assert.equal(legacy.ok && legacy.data.instruction, undefined)
+})
+
+// Ticket #73: distinct tailored briefs are distinct units of work.
+test("handoff idempotency key includes the tailored instruction", () => {
+  const base = { actor: "nova", workspaceID: "w", recipientID: "sage", task: "Summarize", instruction: "List the three risks." }
+  const first = handoffWorkKey(base)
+  assert.equal(first, handoffWorkKey(base))
+  assert.notEqual(first, handoffWorkKey({ ...base, instruction: "List the five risks." }))
+  // Legacy hops without an instruction keep a stable key shape.
+  assert.equal(
+    handoffWorkKey({ actor: "nova", workspaceID: "w", recipientID: "sage", task: "Summarize" }),
+    handoffWorkKey({ actor: "nova", workspaceID: "w", recipientID: "sage", task: "Summarize" }),
+  )
+})
+
+// Ticket #73: the group ack is a concise system line — no policy sentence,
+// no correlation ref. Policy and the ref stay in the tool result.
+test("group ack is concise with $Name syntax and no internal text", () => {
+  const ack = handoffGroupAckText("Sage", "Summarize the deploy")
+  assert.equal(ack, "Handed to $Sage · Summarize the deploy")
+  assert.ok(!ack.includes("@Sage"))
+  assert.ok(!ack.includes("handoff_"))
+  assert.ok(!ack.includes("do not call ensemble_delegate"))
+  assert.ok(!ack.includes("stays open"))
+})
+
+// Ticket #73: a single completion hands the leader review work — sender,
+// title, outcome, and path — never a verbatim forward of the request.
+test("completion review instruction frames the finished turn for review", () => {
+  const text = completionReviewInstruction({
+    finisherName: "Sage",
+    title: "Do research",
+    content: "Finished the work.",
+    path: ".ensemble/handoffs/done.md",
+  })
+  assert.match(text, /\$Sage/)
+  assert.match(text, /Do research/)
+  assert.match(text, /Finished the work\./)
+  assert.match(text, /Review/)
+  assert.match(text, /@\.ensemble\/handoffs\/done\.md/)
+  assert.ok(!text.includes("@Sage"))
 })
 
 test("direct envelope carries addressing, correlation, ordering, and delivery state", () => {
