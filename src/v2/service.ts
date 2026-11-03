@@ -10,7 +10,7 @@ import { anyToolCall, assistantResult, availabilityFailure, contextForTask, prom
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey } from "./queue.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
-import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionWorkKey, groupCompletionCandidates, handoffAckText, handoffDuplicateText, handoffFailureText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
+import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { V2Store, bindingKey } from "./store.ts"
@@ -524,7 +524,7 @@ export class EnsembleV2Service {
       agent.role || "You are a focused teammate.",
       "</ensemble_persona>",
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
-      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
+      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
       "End-of-turn handoff (mandatory): every non-leader turn must end with a handoff to another member — hand off explicitly with ensemble_handoff, or the server hands your finished turn to the workspace leader automatically and the group shows `Handed to $Name`. The leader may end turns normally or hand off voluntarily. A batch review turn lists every pending completion: decide each item with ensemble_review (delegate, start, end, or dismiss) — the batch closes only when every item is decided; non-leaders hand it onward to the leader.",
       "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
       "",
@@ -1850,6 +1850,7 @@ export class EnsembleV2Service {
             parentID: hopParentID,
             recipientID,
             task: hopTask,
+            instruction: typeof approval.payload.instruction === "string" ? approval.payload.instruction : undefined,
             constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
             expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
           })
@@ -1890,11 +1891,11 @@ export class EnsembleV2Service {
             await this.store.saveSubtask(hop)
             this.noteWorkChanged(hop)
             const recipientName = state.agents[recipientID]?.name ?? recipientID
+            // Ticket #73: concise system ack — no policy sentence, no ref, no agent bubble.
             await this.appendMessage(workspace, {
-              author: "agent",
-              agentID: approval.agentID,
-              text: handoffAckText(recipientName, hopTask, correlationID),
-              kind: "text",
+              author: "system",
+              text: handoffGroupAckText(recipientName, hopTask),
+              kind: "system",
               taskID: hop.id,
               correlationID,
             })
@@ -2086,10 +2087,10 @@ export class EnsembleV2Service {
       editor.add({
         name: "handoff",
         options: { namespace: "ensemble", codemode: false },
-        description: "Queue a typed hop to a teammate; the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate.",
+        description: "Queue a typed hop to a teammate; the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate. Write a self-authored instruction for the recipient (what to do, context, expected output) — never paste the user's message verbatim; task stays the short display title.",
         input: {
           type: "object",
-          properties: { task: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" } },
+          properties: { task: { type: "string" }, instruction: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" }, constraints: { type: "string" }, expected: { type: "string" } },
           required: ["task", "summary", "path"],
           additionalProperties: false,
         },
@@ -2394,8 +2395,14 @@ export class EnsembleV2Service {
     const task = parsed.data.task || String(input.task ?? "").trim()
     if (!task) return fail("The handoff file must include a non-empty task field.")
     const summary = parsed.data.summary ?? (typeof input.summary === "string" ? input.summary.trim() : "") ?? ""
-    const constraints = parsed.data.constraints
-    const expected = parsed.data.expected
+    const constraints = parsed.data.constraints ?? (typeof input.constraints === "string" ? input.constraints.trim() || undefined : undefined)
+    const expected = parsed.data.expected ?? (typeof input.expected === "string" ? input.expected.trim() || undefined : undefined)
+    // Ticket #73 instruction contract: the recipient-facing brief is the
+    // sender's self-authored instruction (file frontmatter wins, tool arg
+    // is the fallback), distinct from the short display title. Legacy
+    // callers without one keep the title+summary brief for compat.
+    const tailored = parsed.data.instruction ?? (typeof input.instruction === "string" ? input.instruction.trim() || undefined : undefined)
+    const brief = tailored ?? (summary ? `${task}\n\n${summary}` : task)
     const recipientRef = (typeof input.to === "string" && input.to.trim()) || parsed.data.to || ""
     if (!recipientRef) return fail("The handoff must name a recipient; no recipient was given.")
     const resolved = resolveHandoffRecipient(state, workspace, recipientRef)
@@ -2404,6 +2411,7 @@ export class EnsembleV2Service {
     if (resolved.status === "archived") return fail(`${resolved.agent.name} is archived and cannot receive handoffs.`)
     const recipient = resolved.agent
     const path = relative(workspace.directory, absolute)
+    const hopInstruction = `${brief} (${path})`
     if (!workspace.memberIDs.includes(recipient.id)) {
       const run = this.runForSession(state, context.sessionID)
       const correlationID = parsed.data.correlationID || newCorrelationID()
@@ -2416,7 +2424,7 @@ export class EnsembleV2Service {
         source: "workspace",
         title: `${sender.name} wants to hand off to ${recipient.name}`,
         detail: task,
-        payload: { assigneeID: recipient.id, title: task, instruction: summary ? `${task}\n\n${summary} (${path})` : `${task} (${path})`, constraints, expected, mode: "research", handoff: true, correlationID, path, depth: (run ? this.delegationDepth(state, run.subtaskID) : 0) + 1, parentID: run?.subtaskID, senderID: sender.id },
+        payload: { assigneeID: recipient.id, title: task, instruction: hopInstruction, constraints, expected, mode: "research", handoff: true, correlationID, path, depth: (run ? this.delegationDepth(state, run.subtaskID) : 0) + 1, parentID: run?.subtaskID, senderID: sender.id },
         status: "pending",
         createdAt: now(),
       }
@@ -2451,7 +2459,7 @@ export class EnsembleV2Service {
     // Idempotency spans terminal rows for the row's lifetime: the handoff hop
     // is the effect, so a retried or resubmitted handoff from the same run
     // returns the existing record instead of executing twice.
-    const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: askingSubtaskID, recipientID: recipient.id, task, constraints, expected })
+    const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: askingSubtaskID, recipientID: recipient.id, task, instruction: brief, constraints, expected })
     const duplicate = this.findWorkByKey(workspace.id, key)
     if (duplicate) return { content: handoffDuplicateText(recipient.name, task) }
     const at = now()
@@ -2464,7 +2472,7 @@ export class EnsembleV2Service {
       creatorAgentID: sender.id,
       assigneeID: recipient.id,
       title: task,
-      instruction: summary ? `${task}\n\n${summary} (${path})` : `${task} (${path})`,
+      instruction: hopInstruction,
       constraints,
       expected,
       mode: "research",
@@ -2489,11 +2497,13 @@ export class EnsembleV2Service {
     }
     await this.store.saveSubtask(hop)
     this.noteWorkChanged(hop)
+    // Ticket #73: the group sees only a concise system line. The policy
+    // sentence and correlation ref stay in the tool result below, which is
+    // the calling model's audience — never an agent bubble.
     await this.appendMessage(workspace, {
-      author: "agent",
-      agentID: sender.id,
-      text: handoffAckText(recipient.name, task, correlationID),
-      kind: "text",
+      author: "system",
+      text: handoffGroupAckText(recipient.name, summary || task),
+      kind: "system",
       taskID: hop.id,
       correlationID,
     })
@@ -2545,6 +2555,14 @@ export class EnsembleV2Service {
     const correlationID = correlationIDForKey("handoff", key)
     const content = replyText.trim() || "Work completed."
     const chain = [...prior, finisherID]
+    // Ticket #73: the leader receives review work — who finished what with
+    // what outcome — not a verbatim forward of the finished title and reply.
+    const reviewBrief = completionReviewInstruction({
+      finisherName: finisher?.name ?? finisherID,
+      title: finished.title,
+      content,
+      path: finished.handoff?.path,
+    })
     const hop: Subtask = {
       id: id("task"),
       workspaceID: workspace.id,
@@ -2553,7 +2571,7 @@ export class EnsembleV2Service {
       creatorAgentID: finisherID,
       assigneeID: recipient.id,
       title: finished.title,
-      instruction: `${finished.title}\n\n${content}`,
+      instruction: reviewBrief,
       mode: finished.mode,
       state: "pending",
       stage: "initial",
@@ -2580,11 +2598,11 @@ export class EnsembleV2Service {
     }
     await this.store.saveSubtask(hop)
     this.noteWorkChanged(hop)
+    // Ticket #73: concise system ack — no policy sentence, no ref, no agent bubble.
     await this.appendMessage(workspace, {
-      author: "agent",
-      agentID: finisherID,
-      text: handoffAckText(recipient.name, finished.title, correlationID),
-      kind: "text",
+      author: "system",
+      text: handoffGroupAckText(recipient.name, finished.title),
+      kind: "system",
       taskID: hop.id,
       correlationID,
     })
@@ -2935,11 +2953,11 @@ export class EnsembleV2Service {
       }
       await this.store.saveSubtask(hop)
       this.noteWorkChanged(hop)
+      // Ticket #73: concise system ack — no policy sentence, no ref, no agent bubble.
       await this.appendMessage(workspace, {
-        author: "agent",
-        agentID: reviewer.id,
-        text: handoffAckText(target?.name ?? route.to, batch.title, correlationID),
-        kind: "text",
+        author: "system",
+        text: handoffGroupAckText(target?.name ?? route.to, batch.title),
+        kind: "system",
         taskID: hop.id,
         correlationID,
       })

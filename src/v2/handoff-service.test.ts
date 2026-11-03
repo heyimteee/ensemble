@@ -117,6 +117,10 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Summarize the deploy\n---\n# Handoff\n")
     const asked = await tools.get("handoff").execute({ task: "Summarize the deploy", summary: "Short version", path, to: "Sage" }, { sessionID })
     assert.match(asked.content, /Handed to \$Sage/)
+    // Ticket #73: the waiting policy stays in the tool result for the
+    // calling model — it never renders as an agent bubble.
+    assert.match(asked.content, /stays open/)
+    assert.match(asked.content, /do not call ensemble_delegate/)
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       return Object.values(next.state.subtasks).some((task: any) => task.workKind === "handoff" && task.state === "replied")
@@ -135,7 +139,16 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
     assert.equal(hop.handoff?.recipientID, sage.id)
     assert.equal(hop.handoff?.answeredByID, sage.id)
     const messages = (after.state.messages[workspace.id] ?? []) as any[]
-    assert.ok(messages.some((message) => message.agentID === nova.id && message.text.includes("Handed to $Sage")))
+    // Ticket #73: the group ack is a concise system line — no policy
+    // sentence, no correlation ref, no agent bubble.
+    const ack = messages.find((message) => message.text.includes("Handed to $Sage"))
+    assert.ok(ack)
+    assert.equal(ack.author, "system")
+    assert.equal(ack.text, "Handed to $Sage · Short version")
+    for (const message of messages) {
+      assert.ok(!message.text.includes("do not call ensemble_delegate"), `policy text leaked into the group transcript: ${message.text}`)
+      assert.ok(!message.text.includes("(ref handoff_"), `correlation ref leaked into the group transcript: ${message.text}`)
+    }
     const relayed = messages.filter((message) => message.agentID === sage.id && message.kind === "text" && !message.streaming && message.text === "Relayed answer.")
     assert.equal(relayed.length, 1)
     assert.equal(relayed[0].correlationID, hop.handoff.correlationID)
@@ -153,6 +166,59 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
     assert.equal(row.status, "replied")
     assert.equal(row.handoff?.correlationID, hop.handoff.correlationID)
     assert.equal(row.handoff?.recipientID, sage.id)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+// Ticket #73: the sender's self-authored instruction reaches the recipient
+// as the work item instruction under a short display title — never the
+// user's verbatim words. A distinct brief is a distinct unit of work, and
+// tool-passed constraints/expected travel with the hop.
+test("handoff carries a tailored instruction distinct from the user text", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
+  const { ctx, tools } = fakeContext()
+  // Slow the native wait so both hops are observable before either replies.
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 2000)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Please rewrite the deploy summary from scratch for the exec team" } })
+    const sessionID = await bindingSessionID(handlers, directory, nova.id)
+    const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Deploy summary\n---\n# Handoff\n")
+    const tailored = "Condense the deploy notes into three exec-ready bullets; flag rollout risks."
+    const first = await tools.get("handoff").execute(
+      { task: "Deploy summary", instruction: tailored, summary: "Exec-ready bullets", path, to: "Sage", constraints: "Keep it under 100 words", expected: "Three bullets" },
+      { sessionID },
+    )
+    assert.match(first.content, /Handed to \$Sage/)
+    const afterFirst = await handlers.snapshot({ directory })
+    const hops = Object.values(afterFirst.state.subtasks).filter((task: any) => task.workKind === "handoff") as any[]
+    assert.equal(hops.length, 1)
+    assert.equal(hops[0].title, "Deploy summary")
+    assert.equal(hops[0].assigneeID, sage.id)
+    assert.ok(hops[0].instruction.includes(tailored))
+    assert.ok(!hops[0].instruction.includes("Please rewrite the deploy summary from scratch for the exec team"))
+    assert.equal(hops[0].constraints, "Keep it under 100 words")
+    assert.equal(hops[0].expected, "Three bullets")
+    // Same title, distinct brief: a distinct unit of work, not a duplicate.
+    const retitled = await tools.get("handoff").execute(
+      { task: "Deploy summary", instruction: "Now also cover the rollback plan.", summary: "Exec-ready bullets", path, to: "Sage" },
+      { sessionID },
+    )
+    assert.match(retitled.content, /Handed to \$Sage/)
+    assert.ok(!retitled.content.includes("Already handed"))
+    const afterSecond = await handlers.snapshot({ directory })
+    assert.equal(Object.values(afterSecond.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 2)
+    // Resubmission with the same brief still dedupes.
+    const again = await tools.get("handoff").execute(
+      { task: "Deploy summary", instruction: tailored, summary: "Exec-ready bullets", path, to: "Sage", constraints: "Keep it under 100 words", expected: "Three bullets" },
+      { sessionID },
+    )
+    assert.match(again.content, /Already handed to \$Sage/)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

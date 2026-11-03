@@ -131,8 +131,22 @@ test("non-leader completion auto-handoffs to the leader with finished content", 
     assert.equal(hop.handoff?.senderID, sage.id)
     assert.ok(hop.queueKey.startsWith("completion:"))
     assert.ok(hop.instruction.includes("Finished the work."))
+    // Ticket #73: the leader receives review work — sender, title, outcome —
+    // not a verbatim forward of the finished title and reply.
+    assert.equal(hop.title, "Do research")
+    assert.match(hop.instruction, /Review/)
+    assert.ok(hop.instruction.includes("$Sage"))
+    assert.ok(!hop.instruction.startsWith("Do research\n\nFinished"))
     const texts = ((after.state.messages[workspace.id] ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
+    // Ticket #73: concise system ack — no policy text, no ref, no agent bubble.
+    const ack = ((after.state.messages[workspace.id] ?? []) as any[]).find((message: any) => message.text.includes("Handed to $Nova"))
+    assert.ok(ack)
+    assert.equal(ack.author, "system")
+    assert.equal(ack.text, "Handed to $Nova · Do research")
+    for (const message of (after.state.messages[workspace.id] ?? []) as any[]) {
+      assert.ok(!message.text.includes("do not call ensemble_delegate"))
+    }
     for (const text of texts) assert.ok(!text.includes("@Nova") && !text.includes("@Sage"))
     // Mandatory handoff never double-queues: no delegate child, one hop only.
     const delegations = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "delegation")
@@ -333,6 +347,14 @@ test("two completions produce one batch review with per-item decisions", async (
     assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
     assert.ok(texts.some((text) => text.includes("Review closed: Review 3 completions")))
     for (const text of texts) assert.ok(!text.includes("@Sage") && !text.includes("@Kim") && !text.includes("@Nova"))
+    // Ticket #73: every handoff ack in the transcript is a concise system
+    // line — no policy text, no correlation ref, no agent bubble.
+    for (const message of (after.state.messages[workspaceID] ?? []) as any[]) {
+      if (!message.text.includes("Handed to $")) continue
+      assert.equal(message.author, "system")
+      assert.ok(!message.text.includes("do not call ensemble_delegate"))
+      assert.ok(!message.text.includes("(ref handoff_"))
+    }
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -401,6 +423,13 @@ test("non-leader batch review hands onward to the leader on full disposition", a
     const texts = ((after.state.messages.w ?? []) as any[]).map((message: any) => message.text)
     assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
     for (const text of texts) assert.ok(!text.includes("@Sage") && !text.includes("@Nova"))
+    // Ticket #73: the onward ack is a concise system line — no policy text,
+    // no correlation ref, no agent bubble.
+    const onwardAck = ((after.state.messages.w ?? []) as any[]).find((message: any) => message.text.includes("Handed to $Nova"))
+    assert.ok(onwardAck)
+    assert.equal(onwardAck.author, "system")
+    assert.ok(!onwardAck.text.includes("do not call ensemble_delegate"))
+    assert.ok(!onwardAck.text.includes("(ref handoff_"))
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

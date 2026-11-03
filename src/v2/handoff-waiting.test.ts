@@ -130,6 +130,14 @@ test("parentless handoff anchors to the sender's newest open task", async () => 
     assert.equal(hops[0].parentID, "sender-open")
     assert.equal(hops[0].handoff?.parentID, "sender-open")
     assert.ok(hops[0].handoff?.correlationID)
+    // Ticket #73: the group ack is a concise system line — the waiting
+    // policy stays in the tool result above, never in an agent bubble.
+    const messages = ((after.state.messages.w ?? []) as any[]).map((message) => message.text)
+    assert.ok(messages.some((text) => text === "Handed to $Sage · Short version"))
+    for (const text of messages) {
+      assert.ok(!text.includes("do not call ensemble_delegate"))
+      assert.ok(!text.includes("(ref handoff_"))
+    }
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -213,6 +221,16 @@ test("sender waits on the handoff with a visible wait and no double-queue", asyn
     assert.equal(relayed.length, 1)
     for (const message of (after.state.messages[workspace.result.id] ?? []) as any[]) {
       assert.ok(!message.text.includes("@Sage") && !message.text.includes("@Nova"), `agent mention must use $Name syntax: ${message.text}`)
+    }
+    // Ticket #73: the group ack is a concise system line — no policy text,
+    // no correlation ref, no agent bubble.
+    const ack = ((after.state.messages[workspace.result.id] ?? []) as any[]).find((message) => message.text.includes("Handed to $Sage"))
+    assert.ok(ack)
+    assert.equal(ack.author, "system")
+    assert.equal(ack.text, "Handed to $Sage · Summarize the deploy")
+    for (const message of (after.state.messages[workspace.result.id] ?? []) as any[]) {
+      assert.ok(!message.text.includes("do not call ensemble_delegate"))
+      assert.ok(!message.text.includes("(ref handoff_"))
     }
   } finally {
     await stop()
