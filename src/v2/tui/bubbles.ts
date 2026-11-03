@@ -33,8 +33,16 @@ export function bubbleWidth(chatWidth: number): number {
  * (side padding plus the agent accent edge). Callers pass the same chat
  * width they use for full-width rows; the default chrome covers both
  * bubble variants.
+ *
+ * Chrome accounting (ticket #72): rounded bubbles carry `padding={1}` on
+ * all four sides (2 horizontal cells) plus a full `border` (2 horizontal
+ * cells) — 4 cells of horizontal chrome for both agent and user bubbles.
+ * `bubbleContentWidth(w, BUBBLE_CHROME)` therefore equals the native
+ * content width behind `width="100%"`, so the JS fallback pre-wrap and
+ * the native `<markdown>` wrap agree by construction.
  */
-export function bubbleContentWidth(chatWidth: number, chrome = 4): number {
+export const BUBBLE_CHROME = 4
+export function bubbleContentWidth(chatWidth: number, chrome = BUBBLE_CHROME): number {
   return Math.max(16, bubbleWidth(chatWidth) - chrome)
 }
 
@@ -190,4 +198,35 @@ export function mergeTranscriptRows<T extends { id: string; createdAt: number }>
     return true
   })
   return deduped.slice(-window)
+}
+
+/**
+ * Referentially stabilize merged transcript wrappers across snapshot polls
+ * (ticket #72): `mergeTranscriptRows` allocates fresh wrapper objects per
+ * poll, so Solid's `<For each={mergedRows()}>` remounts every row ~4x/s
+ * even when idle — tearing down native `<markdown>` renderables mid-layout
+ * (the glitch). This folds a fresh merge onto the previous array, reusing
+ * the previous wrapper when the inner `message` ref is identical and the
+ * completion payload (`text`/`at`) plus sort key (`at`) are unchanged.
+ * New/changed rows get fresh wrappers and mount normally; completion
+ * ordering and the live/finalized partition are untouched (sort/dedupe
+ * still happen upstream in `mergeTranscriptRows`). Pure.
+ */
+export function stabilizeMergedRows<T extends { id: string; createdAt: number }>(
+  previous: MergedRow<T>[],
+  next: MergedRow<T>[],
+): MergedRow<T>[] {
+  const prevByID = new Map(previous.map((row) => [row.id, row]))
+  return next.map((row) => {
+    const prev = prevByID.get(row.id)
+    if (!prev) return row
+    if (prev.at !== row.at) return row
+    if (prev.message !== row.message) return row
+    const a = prev.completion
+    const b = row.completion
+    if (a === b) return prev
+    if (!a || !b) return row
+    if (a.text !== b.text || a.at !== b.at) return row
+    return prev
+  })
 }
