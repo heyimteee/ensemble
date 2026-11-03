@@ -107,7 +107,7 @@ live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump remov
 live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "finalized rich reply"
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization"
-live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "activity line unmounts after finalize"
+live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "activity line unmounts after finalize"
 
 # Ticket #70 determinism: rich Markdown lays out over several frames, so an
 # instant assert can catch a partial render — a different missing element per
@@ -236,7 +236,7 @@ live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal
 live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts when all work is terminal"
 live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · working" "no active rows remain in the block"
 live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · replied" "no finished rows remain in the block"
-live_assert_absence "$LIVE_TUI_SESSION" "· checking the details…" "no activity lines when idle"
+live_assert_absence "$LIVE_TUI_SESSION" "· working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
 # and no needs-you marker appears without user-blocked work in this flow.
 live_assert_absence "$LIVE_TUI_SESSION" "Stopping…" "no stuck stop label after terminal"
@@ -326,7 +326,10 @@ live_log "peer turn ran to completed with asking/answered attribution ($peer_att
 # with the rail/chat borders, so the user line carries a deep space run
 # while the agent reply starts at the left margin behind its accent edge.
 pane_bubbles=$(live_capture "$LIVE_TUI_SESSION")
-echo "$pane_bubbles" | grep -qE " {15,}fake-queue-alpha" || live_fail "user bubble not right-aligned in text capture"
+# Ticket #72 chrome: user bubbles carry a quiet but visible rounded edge,
+# so the right-aligned user line reads as a deep space run, the border
+# edge, padding, then the text — never bare text after the gap.
+echo "$pane_bubbles" | grep -qE " {15,}│ fake-queue-alpha" || live_fail "user bubble not right-aligned in text capture"
 echo "$pane_bubbles" | grep -qF "│ │ │ Onboarding complete. I am ready." || live_fail "agent bubble not left-aligned with accent edge in text capture"
 live_log "bubble layout observable in text capture (user right, agent left with edge)"
 # Ticket #67 inline completions: both delegation outcomes finished before
@@ -432,16 +435,34 @@ live_type "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
 live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
-live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "verbatim reply finalized in place"
+live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "verbatim reply finalized in place"
 # Ticket #72 long/multi-element bubble fixture: the agent reply carries a
 # long wrapping heading, a wrapping paragraph, a list, fenced code, and a
 # table inside one bubble. Settle with a bounded poll until every marker
 # co-occurs in one capture (rich Markdown lays out over several frames),
 # then prove each marker renders exactly once — no clipped/overlapping lines
 # when the fallback and Markdown paths swap at finalize.
-live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for bubble fixture"
-live_type "$LIVE_TUI_SESSION" "fake-bubble-fixture"
+# Ticket #74: input delivery to the TUI is flaky right after a heavy reply
+# mounts (single keystrokes land but the follow-up burst is silently
+# dropped most runs). Reset, refocus, and gate every burst on the
+# composer echo; retry the whole burst instead of failing on the first
+# drop. The `Message…` gate above proves the previous send cleared, so a
+# reset here only ever discards a stale draft, never an in-flight send.
+live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after verbatim reply"
+sent=0
+for attempt in 1 2 3; do
+  # Safe reset ONLY while the composer is open: Escape on a closed
+  # composer falls through to opencode and navigates away from Ensemble.
+  if live_try_text "$LIVE_TUI_SESSION" "COMPOSER" 2; then live_key "$LIVE_TUI_SESSION" Escape; sleep 0.5; fi
+  live_key "$LIVE_TUI_SESSION" "i"
+  if live_try_text "$LIVE_TUI_SESSION" "COMPOSER" 5; then
+    sleep 0.5
+    live_type "$LIVE_TUI_SESSION" "fake-bubble-fixture"
+    if live_try_text "$LIVE_TUI_SESSION" "fake-bubble-fixture" 5; then sent=1; break; fi
+  fi
+  live_log "bubble prompt not accepted (try $attempt), resetting composer and retrying"
+done
+[[ "$sent" == "1" ]] || live_fail "composer never echoed the bubble prompt"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_all_text "$LIVE_TUI_SESSION" 20 "settled bubble reply" \
   "Bubble Long Heading Marker" "bubble list alpha" "BUBBLE_CODE_MARKER" "bubble table marker"
@@ -456,8 +477,20 @@ live_assert_text "$LIVE_TUI_SESSION" "fake-bubble-fixture" "DM bubble user line"
 live_assert_count "$LIVE_TUI_SESSION" "fake-bubble-fixture" 1 "DM bubble user line exactly once"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "bubble reply finalized in place"
 live_log "long multi-element bubble reply verified with no clipped markers"
-live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
+# Same send-completion race as above: the bubble send can still be clearing
+# when the finalize absence passes, so gate the next `i` on the cleared
+# composer — then focus with the same retry discipline (a bare Escape on a
+# closed composer falls through and navigates away, so reset only while
+# the composer is open).
+live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after bubble reply"
+focused=0
+for attempt in 1 2 3; do
+  if live_try_text "$LIVE_TUI_SESSION" "COMPOSER" 2; then live_key "$LIVE_TUI_SESSION" Escape; sleep 0.5; fi
+  live_key "$LIVE_TUI_SESSION" "i"
+  if live_try_text "$LIVE_TUI_SESSION" "COMPOSER" 5; then focused=1; break; fi
+  live_log "composer focus lost (try $attempt), retrying"
+done
+[[ "$focused" == "1" ]] || live_fail "composer never focused for queue dance"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while streaming"

@@ -233,7 +233,13 @@ const server = createServer(async (request, response) => {
     const prompt = messages.filter((message) => message?.role === "user").map((message) => textOf(message.content)).join("\n")
     const rich = prompt.includes(FAKE_RICH_PROMPT)
     const bubble = prompt.includes(FAKE_BUBBLE_PROMPT)
-    const text = rich ? RICH_MARKDOWN : bubble ? BUBBLE_MARKDOWN : SHORT_REPLY
+    // Ticket #74 fix-up: the DM session accumulates every earlier trigger,
+    // so precedence must follow the LATEST trigger, not a fixed order —
+    // otherwise the earlier rich trigger lingering in history shadows the
+    // bubble prompt forever and its markers never render.
+    const richAt = prompt.lastIndexOf(FAKE_RICH_PROMPT)
+    const bubbleAt = prompt.lastIndexOf(FAKE_BUBBLE_PROMPT)
+    const text = bubbleAt > richAt ? BUBBLE_MARKDOWN : richAt >= 0 ? RICH_MARKDOWN : SHORT_REPLY
     log("request", {
       request: requestID,
       model: body?.model,
