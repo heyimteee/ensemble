@@ -361,10 +361,13 @@ export function selectActivityAgents(
 }
 
 /**
- * Split active agents into live (working/retrying) and queued-only (pending
- * with no live work), oldest first, deduplicated. Terminal work contributes
- * to neither — it is announced, not listed. Stale claims (lapsed leases)
- * contribute to neither either: a stuck line is hidden from the activity
+ * Split active agents into live (working/retrying/waiting) and queued-only
+ * (pending with no wait), oldest first, deduplicated. Terminal work
+ * contributes to neither — it is announced, not listed. User-blocked pending
+ * work (approval-gated, interrupted, native-blocked) is waiting, not parked,
+ * so it joins live with the waiting-for-you verb; genuinely queued work
+ * stays queued. Stale claims (lapsed leases) contribute to neither either:
+ * a stuck line is hidden from the activity
  * surface instead of hanging forever; the WORK block still lists the row
  * with its derived status, so nothing silently drops. Pure.
  *
@@ -398,6 +401,7 @@ export function splitActivityGroups(
     if (isActivityTaskStale(task, now)) continue
     const label = labelFor(task)
     const children = tasks.filter((child) => child.parentID === task.id)
+    const needsYou = isNeedsYouTask(task, pendingApprovalIDs, nativeBlockedIDs)
     const detail = activityStateForTask(task, {
       now,
       pendingApprovalIDs,
@@ -406,7 +410,11 @@ export function splitActivityGroups(
       agentNameFor,
     })
     const entry: ActivityEntry = { key: keyFor(task), label, agentID: task.assigneeID, createdAt: task.createdAt, verb: detail.verb, kind: detail.kind }
-    const bucket = status === "pending" ? queuedByKey : liveByKey
+    // User-blocked work is waiting, not parked: approval-gated,
+    // interrupted, and native-blocked tasks read the waiting-for-you verb
+    // in live even while their derived queue status is still pending.
+    // Genuinely queued work (pending with no wait) stays queued.
+    const bucket = status === "pending" && !needsYou ? queuedByKey : liveByKey
     const previous = bucket.get(entry.key)
     if (!previous || entry.createdAt < previous.createdAt) bucket.set(entry.key, entry)
   }

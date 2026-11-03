@@ -149,7 +149,7 @@ export function batchReviewText(items: CompletionItem[], reviewerName: string): 
   return [
     `$${reviewerName}, ${batchReviewTitle(items.length).toLowerCase()} before continuing:`,
     ...lines,
-    `Act per item with ensemble_review: delegate (name an assignee), start, end, or dismiss. The batch closes only when every item is acted on or dismissed.${items.length > 0 ? "" : ""}`,
+    `Act per item with ensemble_review: delegate (name an assignee), start, end, or dismiss. The batch closes only when every item is acted on or dismissed.`,
   ].join("\n")
 }
 

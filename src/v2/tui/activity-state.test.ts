@@ -110,6 +110,30 @@ test("stale claims leave the live activity surface but stay listed as work", asy
   assert.equal(groups.live.length, 1)
 })
 
+test("pending approval-gated work shows waiting-for-you in live, not queued", async () => {
+  const { splitActivityGroups } = await import("./workrows.ts")
+  const gated = task({ id: "g", assigneeID: "a", state: "pending", approvalID: "ap", createdAt: 1 })
+  const stalled = task({ id: "s", assigneeID: "c", state: "pending", interrupted: true, createdAt: 2 })
+  const blocked = task({ id: "b", assigneeID: "d", state: "pending", createdAt: 3 })
+  const plain = task({ id: "q", assigneeID: "b", state: "pending", createdAt: 4 })
+  const groups = splitActivityGroups(
+    [gated, stalled, blocked, plain],
+    (item) => item.assigneeID ?? "unassigned",
+    (item) => ({ a: "Nova", c: "June", d: "Theo", b: "Ana" })[item.assigneeID ?? ""] ?? "?",
+    1_000,
+    { pendingApprovalIDs: new Set(["ap"]), nativeBlockedIDs: new Set(["b"]) },
+  )
+  // Approval-gated, interrupted, and native-blocked pending work is
+  // user-blocked: it reads waiting-for-you in live, never "queued".
+  assert.deepEqual(groups.live.map((entry) => entry.label), ["Nova", "June", "Theo"])
+  for (const entry of groups.live) {
+    assert.equal(entry.verb, waitingForYouLine())
+    assert.equal(entry.kind, "waiting")
+  }
+  // Genuinely queued work stays queued with no waiting verb.
+  assert.deepEqual(groups.queued.map((entry) => entry.label), ["Ana"])
+})
+
 test("split groups thread approval-gated waits instead of working", async () => {
   const { splitActivityGroups } = await import("./workrows.ts")
   const gated = task({ id: "g", assigneeID: "a", state: "working", claimedBy: "run", leaseUntil: 9_999, attempts: 1, approvalID: "ap", createdAt: 1 })

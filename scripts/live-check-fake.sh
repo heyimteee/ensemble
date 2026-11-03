@@ -385,11 +385,22 @@ relay_answers=$(live_snapshot_value '(function () { var turns = Object.values(ou
 [[ "$relay_answers" == '"3|3"' ]] || live_fail "relay answers not exactly one per turn (got $relay_answers)"
 live_assert_absence "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" "asking row unmounts when the answers land"
 # Ticket #67: inline completions scroll with the conversation, so after the
-# long fixture replies only the tail is visible in the pane. Exactly-once
-# across all five is proven by the snapshot (five terminal subtasks) plus
-# the accumulator/dedup unit pins and the earlier fully-visible counts of
-# two and three; the pane proves the latest outcome renders inline.
-live_assert_text "$LIVE_TUI_SESSION" "● FakeAgent finished: !FakeAgent peer-direct-probe fake-rich-fixture" "latest outcome announced inline at the tail"
+# long fixture replies only the tail is visible in the pane. Exactly-once is
+# proven two ways on the settled layout: every completion line visible in
+# one pane capture occurs exactly once there (a duplicated inline line
+# fails), and the snapshot terminal total matches all five outcomes (a
+# missing outcome fails). One capture feeds every count below, so the
+# asserts cannot race each other.
+live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: !FakeAgent peer-direct-probe fake-rich-fixture" 15 "latest outcome announced inline at the tail"
+pane_done=$(live_capture "$LIVE_TUI_SESSION")
+visible_done=$(grep -oF "● FakeAgent finished:" <<<"$pane_done" | wc -l | tr -d ' ')
+[[ "$visible_done" -ge 1 ]] || live_fail "expected at least one visible completion line (got $visible_done)"
+while IFS= read -r done_line; do
+  [[ -z "$done_line" ]] && continue
+  done_count=$(grep -cF -- "$done_line" <<<"$pane_done" || true)
+  [[ "$done_count" == "1" ]] || live_fail "completion line not exactly once in pane (got $done_count): $done_line"
+done <<<"$(grep -F "● FakeAgent finished:" <<<"$pane_done" | sort -u)"
+live_log "$visible_done visible completion line(s), each exactly once in the pane"
 terminal_total=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state === "replied" }).length')
 [[ "$terminal_total" == "5" ]] || live_fail "expected five terminal subtasks (got $terminal_total)"
 live_log "probes repeated assignment, asking, and answer exactly once each ($relay_answers)"
@@ -686,6 +697,7 @@ for _ in $(seq 1 8); do
 done
 live_log "reduced-motion run stayed on frame-0 glyphs while live"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 30 "reduced-motion work announced once"
+live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 1 "reduced-motion completion exactly once, no duplicate inline line"
 live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts under reduced motion"
 reduced_idle_first=$(live_capture "$LIVE_TUI_SESSION")
 sleep 1.5

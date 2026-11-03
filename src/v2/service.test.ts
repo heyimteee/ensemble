@@ -862,6 +862,36 @@ test("memory delete and global-promotion approvals stay gated", async () => {
   }
 })
 
+test("stale promote_memory approvals resolve as rejected without re-applying", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  // Already promoted: a second pending promote decision is moot.
+  await seed.saveMemory({ id: "mem-done", agentID: "a", workspaceID: "w", scope: "global", text: "Keep", origin: "manual", source: "user", createdAt: 1, updatedAt: 1, history: [{ at: 1, action: "created", by: "user" }] })
+  await seed.saveApproval({ id: "ap-stale", workspaceID: "w", agentID: "a", kind: "promote_memory", title: "Promote", detail: "Keep", payload: { memoryID: "mem-done" }, status: "pending", createdAt: 1 })
+  // Deleted memory: there is nothing left to promote.
+  await seed.saveApproval({ id: "ap-gone", workspaceID: "w", agentID: "a", kind: "promote_memory", title: "Promote", detail: "Gone", payload: { memoryID: "mem-missing" }, status: "pending", createdAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const stale = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap-stale", approve: true } })
+    assert.equal(stale.ok, true)
+    assert.equal(stale.result.status, "rejected")
+    assert.match(stale.result.resolution, /no longer/)
+    const gone = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap-gone", approve: true } })
+    assert.equal(gone.ok, true)
+    assert.equal(gone.result.status, "rejected")
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.memories["mem-done"].history.length, 1)
+  } finally {
+    await stop()
+  }
+})
+
 test("memory entries can be added, edited, promoted, and deleted", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()

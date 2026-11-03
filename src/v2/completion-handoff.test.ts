@@ -80,6 +80,21 @@ test("batch review copy lists sender, title, outcome, and path with $Name gramma
   for (const action of ["delegate", "start", "end", "dismiss"]) assert.ok(text.includes(action))
 })
 
+test("batch review copy has one closing grammar with no empty-branch artifact", () => {
+  const text = batchReviewText(
+    [{ id: "c1", senderName: "Sage", title: "Summarize the deploy", outcome: "succeeded" }],
+    "Nova",
+  )
+  assert.ok(text.endsWith("The batch closes only when every item is acted on or dismissed."))
+  assert.ok(!text.includes("${") && !text.includes("  "))
+  // Empty batches never form (the scheduler only mints a batch for pending
+  // completions), so the copy carries no special empty branch — it just
+  // names the zero count with the same closing grammar.
+  const empty = batchReviewText([], "Nova")
+  assert.ok(empty.includes("review 0 completions"))
+  assert.ok(empty.endsWith("The batch closes only when every item is acted on or dismissed."))
+})
+
 test("review decisions parse per-item actions and refuse bad input", () => {
   assert.deepEqual(REVIEW_ACTIONS, ["delegate", "start", "end", "dismiss"])
   const parsed = parseReviewDecisions({
