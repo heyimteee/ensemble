@@ -39,8 +39,8 @@ import {
   TRANSCRIPT_WINDOW,
   activityFrameForKind,
   hasActiveWork,
-  isActivityStale,
   isNeedsYouTask,
+  mergeStreamingActivity,
   orderedWorkItems,
   queuedActivityFrame,
   selectActivityAgents,
@@ -423,7 +423,7 @@ export function EnsembleV2App() {
     mergeTranscriptRows(finalizedLines(), [...completionMap().values()], TRANSCRIPT_WINDOW),
   )
   const liveActivity = createMemo(() => {
-    const live: ActivityEntry[] = []
+    const taskLive: ActivityEntry[] = []
     let queued: string[] = []
     if (surface()?.kind === "workspace") {
       const groups = splitActivityGroups(
@@ -437,26 +437,14 @@ export function EnsembleV2App() {
           agentNameFor: (agentID) => agentName(state(), agentID),
         },
       )
-      live.push(...groups.live)
+      taskLive.push(...groups.live)
       queued = groups.queued.map((entry) => entry.label)
     }
-    for (const liveLine of liveMessages()) {
-      // Leaked streaming rows never wedge the activity line: a live row
-      // older than the staleness bound with no finalize is stuck, not live.
-      if (isActivityStale({ createdAt: liveLine.createdAt }, Date.now())) continue
-      if (!live.some((entry) => entry.key === (liveLine.agentID ?? `author:${liveLine.author}`))) {
-        // Streaming text arriving with no task-backed line: the agent is
-        // composing, so the thinking shimmer applies (brief §4).
-        live.push({
-          key: liveLine.agentID ?? `author:${liveLine.author}`,
-          label: liveLine.author,
-          agentID: liveLine.agentID,
-          createdAt: liveLine.createdAt,
-          verb: ACTIVITY_DEFAULT_VERB,
-          kind: "thinking",
-        })
-      }
-    }
+    // Ticket #74: task-less streaming rows never synthesize the generic
+    // checking verb. A fresh live row reads honest `working…` while a run
+    // or recent delta exists; stale orphans and task-backed agents add
+    // nothing, so finished turns leave no ghost line behind.
+    const live = mergeStreamingActivity(taskLive, liveMessages(), Date.now())
     const selected = selectActivityAgents(live, MAX_VISIBLE_ACTIVITY)
     const byLabel = new Map<string, ActivityEntry>()
     for (const entry of live) if (!byLabel.has(entry.label)) byLabel.set(entry.label, entry)

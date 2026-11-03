@@ -102,7 +102,7 @@ live_assert_text "$LIVE_TUI_SESSION" "COMPOSER · enter send · esc cancel" "sta
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no composer blink glyph"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "per-agent activity line while live"
+live_require_text "$LIVE_TUI_SESSION" "· working…" 15 "per-agent activity line while live"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "finalized rich reply"
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
@@ -437,7 +437,7 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 10 "DM live line while streaming"
+live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while streaming"
 live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "fake-queued-probe"
 live_key "$LIVE_TUI_SESSION" Enter
@@ -750,6 +750,10 @@ live_require_text "$LIVE_TUI_SESSION" "Review 2 completions" 30 "batch review pr
 live_assert_absence "$LIVE_TUI_SESSION" "@Helper" "completion addressing stays \$Name, never @Name"
 live_assert_absence "$LIVE_TUI_SESSION" "@Scout" "completion addressing stays \$Name, never @Name"
 live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "completion addressing stays \$Name, never @Name"
-live_log "ticket #71 completion handoff and batch review verified live"
+# Ticket #74 finisher absence: after both turns finished and handed off,
+# no generic checking line remains for either finisher — only the honest
+# batch review state on the leader.
+live_require_absence "$LIVE_TUI_SESSION" "checking the details…" 15 "no ghost checking line after completions"
+live_log "ticket #74 completion handoff and batch review verified live"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"
