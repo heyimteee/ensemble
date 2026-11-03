@@ -61,6 +61,7 @@ export type ChatLine = {
   interrupted?: boolean
   queued?: boolean
   correlationID?: string
+  taskID?: string
   createdAt: number
 }
 

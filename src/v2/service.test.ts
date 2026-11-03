@@ -2730,3 +2730,89 @@ test("ticket75: a waiting parent with terminal children is reconciled, not stuck
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("ticket76: snapshot settles a streaming message whose task is terminal", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-76-stream-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 2, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Done", instruction: "Do", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1, repliedAt: 2, finishedAt: 2 })
+  await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t", text: "partial reply", kind: "text", streaming: true, createdAt: 2 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const message = snapshot.state.messages.w.find((item: any) => item.id === "m")
+    assert.ok(message)
+    assert.equal(message.streaming, false)
+    assert.equal(message.text, "partial reply")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket76: sequential user tasks settle in order with no stuck work", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-76-seq-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [nova.result.id], leaderID: nova.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "first" } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "second" } })
+    await waitFor(async () => {
+      const snapshot = await handlers.snapshot({ directory })
+      return Object.values(snapshot.state.subtasks).every((task: any) => task.state === "replied")
+    }, 15_000)
+    const snapshot = await handlers.snapshot({ directory })
+    const tasks = Object.values(snapshot.state.subtasks) as any[]
+    assert.deepEqual(tasks.map((task) => task.title).sort(), ["first", "second"])
+    assert.equal(tasks.some((task) => task.state !== "replied"), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket76: a delegated child and a later user task both settle in order", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-76-delegate-"))
+  const { ctx, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 200)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "coordinate" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const binding = Object.values(next.state.bindings).find((item: any) => item.agentID === nova.result.id) as any
+      if (!binding) return false
+      sessionID = binding.sessionID
+      return true
+    })
+    await tools.get("delegate").execute({ assignee: "Sage", title: "child", instruction: "check" }, { sessionID })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "later" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).every((task: any) => task.state === "replied")
+    }, 15_000)
+    const next = await handlers.snapshot({ directory })
+    const tasks = Object.values(next.state.subtasks) as any[]
+    assert.deepEqual(tasks.filter((task) => task.workKind !== "handoff").map((task) => task.title).sort(), ["child", "coordinate", "later"])
+    assert.equal(tasks.some((task) => task.state === "working"), false)
+    assert.equal(tasks.some((task) => task.awaitingChildren), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
