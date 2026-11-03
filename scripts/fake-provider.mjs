@@ -13,6 +13,7 @@ import { appendFileSync, renameSync, writeFileSync } from "node:fs"
 import { setTimeout as delay } from "node:timers/promises"
 
 const FAKE_RICH_PROMPT = "fake-rich-fixture"
+const FAKE_BUBBLE_PROMPT = "fake-bubble-fixture"
 const MODEL_ID = "ensemble-fake-model"
 
 const RICH_MARKDOWN = [
@@ -53,6 +54,37 @@ const RICH_MARKDOWN = [
 ].join("\n")
 
 const SHORT_REPLY = "Onboarding complete. I am ready.\n"
+
+// Ticket #72 long/multi-element bubble fixture: a long wrapping heading,
+// a wrapping paragraph, a list, fenced code, and a table inside one bubble.
+// Markers are unique greppable literals; the reply never echoes the trigger
+// prompt so the DM user line keeps its exactly-once count.
+const BUBBLE_MARKDOWN = [
+  "# Bubble Long Heading Marker With Many Words To Force Wrapping Inside The Bounded Bubble Width",
+  "",
+  "This bubble paragraph carries many words so the fallback pre-wrap and the native Markdown wrap must agree on one shared width, otherwise the bubble bottom lands a line off and collides with the next row.",
+  "",
+  "## Bubble lists",
+  "",
+  "- bubble list alpha with enough words to wrap inside the bubble",
+  "- bubble list beta",
+  "- bubble list gamma",
+  "",
+  "## Bubble code",
+  "",
+  "```ts",
+  'const bubbleCodeMarker = "BUBBLE_CODE_MARKER"',
+  "console.log(bubbleCodeMarker)",
+  "```",
+  "",
+  "## Bubble table",
+  "",
+  "| Feature | Result |",
+  "| --- | --- |",
+  "| Wrapping | bubble wrap ok |",
+  "| Finalization | bubble table marker |",
+  "",
+].join("\n")
 
 const args = process.argv.slice(2)
 function argValue(name, fallback) {
@@ -160,7 +192,7 @@ async function streamCompletion(response, text, requestID) {
   response.write(chunkFrame("", "stop"))
   response.write("data: [DONE]\n\n")
   response.end()
-  log("response_end", { request: requestID, chunks: chunks.length, rich: text === RICH_MARKDOWN })
+  log("response_end", { request: requestID, chunks: chunks.length, rich: text === RICH_MARKDOWN, bubble: text === BUBBLE_MARKDOWN })
 }
 
 async function nonStreamingCompletion(response, text, requestID) {
@@ -173,7 +205,7 @@ async function nonStreamingCompletion(response, text, requestID) {
     choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
   }))
-  log("response_end", { request: requestID, rich: text === RICH_MARKDOWN, streaming: false })
+  log("response_end", { request: requestID, rich: text === RICH_MARKDOWN, bubble: text === BUBBLE_MARKDOWN, streaming: false })
 }
 
 const server = createServer(async (request, response) => {
@@ -200,13 +232,15 @@ const server = createServer(async (request, response) => {
     const messages = Array.isArray(body?.messages) ? body.messages : []
     const prompt = messages.filter((message) => message?.role === "user").map((message) => textOf(message.content)).join("\n")
     const rich = prompt.includes(FAKE_RICH_PROMPT)
-    const text = rich ? RICH_MARKDOWN : SHORT_REPLY
+    const bubble = prompt.includes(FAKE_BUBBLE_PROMPT)
+    const text = rich ? RICH_MARKDOWN : bubble ? BUBBLE_MARKDOWN : SHORT_REPLY
     log("request", {
       request: requestID,
       model: body?.model,
       stream: body?.stream !== false,
       messages: messages.length,
       rich,
+      bubble,
       promptTail: prompt.slice(-120),
     })
     try {
