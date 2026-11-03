@@ -433,6 +433,29 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
 live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
 live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "verbatim reply finalized in place"
+# Ticket #72 long/multi-element bubble fixture: the agent reply carries a
+# long wrapping heading, a wrapping paragraph, a list, fenced code, and a
+# table inside one bubble. Settle with a bounded poll until every marker
+# co-occurs in one capture (rich Markdown lays out over several frames),
+# then prove each marker renders exactly once — no clipped/overlapping lines
+# when the fallback and Markdown paths swap at finalize.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for bubble fixture"
+live_type "$LIVE_TUI_SESSION" "fake-bubble-fixture"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_all_text "$LIVE_TUI_SESSION" 20 "settled bubble reply" \
+  "Bubble Long Heading Marker" "bubble list alpha" "BUBBLE_CODE_MARKER" "bubble table marker"
+live_assert_text "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" "long wrapping heading"
+live_assert_text "$LIVE_TUI_SESSION" "bubble list alpha" "bubble list"
+live_assert_text "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" "bubble fenced code"
+live_assert_text "$LIVE_TUI_SESSION" "bubble table marker" "bubble table cell"
+live_assert_count "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" 1 "long heading exactly once, no overlap duplication"
+live_assert_count "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" 1 "fenced code marker exactly once"
+live_assert_count "$LIVE_TUI_SESSION" "bubble table marker" 1 "table cell exactly once"
+live_assert_text "$LIVE_TUI_SESSION" "fake-bubble-fixture" "DM bubble user line"
+live_assert_count "$LIVE_TUI_SESSION" "fake-bubble-fixture" 1 "DM bubble user line exactly once"
+live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "bubble reply finalized in place"
+live_log "long multi-element bubble reply verified with no clipped markers"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"

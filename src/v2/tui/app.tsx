@@ -55,12 +55,14 @@ import {
 } from "./workrows.ts"
 import {
   accumulateCompletions,
+  BUBBLE_CHROME,
   bubbleContentWidth,
   bubbleHead,
   bubbleSide,
   isBubbledRole,
   mergeTranscriptRows,
   relayPartiesForTask,
+  stabilizeMergedRows,
   unifiedAuthorColor,
   type InlineCompletion,
 } from "./bubbles.ts"
@@ -419,9 +421,17 @@ export function EnsembleV2App() {
   // One time-ordered transcript window: conversation lines interleaved with
   // inline completions by (finish/created) time. The scrollbox keeps a stable
   // identity and the live/finalized partition stays intact upstream.
-  const mergedRows = createMemo(() =>
-    mergeTranscriptRows(finalizedLines(), [...completionMap().values()], TRANSCRIPT_WINDOW),
-  )
+  // Ticket #72 idle-quiescence: merged wrappers are referentially stabilized
+  // onto the previous array (same treatment as `stableLines` inner refs), so
+  // Solid's `<For>` reconciles by stable reference and idle 250ms polls mount
+  // nothing. New/changed rows still mount; ordering/partition untouched.
+  let previousMergedRows: ReturnType<typeof mergeTranscriptRows<ChatLine>> = []
+  const mergedRows = createMemo(() => {
+    const fresh = mergeTranscriptRows(finalizedLines(), [...completionMap().values()], TRANSCRIPT_WINDOW)
+    const stable = stabilizeMergedRows(previousMergedRows, fresh)
+    previousMergedRows = stable
+    return stable
+  })
   const liveActivity = createMemo(() => {
     const taskLive: ActivityEntry[] = []
     let queued: string[] = []
@@ -2149,25 +2159,31 @@ export function EnsembleV2App() {
                                     </box>
                                     )
                                   }
-                                  // Ticket #67 bubbles: agent messages read
-                                  // left-aligned in filled blocks carrying the
-                                  // agent's categorical accent edge; user
-                                  // messages read right-aligned. Content wraps
-                                  // inside a bounded ~72% width. Inner rows
-                                  // paint the bubble fill so the block reads as
-                                  // one surface in text capture.
+                                  // Ticket #67 bubbles (ticket #72 chrome):
+                                  // agent messages read left-aligned in filled
+                                  // blocks carrying the agent's categorical
+                                  // accent edge; user messages read
+                                  // right-aligned with a quiet but visible
+                                  // edge. Both bubbles are rounded with
+                                  // padding on all four sides so content never
+                                  // touches the border; Yoga auto-sizes height
+                                  // from content + padding + border. Content
+                                  // wraps at one shared width: the fallback
+                                  // `<text>` pre-wrap and the native
+                                  // `<markdown>` width both use `wrapWidth`
+                                  // (= bounded width − BUBBLE_CHROME), so the
+                                  // height is consistent when paths swap.
                                   const accent = authorColor({ agentID: message.agentID, author: message.author, role: message.role })
-                                  const edge: Array<"top" | "right" | "bottom" | "left"> = side === "left" ? ["left"] : []
-                                  const wrapWidth = bubbleContentWidth(messageWidth())
+                                  const wrapWidth = bubbleContentWidth(messageWidth(), BUBBLE_CHROME)
                                   return (
                                   <box flexDirection="column" width="100%" marginTop={1}>
-                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={edge} borderColor={side === "left" ? accent : colors.panel} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} flexDirection="column">
+                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={side === "left" ? accent : colors.muted} backgroundColor={colors.panel} padding={1} flexDirection="column">
                                       <text fg={tone(message.queued ? colors.muted : accent)} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "user"} fallback={
                                         <Show when={syntaxStyle} fallback={
                                           <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
                                         }>
-                                          {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={tone(colors.text)} bg={colors.panel} conceal tableOptions={{ widthMode: "content" }} />}
+                                          {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={wrapWidth} fg={tone(colors.text)} bg={colors.panel} conceal tableOptions={{ widthMode: "content" }} />}
                                         </Show>
                                       }>
                                         <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth).join("\n")}</text>

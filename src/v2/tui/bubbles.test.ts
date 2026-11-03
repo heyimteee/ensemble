@@ -4,6 +4,7 @@ import type { Subtask } from "../types.ts"
 import { agentColor } from "./format.ts"
 import {
   accumulateCompletions,
+  BUBBLE_CHROME,
   BUBBLE_WIDTH_RATIO,
   bubbleContentWidth,
   bubbleHead,
@@ -14,6 +15,7 @@ import {
   mergeTranscriptRows,
   relayHeader,
   relayPartiesForTask,
+  stabilizeMergedRows,
   unifiedAuthorColor,
 } from "./bubbles.ts"
 
@@ -60,6 +62,13 @@ test("bubbles bound width to ~72% of the chat column", () => {
   assert.ok(bubbleWidth(10) >= 20)
   assert.ok(bubbleContentWidth(100) < bubbleWidth(100))
   assert.ok(bubbleContentWidth(10) >= 16)
+})
+
+test("bubble chrome accounts for rounded padding plus full border", () => {
+  // Ticket #72: padding={1} (2 horizontal) + full border (2 horizontal).
+  assert.equal(BUBBLE_CHROME, 4)
+  assert.equal(bubbleContentWidth(100), bubbleWidth(100) - BUBBLE_CHROME)
+  assert.equal(bubbleContentWidth(160), bubbleWidth(160) - BUBBLE_CHROME)
 })
 
 test("bubble sides put agents left, users right, system full-width", () => {
@@ -174,4 +183,41 @@ test("merged transcript orders completions at their finish position in one windo
   // The shared window drops the oldest rows first.
   const windowed = mergeTranscriptRows(messages, completions, 2)
   assert.deepEqual(windowed.map((row) => row.id), ["m2", "m3"])
+})
+
+test("stabilized merged rows keep identity across idle polls", () => {
+  // Ticket #72: idle 250ms polls rebuild wrappers via mergeTranscriptRows;
+  // stabilization must reuse the previous wrapper so Solid's <For> mounts
+  // nothing when nothing changed.
+  const m1 = { id: "m1", createdAt: 5 }
+  const m2 = { id: "m2", createdAt: 15 }
+  const completions = [{ id: "done:t1", text: "● Nova finished: alpha", at: 10 }]
+  const first = stabilizeMergedRows([], mergeTranscriptRows([m1, m2], completions, 40))
+  // A second poll over the same message refs yields identical wrappers.
+  const second = stabilizeMergedRows(first, mergeTranscriptRows([m1, m2], completions, 40))
+  assert.equal(second.length, first.length)
+  for (let i = 0; i < first.length; i++) assert.equal(second[i], first[i])
+  // Completion ordering is untouched by stabilization.
+  assert.deepEqual(second.map((row) => row.id), ["m1", "done:t1", "m2"])
+  // A new message mounts one fresh wrapper; unchanged rows stay stable.
+  const m3 = { id: "m3", createdAt: 25 }
+  const third = stabilizeMergedRows(second, mergeTranscriptRows([m1, m2, m3], completions, 40))
+  assert.deepEqual(third.map((row) => row.id), ["m1", "done:t1", "m2", "m3"])
+  assert.equal(third[0], second[0])
+  assert.equal(third[1], second[1])
+  assert.equal(third[2], second[2])
+  // A changed message ref (edited text upstream) remounts only that row.
+  const m1Edited = { id: "m1", createdAt: 5 }
+  const fourth = stabilizeMergedRows(third, mergeTranscriptRows([m1Edited, m2, m3], completions, 40))
+  assert.notEqual(fourth[0], third[0])
+  assert.equal(fourth[1], third[1])
+  assert.equal(fourth[2], third[2])
+  assert.equal(fourth[3], third[3])
+  // A changed completion payload remounts only the completion row.
+  const changed = [{ id: "done:t1", text: "● Nova finished: beta", at: 10 }]
+  const fifth = stabilizeMergedRows(fourth, mergeTranscriptRows([m1Edited, m2, m3], changed, 40))
+  assert.equal(fifth[0], fourth[0])
+  assert.notEqual(fifth[1], fourth[1])
+  assert.equal(fifth[2], fourth[2])
+  assert.equal(fifth[3], fourth[3])
 })
