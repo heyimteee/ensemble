@@ -102,12 +102,12 @@ live_assert_text "$LIVE_TUI_SESSION" "COMPOSER · enter send · esc cancel" "sta
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no composer blink glyph"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 15 "per-agent activity line while live"
+live_require_text "$LIVE_TUI_SESSION" "· working…" 15 "per-agent activity line while live"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "finalized rich reply"
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization"
-live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "activity line unmounts after finalize"
+live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "activity line unmounts after finalize"
 
 # Ticket #70 determinism: rich Markdown lays out over several frames, so an
 # instant assert can catch a partial render — a different missing element per
@@ -236,7 +236,7 @@ live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal
 live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts when all work is terminal"
 live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · working" "no active rows remain in the block"
 live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · replied" "no finished rows remain in the block"
-live_assert_absence "$LIVE_TUI_SESSION" "· checking the details…" "no activity lines when idle"
+live_assert_absence "$LIVE_TUI_SESSION" "· working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
 # and no needs-you marker appears without user-blocked work in this flow.
 live_assert_absence "$LIVE_TUI_SESSION" "Stopping…" "no stuck stop label after terminal"
@@ -457,13 +457,13 @@ live_type "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
 live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
-live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "verbatim reply finalized in place"
+live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "verbatim reply finalized in place"
 
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "· checking the details…" 10 "DM live line while streaming"
+live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while streaming"
 live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "fake-queued-probe"
 live_key "$LIVE_TUI_SESSION" Enter
@@ -781,5 +781,7 @@ live_assert_absence "$LIVE_TUI_SESSION" "@Helper" "completion addressing stays \
 live_assert_absence "$LIVE_TUI_SESSION" "@Scout" "completion addressing stays \$Name, never @Name"
 live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "completion addressing stays \$Name, never @Name"
 live_log "ticket #71 completion handoff and batch review verified live"
+# Ticket #74: after both handoffs/completions, no generic checking ghost may remain.
+live_require_absence "$LIVE_TUI_SESSION" "checking the details…" 15 "no ghost checking line after completions"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

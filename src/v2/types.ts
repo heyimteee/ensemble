@@ -90,6 +90,9 @@ export type Message = {
   streaming?: boolean
   interrupted?: boolean
   createdAt: number
+  /** Last wall-clock write (delta or finalize). Drives stream staleness so
+    * long live streams stay visible while fresh and orphaned rows expire. */
+  updatedAt?: number
   /** Correlation ID linking handoff ask/ack/relay/notice legs. */
   correlationID?: string
 }

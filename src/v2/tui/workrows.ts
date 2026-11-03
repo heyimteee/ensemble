@@ -228,6 +228,16 @@ export function retryingLine(): string {
   return "retrying…"
 }
 
+/** Review verb for a completion delivery under review. */
+export function reviewingLine(): string {
+  return "reviewing…"
+}
+
+/** Review verb for a consolidated batch review turn. */
+export function reviewingCompletionsLine(): string {
+  return "reviewing completions…"
+}
+
 /** Build a present-participle verb phrase. Detail-less tool verbs fall back to the default. */
 export function activityVerb(kind: ActivityVerbKind, detail?: string): string {
   const target = detail?.trim()
@@ -295,13 +305,28 @@ export function activityStateForTask(
   if (isNeedsYouTask(task, ctx.pendingApprovalIDs, ctx.nativeBlockedIDs)) {
     return { verb: waitingForYouLine(), kind: "waiting" }
   }
+  // Ticket #74: completion/batch-review work is review work, never generic
+  // activity. A live batch turn reads `reviewing completions…` (not a
+  // self-`Waiting for $Leader…` when waiter and reviewer are the same
+  // agent); a completion delivery reads `reviewing…`. Pending hops are
+  // queued under the leader's key, so these verbs only display while live.
+  if (task.handoff?.batch === true) {
+    return { verb: reviewingCompletionsLine(), kind: "working" }
+  }
+  if (task.handoff?.completion === true) {
+    return { verb: reviewingLine(), kind: "working" }
+  }
   const liveChildren = ctx.children.filter(
     (child) => child.parentID === task.id && !isTerminalWorkStatus(deriveWorkStatus(child, ctx.now)),
   )
   if (task.awaitingChildren || liveChildren.length > 0) {
     const firstAssignee = liveChildren.map((child) => child.assigneeID).find((id) => id !== undefined)
     const name = firstAssignee ? ctx.agentNameFor(firstAssignee) : undefined
-    if (name) return { verb: waitingForLine(name), kind: "waiting" }
+    if (name && firstAssignee !== task.assigneeID) return { verb: waitingForLine(name), kind: "waiting" }
+    // Ticket #74: never self-wait (`Waiting for $Leader…` when the waiter
+    // is the leader). Same-assignee children mean the turn is still active,
+    // so read honest `working…` instead of naming oneself.
+    if (name) return { verb: workingLine(), kind: "working" }
     return { verb: ACTIVITY_DEFAULT_VERB, kind: "checking" }
   }
   if (deriveWorkStatus(task, ctx.now) === "retrying") return { verb: retryingLine(), kind: "retrying" }
@@ -336,11 +361,13 @@ export function isActivityTaskStale(task: Subtask, now: number): boolean {
   return task.leaseUntil === undefined || task.leaseUntil <= now
 }
 
-/** True while a streaming/transcript live row is older than the staleness
- * bound with no finalize — a leaked row that must never wedge the
- * activity line. Pure. */
-export function isActivityStale(entry: { createdAt: number }, now: number): boolean {
-  return now - entry.createdAt > ACTIVITY_STALE_AFTER_MS
+/** True while a streaming/transcript live row has seen no delta or finalize
+ * for the staleness bound — a leaked row that must never wedge the
+ * activity line. The clock is the last write (heartbeat), not creation, so
+ * long live streams stay visible while fresh and orphaned rows expire
+ * promptly. Pure. */
+export function isActivityStale(entry: { createdAt: number; updatedAt?: number }, now: number): boolean {
+  return now - (entry.updatedAt ?? entry.createdAt) > ACTIVITY_STALE_AFTER_MS
 }
 
 /**
@@ -455,4 +482,37 @@ export function splitLiveFinalized<T extends { id: string; streaming?: boolean }
     else finalized.push(line)
   }
   return { finalized, live }
+}
+
+/**
+ * Merge task-less streaming transcript rows into the live activity list
+ * (ticket #74). A fresh streaming row with no task-backed entry for its
+ * agent reads honest `working…` — never the generic `checking the details…`
+ * — and only while a live run or recent delta exists. Stale orphans
+ * (no heartbeat within the bound) and agents already covered by a
+ * task-backed entry contribute nothing, so finished turns leave no ghost
+ * line behind. Pure.
+ */
+export function mergeStreamingActivity(
+  live: ActivityEntry[],
+  lines: Array<{ agentID?: string; author: string; createdAt: number; updatedAt?: number }>,
+  now: number,
+): ActivityEntry[] {
+  const merged = [...live]
+  for (const line of lines) {
+    // Leaked streaming rows never wedge the activity line: a live row with
+    // no heartbeat inside the bound is stuck, not live.
+    if (isActivityStale(line, now)) continue
+    const key = line.agentID ?? `author:${line.author}`
+    if (merged.some((entry) => entry.key === key)) continue
+    merged.push({
+      key,
+      label: line.author,
+      agentID: line.agentID,
+      createdAt: line.createdAt,
+      verb: workingLine(),
+      kind: "working",
+    })
+  }
+  return merged
 }

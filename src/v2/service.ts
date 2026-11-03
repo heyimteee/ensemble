@@ -95,6 +95,22 @@ function sameModels(a: ModelRef[], b: ModelRef[]): boolean {
 }
 
 /**
+ * Settle a streaming transcript row: clear the live flag, record the final
+ * text, and stamp the last write so staleness runs on heartbeat time.
+ * Ticket #74: finalization races must settle through this helper even when
+ * the epoch guard rejects the content update — otherwise the stored row
+ * keeps `streaming: true` and wedges the activity line until the age
+ * filter. Pure over the caller's message object.
+ */
+export function settleStreamMessage(message: Message, text: string, interrupted: boolean): Message {
+  message.text = text
+  message.streaming = false
+  message.interrupted = interrupted
+  message.updatedAt = now()
+  return message
+}
+
+/**
  * Newest still-open task assigned to the sender in the workspace, if any.
  * Ticket #70 parentless-hop anchor: a handoff issued from a session with
  * no live run parents its hop here so the sender's turn stays in
@@ -1512,7 +1528,7 @@ export class EnsembleV2Service {
     return (await this.createWorkItem(input)).subtask
   }
 
-  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; correlationID?: string }): Promise<Message> {
+  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; correlationID?: string; updatedAt?: number }): Promise<Message> {
     return this.store.appendMessage(workspace.id, {
       id: id("msg"),
       author: input.author,
@@ -1524,6 +1540,7 @@ export class EnsembleV2Service {
       interrupted: input.interrupted,
       correlationID: input.correlationID,
       createdAt: now(),
+      ...(input.updatedAt !== undefined ? { updatedAt: input.updatedAt } : {}),
     })
   }
 
@@ -3281,21 +3298,24 @@ export class EnsembleV2Service {
     if (!live.message) return
     live.message.text = live.buffer
     live.message.streaming = true
+    live.message.updatedAt = now()
     if (now() - live.lastSave > 120) {
       live.lastSave = now()
+      live.message.updatedAt = live.lastSave
       await this.store.saveMessage(live.message).catch(() => undefined)
     }
   }
 
   private async finalizeStream(message: Message | undefined, text: string, interrupted = false, epoch = 0, workspaceEpoch = 0, workspaceID = ""): Promise<Message | undefined> {
     if (!message) return undefined
-    if (this.globalEpoch !== epoch) return undefined
-    if (workspaceID && (this.workspaceEpoch.get(workspaceID) ?? 0) !== workspaceEpoch) return undefined
-    message.text = text
-    message.streaming = false
-    message.interrupted = interrupted
+    // Ticket #74: the epoch guard rejects stale content, but the row must
+    // still settle — returning before clearing `streaming` left orphaned
+    // live rows until the 120 s age filter. Settle and persist on both
+    // paths; only the return value signals staleness.
+    const current = this.globalEpoch === epoch && (!workspaceID || (this.workspaceEpoch.get(workspaceID) ?? 0) === workspaceEpoch)
+    settleStreamMessage(message, text, interrupted)
     await this.store.saveMessage(message)
-    return message
+    return current ? message : undefined
   }
 
   private async runTask(taskID: string): Promise<void> {
@@ -3388,7 +3408,7 @@ export class EnsembleV2Service {
     let attemptStartedAt = now()
     try {
       await this.ctx.session.instructions.entry.put({ sessionID: binding.sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-      live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true, correlationID: task.handoff?.correlationID ?? task.turn?.correlationID })
+      live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true, correlationID: task.handoff?.correlationID ?? task.turn?.correlationID, updatedAt: now() })
       const slot = this.liveBySession.get(binding.sessionID)
       if (slot) {
         slot.message = live
