@@ -541,6 +541,7 @@ export class EnsembleV2Service {
       "</ensemble_persona>",
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
       "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
+      "Answer first: write your own answer in the group chat before handing off. A handoff forwards a completed result or clearly scoped work; it is never a substitute for answering your assignment.",
       "End-of-turn handoff (mandatory): every non-leader turn must end with a handoff to another member — hand off explicitly with ensemble_handoff, or the server hands your finished turn to the workspace leader automatically and the group shows `Handed to $Name`. The leader may end turns normally or hand off voluntarily. A batch review turn lists every pending completion: decide each item with ensemble_review (delegate, start, end, or dismiss) — the batch closes only when every item is decided; non-leaders hand it onward to the leader.",
       "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
       "",
@@ -3226,6 +3227,60 @@ export class EnsembleV2Service {
     }
   }
 
+  /**
+   * Reconcile waiting/stale rows before every schedule pass. Fast child
+   * replies and auto completion hops can leave a parent `awaitingChildren`
+   * after all real children are terminal, or leave a `working` row whose run
+   * is gone; either state wedges the activity surface forever. Completion
+   * deliveries are excluded from the wait set. Pure state repair: no run is
+   * started here; the normal pump does that.
+   */
+  private async reconcileWaitingWork(): Promise<void> {
+    const state = this.store.snapshot()
+    for (const task of Object.values(state.subtasks)) {
+      if (task.state === "replied") continue
+      // Batch reviews close only through ensemble_review.
+      if (task.handoff?.batch === true) continue
+      const children = Object.values(state.subtasks).filter((child) => child.parentID === task.id && child.handoff?.completion !== true)
+      const liveChildren = children.filter((child) => child.state !== "replied")
+      if (task.awaitingChildren && liveChildren.length === 0) {
+        task.awaitingChildren = false
+        if (children.length === 0) {
+          task.state = "replied"
+          task.outcome = "succeeded"
+          task.repliedAt = now()
+          task.finishedAt = task.repliedAt
+          task.activeRunID = undefined
+          task.claimedBy = undefined
+          task.leaseUntil = undefined
+          await this.store.saveSubtask(task)
+          this.noteWorkChanged(task)
+          continue
+        }
+        await this.store.saveSubtask(task)
+        await this.maybeSynthesize(task.id)
+        const latest = this.store.snapshot().subtasks[task.id]
+        if (latest && latest.state !== "replied" && latest.stage === "synthesis" && latest.state === "working" && !latest.activeRunID) {
+          latest.state = "pending"
+          latest.outcome = "pending"
+          latest.awaitingChildren = false
+          await this.store.saveSubtask(latest)
+          this.noteWorkChanged(latest)
+        }
+        continue
+      }
+      const staleRun = task.activeRunID !== undefined && !this.activeRuns.has(task.activeRunID)
+      if (task.state === "working" && !task.awaitingChildren && !task.approvalID && !task.claimedBy && (task.activeRunID === undefined || staleRun)) {
+        task.state = "pending"
+        task.outcome = "pending"
+        task.activeRunID = undefined
+        task.retryAfter = undefined
+        await this.store.saveSubtask(task)
+        this.noteWorkChanged(task)
+      }
+    }
+  }
+
   private pump(): void {
     // A schedule request that lands mid-pass must not be dropped: atomic
     // claim means the in-flight pass already snapshotted state, so re-run
@@ -3238,6 +3293,7 @@ export class EnsembleV2Service {
     void (async () => {
       try {
         await this.reapAndRetire()
+        await this.reconcileWaitingWork()
         const state = this.store.snapshot()
         const at = now()
         const running = [...this.activeRuns.values()].filter((run) => run.status === "running")
@@ -3479,8 +3535,11 @@ export class EnsembleV2Service {
         await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
         return
       }
-      const mention = normalizeAgentMentions(result?.text || "Work completed.", workspace.memberIDs.map((id) => current.agents[id]).filter((item): item is Agent => Boolean(item)))
-      const reply = mention.text
+      const mention = normalizeAgentMentions(result?.text ?? "", workspace.memberIDs.map((id) => current.agents[id]).filter((item): item is Agent => Boolean(item)))
+      // An empty/whitespace assistant turn is not an answer. It must never
+      // finalize as success or be handed off as completed work; retry inside
+      // the budget, then fail visibly.
+      const reply = mention.text.trim()
       if (mention.changed) await this.appendMessage(workspace, { author: "system", text: `Mention syntax normalized: ${mention.names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; leaders assign with ensemble_delegate, peers with ensemble_handoff.`, kind: "system", taskID: task.id })
       if (currentTask.approvalID) {
         const linked = current.approvals[currentTask.approvalID]
@@ -3497,6 +3556,26 @@ export class EnsembleV2Service {
         }
         // Resolved meanwhile: drop the stale link and finish normally.
         currentTask.approvalID = undefined
+      }
+      if (!reply) {
+        const errorText = "The agent produced no answer."
+        currentTask.activeRunID = undefined
+        currentTask.claimedBy = undefined
+        currentTask.leaseUntil = undefined
+        if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
+          const delayMs = currentTask.attempts <= 1 ? 5_000 : 60_000
+          currentTask.state = "pending"
+          currentTask.outcome = "pending"
+          currentTask.error = errorText
+          currentTask.retryAfter = now() + delayMs
+          await this.store.saveSubtask(currentTask)
+          await this.finalizeStream(live, "No answer produced — retrying.", true, globalEpoch, workspaceEpoch, task.workspaceID)
+          this.defer(delayMs, () => this.schedule())
+          return
+        }
+        await this.failTask(currentTask, errorText)
+        await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
+        return
       }
       const children = Object.values(current.subtasks).filter((item) => item.parentID === currentTask.id)
       currentTask.activeRunID = undefined
@@ -3667,7 +3746,9 @@ export class EnsembleV2Service {
     // Ticket #71: batch reviews close only via the review tool once every
     // item is acted on or dismissed — never by child completion.
     if (parent.handoff?.batch === true) return
-    const children = Object.values(state.subtasks).filter((item) => item.parentID === parentID)
+    // Completion deliveries are post-turn hops, not synthesis inputs; counting
+    // them here would let an auto-handoff keep its finisher waiting forever.
+    const children = Object.values(state.subtasks).filter((item) => item.parentID === parentID && item.handoff?.completion !== true)
     if (children.length === 0 || children.some((child) => child.state !== "replied")) return
     const workspace = state.workspaces[parent.workspaceID]
     if (!workspace) return

@@ -2424,6 +2424,13 @@ test("task_status exposes the derived lifecycle facts", async () => {
       return true
     })
     await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    // Derived lifecycle facts are asserted once the child is actually claimed;
+    // an immediate read can legitimately observe the queued row first.
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const child = Object.values(next.state.subtasks).find((item: any) => item.title === "Child") as any
+      return child?.state === "working" && Boolean(child.leaseUntil)
+    }, 5_000)
     const status = await tools.get("task_status").execute({}, { sessionID })
     const rows = JSON.parse(status.content)
     const child = rows.find((row: any) => row.title === "Child")
@@ -2658,6 +2665,66 @@ test("ticket68: settling work rejects stale product approvals of every kind", as
     assert.equal(cancelled.ok, true)
     const after = await handlers.snapshot({ directory })
     assert.equal((after.state.approvals.out as any).status, "rejected")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket75: an empty assistant reply is retried, never a silent success", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-75-empty-"))
+  const { ctx } = fakeContext()
+  ctx.session.context = async () => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "   " }] }],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "introduce yourself" } })
+    await waitFor(async () => {
+      const snapshot = await handlers.snapshot({ directory })
+      return Object.values(snapshot.state.subtasks).some((task: any) => task.error === "The agent produced no answer.")
+    }, 15_000)
+    const snapshot = await handlers.snapshot({ directory })
+    const tasks = Object.values(snapshot.state.subtasks) as any[]
+    const task = tasks.find((item) => item.title === "introduce yourself")
+    assert.ok(task)
+    assert.equal(task.error, "The agent produced no answer.")
+    assert.notEqual(task.state, "replied")
+    assert.equal(tasks.some((item) => item.workKind === "handoff"), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket75: a waiting parent with terminal children is reconciled, not stuck working", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-75-reconcile-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "parent", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Parent", instruction: "Do parent", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true, attempts: 1, createdAt: 1 })
+  await seed.saveSubtask({ id: "child", workspaceID: "w", parentID: "parent", creatorType: "agent", creatorAgentID: "a", assigneeID: "a", title: "Child", instruction: "Do child", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 2, repliedAt: 3, finishedAt: 3 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const snapshot = await handlers.snapshot({ directory })
+      return snapshot.state.subtasks.parent?.state === "replied"
+    }, 15_000)
+    const snapshot = await handlers.snapshot({ directory })
+    const parent = snapshot.state.subtasks.parent as any
+    assert.equal(parent.state, "replied")
+    assert.equal(parent.awaitingChildren, false)
+    assert.notEqual(parent.state, "working")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

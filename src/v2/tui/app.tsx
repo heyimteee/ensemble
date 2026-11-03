@@ -2177,7 +2177,7 @@ export function EnsembleV2App() {
                                   const wrapWidth = bubbleContentWidth(messageWidth(), BUBBLE_CHROME)
                                   return (
                                   <box flexDirection="column" width="100%" marginTop={1}>
-                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={side === "left" ? accent : colors.muted} backgroundColor={colors.panel} padding={1} flexDirection="column">
+                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={side === "left" ? accent : message.queued ? colors.muted : colors.good} backgroundColor={colors.panel} padding={1} flexDirection="column">
                                       <text fg={tone(message.queued ? colors.muted : accent)} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "user"} fallback={
                                         <Show when={syntaxStyle} fallback={
