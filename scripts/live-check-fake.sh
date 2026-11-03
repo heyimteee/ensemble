@@ -765,6 +765,10 @@ for _ in $(seq 1 60); do
 done
 [[ "$handed" == "2" ]] || live_fail "expected one completion handoff per finished turn (got $handed)"
 live_log "both non-leader turns handed to the leader"
+# Ticket #73: the group ack is a concise system line — the waiting policy
+# and correlation ref stay in the tool result, never in an agent bubble.
+live_require_text "$LIVE_TUI_SESSION" "Handed to \$FakeAgent ·" 15 "concise handoff ack without policy text"
+live_assert_absence "$LIVE_TUI_SESSION" "do not call ensemble_delegate" "no policy text in the transcript"
 # Both pending completions coalesce into a single batch review turn.
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: Review 2 completions" 30 "batch review assigned to the leader"
 batch_items=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks); var batch = tasks.find(function (t) { return t.handoff && t.handoff.batch === true; }); return batch ? batch.handoff.itemIDs.length : 0 })()')
