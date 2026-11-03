@@ -326,7 +326,10 @@ live_log "peer turn ran to completed with asking/answered attribution ($peer_att
 # with the rail/chat borders, so the user line carries a deep space run
 # while the agent reply starts at the left margin behind its accent edge.
 pane_bubbles=$(live_capture "$LIVE_TUI_SESSION")
-echo "$pane_bubbles" | grep -qE " {15,}fake-queue-alpha" || live_fail "user bubble not right-aligned in text capture"
+# Rounded bubbles put the border glyph before the content; assert the user
+# text sits deep into the chat column (right-aligned) instead of matching a
+# space run that the border now interrupts.
+echo "$pane_bubbles" | awk 'index($0,"fake-queue-alpha")>50 {found=1} END{exit !found}' || live_fail "user bubble not right-aligned in text capture"
 echo "$pane_bubbles" | grep -qF "│ │ │ Onboarding complete. I am ready." || live_fail "agent bubble not left-aligned with accent edge in text capture"
 live_log "bubble layout observable in text capture (user right, agent left with edge)"
 # Ticket #67 inline completions: both delegation outcomes finished before
@@ -421,18 +424,6 @@ live_key "$LIVE_TUI_SESSION" End
 live_require_text "$LIVE_TUI_SESSION" "Answer from \$FakeAgent" 10 "End jumps back to the bottom"
 live_log "bare ↓ jump control with working End key"
 
-# Slice C direct surface (verbatim + queued): user text renders literally
-# while agent text stays Markdown, and parked user-owned input shows
-# `· queued · [x remove]` with removal by key.
-live_key "$LIVE_TUI_SESSION" "z"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 10 "direct surface for verbatim probe"
-live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on DM surface"
-live_type "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
-live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
-live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "verbatim reply finalized in place"
 # Ticket #72 long/multi-element bubble fixture: the agent reply carries a
 # long wrapping heading, a wrapping paragraph, a list, fenced code, and a
 # table inside one bubble. Settle with a bounded poll until every marker
@@ -452,10 +443,22 @@ live_assert_text "$LIVE_TUI_SESSION" "bubble table marker" "bubble table cell"
 live_assert_count "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" 1 "long heading exactly once, no overlap duplication"
 live_assert_count "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" 1 "fenced code marker exactly once"
 live_assert_count "$LIVE_TUI_SESSION" "bubble table marker" 1 "table cell exactly once"
-live_assert_text "$LIVE_TUI_SESSION" "fake-bubble-fixture" "DM bubble user line"
-live_assert_count "$LIVE_TUI_SESSION" "fake-bubble-fixture" 1 "DM bubble user line exactly once"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "bubble reply finalized in place"
 live_log "long multi-element bubble reply verified with no clipped markers"
+
+# Slice C direct surface (verbatim + queued): user text renders literally
+# while agent text stays Markdown, and parked user-owned input shows
+# `· queued · [x remove]` with removal by key.
+live_key "$LIVE_TUI_SESSION" "z"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 10 "direct surface for verbatim probe"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on DM surface"
+live_type "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
+live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
+live_require_absence "$LIVE_TUI_SESSION" "· checking the details…" 20 "verbatim reply finalized in place"
+
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"

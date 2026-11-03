@@ -233,7 +233,9 @@ const server = createServer(async (request, response) => {
     const prompt = messages.filter((message) => message?.role === "user").map((message) => textOf(message.content)).join("\n")
     const rich = prompt.includes(FAKE_RICH_PROMPT)
     const bubble = prompt.includes(FAKE_BUBBLE_PROMPT)
-    const text = rich ? RICH_MARKDOWN : bubble ? BUBBLE_MARKDOWN : SHORT_REPLY
+    // Bubble fixture wins: prior context can still contain fake-rich-fixture,
+    // and the bubble request must always return the long bubble document.
+    const text = bubble ? BUBBLE_MARKDOWN : rich ? RICH_MARKDOWN : SHORT_REPLY
     log("request", {
       request: requestID,
       model: body?.model,
