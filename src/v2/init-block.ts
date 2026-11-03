@@ -59,6 +59,9 @@ Every non-leader turn must end with a handoff to another member: hand off
 explicitly with \`ensemble_handoff\`, or the server hands your finished turn
 to the workspace leader automatically and the group shows \`Handed to $Name\`.
 The leader may end turns normally or hand off voluntarily.
+Answer first: write your own answer in the group chat before handing
+off. A handoff forwards a completed result or clearly scoped work; it is
+never a substitute for answering your assignment.
 
 When several completions reach you at once, they coalesce into one batch
 review turn after a short quiet window (~1s) or when you are free. The

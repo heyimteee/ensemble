@@ -467,6 +467,7 @@ live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while str
 live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "fake-queued-probe"
 live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after queued probe"
 live_require_text "$LIVE_TUI_SESSION" "· queued" 15 "parked user line flagged queued"
 live_require_text "$LIVE_TUI_SESSION" "[x remove]" 15 "remove affordance on the parked line"
 live_assert_count "$LIVE_TUI_SESSION" "fake-queued-probe" 1 "queued line rendered exactly once"
