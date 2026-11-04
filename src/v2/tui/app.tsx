@@ -41,6 +41,8 @@ import {
   type InteractionState,
 } from "./interaction.ts"
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
+import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
+import { createVimRegisterStore, normalizeVimKey, type VimBuffer } from "./vim.ts"
 import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
 import { layerEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
@@ -310,6 +312,39 @@ export function EnsembleV2App() {
     }, 3_000)
   }
   onCleanup(() => { if (messageTimer !== undefined) clearTimeout(messageTimer) })
+
+  // v5.6 T7: Normal-mode Vim editing for the composer. One internal register
+  // is shared by every text buffer; the system clipboard is primary and the
+  // adapter writes/reads it asynchronously with the register as fallback.
+  const vimRegister = createVimRegisterStore()
+  let vimClipboard: ReturnType<typeof createClipboardPort> | null = null
+  let composerVim: VimBuffer | null = null
+  let composerVimRef: any
+  const clipboardPort = () => {
+    if (!vimClipboard) vimClipboard = createClipboardPort(context.renderer)
+    return vimClipboard
+  }
+  const composerVimBuffer = (): VimBuffer | null => {
+    if (!composerRef) return null
+    if (composerVim && composerVimRef === composerRef) return composerVim
+    composerVimRef = composerRef
+    composerVim = createVimBuffer({
+      editor: createEditorPort(composerRef),
+      clipboard: clipboardPort(),
+      register: vimRegister,
+      onMessage: (message) => notify(message.text, message.tone),
+    })
+    return composerVim
+  }
+  const syncVimChord = (chord: string | null | undefined) => {
+    if (chord) dispatchInteraction({ type: "chord.set", chord })
+    else if (interaction().pendingChord) dispatchInteraction({ type: "chord.clear" })
+  }
+  onCleanup(() => {
+    vimClipboard?.dispose()
+    vimClipboard = null
+    composerVim = null
+  })
 
   const currentDraftSurface = (): DraftSurface | null => {
     const current = surface()
@@ -1259,6 +1294,7 @@ export function EnsembleV2App() {
   const focusComposer = () => queueMicrotask(() => composerRef?.focus?.())
   const composerHeight = () => computeComposerHeight(composerDraft(), Math.max(12, messageWidth() - 6))
   const setComposerValue = (value: string) => {
+    composerVim?.invalidate()
     if (composerRef) {
       composerRef.setText?.(value)
       composerRef.cursorOffset = value.length
@@ -1277,6 +1313,7 @@ export function EnsembleV2App() {
     const key = currentDraftKey()
     if (key === lastDraftKey) return
     lastDraftKey = key
+    composerVim?.invalidate()
     const value = draftFor(drafts(), key)
     setComposerDraft(value)
     setComposerCursor(value.length)
@@ -1329,12 +1366,15 @@ export function EnsembleV2App() {
   const startCompose = () => {
     if (!surface()) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
     composerEpoch++
+    composerVim?.invalidate()
     dispatchInteraction({ type: "insert.enter" })
     focusComposer()
   }
   /** Esc/Ctrl+G leave the editor but keep its surface draft. */
   const leaveComposer = () => {
     composerEpoch++
+    composerVim?.invalidate()
+    syncVimChord(null)
     try { composerRef?.blur?.() } catch {}
     closeCompletion()
     dispatchInteraction({ type: "leave.editor" })
@@ -1342,6 +1382,8 @@ export function EnsembleV2App() {
   /** Slash commands consume their text, so only this path clears a draft. */
   const resetComposer = () => {
     composerEpoch++
+    composerVim?.invalidate()
+    syncVimChord(null)
     setDrafts((store) => clearDraft(store, currentDraftKey()))
     setComposerDraft("")
     setComposerCursor(0)
@@ -1520,39 +1562,64 @@ export function EnsembleV2App() {
   }
 
   const handleComposerKey = (event: any): boolean => {
-    const name = String(event?.name ?? "")
-    if (name === "escape") {
+    const rawName = String(event?.name ?? "")
+    const ctrl = Boolean(event?.ctrl) || rawName.startsWith("ctrl+")
+    const name = rawName.startsWith("ctrl+") ? rawName.slice("ctrl+".length) : rawName
+    if (name === "escape" && !ctrl) {
       event?.preventDefault?.(); event?.stopPropagation?.()
       if (completion()) closeCompletion()
-      else dispatchInteraction({ type: "escape" })
+      else {
+        const wasInsert = interaction().mode === "insert"
+        dispatchInteraction({ type: "escape" })
+        const vim = composerVimBuffer()
+        vim?.invalidate()
+        if (wasInsert) {
+          vim?.normalizeCursor()
+          if (composerRef) setComposerCursor(Number(composerRef.cursorOffset ?? 0))
+        }
+        syncVimChord(null)
+      }
       return true
     }
-    if (name === "ctrl+g") {
+    if (ctrl && name === "g") {
       event?.preventDefault?.(); event?.stopPropagation?.()
       leaveComposer()
       return true
     }
+    // Stop-running work stays on the shared keymap layer; do not swallow it.
+    if (ctrl && name === "c") return false
     if (interaction().mode === "normal") {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      // Command and search still open from composer Normal (#80); the rest of
+      // Normal is the Vim grammar (#85).
       const sequence = String(event?.sequence ?? "")
       if (sequence === ":" || sequence === "/") {
-        event?.preventDefault?.(); event?.stopPropagation?.()
         openCommandLine(sequence)
         return true
       }
-      if (name === "i") {
-        event?.preventDefault?.(); event?.stopPropagation?.()
-        dispatchInteraction({ type: "insert.enter" })
-        return true
-      }
       if (name === "return" || name === "enter" || name === "kpenter") {
-        event?.preventDefault?.(); event?.stopPropagation?.()
+        composerVim?.invalidate()
+        syncVimChord(null)
         void submitComposer(String(composerRef?.plainText ?? "")).catch(showError)
         return true
       }
-      // Normal mode owns the composer's keys; later Vim tickets replace this
-      // no-op with the motion/operator catalog. Swallowing here keeps app
-      // actions from firing while the composer holds focus.
-      event?.preventDefault?.(); event?.stopPropagation?.()
+      // Normal mode owns the composer's keys: motions, operators, insert
+      // entries, yank/paste, undo/redo. Unbound keys are swallowed so app
+      // actions never fire while the composer holds focus.
+      const vim = composerVimBuffer()
+      const key = normalizeVimKey({ name, ctrl, shift: Boolean(event?.shift) })
+      if (!vim || !key) return true
+      void vim
+        .press(key)
+        .then((outcome) => {
+          syncVimChord(outcome.pendingChord)
+          if (outcome.mode === "insert") {
+            dispatchInteraction({ type: "insert.enter" })
+            focusComposer()
+          }
+          if (composerRef) setComposerCursor(Number(composerRef.cursorOffset ?? 0))
+        })
+        .catch(showError)
       return true
     }
     return false
@@ -2841,7 +2908,7 @@ export function EnsembleV2App() {
     if (composerActive()) {
       return interaction().mode === "insert"
         ? footerLine1({ focus: "composer", hasWork: showWorkBlock() ?? false })
-        : "i insert · enter send · esc chat · ctrl+g leave"
+        : "i insert · h/j/k/l · x/d · yy/p · enter send · esc chat"
     }
     if (interaction().focus === "work") return statuslineHints("work", { hasWork: hasWorkZone() })
     const keyContext = surfaceKeyContext()
@@ -3027,7 +3094,7 @@ export function EnsembleV2App() {
                       <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (interaction().mode === "normal" ? "COMPOSER · NORMAL · i insert · enter send · esc chat" : stoppable() ? "COMPOSER · enter send · esc normal · Ctrl+C stop" : "COMPOSER · enter send · esc normal") : "i compose · $ agent · @ file · / command"}</text>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (interaction().mode === "normal" ? "COMPOSER · NORMAL · i/a insert · h/j/k/l move · x/d edit · yy/p yank · enter send" : stoppable() ? "COMPOSER · enter send · esc normal · Ctrl+C stop" : "COMPOSER · enter send · esc normal") : "i compose · $ agent · @ file · / command"}</text>
                     </>
                   </Show>
                 }>

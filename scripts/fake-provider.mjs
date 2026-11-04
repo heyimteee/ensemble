@@ -14,6 +14,7 @@ import { setTimeout as delay } from "node:timers/promises"
 
 const FAKE_RICH_PROMPT = "fake-rich-fixture"
 const FAKE_BUBBLE_PROMPT = "fake-bubble-fixture"
+const FAKE_QUEUE_HOLD_PROMPT = "fake-queue-hold"
 const MODEL_ID = "ensemble-fake-model"
 
 const RICH_MARKDOWN = [
@@ -54,6 +55,24 @@ const RICH_MARKDOWN = [
 ].join("\n")
 
 const SHORT_REPLY = "Onboarding complete. I am ready.\n"
+
+// A deterministic long stream for the parked-message live probe. The queued
+// line only exists while the preceding turn streams, so a fixed-duration rich
+// reply made the assertion race the queue transition. At 36 lines and the
+// default 35 ms chunk delay this streams for roughly five seconds, leaving a
+// stable window for the probe to type, park, assert, and remove without
+// weakening the queued/removal assertions. Like the rich and bubble triggers,
+// it stays in session history, so later turns keep the long stream too.
+const QUEUE_HOLD_MARKDOWN = [
+  "# Queue Hold Fixture",
+  "",
+  "QUEUE_HOLD_MARKER",
+  ...Array.from(
+    { length: 36 },
+    (_, index) => `hold line ${index + 1} keeps this direct reply streaming while the parked-message probe runs.`,
+  ),
+  "",
+].join("\n")
 
 // Ticket #72 long/multi-element bubble fixture: a long wrapping heading,
 // a wrapping paragraph, a list, fenced code, and a table inside one bubble.
@@ -233,13 +252,27 @@ const server = createServer(async (request, response) => {
     const prompt = messages.filter((message) => message?.role === "user").map((message) => textOf(message.content)).join("\n")
     const rich = prompt.includes(FAKE_RICH_PROMPT)
     const bubble = prompt.includes(FAKE_BUBBLE_PROMPT)
+    // The queue-hold trigger is deliberately sticky in history, like the rich
+    // and bubble triggers: the live probe must always get the long stream even
+    // when the host adds another user-role context message after the prompt.
+    // Only the parked-message probe sends it, and no later DM turn depends on a
+    // short reply, so the longer stream cannot mask another assertion.
+    const hold = prompt.includes(FAKE_QUEUE_HOLD_PROMPT)
     // Ticket #74 fix-up: the DM session accumulates every earlier trigger,
     // so precedence must follow the LATEST trigger, not a fixed order —
     // otherwise the earlier rich trigger lingering in history shadows the
     // bubble prompt forever and its markers never render.
     const richAt = prompt.lastIndexOf(FAKE_RICH_PROMPT)
     const bubbleAt = prompt.lastIndexOf(FAKE_BUBBLE_PROMPT)
-    const text = bubbleAt > richAt ? BUBBLE_MARKDOWN : richAt >= 0 ? RICH_MARKDOWN : SHORT_REPLY
+    const holdAt = prompt.lastIndexOf(FAKE_QUEUE_HOLD_PROMPT)
+    const latest = Math.max(richAt, bubbleAt, holdAt)
+    const text = latest === holdAt && holdAt >= 0
+      ? QUEUE_HOLD_MARKDOWN
+      : bubbleAt > richAt
+        ? BUBBLE_MARKDOWN
+        : richAt >= 0
+          ? RICH_MARKDOWN
+          : SHORT_REPLY
     log("request", {
       request: requestID,
       model: body?.model,
@@ -247,6 +280,7 @@ const server = createServer(async (request, response) => {
       messages: messages.length,
       rich,
       bubble,
+      hold,
       promptTail: prompt.slice(-120),
     })
     try {
