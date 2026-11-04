@@ -7,6 +7,11 @@ import {
   filterSkills,
   settingsTabLine,
   skillAssigned,
+  skillPageCount,
+  skillPageForCursor,
+  skillPageItems,
+  skillPageSlice,
+  skillPaginationText,
   skillRowLabel,
   skillToggleMark,
 } from "./skills.ts"
@@ -39,16 +44,16 @@ test("assignment state is a fill mark, never a tick", () => {
   assert.equal(skillToggleMark(false), "[ ]")
 })
 
-test("the visible cap keeps 40 rows and names the overflow explicitly", () => {
-  assert.equal(SKILL_VISIBLE_LIMIT, 40)
-  const many: SkillOption[] = Array.from({ length: 45 }, (_, index) => ({ id: `s${index}`, name: `s${index}` }))
+test("the visible cap keeps 12 rows and names the overflow explicitly", () => {
+  assert.equal(SKILL_VISIBLE_LIMIT, 12)
+  const many: SkillOption[] = Array.from({ length: 15 }, (_, index) => ({ id: `s${index}`, name: `s${index}` }))
   const capped = capSkills(many)
-  assert.equal(capped.visible.length, 40)
-  assert.equal(capped.overflow, 5)
-  assert.equal(capLineText(capped.overflow), "· +5 more — refine filter")
-  const exact = capSkills(many.slice(0, 40))
+  assert.equal(capped.visible.length, 12)
+  assert.equal(capped.overflow, 3)
+  assert.equal(capLineText(capped.overflow), "· +3 more — refine filter")
+  const exact = capSkills(many.slice(0, 12))
   assert.equal(exact.overflow, 0)
-  assert.equal(exact.visible.length, 40)
+  assert.equal(exact.visible.length, 12)
 })
 
 test("the settings tab line carries live counts and marks the active tab", () => {
@@ -58,4 +63,20 @@ test("the settings tab line carries live counts and marks the active tab", () =>
   assert.ok(line.includes("›"), `active tab not marked: ${line}`)
   const general = settingsTabLine("general", 0, 0, 0)
   assert.ok(general.startsWith("› General"), `active general not marked: ${general}`)
+})
+
+test("skill pagination keeps the cursor row visible with a page indicator", () => {
+  const many: SkillOption[] = Array.from({ length: 30 }, (_, index) => ({ id: `s${index}`, name: `s${index}` }))
+  assert.equal(skillPageCount(30), 3)
+  assert.deepEqual(skillPageSlice(many, 2).slice(0, 1).map((skill) => skill.id), ["s12"])
+  const third = skillPageItems(many, 3)
+  assert.equal(third[0].index, 24)
+  assert.equal(third.at(-1)?.index, 29)
+  assert.equal(skillPageForCursor(0), 1)
+  assert.equal(skillPageForCursor(12), 2)
+  assert.equal(skillPageForCursor(25), 3)
+  assert.equal(skillPaginationText(30, 2), "page 2/3 · PgUp/PgDn")
+  assert.equal(skillPaginationText(5, 1), "")
+  // The last page may be short; the cursor still addresses real rows only.
+  assert.equal(skillPageItems(many.slice(0, 29), 3).length, 5)
 })

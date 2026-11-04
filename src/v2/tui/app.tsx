@@ -14,7 +14,7 @@ import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
-import { EMPTY_MARK, createStaggerState, shouldRunMotion, updateStagger } from "./motion.ts"
+import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
 import {
   chromeOwnsFocus,
   confirmFooter,
@@ -26,7 +26,7 @@ import {
   resolveChromeFocus,
   resultFooter,
 } from "./chrome.ts"
-import { SKILL_VISIBLE_LIMIT } from "./skills.ts"
+import { SKILL_VISIBLE_LIMIT, skillPageForCursor } from "./skills.ts"
 import { modelPickerLabel, sortModelsByProvider } from "./settings.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue, filterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
@@ -227,10 +227,6 @@ export function EnsembleV2App() {
   let transcriptScrollRef: any
   let helpScrollRef: any
   const lineCache = new Map<string, ChatLine>()
-  // Review fix (finding 4): mount-once stagger tracker for the transcript.
-  // Lives with the component (never re-keyed), pruned to the window inside
-  // updateStagger; scroll/finalization stay untouched (see render).
-  const staggerState = createStaggerState()
   let refreshSeq = 0
   let chatSeq = 0
   // Highest snapshot store version applied so far. Out-of-order RPC
@@ -327,6 +323,9 @@ export function EnsembleV2App() {
     for (const id of lineCache.keys()) if (!seen.has(id)) lineCache.delete(id)
     return next
   }
+  // Ticket #77: `queued` now comes from the service's queue-truth derivation
+  // (the queue entry is authoritative; stale persisted flags no longer win),
+  // so the UI renders exactly what the service reports.
   const chatLines = createMemo<ChatLine[]>(() => {
     if (surface()?.kind === "agent") {
       const messages: ChatLine[] = (chatContext()?.messages ?? []).slice(-TRANSCRIPT_WINDOW).map((message: ChatMessage) => ({
@@ -467,15 +466,20 @@ export function EnsembleV2App() {
       const entry = byLabel.get(label)
       return { label, agentID: entry?.agentID, verb: entry?.verb ?? ACTIVITY_DEFAULT_VERB, kind: entry?.kind ?? ("checking" as ActivityVerbKind) }
     })
-    const queuedShown =
-      shown.length > 0
-        ? queued.filter((label) => !shown.some((entry) => entry.label === label)).slice(0, MAX_VISIBLE_ACTIVITY)
-        : []
+    // Ticket #77: queued work is real work and must be visible on its own,
+    // not only when something else is live. This is why a just-handoff'd
+    // recipient showed nothing until their answer — or a later live run —
+    // appeared: the old gate rendered queued labels only alongside live
+    // ones. Queued labels now always render, deduped against live and
+    // capped at the same budget.
+    const queuedShown = queued
+      .filter((label) => !shown.some((entry) => entry.label === label))
+      .slice(0, MAX_VISIBLE_ACTIVITY)
     return {
       shown,
       queued: queuedShown,
       overflow:
-        selected.overflow + (shown.length > 0 ? Math.max(0, queued.length - queuedShown.length) : 0),
+        selected.overflow + Math.max(0, queued.length - queuedShown.length),
     }
   })
   // Ticket #67 one author-color source: the transcript, activity lines, and
@@ -542,6 +546,14 @@ export function EnsembleV2App() {
     const query = skillFilter().trim().toLowerCase()
     return skills().filter((skill) => !query || skill.id.toLowerCase().includes(query) || skill.name.toLowerCase().includes(query) || (skill.description ?? "").toLowerCase().includes(query))
   })
+  // Ticket #77 skill pagination: the page is derived from the cursor, so j/k
+  // scrolls through every skill and the visible window always contains the
+  // cursor. PgUp/PgDn jump by one page (cursor-anchored, ordinal preserved).
+  const skillPage = () => skillPageForCursor(skillCursor())
+  const moveSkillPage = (delta: number) => {
+    const max = Math.max(0, filteredSkills().length - 1)
+    setSkillCursor((cursor) => Math.max(0, Math.min(max, cursor + delta * SKILL_VISIBLE_LIMIT)))
+  }
   const filteredMemories = createMemo(() => filterMemories(agentMemories(), memoryFilter()))
   const selectedMissingSkills = createMemo(() => {
     const agent = draft() ?? selectedAgent()
@@ -1081,6 +1093,11 @@ export function EnsembleV2App() {
     const target = selectedAgent() ?? rosterAgents()[0]
     if (!target) return
     setSettingsAgentID(target.id); setSettingsTab("general"); setDraft(structuredClone(target)); setDirty(false)
+    // Ticket #77: fresh cursors/filters so the paginated skill list always
+    // opens on a row that exists.
+    setSkillCursor(0); setSkillFilter(""); setSkillFilterEditing(false)
+    setMemoryCursor(0); setMemoryFilter(""); setMemoryFilterEditing(false)
+    setBackupCursor(0)
   }
 
   const closeSettings = async () => {
@@ -1244,7 +1261,7 @@ export function EnsembleV2App() {
   const moveSettingsCursor = (delta: number) => {
     if (settingsTab() === "memories") setMemoryCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredMemories().length - 1), cursor + delta)))
     else if (settingsTab() === "models") setBackupCursor((cursor) => Math.max(0, Math.min(Math.max(0, (draft()?.backupModels.length ?? 1) - 1), cursor + delta)))
-    else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, Math.min(filteredSkills().length, SKILL_VISIBLE_LIMIT) - 1), cursor + delta)))
+    else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredSkills().length - 1), cursor + delta)))
   }
 
   // Slice B motion gate: the 4 fps clock runs only while something is in
@@ -1262,16 +1279,10 @@ export function EnsembleV2App() {
       process.env,
     )
 
-  // Review fix (finding 4): ids staggering on this paint — newly mounted
-  // transcript rows only, capped, one tick, static when idle or reduced.
-  // Re-evaluates per poll/chunk but never re-triggers (mount-once guard).
-  // Ordering: this memo calls motionOn(), so it must stay below the motionOn
-  // definition — Solid evaluates memos eagerly at creation, and a memo placed
-  // above a later `const` it calls crashes the route with a temporal-dead-zone
-  // error (see app-order.test.ts, which pins this declaration order).
-  const staggeringIds = createMemo<Set<string>>(() =>
-    updateStagger(staggerState, finalizedLines().map((line) => line.id), motionFrame(), motionOn(), process.env),
-  )
+  // Transcript text never dims for entrance motion (ticket #77): color
+  // dimming read as a wrong/muted author name while the Markdown body kept
+  // full color, and the modulo motion tick could re-dim old rows. Attribution
+  // and body colors are stable; only frames/glyphs animate.
 
   // Idle-quiescent frame clock (slice B): one 4 fps interval per
   // motion-active epoch. Snapshot polls re-run this effect ~4×/s, so the
@@ -1287,7 +1298,10 @@ export function EnsembleV2App() {
     clockRunning = want
     if (clockTimer !== undefined) { clearInterval(clockTimer); clockTimer = undefined }
     if (want) {
-      clockTimer = setInterval(() => setMotionFrame((frame) => (frame + 1) % 120), 250)
+      // Ticket #77: monotonic tick — never modulo-wrapped. Frame helpers do
+      // their own modular cycle; wrapping here could make a new tick equal an
+      // old mount tick and re-trigger stale state.
+      clockTimer = setInterval(() => setMotionFrame((frame) => frame + 1), 250)
     } else {
       setMotionFrame(0)
     }
@@ -1458,10 +1472,12 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.edit", title: "Ensemble: Edit", bind: "e", run: () => void editField().catch(showError) },
         { id: "ensemble.v2.memory.new", title: "Ensemble: New memory", bind: "n", enabled: () => settingsTab() === "memories", run: () => void addMemory().catch(showError) },
         { id: "ensemble.v2.backup.add", title: "Ensemble: Add backup", bind: "b", enabled: () => settingsTab() === "models", run: () => void addBackup().catch(showError) },
-        { id: "ensemble.v2.backup.up", title: "Ensemble: Move backup up", bind: "ctrl+up", enabled: () => settingsTab() === "models", run: () => reorderBackup("up") },
-        { id: "ensemble.v2.backup.down", title: "Ensemble: Move backup down", bind: "ctrl+down", enabled: () => settingsTab() === "models", run: () => reorderBackup("down") },
+        { id: "ensemble.v2.backup.up", title: "Ensemble: Move backup up", bind: "shift+up", enabled: () => settingsTab() === "models", run: () => reorderBackup("up") },
+        { id: "ensemble.v2.backup.down", title: "Ensemble: Move backup down", bind: "shift+down", enabled: () => settingsTab() === "models", run: () => reorderBackup("down") },
         { id: "ensemble.v2.backup.remove", title: "Ensemble: Remove backup", bind: "backspace", enabled: () => settingsTab() === "models", run: () => removeBackup() },
-        { id: "ensemble.v2.save", title: "Ensemble: Save", bind: "ctrl+s", run: () => void saveSettings().catch(showError) },
+        { id: "ensemble.v2.save", title: "Ensemble: Save", bind: "s", run: () => void saveSettings().catch(showError) },
+        { id: "ensemble.v2.skill.prev", title: "Ensemble: Previous skill page", bind: "pageup", enabled: () => settingsTab() === "skillbox", run: () => moveSkillPage(-1) },
+        { id: "ensemble.v2.skill.next", title: "Ensemble: Next skill page", bind: "pagedown", enabled: () => settingsTab() === "skillbox", run: () => moveSkillPage(1) },
         { id: "ensemble.v2.skill", title: "Ensemble: Toggle skill", bind: "space", enabled: () => settingsTab() === "skillbox", run: () => toggleSkill() },
         { id: "ensemble.v2.filter", title: "Ensemble: Filter skills", bind: "ctrl+f", enabled: () => settingsTab() === "skillbox", run: () => { setSkillFilterEditing(true); setSkillCursor(0) } },
         { id: "ensemble.v2.memory.filter", title: "Ensemble: Filter memories", bind: "ctrl+f", enabled: () => settingsTab() === "memories", run: () => { setMemoryFilterEditing(true); setMemoryCursor(0) } },
@@ -1472,7 +1488,7 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.settings.down", title: "Ensemble: Down", bind: "down", run: () => moveSettingsCursor(1) },
         { id: "ensemble.v2.settings.back", title: "Ensemble: Close settings", bind: "escape", run: () => void closeSettings() },
       ],
-      bindings: ["ensemble.v2.tab", "ensemble.v2.edit", "ensemble.v2.memory.new", "ensemble.v2.backup.add", "ensemble.v2.backup.up", "ensemble.v2.backup.down", "ensemble.v2.backup.remove", "ensemble.v2.save", "ensemble.v2.skill", "ensemble.v2.filter", "ensemble.v2.memory.filter", "ensemble.v2.memory.filter.slash", "ensemble.v2.memory.delete", "ensemble.v2.memory.promote", "ensemble.v2.settings.up", "ensemble.v2.settings.down", "ensemble.v2.settings.back"],
+      bindings: ["ensemble.v2.tab", "ensemble.v2.edit", "ensemble.v2.memory.new", "ensemble.v2.backup.add", "ensemble.v2.backup.up", "ensemble.v2.backup.down", "ensemble.v2.backup.remove", "ensemble.v2.save", "ensemble.v2.skill.prev", "ensemble.v2.skill.next", "ensemble.v2.skill", "ensemble.v2.filter", "ensemble.v2.memory.filter", "ensemble.v2.memory.filter.slash", "ensemble.v2.memory.delete", "ensemble.v2.memory.promote", "ensemble.v2.settings.up", "ensemble.v2.settings.down", "ensemble.v2.settings.back"],
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
@@ -2138,15 +2154,6 @@ export function EnsembleV2App() {
                                     )
                                   }
                                   const message = row.message!
-                                  // Review fix (finding 4): first-paint stagger
-                                  // — newly arrived rows enter dim one tick
-                                  // then full (glyph/color only, no reflow),
-                                  // capped at 6, mount-once, static under
-                                  // reduced motion or idle. Identity stays
-                                  // id-keyed and the scrollbox untouched, so
-                                  // scroll and finalization are unaffected.
-                                  const stagger = staggeringIds().has(message.id)
-                                  const tone = (normal: typeof colors.text) => (stagger ? colors.faint : normal)
                                   const side = bubbleSide(message.role)
                                   // System, task, approval, assignment, and
                                   // completion-adjacent lines stay full-width
@@ -2155,11 +2162,11 @@ export function EnsembleV2App() {
                                   if (!isBubbledRole(message.role)) {
                                     return (
                                     <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                      <text fg={tone(message.queued ? colors.muted : authorColor({ agentID: message.agentID, author: message.author, role: message.role }))} bg={colors.bg} width="100%" truncate>{headerForLine(message)}</text>
+                                      <text fg={message.queued ? colors.warn : authorColor({ agentID: message.agentID, author: message.author, role: message.role })} bg={colors.bg} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "agent" && syntaxStyle} fallback={
-                                        <text fg={tone(message.role === "system" || message.queued ? colors.muted : colors.text)} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
+                                        <text fg={message.role === "system" || message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                       }>
-                                        {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={tone(colors.text)} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
+                                        {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width="100%" fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
                                       </Show>
                                     </box>
                                     )
@@ -2183,15 +2190,15 @@ export function EnsembleV2App() {
                                   return (
                                   <box flexDirection="column" width="100%" marginTop={1}>
                                     <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={side === "left" ? accent : message.queued ? colors.warn : colors.good} backgroundColor={colors.panel} padding={1} flexDirection="column">
-                                      <text fg={tone(message.queued ? colors.warn : accent)} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
+                                      <text fg={message.queued ? colors.warn : accent} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "user"} fallback={
                                         <Show when={syntaxStyle} fallback={
-                                          <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
+                                          <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
                                         }>
-                                          {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={wrapWidth} fg={tone(colors.text)} bg={colors.panel} conceal tableOptions={{ widthMode: "content" }} />}
+                                          {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={wrapWidth} fg={colors.text} bg={colors.panel} conceal tableOptions={{ widthMode: "content" }} />}
                                         </Show>
                                       }>
-                                        <text fg={tone(message.queued ? colors.muted : colors.text)} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth).join("\n")}</text>
+                                        <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth).join("\n")}</text>
                                       </Show>
                                     </box>
                                   </box>
@@ -2247,8 +2254,8 @@ export function EnsembleV2App() {
                             </box>
                           </Show>
                           <Show when={!atBottom()}>
-                            <box position="absolute" bottom={1} right={1} zIndex={40} onMouseDown={() => jumpToBottom()}>
-                              <text fg={colors.focus} bg={colors.bg}>↓</text>
+                            <box position="absolute" bottom={2} right={4} zIndex={40} onMouseDown={() => jumpToBottom()} border borderStyle="rounded" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0}>
+                              <text fg={colors.focus} bg={colors.panel}>↓</text>
                             </box>
                           </Show>
                         </box>
@@ -2286,7 +2293,7 @@ export function EnsembleV2App() {
                 <HelpView colors={colors} scrollRef={(value: any) => { helpScrollRef = value }} />
               </Show>
             }>
-              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={filteredMemories()} memoryCursor={memoryCursor()} memoryFilter={memoryFilter()} memoryFilterEditing={memoryFilterEditing()} memoryTotal={agentMemories().length} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} filterEditing={skillFilterEditing()} skillCatalog={skills()} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={filteredMemories()} memoryCursor={memoryCursor()} memoryFilter={memoryFilter()} memoryFilterEditing={memoryFilterEditing()} memoryTotal={agentMemories().length} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} filterEditing={skillFilterEditing()} skillCatalog={skills()} skillPage={skillPage()} />
             </Show>
           </box>
         </box>

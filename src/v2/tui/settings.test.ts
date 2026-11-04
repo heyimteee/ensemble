@@ -138,7 +138,7 @@ test("state lines share one grammar: empty, loading, unavailable, and no-agent",
 })
 
 test("footers name the keys that act on each tab plus the shared save grammar", () => {
-  assert.equal(settingsSaveFooter(), "Ctrl+S save · Esc cancel")
+  assert.equal(settingsSaveFooter(), "s save · Esc cancel")
   assert.ok(settingsTabFooter("general").includes("e edits"), "general names edit")
   assert.ok(settingsTabFooter("models").includes("b add"), "models names add")
   assert.ok(settingsTabFooter("models").includes("move"), "models names reorder")

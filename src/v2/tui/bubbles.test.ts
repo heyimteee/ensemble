@@ -128,6 +128,12 @@ test("one author color serves transcript rows and activity labels alike", () => 
   assert.equal(byID, agentColor(agent() as any, "#accent", 0, []))
   assert.equal(unifiedAuthorColor({ author: "You", role: "user" }, agents, roster as any, colors, []), "#good")
   assert.equal(unifiedAuthorColor({ author: "Ensemble", role: "system" }, agents, roster as any, colors, []), "#muted")
+  // Ticket #77: a system-authored line that still carries a real agentID
+  // resolves the agent color — "Handed to $Nova" names are never grey.
+  assert.equal(
+    unifiedAuthorColor({ agentID: "a", author: "Ensemble", role: "system" }, agents, roster as any, colors, []),
+    agentColor(agent() as any, "#accent", 0, []),
+  )
   // Unknown agents fall back to the accent without throwing.
   assert.equal(unifiedAuthorColor({ agentID: "zzz", author: "Ghost", role: "agent" }, {}, [], colors, []), "#accent")
 })
@@ -180,6 +186,13 @@ test("merged transcript orders completions at their finish position in one windo
     40,
   )
   assert.equal(clash.length, 2)
+  // Ticket #77 ordering: at an equal timestamp a message row sorts before a
+  // completion row, so an answer is never displaced by its own handoff ack.
+  assert.deepEqual(mergeTranscriptRows(
+    [{ id: "z-message", createdAt: 10 }],
+    [{ id: "done:a-task", text: "x", at: 10 }],
+    40,
+  ).map((row) => row.id), ["z-message", "done:a-task"])
   // The shared window drops the oldest rows first.
   const windowed = mergeTranscriptRows(messages, completions, 2)
   assert.deepEqual(windowed.map((row) => row.id), ["m2", "m3"])

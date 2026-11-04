@@ -136,21 +136,24 @@ export function skillboxEmptyLine(): string {
 /** Per-tab action footer: the keys that act on this tab. The shared save
  *  line renders beneath it via settingsSaveFooter. */
 export function settingsTabFooter(tab: SettingsTabID): string {
+  // Ticket #77 keybinds: Ctrl+S and Ctrl+arrows collide with macOS window
+  // shortcuts, Cmd chords, and the Herdr leader. Save is a plain `s` inside
+  // the settings layer (no global conflict there); reorder uses Shift+arrows.
   switch (tab) {
     case "general":
-      return "e edits a field · Ctrl+S saves"
+      return "e edits a field · s saves"
     case "models":
-      return "e main · b add · Ctrl+↑/↓ move · Backspace remove"
+      return "e main · b add · Shift+↑/↓ move · Backspace remove"
     case "memories":
       return "e edit · n new · Ctrl+D delete · Ctrl+P promote · / filter"
     case "skillbox":
-      return "Space toggles · empty means no optional skills"
+      return "Space toggles · PgUp/PgDn pages · empty means no optional skills"
   }
 }
 
 /** Shared save/cancel footer grammar under every tab. */
 export function settingsSaveFooter(): string {
-  return "Ctrl+S save · Esc cancel"
+  return "s save · Esc cancel"
 }
 
 /** Agent-list group header with its live count. */

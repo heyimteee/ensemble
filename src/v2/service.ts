@@ -627,7 +627,12 @@ export class EnsembleV2Service {
         .filter((entry) => entry.id && entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID))
         .map((entry) => entry.id),
     )
-    const stored = (state.dmTranscripts[key] ?? []).map((message) => ({ ...message, queued: queuedIDs.has(message.id) || message.queued === true }))
+    // Ticket #77 root cause of permanently-grey sent lines: the stored DM
+    // line keeps `queued: true` after it was flushed, and `|| message.queued`
+    // made that stale bit outrank the queue's own truth. The queue entry is
+    // authoritative: a line is queued exactly while its entry is still
+    // `queued`; sent/failed/removed entries mean the line renders as sent.
+    const stored = (state.dmTranscripts[key] ?? []).map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
     const native = mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
     const messages = mergeDmTranscript(stored, native)
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
@@ -2586,6 +2591,11 @@ export class EnsembleV2Service {
       content,
       path: finished.handoff?.path,
     })
+    // Ticket #71 quiet window: park the delivery briefly so completions for
+    // one recipient consolidate into a single batch review instead of racing
+    // it. Ticket #77: the parked hop is queued work and the activity surface
+    // shows the recipient immediately (queued labels are no longer hidden
+    // behind a live row).
     const hop: Subtask = {
       id: id("task"),
       workspaceID: workspace.id,
@@ -2606,8 +2616,6 @@ export class EnsembleV2Service {
       workKind: "handoff",
       queueKey: key,
       deadlineAt: at + DEADLINE_MS,
-      // Park inside the batch quiet window so pending completions for one
-      // recipient consolidate into a single review turn instead of racing it.
       retryAfter: at + COMPLETION_QUIET_WINDOW_MS,
       handoff: {
         correlationID,

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
-import { V2Store } from "./store.ts"
+import { V2Store, bindingKey } from "./store.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -1992,6 +1992,40 @@ test("a queued direct message stays visible as queued, then sent", async () => {
       const items = (next.result.messages as any[]).filter((message) => message.role === "user")
       return items.length === 2 && items.every((message) => message.queued !== true)
     }, 4000)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("a sent direct message ignores a stale persisted queued flag", async () => {
+  // Ticket #77 root cause of permanently-grey sent lines: chatContext used to
+  // OR the stored line's own `queued` bit, so a line flushed after the fact
+  // stayed queued forever. The queue entry is the single source of truth.
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-stale-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const sent = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "Sent already" } })
+    assert.ok(sent.ok)
+    const store = (service as any).store as V2Store
+    const stored = store.snapshot().dmTranscripts[bindingKey("home", "a")].find((message) => message.id === sent.result.id)
+    assert.ok(stored)
+    await store.saveDmMessage("home", "a", { ...stored!, queued: true })
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    const line = (context.result.messages as any[]).find((message) => message.id === sent.result.id)
+    assert.equal(line.queued, false)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

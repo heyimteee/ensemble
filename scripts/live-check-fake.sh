@@ -13,6 +13,11 @@ live_require_runtime
 live_require_node
 live_setup "fake"
 
+# Ticket #77: keep fake streams long enough that the parked-queue probe is
+# deterministic — the queued line must still be parked when the removal key
+# is pressed. This only slows the fake harness; the real provider is untouched.
+export ENSEMBLE_FAKE_CHUNK_DELAY_MS="${ENSEMBLE_FAKE_CHUNK_DELAY_MS:-60}"
+
 ENSEMBLE_LIVE_TUI_WIDTH="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
 ENSEMBLE_LIVE_TUI_HEIGHT="${ENSEMBLE_LIVE_TUI_HEIGHT:-80}"
 
@@ -643,14 +648,15 @@ live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings header names the agent"
 live_assert_text "$LIVE_TUI_SESSION" "AGENTS (1)" "agent list names its count"
 live_assert_text "$LIVE_TUI_SESSION" "WORKSPACES (1)" "workspace list names its count"
-live_assert_text "$LIVE_TUI_SESSION" "FakeAgent — Engineering" "agent list names the title description"
+live_assert_text "$LIVE_TUI_SESSION" "FakeAgent" "agent list names the agent"
+live_assert_text "$LIVE_TUI_SESSION" "Engineering" "agent list names the title description"
 live_assert_text "$LIVE_TUI_SESSION" "Identity — name" "general section header"
 live_assert_text "$LIVE_TUI_SESSION" "Name       FakeAgent" "general label/value alignment"
 live_assert_text "$LIVE_TUI_SESSION" "Title      Engineering" "title row aligns with name row"
 live_assert_text "$LIVE_TUI_SESSION" "Model      ensemble-fake/ensemble-fake-model" "general model summary"
 live_assert_text "$LIVE_TUI_SESSION" "› General" "settings tab cursor"
 live_assert_text "$LIVE_TUI_SESSION" "e edits a field" "general action footer"
-live_assert_text "$LIVE_TUI_SESSION" "Ctrl+S save · Esc cancel" "shared save footer"
+live_assert_text "$LIVE_TUI_SESSION" "s save · Esc cancel" "shared save footer"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "Main + backups — main + 0 backups" 10 "models section header with counts"
 live_assert_text "$LIVE_TUI_SESSION" "(•)" "main slot fill mark"

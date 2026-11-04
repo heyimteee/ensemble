@@ -112,6 +112,10 @@ export function bubbleHead(author: string, relay?: RelayParties): string {
  * (ticket #67). Agents resolve by ID first with a roster-name fallback so
  * transcript rows (which carry IDs) and activity labels (which carry names)
  * can never disagree; the user reads green and system lines read muted.
+ * Ticket #77 (root cause): system-authored lines that carry a real agentID
+ * still resolve to that agent's color — only generic system (no agent)
+ * stays muted, so "Handed to $Clark" / "Answer from $Clark" names are
+ * never grey.
  */
 export function unifiedAuthorColor(
   line: { agentID?: string; author: string; role: "user" | "agent" | "system" },
@@ -121,16 +125,23 @@ export function unifiedAuthorColor(
   categorical: readonly any[],
 ): any {
   if (line.role === "user") return colors.good
-  if (line.role === "system") return colors.muted
   const byID = line.agentID ? agents[line.agentID] : undefined
   const index = line.agentID
     ? roster.findIndex((item) => item.id === line.agentID)
     : roster.findIndex((item) => item.name === line.author)
   const agent = byID ?? (index >= 0 ? roster[index] : undefined)
+  if (agent) return agentColor(agent, colors.accent, Math.max(0, index), categorical)
+  if (line.role === "system") return colors.muted
   return agentColor(agent, colors.accent, Math.max(0, index), categorical)
 }
 
-/** One terminal outcome as a muted inline transcript row. Non-terminal work maps to nothing. */
+  // Ticket #77 handoff ordering: completions sort by causal position,
+  // not finishedAt lexical ties. A completion's `at` is the finishing
+  // task's finish time; the transcript sorts by (at, message-then-completion)
+  // is insufficient — instead we make mergeTranscriptRows sort completions
+  // after messages with the same timestamp via a sequence tie-breaker.
+  // The service ensures hop.createdAt < recipient answer.createdAt, so
+  // ordering by createdAt emerges naturally once finishedAt is not used.
 export type InlineCompletion = { id: string; text: string; at: number }
 
 export function completionEntry(
@@ -140,6 +151,13 @@ export function completionEntry(
 ): InlineCompletion | undefined {
   const text = terminalAnnouncement(task, agentLabel, now)
   if (text === undefined) return undefined
+  // Ticket #77 handoff ordering: completions sort by causal position,
+  // not finishedAt lexical ties. A completion's `at` is the finishing
+  // task's finish time; the transcript sorts by (at, message-then-completion)
+  // is insufficient — instead we make mergeTranscriptRows sort completions
+  // after messages with the same timestamp via a sequence tie-breaker.
+  // The service ensures hop.createdAt < recipient answer.createdAt, so
+  // ordering by createdAt emerges naturally once finishedAt is not used.
   return {
     id: `done:${task.id}`,
     text,
@@ -171,15 +189,17 @@ export function accumulateCompletions(
 }
 
 /** One row of the merged transcript: either a conversation line or a completion. Exactly one side is set. */
-export type MergedRow<T> = { id: string; at: number; message?: T; completion?: InlineCompletion }
+export type MergedRow<T> = { id: string; at: number; message?: T; completion?: InlineCompletion; kind?: "message" | "completion" }
 
 /**
  * Merge conversation lines with inline completions into one time-ordered
  * transcript window (ticket #67): completions render at their finish
- * position, not in a trailing feed. Ties break by row ID so the order is
- * deterministic; rows beyond the shared window fall off the front; message
- * and completion IDs live in disjoint namespaces (`done:` prefix), so one
- * outcome can never collide with or duplicate a message row. Pure.
+ * position, not in a trailing feed. Ties break deterministically:
+ * messages win over completions at the same timestamp, then by row ID,
+ * so an answer can never precede its own handoff ack. Rows beyond the
+ * shared window fall off the front; message and completion IDs live in
+ * disjoint namespaces (`done:` prefix), so one outcome can never collide
+ * with or duplicate a message row. Pure.
  */
 export function mergeTranscriptRows<T extends { id: string; createdAt: number }>(
   messages: T[],
@@ -187,10 +207,14 @@ export function mergeTranscriptRows<T extends { id: string; createdAt: number }>
   window: number = TRANSCRIPT_WINDOW,
 ): MergedRow<T>[] {
   const rows: MergedRow<T>[] = [
-    ...messages.map((message) => ({ id: message.id, at: message.createdAt, message })),
-    ...completions.map((completion) => ({ id: completion.id, at: completion.at, completion })),
+    ...messages.map((message) => ({ id: message.id, at: message.createdAt, message, kind: "message" as const })),
+    ...completions.map((completion) => ({ id: completion.id, at: completion.at, completion, kind: "completion" as const })),
   ]
-  rows.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  rows.sort((a, b) => {
+    if (a.at !== b.at) return a.at - b.at
+    if (a.kind !== b.kind) return a.kind === "message" ? -1 : 1
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+  })
   const seen = new Set<string>()
   const deduped = rows.filter((row) => {
     if (seen.has(row.id)) return false

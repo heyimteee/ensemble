@@ -11,7 +11,7 @@ export type SettingsTabID = "general" | "models" | "memories" | "skillbox"
  */
 
 /** Rows rendered before the overflow line names the remainder. */
-export const SKILL_VISIBLE_LIMIT = 40
+export const SKILL_VISIBLE_LIMIT = 12
 
 /** Substring filter across id, name, and description (case-insensitive). */
 export function filterSkills(catalog: readonly SkillOption[], query: string): SkillOption[] {
@@ -50,6 +50,36 @@ export function capSkills<T>(list: readonly T[], limit: number = SKILL_VISIBLE_L
 /** Overflow line shown when the catalog/filter exceeds the viewport. */
 export function capLineText(overflow: number): string {
   return `· +${overflow} more — refine filter`
+}
+
+/** Pagination helpers for the Skillbox tab (ticket #77): 12 rows per page. */
+export function skillPageCount(total: number, perPage: number = SKILL_VISIBLE_LIMIT): number {
+  return Math.max(1, Math.ceil(total / perPage))
+}
+
+/** `page 3/11` grammar; empty when everything fits on one page. */
+export function skillPaginationText(total: number, page: number, perPage: number = SKILL_VISIBLE_LIMIT): string {
+  const pages = skillPageCount(total, perPage)
+  if (pages <= 1) return ""
+  const current = Math.max(1, Math.min(page, pages))
+  return `page ${current}/${pages} · PgUp/PgDn`
+}
+
+/** Window of row indices for a page, preserving absolute cursor indices. */
+export function skillPageItems(skills: SkillOption[], page: number, perPage: number = SKILL_VISIBLE_LIMIT): Array<{ skill: SkillOption; index: number }> {
+  const start = (Math.max(1, page) - 1) * perPage
+  return skills.slice(start, start + perPage).map((skill, index) => ({ skill, index: start + index }))
+}
+
+/** Page window of plain skill rows (no index wrapper) for cursor math. */
+export function skillPageSlice<T>(list: readonly T[], page: number, perPage: number = SKILL_VISIBLE_LIMIT): T[] {
+  const start = (Math.max(1, page) - 1) * perPage
+  return list.slice(start, start + perPage)
+}
+
+/** Page holding the cursor row; keeps the visible window in sync with j/k. */
+export function skillPageForCursor(cursor: number, perPage: number = SKILL_VISIBLE_LIMIT): number {
+  return Math.floor(Math.max(0, cursor) / perPage) + 1
 }
 
 /**

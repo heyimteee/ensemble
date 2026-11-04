@@ -3,7 +3,7 @@ import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../typ
 import { approvalSource } from "../types.ts"
 import type { Palette } from "./theme.ts"
 import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
-import { capLineText, capSkills, settingsTabLine, skillAssigned, skillRowLabel, skillToggleMark } from "./skills.ts"
+import { settingsTabLine, skillAssigned, skillPageItems, skillPaginationText, skillToggleMark } from "./skills.ts"
 import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
 import {
   backupRowLabel,
@@ -106,14 +106,21 @@ export function Rail(props: {
             <Show when={groupHeader}>
               <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
             </Show>
-            <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>
-              {settingsCursorMark(selected && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : railAgentLabel(item.title, item.description ?? "")}
-              {leader ? " · leader" : ""}
-              {item.detail ? ` · ${item.detail}` : ""}
-              {workspace?.paused ? " ⏸" : ""}
-              {busy > 0 ? ` ◐${busy}` : ""}
-              {unread > 0 ? ` ●${unread}` : ""}
-            </text>
+            <box flexDirection="column">
+              <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>
+                {settingsCursorMark(selected && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
+                {workspace?.paused ? " ⏸" : ""}
+                {busy > 0 ? ` ◐${busy}` : ""}
+                {unread > 0 ? ` ●${unread}` : ""}
+              </text>
+              <Show when={item.kind === "agent" && (item.description || leader || item.detail)}>
+                <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>
+                  {item.description ? item.description : ""}
+                  {leader ? (item.description ? " · leader" : "leader") : ""}
+                  {item.detail ? (item.description || leader ? ` · ${item.detail}` : item.detail) : ""}
+                </text>
+              </Show>
+            </box>
           </>
         )
       }}</For>
@@ -190,9 +197,9 @@ export function SettingsView(props: {
   skillFilter: string
   filterEditing: boolean
   skillCatalog: SkillOption[]
+  skillPage?: number
 }) {
   const missing = () => props.agent ? missingSkills(props.agent, props.skillCatalog) : []
-  const capped = () => capSkills(props.skills)
   // Slice G section counts: the header names the section, the body carries
   // the rows. Backup depth comes from the draft; the rest is already props.
   const sectionCounts = () => ({
@@ -232,13 +239,17 @@ export function SettingsView(props: {
         </Show>
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
-          <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}{props.filterEditing ? " · typing… enter done · esc cancel" : ""}</text>
+          <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}{props.filterEditing ? " · typing… enter done · esc cancel" : ""}{skillPaginationText(props.skills.length, props.skillPage ?? 1) ? ` · ${skillPaginationText(props.skills.length, props.skillPage ?? 1)}` : ""}</text>
           <Show when={props.skillCatalog.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillsUnavailableLine()}</text></Show>
 <Show when={props.skillCatalog.length > 0 && props.skills.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillboxEmptyLine()}</text></Show>
-          <For each={capped().visible}>{(skill, index) => (
-            <text fg={props.skillCursor === index() ? props.colors.good : props.colors.text}>{settingsCursorMark(props.skillCursor === index())}{skillToggleMark(skillAssigned(props.agent!.skillbox, skill.id))} {skillRowLabel(skill)}</text>
+          <For each={skillPageItems(props.skills, props.skillPage ?? 1)}>{(entry) => (
+            <box flexDirection="column">
+              <text fg={props.skillCursor === entry.index ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.skillCursor === entry.index)}{skillToggleMark(skillAssigned(props.agent!.skillbox, entry.skill.id))} {entry.skill.name}{entry.skill.name !== entry.skill.id ? ` (${entry.skill.id})` : ""}</text>
+              <Show when={(entry.skill.description ?? "").trim()}>
+                <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>    {short(entry.skill.description!.replace(/\s+/g, " ").trim(), 120)}</text>
+              </Show>
+            </box>
           )}</For>
-          <Show when={capped().overflow > 0}><text fg={props.colors.faint}>{capLineText(capped().overflow)}</text></Show>
         </Show>
         </box>
         <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{settingsDivider()}</text>

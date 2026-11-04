@@ -96,8 +96,8 @@ const host = argValue("--host", "127.0.0.1")
 const port = Number(argValue("--port", "0"))
 const urlFile = argValue("--url-file", "")
 const logFile = argValue("--log", "")
-const chunkDelay = Math.max(0, Number(argValue("--chunk-delay-ms", "35")))
-const initialDelay = Math.max(0, Number(argValue("--initial-delay-ms", "250")))
+const chunkDelay = Math.max(0, Number(argValue("--chunk-delay-ms", process.env.ENSEMBLE_FAKE_CHUNK_DELAY_MS ?? "35")))
+const initialDelay = Math.max(0, Number(argValue("--initial-delay-ms", process.env.ENSEMBLE_FAKE_INITIAL_DELAY_MS ?? "250")))
 
 function log(event, fields = {}) {
   const line = `${JSON.stringify({ time: new Date().toISOString(), event, ...fields })}\n`
