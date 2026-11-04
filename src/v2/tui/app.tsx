@@ -58,7 +58,7 @@ import {
 } from "./interaction.ts"
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
-import { createVimRegisterStore, normalizeVimKey, type VimBuffer } from "./vim.ts"
+import { createVimRegisterStore, normalizeVimKey, visualSelectionSize, type VimBuffer, type VimOutcome } from "./vim.ts"
 import { dialogEscape, dialogFilterEdit, dialogKeyContext } from "./dialogs.ts"
 import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
 import { layerEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
@@ -408,6 +408,28 @@ export function EnsembleV2App() {
   const syncVimChord = (chord: string | null | undefined) => {
     if (chord) dispatchInteraction({ type: "chord.set", chord })
     else if (interaction().pendingChord) dispatchInteraction({ type: "chord.clear" })
+  }
+  const visualHint =
+    "h/j/k/l extend · 0/^/$ · w/b/e · gg/G · o swap · y copy · d/x cut · c change · p/P paste · esc normal"
+  /**
+   * Ticket #86: the Vim controller owns the selection while a text buffer is
+   * focused; mirror its mode and range into the interaction state so the
+   * statusline and the Esc ladder agree. Buffer edits update the caller's
+   * cursor signal after the mode transition.
+   */
+  const applyVimOutcome = (
+    outcome: VimOutcome,
+    handlers: { insert: () => void; cursor?: () => void },
+  ) => {
+    syncVimChord(outcome.pendingChord)
+    if (outcome.mode === "insert") {
+      handlers.insert()
+    } else if (outcome.mode === "visual" && outcome.selection) {
+      dispatchInteraction({ type: "visual.set", selection: outcome.selection })
+    } else if (outcome.mode === "normal" && interaction().mode === "visual") {
+      dispatchInteraction({ type: "visual.leave" })
+    }
+    handlers.cursor?.()
   }
   onCleanup(() => {
     vimClipboard?.dispose()
@@ -1700,37 +1722,42 @@ export function EnsembleV2App() {
     }
     // Stop-running work stays on the shared keymap layer; do not swallow it.
     if (ctrl && name === "c") return false
-    if (interaction().mode === "normal") {
+    const mode = interaction().mode
+    if (mode === "normal" || mode === "visual") {
       event?.preventDefault?.(); event?.stopPropagation?.()
       // Command and search still open from composer Normal (#80); the rest of
-      // Normal is the Vim grammar (#85).
+      // Normal is the Vim grammar (#85). Visual owns every other key (#86).
       const sequence = String(event?.sequence ?? "")
-      if (sequence === ":" || sequence === "/") {
+      if (mode === "normal" && (sequence === ":" || sequence === "/")) {
         openCommandLine(sequence)
         return true
       }
       if (name === "return" || name === "enter" || name === "kpenter") {
+        if (mode === "visual") return true
         composerCache.buffer?.invalidate()
         syncVimChord(null)
         void submitComposer(String(composerRef?.plainText ?? "")).catch(showError)
         return true
       }
-      // Normal mode owns the composer's keys: motions, operators, insert
-      // entries, yank/paste, undo/redo. Unbound keys are swallowed so app
-      // actions never fire while the composer holds focus.
+      // Normal and Visual own the composer's keys: motions, operators, insert
+      // entries, selection, yank/paste, undo/redo. Unbound keys are swallowed
+      // so app actions never fire while the composer holds focus.
       const vim = composerVimBuffer()
       const key = normalizeVimKey({ name, ctrl, shift: Boolean(event?.shift) })
       if (!vim || !key) return true
       void vim
         .press(key)
-        .then((outcome) => {
-          syncVimChord(outcome.pendingChord)
-          if (outcome.mode === "insert") {
-            dispatchInteraction({ type: "insert.enter" })
-            focusComposer()
-          }
-          if (composerRef) setComposerCursor(Number(composerRef.cursorOffset ?? 0))
-        })
+        .then((outcome) =>
+          applyVimOutcome(outcome, {
+            insert: () => {
+              dispatchInteraction({ type: "insert.enter" })
+              focusComposer()
+            },
+            cursor: () => {
+              if (composerRef) setComposerCursor(Number(composerRef.cursorOffset ?? 0))
+            },
+          }),
+        )
         .catch(showError)
       return true
     }
@@ -1748,6 +1775,13 @@ export function EnsembleV2App() {
 
     if (name === "escape" && !ctrl) {
       prevent()
+      if (mode === "visual") {
+        dispatchInteraction({ type: "escape" })
+        const vim = settingsFieldVimBuffer()
+        vim?.invalidate()
+        syncVimChord(null)
+        return true
+      }
       if (mode === "insert") {
         const wasCursor = Number(settingsFieldRef?.cursorOffset ?? 0)
         dispatchInteraction({ type: "escape" })
@@ -1768,9 +1802,9 @@ export function EnsembleV2App() {
     }
     if (name === "return" || name === "enter" || name === "kpenter") {
       // Enter submits the field, matching the old prompt and the composer's
-      // Insert behavior; the Esc ladder is still the documented way out.
+      // Insert behavior; Visual swallows it like any non-visual key.
       prevent()
-      finishSettingsField()
+      if (mode !== "visual") finishSettingsField()
       return true
     }
     if (mode === "insert") return true
@@ -1780,14 +1814,15 @@ export function EnsembleV2App() {
     if (!vim || !key) return true
     void vim
       .press(key)
-      .then((outcome) => {
-        syncVimChord(outcome.pendingChord)
-        if (outcome.mode === "insert") {
-          dispatchInteraction({ type: "settings.field.open" })
-          queueMicrotask(() => settingsFieldRef?.focus?.())
-        }
-        syncSettingsFieldFromEditor()
-      })
+      .then((outcome) =>
+        applyVimOutcome(outcome, {
+          insert: () => {
+            dispatchInteraction({ type: "settings.field.open" })
+            queueMicrotask(() => settingsFieldRef?.focus?.())
+          },
+          cursor: syncSettingsFieldFromEditor,
+        }),
+      )
       .catch(showError)
     return true
   }
@@ -3285,10 +3320,17 @@ export function EnsembleV2App() {
 
   const handleFieldNormalKey = (surface: "wizard" | "prompt", event: any): boolean => {
     const token = normalizeKeyToken(event)
+    const mode = interaction().mode
     if (token === "escape") {
       event?.preventDefault?.(); event?.stopPropagation?.()
-      const action = dialogEscape({ surface })
       const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
+      if (mode === "visual") {
+        dispatchInteraction({ type: "escape" })
+        vim?.invalidate()
+        syncVimChord(null)
+        return true
+      }
+      const action = dialogEscape({ surface })
       vim?.invalidate()
       dispatchInteraction({ type: "field.leave" })
       if (action === "back") wizardPrev()
@@ -3296,8 +3338,12 @@ export function EnsembleV2App() {
       return true
     }
     if (token === "enter" || token === "shift+enter") {
-      // The focused textarea owns submit/newline in both modes; this keeps
-      // Enter from double-firing through the raw listener and the renderable.
+      // The focused textarea owns submit/newline in both Normal and Insert;
+      // Visual swallows them so a pending selection is never submitted.
+      if (mode === "visual") {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        return true
+      }
       return false
     }
     event?.preventDefault?.(); event?.stopPropagation?.()
@@ -3309,10 +3355,11 @@ export function EnsembleV2App() {
     if (!vim || !key) return true
     void vim
       .press(key)
-      .then((outcome) => {
-        syncVimChord(outcome.pendingChord)
-        if (outcome.mode === "insert") fieldEnter(surface)
-      })
+      .then((outcome) =>
+        applyVimOutcome(outcome, {
+          insert: () => fieldEnter(surface),
+        }),
+      )
       .catch(showError)
     return true
   }
@@ -3396,8 +3443,23 @@ export function EnsembleV2App() {
     if (interaction().focus === "work") return listPosition(taskCursor(), orderedTasks().length)
     return atBottom() ? "100%" : "scrolled"
   }
+  const statusTextValue = (): string => {
+    if (settingsField()) return settingsFieldText()
+    const activeWizard = wizard()
+    if (activeWizard && wizardStep()?.kind === "text") return String(wizardRef?.plainText ?? "")
+    const prompt = textPrompt()
+    if (prompt) return String(textPromptRef?.plainText ?? prompt.value)
+    if (composerActive()) return String(composerRef?.plainText ?? composerDraft())
+    return ""
+  }
+  const statusSelectionSize = (): string | undefined => {
+    const selection = interaction().selection
+    if (interaction().mode !== "visual" || !selection) return undefined
+    return visualSelectionSize(statusTextValue(), selection)
+  }
   const settingsEntryEnabled = (entry: KeyEntry) => settingsActionEnabled(entry.id)
   const wizardHint = () => {
+    if (interaction().mode === "visual") return visualHint
     const state = wizard()
     if (!state) return ""
     const step = wizardStep()
@@ -3408,6 +3470,7 @@ export function EnsembleV2App() {
     return statuslineHints("wizard", { multiple: step?.kind === "multi" })
   }
   const dialogHint = () => {
+    if (interaction().mode === "visual") return visualHint
     const prompt = textPrompt()
     if (prompt) {
       return statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))
@@ -3429,6 +3492,7 @@ export function EnsembleV2App() {
       }
       return "enter search · esc cancel · ↑↓ history"
     }
+    if (interaction().mode === "visual") return visualHint
     if (wizard()) return wizardHint()
     if (picker() || textPrompt() || confirm() || result()) return dialogHint()
     if (approvalsOpen() && !helpOpen() && !settingsAgentID()) return statuslineHints("approvals")
@@ -3640,7 +3704,7 @@ export function EnsembleV2App() {
                       <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (interaction().mode === "normal" ? "COMPOSER · NORMAL · i/a insert · h/j/k/l move · x/d edit · yy/p yank · enter send" : stoppable() ? "COMPOSER · enter send · esc normal · Ctrl+C stop" : "COMPOSER · enter send · esc normal") : "i compose · $ agent · @ file · / command"}</text>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (interaction().mode === "visual" ? `COMPOSER · ${interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL"} · y copy · d cut · c change · p paste · esc cancel` : interaction().mode === "normal" ? "COMPOSER · NORMAL · i/a insert · h/j/k/l move · x/d edit · yy/p yank · esc chat" : stoppable() ? "COMPOSER · enter send · esc normal · Ctrl+C stop" : "COMPOSER · enter send · esc normal") : "i compose · $ agent · @ file · / command"}</text>
                     </>
                   </Show>
                 }>
@@ -3672,7 +3736,7 @@ export function EnsembleV2App() {
             <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
               <textarea ref={(value: any) => { textPromptRef = value; queueMicrotask(() => value?.focus?.()) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
             </box>
-            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))}</text>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{interaction().mode === "visual" ? visualHint : statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))}</text>
             </box>
           </box>
         </>
@@ -3765,12 +3829,14 @@ export function EnsembleV2App() {
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
-        <text fg={leaderMode() ? colors.warn : interactionMode() === "insert" ? colors.good : interactionMode() === "command" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate>
+        <text fg={leaderMode() ? colors.warn : interactionMode() === "insert" ? colors.good : interactionMode() === "visual" ? colors.warn : interactionMode() === "command" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate>
           {statuslineRow1({
             mode: interactionMode(),
+            visualKind: interaction().selection?.kind,
             context: statusContext(),
             git: gitState(),
             position: statusPosition(),
+            selectionSize: statusSelectionSize(),
             pendingChord: interaction().pendingChord,
             hints: statusHints(),
           })}

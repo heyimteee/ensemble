@@ -62,6 +62,12 @@ export function createEditorPort(renderable: RenderableEditor): VimEditorPort {
     redo: () => {
       renderable.redo?.()
     },
+    select: (start, end) => {
+      renderable.setSelection?.(start, end)
+    },
+    clearSelection: () => {
+      renderable.clearSelection?.()
+    },
   }
 }
 

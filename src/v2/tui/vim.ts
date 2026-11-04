@@ -1,23 +1,27 @@
 /**
- * Vim text editing subset (ticket #85).
+ * Vim text editing subset (tickets #85 and #86).
  *
- * Pure motion, operator, insert, yank, and paste math over a plain string and
- * a cursor offset. The controller below the calculators uses injected editor
- * and clipboard ports, so tests never render OpenTUI; the OpenTUI adapter in
- * `vim-opentui.ts` stays thin.
+ * Pure motion, operator, insert, yank, paste, and Visual range math over a
+ * plain string and a cursor offset. The controller below the calculators uses
+ * injected editor and clipboard ports, so tests never render OpenTUI; the
+ * OpenTUI adapter in `vim-opentui.ts` stays thin.
  *
  * No counts, text objects, macros, marks, or extra registers: only the v5.6
- * Normal grammar from spec #78. Visual mode is ticket #86 and extends these
- * primitives.
+ * Normal and Visual grammar from spec #78.
  */
 
 export type VimMotion = "h" | "l" | "j" | "k" | "w" | "b" | "e" | "0" | "^" | "$" | "gg" | "G"
+
+export type VimVisualKind = "char" | "line"
+
+export type VimVisualSelection = { kind: VimVisualKind; anchor: number; cursor: number }
 
 export type VimInsertWhere = "before" | "after" | "lineStart" | "lineEnd" | "lineBelow" | "lineAbove"
 
 export type VimCommand =
   | { type: "motion"; motion: VimMotion }
   | { type: "insert"; where: VimInsertWhere }
+  | { type: "visual.enter"; kind: VimVisualKind }
   | { type: "x" }
   | { type: "D" }
   | { type: "delete.motion"; motion: VimMotion }
@@ -105,6 +109,10 @@ export function resolveVimKey(pending: VimPending, key: string): VimKeyResolutio
       return { type: "command", command: { type: "insert", where: "lineBelow" } }
     case "O":
       return { type: "command", command: { type: "insert", where: "lineAbove" } }
+    case "v":
+      return { type: "command", command: { type: "visual.enter", kind: "char" } }
+    case "V":
+      return { type: "command", command: { type: "visual.enter", kind: "line" } }
     case "x":
       return { type: "command", command: { type: "x" } }
     case "D":
@@ -123,6 +131,61 @@ export function resolveVimKey(pending: VimPending, key: string): VimKeyResolutio
       return { type: "command", command: { type: "undo" } }
     case "ctrl+r":
       return { type: "command", command: { type: "redo" } }
+    default:
+      return { type: "unhandled" }
+  }
+}
+
+export type VimVisualCommand =
+  | { type: "extend"; motion: VimMotion }
+  | { type: "swap" }
+  | { type: "yank" }
+  | { type: "delete" }
+  | { type: "change" }
+  | { type: "paste"; before: boolean }
+  | { type: "exit" }
+  | { type: "line" }
+
+export type VimVisualKeyResolution =
+  | { type: "pending"; pending: "g" }
+  | { type: "command"; command: VimVisualCommand }
+  | { type: "cancel" }
+  | { type: "unhandled" }
+
+/**
+ * Visual grammar: motions extend the selection, `o` swaps the ends, and the
+ * operators act on the selected range. `v` leaves Visual, `V` switches to
+ * line selection, and an unknown key cancels a pending `g` but keeps the
+ * selection.
+ */
+export function resolveVisualKey(pending: VimPending, key: string): VimVisualKeyResolution {
+  if (pending === "g") {
+    if (key === "g") return { type: "command", command: { type: "extend", motion: "gg" } }
+    return { type: "cancel" }
+  }
+  if (isVimMotion(key)) return { type: "command", command: { type: "extend", motion: key } }
+  switch (key) {
+    case "g":
+      return { type: "pending", pending: "g" }
+    case "o":
+      return { type: "command", command: { type: "swap" } }
+    case "y":
+      return { type: "command", command: { type: "yank" } }
+    case "d":
+    case "x":
+      return { type: "command", command: { type: "delete" } }
+    case "c":
+      return { type: "command", command: { type: "change" } }
+    case "p":
+      return { type: "command", command: { type: "paste", before: false } }
+    case "P":
+      return { type: "command", command: { type: "paste", before: true } }
+    case "escape":
+      return { type: "command", command: { type: "exit" } }
+    case "v":
+      return { type: "command", command: { type: "exit" } }
+    case "V":
+      return { type: "command", command: { type: "line" } }
     default:
       return { type: "unhandled" }
   }
@@ -452,6 +515,77 @@ export function registerFromClipboard(text: string, internal: VimRegister): VimR
   return { text, linewise: text.endsWith("\n") || (internal.text === text && internal.linewise) }
 }
 
+export type VimVisualRange = { start: number; end: number; linewise: boolean; text: string }
+
+/** The inclusive range a Visual selection covers. Line selection owns whole lines. */
+export function visualRange(
+  text: string,
+  anchor: number,
+  cursor: number,
+  kind: VimVisualKind,
+): VimVisualRange {
+  if (kind === "line") {
+    const rows = vimLines(text)
+    const first = vimLineIndexAt(text, anchor)
+    const last = vimLineIndexAt(text, cursor)
+    const startRow = Math.min(first, last)
+    const endRow = Math.max(first, last)
+    const start = rows[startRow].start
+    const end = rows[endRow].next
+    return { start, end, linewise: true, text: text.slice(start, end) }
+  }
+  if (text.length === 0) return { start: 0, end: 0, linewise: false, text: "" }
+  const first = Math.max(0, Math.min(text.length - 1, Math.trunc(anchor)))
+  const second = Math.max(0, Math.min(text.length - 1, Math.trunc(cursor)))
+  const start = Math.min(first, second)
+  const end = Math.max(first, second) + 1
+  return { start, end, linewise: false, text: text.slice(start, end) }
+}
+
+/** What `y` writes: charwise keeps the exact range, linewise adds a newline. */
+export function visualRegister(text: string, selection: VimVisualSelection): VimRegister {
+  const range = visualRange(text, selection.anchor, selection.cursor, selection.kind)
+  if (!range.linewise) return { text: range.text, linewise: false }
+  return {
+    text: range.text.endsWith("\n") ? range.text : `${range.text}\n`,
+    linewise: true,
+  }
+}
+
+/** Human-readable selection size for the statusline. */
+export function visualSelectionSize(text: string, selection: VimVisualSelection): string {
+  const range = visualRange(text, selection.anchor, selection.cursor, selection.kind)
+  if (selection.kind === "line") {
+    const first = vimLineIndexAt(text, selection.anchor)
+    const last = vimLineIndexAt(text, selection.cursor)
+    const lines = Math.abs(last - first) + 1
+    return `${lines} line${lines === 1 ? "" : "s"}`
+  }
+  const chars = range.end - range.start
+  return `${chars} char${chars === 1 ? "" : "s"}`
+}
+
+/**
+ * `p`/`P` in Visual replace the selection. A linewise selection always keeps
+ * whole lines; a charwise selection keeps the clipboard text exactly.
+ */
+export function visualPastePlan(
+  text: string,
+  selection: VimVisualSelection,
+  register: VimRegister,
+): VimPastePlan | null {
+  if (register.text === "") return null
+  const range = visualRange(text, selection.anchor, selection.cursor, selection.kind)
+  if (range.linewise) {
+    const content = register.text.endsWith("\n") ? register.text : `${register.text}\n`
+    const result = `${text.slice(0, range.start)}${content}${text.slice(range.end)}`
+    return { insertAt: range.start, text: content, linewise: true, cursor: range.start, result }
+  }
+  const result = `${text.slice(0, range.start)}${register.text}${text.slice(range.end)}`
+  const cursorAfter = clampVimCursor(result, range.start + register.text.length - 1)
+  return { insertAt: range.start, text: register.text, linewise: false, cursor: cursorAfter, result }
+}
+
 export type VimEditorPort = {
   text(): string
   cursor(): number
@@ -459,6 +593,9 @@ export type VimEditorPort = {
   replace(start: number, end: number, text: string): void
   undo(): void
   redo(): void
+  /** Optional visual highlight; the OpenTUI adapter maps it to setSelection. */
+  select?(start: number, end: number): void
+  clearSelection?(): void
 }
 
 export type VimClipboardPort = {
@@ -472,7 +609,8 @@ export type VimMessage = { text: string; tone: "info" | "success" | "error" }
 
 export type VimOutcome = {
   handled: boolean
-  mode?: "insert"
+  mode?: "insert" | "normal" | "visual"
+  selection?: VimVisualSelection | null
   pendingChord?: string | null
   message?: VimMessage
 }
@@ -494,6 +632,7 @@ export class VimBuffer {
   private preferredColumn: number | null = null
   private writes: Promise<void> = Promise.resolve()
   private lastWrite: { text: string; ok: boolean } | null = null
+  private visual: VimVisualSelection | null = null
   private readonly editor: VimEditorPort
   private readonly clipboard: VimClipboardPort
   private readonly register: VimRegisterStore
@@ -519,11 +658,18 @@ export class VimBuffer {
     return this.register.current
   }
 
+  get visualSelection(): VimVisualSelection | null {
+    return this.visual
+  }
+
   /** Called on focus or mode changes so an in-flight paste is discarded. */
   invalidate(): void {
     this.epoch++
     this.pending = ""
     this.preferredColumn = null
+    if (!this.visual) return
+    this.visual = null
+    this.editor.clearSelection?.()
   }
 
   /** Put the cursor on a character; Insert mode may have left it on a newline. */
@@ -538,6 +684,7 @@ export class VimBuffer {
 
   async press(key: string): Promise<VimOutcome> {
     const epoch = ++this.epoch
+    if (this.visual) return this.pressVisual(key, epoch)
     const resolution = resolveVimKey(this.pending, key)
     if (resolution.type === "pending") {
       this.pending = resolution.pending
@@ -555,6 +702,122 @@ export class VimBuffer {
 
     this.pending = ""
     return this.run(resolution.command, epoch)
+  }
+
+  private visualOutcome(pendingChord: string | null = null): VimOutcome {
+    if (!this.visual) return { handled: true, mode: "normal", selection: null, pendingChord }
+    return {
+      handled: true,
+      mode: "visual",
+      selection: { ...this.visual },
+      pendingChord,
+    }
+  }
+
+  private async pressVisual(key: string, epoch: number): Promise<VimOutcome> {
+    const resolution = resolveVisualKey(this.pending, key)
+    if (resolution.type === "pending") {
+      this.pending = resolution.pending
+      return this.visualOutcome(this.pending)
+    }
+    if (resolution.type === "cancel") {
+      this.pending = ""
+      return this.visualOutcome(null)
+    }
+    if (resolution.type === "unhandled") {
+      this.pending = ""
+      return this.visualOutcome(null)
+    }
+    this.pending = ""
+    return this.runVisual(resolution.command, epoch)
+  }
+
+  private enterVisual(kind: VimVisualKind): VimOutcome {
+    const cursor = clampVimCursor(this.editor.text(), this.editor.cursor())
+    this.visual = { kind, anchor: cursor, cursor }
+    this.editor.setCursor(cursor)
+    this.syncVisualHighlight()
+    return this.visualOutcome(null)
+  }
+
+  private syncVisualHighlight(): void {
+    if (!this.visual) {
+      this.editor.clearSelection?.()
+      return
+    }
+    const range = visualRange(this.editor.text(), this.visual.anchor, this.visual.cursor, this.visual.kind)
+    if (range.end > range.start) this.editor.select?.(range.start, range.end)
+    else this.editor.clearSelection?.()
+  }
+
+  private async runVisual(command: VimVisualCommand, epoch: number): Promise<VimOutcome> {
+    const selection = this.visual
+    if (!selection) return { handled: true, mode: "normal", selection: null, pendingChord: null }
+    switch (command.type) {
+      case "extend": {
+        const text = this.editor.text()
+        const at = selection.cursor
+        if (command.motion === "j" || command.motion === "k") {
+          const line = vimLineAt(text, Math.max(0, Math.min(text.length - 1, at)))
+          const column = at - line.start
+          const preferred = this.preferredColumn ?? column
+          this.visual = { ...selection, cursor: motionTarget(text, at, command.motion, preferred) }
+          this.preferredColumn = preferred
+        } else {
+          this.preferredColumn = null
+          this.visual = { ...selection, cursor: motionTarget(text, at, command.motion) }
+        }
+        this.editor.setCursor(this.visual.cursor)
+        this.syncVisualHighlight()
+        return this.visualOutcome(null)
+      }
+      case "swap": {
+        this.visual = { kind: selection.kind, anchor: selection.cursor, cursor: selection.anchor }
+        this.editor.setCursor(this.visual.cursor)
+        this.syncVisualHighlight()
+        return this.visualOutcome(null)
+      }
+      case "line": {
+        this.visual = { ...selection, kind: "line" }
+        this.syncVisualHighlight()
+        return this.visualOutcome(null)
+      }
+      case "exit": {
+        this.clearVisual()
+        return { handled: true, mode: "normal", selection: null, pendingChord: null }
+      }
+      case "yank": {
+        const register = visualRegister(this.editor.text(), selection)
+        this.remember(register)
+        this.clearVisual()
+        if (register.text !== "") this.scheduleClipboard(register.text, "Yanked")
+        return { handled: true, mode: "normal", selection: null, pendingChord: null }
+      }
+      case "delete":
+      case "change": {
+        const text = this.editor.text()
+        const register = visualRegister(text, selection)
+        const range = visualRange(text, selection.anchor, selection.cursor, selection.kind)
+        this.preferredColumn = null
+        if (range.end > range.start) this.editor.replace(range.start, range.end, "")
+        this.editor.setCursor(clampVimCursor(this.editor.text(), range.start))
+        this.remember(register)
+        this.clearVisual()
+        if (register.text !== "") this.scheduleClipboard(register.text, "Cut")
+        if (command.type === "change") {
+          return { handled: true, mode: "insert", selection: null, pendingChord: null }
+        }
+        return { handled: true, mode: "normal", selection: null, pendingChord: null }
+      }
+      case "paste": {
+        return this.pasteVisual(command.before, epoch)
+      }
+    }
+  }
+
+  private clearVisual(): void {
+    this.visual = null
+    this.editor.clearSelection?.()
   }
 
   private async run(command: VimCommand, epoch: number): Promise<VimOutcome> {
@@ -580,6 +843,10 @@ export class VimBuffer {
         if (plan.text) this.editor.replace(plan.insertAt, plan.insertAt, plan.text)
         this.editor.setCursor(plan.cursor)
         return { handled: true, mode: "insert", pendingChord: null }
+      }
+      case "visual.enter": {
+        this.preferredColumn = null
+        return this.enterVisual(command.kind)
       }
       case "x":
       case "D":
@@ -620,6 +887,11 @@ export class VimBuffer {
     this.register.current = register
   }
 
+  /** Visual edits return immediately; the clipboard write reports via onMessage. */
+  private scheduleClipboard(text: string, verb: "Cut" | "Yanked"): void {
+    this.writeClipboard(text, verb).catch(() => {})
+  }
+
   /**
    * Write to the system clipboard and keep the internal register either way.
    * The promise is chained so overlapping cuts cannot report out of order.
@@ -639,6 +911,15 @@ export class VimBuffer {
       this.onMessage(value)
       return value
     })
+  }
+
+  private chooseRegister(system: string | null): VimRegister {
+    const internal = this.register.current
+    if (system && system.length > 0) {
+      const failedWrite = this.lastWrite !== null && !this.lastWrite.ok
+      if (!failedWrite || system === internal.text) return registerFromClipboard(system, internal)
+    }
+    return internal
   }
 
   /**
@@ -662,17 +943,39 @@ export class VimBuffer {
       system = null
     }
     if (epoch !== this.epoch || this.editor.text() !== snapshot) return { handled: true, pendingChord: null }
-    const internal = this.register.current
-    let chosen = internal
-    if (system && system.length > 0) {
-      const failedWrite = this.lastWrite !== null && !this.lastWrite.ok
-      if (!failedWrite || system === internal.text) chosen = registerFromClipboard(system, internal)
-    }
+    const chosen = this.chooseRegister(system)
     const plan = pastePlan(this.editor.text(), this.editor.cursor(), chosen, before)
     if (!plan) return { handled: true, pendingChord: null }
     this.preferredColumn = null
     this.editor.replace(plan.insertAt, plan.insertAt, plan.text)
     this.editor.setCursor(plan.cursor)
     return { handled: true, pendingChord: null }
+  }
+
+  /** Visual `p`/`P`: read like Normal paste, then replace the selected range. */
+  private async pasteVisual(_before: boolean, epoch: number): Promise<VimOutcome> {
+    const selection = this.visual
+    if (!selection) return { handled: true, mode: "normal", selection: null, pendingChord: null }
+    const snapshot = this.editor.text()
+    try {
+      await this.writes
+    } catch {}
+    if (epoch !== this.epoch || this.editor.text() !== snapshot) return this.visualOutcome(null)
+    let system: string | null = null
+    try {
+      system = await this.clipboard.read()
+    } catch {
+      system = null
+    }
+    if (epoch !== this.epoch || this.editor.text() !== snapshot) return this.visualOutcome(null)
+    const chosen = this.chooseRegister(system)
+    const plan = visualPastePlan(this.editor.text(), selection, chosen)
+    if (!plan) return this.visualOutcome(null)
+    const range = visualRange(this.editor.text(), selection.anchor, selection.cursor, selection.kind)
+    this.preferredColumn = null
+    this.editor.replace(range.start, range.end, plan.text)
+    this.editor.setCursor(plan.cursor)
+    this.clearVisual()
+    return { handled: true, mode: "normal", selection: null, pendingChord: null }
   }
 }

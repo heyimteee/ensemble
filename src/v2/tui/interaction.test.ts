@@ -215,3 +215,55 @@ test("pending chord, selection, and transient messages are pure state", () => {
   assert.equal(visibleMessage(shown.state, 4_001), null)
   assert.equal(reduce(shown.state, { type: "message.clear" }).state.message, null)
 })
+
+test("visual mode carries the char or line selection and Esc cancels to Normal", () => {
+  const composer = initialInteractionState({ focus: "composer" })
+  const entered = reduce(composer, {
+    type: "visual.set",
+    selection: { kind: "char", anchor: 2, cursor: 6 },
+  })
+  assert.equal(entered.state.mode, "visual")
+  assert.equal(entered.state.focus, "composer")
+  assert.deepEqual(entered.state.selection, { kind: "char", anchor: 2, cursor: 6 })
+  assert.deepEqual(entered.intents, [])
+
+  const line = reduce(entered.state, {
+    type: "visual.set",
+    selection: { kind: "line", anchor: 0, cursor: 6 },
+  })
+  assert.equal(line.state.mode, "visual")
+  assert.equal(line.state.selection?.kind, "line")
+
+  const cancelled = reduce(line.state, { type: "escape" })
+  assert.equal(cancelled.state.mode, "normal")
+  assert.equal(cancelled.state.focus, "composer", "Visual -> Normal keeps the editor focus")
+  assert.equal(cancelled.state.selection, null)
+  assert.deepEqual(cancelled.intents, [], "cancelling Visual never blurs the field")
+})
+
+test("leaving Visual, changing focus, or entering Insert clears the selection", () => {
+  const visual = reduce(initialInteractionState({ focus: "composer" }), {
+    type: "visual.set",
+    selection: { kind: "line", anchor: 0, cursor: 2 },
+  }).state
+
+  const left = reduce(visual, { type: "visual.leave" })
+  assert.equal(left.state.mode, "normal")
+  assert.equal(left.state.selection, null)
+
+  const rail = reduce(visual, { type: "focus.set", focus: "rail" })
+  assert.equal(rail.state.mode, "normal")
+  assert.equal(rail.state.selection, null)
+
+  const composerFocus = reduce(visual, { type: "focus.set", focus: "composer" })
+  assert.equal(composerFocus.state.mode, "normal", "focus changes never leave a dangling Visual mode")
+  assert.equal(composerFocus.state.selection, null)
+
+  const insert = reduce(visual, { type: "insert.enter" })
+  assert.equal(insert.state.mode, "insert")
+  assert.equal(insert.state.selection, null)
+
+  const command = reduce(visual, { type: "command.open", kind: ":" })
+  assert.equal(command.state.mode, "command")
+  assert.equal(command.state.selection, null)
+})

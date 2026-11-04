@@ -10,10 +10,12 @@ import {
   statuslineRow2,
 } from "./statusline.ts"
 
-test("mode chip names Normal, Insert, and Command in text, never color alone", () => {
+test("mode chip names Normal, Insert, Command, and both Visual kinds in text", () => {
   assert.equal(modeLabel("normal"), "NORMAL")
   assert.equal(modeLabel("insert"), "INSERT")
   assert.equal(modeLabel("command"), "COMMAND")
+  assert.equal(modeLabel("visual", "char"), "VISUAL")
+  assert.equal(modeLabel("visual", "line"), "V-LINE")
 })
 
 test("context names the active surface and overlay precedence", () => {
@@ -65,6 +67,23 @@ test("row one always carries mode, context, git, position, chord, and hints", ()
 
 test("row one omits empty optional segments but still names mode and context", () => {
   assert.equal(statuslineRow1({ mode: "normal", context: "Roster" }), "NORMAL · Roster")
+})
+
+test("row one names the Visual kind and the selection size", () => {
+  assert.equal(
+    statuslineRow1({
+      mode: "visual",
+      visualKind: "line",
+      context: "COMPOSER · Group chat",
+      position: "1:1",
+      selectionSize: "2 lines",
+    }),
+    "V-LINE · COMPOSER · Group chat · 2 lines · 1:1",
+  )
+  assert.equal(
+    statuslineRow1({ mode: "visual", visualKind: "char", context: "Settings", selectionSize: "5 chars" }),
+    "VISUAL · Settings · 5 chars",
+  )
 })
 
 test("row two renders command input, else a transient message, else a reserved blank", () => {

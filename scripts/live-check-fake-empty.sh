@@ -55,6 +55,16 @@ live_type "$LIVE_TUI_SESSION" "FakeAgent"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
 live_type "$LIVE_TUI_SESSION" "Engineering"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "wizard text field Normal"
+# v5.6 T8: Visual works in wizard text fields too.
+live_key "$LIVE_TUI_SESSION" "v"
+live_require_text "$LIVE_TUI_SESSION" "VISUAL · Wizard" 10 "v enters Visual in a wizard field"
+live_key "$LIVE_TUI_SESSION" "0"
+live_require_text "$LIVE_TUI_SESSION" "chars" 10 "a motion extends the wizard selection"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc cancels Visual in the wizard field"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
 live_type "$LIVE_TUI_SESSION" "Renders deterministic Markdown."
