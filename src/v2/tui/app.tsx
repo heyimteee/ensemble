@@ -42,6 +42,7 @@ import {
 } from "./interaction.ts"
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
+import { layerEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
 import { createCommandHistory, recallHistory, rememberHistory, startHistory, type CommandHistory } from "./history.ts"
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
@@ -265,6 +266,9 @@ export function EnsembleV2App() {
   // still in flight must not re-focus (or wipe) a composer the user already
   // left with Escape.
   let composerEpoch = 0
+  // v5.6 T3: chord prefixes (gg) are app-local pending keys; the interaction
+  // reducer mirrors them as `pendingChord` for the statusline.
+  let pendingKeys: string[] = []
   let textPromptRef: any
   let wizardRef: any
   let resultScrollRef: any
@@ -919,6 +923,22 @@ export function EnsembleV2App() {
   // inherit its border; only true overlays steal it.
   const chromeFocus = () => resolveChromeFocus({ focusArea: focusArea(), composerActive: composerActive(), overlayOpen: overlayOpen() })
 
+  // v5.6 T3: the generated Normal keymap layers are enabled for exactly one
+  // of these contexts at a time. Overlays, the composer, the leader, and the
+  // command/search input own their keys first.
+  const surfaceKeyContext = (): KeyContext | null => {
+    if (!isOurRoute() || isModal() || leaderMode() || wizard() !== null) return null
+    if (interaction().overlay !== "none" || interaction().command !== null) return null
+    if (composerActive()) return null
+    switch (interaction().focus) {
+      case "rail": return "roster"
+      case "chat": return "chat"
+      case "work": return "work"
+      default: return null
+    }
+  }
+  const hasWorkZone = () => showWorkBlock() ?? false
+
   const run = async (label: string, action: () => Promise<void>): Promise<boolean> => {
     if (busy()) return false
     setBusy(true)
@@ -1054,20 +1074,26 @@ export function EnsembleV2App() {
     await run("Activate workspace", async () => { await invoke(context, "workspace.activate", { id: workspace.id }) })
   }
 
-  const enterRail = async () => {
+  const enterRail = async (): Promise<boolean> => {
     const item = railItems()[railCursor()]
-    if (!item) return
+    if (!item) return false
     if (item.kind === "agent") {
       const agent = state()?.agents[item.id]
-      if (agent) openAgent(agent)
-    } else {
-      const workspace = state()?.workspaces[item.id]
-      if (workspace) await openWorkspace(workspace)
+      if (!agent) return false
+      openAgent(agent)
+      return true
     }
+    const workspace = state()?.workspaces[item.id]
+    if (!workspace) return false
+    await openWorkspace(workspace)
+    return true
   }
 
-  const focusLeft = () => setFocusArea("rail")
-  const focusRight = () => setFocusArea("chat")
+  /** Roster Enter opens the surface and focuses the composer in Insert. */
+  const openRailAndCompose = async () => {
+    if (await enterRail()) startCompose()
+  }
+
   const moveRail = (delta: number) => {
     const length = railItems().length
     if (length === 0) return
@@ -1077,6 +1103,61 @@ export function EnsembleV2App() {
     const length = orderedTasks().length
     if (length === 0) return
     setTaskCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
+  }
+  /**
+   * Tab moves focus zones: roster -> chat -> work list -> chat. A group chat
+   * with no inline work falls back to the rail; Direct conversations have no
+   * work list. Esc from the work zone returns to the transcript.
+   */
+  const cycleFocusZone = () => {
+    clearPendingChord()
+    if (interaction().focus === "rail") { dispatchInteraction({ type: "focus.set", focus: "chat" }); return }
+    if (interaction().focus === "work") { dispatchInteraction({ type: "focus.set", focus: "chat" }); return }
+    if (interaction().focus === "chat") {
+      dispatchInteraction({ type: "focus.set", focus: hasWorkZone() ? "work" : "rail" })
+    }
+  }
+
+  const scrollTranscriptBy = (delta: number) => {
+    try { transcriptScrollRef?.scrollBy?.(delta) } catch {}
+    queueMicrotask(() => syncTranscriptScroll())
+  }
+  const scrollTranscriptTop = () => {
+    if (transcriptScrollRef) transcriptScrollRef.scrollTop = 0
+    setAtBottom(false)
+  }
+  const scrollTranscriptHalf = (direction: 1 | -1) => {
+    scrollTranscriptBy(direction * Math.max(1, Math.floor(messageHeight() / 2)))
+  }
+
+  // Roster selection helpers: a/e/s/x/X act on the rail cursor, not the open
+  // surface, so they work before Enter opens a chat.
+  const railSelection = () => railItems()[railCursor()]
+  const railAgent = () => {
+    const item = railSelection()
+    return item?.kind === "agent" ? state()?.agents[item.id] : undefined
+  }
+  const railWorkspace = () => {
+    const item = railSelection()
+    return item?.kind === "workspace" ? state()?.workspaces[item.id] : undefined
+  }
+  const editRailSelection = async () => {
+    const workspace = railWorkspace()
+    if (workspace) { await editWorkspace(workspace); return }
+    const agent = railAgent()
+    if (agent) openSettings(agent)
+  }
+  const archiveRailSelection = async () => {
+    const workspace = railWorkspace()
+    if (workspace) { await archiveWorkspace(workspace); return }
+    const agent = railAgent()
+    if (agent) await archiveSelectedAgent(agent)
+  }
+  const deleteRailSelection = async () => {
+    const workspace = railWorkspace()
+    if (workspace) { await deleteWorkspace(workspace); return }
+    const agent = railAgent()
+    if (agent) await deleteSelectedAgent(agent)
   }
 
   const chooseModel = async (current?: Pick<ModelOption, "providerID" | "modelID">): Promise<ModelOption | undefined> => {
@@ -1149,8 +1230,8 @@ export function EnsembleV2App() {
     }
   }
 
-  const editWorkspace = async () => {
-    const workspace = activeWorkspace()
+  const editWorkspace = async (target?: Workspace) => {
+    const workspace = target ?? activeWorkspace()
     if (!workspace) return
     const draft = await openWizard("workspace", workspace)
     if (!draft) return
@@ -1219,6 +1300,30 @@ export function EnsembleV2App() {
       if (chatContext()?.sessionID === session) { setLiveDm(null); void refreshChat() }
       void refresh()
     }
+  }
+
+  // v5.6 T3 chord/leader/search plumbing ---------------------------------
+  const clearPendingChord = () => {
+    pendingKeys = []
+    if (interaction().pendingChord !== null) dispatchInteraction({ type: "chord.clear" })
+  }
+  const setPendingChord = (keys: string[]) => {
+    pendingKeys = keys
+    setInteraction((state) => interactionReducer(state, { type: "chord.set", chord: keys.join(" ") }).state)
+  }
+  const openLeader = () => {
+    clearPendingChord()
+    setLeaderMode(true)
+    setInteraction((state) => interactionReducer(state, { type: "chord.set", chord: "space" }).state)
+  }
+  const closeLeader = () => {
+    setLeaderMode(false)
+    clearPendingChord()
+  }
+  const surfaceEscape = () => {
+    clearPendingChord()
+    if (clearSearchAndFilter()) return
+    if (interaction().focus === "work") dispatchInteraction({ type: "escape" })
   }
 
   const startCompose = () => {
@@ -1533,8 +1638,8 @@ export function EnsembleV2App() {
     if (binding) context.ui.router.navigate({ type: "session", sessionID: binding.sessionID })
   }
 
-  const openSettings = () => {
-    const target = selectedAgent() ?? rosterAgents()[0]
+  const openSettings = (agent?: Agent) => {
+    const target = agent ?? selectedAgent() ?? rosterAgents()[0]
     if (!target) return
     setSettingsAgentID(target.id); setSettingsTab("general"); setDraft(structuredClone(target)); setDirty(false)
     // Ticket #77: fresh cursors/filters so the paginated skill list always
@@ -1664,38 +1769,43 @@ export function EnsembleV2App() {
     const index = Math.max(0, list.findIndex((agent) => agent.id === surfaceAgent()?.id))
     openAgent(list[(index + delta + list.length) % list.length])
   }
-
-  const archiveWorkspace = async () => {
-    const workspace = activeWorkspace(); if (!workspace) return
+  const archiveWorkspace = async (target?: Workspace) => {
+    const workspace = target ?? activeWorkspace(); if (!workspace) return
     if (!(await openConfirm(`Archive #${workspace.name}?`, "History is preserved."))) return
-    await run("Archive workspace", async () => { await invoke(context, "workspace.archive", { id: workspace.id }); setSurface(null); setWorkspaceID(null) })
+    await run("Archive workspace", async () => {
+      await invoke(context, "workspace.archive", { id: workspace.id })
+      if (workspaceID() === workspace.id || surface()?.kind === "workspace" && surface()!.workspaceID === workspace.id) { setSurface(null); setWorkspaceID(null) }
+    })
   }
-  const deleteWorkspace = async () => {
-    const workspace = activeWorkspace(); if (!workspace) return
+  const deleteWorkspace = async (target?: Workspace) => {
+    const workspace = target ?? activeWorkspace(); if (!workspace) return
     if (!(await openConfirm(`Delete #${workspace.name}?`, "Removes workspace data."))) return
     const deleteNativeSessions = await openConfirm("Delete native sessions too?", "No preserves them for inspection.")
-    await run("Delete workspace", async () => { await invoke(context, "workspace.delete", { id: workspace.id, deleteNativeSessions: Boolean(deleteNativeSessions) }); setSurface(null); setWorkspaceID(null) })
+    await run("Delete workspace", async () => {
+      await invoke(context, "workspace.delete", { id: workspace.id, deleteNativeSessions: Boolean(deleteNativeSessions) })
+      if (workspaceID() === workspace.id || surface()?.kind === "workspace" && surface()!.workspaceID === workspace.id) { setSurface(null); setWorkspaceID(null) }
+    })
   }
-  const archiveSelectedAgent = async () => {
-    const agent = selectedAgent(); if (!agent) return
-    const workspace = activeWorkspace()
+  const archiveSelectedAgent = async (target?: Agent) => {
+    const agent = target ?? selectedAgent(); if (!agent) return
     if (!(await openConfirm(`Archive ${agent.name}?`, "History is preserved."))) return
-    await run("Archive agent", async () => { await invoke(context, "agent.archive", { id: agent.id }); setSurface(null) })
+    await run("Archive agent", async () => {
+      await invoke(context, "agent.archive", { id: agent.id })
+      if (surfaceAgent()?.id === agent.id) setSurface(null)
+    })
   }
-  const deleteSelectedAgent = async () => {
-    const agent = selectedAgent(); if (!agent) return
+  const deleteSelectedAgent = async (target?: Agent) => {
+    const agent = target ?? selectedAgent(); if (!agent) return
     if (!(await openConfirm(`Delete ${agent.name}?`, "Removes the agent profile and memory."))) return
     const deleteNativeSessions = await openConfirm("Delete native sessions too?", "No preserves them for inspection.")
-    await run("Delete agent", async () => { await invoke(context, "agent.delete", { id: agent.id, deleteNativeSessions: Boolean(deleteNativeSessions) }); setSurface(null) })
+    await run("Delete agent", async () => {
+      await invoke(context, "agent.delete", { id: agent.id, deleteNativeSessions: Boolean(deleteNativeSessions) })
+      if (surfaceAgent()?.id === agent.id) setSurface(null)
+    })
   }
 
-  // Task actions stay keyboard-first from the inline work rows: with no task
-  // column, j/k in the chat surface moves the work selection and the
-  // d/t/enter/r/R/x/o bindings below act on the selected row.
-  const moveCursor = (delta: number) => {
-    if (focusArea() === "chat") moveTask(delta)
-    else if (focusArea() === "rail") moveRail(delta)
-  }
+  // Task actions stay keyboard-first from the inline work rows. Tab focuses
+  // the work zone; the transcript keeps j/k as scroll, never a row cursor.
 
   const moveSettingsCursor = (delta: number) => {
     if (settingsTab() === "memories") setMemoryCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredMemories().length - 1), cursor + delta)))
@@ -1758,6 +1868,111 @@ export function EnsembleV2App() {
     void persistHistory(surface())
   })
 
+  // v5.6 T3: the catalog ids resolve to app actions here. The generated
+  // keymap layers, the gg chord resolver, and the which-key popup all share
+  // this one registry.
+  const runAction = (action: (() => unknown) | undefined) => {
+    if (!action) return
+    try {
+      const result = action()
+      if (result && typeof (result as Promise<unknown>).catch === "function") void (result as Promise<unknown>).catch(showError)
+    } catch (error) {
+      showError(error)
+    }
+  }
+  const keyActionHandlers: Record<string, () => unknown> = {
+    "nav.down": () => moveRail(1),
+    "nav.up": () => moveRail(-1),
+    "nav.top": () => setRailCursor(0),
+    "nav.bottom": () => setRailCursor(Math.max(0, railItems().length - 1)),
+    "nav.left": () => setFocusArea("rail"),
+    "nav.right": () => setFocusArea("chat"),
+    "focus.tab": () => cycleFocusZone(),
+    open: () => openRailAndCompose(),
+    "new.agent": () => createAgent(),
+    "new.workspace": () => createWorkspace(),
+    edit: () => editRailSelection(),
+    settings: () => openSettings(railAgent()),
+    archive: () => archiveRailSelection(),
+    delete: () => deleteRailSelection(),
+    approvals: () => { setApprovalCursor(0); setApprovalsOpen(true) },
+    init: () => initEnsemble(),
+    pause: () => togglePause(),
+    filter: () => openCommandLine("/"),
+    leader: () => openLeader(),
+    escape: () => surfaceEscape(),
+    "chat.scroll.down": () => scrollTranscriptBy(1),
+    "chat.scroll.up": () => scrollTranscriptBy(-1),
+    "chat.top": () => scrollTranscriptTop(),
+    "chat.bottom": () => jumpToBottom(),
+    "chat.half.down": () => scrollTranscriptHalf(1),
+    "chat.half.up": () => scrollTranscriptHalf(-1),
+    "chat.nav.left": () => setFocusArea("rail"),
+    "chat.nav.right": () => setFocusArea("chat"),
+    compose: () => startCompose(),
+    "compose.alt": () => startCompose(),
+    "chat.new.agent": () => createAgent(),
+    "chat.new.workspace": () => createWorkspace(),
+    "chat.settings": () => openSettings(),
+    "chat.approvals": () => { setApprovalCursor(0); setApprovalsOpen(true) },
+    "chat.init": () => initEnsemble(),
+    "chat.pause": () => togglePause(),
+    "chat.native": () => openNative(),
+    "chat.cancel": () => {
+      if (surface()?.kind === "agent" && (chatContext()?.queued ?? 0) > 0) return removeQueuedDm()
+      return cancelSelected()
+    },
+    "chat.filter": () => openCommandLine("/"),
+    "chat.workspace.next": () => cycleWorkspace(1),
+    "chat.workspace.prev": () => cycleWorkspace(-1),
+    "chat.agent.next": () => cycleAgent(1),
+    "chat.agent.prev": () => cycleAgent(-1),
+    "chat.page.up": () => scrollTranscriptBy(-messageHeight()),
+    "chat.page.down": () => scrollTranscriptBy(messageHeight()),
+    "chat.page.bottom": () => jumpToBottom(),
+    "work.down": () => moveTask(1),
+    "work.up": () => moveTask(-1),
+    "work.top": () => setTaskCursor(0),
+    "work.bottom": () => setTaskCursor(Math.max(0, orderedTasks().length - 1)),
+    "work.open": () => openResult(),
+    "legacy.workspace.archive": () => archiveWorkspace(),
+    "legacy.workspace.delete": () => deleteWorkspace(),
+    "legacy.agent.archive": () => archiveSelectedAgent(),
+    "legacy.agent.delete": () => deleteSelectedAgent(),
+    "legacy.reset": () => resetEnsemble(),
+  }
+  const leaderActionHandlers: Record<string, () => unknown> = {
+    "leader.help": () => setHelpOpen(true),
+    "leader.leave": () => context.ui.router.navigate({ type: "home" }),
+    "leader.cancel": () => closeLeader(),
+    "leader.new.agent": () => createAgent(),
+    "leader.new.workspace": () => createWorkspace(),
+    "leader.edit.workspace": () => editWorkspace(),
+    "leader.settings": () => openSettings(),
+    "leader.archive.workspace": () => archiveWorkspace(),
+    "leader.delete.workspace": () => deleteWorkspace(),
+    "leader.archive.agent": () => archiveSelectedAgent(),
+    "leader.delete.agent": () => deleteSelectedAgent(),
+    "leader.approvals": () => { setApprovalCursor(0); setApprovalsOpen(true) },
+    "leader.pause": () => togglePause(),
+    "leader.init": () => initEnsemble(),
+    "leader.native": () => openNative(),
+    "leader.delegate": () => delegateSelected(),
+    "leader.reassign": () => reassignSelected(),
+    "leader.retry": () => retrySelected(),
+    "leader.restart": () => restartSelected(),
+    "leader.cancel.task": () => cancelSelected(),
+  }
+  const runKeyAction = (id: string) => {
+    clearPendingChord()
+    runAction(keyActionHandlers[id])
+  }
+  const runLeaderAction = (id: string) => {
+    setLeaderMode(false)
+    clearPendingChord()
+    runAction(leaderActionHandlers[id])
+  }
+
   onMount(() => {
     void refresh()
     const timer = setInterval(() => {
@@ -1813,7 +2028,7 @@ export function EnsembleV2App() {
       if (composerActive() && !isModal() && handleComposerKey(event)) return
       // v5.6 T2: n/N move through the committed transcript search, Esc
       // clears a committed filter/search, and `:`/`/` open the command line.
-      // These run before the leader/global layers so `n` cannot create a
+      // These run before the leader/chord layers so `n` cannot create a
       // workspace while a search is active.
       const pressed = String(event?.name ?? "")
       const typed = String(event?.sequence ?? "")
@@ -1837,68 +2052,87 @@ export function EnsembleV2App() {
           return
         }
       }
-      if (!leaderMode()) return
-      const name = String(event?.name ?? ""); const sequence = String(event?.sequence ?? "")
-      if (name === "escape" || name === "q" || name === "?" || sequence === "?") return
-      event?.preventDefault?.(); event?.stopPropagation?.()
-      setLeaderMode(false)
-      context.ui.toast.show({ title: "Leader", message: `Unknown shortcut: ${sequence || name}`, variant: "warning" })
+      // v5.6 T3: the leader owns known keys through the generated leader
+      // layer; anything else closes which-key with a truthful warning.
+      if (leaderMode()) {
+        const token = normalizeKeyToken(event)
+        if (token === "escape" || resolveLeaderKey(token).type === "action") return
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        setLeaderMode(false)
+        clearPendingChord()
+        context.ui.toast.show({ title: "Leader", message: `Unknown shortcut: ${String(event?.sequence ?? event?.name ?? token)}`, variant: "warning" })
+        return
+      }
+      // Multi-key chords (gg) live above the host keymap: single keys belong
+      // to the generated layers, prefixes set the statusline pending chord.
+      const keyContext = surfaceKeyContext()
+      if (!keyContext) return
+      const token = normalizeKeyToken(event)
+      if (!token) return
+      const sequence = [...pendingKeys, token]
+      const resolved = resolveNormalKey(keyContext, pendingKeys, token)
+      if (resolved.type === "pending") {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        setPendingChord([...resolved.prefix])
+        return
+      }
+      if (resolved.type === "action" && resolved.entry.keys.length > 1 && resolved.entry.keys.join(" ") === sequence.join(" ")) {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        runKeyAction(resolved.entry.id)
+        return
+      }
+      // A stale prefix never swallows a fresh single key: clear it and let
+      // the generated single-key layer handle the event.
+      if (pendingKeys.length > 0) clearPendingChord()
     }
     keyInput.on("keypress", onKey)
-    platformLayer(() => ({
-      mode: "global", priority: 120,
-      enabled: () => isOurRoute() && !isModal() && leaderMode() && !commandActive(),
-      commands: [
-        { id: "ensemble.v2.help", title: "Ensemble: Shortcut help", bind: "?", run: () => { setLeaderMode(false); setHelpOpen(true) } },
-        { id: "ensemble.v2.leave", title: "Ensemble: Leave", bind: "q", run: () => { setLeaderMode(false); context.ui.router.navigate({ type: "home" }) } },
-        { id: "ensemble.v2.cancel", title: "Ensemble: Cancel leader", bind: "escape", run: () => setLeaderMode(false) },
-      ],
-      bindings: ["ensemble.v2.help", "ensemble.v2.leave", "ensemble.v2.cancel"],
+
+    // v5.6 T3: every surface layer is generated from the declarative catalog.
+    // One context is active at a time; the composer, overlays, the command
+    // line, and the leader own their keys before these layers.
+    const catalogCommand = (entry: KeyEntry, id: string) => ({
+      id,
+      title: `Ensemble: ${entry.title}`,
+      bind: entry.keys[0],
+      enabled: entry.availability === "no-transcript-search" ? () => !transcriptSearch() : undefined,
+      run: (_input: string | undefined, event: any) => {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        runKeyAction(entry.id)
+      },
+    })
+    const surfaceLayer = (keyContext: "roster" | "chat" | "work", platform: boolean) => {
+      const entries = layerEntries(keyContext).filter((entry) => Boolean(entry.platform) === platform)
+      if (entries.length === 0) return
+      const commands = entries.map((entry) => catalogCommand(entry, `ensemble.v2.key.${keyContext}.${entry.id}`))
+      const factory = () => ({
+        mode: "global",
+        priority: 100,
+        enabled: () => isOurRoute() && !isModal() && !leaderMode() && !commandActive() && wizard() === null && !composerActive() && interaction().command === null && surfaceKeyContext() === keyContext,
+        commands,
+        bindings: commands.map((command) => command.id),
+      })
+      if (platform) platformLayer(factory)
+      else context.keymap.layer(factory)
+    }
+    for (const keyContext of ["roster", "chat", "work"] as const) {
+      surfaceLayer(keyContext, false)
+      surfaceLayer(keyContext, true)
+    }
+    const leaderCommands = leaderLayerEntries().map((entry) => ({
+      id: `ensemble.v2.key.leader.${entry.id}`,
+      title: `Ensemble: ${entry.title}`,
+      bind: entry.keys[0],
+      run: (_input: string | undefined, event: any) => {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        runLeaderAction(entry.id)
+      },
     }))
-    platformLayer(() => ({
-      mode: "global", priority: 100,
-      enabled: () => isOurRoute() && !isModal() && !leaderMode() && !composerActive() && !commandActive() && wizard() === null && !skillFilterEditing() && !memoryFilterEditing(),
-      commands: [
-        { id: "ensemble.v2.leader", title: "Ensemble: Leader key", bind: "~", run: () => setLeaderMode(true) },
-        { id: "ensemble.v2.left", title: "Ensemble: Column left", bind: "h", run: () => focusLeft() },
-        { id: "ensemble.v2.right", title: "Ensemble: Column right", bind: "l", run: () => focusRight() },
-        { id: "ensemble.v2.down", title: "Ensemble: Down", bind: "j", run: () => moveCursor(1) },
-        { id: "ensemble.v2.up", title: "Ensemble: Up", bind: "k", run: () => moveCursor(-1) },
-        { id: "ensemble.v2.enter", title: "Ensemble: Open chat / work result", bind: "enter", run: () => { if (focusArea() === "rail") void enterRail().catch(showError); else void openResult().catch(showError) } },
-        { id: "ensemble.v2.compose", title: "Ensemble: Compose", bind: "i", run: () => startCompose() },
-        { id: "ensemble.v2.new.agent", title: "Ensemble: New agent", bind: "a", run: () => void createAgent().catch(showError) },
-        { id: "ensemble.v2.new.workspace", title: "Ensemble: New workspace", bind: "n", enabled: () => focusArea() !== "chat" || !transcriptSearch(), run: () => void createWorkspace().catch(showError) },
-        { id: "ensemble.v2.workspace.edit", title: "Ensemble: Edit workspace", bind: "g", run: () => void editWorkspace().catch(showError) },
-        { id: "ensemble.v2.settings", title: "Ensemble: Agent settings", bind: "s", run: () => openSettings() },
-        { id: "ensemble.v2.approvals", title: "Ensemble: Approvals", bind: "v", run: () => { setApprovalCursor(0); setApprovalsOpen(true) } },
-        { id: "ensemble.v2.search", title: "Ensemble: Search", bind: "/", run: () => { openCommandLine("/") } },
-        { id: "ensemble.v2.scroll.up", title: "Ensemble: Scroll transcript up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); transcriptScrollRef?.scrollBy?.(-messageHeight()) } },
-        { id: "ensemble.v2.scroll.down", title: "Ensemble: Scroll transcript down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); transcriptScrollRef?.scrollBy?.(messageHeight()) } },
-        { id: "ensemble.v2.scroll.bottom", title: "Ensemble: Scroll transcript to bottom", bind: "end", enabled: () => !composerActive(), run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); jumpToBottom() } },
-        { id: "ensemble.v2.init", title: "Ensemble: Init workspace files (initialisation, not routing)", bind: "shift+i", run: () => void initEnsemble().catch(showError) },
-        { id: "ensemble.v2.init.alt", title: "Ensemble: Init workspace files, alternate binding (initialisation, not routing)", bind: "ctrl+g", run: () => void initEnsemble().catch(showError) },
-        { id: "ensemble.v2.pause", title: "Ensemble: Pause workspace", bind: "p", run: () => void togglePause().catch(showError) },
-        { id: "ensemble.v2.native", title: "Ensemble: Native session", bind: "o", run: () => openNative() },
-        { id: "ensemble.v2.delegate", title: "Ensemble: Delegate", bind: "d", run: () => void delegateSelected().catch(showError) },
-        { id: "ensemble.v2.reassign", title: "Ensemble: Reassign", bind: "t", run: () => void reassignSelected().catch(showError) },
-        { id: "ensemble.v2.retry", title: "Ensemble: Retry", bind: "r", run: () => void retrySelected().catch(showError) },
-        { id: "ensemble.v2.restart", title: "Ensemble: Restart", bind: "shift+r", run: () => void restartSelected().catch(showError) },
-        { id: "ensemble.v2.cancel.task", title: "Ensemble: Cancel subtask", bind: "x", run: () => {
-          if (surface()?.kind === "agent" && (chatContext()?.queued ?? 0) > 0) void removeQueuedDm().catch(showError)
-          else void cancelSelected().catch(showError)
-        } },
-        { id: "ensemble.v2.workspace.next", title: "Ensemble: Next workspace", bind: "w", run: () => cycleWorkspace(1) },
-        { id: "ensemble.v2.workspace.prev", title: "Ensemble: Previous workspace", bind: "shift+w", run: () => cycleWorkspace(-1) },
-        { id: "ensemble.v2.agent.next", title: "Ensemble: Next agent", bind: "z", run: () => cycleAgent(1) },
-        { id: "ensemble.v2.agent.prev", title: "Ensemble: Previous agent", bind: "shift+z", run: () => cycleAgent(-1) },
-        { id: "ensemble.v2.workspace.archive", title: "Ensemble: Archive workspace", bind: "ctrl+w", run: () => void archiveWorkspace().catch(showError) },
-        { id: "ensemble.v2.workspace.delete", title: "Ensemble: Delete workspace", bind: "ctrl+shift+w", run: () => void deleteWorkspace().catch(showError) },
-        { id: "ensemble.v2.agent.archive", title: "Ensemble: Archive agent", bind: "ctrl+a", run: () => void archiveSelectedAgent().catch(showError) },
-        { id: "ensemble.v2.agent.delete", title: "Ensemble: Delete agent", bind: "ctrl+shift+a", run: () => void deleteSelectedAgent().catch(showError) },
-        { id: "ensemble.v2.reset", title: "Ensemble: Reset", bind: "ctrl+shift+delete", run: () => void resetEnsemble().catch(showError) },
-        { id: "ensemble.v2.back", title: "Ensemble: Clear filter", bind: "escape", run: () => { clearSearchAndFilter() } },
-      ],
-      bindings: ["ensemble.v2.leader", "ensemble.v2.left", "ensemble.v2.right", "ensemble.v2.down", "ensemble.v2.up", "ensemble.v2.enter", "ensemble.v2.compose", "ensemble.v2.new.agent", "ensemble.v2.new.workspace", "ensemble.v2.workspace.edit", "ensemble.v2.settings", "ensemble.v2.approvals", "ensemble.v2.search", "ensemble.v2.scroll.up", "ensemble.v2.scroll.down", "ensemble.v2.scroll.bottom", "ensemble.v2.init", "ensemble.v2.init.alt", "ensemble.v2.pause", "ensemble.v2.native", "ensemble.v2.delegate", "ensemble.v2.reassign", "ensemble.v2.retry", "ensemble.v2.restart", "ensemble.v2.cancel.task", "ensemble.v2.workspace.next", "ensemble.v2.workspace.prev", "ensemble.v2.agent.next", "ensemble.v2.agent.prev", "ensemble.v2.workspace.archive", "ensemble.v2.workspace.delete", "ensemble.v2.agent.archive", "ensemble.v2.agent.delete", "ensemble.v2.reset", "ensemble.v2.back"],
+    context.keymap.layer(() => ({
+      mode: "global",
+      priority: 120,
+      enabled: () => isOurRoute() && !isModal() && leaderMode() && !commandActive(),
+      commands: leaderCommands,
+      bindings: leaderCommands.map((command) => command.id),
     }))
     platformLayer(() => ({
       mode: "global", priority: 130,
@@ -2575,12 +2809,12 @@ export function EnsembleV2App() {
   const statusContext = () => contextLabel({ focus: interaction().focus, overlay: interaction().overlay, surface: statusSurface() })
   const statusPosition = () => {
     if (composerActive()) return composerPosition(composerDraft(), composerCursor())
-    if (focusArea() === "rail") return listPosition(railCursor(), railItems().length)
-    if (showWorkBlock() ?? false) return listPosition(taskCursor(), orderedTasks().length)
+    if (interaction().focus === "rail") return listPosition(railCursor(), railItems().length)
+    if (interaction().focus === "work") return listPosition(taskCursor(), orderedTasks().length)
     return atBottom() ? "100%" : "scrolled"
   }
   const statusHints = () => {
-    if (leaderMode()) return "? help · q leave · esc cancel"
+    if (leaderMode()) return "which-key · ? help · q leave · esc cancel"
     const command = interaction().command
     if (command) {
       if (command.kind === ":") {
@@ -2609,8 +2843,10 @@ export function EnsembleV2App() {
         ? footerLine1({ focus: "composer", hasWork: showWorkBlock() ?? false })
         : "i insert · enter send · esc chat · ctrl+g leave"
     }
-    const hints = footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false })
-    return interaction().overlay === "none" ? `${hints} · ~ leader` : hints
+    if (interaction().focus === "work") return statuslineHints("work", { hasWork: hasWorkZone() })
+    const keyContext = surfaceKeyContext()
+    if (keyContext) return statuslineHints(keyContext, { hasWork: hasWorkZone() })
+    return footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false })
   }
   const statusMessage = () => visibleMessage(interaction(), Date.now())?.text ?? null
 
@@ -2619,7 +2855,7 @@ export function EnsembleV2App() {
       <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={overlayOpen() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
-          <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · ? help · q leave · esc cancel" : `${isBusy() ? "BUSY · " : ""}${status()}`}</text>
+          <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · which-key · esc cancel" : `${isBusy() ? "BUSY · " : ""}${status()}`}</text>
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
@@ -2753,8 +2989,8 @@ export function EnsembleV2App() {
                                 const pending = pendingWork()?.id === task.id ? pendingWork()!.action : null
                                 const rowStatus = deriveWorkStatus(task, Date.now())
                                 return (
-                                <text fg={taskCursor() === index() ? (chromeOwnsFocus(chromeFocus(), "chat") ? colors.good : colors.warn) : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
-                                  {taskCursor() === index() && chromeOwnsFocus(chromeFocus(), "chat") ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })}{` ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
+                                <text fg={taskCursor() === index() && interaction().focus === "work" ? colors.good : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
+                                  {taskCursor() === index() && interaction().focus === "work" ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })}{` ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
                                 </text>
                                 )
                               }}</For>
@@ -2893,6 +3129,26 @@ export function EnsembleV2App() {
           <box width="100%" flexDirection="row" justifyContent="center" flexShrink={0}>
             <text fg={colors.faint} bg={colors.panel} truncate>{wizardNavHint(Boolean(wizard() && wizardFinal(wizard()!)))}</text>
           </box>
+        </box>
+      </Show>
+      <Show when={leaderMode()}>
+        <box
+          position="absolute"
+          bottom={4}
+          right={4}
+          width={68}
+          height={whichKeyLines(leaderEntries()).length + 2}
+          zIndex={90}
+          border
+          borderStyle="rounded"
+          borderColor={colors.leader}
+          backgroundColor={colors.panel}
+          paddingLeft={1}
+          paddingRight={1}
+          flexDirection="column"
+        >
+          <text fg={colors.leader} bg={colors.panel} width="100%" truncate>LEADER · Space</text>
+          <For each={whichKeyLines(leaderEntries())}>{(line) => <text fg={colors.text} bg={colors.panel} width="100%" truncate>{line}</text>}</For>
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>

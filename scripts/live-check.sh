@@ -127,7 +127,7 @@ else
   live_log "no models available; agent/workspace/composer coverage skipped explicitly"
 fi
 
-live_key "$LIVE_TUI_SESSION" '~'
+live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before leaving"
 live_key "$LIVE_TUI_SESSION" 'q'
 live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after leaving Ensemble"

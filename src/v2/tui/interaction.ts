@@ -16,6 +16,7 @@ export type InteractionMode = "normal" | "insert" | "command"
 export type InteractionFocus =
   | "rail"
   | "chat"
+  | "work"
   | "composer"
   | "settings"
   | "wizard"
@@ -106,6 +107,9 @@ function escape(state: InteractionState): InteractionResult {
       state: { ...state, overlay: "none", mode: "normal" },
       intents: [{ type: "close-overlay", overlay: state.overlay }],
     }
+  }
+  if (state.focus === "work") {
+    return { state: { ...state, mode: "normal", focus: "chat" }, intents: [{ type: "blur-editor" }] }
   }
   if (state.focus === "composer") {
     if (state.mode === "insert") {

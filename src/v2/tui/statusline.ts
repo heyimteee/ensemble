@@ -49,6 +49,8 @@ export function contextLabel(input: {
       return "Approvals"
     case "help":
       return "Help"
+    case "work":
+      return "Work list"
     case "rail":
     case "chat":
     case "composer":
