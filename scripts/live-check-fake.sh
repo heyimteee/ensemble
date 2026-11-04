@@ -110,8 +110,10 @@ live_require_absence "$LIVE_TUI_SESSION" "streaming…" 15 "onboarding finalizat
 # fixture, then observe the live block before it is finalized in place.
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
+# v5.6 T1: Insert mode, context, and the new Esc ladder are visible in the bar.
+live_assert_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER · Direct conversation" "statusline names Insert and context"
+live_assert_text "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" "statusline names the composer ladder"
 # Slice B: the COMPOSER hint is focus-border-only — no blink glyph anywhere.
-live_assert_text "$LIVE_TUI_SESSION" "COMPOSER · enter send · esc cancel" "static composer hint"
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no composer blink glyph"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
@@ -121,12 +123,17 @@ live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "finalized rich
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization"
 live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "activity line unmounts after finalize"
-# Ticket #77d: Enter sends without leaving the composer; only Esc leaves.
+# v5.6 T1: Enter keeps Insert focus; Esc goes composer Insert -> composer
+# Normal -> chat Normal, and never leaves Ensemble.
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after send but still focused"
-live_assert_text "$LIVE_TUI_SESSION" "COMPOSER" "composer keeps focus after Enter send"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER" "composer keeps Insert focus after Enter send"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "Esc leaves the composer"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "first Esc goes to composer Normal"
+live_assert_text "$LIVE_TUI_SESSION" "i insert · enter send · esc chat · ctrl+g leave" "composer Normal hints name the ladder"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "second Esc returns to chat Normal"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Direct conversation" "chat stays in Normal mode"
 
 # Ticket #70 determinism: rich Markdown lays out over several frames, so an
 # instant assert can catch a partial render — a different missing element per
@@ -527,11 +534,14 @@ live_require_absence "$LIVE_TUI_SESSION" "enter open" 10 "chat focus leaves the 
 live_assert_absence "$LIVE_TUI_SESSION" "enter result" "idle chat footer hides dead work keys"
 live_assert_text "$LIVE_TUI_SESSION" "g members" "idle chat footer keeps member actions"
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "esc cancel · \$ agent" 10 "composer focus footer names send keys"
+live_require_text "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "composer Insert hints name the ladder"
 live_assert_absence "$LIVE_TUI_SESSION" "enter result" "composer footer hides dead work keys"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "esc cancel · \$ agent" 10 "composer closed back to chat footer"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "composer Normal after one Esc"
+live_require_absence "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "Insert hints replaced by Normal hints"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "second Esc returns to chat Normal"
 live_log "slice E focus walkthrough shows context footers with no hidden-work hints"
 
 # Slice E help: tone-down keeps every shortcut searchable; the zero state
@@ -768,7 +778,7 @@ live_open_ensemble
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page under reduced motion"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored under reduced motion"
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "COMPOSER · enter send · esc cancel" 10 "static composer hint under reduced motion"
+live_require_text "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "static composer hint under reduced motion"
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
