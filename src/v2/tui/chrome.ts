@@ -2,10 +2,10 @@
  * Slice E chrome seam (ticket #65, brief §2.0/2.1/2.7–2.10).
  *
  * Pure helpers behind the final chrome polish: the single-focus model, the
- * context-sensitive footer, the unified overlay footer grammar, and the
- * empty-state copy. No rendering, no signals — callers wire these into the
- * Solid tree so exactly one focus-colored border renders at all times and
- * every hint matches the actions actually available.
+ * context-sensitive footer, and the empty-state copy. Overlay footer keys now
+ * come from the shared keymap catalog (v5.6 T6). No rendering, no signals —
+ * callers wire these into the Solid tree so exactly one focus-colored border
+ * renders at all times and every hint matches the actions actually available.
  */
 
 /** Columns that can own the chat-surface focus. The composer is a distinct focus state (brief §2.10). */

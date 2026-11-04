@@ -4,9 +4,11 @@
  * One declarative catalog is the source of truth for the generated keymap
  * layers, the statusline hints, and the Space which-key popup. Later tickets
  * add their contexts and leader actions here instead of growing per-surface
- * key handler lists. Keys are canonical tokens (lower-case names, `shift+x`,
- * `ctrl+d`, named keys) so one pure resolver serves raw keypresses and the
- * host keymap alike.
+ * key handler lists. v5.6 T6 reuses the same grammar for wizards and dialogs:
+ * their surface keys and text-field footer hints are catalog entries, and the
+ * app resolves them through the one chord machine. Keys are canonical tokens
+ * (lower-case names, `shift+x`, `ctrl+d`, named keys) so one pure resolver
+ * serves raw keypresses and the host keymap alike.
  */
 
 export type KeyContext =
