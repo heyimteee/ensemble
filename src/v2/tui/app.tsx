@@ -30,6 +30,18 @@ import { SKILL_VISIBLE_LIMIT, skillPageForCursor } from "./skills.ts"
 import { modelPickerLabel, sortModelsByProvider } from "./settings.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue, filterEdit } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
+import {
+  initialInteractionState,
+  interactionReducer,
+  visibleMessage,
+  type InteractionEvent,
+  type InteractionMode,
+  type InteractionOverlay,
+  type InteractionResult,
+  type InteractionState,
+} from "./interaction.ts"
+import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
+import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { shouldApplySnapshot } from "../snapshot-guard.ts"
@@ -182,7 +194,11 @@ export function EnsembleV2App() {
   const [snapshot, setSnapshot] = createSignal<Snapshot | null>(null)
   const [workspaceID, setWorkspaceID] = createSignal<string | null>(null)
   const [surface, setSurface] = createSignal<Surface | null>(null)
-  const [focusArea, setFocusArea] = createSignal<FocusArea>("rail")
+  // v5.6 T1 interaction foundation: the pure reducer owns mode, focus,
+  // overlay context, command input, pending chord, selection, and the
+  // transient statusline message. Focus areas elsewhere in the app read
+  // through the compatibility accessors below.
+  const [interaction, setInteraction] = createSignal<InteractionState>(initialInteractionState())
   const [railCursor, setRailCursor] = createSignal(0)
   const [taskCursor, setTaskCursor] = createSignal(0)
   const [chatContext, setChatContext] = createSignal<ChatContext | null>(null)
@@ -210,8 +226,9 @@ export function EnsembleV2App() {
   const [skillFilter, setSkillFilter] = createSignal("")
   const [backupCursor, setBackupCursor] = createSignal(0)
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
-  const [composerActive, setComposerActive] = createSignal(false)
   const [composerDraft, setComposerDraft] = createSignal("")
+  const [composerCursor, setComposerCursor] = createSignal(0)
+  const [drafts, setDrafts] = createSignal<DraftStore>({})
   const [completion, setCompletion] = createSignal<Completion | null>(null)
   const [picker, setPicker] = createSignal<PickerState | null>(null)
   const [textPrompt, setTextPrompt] = createSignal<TextPromptState | null>(null)
@@ -232,6 +249,67 @@ export function EnsembleV2App() {
   let resultScrollRef: any
   let transcriptScrollRef: any
   let helpScrollRef: any
+  let messageTimer: ReturnType<typeof setTimeout> | undefined
+
+  // Focus/mode compatibility accessors: existing call sites keep reading
+  // `focusArea()` and `composerActive()` while the reducer owns the values.
+  const focusArea = (): FocusArea => (interaction().focus === "rail" ? "rail" : "chat")
+  const composerActive = () => interaction().focus === "composer"
+  const interactionMode = (): InteractionMode => interaction().mode
+  const setFocusArea = (area: FocusArea) => { dispatchInteraction({ type: "focus.set", focus: area }) }
+  const applyInteraction = (result: InteractionResult) => {
+    setInteraction(result.state)
+    for (const intent of result.intents) {
+      if (intent.type === "focus-editor") queueMicrotask(() => composerRef?.focus?.())
+      else if (intent.type === "blur-editor") { try { composerRef?.blur?.() } catch {} }
+    }
+  }
+  const dispatchInteraction = (event: InteractionEvent): InteractionResult => {
+    const result = interactionReducer(interaction(), event)
+    applyInteraction(result)
+    return result
+  }
+  const setComposerActive = (active: boolean) => {
+    if (active) { dispatchInteraction({ type: "insert.enter" }); return }
+    try { composerRef?.blur?.() } catch {}
+    if (composerActive()) dispatchInteraction({ type: "focus.set", focus: "chat" })
+  }
+  const notify = (text: string, tone: "info" | "success" | "error" = "info") => {
+    const at = Date.now()
+    setInteraction((state) => interactionReducer(state, { type: "message.show", text, tone, at }).state)
+    if (messageTimer !== undefined) clearTimeout(messageTimer)
+    messageTimer = setTimeout(() => {
+      setInteraction((state) => interactionReducer(state, { type: "message.clear" }).state)
+      messageTimer = undefined
+    }, 3_000)
+  }
+  onCleanup(() => { if (messageTimer !== undefined) clearTimeout(messageTimer) })
+
+  const currentDraftSurface = (): DraftSurface | null => {
+    const current = surface()
+    if (!current) return null
+    return current.kind === "agent"
+      ? { kind: "agent", agentID: current.agentID }
+      : { kind: "workspace", workspaceID: current.workspaceID }
+  }
+  const currentDraftKey = () => draftKey(currentDraftSurface())
+
+  const interactionOverlay = (): InteractionOverlay => {
+    if (wizard()) return "wizard"
+    if (picker() || textPrompt() || confirm() || result()) return "dialog"
+    if (helpOpen()) return "help"
+    if (approvalsOpen()) return "approvals"
+    if (settingsAgentID()) return "settings"
+    return "none"
+  }
+  // Overlays are contexts, not modes: keep the reducer's overlay field in
+  // step so the statusline, Esc precedence, and later key catalogs agree.
+  createEffect(() => {
+    const overlay = interactionOverlay()
+    if (interaction().overlay === overlay) return
+    setInteraction((state) => interactionReducer(state, { type: "overlay.set", overlay }).state)
+  })
+
   const lineCache = new Map<string, ChatLine>()
   let refreshSeq = 0
   let chatSeq = 0
@@ -618,7 +696,9 @@ export function EnsembleV2App() {
     if (busy()) return false
     setBusy(true)
     try { await action(); await refresh(); return true } catch (error: any) {
-      setStatus(`${label}: ${error?.message ?? error}`)
+      const message = error?.message ?? String(error)
+      setStatus(`${label}: ${message}`)
+      notify(`${label}: ${message}`, "error")
       context.ui.toast.show({ title: "Ensemble", message: error?.message ?? String(error), variant: "error" })
       return false
     } finally { setBusy(false) }
@@ -676,7 +756,7 @@ export function EnsembleV2App() {
       // Ticket #77d: keep the composer focused across snapshot repaints. A
       // poll that lands between typing and Enter must not silently drop the
       // key because the textarea lost focus.
-      if (composerActive()) queueMicrotask(() => composerRef?.focus?.())
+      if (composerActive() && interaction().mode === "insert") queueMicrotask(() => composerRef?.focus?.())
       syncTranscriptScroll()
       try { (context.renderer as any)?.requestRender?.() } catch {}
       if (next.configError && next.configError !== lastConfigError) {
@@ -875,7 +955,28 @@ export function EnsembleV2App() {
       composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6))
     }
     setComposerDraft(value)
+    setComposerCursor(value.length)
+    setDrafts((store) => updateDraft(store, currentDraftKey(), value))
   }
+  // Per-surface draft restoration: switching a Workspace or Direct
+  // conversation swaps the textarea to that surface's draft. Mode and focus
+  // changes never trigger this path, so Normal/composer focus moves keep the
+  // text in place.
+  let lastDraftKey: string | null | undefined = undefined
+  createEffect(() => {
+    const key = currentDraftKey()
+    if (key === lastDraftKey) return
+    lastDraftKey = key
+    const value = draftFor(drafts(), key)
+    setComposerDraft(value)
+    setComposerCursor(value.length)
+    setCompletion(null)
+    if (composerRef) {
+      composerRef.setText?.(value)
+      composerRef.cursorOffset = value.length
+      composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6))
+    }
+  })
   const handleNativeEvent = (event: any) => {
     const data = event?.data ?? event
     const session = String(data?.sessionID ?? "")
@@ -894,9 +995,30 @@ export function EnsembleV2App() {
   const startCompose = () => {
     if (!surface()) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
     composerEpoch++
-    setComposerActive(true); focusComposer()
+    dispatchInteraction({ type: "insert.enter" })
+    focusComposer()
   }
-  const clearComposer = () => { composerEpoch++; setComposerValue(""); composerRef?.blur?.(); setComposerActive(false) }
+  /** Esc/Ctrl+G leave the editor but keep its surface draft. */
+  const leaveComposer = () => {
+    composerEpoch++
+    try { composerRef?.blur?.() } catch {}
+    closeCompletion()
+    dispatchInteraction({ type: "leave.editor" })
+  }
+  /** Slash commands consume their text, so only this path clears a draft. */
+  const resetComposer = () => {
+    composerEpoch++
+    setDrafts((store) => clearDraft(store, currentDraftKey()))
+    setComposerDraft("")
+    setComposerCursor(0)
+    if (composerRef) {
+      composerRef.setText?.("")
+      composerRef.cursorOffset = 0
+      composerRef.height = computeComposerHeight("", Math.max(12, messageWidth() - 6))
+    }
+    try { composerRef?.blur?.() } catch {}
+    dispatchInteraction({ type: "leave.editor" })
+  }
 
   const agentItems = () => activeAgents().map((agent) => ({ title: `${agent.name}${activeWorkspace()?.leaderID === agent.id ? " · leader" : ""}`, value: agent.name }))
 
@@ -990,7 +1112,7 @@ export function EnsembleV2App() {
   const runSlashCommand = async (input: string): Promise<void> => {
     const parsed = parseSlashCommand(input)
     const command = parsed?.command ?? ""
-    clearComposer()
+    resetComposer()
     switch (command) {
       case "workspace": await pickWorkspace(); return
       case "agent": mention(); return
@@ -1035,16 +1157,59 @@ export function EnsembleV2App() {
     if (completion()) { await selectCompletion(); return }
     if (text === "/") { openCompletion("command", "/", 0); return }
     if (parseSlashCommand(text)) { await runSlashCommand(text); return }
-    // Ticket #77d: Enter sends but keeps the composer focused. Only Esc
-    // leaves it, so a follow-up message needs no extra `i`. Text is cleared
-    // only after the send actually ran (busy/failed sends keep the draft).
-    // A send can outlive the composer session (the user hit Escape while the
-    // request was in flight): never re-open it or wipe a newer draft.
+    // v5.6 T1: Enter sends and keeps Insert focus. The draft is owned by the
+    // surface, cleared only after a successful send; busy/failed sends keep
+    // it. A send can outlive the composer session, and a newer draft typed
+    // while it is in flight must never be wiped.
+    const key = currentDraftKey()
     const epoch = composerEpoch
-    if (await send(text) && composerActive() && composerEpoch === epoch) {
-      setComposerValue("")
-      focusComposer()
+    const wasBusy = busy()
+    const sent = await send(text)
+    if (!sent) {
+      if (wasBusy) notify("Busy — draft kept", "info")
+      return
     }
+    notify("Message sent", "success")
+    const sameKey = currentDraftKey() === key
+    const unchanged = sameKey && composerDraft() === value
+    if (!sameKey || unchanged) setDrafts((store) => applySendResult(store, key, true))
+    if (unchanged) {
+      setComposerValue("")
+      if (composerActive() && composerEpoch === epoch && interaction().mode === "insert") focusComposer()
+    }
+  }
+
+  const handleComposerKey = (event: any): boolean => {
+    const name = String(event?.name ?? "")
+    if (name === "escape") {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      if (completion()) closeCompletion()
+      else dispatchInteraction({ type: "escape" })
+      return true
+    }
+    if (name === "ctrl+g") {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      leaveComposer()
+      return true
+    }
+    if (interaction().mode === "normal") {
+      if (name === "i") {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        dispatchInteraction({ type: "insert.enter" })
+        return true
+      }
+      if (name === "return" || name === "enter" || name === "kpenter") {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        void submitComposer(String(composerRef?.plainText ?? "")).catch(showError)
+        return true
+      }
+      // Normal mode owns the composer's keys; later Vim tickets replace this
+      // no-op with the motion/operator catalog. Swallowing here keeps app
+      // actions from firing while the composer holds focus.
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      return true
+    }
+    return false
   }
 
   const togglePause = async (paused?: boolean) => {
@@ -1406,14 +1571,9 @@ export function EnsembleV2App() {
       if (result()) { handleResultKey(event); return }
       if (skillFilterEditing()) { handleSkillFilterKey(event); return }
       if (memoryFilterEditing()) { handleMemoryFilterKey(event); return }
-      // Ticket #77d: Enter keeps the composer focused, so Escape must be
-      // handled at the raw key layer — the focused textarea consumes it before
-      // the keymap layer can. Only Escape leaves the composer.
-      if (composerActive() && String(event?.name ?? "") === "escape") {
-        event?.preventDefault?.(); event?.stopPropagation?.()
-        clearComposer()
-        return
-      }
+      // v5.6 T1: the composer owns its Esc ladder at the raw key layer — the
+      // focused textarea consumes Escape before the keymap layer can.
+      if (composerActive() && !isModal() && handleComposerKey(event)) return
       if (!leaderMode()) return
       const name = String(event?.name ?? ""); const sequence = String(event?.sequence ?? "")
       if (name === "escape" || name === "q" || name === "?" || sequence === "?") return
@@ -1479,12 +1639,12 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 130,
-      enabled: () => isOurRoute() && composerActive() && !modal() && wizard() === null,
+      enabled: () => isOurRoute() && composerActive() && !isModal() && wizard() === null,
       commands: [
-        { id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } },
+        { id: "ensemble.v2.composer.cancel", title: "Ensemble: Composer Esc ladder", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); if (completion()) closeCompletion(); else dispatchInteraction({ type: "escape" }) } },
         // Host Escape handling can swallow the key while a native run is
         // active; Ctrl+G is the reliable leave-composer chord.
-        { id: "ensemble.v2.composer.leave", title: "Ensemble: Leave composer", bind: "ctrl+g", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } },
+        { id: "ensemble.v2.composer.leave", title: "Ensemble: Leave composer", bind: "ctrl+g", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); leaveComposer() } },
         { id: "ensemble.v2.composer.stop", title: "Ensemble: Stop running work", bind: "ctrl+c", enabled: () => stoppable(), run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); void cancelSelected("stop").catch(showError) } },
       ],
       bindings: ["ensemble.v2.composer.cancel", "ensemble.v2.composer.leave", "ensemble.v2.composer.stop"],
@@ -2148,23 +2308,39 @@ export function EnsembleV2App() {
     return `#${workspace.name} · ${workspaceLabel(workspace.directory)} · leader ${leader}`
   }
 
+  const statusSurface = (): StatuslineSurface => surface()?.kind ?? "none"
+  const statusContext = () => contextLabel({ focus: interaction().focus, overlay: interaction().overlay, surface: statusSurface() })
+  const statusPosition = () => {
+    if (composerActive()) return composerPosition(composerDraft(), composerCursor())
+    if (focusArea() === "rail") return listPosition(railCursor(), railItems().length)
+    if (showWorkBlock() ?? false) return listPosition(taskCursor(), orderedTasks().length)
+    return atBottom() ? "100%" : "scrolled"
+  }
+  const statusHints = () => {
+    if (leaderMode()) return "? help · q leave · esc cancel"
+    if (selectedMissingSkills().length > 0) {
+      return footerLine2({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })
+    }
+    if (interaction().overlay === "settings") return "esc close · tab tabs · e edit · s save"
+    if (interaction().overlay === "approvals") return "enter resolve · esc close"
+    if (interaction().overlay === "help") return "esc close"
+    if (composerActive()) {
+      return interaction().mode === "insert"
+        ? footerLine1({ focus: "composer", hasWork: showWorkBlock() ?? false })
+        : "i insert · enter send · esc chat · ctrl+g leave"
+    }
+    const hints = footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false })
+    return interaction().overlay === "none" ? `${hints} · ~ leader` : hints
+  }
+  const statusMessage = () => visibleMessage(interaction(), Date.now())?.text ?? null
+
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor={colors.bg} padding={1} gap={1}>
       <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={overlayOpen() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
-          <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · ? help · q leave · esc cancel" : `${status()}`}</text>
+          <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · ? help · q leave · esc cancel" : `${isBusy() ? "BUSY · " : ""}${status()}`}</text>
         </box>
-        <Show when={gitState()}>
-          <box flexDirection="row" flexShrink={0} alignItems="center">
-            <text fg={colors.muted} bg={colors.bg}>git:(</text>
-            <text fg={colors.text} bg={colors.bg}>{gitState()!.branch}</text>
-            <Show when={gitState()!.dirty}><text fg={colors.warn} bg={colors.bg}>*</text></Show>
-            <text fg={colors.muted} bg={colors.bg}>)</text>
-            <Show when={gitState()!.ahead > 0}><text fg={colors.good} bg={colors.bg}> ↑{gitState()!.ahead}</text></Show>
-            <Show when={gitState()!.behind > 0}><text fg={colors.bad} bg={colors.bg}> ↓{gitState()!.behind}</text></Show>
-          </box>
-        </Show>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
           <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
@@ -2331,9 +2507,9 @@ export function EnsembleV2App() {
                         </box>
                       </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (stoppable() ? "COMPOSER · enter send · esc cancel · Ctrl+C stop" : "COMPOSER · enter send · esc cancel") : "i compose · $ agent · @ file · / command"}</text>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (interaction().mode === "normal" ? "COMPOSER · NORMAL · i insert · enter send · esc chat" : stoppable() ? "COMPOSER · enter send · esc normal · Ctrl+C stop" : "COMPOSER · enter send · esc normal") : "i compose · $ agent · @ file · / command"}</text>
                     </>
                   </Show>
                 }>
@@ -2438,8 +2614,19 @@ export function EnsembleV2App() {
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
-        <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false })}</text>
-        <text fg={selectedMissingSkills().length > 0 ? colors.bad : colors.faint} bg={colors.bg} width="100%" truncate>{footerLine2({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })}</text>
+        <text fg={leaderMode() ? colors.warn : interactionMode() === "insert" ? colors.good : colors.muted} bg={colors.bg} width="100%" truncate>
+          {statuslineRow1({
+            mode: interactionMode(),
+            context: statusContext(),
+            git: gitState(),
+            position: statusPosition(),
+            pendingChord: interaction().pendingChord,
+            hints: statusHints(),
+          })}
+        </text>
+        <text fg={interaction().message?.tone === "error" ? colors.bad : interaction().message?.tone === "success" ? colors.good : colors.faint} bg={colors.bg} width="100%" truncate>
+          {statuslineRow2({ command: interaction().command, message: statusMessage() })}
+        </text>
       </box>
     </box>
   )

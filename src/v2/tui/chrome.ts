@@ -45,7 +45,7 @@ export type FooterContext = {
 export function footerLine1(context: { focus: ChromeFocus; hasWork: boolean }): string {
   switch (context.focus) {
     case "composer":
-      return "enter send · esc cancel · $ agent · @ file · / command"
+      return "enter send · esc normal · ctrl+g leave · $ agent · @ file · / command"
     case "overlay":
       return "esc cancel · dialog open — close to return"
     case "rail":
