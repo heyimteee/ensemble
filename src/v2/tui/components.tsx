@@ -1,4 +1,5 @@
 import { For, Show, createSignal } from "solid-js"
+import { TextAttributes } from "@opentui/core"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import { approvalSource } from "../types.ts"
 import type { Palette } from "./theme.ts"
@@ -114,10 +115,8 @@ export function Rail(props: {
                 {unread > 0 ? ` ●${unread}` : ""}
               </text>
               <Show when={item.kind === "agent" && (item.description || leader || item.detail)}>
-                <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>
-                  {item.description ? item.description : ""}
-                  {leader ? (item.description ? " · leader" : "leader") : ""}
-                  {item.detail ? (item.description || leader ? ` · ${item.detail}` : item.detail) : ""}
+                <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
+                  {"  "}{short([item.description, leader ? "leader" : "", item.detail].filter(Boolean).join(" · "), Math.max(8, props.width - 6))}
                 </text>
               </Show>
             </box>
