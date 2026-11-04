@@ -59,6 +59,8 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
 live_type "$LIVE_TUI_SESSION" "Renders deterministic Markdown."
 live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
+live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "main model step"
 live_require_text "$LIVE_TUI_SESSION" "0 options" 10 "empty option count"
 live_assert_text "$LIVE_TUI_SESSION" "No models available" "explained empty model state"

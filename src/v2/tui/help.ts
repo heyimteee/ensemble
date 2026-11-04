@@ -10,9 +10,9 @@ export function helpKeyLabel(key: string, mac = isMacPlatform()): string {
 
 export const shortcutGroups: Array<{ title: string; entries: Array<[string, string]> }> = [
   { title: "Leader", entries: [["~", "Leader key"], ["~ ?", "This searchable help"], ["~ q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },
-  { title: "Navigation", entries: [["h / l", "Switch column"], ["j / k", "Rail item / work row"], ["Enter", "Open chat / work result"], ["i", "Focus composer"], ["Esc", "Leave composer"]] },
+  { title: "Navigation", entries: [["h / l", "Switch column"], ["j / k", "Rail item / work row"], ["Enter", "Open chat / work result"], ["i", "Focus composer"], ["Esc", "Leave composer"], ["Ctrl+G", "Leave composer (works while a run is active)"]] },
   { title: "Workspaces", entries: [["n", "New workspace"], ["g", "Edit members and leader"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume"], ["I", "Init workspace files (initialisation, not routing)"], ["Ctrl+W", "Archive workspace"], ["Ctrl+Shift+W", "Delete workspace"], ["Ctrl+Shift+Delete", "Reset Ensemble"]] },
-  { title: "Chat", entries: [["$Name", "Mention an agent"], ["@path", "Reference a workspace file"], ["/command", "Ensemble commands"], ["PageUp / PageDown", "Scroll transcript"], ["End", "Jump to newest message"]] },
+  { title: "Chat", entries: [["$Name", "Mention an agent"], ["@path", "Reference a workspace file"], ["/command", "Ensemble commands"], ["PageUp / PageDown", "Scroll transcript"], ["End", "Jump to newest message"], ["F2", "Open Ensemble from any session"]] },
   { title: "Wizards", entries: [["Ctrl+P", "Previous step"], ["Ctrl+N", "Next step"], ["Enter", "Continue or submit"], ["Shift+Enter", "New line in a text field"], ["Esc", "Cancel the wizard"]] },
   { title: "Work", entries: [["d", "Delegate selected work"], ["t", "Reassign selected work"], ["Enter", "Open selected work result"], ["r", "Retry selected work"], ["R", "Restart selected work"], ["x", "Cancel selected work"], ["o", "Open native session"]] },
   { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive agent"], ["Ctrl+Shift+A", "Delete agent"]] },

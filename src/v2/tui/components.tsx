@@ -117,7 +117,7 @@ export function Rail(props: {
                 </text>
                 <Show when={item.kind === "agent" && item.leader}>
                   <box marginLeft={1} flexShrink={0} backgroundColor={props.colors.leader} paddingLeft={1} paddingRight={1}>
-                    <text fg="#000000" attributes={TextAttributes.BOLD}>LEADER</text>
+                    <text fg={props.colors.bg} attributes={TextAttributes.BOLD}>LEADER</text>
                   </box>
                 </Show>
                 <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
@@ -125,6 +125,9 @@ export function Rail(props: {
                 <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ●{unread}</text></Show>
               </box>
               <Show when={item.kind === "agent"}>
+                <Show when={item.leader}>
+                  <text fg={props.colors.faint} bg={props.colors.bg} attributes={TextAttributes.DIM}>{"  │"}</text>
+                </Show>
                 <Show when={(item.description ?? "").trim()}>
                   <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
                     {"  ├ "}{short(item.description!, Math.max(8, props.width - 8))}

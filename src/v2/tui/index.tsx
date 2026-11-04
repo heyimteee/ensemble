@@ -15,6 +15,7 @@ export default Plugin.define({
           id: "ensemble.v2.open",
           title: "Open Ensemble",
           group: "Ensemble",
+          bind: "f2",
           slash: { name: "ensemble" },
           palette: true,
           run: () => ctx.ui.router.navigate({ type: "plugin", name: "ensemble" }),

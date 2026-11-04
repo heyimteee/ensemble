@@ -42,6 +42,8 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
   live_type "$LIVE_TUI_SESSION" "Reviews changes and keeps the build green."
   live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
+  live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_any_text "$LIVE_TUI_SESSION" 20 "reasoning step or direct chat" "Reasoning effort" "LiveAgent · direct"
@@ -107,6 +109,8 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_type "$LIVE_TUI_SESSION" "ping"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$LiveAgent: ping" 15 "group message sent"
+  live_key "$LIVE_TUI_SESSION" C-g
+  live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer left after send"
 
   live_key "$LIVE_TUI_SESSION" "i"
   live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"

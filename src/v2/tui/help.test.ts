@@ -4,7 +4,7 @@ import { helpKeyLabel, helpGroups, shortcutGroups } from "./help.ts"
 
 test("shortcut help includes workspace and agent destructive actions", () => {
   const keys = shortcutGroups.flatMap((group) => group.entries.map((entry) => entry[0]))
-  for (const key of ["Ctrl+W", "Ctrl+Shift+W", "Ctrl+A", "Ctrl+Shift+A", "Ctrl+Shift+Delete", "End", "Ctrl+P", "Ctrl+N"]) {
+  for (const key of ["Ctrl+W", "Ctrl+Shift+W", "Ctrl+A", "Ctrl+Shift+A", "Ctrl+Shift+Delete", "End", "Ctrl+P", "Ctrl+N", "F2", "Ctrl+G"]) {
     assert.ok(keys.includes(key), key)
   }
 })

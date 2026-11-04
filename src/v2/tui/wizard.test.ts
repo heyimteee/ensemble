@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { WIZARD_NAV_BINDINGS, overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint } from "./wizard.ts"
+import { WIZARD_NAV_BINDINGS, overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint } from "./wizard.ts"
 import { platformBind } from "./platform.ts"
 
 test("wizard filter appends printable characters without modifiers", () => {
@@ -84,4 +84,10 @@ test("enter owns selection, continue, and submit on non-text steps", () => {
 test("text steps keep enter for continue handled by the field", () => {
   assert.equal(wizardEnterAction("text", false), "text")
   assert.equal(wizardEnterAction("text", true), "text")
+})
+
+test("wizard memory lines split one-per-line and skip blanks", () => {
+  assert.deepEqual(wizardMemoryLines("pnpm only\n\n  never edit dist  \n"), ["pnpm only", "never edit dist"])
+  assert.deepEqual(wizardMemoryLines(""), [])
+  assert.deepEqual(wizardMemoryLines("one\r\ntwo"), ["one", "two"])
 })

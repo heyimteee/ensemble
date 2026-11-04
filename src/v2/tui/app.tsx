@@ -13,7 +13,7 @@ import { palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
-import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
+import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
 import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
 import {
   chromeOwnsFocus,
@@ -117,6 +117,8 @@ type WizardDraft = {
   synthesis: boolean
   title: string
   role: string
+  /** Optional new-agent memories, one per line (wizard step). */
+  memories: string
   modelKey: string
   variant: string
 }
@@ -221,6 +223,10 @@ export function EnsembleV2App() {
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
   const [atBottom, setAtBottom] = createSignal(true)
   let composerRef: any
+  // Ticket #77d: identifies the current composer session. A send that is
+  // still in flight must not re-focus (or wipe) a composer the user already
+  // left with Escape.
+  let composerEpoch = 0
   let textPromptRef: any
   let wizardRef: any
   let resultScrollRef: any
@@ -608,12 +614,13 @@ export function EnsembleV2App() {
   // inherit its border; only true overlays steal it.
   const chromeFocus = () => resolveChromeFocus({ focusArea: focusArea(), composerActive: composerActive(), overlayOpen: overlayOpen() })
 
-  const run = async (label: string, action: () => Promise<void>) => {
-    if (busy()) return
+  const run = async (label: string, action: () => Promise<void>): Promise<boolean> => {
+    if (busy()) return false
     setBusy(true)
-    try { await action(); await refresh() } catch (error: any) {
+    try { await action(); await refresh(); return true } catch (error: any) {
       setStatus(`${label}: ${error?.message ?? error}`)
       context.ui.toast.show({ title: "Ensemble", message: error?.message ?? String(error), variant: "error" })
+      return false
     } finally { setBusy(false) }
   }
 
@@ -666,6 +673,10 @@ export function EnsembleV2App() {
       if (!shouldApplySnapshot(lastAppliedVersion, next.state.version)) return
       lastAppliedVersion = next.state.version
       setSnapshot(next)
+      // Ticket #77d: keep the composer focused across snapshot repaints. A
+      // poll that lands between typing and Enter must not silently drop the
+      // key because the textarea lost focus.
+      if (composerActive()) queueMicrotask(() => composerRef?.focus?.())
       syncTranscriptScroll()
       try { (context.renderer as any)?.requestRender?.() } catch {}
       if (next.configError && next.configError !== lastConfigError) {
@@ -809,7 +820,13 @@ export function EnsembleV2App() {
         skillbox: [],
         color: "cyan",
       })
-      context.ui.toast.show({ title: "Ensemble", message: `${agent.name} created. Opening a direct chat.`, variant: "success" })
+      // Ticket #77c: optional wizard memories are saved per line after the
+      // agent exists; empty lines are skipped and never block creation.
+      const memories = wizardMemoryLines(draft.memories)
+      for (const text of memories) {
+        await invoke(context, "memory.add", { agentID: agent.id, scope: "project", text, source: "wizard" }).catch(() => undefined)
+      }
+      context.ui.toast.show({ title: "Ensemble", message: `${agent.name} created. Opening a direct chat.${memories.length > 0 ? ` Saved ${memories.length} ${memories.length === 1 ? "memory" : "memories"}.` : ""}`, variant: "success" })
       openAgent(agent)
     })
   }
@@ -834,12 +851,12 @@ export function EnsembleV2App() {
     })
   }
 
-  const send = async (text: string, recipientIDs?: string[]) => {
+  const send = async (text: string, recipientIDs?: string[]): Promise<boolean> => {
     const value = text.trim()
-    if (!value) return
+    if (!value) return false
     const current = surface()
-    if (!current) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
-    await run("Send message", async () => {
+    if (!current) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return false }
+    return run("Send message", async () => {
       if (current.kind === "agent") {
         await invoke(context, "chat.send", { agentID: current.agentID, workspaceID: current.workspaceID, text: value })
         await refreshChat()
@@ -876,9 +893,10 @@ export function EnsembleV2App() {
 
   const startCompose = () => {
     if (!surface()) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
+    composerEpoch++
     setComposerActive(true); focusComposer()
   }
-  const clearComposer = () => { setComposerValue(""); composerRef?.blur?.(); setComposerActive(false) }
+  const clearComposer = () => { composerEpoch++; setComposerValue(""); composerRef?.blur?.(); setComposerActive(false) }
 
   const agentItems = () => activeAgents().map((agent) => ({ title: `${agent.name}${activeWorkspace()?.leaderID === agent.id ? " · leader" : ""}`, value: agent.name }))
 
@@ -1017,8 +1035,16 @@ export function EnsembleV2App() {
     if (completion()) { await selectCompletion(); return }
     if (text === "/") { openCompletion("command", "/", 0); return }
     if (parseSlashCommand(text)) { await runSlashCommand(text); return }
-    await send(text)
-    clearComposer()
+    // Ticket #77d: Enter sends but keeps the composer focused. Only Esc
+    // leaves it, so a follow-up message needs no extra `i`. Text is cleared
+    // only after the send actually ran (busy/failed sends keep the draft).
+    // A send can outlive the composer session (the user hit Escape while the
+    // request was in flight): never re-open it or wipe a newer draft.
+    const epoch = composerEpoch
+    if (await send(text) && composerActive() && composerEpoch === epoch) {
+      setComposerValue("")
+      focusComposer()
+    }
   }
 
   const togglePause = async (paused?: boolean) => {
@@ -1380,6 +1406,14 @@ export function EnsembleV2App() {
       if (result()) { handleResultKey(event); return }
       if (skillFilterEditing()) { handleSkillFilterKey(event); return }
       if (memoryFilterEditing()) { handleMemoryFilterKey(event); return }
+      // Ticket #77d: Enter keeps the composer focused, so Escape must be
+      // handled at the raw key layer — the focused textarea consumes it before
+      // the keymap layer can. Only Escape leaves the composer.
+      if (composerActive() && String(event?.name ?? "") === "escape") {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        clearComposer()
+        return
+      }
       if (!leaderMode()) return
       const name = String(event?.name ?? ""); const sequence = String(event?.sequence ?? "")
       if (name === "escape" || name === "q" || name === "?" || sequence === "?") return
@@ -1439,7 +1473,7 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.agent.archive", title: "Ensemble: Archive agent", bind: "ctrl+a", run: () => void archiveSelectedAgent().catch(showError) },
         { id: "ensemble.v2.agent.delete", title: "Ensemble: Delete agent", bind: "ctrl+shift+a", run: () => void deleteSelectedAgent().catch(showError) },
         { id: "ensemble.v2.reset", title: "Ensemble: Reset", bind: "ctrl+shift+delete", run: () => void resetEnsemble().catch(showError) },
-        { id: "ensemble.v2.back", title: "Ensemble: Back", bind: "escape", run: () => { if (workspaceFilter()) { setWorkspaceFilter(""); return } context.ui.router.navigate({ type: "home" }) } },
+        { id: "ensemble.v2.back", title: "Ensemble: Clear filter", bind: "escape", run: () => { if (workspaceFilter()) setWorkspaceFilter("") } },
       ],
       bindings: ["ensemble.v2.leader", "ensemble.v2.left", "ensemble.v2.right", "ensemble.v2.down", "ensemble.v2.up", "ensemble.v2.enter", "ensemble.v2.compose", "ensemble.v2.new.agent", "ensemble.v2.new.workspace", "ensemble.v2.workspace.edit", "ensemble.v2.settings", "ensemble.v2.approvals", "ensemble.v2.search", "ensemble.v2.scroll.up", "ensemble.v2.scroll.down", "ensemble.v2.scroll.bottom", "ensemble.v2.init", "ensemble.v2.init.alt", "ensemble.v2.pause", "ensemble.v2.native", "ensemble.v2.delegate", "ensemble.v2.reassign", "ensemble.v2.retry", "ensemble.v2.restart", "ensemble.v2.cancel.task", "ensemble.v2.workspace.next", "ensemble.v2.workspace.prev", "ensemble.v2.agent.next", "ensemble.v2.agent.prev", "ensemble.v2.workspace.archive", "ensemble.v2.workspace.delete", "ensemble.v2.agent.archive", "ensemble.v2.agent.delete", "ensemble.v2.reset", "ensemble.v2.back"],
     }))
@@ -1448,9 +1482,12 @@ export function EnsembleV2App() {
       enabled: () => isOurRoute() && composerActive() && !modal() && wizard() === null,
       commands: [
         { id: "ensemble.v2.composer.cancel", title: "Ensemble: Cancel composer", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } },
+        // Host Escape handling can swallow the key while a native run is
+        // active; Ctrl+G is the reliable leave-composer chord.
+        { id: "ensemble.v2.composer.leave", title: "Ensemble: Leave composer", bind: "ctrl+g", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); clearComposer() } },
         { id: "ensemble.v2.composer.stop", title: "Ensemble: Stop running work", bind: "ctrl+c", enabled: () => stoppable(), run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); void cancelSelected("stop").catch(showError) } },
       ],
-      bindings: ["ensemble.v2.composer.cancel", "ensemble.v2.composer.stop"],
+      bindings: ["ensemble.v2.composer.cancel", "ensemble.v2.composer.leave", "ensemble.v2.composer.stop"],
     }))
     platformLayer(() => ({
       mode: "global", priority: 140,
@@ -1770,6 +1807,7 @@ export function EnsembleV2App() {
       { key: "name", title: "Agent name", description: "Names are unique. Text wraps; Enter continues.", kind: "text", placeholder: "Nova" },
       { key: "title", title: "Agent title", description: "A short role label, such as Engineering.", kind: "text", placeholder: "Engineering" },
       { key: "role", title: "Agent role", description: "Describe how this agent works and what it owns.", kind: "text", placeholder: "You are a focused coding teammate." },
+      { key: "memories", title: "Agent memories (optional)", description: "One memory per line. Shift+Enter adds a line; Enter continues. Leave empty to skip.", kind: "text", placeholder: "The team uses pnpm.\nNever edit generated files." },
       { key: "model", title: "Main model", description: "Used for this agent's native sessions.", kind: "pick", options: state.modelOptions },
     ]
     if (model && model.variants.length > 0) {
@@ -2060,9 +2098,9 @@ export function EnsembleV2App() {
     const model = models()[0]
     const draft: WizardDraft = flow === "workspace"
       ? edit
-        ? { directory: edit.directory, name: edit.name, memberIDs: [...edit.memberIDs], leaderID: edit.leaderID, synthesis: edit.synthesis, title: "", role: "", modelKey: "", variant: "" }
-        : { directory: directoryOf(context), name: "", memberIDs: first ? [first.id] : [], leaderID: first?.id ?? "", synthesis: true, title: "", role: "", modelKey: "", variant: "" }
-      : { directory: "", name: "", memberIDs: [], leaderID: "", synthesis: true, title: "", role: "", modelKey: model ? `${model.providerID}/${model.modelID}` : "", variant: model?.variants[0] ?? "none" }
+        ? { directory: edit.directory, name: edit.name, memberIDs: [...edit.memberIDs], leaderID: edit.leaderID, synthesis: edit.synthesis, title: "", role: "", memories: "", modelKey: "", variant: "" }
+        : { directory: directoryOf(context), name: "", memberIDs: first ? [first.id] : [], leaderID: first?.id ?? "", synthesis: true, title: "", role: "", memories: "", modelKey: "", variant: "" }
+      : { directory: "", name: "", memberIDs: [], leaderID: "", synthesis: true, title: "", role: "", memories: "", modelKey: model ? `${model.providerID}/${model.modelID}` : "", variant: model?.variants[0] ?? "none" }
     const state: WizardState = {
       flow,
       title: edit ? `Edit workspace · #${edit.name}` : flow === "workspace" ? "New workspace" : "New agent",

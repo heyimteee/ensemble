@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
-import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, onboardingPrompt } from "./init-block.ts"
+import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstruction, onboardingPrompt } from "./init-block.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
@@ -1086,7 +1086,7 @@ export class EnsembleV2Service {
       }))
       sessionID = created?.id
       if (!sessionID) throw new Error("Could not create an init session.")
-      await this.ctx.session.command({ sessionID, name: "init", text: "" })
+      await this.ctx.session.command({ sessionID, name: "init", text: initInstruction() })
       await this.ctx.session.wait({ sessionID })
       writeAgentsBlock(workspace.directory, ensembleBlock())
       writeInitMetadata(workspace.directory, ENSEMBLE_BLOCK_VERSION)

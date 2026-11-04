@@ -85,3 +85,15 @@ export function overlayGeometry(viewWidth: number, viewHeight: number, height: n
   const top = Math.max(1, Math.floor((viewHeight - height) / 2))
   return { width, left, top }
 }
+
+/**
+ * New-agent memories entered in the wizard textarea: one memory per line.
+ * Blank lines and surrounding whitespace are dropped; order is preserved.
+ * Pure.
+ */
+export function wizardMemoryLines(value: string): string[] {
+  return String(value ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}

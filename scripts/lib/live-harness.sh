@@ -470,6 +470,9 @@ live_open_ensemble() {
 
 live_type() {
   "$LIVE_TMUX_BIN" send-keys -l -t "$1" -- "$2"
+  # Let the TUI commit the text before the next key (Enter/Escape) is parsed;
+  # a single write can otherwise coalesce with the following key event.
+  sleep 0.5
 }
 
 live_key() {

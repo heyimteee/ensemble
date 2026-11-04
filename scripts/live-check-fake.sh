@@ -87,6 +87,9 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
 live_type "$LIVE_TUI_SESSION" "Renders deterministic Markdown."
 live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
+live_type "$LIVE_TUI_SESSION" "Likes deterministic fixtures"
+live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_any_text "$LIVE_TUI_SESSION" 15 "reasoning step or direct chat" "Reasoning effort" "FakeAgent · direct"
@@ -94,6 +97,11 @@ if live_capture_contains "$LIVE_TUI_SESSION" "Reasoning effort"; then
   live_key "$LIVE_TUI_SESSION" Enter
 fi
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 20 "direct chat opened"
+agent_memories=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
+[[ "$agent_memories" == '["Likes deterministic fixtures"]' ]] || live_fail "wizard memories did not persist (got $agent_memories)"
+# Clear it so later memory-count probes stay meaningful.
+wizard_memory_id=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt })[0].id')
+live_invoke memory.delete "{\"id\":$wizard_memory_id}" >/dev/null
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent" 10 "agent roster entry"
 live_require_text "$LIVE_TUI_SESSION" "Onboarding complete. I am ready." 20 "fake onboarding reply"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 15 "onboarding finalization"
@@ -113,6 +121,12 @@ live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "finalized rich
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization"
 live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "activity line unmounts after finalize"
+# Ticket #77d: Enter sends without leaving the composer; only Esc leaves.
+live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after send but still focused"
+live_assert_text "$LIVE_TUI_SESSION" "COMPOSER" "composer keeps focus after Enter send"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "Esc leaves the composer"
 
 # Ticket #70 determinism: rich Markdown lays out over several frames, so an
 # instant assert can catch a partial render — a different missing element per
@@ -163,6 +177,7 @@ live_assert_text "$LIVE_TUI_SESSION" "Yes — let the leader synthesize" "synthe
 live_key "$LIVE_TUI_SESSION" Enter
 live_assert_absence "$LIVE_TUI_SESSION" "\$ agents" "no completion popup from wizard Enter"
 live_require_text "$LIVE_TUI_SESSION" "Move FakeAgent into" 15 "move-home confirm"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "workspace created"
 live_require_text "$LIVE_TUI_SESSION" "leader FakeAgent" 15 "leader visible on group surface"
@@ -185,6 +200,8 @@ live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on group sur
 live_type "$LIVE_TUI_SESSION" "fake-queue-alpha"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message posted"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "ephemeral work block mounts while active"
 live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · working" 15 "work row loading state with assignee"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
@@ -271,6 +288,7 @@ live_log "group work ran to replied with derived status ($queue_status)"
 # its own row; the terminal outcome is announced once and the block
 # unmounts. The recipient's reply is the relay: exactly one answer row, no
 # second leg.
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for peer turn"
 live_type "$LIVE_TUI_SESSION" "$"
@@ -349,6 +367,7 @@ live_log "completions render inline at finish position (done @$first_done before
 # assignment → asking → answer flow repeats with one line per leg and no
 # duplicates across bursts. The `fake-rich-fixture` trigger makes this turn's
 # reply stream the long fixture, widening the live window for the asserts.
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for attribution probe"
 live_type "$LIVE_TUI_SESSION" "$"
@@ -365,16 +384,20 @@ live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "probe asking ro
 # popup, so it posts in one shot while the probe turn is still streaming its
 # long reply — per-agent serialization parks it as pending, giving a wide,
 # race-free window for the direct-surface check.
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for direct-surface probe"
 live_type "$LIVE_TUI_SESSION" "!FakeAgent peer-direct-probe fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 20 "assignment line for the direct-surface probe"
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 1 "direct probe assignment emitted exactly once"
+# Esc can be swallowed by the host while a native run is active; Ctrl+G is
+# the reliable leave-composer chord and is asserted here.
+live_key "$LIVE_TUI_SESSION" C-g
+live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "Ctrl+G leaves the composer"
 live_key "$LIVE_TUI_SESSION" "z"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 10 "direct surface for the assignment check"
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 20 "assignment line on the direct surface"
-live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 1 "direct probe assignment exactly once on the direct surface"
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "w"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "back on the group surface"
 # Both probes run to replied with no further action. The long fixture replies
@@ -435,9 +458,11 @@ live_log "bare ↓ jump control with working End key"
 # co-occurs in one capture (rich Markdown lays out over several frames),
 # then prove each marker renders exactly once — no clipped/overlapping lines
 # when the fallback and Markdown paths swap at finalize.
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for bubble fixture"
 live_type "$LIVE_TUI_SESSION" "fake-bubble-fixture"
+sleep 0.6
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_all_text "$LIVE_TUI_SESSION" 20 "settled bubble reply" \
   "Bubble Long Heading Marker" "bubble list alpha" "BUBBLE_CODE_MARKER" "bubble table marker"
@@ -454,8 +479,10 @@ live_log "long multi-element bubble reply verified with no clipped markers"
 # Slice C direct surface (verbatim + queued): user text renders literally
 # while agent text stays Markdown, and parked user-owned input shows
 # `· queued · [x remove]` with removal by key.
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "z"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 10 "direct surface for verbatim probe"
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on DM surface"
 live_type "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)"
@@ -464,11 +491,13 @@ live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15
 live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
 live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "verbatim reply finalized in place"
 
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while streaming"
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "fake-queued-probe"
 live_key "$LIVE_TUI_SESSION" Enter
@@ -476,10 +505,12 @@ live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after qu
 live_require_text "$LIVE_TUI_SESSION" "· queued" 15 "parked user line flagged queued"
 live_require_text "$LIVE_TUI_SESSION" "[x remove]" 15 "remove affordance on the parked line"
 live_assert_count "$LIVE_TUI_SESSION" "fake-queued-probe" 1 "queued line rendered exactly once"
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "x"
 live_require_absence "$LIVE_TUI_SESSION" "fake-queued-probe" 15 "queued line removed by key"
 live_require_absence "$LIVE_TUI_SESSION" "[x remove]" 10 "affordance gone with the line"
 live_log "verbatim user text and queued-line removal verified on the direct surface"
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "w"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored after DM probes"
 
@@ -498,6 +529,7 @@ live_assert_text "$LIVE_TUI_SESSION" "g members" "idle chat footer keeps member 
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "esc cancel · \$ agent" 10 "composer focus footer names send keys"
 live_assert_absence "$LIVE_TUI_SESSION" "enter result" "composer footer hides dead work keys"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "esc cancel · \$ agent" 10 "composer closed back to chat footer"
 live_log "slice E focus walkthrough shows context footers with no hidden-work hints"
@@ -513,6 +545,7 @@ live_require_text "$LIVE_TUI_SESSION" "No matching shortcuts" 10 "help zero stat
 live_assert_absence "$LIVE_TUI_SESSION" "Delete workspace" "help filter hid unrelated shortcuts"
 live_key_repeat "$LIVE_TUI_SESSION" "BSpace" 20
 live_require_text "$LIVE_TUI_SESSION" "Leader key" 10 "help filter cleared"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed"
 
@@ -523,6 +556,7 @@ live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings for tab check"
 live_assert_text "$LIVE_TUI_SESSION" "› General" "settings tab cursor"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "settings tab keeps the live memory total"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
 
@@ -532,6 +566,7 @@ live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings cl
 live_key "$LIVE_TUI_SESSION" "v"
 live_require_text "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals inbox opens"
 live_require_text "$LIVE_TUI_SESSION" "Nothing waits for you." 10 "approvals empty state"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals closed"
 live_log "slice E help/settings/approvals chrome verified"
@@ -553,6 +588,7 @@ live_require_text "$LIVE_TUI_SESSION" "enter submit · shift+enter newline · es
 live_type "$LIVE_TUI_SESSION" "X"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "UNSAVED" 10 "draft marked unsaved"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "in-house confirm modal"
 live_assert_text "$LIVE_TUI_SESSION" "enter yes · esc cancel" "confirm footer"
@@ -571,7 +607,7 @@ live_require_text "$LIVE_TUI_SESSION" "Add memory" 10 "in-house add-memory promp
 live_type "$LIVE_TUI_SESSION" "fake-live-memory"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_absence "$LIVE_TUI_SESSION" "enter submit · shift+enter" 10 "prompt submitted"
-memory_text=$(live_snapshot_value 'Object.values(output.state.memories).map(function (m) { return m.text })')
+memory_text=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
 [[ "$memory_text" == '["fake-live-memory"]' ]] || live_fail "memory prompt did not persist (got $memory_text)"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "memories count renders the live total"
 live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "memory provenance line"
@@ -582,11 +618,11 @@ live_require_text "$LIVE_TUI_SESSION" "Edit memory" 10 "in-house edit-memory pro
 live_type "$LIVE_TUI_SESSION" " v2"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_absence "$LIVE_TUI_SESSION" "enter submit · shift+enter" 10 "edit prompt submitted"
-memory_edited=$(live_snapshot_value 'Object.values(output.state.memories).map(function (m) { return m.text })')
+memory_edited=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
 [[ "$memory_edited" == '["v2fake-live-memory"]' ]] || live_fail "memory edit did not persist (got $memory_edited)"
 memory_rows=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).length')
 [[ "$memory_rows" == '1' ]] || live_fail "edit re-added instead of updating in place (got $memory_rows rows)"
-memory_prov=$(live_snapshot_value '(function () { var m = Object.values(output.state.memories)[0]; return m.origin + "|" + m.scope + "|" + m.history.map(function (h) { return h.action }).join(",") })()')
+memory_prov=$(live_snapshot_value '(function () { var m = Object.values(output.state.memories).filter(function (x) { return !x.deletedAt })[0]; return m.origin + "|" + m.scope + "|" + m.history.map(function (h) { return h.action }).join(",") })()')
 [[ "$memory_prov" == '"manual|project|created,edited"' ]] || live_fail "edit lost provenance history (got $memory_prov)"
 live_require_text "$LIVE_TUI_SESSION" "v2fake-live-memory" 10 "edited fact renders"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count unchanged after edit"
@@ -603,6 +639,7 @@ live_key_repeat "$LIVE_TUI_SESSION" "BSpace" 12
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "provenance line restored after clearing filter"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count survives filtering"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
 
@@ -629,13 +666,15 @@ if live_capture_contains "$LIVE_TUI_SESSION" "[ ]"; then
   live_key "$LIVE_TUI_SESSION" "Space"
   live_require_text "$LIVE_TUI_SESSION" "[x]" 10 "fill mark shows the assignment"
   live_require_text "$LIVE_TUI_SESSION" "UNSAVED" 10 "skill toggle dirties the draft"
-  live_key "$LIVE_TUI_SESSION" Escape
+  sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
   live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "skill draft discards via confirm"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed after skill discard"
 else
   live_log "host skill catalog is empty; toggle covered by unit tests"
-  live_key "$LIVE_TUI_SESSION" Escape
+  sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
   live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
 fi
 
@@ -671,6 +710,7 @@ live_require_text "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "model picker names 
 live_assert_text "$LIVE_TUI_SESSION" "Ensemble${NBSP}Fake${NBSP}Model${NBSP}—${NBSP}ensemble-fake/ensemble-fake-model" "model picker groups provider/model"
 live_assert_text "$LIVE_TUI_SESSION" "1${NBSP}matches" "model picker names its search count"
 live_assert_text "$LIVE_TUI_SESSION" "(•)${NBSP}Ensemble" "model picker marks the current selection"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "model picker closed"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings kept with no dirty draft"
@@ -688,16 +728,28 @@ if live_capture_contains "$LIVE_TUI_SESSION" "[ ]"; then
 else
   live_assert_text "$LIVE_TUI_SESSION" "No skills available from the host." "skillbox unavailable state names the catalog miss"
 fi
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed with bindings intact"
 live_log "slice G settings stylization verified across all four tabs"
 
 live_check_help
 
+# Ticket #77d: Escape must never leave Ensemble; only the leader chord does.
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.5
+live_assert_text "$LIVE_TUI_SESSION" "ENSEMBLE" "Escape never quits Ensemble"
 live_key "$LIVE_TUI_SESSION" '~'
 live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before leaving"
 live_key "$LIVE_TUI_SESSION" 'q'
 live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after leaving Ensemble"
+# Ticket #77d: F2 returns to Ensemble from any native session.
+live_key "$LIVE_TUI_SESSION" F2
+live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "F2 opens Ensemble from the native session"
+live_key "$LIVE_TUI_SESSION" '~'
+live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode after F2 round-trip"
+live_key "$LIVE_TUI_SESSION" 'q'
+live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after F2 round-trip"
 live_assert_absence "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "stale heading after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "stale code after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "fake-queue-beta" "stale work row after leaving Ensemble"
@@ -721,6 +773,8 @@ live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced moti
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "◐ FakeAgent · working…" 15 "frame-0 activity line under reduced motion"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
 for _ in $(seq 1 8); do
   pane=$(live_capture "$LIVE_TUI_SESSION")
   for glyph in "◑" "◒" "◓" "◌" "▹" "▌"; do
@@ -756,12 +810,15 @@ members=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].memberI
 # members, so a single fan-out creates both peer turns atomically and they
 # run in parallel on their own agents — both completions land inside the
 # batch quiet window instead of racing it.
+live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for completion probes"
 live_type "$LIVE_TUI_SESSION" "!Helper !Scout joint-task"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: !Helper !Scout joint-task" 15 "assignment line for the Helper turn"
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Scout: !Helper !Scout joint-task" 15 "assignment line for the Scout turn"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
 # Each finished non-leader turn hands to the leader automatically.
 live_require_text "$LIVE_TUI_SESSION" "Handed to \$FakeAgent" 30 "completion handoff to the leader"
 handed=0

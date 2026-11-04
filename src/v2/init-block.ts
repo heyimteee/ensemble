@@ -121,3 +121,20 @@ export function onboardingPrompt(agent: OnboardingAgent): string {
     "</ensemble_onboarding>",
   ].join("\n\n")
 }
+
+/**
+ * Steering text for the native `/init` run. The workspace may already carry an
+ * Ensemble block; the init agent must replace it in place instead of adding a
+ * second copy, and must not leave overlapping or stale Ensemble instructions
+ * behind. The deterministic block write that follows is the final authority,
+ * but the model must not create a duplicate before it lands.
+ */
+export function initInstruction(): string {
+  return [
+    "<ensemble_init>",
+    "Before writing AGENTS.md, inspect the existing file and .ensemble/init.json.",
+    "If an Ensemble block already exists between <!-- ensemble:start ... --> and <!-- ensemble:end -->, replace that block in place; never add a second Ensemble block.",
+    "Remove stale, duplicated, or overlapping Ensemble instructions, keep the project's own content intact, and leave exactly one current Ensemble block.",
+    "</ensemble_init>",
+  ].join("\n")
+}
