@@ -497,7 +497,7 @@ live_platform_modifier() {
 live_check_help() {
   local modifier
   modifier=$(live_platform_modifier)
-  live_key "$LIVE_TUI_SESSION" '~'
+  live_key "$LIVE_TUI_SESSION" Space
   live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode"
   live_key "$LIVE_TUI_SESSION" '?'
   live_require_text "$LIVE_TUI_SESSION" "Keyboard shortcuts" 15 "searchable shortcut help"

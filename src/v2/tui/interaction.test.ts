@@ -76,6 +76,15 @@ test("focus changes outside the composer return to Normal mode", () => {
   assert.deepEqual(rail.intents, [{ type: "blur-editor" }])
 })
 
+test("Esc returns from the work-list zone to the transcript", () => {
+  const work = reduce(initialInteractionState(), { type: "focus.set", focus: "work" })
+  assert.equal(work.state.focus, "work")
+  assert.equal(work.state.mode, "normal")
+  const chat = reduce(work.state, { type: "escape" })
+  assert.equal(chat.state.focus, "chat")
+  assert.equal(chat.state.mode, "normal")
+})
+
 test("an open overlay owns Esc first and closes via a typed intent", () => {
   const overlay = reduce(initialInteractionState(), { type: "overlay.set", overlay: "wizard" })
   assert.equal(overlay.state.overlay, "wizard")

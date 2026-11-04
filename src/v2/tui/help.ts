@@ -2,17 +2,20 @@ import { fuzzyMatch } from "./format.ts"
 import { isMacPlatform, platformLabel } from "./platform.ts"
 import { WIZARD_NAV_LABELS } from "./wizard.ts"
 
-/** Help keys that must not be rewritten to Cmd: the universal wizard pair. */
+/** Help keys that must not be rewritten to Cmd: the universal wizard pair and transcript paging. */
 export function helpKeyLabel(key: string, mac = isMacPlatform()): string {
   if (key === WIZARD_NAV_LABELS.back || key === WIZARD_NAV_LABELS.next) return key
+  if (key === "Ctrl+D / Ctrl+U") return key
   return platformLabel(key, mac)
 }
 
 export const shortcutGroups: Array<{ title: string; entries: Array<[string, string]> }> = [
-  { title: "Leader", entries: [["~", "Leader key"], ["~ ?", "This searchable help"], ["~ q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },
-  { title: "Navigation", entries: [["h / l", "Switch column"], ["j / k", "Rail item / work row"], ["Enter", "Open chat / work result"], ["i", "Focus composer"], ["Esc", "Leave composer"], ["Ctrl+G", "Leave composer (works while a run is active)"]] },
-  { title: "Workspaces", entries: [["n", "New workspace"], ["g", "Edit members and leader"], ["w / W", "Next / previous workspace"], ["/", "Search workspaces"], ["p", "Pause or resume"], ["I", "Init workspace files (initialisation, not routing)"], ["Ctrl+W", "Archive workspace"], ["Ctrl+Shift+W", "Delete workspace"], ["Ctrl+Shift+Delete", "Reset Ensemble"]] },
-  { title: "Chat", entries: [["$Name", "Mention an agent"], ["@path", "Reference a workspace file"], ["/command", "Ensemble commands"], ["PageUp / PageDown", "Scroll transcript"], ["End", "Jump to newest message"], ["F2", "Open Ensemble from any session"]] },
+  { title: "Leader", entries: [["Space", "Leader key (which-key menu)"], ["Space ?", "This searchable help"], ["Space q", "Leave Ensemble"], ["Esc", "Cancel leader mode"]] },
+  { title: "Roster", entries: [["j / k", "Move the rail selection"], ["g g / G", "First / last item"], ["Enter", "Open Workspace or Agent and focus the composer"], ["h / l", "Switch column"], ["/", "Filter the rail"], ["a", "New agent"], ["e", "Edit the selected item"], ["s", "Agent settings"], ["x / X", "Archive / delete the selected item"], ["Tab", "Move focus to the chat"]] },
+  { title: "Group chat and Direct conversation", entries: [["j / k", "Scroll the transcript by line"], ["Ctrl+D / Ctrl+U", "Half page down / up"], ["g g / G", "First / last message"], ["Enter / i", "Focus the composer in Insert"], ["Tab", "Move between transcript and work list"], ["/", "Search the loaded transcript"], ["h / l", "Switch column"], ["PageUp / PageDown", "Scroll a page"], ["End", "Jump to newest message"]] },
+  { title: "Navigation", entries: [["Esc", "Go up one level; never quits"], ["Ctrl+G", "Leave the composer (works while a run is active)"], ["Enter", "Open or act on the focused item"], ["F2", "Open Ensemble from any session"]] },
+  { title: "Workspaces", entries: [["n", "New workspace"], ["w / W", "Next / previous workspace"], ["p", "Pause or resume"], ["I", "Init workspace files (initialisation, not routing)"], ["Ctrl+W", "Archive workspace"], ["Ctrl+Shift+W", "Delete workspace"], ["Ctrl+Shift+Delete", "Reset Ensemble"]] },
+  { title: "Chat", entries: [["$Name", "Mention an agent"], ["@path", "Reference a workspace file"], ["/command", "Ensemble commands"], ["F2", "Open Ensemble from any session"]] },
   { title: "Wizards", entries: [["Ctrl+P", "Previous step"], ["Ctrl+N", "Next step"], ["Enter", "Continue or submit"], ["Shift+Enter", "New line in a text field"], ["Esc", "Cancel the wizard"]] },
   { title: "Work", entries: [["d", "Delegate selected work"], ["t", "Reassign selected work"], ["Enter", "Open selected work result"], ["r", "Retry selected work"], ["R", "Restart selected work"], ["x", "Cancel selected work"], ["o", "Open native session"]] },
   { title: "Agents", entries: [["a", "New agent"], ["z / Z", "Next / previous agent"], ["s", "Agent settings"], ["Ctrl+A", "Archive agent"], ["Ctrl+Shift+A", "Delete agent"]] },

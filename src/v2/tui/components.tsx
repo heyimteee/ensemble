@@ -84,6 +84,9 @@ export function Rail(props: {
 }) {
   return (
     <box width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
+      <Show when={props.filter}>
+        <text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>filter: {props.filter}</text>
+      </Show>
       <For each={props.items}>{(item, index) => {
         const previous = index() > 0 ? props.items[index() - 1] : undefined
         const kindHeader = item.kind !== previous?.kind
@@ -176,7 +179,7 @@ function HelpEntries(props: { colors: Palette; groups: Array<{ title: string; en
         </>
       )}</For>
       <Show when={props.groups.length === 0}><text fg={props.colors.muted}>{helpEmptyLine()}</text></Show>
-      <text fg={props.colors.muted}>~ is disabled while the composer or a dialog is active.</text>
+      <text fg={props.colors.muted}>Space opens the leader; Esc goes up one level and never quits.</text>
     </box>
   )
 }

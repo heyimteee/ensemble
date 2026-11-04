@@ -387,6 +387,13 @@ live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent 
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 1 "probe assignment emitted exactly once"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the probe turn is in flight"
 live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "probe asking row exactly once"
+# v5.6 T3: the long fixture keeps the work zone live while Tab focuses it.
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" Tab
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab focuses the work list"
+live_require_text "$LIVE_TUI_SESSION" "enter result" 10 "work list names its open action"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "Esc returns to the transcript"
 # Slice C third probe (direct surface): the `!Name` alias needs no completion
 # popup, so it posts in one shot while the probe turn is still streaming its
 # long reply — per-agent serialization parks it as pending, giving a wide,
@@ -447,11 +454,38 @@ live_log "probes repeated assignment, asking, and answer exactly once each ($rel
 # words, no pill text. The long fixture replies above guarantee the
 # transcript overflows the viewport, so PageUp provably scrolls; End still
 # jumps back to the bottom.
-pane_before_scroll=$(live_capture "$LIVE_TUI_SESSION")
+# v5.6 T3: the transcript is a calm scroller — j/k move by line, gg/G go to
+# the ends, Ctrl+d/u move half a page, and no message cursor appears.
+live_key "$LIVE_TUI_SESSION" G
+sleep 0.5
+live_key "$LIVE_TUI_SESSION" "g"
+live_key "$LIVE_TUI_SESSION" "g"
+sleep 0.5
+pane_top=$(live_capture "$LIVE_TUI_SESSION")
+live_require_text "$LIVE_TUI_SESSION" "↓" 10 "gg scrolls to the first message"
+live_key "$LIVE_TUI_SESSION" "j"
+sleep 0.5
+pane_line=$(live_capture "$LIVE_TUI_SESSION")
+[[ "$pane_top" != "$pane_line" ]] || live_fail "j did not scroll the transcript by line"
+live_key "$LIVE_TUI_SESSION" "k"
+sleep 0.5
+pane_line_back=$(live_capture "$LIVE_TUI_SESSION")
+[[ "$pane_line" != "$pane_line_back" ]] || live_fail "k did not scroll the transcript back by line"
+live_key "$LIVE_TUI_SESSION" C-d
+sleep 0.5
+pane_half=$(live_capture "$LIVE_TUI_SESSION")
+[[ "$pane_line_back" != "$pane_half" ]] || live_fail "Ctrl+d did not move the transcript half a page"
+live_key "$LIVE_TUI_SESSION" C-u
+sleep 0.5
+pane_half_back=$(live_capture "$LIVE_TUI_SESSION")
+[[ "$pane_half" != "$pane_half_back" ]] || live_fail "Ctrl+u did not move the transcript back"
+live_assert_absence "$LIVE_TUI_SESSION" "› FakeAgent" "no message cursor in the transcript"
+live_key "$LIVE_TUI_SESSION" G
+sleep 0.5
 live_key "$LIVE_TUI_SESSION" PageUp
 sleep 1
 pane_scrolled=$(live_capture "$LIVE_TUI_SESSION")
-[[ "$pane_before_scroll" != "$pane_scrolled" ]] || live_fail "PageUp did not scroll the transcript"
+[[ "$pane_half_back" != "$pane_scrolled" ]] || live_fail "PageUp did not scroll the transcript"
 live_require_text "$LIVE_TUI_SESSION" "↓" 10 "bare back-to-bottom glyph when scrolled up"
 live_assert_absence "$LIVE_TUI_SESSION" "↓ bottom" "no pill words on the jump control"
 live_assert_absence "$LIVE_TUI_SESSION" "bottom · end" "no key label on the jump control"
@@ -481,6 +515,7 @@ live_assert_count "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" 1 "long headi
 live_assert_count "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" 1 "fenced code marker exactly once"
 live_assert_count "$LIVE_TUI_SESSION" "bubble table marker" 1 "table cell exactly once"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "bubble reply finalized in place"
+live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after the bubble fixture"
 live_log "long multi-element bubble reply verified with no clipped markers"
 
 # Slice C direct surface (verbatim + queued): user text renders literally
@@ -497,6 +532,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
 live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
 live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "verbatim reply finalized in place"
+live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after the verbatim send"
 
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
@@ -504,8 +540,10 @@ live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue da
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while streaming"
+live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after the live DM send"
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queued probe"
 live_type "$LIVE_TUI_SESSION" "fake-queued-probe"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after queued probe"
@@ -529,16 +567,54 @@ live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored aft
 live_key "$LIVE_TUI_SESSION" "h"
 live_require_text "$LIVE_TUI_SESSION" "enter open" 10 "rail focus footer names the open action"
 live_assert_absence "$LIVE_TUI_SESSION" "enter result" "idle rail footer hides work results"
+
+# v5.6 T3: roster Enter opens the surface and focuses the composer in Insert.
+# Rail order is agents then workspaces, so j selects #LiveSite.
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Roster" 10 "roster uses Normal grammar"
+live_key "$LIVE_TUI_SESSION" "j"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER · Group chat" 15 "roster Enter focuses the composer in Insert"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "composer Normal after one Esc"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "second Esc returns to the transcript"
+# The retired ~ leader leaves no popup; Space opens which-key.
+live_key "$LIVE_TUI_SESSION" '~'
+sleep 0.3
+live_assert_absence "$LIVE_TUI_SESSION" "which-key" "tilde no longer opens the leader"
+live_key "$LIVE_TUI_SESSION" Space
+live_require_text "$LIVE_TUI_SESSION" "LEADER · which-key" 10 "Space opens the which-key leader"
+live_require_text "$LIVE_TUI_SESSION" "Leave Ensemble" 10 "which-key lists leader actions"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "which-key" 10 "Esc closes the leader"
+# `/` routes to the focused surface without changing mode. Roster filters the
+# rail; the transcript search narrows the loaded window.
+live_key "$LIVE_TUI_SESSION" "h"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Roster" 10 "roster Normal before filter"
+live_key "$LIVE_TUI_SESSION" "/"
+live_type "$LIVE_TUI_SESSION" "Live"
+live_require_text "$LIVE_TUI_SESSION" "/Live" 10 "roster filter line receives text"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Roster" "filter keeps Normal mode"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "filter: Live" 10 "roster filter narrows the rail"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "filter: Live" 10 "Esc clears the roster filter"
 live_key "$LIVE_TUI_SESSION" "l"
-live_require_absence "$LIVE_TUI_SESSION" "enter open" 10 "chat focus leaves the rail footer"
-live_assert_absence "$LIVE_TUI_SESSION" "enter result" "idle chat footer hides dead work keys"
-live_assert_text "$LIVE_TUI_SESSION" "g members" "idle chat footer keeps member actions"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "chat Normal after column switch"
+live_key "$LIVE_TUI_SESSION" "/"
+live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
+live_require_text "$LIVE_TUI_SESSION" "search: fake-rich-fixture" 10 "chat search narrows the transcript"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" "search keeps Normal mode"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "chat stays Normal after search"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "search: fake-rich-fixture" 10 "Esc clears the transcript search"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "composer Insert hints name the ladder"
 live_assert_absence "$LIVE_TUI_SESSION" "enter result" "composer footer hides dead work keys"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "composer Normal after one Esc"
 live_require_absence "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "Insert hints replaced by Normal hints"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "second Esc returns to chat Normal"
@@ -546,7 +622,7 @@ live_log "slice E focus walkthrough shows context footers with no hidden-work hi
 
 # Slice E help: tone-down keeps every shortcut searchable; the zero state
 # names the fix.
-live_key "$LIVE_TUI_SESSION" '~'
+live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before help"
 live_key "$LIVE_TUI_SESSION" '?'
 live_require_text "$LIVE_TUI_SESSION" "Keyboard shortcuts" 15 "searchable shortcut help"
@@ -749,14 +825,14 @@ live_check_help
 live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.5
 live_assert_text "$LIVE_TUI_SESSION" "ENSEMBLE" "Escape never quits Ensemble"
-live_key "$LIVE_TUI_SESSION" '~'
+live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before leaving"
 live_key "$LIVE_TUI_SESSION" 'q'
 live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after leaving Ensemble"
 # Ticket #77d: F2 returns to Ensemble from any native session.
 live_key "$LIVE_TUI_SESSION" F2
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "F2 opens Ensemble from the native session"
-live_key "$LIVE_TUI_SESSION" '~'
+live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode after F2 round-trip"
 live_key "$LIVE_TUI_SESSION" 'q'
 live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after F2 round-trip"

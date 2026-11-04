@@ -49,11 +49,11 @@ export function footerLine1(context: { focus: ChromeFocus; hasWork: boolean }): 
     case "overlay":
       return "esc cancel · dialog open — close to return"
     case "rail":
-      return "h/l column · j/k rail · enter open · i compose · a agent · n workspace · I init · v approvals"
+      return "j/k move · enter open · h/l column · / filter · space leader"
     case "chat":
       return context.hasWork
-        ? "h/l column · j/k work · enter result · i compose · a agent · n workspace · g members · I init · v approvals"
-        : "h/l column · i compose · a agent · n workspace · g members · I init · v approvals"
+        ? "j/k scroll · tab work · enter compose · / search · space leader"
+        : "j/k scroll · tab rail · enter compose · / search · space leader"
   }
 }
 
@@ -66,8 +66,8 @@ export function footerLine1(context: { focus: ChromeFocus; hasWork: boolean }): 
 export function footerLine2(context: FooterContext): string {
   if (context.missingSkills.length > 0) return `! missing skills: ${context.missingSkills.join(", ")}`
   const workLive = context.hasWork && context.focus !== "composer" && context.focus !== "overlay"
-  if (workLive) return "d delegate · t reassign · r retry · R restart · x cancel · o native · ~ leader · / search · p pause · s settings"
-  return "~ leader · / search · p pause · s settings"
+  if (workLive) return "tab work · space leader · / search · p pause · s settings"
+  return "space leader · / search · p pause · s settings"
 }
 
 /** Picker footer: `↑/↓ move · [space toggle · ]enter confirm · esc cancel`. Spaces; callers render word gaps. */
