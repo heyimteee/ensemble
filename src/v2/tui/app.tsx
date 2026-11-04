@@ -26,15 +26,31 @@ import {
   resolveChromeFocus,
   resultFooter,
 } from "./chrome.ts"
-import { SKILL_VISIBLE_LIMIT, skillPageForCursor } from "./skills.ts"
+import { skillPageForCursor } from "./skills.ts"
 import { modelPickerLabel, sortModelsByProvider } from "./settings.ts"
-import { confirmKeyAction, resultKeyAction, singleChoiceValue, filterEdit } from "./overlays.ts"
+import {
+  clampSettingsRow,
+  moveSettingsRow,
+  normalizeSettingsField,
+  settingsAddAction,
+  settingsDeleteAction,
+  settingsFieldAtRow,
+  settingsFieldLabel,
+  settingsFilterable,
+  settingsRowCount,
+  settingsRowKind,
+  settingsTabStep,
+  settingsToggleAction,
+  type SettingsFieldID,
+} from "./settings-grammar.ts"
+import { confirmKeyAction, resultKeyAction, singleChoiceValue } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import {
   initialInteractionState,
   interactionReducer,
   visibleMessage,
   type InteractionEvent,
+  type InteractionFocus,
   type InteractionMode,
   type InteractionOverlay,
   type InteractionResult,
@@ -177,6 +193,15 @@ type CommandSession = {
   }
 }
 
+/**
+ * The settings text buffer currently in Insert or field Normal. `agent`
+ * fields live in the draft; `memory` fields persist on commit. A null
+ * memoryID means a new memory.
+ */
+type SettingsFieldState =
+  | { kind: "agent"; field: SettingsFieldID; label: string; value: string }
+  | { kind: "memory"; memoryID: string | null; label: string; value: string }
+
 type TranscriptSearch = { query: string; cursor: number }
 
 function directoryOf(context: any): string {
@@ -243,12 +268,12 @@ export function EnsembleV2App() {
   // retry/restart) action shows its interim label until the terminal state
   // arrives; cleared in a finally so it can never stick.
   const [pendingWork, setPendingWork] = createSignal<{ id: string; action: PendingWorkAction } | null>(null)
-  const [memoryCursor, setMemoryCursor] = createSignal(0)
+  const [settingsCursor, setSettingsCursor] = createSignal(0)
+  const [settingsField, setSettingsField] = createSignal<SettingsFieldState | null>(null)
+  const [settingsFieldText, setSettingsFieldText] = createSignal("")
+  const [settingsFieldCursor, setSettingsFieldCursor] = createSignal(0)
   const [memoryFilter, setMemoryFilter] = createSignal("")
-  const [memoryFilterEditing, setMemoryFilterEditing] = createSignal(false)
-  const [skillCursor, setSkillCursor] = createSignal(0)
   const [skillFilter, setSkillFilter] = createSignal("")
-  const [backupCursor, setBackupCursor] = createSignal(0)
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
   const [composerDraft, setComposerDraft] = createSignal("")
   const [composerCursor, setComposerCursor] = createSignal(0)
@@ -258,7 +283,6 @@ export function EnsembleV2App() {
   const [textPrompt, setTextPrompt] = createSignal<TextPromptState | null>(null)
   const [confirm, setConfirm] = createSignal<ConfirmState | null>(null)
   const [result, setResult] = createSignal<ResultState | null>(null)
-  const [skillFilterEditing, setSkillFilterEditing] = createSignal(false)
   const [motionFrame, setMotionFrame] = createSignal(0)
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
@@ -276,6 +300,9 @@ export function EnsembleV2App() {
   let resultScrollRef: any
   let transcriptScrollRef: any
   let helpScrollRef: any
+  let settingsFieldRef: any
+  // Remember where settings was opened so closing returns to the same column.
+  let settingsReturnFocus: InteractionFocus = "chat"
   let messageTimer: ReturnType<typeof setTimeout> | undefined
 
   // Focus/mode compatibility accessors: existing call sites keep reading
@@ -288,8 +315,15 @@ export function EnsembleV2App() {
   const applyInteraction = (result: InteractionResult) => {
     setInteraction(result.state)
     for (const intent of result.intents) {
-      if (intent.type === "focus-editor") queueMicrotask(() => composerRef?.focus?.())
-      else if (intent.type === "blur-editor") { try { composerRef?.blur?.() } catch {} }
+      if (intent.type === "focus-editor") {
+        queueMicrotask(() => {
+          if (result.state.field === "settings") settingsFieldRef?.focus?.()
+          else composerRef?.focus?.()
+        })
+      } else if (intent.type === "blur-editor") {
+        try { composerRef?.blur?.() } catch {}
+        try { settingsFieldRef?.blur?.() } catch {}
+      }
     }
   }
   const dispatchInteraction = (event: InteractionEvent): InteractionResult => {
@@ -336,6 +370,23 @@ export function EnsembleV2App() {
     })
     return composerVim
   }
+  // Ticket #83: settings text fields reuse the same Vim adapter, register, and
+  // clipboard as the composer. The input remounts for every field, so the
+  // buffer is recreated only when the renderable reference changes.
+  let settingsVim: VimBuffer | null = null
+  let settingsVimRef: any
+  const settingsFieldVimBuffer = (): VimBuffer | null => {
+    if (!settingsFieldRef) return null
+    if (settingsVim && settingsVimRef === settingsFieldRef) return settingsVim
+    settingsVimRef = settingsFieldRef
+    settingsVim = createVimBuffer({
+      editor: createEditorPort(settingsFieldRef),
+      clipboard: clipboardPort(),
+      register: vimRegister,
+      onMessage: (message) => notify(message.text, message.tone),
+    })
+    return settingsVim
+  }
   const syncVimChord = (chord: string | null | undefined) => {
     if (chord) dispatchInteraction({ type: "chord.set", chord })
     else if (interaction().pendingChord) dispatchInteraction({ type: "chord.clear" })
@@ -344,6 +395,7 @@ export function EnsembleV2App() {
     vimClipboard?.dispose()
     vimClipboard = null
     composerVim = null
+    settingsVim = null
   })
 
   const currentDraftSurface = (): DraftSurface | null => {
@@ -751,13 +803,43 @@ export function EnsembleV2App() {
   })
   // Ticket #77 skill pagination: the page is derived from the cursor, so j/k
   // scrolls through every skill and the visible window always contains the
-  // cursor. PgUp/PgDn jump by one page (cursor-anchored, ordinal preserved).
-  const skillPage = () => skillPageForCursor(skillCursor())
-  const moveSkillPage = (delta: number) => {
-    const max = Math.max(0, filteredSkills().length - 1)
-    setSkillCursor((cursor) => Math.max(0, Math.min(max, cursor + delta * SKILL_VISIBLE_LIMIT)))
-  }
+  // cursor. The unified settings cursor now drives it (#83).
+  const skillPage = () => skillPageForCursor(clampSettingsRow(settingsCursor(), settingsCounts().skills))
   const filteredMemories = createMemo(() => filterMemories(agentMemories(), memoryFilter()))
+  // Ticket #83: one cursor and one row model across all four tabs. The
+  // catalog owns the keys; the pure grammar owns counts, clamping, and which
+  // action a row supports.
+  const settingsCounts = createMemo(() => ({
+    backups: draft()?.backupModels.length ?? 0,
+    memories: filteredMemories().length,
+    skills: filteredSkills().length,
+  }))
+  const settingsRowTotal = () => settingsRowCount(settingsTab(), settingsCounts())
+  const settingsCursorClamped = () => clampSettingsRow(settingsCursor(), settingsRowTotal())
+  const settingsCurrentKind = () => settingsRowKind(settingsTab(), settingsCursorClamped(), settingsCounts())
+  const settingsActionEnabled = (id: string): boolean => {
+    switch (id) {
+      case "settings.add":
+        return settingsAddAction(settingsTab()) !== "none"
+      case "settings.delete":
+        return settingsDeleteAction(settingsTab()) === "memory"
+          ? settingsCounts().memories > 0
+          : (settingsDeleteAction(settingsTab()) === "backup" && settingsCounts().backups > 0)
+      case "settings.toggle":
+        return settingsToggleAction(settingsTab()) === "skill" && settingsRowTotal() > 0
+      case "settings.filter":
+        return settingsFilterable(settingsTab())
+      case "settings.edit":
+      case "settings.edit.alt":
+        return settingsRowTotal() > 0
+      default:
+        return true
+    }
+  }
+  const setSettingsTabTo = (tab: SettingsTab) => {
+    setSettingsTab(tab)
+    setSettingsCursor(0)
+  }
   const selectedMissingSkills = createMemo(() => {
     const agent = draft() ?? selectedAgent()
     return agent ? missingSkills(agent, skills()) : []
@@ -803,14 +885,14 @@ export function EnsembleV2App() {
   }
   const canOpenCommand = () =>
     !leaderMode() && !wizard() && !picker() && !textPrompt() && !confirm() && !result() &&
-    !helpOpen() && !approvalsOpen() && !skillFilterEditing() && !memoryFilterEditing()
+    !helpOpen() && !approvalsOpen() && settingsField() === null
 
   const applySearchPreview = (target: CommandTarget, text: string) => {
     if (target === "roster") { setTranscriptSearch(null); setWorkspaceFilter(text); return }
     if (target === "settings") {
       setTranscriptSearch(null)
-      if (settingsTab() === "memories") { setMemoryFilter(text); setMemoryCursor(0) }
-      else if (settingsTab() === "skillbox") { setSkillFilter(text); setSkillCursor(0) }
+      if (settingsTab() === "memories") { setMemoryFilter(text); setSettingsCursor(0) }
+      else if (settingsTab() === "skillbox") { setSkillFilter(text); setSettingsCursor(0) }
       return
     }
     const query = text.trim()
@@ -958,12 +1040,17 @@ export function EnsembleV2App() {
   // inherit its border; only true overlays steal it.
   const chromeFocus = () => resolveChromeFocus({ focusArea: focusArea(), composerActive: composerActive(), overlayOpen: overlayOpen() })
 
-  // v5.6 T3: the generated Normal keymap layers are enabled for exactly one
-  // of these contexts at a time. Overlays, the composer, the leader, and the
-  // command/search input own their keys first.
+  // v5.6 T3/T5: the generated Normal keymap layers are enabled for exactly
+  // one of these contexts at a time. Settings is a modal context but its rows
+  // use the same grammar; a focused settings field owns the keys first.
   const surfaceKeyContext = (): KeyContext | null => {
-    if (!isOurRoute() || isModal() || leaderMode() || wizard() !== null) return null
-    if (interaction().overlay !== "none" || interaction().command !== null) return null
+    if (!isOurRoute() || leaderMode() || wizard() !== null) return null
+    if (interaction().command !== null) return null
+    if (settingsAgentID()) {
+      if (settingsField() !== null || overlayOpen()) return null
+      return "settings"
+    }
+    if (isModal() || interaction().overlay !== "none") return null
     if (composerActive()) return null
     switch (interaction().focus) {
       case "rail": return "roster"
@@ -1625,6 +1712,61 @@ export function EnsembleV2App() {
     return false
   }
 
+  const handleSettingsFieldKey = (event: any) => {
+    const field = settingsField()
+    if (!field) return false
+    const rawName = String(event?.name ?? "")
+    const ctrl = Boolean(event?.ctrl) || rawName.startsWith("ctrl+")
+    const name = rawName.startsWith("ctrl+") ? rawName.slice("ctrl+".length) : rawName
+    const prevent = () => { event?.preventDefault?.(); event?.stopPropagation?.() }
+    const mode = interaction().mode
+
+    if (name === "escape" && !ctrl) {
+      prevent()
+      if (mode === "insert") {
+        const wasCursor = Number(settingsFieldRef?.cursorOffset ?? 0)
+        dispatchInteraction({ type: "escape" })
+        const vim = settingsFieldVimBuffer()
+        vim?.invalidate()
+        vim?.normalizeCursor()
+        setSettingsFieldCursor(Number(settingsFieldRef?.cursorOffset ?? wasCursor))
+        syncVimChord(null)
+      } else {
+        finishSettingsField()
+      }
+      return true
+    }
+    if (ctrl && name === "g") {
+      prevent()
+      finishSettingsField()
+      return true
+    }
+    if (name === "return" || name === "enter" || name === "kpenter") {
+      // Enter submits the field, matching the old prompt and the composer's
+      // Insert behavior; the Esc ladder is still the documented way out.
+      prevent()
+      finishSettingsField()
+      return true
+    }
+    if (mode === "insert") return true
+    prevent()
+    const vim = settingsFieldVimBuffer()
+    const key = normalizeVimKey({ name, ctrl, shift: Boolean(event?.shift) })
+    if (!vim || !key) return true
+    void vim
+      .press(key)
+      .then((outcome) => {
+        syncVimChord(outcome.pendingChord)
+        if (outcome.mode === "insert") {
+          dispatchInteraction({ type: "settings.field.open" })
+          queueMicrotask(() => settingsFieldRef?.focus?.())
+        }
+        syncSettingsFieldFromEditor()
+      })
+      .catch(showError)
+    return true
+  }
+
   const togglePause = async (paused?: boolean) => {
     const workspace = activeWorkspace()
     if (!workspace) return
@@ -1705,15 +1847,33 @@ export function EnsembleV2App() {
     if (binding) context.ui.router.navigate({ type: "session", sessionID: binding.sessionID })
   }
 
+  const restoreSettingsFocus = () => {
+    const target = settingsReturnFocus
+    dispatchInteraction({ type: "focus.set", focus: target })
+  }
+
+  const finishSettingsClose = () => {
+    if (interaction().field === "settings") dispatchInteraction({ type: "settings.field.close" })
+    settingsVim?.invalidate()
+    setSettingsField(null)
+    setSettingsFieldText("")
+    setSettingsFieldCursor(0)
+    setSettingsAgentID(null)
+    setDraft(null)
+    setDirty(false)
+    restoreSettingsFocus()
+  }
+
   const openSettings = (agent?: Agent) => {
     const target = agent ?? selectedAgent() ?? rosterAgents()[0]
     if (!target) return
+    if (interaction().focus !== "settings") settingsReturnFocus = interaction().focus
     setSettingsAgentID(target.id); setSettingsTab("general"); setDraft(structuredClone(target)); setDirty(false)
-    // Ticket #77: fresh cursors/filters so the paginated skill list always
-    // opens on a row that exists.
-    setSkillCursor(0); setSkillFilter(""); setSkillFilterEditing(false)
-    setMemoryCursor(0); setMemoryFilter(""); setMemoryFilterEditing(false)
-    setBackupCursor(0)
+    // Fresh filters and cursor so the settings surface always opens on a row
+    // that exists in the current tab.
+    setSkillFilter(""); setMemoryFilter(""); setSettingsCursor(0)
+    setSettingsField(null); setSettingsFieldText(""); setSettingsFieldCursor(0)
+    dispatchInteraction({ type: "focus.set", focus: "settings" })
   }
 
   const closeSettings = async () => {
@@ -1721,7 +1881,7 @@ export function EnsembleV2App() {
       const discard = await openConfirm("Discard changes?", "This agent has unsaved settings.")
       if (!discard) return
     }
-    setSettingsAgentID(null); setDraft(null); setDirty(false)
+    finishSettingsClose()
   }
 
   const saveSettings = async () => {
@@ -1729,7 +1889,7 @@ export function EnsembleV2App() {
     if (!agent.name.trim()) throw new Error("Agent name is required.")
     await run("Save settings", async () => {
       await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color })
-      setDirty(false); setSettingsAgentID(null); setDraft(null)
+      finishSettingsClose()
     })
   }
 
@@ -1738,73 +1898,150 @@ export function EnsembleV2App() {
     const model = await chooseModel(); if (!model) return
     const variant = await chooseVariant(model)
     setDraft({ ...agent, backupModels: [...agent.backupModels, { providerID: model.providerID, modelID: model.modelID, variant }] })
-    setBackupCursor(agent.backupModels.length); setDirty(true)
+    // Row 0 is the main model, so the appended backup lands at row N+1.
+    setSettingsCursor(agent.backupModels.length + 1)
+    setDirty(true)
   }
 
-  const reorderBackup = (direction: "up" | "down") => {
-    const agent = draft(); if (!agent || agent.backupModels.length < 2) return
-    const index = Math.max(0, Math.min(agent.backupModels.length - 1, backupCursor()))
-    const target = direction === "up" ? Math.max(0, index - 1) : Math.min(agent.backupModels.length - 1, index + 1)
-    if (target === index) return
-    const models = [...agent.backupModels]; const [model] = models.splice(index, 1); models.splice(target, 0, model)
-    setDraft({ ...agent, backupModels: models }); setBackupCursor(target); setDirty(true)
+  const editModelRow = async (row: number) => {
+    const agent = draft(); if (!agent) return
+    if (row <= 0) {
+      const model = await chooseModel(agent.mainModel); if (!model) return
+      const variant = await chooseVariant(model)
+      setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); setDirty(true)
+      return
+    }
+    const index = row - 1
+    const current = agent.backupModels[index]; if (!current) return
+    const model = await chooseModel(current); if (!model) return
+    const variant = await chooseVariant(model)
+    const backupModels = [...agent.backupModels]
+    backupModels[index] = { providerID: model.providerID, modelID: model.modelID, variant }
+    setDraft({ ...agent, backupModels }); setDirty(true)
   }
 
   const removeBackup = () => {
     const agent = draft(); if (!agent || agent.backupModels.length === 0) return
-    const index = Math.max(0, Math.min(agent.backupModels.length - 1, backupCursor()))
-    setDraft({ ...agent, backupModels: agent.backupModels.filter((_, i) => i !== index) }); setBackupCursor(Math.max(0, index - 1)); setDirty(true)
-  }
-
-  const editField = async () => {
-    const agent = draft(); if (!agent) return
-    if (settingsTab() === "general") {
-      const field = (await openChoice("Edit field", [{ title: "Name", value: "name" }, { title: "Title", value: "title" }, { title: "Role", value: "role" }, { title: "Color", value: "color" }])) as string | undefined
-      if (!field) return
-      const value = await openTextPrompt(field, { value: agent[field as "name" | "title" | "role" | "color"] })
-      if (value !== undefined) { setDraft({ ...agent, [field]: value } as Agent); setDirty(true) }
-    } else if (settingsTab() === "models") {
-      // Slice G selection clarity: the picker opens on the current main
-      // model, so the (•) fill mark names the active selection.
-      const model = await chooseModel(agent.mainModel); if (!model) return
-      const variant = await chooseVariant(model)
-      setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); setDirty(true)
-    } else if (settingsTab() === "memories") {
-      const memories = filteredMemories()
-      if (memories.length === 0 && memoryFilter().trim() === "") {
-        const text = await openTextPrompt("Add memory", { placeholder: "The team uses pnpm." })
-        if (text?.trim()) await run("Add memory", async () => { await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text: text.trim(), source: "user" }) })
-      } else {
-        await editMemory()
-      }
-    } else if (settingsTab() === "skillbox") toggleSkill()
+    const row = settingsCursorClamped()
+    if (row < 1) return
+    const index = row - 1
+    setDraft({ ...agent, backupModels: agent.backupModels.filter((_, i) => i !== index) })
+    setSettingsCursor(Math.max(0, row - 1))
+    setDirty(true)
   }
 
   const toggleSkill = () => {
-    const agent = draft(); const skill = filteredSkills()[skillCursor()]
+    const agent = draft(); const skill = filteredSkills()[settingsCursorClamped()]
     if (!agent || !skill) return
     const has = agent.skillbox.includes(skill.id)
     setDraft({ ...agent, skillbox: has ? agent.skillbox.filter((id) => id !== skill.id) : [...agent.skillbox, skill.id] }); setDirty(true)
   }
 
-  const deleteMemory = async () => { const memory = filteredMemories()[memoryCursor()]; if (memory) await run("Delete memory", async () => { await invoke(context, "memory.delete", { id: memory.id }) }) }
-  const promoteMemory = async () => { const memory = filteredMemories()[memoryCursor()]; if (memory) await run("Promote memory", async () => { await invoke(context, "memory.promote", { id: memory.id }) }) }
-
-  const addMemory = async () => {
-    const agent = draft(); if (!agent) return
-    const text = await openTextPrompt("Add memory", { placeholder: "The team uses pnpm." })
-    if (text?.trim()) {
-      await run("Add memory", async () => { await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text: text.trim(), source: "user" }) })
-      setMemoryCursor(Math.max(0, filteredMemories().length - 1))
-    }
+  const deleteMemory = async () => {
+    const memory = filteredMemories()[settingsCursorClamped()]; if (!memory) return
+    const row = settingsCursorClamped()
+    await run("Delete memory", async () => { await invoke(context, "memory.delete", { id: memory.id }) })
+    setSettingsCursor(Math.max(0, row - 1))
   }
 
-  const editMemory = async () => {
-    const memory = filteredMemories()[memoryCursor()]; if (!memory) return
-    const text = await openTextPrompt("Edit memory", { value: memory.text })
-    if (text === undefined) return
-    if (text.trim() === "" || text === memory.text) return
-    await run("Edit memory", async () => { await invoke(context, "memory.update", { id: memory.id, text: text.trim() }) })
+  // Settings text fields reuse the composer Vim adapter (#85): Insert type,
+  // Esc -> field Normal, Esc -> settings Normal, Esc -> close. The adapter is
+  // rebuilt when the renderable changes and shares the internal register.
+  const beginSettingsField = (field: SettingsFieldState) => {
+    clearPendingChord()
+    settingsVim?.invalidate()
+    settingsVim = null
+    settingsVimRef = null
+    setSettingsField(field)
+    setSettingsFieldText(field.value)
+    setSettingsFieldCursor(field.value.length)
+    dispatchInteraction({ type: "settings.field.open" })
+    queueMicrotask(() => {
+      if (!settingsFieldRef) return
+      settingsFieldRef.cursorOffset = field.value.length
+      setSettingsFieldCursor(field.value.length)
+    })
+  }
+
+  const syncSettingsFieldFromEditor = () => {
+    const field = settingsField()
+    if (!field) return
+    const value = String(settingsFieldRef?.plainText ?? field.value)
+    const cursor = Number(settingsFieldRef?.cursorOffset ?? value.length)
+    setSettingsFieldText(value)
+    setSettingsFieldCursor(cursor)
+    if (field.kind !== "agent") return
+    const agent = draft()
+    if (!agent || String(agent[field.field] ?? "") === value) return
+    setDraft({ ...agent, [field.field]: value } as Agent)
+    setDirty(true)
+  }
+
+  const commitSettingsField = async (field: SettingsFieldState, raw: string) => {
+    if (field.kind === "agent") {
+      const agent = draft(); if (!agent) return
+      const value = normalizeSettingsField(field.field, raw)
+      if (String(agent[field.field] ?? "") === value) return
+      setDraft({ ...agent, [field.field]: value } as Agent)
+      setDirty(true)
+      return
+    }
+    const text = raw.trim()
+    if (field.memoryID === null) {
+      if (!text) return
+      const agent = draft(); if (!agent) return
+      await run("Add memory", async () => { await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text, source: "user" }) })
+      setSettingsCursor(Math.max(0, filteredMemories().length - 1))
+      return
+    }
+    if (!text || text === field.value.trim()) return
+    await run("Edit memory", async () => { await invoke(context, "memory.update", { id: field.memoryID!, text }) })
+  }
+
+  const finishSettingsField = () => {
+    const field = settingsField()
+    if (!field) return
+    const raw = String(settingsFieldRef?.plainText ?? field.value)
+    settingsVim?.invalidate()
+    settingsVim = null
+    settingsVimRef = null
+    syncVimChord(null)
+    dispatchInteraction({ type: "settings.field.close" })
+    setSettingsField(null)
+    setSettingsFieldText("")
+    setSettingsFieldCursor(0)
+    void commitSettingsField(field, raw).catch(showError)
+  }
+
+  const editSettingsRow = async () => {
+    const cursor = settingsCursorClamped()
+    const kind = settingsCurrentKind()
+    if (kind === "field") {
+      const field = settingsFieldAtRow(cursor)
+      const agent = draft()
+      if (field && agent) beginSettingsField({ kind: "agent", field, label: settingsFieldLabel(field), value: String(agent[field] ?? "") })
+      return
+    }
+    if (kind === "model") { await editModelRow(0); return }
+    if (kind === "backup") { await editModelRow(cursor); return }
+    if (kind === "memory") {
+      const memory = filteredMemories()[cursor]
+      if (memory) beginSettingsField({ kind: "memory", memoryID: memory.id, label: "Edit memory", value: memory.text })
+      return
+    }
+    if (kind === "skill") toggleSkill()
+  }
+
+  const addSettingsRow = async () => {
+    const action = settingsAddAction(settingsTab())
+    if (action === "backup") { await addBackup(); return }
+    if (action === "memory") beginSettingsField({ kind: "memory", memoryID: null, label: "New memory", value: "" })
+  }
+
+  const deleteSettingsRow = async () => {
+    const kind = settingsCurrentKind()
+    if (kind === "memory") { await deleteMemory(); return }
+    if (kind === "backup") removeBackup()
   }
 
   const resolveApproval = async (approval: Approval) => {
@@ -1875,9 +2112,7 @@ export function EnsembleV2App() {
   // the work zone; the transcript keeps j/k as scroll, never a row cursor.
 
   const moveSettingsCursor = (delta: number) => {
-    if (settingsTab() === "memories") setMemoryCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredMemories().length - 1), cursor + delta)))
-    else if (settingsTab() === "models") setBackupCursor((cursor) => Math.max(0, Math.min(Math.max(0, (draft()?.backupModels.length ?? 1) - 1), cursor + delta)))
-    else if (settingsTab() === "skillbox") setSkillCursor((cursor) => Math.max(0, Math.min(Math.max(0, filteredSkills().length - 1), cursor + delta)))
+    setSettingsCursor(moveSettingsRow(settingsCursorClamped(), delta, settingsRowTotal()))
   }
 
   // Slice B motion gate: the 4 fps clock runs only while something is in
@@ -2007,6 +2242,24 @@ export function EnsembleV2App() {
     "legacy.agent.archive": () => archiveSelectedAgent(),
     "legacy.agent.delete": () => deleteSelectedAgent(),
     "legacy.reset": () => resetEnsemble(),
+    // Settings grammar (#83): the keys live in the catalog; these handlers
+    // only mutate the cursor or dispatch the row action.
+    "settings.tab.prev": () => setSettingsTabTo(settingsTabStep(settingsTab(), -1)),
+    "settings.tab.next": () => setSettingsTabTo(settingsTabStep(settingsTab(), 1)),
+    "settings.tab.cycle": () => setSettingsTabTo(settingsTabStep(settingsTab(), 1)),
+    "settings.tab.cycle.prev": () => setSettingsTabTo(settingsTabStep(settingsTab(), -1)),
+    "settings.down": () => moveSettingsCursor(1),
+    "settings.up": () => moveSettingsCursor(-1),
+    "settings.top": () => setSettingsCursor(0),
+    "settings.bottom": () => setSettingsCursor(Math.max(0, settingsRowTotal() - 1)),
+    "settings.edit": () => editSettingsRow(),
+    "settings.edit.alt": () => editSettingsRow(),
+    "settings.add": () => addSettingsRow(),
+    "settings.delete": () => deleteSettingsRow(),
+    "settings.toggle": () => toggleSkill(),
+    "settings.save": () => saveSettings(),
+    "settings.filter": () => openCommandLine("/"),
+    "settings.escape": () => closeSettings(),
   }
   const leaderActionHandlers: Record<string, () => unknown> = {
     "leader.help": () => setHelpOpen(true),
@@ -2088,8 +2341,9 @@ export function EnsembleV2App() {
       }
       if (confirm()) { handleConfirmKey(event); return }
       if (result()) { handleResultKey(event); return }
-      if (skillFilterEditing()) { handleSkillFilterKey(event); return }
-      if (memoryFilterEditing()) { handleMemoryFilterKey(event); return }
+      // Ticket #83: a settings field owns every raw key. Insert lets the
+      // input renderable type; field Normal runs the shared Vim adapter.
+      if (settingsField()) { handleSettingsFieldKey(event); return }
       // v5.6 T1: the composer owns its Esc ladder at the raw key layer — the
       // focused textarea consumes Escape before the keymap layer can.
       if (composerActive() && !isModal() && handleComposerKey(event)) return
@@ -2148,6 +2402,14 @@ export function EnsembleV2App() {
         runKeyAction(resolved.entry.id)
         return
       }
+      // Settings rows run from the same resolved catalog at the raw layer:
+      // G, Space, and punctuation bindings are unreliable as host keymap
+      // strings, so the settings context executes every catalog action here.
+      if (keyContext === "settings" && resolved.type === "action" && resolved.entry.keys.join(" ") === sequence.join(" ")) {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        if (settingsActionEnabled(resolved.entry.id)) runKeyAction(resolved.entry.id)
+        return
+      }
       // A stale prefix never swallows a fresh single key: clear it and let
       // the generated single-key layer handle the event.
       if (pendingKeys.length > 0) clearPendingChord()
@@ -2157,11 +2419,11 @@ export function EnsembleV2App() {
     // v5.6 T3: every surface layer is generated from the declarative catalog.
     // One context is active at a time; the composer, overlays, the command
     // line, and the leader own their keys before these layers.
-    const catalogCommand = (entry: KeyEntry, id: string) => ({
+    const catalogCommand = (entry: KeyEntry, id: string, enabled?: () => boolean) => ({
       id,
       title: `Ensemble: ${entry.title}`,
       bind: entry.keys[0],
-      enabled: entry.availability === "no-transcript-search" ? () => !transcriptSearch() : undefined,
+      enabled: enabled ?? (entry.availability === "no-transcript-search" ? () => !transcriptSearch() : undefined),
       run: (_input: string | undefined, event: any) => {
         event?.preventDefault?.(); event?.stopPropagation?.()
         runKeyAction(entry.id)
@@ -2185,6 +2447,19 @@ export function EnsembleV2App() {
       surfaceLayer(keyContext, false)
       surfaceLayer(keyContext, true)
     }
+    // Ticket #83: settings is generated from its own catalog context. The
+    // layer is disabled while a text field owns the keyboard so Insert typing
+    // and field Normal Vim never leak into rows.
+    const settingsCommands = layerEntries("settings").map((entry) =>
+      catalogCommand(entry, `ensemble.v2.key.settings.${entry.id}`, () => settingsActionEnabled(entry.id)),
+    )
+    platformLayer(() => ({
+      mode: "global",
+      priority: 110,
+      enabled: () => isOurRoute() && Boolean(settingsAgentID()) && settingsField() === null && !overlayOpen() && !leaderMode() && !commandActive() && wizard() === null && interaction().command === null,
+      commands: settingsCommands,
+      bindings: settingsCommands.map((command) => command.id),
+    }))
     const leaderCommands = leaderLayerEntries().map((entry) => ({
       id: `ensemble.v2.key.leader.${entry.id}`,
       title: `Ensemble: ${entry.title}`,
@@ -2236,32 +2511,6 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.wizard.cancel", title: "Ensemble: Cancel wizard", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardCancel() } },
       ],
       bindings: ["ensemble.v2.wizard.prev", "ensemble.v2.wizard.next", "ensemble.v2.wizard.cancel"],
-    }))
-    platformLayer(() => ({
-      mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode() && !commandActive() && wizard() === null && !skillFilterEditing() && !memoryFilterEditing(),
-      commands: [
-        { id: "ensemble.v2.tab", title: "Ensemble: Settings tab", bind: "tab", run: () => { const tabs: SettingsTab[] = ["general", "models", "memories", "skillbox"]; setSettingsTab(tabs[(tabs.indexOf(settingsTab()) + 1) % tabs.length]) } },
-        { id: "ensemble.v2.edit", title: "Ensemble: Edit", bind: "e", run: () => void editField().catch(showError) },
-        { id: "ensemble.v2.memory.new", title: "Ensemble: New memory", bind: "n", enabled: () => settingsTab() === "memories", run: () => void addMemory().catch(showError) },
-        { id: "ensemble.v2.backup.add", title: "Ensemble: Add backup", bind: "b", enabled: () => settingsTab() === "models", run: () => void addBackup().catch(showError) },
-        { id: "ensemble.v2.backup.up", title: "Ensemble: Move backup up", bind: "shift+up", enabled: () => settingsTab() === "models", run: () => reorderBackup("up") },
-        { id: "ensemble.v2.backup.down", title: "Ensemble: Move backup down", bind: "shift+down", enabled: () => settingsTab() === "models", run: () => reorderBackup("down") },
-        { id: "ensemble.v2.backup.remove", title: "Ensemble: Remove backup", bind: "backspace", enabled: () => settingsTab() === "models", run: () => removeBackup() },
-        { id: "ensemble.v2.save", title: "Ensemble: Save", bind: "s", run: () => void saveSettings().catch(showError) },
-        { id: "ensemble.v2.skill.prev", title: "Ensemble: Previous skill page", bind: "pageup", enabled: () => settingsTab() === "skillbox", run: () => moveSkillPage(-1) },
-        { id: "ensemble.v2.skill.next", title: "Ensemble: Next skill page", bind: "pagedown", enabled: () => settingsTab() === "skillbox", run: () => moveSkillPage(1) },
-        { id: "ensemble.v2.skill", title: "Ensemble: Toggle skill", bind: "space", enabled: () => settingsTab() === "skillbox", run: () => toggleSkill() },
-        { id: "ensemble.v2.filter", title: "Ensemble: Filter skills", bind: "ctrl+f", enabled: () => settingsTab() === "skillbox", run: () => { setSkillFilterEditing(true); setSkillCursor(0) } },
-        { id: "ensemble.v2.memory.filter", title: "Ensemble: Filter memories", bind: "ctrl+f", enabled: () => settingsTab() === "memories", run: () => { setMemoryFilterEditing(true); setMemoryCursor(0) } },
-        { id: "ensemble.v2.memory.filter.slash", title: "Ensemble: Filter memories", bind: "/", enabled: () => settingsTab() === "memories", run: () => { openCommandLine("/") } },
-        { id: "ensemble.v2.memory.delete", title: "Ensemble: Delete memory", bind: "ctrl+d", enabled: () => settingsTab() === "memories", run: () => void deleteMemory().catch(showError) },
-        { id: "ensemble.v2.memory.promote", title: "Ensemble: Promote memory", bind: "ctrl+p", enabled: () => settingsTab() === "memories", run: () => void promoteMemory().catch(showError) },
-        { id: "ensemble.v2.settings.up", title: "Ensemble: Up", bind: "up", run: () => moveSettingsCursor(-1) },
-        { id: "ensemble.v2.settings.down", title: "Ensemble: Down", bind: "down", run: () => moveSettingsCursor(1) },
-        { id: "ensemble.v2.settings.back", title: "Ensemble: Close settings", bind: "escape", run: () => void closeSettings() },
-      ],
-      bindings: ["ensemble.v2.tab", "ensemble.v2.edit", "ensemble.v2.memory.new", "ensemble.v2.backup.add", "ensemble.v2.backup.up", "ensemble.v2.backup.down", "ensemble.v2.backup.remove", "ensemble.v2.save", "ensemble.v2.skill.prev", "ensemble.v2.skill.next", "ensemble.v2.skill", "ensemble.v2.filter", "ensemble.v2.memory.filter", "ensemble.v2.memory.filter.slash", "ensemble.v2.memory.delete", "ensemble.v2.memory.promote", "ensemble.v2.settings.up", "ensemble.v2.settings.down", "ensemble.v2.settings.back"],
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
@@ -2458,36 +2707,6 @@ export function EnsembleV2App() {
     if (action === "dismiss") { finishResultModal(); return }
     const delta = action === "up" ? -3 : action === "down" ? 3 : action === "pageUp" ? -messageHeight() : messageHeight()
     try { resultScrollRef?.scrollBy?.(delta) } catch {}
-  }
-
-  const handleSkillFilterKey = (event: any) => {
-    const next = filterEdit(skillFilter(), {
-      name: String(event?.name ?? ""),
-      sequence: String(event?.sequence ?? ""),
-      ctrl: Boolean(event?.ctrl),
-      meta: Boolean(event?.meta),
-      super: Boolean(event?.super),
-    })
-    event?.preventDefault?.()
-    event?.stopPropagation?.()
-    setSkillFilter(next.query)
-    setSkillCursor(0)
-    if (next.done) setSkillFilterEditing(false)
-  }
-
-  const handleMemoryFilterKey = (event: any) => {
-    const next = filterEdit(memoryFilter(), {
-      name: String(event?.name ?? ""),
-      sequence: String(event?.sequence ?? ""),
-      ctrl: Boolean(event?.ctrl),
-      meta: Boolean(event?.meta),
-      super: Boolean(event?.super),
-    })
-    event?.preventDefault?.()
-    event?.stopPropagation?.()
-    setMemoryFilter(next.query)
-    setMemoryCursor(0)
-    if (next.done) setMemoryFilterEditing(false)
   }
 
   const directoryChoices = (): WizardOption[] => {
@@ -2875,11 +3094,14 @@ export function EnsembleV2App() {
   const statusSurface = (): StatuslineSurface => surface()?.kind ?? "none"
   const statusContext = () => contextLabel({ focus: interaction().focus, overlay: interaction().overlay, surface: statusSurface() })
   const statusPosition = () => {
+    if (settingsField()) return composerPosition(settingsFieldText(), settingsFieldCursor())
     if (composerActive()) return composerPosition(composerDraft(), composerCursor())
+    if (settingsAgentID()) return listPosition(settingsCursorClamped(), settingsRowTotal())
     if (interaction().focus === "rail") return listPosition(railCursor(), railItems().length)
     if (interaction().focus === "work") return listPosition(taskCursor(), orderedTasks().length)
     return atBottom() ? "100%" : "scrolled"
   }
+  const settingsEntryEnabled = (entry: KeyEntry) => settingsActionEnabled(entry.id)
   const statusHints = () => {
     if (leaderMode()) return "which-key · ? help · q leave · esc cancel"
     const command = interaction().command
@@ -2902,7 +3124,12 @@ export function EnsembleV2App() {
     if (selectedMissingSkills().length > 0) {
       return footerLine2({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })
     }
-    if (interaction().overlay === "settings") return "esc close · tab tabs · e edit · s save"
+    if (settingsField()) {
+      return interaction().mode === "insert"
+        ? `${settingsField()!.label} · type to edit · enter done · esc field normal`
+        : `h/j/k/l move · i/a insert · x/d edit · yy/p yank · esc settings`
+    }
+    if (settingsAgentID()) return statuslineHints("settings", { filter: settingsEntryEnabled })
     if (interaction().overlay === "approvals") return "enter resolve · esc close"
     if (interaction().overlay === "help") return "esc close"
     if (composerActive()) {
@@ -3104,7 +3331,7 @@ export function EnsembleV2App() {
                 <HelpView colors={colors} scrollRef={(value: any) => { helpScrollRef = value }} />
               </Show>
             }>
-              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} memories={filteredMemories()} memoryCursor={memoryCursor()} memoryFilter={memoryFilter()} memoryFilterEditing={memoryFilterEditing()} memoryTotal={agentMemories().length} backupCursor={backupCursor()} skills={filteredSkills()} skillCursor={skillCursor()} skillFilter={skillFilter()} filterEditing={skillFilterEditing()} skillCatalog={skills()} skillPage={skillPage()} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
             </Show>
           </box>
         </box>

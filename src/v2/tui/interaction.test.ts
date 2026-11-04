@@ -17,6 +17,7 @@ test("interaction starts in Normal mode on the roster with no pending surface st
   assert.equal(state.mode, "normal")
   assert.equal(state.focus, "rail")
   assert.equal(state.overlay, "none")
+  assert.equal(state.field, null)
   assert.equal(state.command, null)
   assert.equal(state.pendingChord, null)
   assert.equal(state.selection, null)
@@ -104,6 +105,58 @@ test("a command input owns Esc before the composer ladder and closes cleanly", (
   assert.equal(closed.state.command, null)
   assert.equal(closed.state.mode, "normal")
   assert.deepEqual(closed.intents, [{ type: "blur-editor" }])
+})
+
+test("settings text fields follow Insert -> field Normal -> settings Normal -> close", () => {
+  const opened = reduce(initialInteractionState({ overlay: "settings", focus: "settings" }), {
+    type: "settings.field.open",
+  })
+  assert.equal(opened.state.mode, "insert")
+  assert.equal(opened.state.focus, "settings")
+  assert.equal(opened.state.field, "settings")
+  assert.equal(opened.state.overlay, "settings")
+  assert.deepEqual(opened.intents, [{ type: "focus-editor" }])
+
+  const fieldNormal = reduce(opened.state, { type: "escape" })
+  assert.equal(fieldNormal.state.mode, "normal")
+  assert.equal(fieldNormal.state.field, "settings", "the field keeps the keyboard in field Normal")
+  assert.equal(fieldNormal.state.overlay, "settings")
+  assert.deepEqual(fieldNormal.intents, [{ type: "blur-editor" }])
+
+  const settingsNormal = reduce(fieldNormal.state, { type: "escape" })
+  assert.equal(settingsNormal.state.mode, "normal")
+  assert.equal(settingsNormal.state.field, null, "the second Esc returns to settings Normal")
+  assert.equal(settingsNormal.state.overlay, "settings")
+  assert.deepEqual(settingsNormal.intents, [{ type: "blur-editor" }])
+
+  const closed = reduce(settingsNormal.state, { type: "escape" })
+  assert.equal(closed.state.overlay, "none", "the third Esc closes settings")
+  assert.deepEqual(closed.intents, [{ type: "close-overlay", overlay: "settings" }])
+})
+
+test("Ctrl+G leaves a settings field straight to settings Normal", () => {
+  const opened = reduce(initialInteractionState({ overlay: "settings", focus: "settings" }), {
+    type: "settings.field.open",
+  })
+  const left = reduce(opened.state, { type: "leave.editor" })
+  assert.equal(left.state.mode, "normal")
+  assert.equal(left.state.focus, "settings")
+  assert.equal(left.state.field, null)
+  assert.deepEqual(left.intents, [{ type: "blur-editor" }])
+})
+
+test("closing or leaving settings clears the field state", () => {
+  const opened = reduce(initialInteractionState({ overlay: "settings", focus: "settings" }), {
+    type: "settings.field.open",
+  })
+  const closed = reduce(opened.state, { type: "settings.field.close" })
+  assert.equal(closed.state.mode, "normal")
+  assert.equal(closed.state.field, null)
+  assert.equal(closed.state.focus, "settings")
+  assert.deepEqual(closed.intents, [{ type: "blur-editor" }])
+
+  const refreshed = reduce(opened.state, { type: "overlay.set", overlay: "none" })
+  assert.equal(refreshed.state.field, null, "closing the overlay never leaves a hidden field active")
 })
 
 test("pending chord, selection, and transient messages are pure state", () => {

@@ -20,9 +20,7 @@ import {
   settingsFieldRow,
   settingsHeader,
   settingsNoAgentLine,
-  settingsSaveFooter,
   settingsSectionHeader,
-  settingsTabFooter,
   skillboxEmptyLine,
   skillsUnavailableLine,
 } from "./settings.ts"
@@ -206,18 +204,19 @@ export function SettingsView(props: {
   agent: Agent | null
   tab: SettingsTab
   dirty: boolean
+  cursor: number
   memories: Memory[]
-  memoryCursor: number
   memoryFilter: string
-  memoryFilterEditing: boolean
   memoryTotal: number
-  backupCursor: number
   skills: SkillOption[]
-  skillCursor: number
   skillFilter: string
-  filterEditing: boolean
   skillCatalog: SkillOption[]
   skillPage?: number
+  field?: { label: string; value: string } | null
+  fieldMode?: "normal" | "insert" | "command"
+  fieldRef?: (value: any) => void
+  onFieldContentChange?: () => void
+  onFieldCursorChange?: () => void
 }) {
   const missing = () => props.agent ? missingSkills(props.agent, props.skillCatalog) : []
   // Slice G section counts: the header names the section, the body carries
@@ -228,6 +227,7 @@ export function SettingsView(props: {
     assigned: props.agent?.skillbox.length ?? 0,
     catalog: props.skillCatalog.length,
   })
+  const fieldMode = () => props.fieldMode ?? "normal"
   return (
     <Show when={props.agent} fallback={<text fg={props.colors.muted}>{settingsNoAgentLine()}</text>}>
       <box flexDirection="column">
@@ -237,20 +237,20 @@ export function SettingsView(props: {
         <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsSectionHeader(props.tab, sectionCounts())}</text>
         <box border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" paddingLeft={1} paddingRight={1}>
         <Show when={props.tab === "general"}>
-          <For each={generalFieldRows(props.agent!, props.agent!.mainModel)}>{([label, value]) => (
-            <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsFieldRow(label, value)}</text>
+          <For each={generalFieldRows(props.agent!, props.agent!.mainModel)}>{([label, value], index) => (
+            <text fg={props.cursor === index() ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.cursor === index())}{settingsFieldRow(label, value)}</text>
           )}</For>
         </Show>
         <Show when={props.tab === "models"}>
-          <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(false)}(•) {settingsFieldRow("Main", modelSummary(props.agent!.mainModel))}</text>
-          <For each={props.agent!.backupModels}>{(model, index) => <text fg={props.backupCursor === index() ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.backupCursor === index())}( ) {settingsFieldRow(backupRowLabel(index(), model), modelSummary(model))}</text>}</For>
+          <text fg={props.cursor === 0 ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.cursor === 0)}(•) {settingsFieldRow("Main", modelSummary(props.agent!.mainModel))}</text>
+          <For each={props.agent!.backupModels}>{(model, index) => <text fg={props.cursor === index() + 1 ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.cursor === index() + 1)}( ) {settingsFieldRow(backupRowLabel(index(), model), modelSummary(model))}</text>}</For>
           <Show when={props.agent!.backupModels.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{modelsEmptyLine()}</text></Show>
         </Show>
         <Show when={props.tab === "memories"}>
-          <text fg={props.colors.muted}>Filter: {props.memoryFilter || "(none)"} · {platformLabel("/ filter · Ctrl+F")}{props.memoryFilterEditing ? " · typing… enter done · esc cancel" : ""}</text>
+          <text fg={props.colors.muted}>Filter: {props.memoryFilter || "(none)"} · / filter</text>
           <For each={props.memories}>{(memory, index) => (
             <box flexDirection="column">
-              <text fg={props.memoryCursor === index() ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" wrapMode="word">{settingsCursorMark(props.memoryCursor === index())}{memory.text}</text>
+              <text fg={props.cursor === index() ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" wrapMode="word">{settingsCursorMark(props.cursor === index())}{memory.text}</text>
               <text fg={memoryNeedsReview(memory) ? props.colors.warn : props.colors.muted} bg={props.colors.bg} width="100%" truncate>    {memoryProvenanceLine(memory)}{memoryNeedsReview(memory) ? " ◆" : ""}</text>
             </box>
           )}</For>
@@ -259,12 +259,12 @@ export function SettingsView(props: {
         </Show>
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
-          <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · {platformLabel("Ctrl+F")}{props.filterEditing ? " · typing… enter done · esc cancel" : ""}{skillPaginationText(props.skills.length, props.skillPage ?? 1) ? ` · ${skillPaginationText(props.skills.length, props.skillPage ?? 1)}` : ""}</text>
+          <text fg={props.colors.muted}>Filter: {props.skillFilter || "(none)"} · / filter{skillPaginationText(props.skills.length, props.skillPage ?? 1) ? ` · ${skillPaginationText(props.skills.length, props.skillPage ?? 1)}` : ""}</text>
           <Show when={props.skillCatalog.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillsUnavailableLine()}</text></Show>
 <Show when={props.skillCatalog.length > 0 && props.skills.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillboxEmptyLine()}</text></Show>
           <For each={skillPageItems(props.skills, props.skillPage ?? 1)}>{(entry) => (
             <box flexDirection="column">
-              <text fg={props.skillCursor === entry.index ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.skillCursor === entry.index)}{skillToggleMark(skillAssigned(props.agent!.skillbox, entry.skill.id))} {entry.skill.name}{entry.skill.name !== entry.skill.id ? ` (${entry.skill.id})` : ""}</text>
+              <text fg={props.cursor === entry.index ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.cursor === entry.index)}{skillToggleMark(skillAssigned(props.agent!.skillbox, entry.skill.id))} {entry.skill.name}{entry.skill.name !== entry.skill.id ? ` (${entry.skill.id})` : ""}</text>
               <Show when={(entry.skill.description ?? "").trim()}>
                 <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>    {short(entry.skill.description!.replace(/\s+/g, " ").trim(), 120)}</text>
               </Show>
@@ -272,9 +272,17 @@ export function SettingsView(props: {
           )}</For>
         </Show>
         </box>
+        <Show when={props.field}>
+          <box flexDirection="column" marginTop={1}>
+            <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>
+              {props.field!.label} · {fieldMode() === "insert" ? "INSERT · enter done · esc field normal" : "NORMAL · i/a insert · h/j/k/l move · esc settings"}
+            </text>
+            <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.focus} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
+              <input ref={props.fieldRef} value={props.field!.value} width="100%" backgroundColor={props.colors.bg} textColor={props.colors.text} onContentChange={() => props.onFieldContentChange?.()} onCursorChange={() => props.onFieldCursorChange?.()} />
+            </box>
+          </box>
+        </Show>
         <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{settingsDivider()}</text>
-        <text fg={props.colors.muted}>{platformLabel(settingsTabFooter(props.tab))}</text>
-        <text fg={props.colors.muted}>{platformLabel(settingsSaveFooter())}</text>
       </box>
     </Show>
   )

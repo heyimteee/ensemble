@@ -62,7 +62,7 @@ export function skillPaginationText(total: number, page: number, perPage: number
   const pages = skillPageCount(total, perPage)
   if (pages <= 1) return ""
   const current = Math.max(1, Math.min(page, pages))
-  return `page ${current}/${pages} · PgUp/PgDn`
+  return `page ${current}/${pages}`
 }
 
 /** Window of row indices for a page, preserving absolute cursor indices. */

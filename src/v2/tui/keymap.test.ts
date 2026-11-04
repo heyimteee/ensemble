@@ -48,6 +48,33 @@ test("group chat and direct conversation scroll the transcript and never expose 
   )
 })
 
+test("settings share the Normal grammar: h/l tabs, j/k rows, Enter, a/e/x, Space, s, /, Esc", () => {
+  const keys = keysFor("settings")
+  for (const sequence of ["h", "l", "tab", "shift+tab", "j", "k", "g g", "shift+g", "enter", "a", "e", "x", "space", "s", "/", "escape"]) {
+    assert.ok(keys.includes(sequence), `settings keeps ${sequence}`)
+  }
+  assert.equal(entryId("settings", "h"), "settings.tab.prev")
+  assert.equal(entryId("settings", "l"), "settings.tab.next")
+  assert.equal(entryId("settings", "tab"), "settings.tab.cycle")
+  assert.equal(entryId("settings", "j"), "settings.down")
+  assert.equal(entryId("settings", "k"), "settings.up")
+  assert.equal(entryId("settings", "enter"), "settings.edit")
+  assert.equal(entryId("settings", "a"), "settings.add")
+  assert.equal(entryId("settings", "x"), "settings.delete")
+  assert.equal(entryId("settings", "space"), "settings.toggle")
+  assert.equal(entryId("settings", "s"), "settings.save")
+  assert.equal(entryId("settings", "/"), "settings.filter")
+  assert.equal(entryId("settings", "escape"), "settings.escape")
+})
+
+test("settings lists expose no Visual, yank, or paste and no per-tab filter chords", () => {
+  for (const entry of normalEntries("settings")) {
+    assert.ok(!/visual|yank|paste/i.test(`${entry.id} ${entry.title}`), `settings:${entry.id} is a list-surface action`)
+    assert.ok(!entry.keys.some((key) => key.startsWith("ctrl+")), `settings:${entry.id} must not use a Ctrl chord`)
+  }
+  assert.deepEqual(duplicateBindings(), [], "settings keys never collide in their context")
+})
+
 test("the work zone is reachable with Tab and keeps list navigation", () => {
   const keys = keysFor("work")
   for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "escape"]) {
@@ -140,6 +167,31 @@ test("statusline hints come from the same catalog and adapt to the work zone", (
 
   const work = statuslineHints("work")
   assert.ok(work.includes("enter result"), work)
+})
+
+test("settings hints keep teaching keys only where that tab has the action", () => {
+  const enabled = (tab: "general" | "models" | "memories" | "skillbox") => (entry: { id: string }) => {
+    if (entry.id === "settings.add") return tab === "models" || tab === "memories"
+    if (entry.id === "settings.delete") return tab === "models" || tab === "memories"
+    if (entry.id === "settings.toggle") return tab === "skillbox"
+    if (entry.id === "settings.filter") return tab === "memories" || tab === "skillbox"
+    return true
+  }
+  const general = statuslineHints("settings", { filter: enabled("general") })
+  for (const hint of ["h/l tabs", "j/k rows", "enter edit", "s save", "esc close"]) {
+    assert.ok(general.includes(hint), `general teaches ${hint}: ${general}`)
+  }
+  assert.ok(!general.includes("a add"), "general has no add row")
+  assert.ok(!general.includes("/ filter"), "general has no filter tab")
+
+  const memories = statuslineHints("settings", { filter: enabled("memories") })
+  assert.ok(memories.includes("a add"), memories)
+  assert.ok(memories.includes("x delete"), memories)
+  assert.ok(memories.includes("/ filter"), memories)
+
+  const skillbox = statuslineHints("settings", { filter: enabled("skillbox") })
+  assert.ok(skillbox.includes("space toggle"), skillbox)
+  assert.ok(!skillbox.includes("a add"), "skillbox has no add row")
 })
 
 test("layer entries are single-key bindings the host can generate directly", () => {

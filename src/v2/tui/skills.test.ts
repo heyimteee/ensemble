@@ -75,7 +75,7 @@ test("skill pagination keeps the cursor row visible with a page indicator", () =
   assert.equal(skillPageForCursor(0), 1)
   assert.equal(skillPageForCursor(12), 2)
   assert.equal(skillPageForCursor(25), 3)
-  assert.equal(skillPaginationText(30, 2), "page 2/3 · PgUp/PgDn")
+  assert.equal(skillPaginationText(30, 2), "page 2/3", "j/k keep the page cursor-anchored; no removed page keys are taught")
   assert.equal(skillPaginationText(5, 1), "")
   // The last page may be short; the cursor still addresses real rows only.
   assert.equal(skillPageItems(many.slice(0, 29), 3).length, 5)

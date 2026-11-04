@@ -18,9 +18,7 @@ import {
   settingsHeader,
   settingsLoadingLine,
   settingsNoAgentLine,
-  settingsSaveFooter,
   settingsSectionHeader,
-  settingsTabFooter,
   skillsUnavailableLine,
   sortModelsByProvider,
 } from "./settings.ts"
@@ -121,13 +119,13 @@ test("model summaries carry provider, id, and variant info", () => {
   )
   assert.equal(modelsSectionCount(0), "main + 0 backups")
   assert.equal(modelsSectionCount(2), "main + 2 backups")
-  assert.equal(modelsEmptyLine(), "No backups yet. b adds one.")
+  assert.equal(modelsEmptyLine(), "No backups yet. a adds one.")
 })
 
 test("state lines share one grammar: empty, loading, unavailable, and no-agent", () => {
-  assert.equal(memoriesEmptyLine(), "No memories yet. e adds one.")
+  assert.equal(memoriesEmptyLine(), "No memories yet. a adds one.")
   assert.equal(memoriesNoMatchLine(), "No matching memories — refine filter.")
-  assert.ok(modelsEmptyLine().includes("b adds one"), "models empty names the fix key")
+  assert.ok(modelsEmptyLine().includes("a adds one"), "models empty names the fix key")
   assert.ok(settingsLoadingLine().includes("…"), "loading reads as in-flight work")
   assert.ok(settingsNoAgentLine().includes("s"), "no-agent names the open key")
   assert.ok(skillsUnavailableLine().length > 0, "unavailable catalog has a line")
@@ -135,15 +133,6 @@ test("state lines share one grammar: empty, loading, unavailable, and no-agent",
     !skillsUnavailableLine().includes("refine filter"),
     "an empty catalog does not blame the filter",
   )
-})
-
-test("footers name the keys that act on each tab plus the shared save grammar", () => {
-  assert.equal(settingsSaveFooter(), "s save · Esc cancel")
-  assert.ok(settingsTabFooter("general").includes("e edits"), "general names edit")
-  assert.ok(settingsTabFooter("models").includes("b add"), "models names add")
-  assert.ok(settingsTabFooter("models").includes("move"), "models names reorder")
-  assert.ok(settingsTabFooter("memories").includes("/ filter"), "memories names filter")
-  assert.ok(settingsTabFooter("skillbox").includes("Space toggles"), "skillbox names toggle")
 })
 
 test("the agent list shows group counts and agent descriptions", () => {
