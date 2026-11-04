@@ -10,6 +10,9 @@ import {
   settingsFieldAtRow,
   settingsFieldLabel,
   settingsFilterable,
+  settingsPromoteAction,
+  settingsReorderAction,
+  reorderBackupList,
   settingsRowCount,
   settingsRowKind,
   settingsTabAfterKey,
@@ -83,4 +86,30 @@ test("text fields normalize before they reach the draft", () => {
   assert.equal(normalizeSettingsField("name", "  Fake   Agent  "), "Fake Agent", "single-line identity fields collapse whitespace")
   assert.equal(normalizeSettingsField("color", "cyan\n"), "cyan")
   assert.equal(normalizeSettingsField("role", "  Writes code.\n  Reviews it.  "), "Writes code.\n  Reviews it.", "roles keep intentional line breaks")
+})
+
+test("promote is a memory action; backup reorder is a models action", () => {
+  assert.equal(settingsPromoteAction("memories"), "memory")
+  assert.equal(settingsPromoteAction("models"), "none")
+  assert.equal(settingsPromoteAction("general"), "none")
+  assert.equal(settingsPromoteAction("skillbox"), "none")
+  assert.equal(settingsReorderAction("models"), "backup")
+  assert.equal(settingsReorderAction("memories"), "none")
+  assert.equal(settingsReorderAction("general"), "none")
+  assert.equal(settingsReorderAction("skillbox"), "none")
+})
+
+test("backup reorder moves one slot and stops at the ends", () => {
+  assert.deepEqual(reorderBackupList(["low", "medium", "high"], 0, "down"), {
+    backups: ["medium", "low", "high"],
+    index: 1,
+  })
+  assert.deepEqual(reorderBackupList(["low", "medium", "high"], 2, "up"), {
+    backups: ["low", "high", "medium"],
+    index: 1,
+  })
+  assert.equal(reorderBackupList(["low", "medium"], 1, "down"), null, "the last backup cannot move down")
+  assert.equal(reorderBackupList(["low", "medium"], 0, "up"), null, "the first backup cannot move up")
+  assert.equal(reorderBackupList(["low"], 3, "down"), null, "out-of-range rows are rejected")
+  assert.equal(reorderBackupList([], 0, "down"), null)
 })

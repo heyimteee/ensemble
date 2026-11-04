@@ -105,6 +105,32 @@ export function settingsToggleAction(tab: SettingsTabID): "skill" | "none" {
   return tab === "skillbox" ? "skill" : "none"
 }
 
+export function settingsPromoteAction(tab: SettingsTabID): "memory" | "none" {
+  return tab === "memories" ? "memory" : "none"
+}
+
+export function settingsReorderAction(tab: SettingsTabID): "backup" | "none" {
+  return tab === "models" ? "backup" : "none"
+}
+
+/**
+ * Move one backup by one slot. Returns the new list and cursor index, or null
+ * when the move is out of range so callers never invent a no-op mutation.
+ */
+export function reorderBackupList<T>(
+  backups: readonly T[],
+  index: number,
+  direction: "up" | "down",
+): { backups: T[]; index: number } | null {
+  if (!Number.isInteger(index) || index < 0 || index >= backups.length) return null
+  const target = direction === "up" ? index - 1 : index + 1
+  if (target < 0 || target >= backups.length) return null
+  const next = [...backups]
+  const [item] = next.splice(index, 1)
+  next.splice(target, 0, item)
+  return { backups: next, index: target }
+}
+
 const FIELD_LABELS: Record<SettingsFieldID, string> = {
   name: "Name",
   title: "Title",

@@ -37,10 +37,13 @@ import {
   settingsFieldAtRow,
   settingsFieldLabel,
   settingsFilterable,
+  settingsPromoteAction,
+  settingsReorderAction,
   settingsRowCount,
   settingsRowKind,
   settingsTabStep,
   settingsToggleAction,
+  reorderBackupList,
   type SettingsFieldID,
 } from "./settings-grammar.ts"
 import { confirmKeyAction, resultKeyAction, singleChoiceValue } from "./overlays.ts"
@@ -825,6 +828,11 @@ export function EnsembleV2App() {
         return settingsDeleteAction(settingsTab()) === "memory"
           ? settingsCounts().memories > 0
           : (settingsDeleteAction(settingsTab()) === "backup" && settingsCounts().backups > 0)
+      case "settings.promote":
+        return settingsPromoteAction(settingsTab()) === "memory" && settingsCounts().memories > 0
+      case "settings.backup.down":
+      case "settings.backup.up":
+        return settingsReorderAction(settingsTab()) === "backup" && settingsCursorClamped() >= 1
       case "settings.toggle":
         return settingsToggleAction(settingsTab()) === "skill" && settingsRowTotal() > 0
       case "settings.filter":
@@ -1944,6 +1952,24 @@ export function EnsembleV2App() {
     setSettingsCursor(Math.max(0, row - 1))
   }
 
+  const promoteMemory = async () => {
+    const memory = filteredMemories()[settingsCursorClamped()]; if (!memory) return
+    await run("Promote memory", async () => { await invoke(context, "memory.promote", { id: memory.id }) })
+  }
+
+  // Backup reorder keeps j/k on the row cursor: J/K move the selected backup
+  // one slot, and the cursor follows the moved row.
+  const reorderBackup = (direction: "up" | "down") => {
+    const agent = draft(); if (!agent) return
+    const row = settingsCursorClamped()
+    if (row < 1) return
+    const moved = reorderBackupList(agent.backupModels, row - 1, direction)
+    if (!moved) return
+    setDraft({ ...agent, backupModels: moved.backups })
+    setSettingsCursor(moved.index + 1)
+    setDirty(true)
+  }
+
   // Settings text fields reuse the composer Vim adapter (#85): Insert type,
   // Esc -> field Normal, Esc -> settings Normal, Esc -> close. The adapter is
   // rebuilt when the renderable changes and shares the internal register.
@@ -1990,8 +2016,13 @@ export function EnsembleV2App() {
     if (field.memoryID === null) {
       if (!text) return
       const agent = draft(); if (!agent) return
-      await run("Add memory", async () => { await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text, source: "user" }) })
-      setSettingsCursor(Math.max(0, filteredMemories().length - 1))
+      let createdID: string | undefined
+      await run("Add memory", async () => {
+        const created = await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text, source: "user" })
+        createdID = created?.id
+      })
+      const index = createdID ? filteredMemories().findIndex((memory) => memory.id === createdID) : -1
+      setSettingsCursor(index >= 0 ? index : Math.max(0, filteredMemories().length - 1))
       return
     }
     if (!text || text === field.value.trim()) return
@@ -2256,6 +2287,9 @@ export function EnsembleV2App() {
     "settings.edit.alt": () => editSettingsRow(),
     "settings.add": () => addSettingsRow(),
     "settings.delete": () => deleteSettingsRow(),
+    "settings.promote": () => promoteMemory(),
+    "settings.backup.down": () => reorderBackup("down"),
+    "settings.backup.up": () => reorderBackup("up"),
     "settings.toggle": () => toggleSkill(),
     "settings.save": () => saveSettings(),
     "settings.filter": () => openCommandLine("/"),

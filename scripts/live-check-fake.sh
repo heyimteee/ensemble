@@ -800,6 +800,10 @@ live_key "$LIVE_TUI_SESSION" "e"
 live_require_text "$LIVE_TUI_SESSION" "Edit memory · INSERT" 10 "e opens the selected memory field"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "memory field Normal"
+# p in a field is Vim paste, never the row promote action; undo any clipboard
+# content so the append below starts from the saved text.
+live_key "$LIVE_TUI_SESSION" "p"
+live_key "$LIVE_TUI_SESSION" "u"
 live_key "$LIVE_TUI_SESSION" "$"
 live_key "$LIVE_TUI_SESSION" "A"
 live_require_text "$LIVE_TUI_SESSION" "INSERT · Settings" 10 "A returns the field to Insert at the line end"
@@ -831,6 +835,18 @@ live_require_text "$LIVE_TUI_SESSION" "Memories (1)" 10 "x deletes the selected 
 live_require_absence "$LIVE_TUI_SESSION" "scratch-memory" 10 "deleted memory leaves the list"
 memory_left=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
 [[ "$memory_left" == '["fake-live-memory v2"]' ]] || live_fail "delete removed the wrong memory (got $memory_left)"
+# p promotes the selected memory into a pending approval. It is a memory-row
+# action, not row paste; paste stays inside text fields.
+live_key "$LIVE_TUI_SESSION" "p"
+sleep 0.5
+promotion=$(live_snapshot_value '(function () { var a = Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" }); return a.length + ":" + (a[0] ? a[0].detail : "") })()')
+[[ "$promotion" == '"1:fake-live-memory v2"' ]] || live_fail "p did not request a memory promotion (got $promotion)"
+promotion_id=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" })[0].id')
+live_invoke approval.resolve "{\"id\":$promotion_id,\"approve\":false}" >/dev/null
+sleep 0.3
+promotions_left=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" }).length')
+[[ "$promotions_left" == '0' ]] || live_fail "promotion approval was not cleaned up (got $promotions_left)"
+live_log "settings p promoted the selected memory through the approval flow"
 # Slice D inline filter (ticket #80): / opens the shared command-line search
 # and filters the focused settings tab live; Enter commits, Esc would restore
 # the prior filter.
@@ -942,6 +958,35 @@ sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed with bindings intact"
 live_log "slice G settings stylization verified across all four tabs"
+
+# v5.6 T5 follow-up: backup reorder keeps j/k on the row cursor. Add two
+# backups with distinct variants, move the selected one up with K, save, and
+# inspect the persisted order.
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings reopened for backup reorder"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "Main + backups — main + 0 backups" 10 "models tab before adding backups"
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "first backup model picker"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Reasoning${NBSP}effort" 10 "first backup variant picker"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 1" 10 "first backup selected after add"
+live_require_text "$LIVE_TUI_SESSION" "J/K reorder" 10 "models teaches reorder once a backup row is selected"
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "second backup model picker"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Reasoning${NBSP}effort" 10 "second backup variant picker"
+live_key "$LIVE_TUI_SESSION" Down
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 2" 10 "second backup selected after add"
+live_key "$LIVE_TUI_SESSION" "K"
+live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 1" 10 "K moves the selected backup up"
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings saved after backup reorder"
+backup_order=$(live_snapshot_value '(function () { var a = Object.values(output.state.agents).filter(function (x) { return x.name === "FakeAgent" })[0]; return a.backupModels.map(function (m) { return m.variant }) })()')
+[[ "$backup_order" == '["medium","low"]' ]] || live_fail "K did not reorder the backups before save (got $backup_order)"
+live_log "settings J/K reordered backups and saved the persisted order"
 
 # v5.6 T7: composer Normal runs Vim motions, x/u/Ctrl+r, A, yy/p, dd, and
 # Enter sends from Normal. The statusline position is the text-observable
