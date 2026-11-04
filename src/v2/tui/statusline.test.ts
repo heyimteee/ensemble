@@ -10,9 +10,10 @@ import {
   statuslineRow2,
 } from "./statusline.ts"
 
-test("mode chip names Normal and Insert in text, never color alone", () => {
+test("mode chip names Normal, Insert, and Command in text, never color alone", () => {
   assert.equal(modeLabel("normal"), "NORMAL")
   assert.equal(modeLabel("insert"), "INSERT")
+  assert.equal(modeLabel("command"), "COMMAND")
 })
 
 test("context names the active surface and overlay precedence", () => {
@@ -66,7 +67,9 @@ test("row one omits empty optional segments but still names mode and context", (
 })
 
 test("row two renders command input, else a transient message, else a reserved blank", () => {
+  assert.equal(statuslineRow2({ command: { kind: ":", text: "" } }), ":", "an empty command line stays visible")
   assert.equal(statuslineRow2({ command: { kind: ":", text: "settings" } }), ":settings")
+  assert.equal(statuslineRow2({ command: { kind: "/", text: "" } }), "/", "an empty search line stays visible")
   assert.equal(statuslineRow2({ command: { kind: "/", text: "agent" } }), "/agent")
   assert.equal(statuslineRow2({ message: "Message sent" }), "Message sent")
   assert.equal(statuslineRow2({}), " ")
