@@ -1,13 +1,13 @@
 /**
- * v5.6 interaction foundation (ticket #79).
+ * v5.6 interaction foundation (tickets #79 and #86).
  *
- * A pure modal state machine: Normal, Insert, and Command modes, focus,
- * overlay, command input, pending chord, selection, and a transient message.
- * The reducer maps normalized events to the next state plus adapter intents,
- * so tests never render OpenTUI and the adapter stays thin.
+ * A pure modal state machine: Normal, Insert, Visual (char/line), and Command
+ * modes, focus, overlay, command input, pending chord, selection, and a
+ * transient message. The reducer maps normalized events to the next state plus
+ * adapter intents, so tests never render OpenTUI and the adapter stays thin.
  */
 
-export type InteractionMode = "normal" | "insert" | "command"
+export type InteractionMode = "normal" | "insert" | "visual" | "command"
 
 /**
  * Focus is separate from mode. Settings, wizards, dialogs, approvals, and
@@ -68,6 +68,8 @@ export type InteractionEvent =
   | { type: "chord.clear" }
   | { type: "selection.set"; selection: InteractionSelection }
   | { type: "selection.clear" }
+  | { type: "visual.set"; selection: InteractionSelection }
+  | { type: "visual.leave" }
   | { type: "message.show"; text: string; tone?: TransientTone; at: number }
   | { type: "message.clear" }
 
@@ -116,7 +118,7 @@ function escape(state: InteractionState): InteractionResult {
   if (state.selection) {
     return {
       state: { ...state, selection: null, mode: "normal" },
-      intents: [{ type: "blur-editor" }],
+      intents: [],
     }
   }
   // Settings text fields sit above the settings overlay: Insert -> field
@@ -154,40 +156,53 @@ function escape(state: InteractionState): InteractionResult {
 export function interactionReducer(state: InteractionState, event: InteractionEvent): InteractionResult {
   switch (event.type) {
     case "insert.enter":
-      return { state: { ...state, mode: "insert", focus: "composer" }, intents: [{ type: "focus-editor" }] }
+      return {
+        state: { ...state, mode: "insert", focus: "composer", selection: null },
+        intents: [{ type: "focus-editor" }],
+      }
     case "field.enter":
       return {
-        state: { ...state, mode: "insert" },
+        state: { ...state, mode: "insert", selection: null },
         intents: [{ type: "focus-editor", target: event.target }],
       }
     case "field.leave":
-      return { state: { ...state, mode: "normal" }, intents: [] }
+      return { state: { ...state, mode: "normal", selection: null }, intents: [] }
     case "escape":
       return escape(state)
     case "leave.editor":
       if (state.field === "settings") {
         return {
-          state: { ...state, mode: "normal", focus: "settings", field: null },
+          state: { ...state, mode: "normal", focus: "settings", field: null, selection: null },
           intents: [{ type: "blur-editor" }],
         }
       }
-      return { state: { ...state, mode: "normal", focus: "chat" }, intents: [{ type: "blur-editor" }] }
+      return {
+        state: { ...state, mode: "normal", focus: "chat", selection: null },
+        intents: [{ type: "blur-editor" }],
+      }
     case "settings.field.open":
       return {
-        state: { ...state, mode: "insert", focus: "settings", overlay: "settings", field: "settings" },
+        state: {
+          ...state,
+          mode: "insert",
+          focus: "settings",
+          overlay: "settings",
+          field: "settings",
+          selection: null,
+        },
         intents: [{ type: "focus-editor" }],
       }
     case "settings.field.close":
       return {
-        state: { ...state, mode: "normal", focus: "settings", field: null },
+        state: { ...state, mode: "normal", focus: "settings", field: null, selection: null },
         intents: [{ type: "blur-editor" }],
       }
     case "focus.set": {
       const composer = event.focus === "composer"
-      const mode = composer ? state.mode : "normal"
+      const mode = composer && state.mode !== "visual" ? state.mode : "normal"
       const field = state.field !== null && event.focus !== "settings" ? null : state.field
       return {
-        state: { ...state, focus: event.focus, mode, field },
+        state: { ...state, focus: event.focus, mode, field, selection: null },
         intents: [{ type: composer && mode === "insert" ? "focus-editor" : "blur-editor" }],
       }
     }
@@ -200,13 +215,19 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
           overlay: event.overlay,
           mode: opening || closing ? "normal" : state.mode,
           field: event.overlay === "none" || event.overlay !== "settings" ? null : state.field,
+          selection: opening || closing ? null : state.selection,
         },
         intents: opening ? [{ type: "blur-editor" }] : [],
       }
     }
     case "command.open":
       return {
-        state: { ...state, command: { kind: event.kind, text: event.text ?? "" }, mode: "command" },
+        state: {
+          ...state,
+          command: { kind: event.kind, text: event.text ?? "" },
+          mode: "command",
+          selection: null,
+        },
         intents: [{ type: "blur-editor" }],
       }
     case "command.update":
@@ -224,6 +245,13 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
       return { state: { ...state, selection: event.selection }, intents: [] }
     case "selection.clear":
       return { state: { ...state, selection: null }, intents: [] }
+    case "visual.set":
+      return {
+        state: { ...state, mode: "visual", selection: event.selection },
+        intents: [],
+      }
+    case "visual.leave":
+      return { state: { ...state, mode: "normal", selection: null }, intents: [] }
     case "message.show":
       return {
         state: { ...state, message: { text: event.text, tone: event.tone ?? "info", at: event.at } },

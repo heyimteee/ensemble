@@ -10,12 +10,18 @@ import {
   pastePlan,
   registerFromClipboard,
   resolveVimKey,
+  resolveVisualKey,
   VimBuffer,
   vimLines,
+  visualPastePlan,
+  visualRange,
+  visualRegister,
+  visualSelectionSize,
   yankLine,
   type VimClipboardPort,
   type VimEditorPort,
   type VimMessage,
+  type VimVisualSelection,
 } from "./vim.ts"
 
 test("line splitting keeps the trailing empty line and newline boundaries", () => {
@@ -218,6 +224,92 @@ test("linewise paste goes below and above; charwise paste sits at the cursor", (
   assert.equal(pastePlan("", 0, chars, false)?.result, "XY")
   assert.equal(pastePlan("a\n\nb", 2, chars, false)?.insertAt, 2, "an empty line pastes at its start")
   assert.equal(pastePlan("abc", 0, { text: "", linewise: false }, false), null)
+})
+
+test("visual ranges are inclusive for chars and cover whole lines for V-LINE", () => {
+  assert.deepEqual(visualRange("one two", 0, 3, "char"), {
+    start: 0,
+    end: 4,
+    linewise: false,
+    text: "one ",
+  })
+  assert.deepEqual(visualRange("one two", 3, 0, "char"), visualRange("one two", 0, 3, "char"))
+  assert.deepEqual(visualRange("a\nb\nc", 2, 0, "line"), {
+    start: 0,
+    end: 4,
+    linewise: true,
+    text: "a\nb\n",
+  })
+  assert.deepEqual(visualRange("a\nb", 0, 2, "line"), {
+    start: 0,
+    end: 3,
+    linewise: true,
+    text: "a\nb",
+  })
+  assert.deepEqual(visualRange("", 0, 0, "char"), { start: 0, end: 0, linewise: false, text: "" })
+  assert.deepEqual(visualRange("abc", 99, 99, "char"), { start: 2, end: 3, linewise: false, text: "c" })
+})
+
+test("visual registers keep charwise text and terminate linewise yanks", () => {
+  const chars: VimVisualSelection = { kind: "char", anchor: 0, cursor: 3 }
+  assert.deepEqual(visualRegister("one two", chars), { text: "one ", linewise: false })
+  assert.deepEqual(visualRegister("a\nb", { kind: "line", anchor: 0, cursor: 2 }), {
+    text: "a\nb\n",
+    linewise: true,
+  })
+  assert.deepEqual(visualRegister("a\n", { kind: "line", anchor: 2, cursor: 2 }), {
+    text: "\n",
+    linewise: true,
+  })
+  assert.deepEqual(visualRegister("", { kind: "line", anchor: 0, cursor: 0 }), {
+    text: "\n",
+    linewise: true,
+  })
+})
+
+test("visual size labels characters and lines for the statusline", () => {
+  assert.equal(visualSelectionSize("one two", { kind: "char", anchor: 0, cursor: 3 }), "4 chars")
+  assert.equal(visualSelectionSize("one two", { kind: "char", anchor: 1, cursor: 1 }), "1 char")
+  assert.equal(visualSelectionSize("a\nb\nc", { kind: "line", anchor: 0, cursor: 3 }), "2 lines")
+  assert.equal(visualSelectionSize("a\nb", { kind: "line", anchor: 0, cursor: 0 }), "1 line")
+})
+
+test("visual paste replaces the selection and preserves line structure", () => {
+  assert.deepEqual(
+    visualPastePlan("one two", { kind: "char", anchor: 0, cursor: 3 }, { text: "X", linewise: false }),
+    { insertAt: 0, text: "X", linewise: false, cursor: 0, result: "Xtwo" },
+  )
+  assert.deepEqual(
+    visualPastePlan("a\nb\nc", { kind: "line", anchor: 2, cursor: 0 }, { text: "X\n", linewise: true }),
+    { insertAt: 0, text: "X\n", linewise: true, cursor: 0, result: "X\nc" },
+  )
+  assert.deepEqual(
+    visualPastePlan("a\nb\nc", { kind: "line", anchor: 0, cursor: 2 }, { text: "X", linewise: false }),
+    { insertAt: 0, text: "X\n", linewise: true, cursor: 0, result: "X\nc" },
+  )
+  assert.equal(
+    visualPastePlan("one two", { kind: "char", anchor: 0, cursor: 3 }, { text: "", linewise: false }),
+    null,
+  )
+})
+
+test("the visual key resolver maps motions, operators, and exits", () => {
+  assert.deepEqual(resolveVisualKey("", "l"), { type: "command", command: { type: "extend", motion: "l" } })
+  assert.deepEqual(resolveVisualKey("", "G"), { type: "command", command: { type: "extend", motion: "G" } })
+  assert.deepEqual(resolveVisualKey("", "g"), { type: "pending", pending: "g" })
+  assert.deepEqual(resolveVisualKey("g", "g"), { type: "command", command: { type: "extend", motion: "gg" } })
+  assert.deepEqual(resolveVisualKey("g", "x"), { type: "cancel" })
+  assert.deepEqual(resolveVisualKey("", "o"), { type: "command", command: { type: "swap" } })
+  assert.deepEqual(resolveVisualKey("", "y"), { type: "command", command: { type: "yank" } })
+  assert.deepEqual(resolveVisualKey("", "d"), { type: "command", command: { type: "delete" } })
+  assert.deepEqual(resolveVisualKey("", "x"), { type: "command", command: { type: "delete" } })
+  assert.deepEqual(resolveVisualKey("", "c"), { type: "command", command: { type: "change" } })
+  assert.deepEqual(resolveVisualKey("", "p"), { type: "command", command: { type: "paste", before: false } })
+  assert.deepEqual(resolveVisualKey("", "P"), { type: "command", command: { type: "paste", before: true } })
+  assert.deepEqual(resolveVisualKey("", "escape"), { type: "command", command: { type: "exit" } })
+  assert.deepEqual(resolveVisualKey("", "v"), { type: "command", command: { type: "exit" } })
+  assert.deepEqual(resolveVisualKey("", "V"), { type: "command", command: { type: "line" } })
+  assert.deepEqual(resolveVisualKey("", "z"), { type: "unhandled" })
 })
 
 test("system clipboard text infers linewise behavior", () => {
@@ -470,5 +562,129 @@ test("undo and redo use the editor history", async () => {
   assert.equal(editor.text(), "abc")
   await buffer.press("ctrl+r")
   assert.equal(editor.text(), "ac")
+})
+
+test("v enters Visual, motions extend it, and o swaps the selection ends", async () => {
+  const { editor, buffer } = controller("one two\nthree", 0)
+  const entered = await buffer.press("v")
+  assert.equal(entered.mode, "visual")
+  assert.deepEqual(entered.selection, { kind: "char", anchor: 0, cursor: 0 })
+
+  const extended = await buffer.press("l")
+  assert.equal(extended.mode, "visual")
+  assert.deepEqual(extended.selection, { kind: "char", anchor: 0, cursor: 1 })
+  await buffer.press("w")
+  assert.deepEqual(buffer.visualSelection, { kind: "char", anchor: 0, cursor: 4 })
+
+  const swapped = await buffer.press("o")
+  assert.equal(swapped.mode, "visual")
+  assert.deepEqual(swapped.selection, { kind: "char", anchor: 4, cursor: 0 })
+  assert.equal(editor.cursor(), 0)
+
+  const cancelled = await buffer.press("escape")
+  assert.equal(cancelled.mode, "normal")
+  assert.equal(buffer.visualSelection, null)
+})
+
+test("V selects whole lines and gg/G extend the line selection", async () => {
+  const { buffer } = controller("a\nb\nc", 3)
+  const entered = await buffer.press("V")
+  assert.deepEqual(entered.selection, { kind: "line", anchor: 2, cursor: 2 }, "Normal cursor snaps off the newline")
+
+  const first = await buffer.press("g")
+  assert.equal(first.pendingChord, "g")
+  const top = await buffer.press("g")
+  assert.equal(top.mode, "visual")
+  assert.deepEqual(top.selection, { kind: "line", anchor: 2, cursor: 0 })
+
+  await buffer.press("G")
+  assert.deepEqual(buffer.visualSelection, { kind: "line", anchor: 2, cursor: 4 })
+})
+
+test("visual y copies the selection and Visual Line keeps whole lines", async () => {
+  const chars = controller("one two", 0)
+  await chars.buffer.press("v")
+  await chars.buffer.press("e")
+  const yanked = await chars.buffer.press("y")
+  assert.equal(yanked.mode, "normal")
+  assert.deepEqual(chars.clipboard.written, ["one"])
+  assert.deepEqual(chars.buffer.registerState, { text: "one", linewise: false })
+  assert.deepEqual(chars.messages.at(-1), { text: "Yanked to clipboard", tone: "success" })
+
+  const lines = controller("a\nb", 0)
+  await lines.buffer.press("V")
+  await lines.buffer.press("y")
+  assert.deepEqual(lines.clipboard.written, ["a\n"])
+  assert.deepEqual(lines.buffer.registerState, { text: "a\n", linewise: true })
+
+  await lines.buffer.press("p")
+  assert.equal(lines.editor.text(), "a\na\nb", "a V-LINE yank pastes as whole lines")
+})
+
+test("visual d and x cut the selection, and c cuts then enters Insert", async () => {
+  const cut = controller("one two", 0)
+  await cut.buffer.press("v")
+  await cut.buffer.press("e")
+  const deleted = await cut.buffer.press("d")
+  assert.equal(deleted.mode, "normal")
+  assert.equal(cut.editor.text(), " two")
+  assert.deepEqual(cut.clipboard.written, ["one"])
+  assert.deepEqual(cut.buffer.registerState, { text: "one", linewise: false })
+
+  const cutX = controller("one two", 0)
+  await cutX.buffer.press("v")
+  await cutX.buffer.press("e")
+  await cutX.buffer.press("x")
+  assert.equal(cutX.editor.text(), " two")
+
+  const changed = controller("one two", 0)
+  await changed.buffer.press("v")
+  await changed.buffer.press("e")
+  const insert = await changed.buffer.press("c")
+  assert.equal(insert.mode, "insert")
+  assert.equal(changed.editor.text(), " two")
+  assert.equal(changed.editor.cursor(), 0)
+  assert.deepEqual(changed.clipboard.written, ["one"])
+
+  const lines = controller("a\nb\nc", 0)
+  await lines.buffer.press("V")
+  await lines.buffer.press("j")
+  const lineCut = await lines.buffer.press("d")
+  assert.equal(lineCut.mode, "normal")
+  assert.equal(lines.editor.text(), "c")
+  assert.deepEqual(lines.buffer.registerState, { text: "a\nb\n", linewise: true })
+})
+
+test("visual p/P replace the selection with the clipboard text", async () => {
+  const chars = controller("one two", 0)
+  chars.clipboard.readValue = "XX"
+  await chars.buffer.press("v")
+  await chars.buffer.press("e")
+  const pasted = await chars.buffer.press("p")
+  assert.equal(pasted.mode, "normal")
+  assert.equal(chars.editor.text(), "XX two")
+  assert.equal(chars.buffer.visualSelection, null)
+
+  const lines = controller("a\nb\nc", 0)
+  lines.clipboard.readValue = "X\n"
+  await lines.buffer.press("V")
+  await lines.buffer.press("j")
+  const linePaste = await lines.buffer.press("P")
+  assert.equal(linePaste.mode, "normal")
+  assert.equal(lines.editor.text(), "X\nc", "linewise paste replaces whole lines")
+})
+
+test("a visual paste is discarded when another key intervenes", async () => {
+  const { editor, clipboard, buffer } = controller("one two", 0)
+  await buffer.press("v")
+  await buffer.press("e")
+  let resolveRead: ((value: string | null) => void) | undefined
+  clipboard.readImpl = () => new Promise((resolve) => { resolveRead = resolve })
+  const pending = buffer.press("p")
+  await buffer.press("l")
+  resolveRead?.("SHOULD NOT PASTE")
+  await pending
+  assert.equal(editor.text(), "one two")
+  assert.deepEqual(buffer.visualSelection, { kind: "char", anchor: 0, cursor: 3 })
 })
 

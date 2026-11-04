@@ -8,13 +8,20 @@
  */
 
 import type { GitState } from "./git.ts"
-import type { CommandInput, InteractionFocus, InteractionMode, InteractionOverlay } from "./interaction.ts"
+import type {
+  CommandInput,
+  InteractionFocus,
+  InteractionMode,
+  InteractionOverlay,
+  InteractionSelection,
+} from "./interaction.ts"
 
 export type StatuslineSurface = "none" | "agent" | "workspace"
 
-export function modeLabel(mode: InteractionMode): string {
+export function modeLabel(mode: InteractionMode, visualKind?: InteractionSelection["kind"]): string {
   if (mode === "insert") return "INSERT"
   if (mode === "command") return "COMMAND"
+  if (mode === "visual") return visualKind === "line" ? "V-LINE" : "VISUAL"
   return "NORMAL"
 }
 
@@ -93,13 +100,17 @@ export function listPosition(cursor: number, total: number): string {
 
 export function statuslineRow1(input: {
   mode: InteractionMode
+  visualKind?: InteractionSelection["kind"]
   context: string
   git?: GitState | null
   position?: string
+  /** Visual selection size, e.g. `3 chars` or `2 lines`. */
+  selectionSize?: string
   pendingChord?: string | null
   hints?: string
 }): string {
-  const parts = [modeLabel(input.mode), input.context]
+  const parts = [modeLabel(input.mode, input.visualKind), input.context]
+  if (input.selectionSize) parts.push(input.selectionSize)
   if (input.git !== undefined) parts.push(gitLabel(input.git))
   if (input.position) parts.push(input.position)
   if (input.pendingChord) parts.push(`chord ${input.pendingChord}`)

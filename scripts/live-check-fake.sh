@@ -1212,6 +1212,51 @@ live_key "$LIVE_TUI_SESSION" C-g
 live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "Ctrl+G leaves the composer from Normal"
 live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" "Ctrl+G returns to chat Normal"
 
+# v5.6 T8: Visual and Visual-Line. `v`/`V` select, motions extend, y copies,
+# d cuts, p pastes, and Esc cancels to Normal. The statusline names the kind
+# and the selection size, so the probe never reads private state.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for the Visual probe"
+live_type "$LIVE_TUI_SESSION" "vim visual line"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "Visual probe starts in composer Normal"
+live_key "$LIVE_TUI_SESSION" "V"
+live_require_text "$LIVE_TUI_SESSION" "V-LINE · COMPOSER" 10 "V enters Visual Line"
+live_require_text "$LIVE_TUI_SESSION" "1 line" 10 "the statusline names the line selection size"
+live_key "$LIVE_TUI_SESSION" '$'
+live_assert_text "$LIVE_TUI_SESSION" "V-LINE · COMPOSER" "motions keep Visual Line active"
+live_key "$LIVE_TUI_SESSION" "y"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "y copies and leaves Visual Line"
+live_key "$LIVE_TUI_SESSION" "p"
+sleep 0.5
+live_assert_count "$LIVE_TUI_SESSION" "vim visual line" 2 "a V-LINE yank pastes as whole lines"
+live_key "$LIVE_TUI_SESSION" "u"
+sleep 0.5
+live_assert_count "$LIVE_TUI_SESSION" "vim visual line" 1 "u undoes the Visual Line paste"
+# Character Visual, a motion, and the `o` end swap.
+live_key "$LIVE_TUI_SESSION" "v"
+live_require_text "$LIVE_TUI_SESSION" "VISUAL · COMPOSER" 10 "v enters Character Visual"
+live_key "$LIVE_TUI_SESSION" "0"
+live_require_text "$LIVE_TUI_SESSION" "chars" 10 "motions extend the character selection"
+live_key "$LIVE_TUI_SESSION" "o"
+live_assert_text "$LIVE_TUI_SESSION" "VISUAL · COMPOSER" "o swaps the ends without leaving Visual"
+live_key "$LIVE_TUI_SESSION" '$'
+live_assert_text "$LIVE_TUI_SESSION" "VISUAL · COMPOSER" "a motion after o keeps the selection active"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "Esc cancels Visual to Normal"
+# V then d cuts the whole line; p pastes it back as a line.
+live_key "$LIVE_TUI_SESSION" "V"
+live_key "$LIVE_TUI_SESSION" "d"
+sleep 0.5
+live_assert_count "$LIVE_TUI_SESSION" "vim visual line" 0 "V d cuts the selected line"
+live_key "$LIVE_TUI_SESSION" "p"
+sleep 0.5
+live_assert_count "$LIVE_TUI_SESSION" "vim visual line" 1 "the cut line pastes back as a line"
+live_key "$LIVE_TUI_SESSION" "u"
+sleep 0.5
+live_key "$LIVE_TUI_SESSION" C-g
+live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "Ctrl+G leaves after the Visual probe"
+
 live_check_help
 
 # Ticket #77d / #80: Escape must never leave Ensemble; `:q` and `Space q` do.

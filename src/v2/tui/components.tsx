@@ -2,6 +2,7 @@ import { For, Show, createSignal } from "solid-js"
 import { TextAttributes } from "@opentui/core"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import { approvalSource } from "../types.ts"
+import type { InteractionMode } from "./interaction.ts"
 import type { Palette } from "./theme.ts"
 import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
 import { settingsTabLine, skillAssigned, skillPageItems, skillPaginationText, skillToggleMark } from "./skills.ts"
@@ -211,7 +212,7 @@ export function SettingsView(props: {
   skillCatalog: SkillOption[]
   skillPage?: number
   field?: { label: string; value: string } | null
-  fieldMode?: "normal" | "insert" | "command"
+  fieldMode?: InteractionMode
   fieldRef?: (value: any) => void
   onFieldContentChange?: () => void
   onFieldCursorChange?: () => void
@@ -273,7 +274,7 @@ export function SettingsView(props: {
         <Show when={props.field}>
           <box flexDirection="column" marginTop={1}>
             <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>
-              {props.field!.label} · {fieldMode() === "insert" ? "INSERT · enter done · esc field normal" : "NORMAL · i/a insert · h/j/k/l move · esc settings"}
+              {props.field!.label} · {fieldMode() === "insert" ? "INSERT · enter done · esc field normal" : fieldMode() === "visual" ? "VISUAL · y copy · d cut · c change · p paste · esc cancel" : "NORMAL · i/a insert · h/j/k/l move · esc settings"}
             </text>
             <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.focus} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
               <input ref={props.fieldRef} value={props.field!.value} width="100%" backgroundColor={props.colors.bg} textColor={props.colors.text} onContentChange={() => props.onFieldContentChange?.()} onCursorChange={() => props.onFieldCursorChange?.()} />
