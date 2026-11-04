@@ -646,6 +646,86 @@ live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "w"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored after DM probes"
 
+# v5.6 T4: the work list shares the Normal grammar and carries the task
+# actions. Each probe uses a fresh delegated hold task: the fake provider
+# streams the long fixture, and a fresh task is the only way to observe a
+# cancellation announcement (terminal outcomes are announced once per task).
+# Picker titles render word gaps as non-breaking spaces.
+NBSP=$'\u00a0'
+t4_ws=$(live_snapshot_value 'Object.values(output.state.workspaces)[0]?.id' | tr -d '"')
+t4_agent=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0]?.id' | tr -d '"')
+t4_delegate() {
+  live_invoke task.delegate "{\"workspaceID\":\"$t4_ws\",\"assigneeID\":\"$t4_agent\",\"title\":\"$1\",\"instruction\":\"fake-queue-hold\",\"mode\":\"research\"}" >/dev/null
+}
+t4_id_for() {
+  live_snapshot_value "Object.values(output.state.subtasks).filter(function (task) { return task.title === \"$1\" })[0]?.id" | tr -d '"'
+}
+
+# Result and picker actions: retry retains the prior result, so Enter opens a
+# real result while the long fixture streams again.
+t4_delegate "T4 work action probe"
+t4_replied=0
+for _ in $(seq 1 120); do
+  t4_state=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 work action probe" })[0]?.status')
+  [[ "$t4_state" == '"replied"' ]] && { t4_replied=1; break; }
+  sleep 0.5
+done
+[[ "$t4_replied" == "1" ]] || live_fail "T4 work fixture did not reply"
+t4_id=$(t4_id_for "T4 work action probe")
+live_invoke task.retry "{\"id\":\"$t4_id\"}" >/dev/null
+live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "retried T4 work row mounts"
+live_key "$LIVE_TUI_SESSION" Tab
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab reaches the work list"
+live_require_text "$LIVE_TUI_SESSION" "enter result" 10 "work list names its open action"
+live_assert_text "$LIVE_TUI_SESSION" "d delegate · t reassign" "work footer names delegate and reassign"
+live_assert_text "$LIVE_TUI_SESSION" "r retry · R restart · x cancel · o native" "work footer names the remaining task actions"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "enter/esc close" 10 "Enter opens the selected work result"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "enter/esc close" 10 "result modal closes"
+# d is delegate in the work list, never the text delete operator.
+live_key "$LIVE_TUI_SESSION" "d"
+live_require_text "$LIVE_TUI_SESSION" "Delegate${NBSP}subtask" 10 "d opens the delegate picker"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Delegate${NBSP}subtask" 10 "delegate picker cancels"
+live_key "$LIVE_TUI_SESSION" "t"
+live_require_text "$LIVE_TUI_SESSION" "Reassign${NBSP}subtask" 10 "t opens the reassign picker"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Reassign${NBSP}subtask" 10 "reassign picker cancels"
+# Clean this row up out of band; its terminal outcome was already announced.
+live_invoke task.cancel "{\"id\":\"$t4_id\"}" >/dev/null
+live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "T4 result probe cleaned up"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "Esc returns to the transcript"
+
+# Retry, restart, and cancel on a fresh row so the cancelled outcome announces.
+t4_delegate "T4 retry probe"
+live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "retry-probe work row mounts"
+live_key "$LIVE_TUI_SESSION" Tab
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab reaches the work list for retry"
+t4_attempts_before=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 retry probe" })[0]?.attempts')
+live_key "$LIVE_TUI_SESSION" "r"
+t4_retried=0
+for _ in $(seq 1 40); do
+  t4_attempts_after=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 retry probe" })[0]?.attempts')
+  if (( t4_attempts_after > t4_attempts_before )); then t4_retried=1; break; fi
+  sleep 0.25
+done
+[[ "$t4_retried" == "1" ]] || live_fail "r did not retry the selected work"
+sleep 0.75
+live_key "$LIVE_TUI_SESSION" "R"
+live_require_text "$LIVE_TUI_SESSION" "Restarting work: T4 retry probe" 10 "R restarts the selected work"
+# Let the restart RPC clear the busy gate; x is dropped while an action runs.
+sleep 1
+live_require_text "$LIVE_TUI_SESSION" "WORK ·" 5 "restarted work row stays live"
+live_key "$LIVE_TUI_SESSION" "x"
+live_require_text "$LIVE_TUI_SESSION" "T4 retry probe cancelled" 15 "x cancels the selected work"
+live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts after the cancel"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "Esc returns to the transcript after cancel"
+
+live_log "work-list actions verified: enter, d, t, r, R, x, and Esc/Tab focus"
+
 # Slice E (ticket #65) chrome walkthrough: one focus owner at a time, proven
 # through the context footer. Border colors do not survive `capture-pane`
 # text capture, so the footer — driven by the same single-owner resolver —
@@ -971,6 +1051,23 @@ live_assert_absence "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "stale heading a
 live_assert_absence "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "stale code after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "fake-queue-beta" "stale work row after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "WORK ·" "stale work section after leaving Ensemble"
+
+# v5.6 T4: `o` opens the selected work's native session. It runs after the
+# `:q` probe so no literal `:` follows a native round-trip; in this harness a
+# later `:` did not open Command mode, which is recorded as a follow-up risk.
+live_key "$LIVE_TUI_SESSION" F2
+live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "F2 returns before the work-list native probe"
+t4_delegate "T4 native probe"
+live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "native-probe work row mounts"
+live_key "$LIVE_TUI_SESSION" "h"
+live_key "$LIVE_TUI_SESSION" Tab
+live_key "$LIVE_TUI_SESSION" Tab
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab reaches the work list for the native probe"
+live_key "$LIVE_TUI_SESSION" "o"
+live_require_text "$LIVE_TUI_SESSION" "ctrl+p commands" 15 "o opens the selected work's native session"
+t4_native_id=$(t4_id_for "T4 native probe")
+live_invoke task.cancel "{\"id\":\"$t4_native_id\"}" >/dev/null
+live_log "work-list o opens the selected work's native session"
 
 # Slice B reduced-motion run: restart the TUI with ENSEMBLE_REDUCED_MOTION=1
 # and prove live work renders static frame-0 glyphs only — the working

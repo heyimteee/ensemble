@@ -55,6 +55,37 @@ test("the work zone is reachable with Tab and keeps list navigation", () => {
   }
 })
 
+test("the work list carries the shared task actions on their Normal keys", () => {
+  const keys = keysFor("work")
+  for (const sequence of ["x", "r", "shift+r", "d", "t", "o"]) {
+    assert.ok(keys.includes(sequence), `work keeps ${sequence}`)
+  }
+  assert.equal(entryId("work", "enter"), "work.open")
+  assert.equal(entryId("work", "x"), "work.cancel")
+  assert.equal(entryId("work", "r"), "work.retry")
+  assert.equal(entryId("work", "shift+r"), "work.restart")
+  assert.equal(entryId("work", "d"), "work.delegate")
+  assert.equal(entryId("work", "t"), "work.reassign")
+  assert.equal(entryId("work", "o"), "work.native")
+})
+
+test("d delegates in the work list instead of invoking the text delete operator", () => {
+  const delegate = normalEntries("work").find((entry) => entry.keys.join(" ") === "d")
+  assert.equal(delegate?.id, "work.delegate")
+  assert.match(delegate?.title ?? "", /delegate/i)
+  assert.ok(!/delete/i.test(`${delegate?.id} ${delegate?.title}`), "work d never binds delete")
+})
+
+test("Esc and Tab return from the work list to the transcript", () => {
+  const escape = normalEntries("work").find((entry) => entry.id === "escape")
+  const tab = normalEntries("work").find((entry) => entry.id === "focus.tab")
+  assert.match(escape?.title ?? "", /transcript/i)
+  assert.match(tab?.title ?? "", /transcript/i)
+  assert.equal(actionId(resolveNormalKey("work", ["g"], "g")), "work.top")
+  assert.equal(actionId(resolveNormalKey("work", [], "shift+g")), "work.bottom")
+  assert.equal(actionId(resolveNormalKey("work", [], "x")), "work.cancel")
+})
+
 test("the catalog retires the tilde leader and list surfaces expose no Visual, yank, or paste", () => {
   for (const entry of KEYMAP_CATALOG) {
     assert.ok(!entry.keys.includes("~"), `${entry.id} must not bind ~`)
@@ -140,6 +171,9 @@ test("statusline hints come from the same catalog and adapt to the work zone", (
 
   const work = statuslineHints("work")
   assert.ok(work.includes("enter result"), work)
+  for (const hint of ["x cancel", "r retry", "R restart", "d delegate", "t reassign", "o native"]) {
+    assert.ok(work.includes(hint), `work hints name ${hint} (${work})`)
+  }
 })
 
 test("layer entries are single-key bindings the host can generate directly", () => {

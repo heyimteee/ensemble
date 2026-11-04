@@ -136,6 +136,13 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.top", scope: "normal", contexts: ["work"], keys: ["g", "g"], title: "First work row", group: "Navigation", listed: false },
   { id: "work.bottom", scope: "normal", contexts: ["work"], keys: ["shift+g"], title: "Last work row", group: "Navigation", listed: false },
   { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result", group: "Open", hint: "enter result" },
+  // `d` is contextual: delegate here, never the text-buffer delete operator.
+  { id: "work.delegate", scope: "normal", contexts: ["work"], keys: ["d"], title: "Delegate work", group: "Work", hint: "d delegate" },
+  { id: "work.reassign", scope: "normal", contexts: ["work"], keys: ["t"], title: "Reassign work", group: "Work", hint: "t reassign" },
+  { id: "work.retry", scope: "normal", contexts: ["work"], keys: ["r"], title: "Retry work", group: "Work", hint: "r retry" },
+  { id: "work.restart", scope: "normal", contexts: ["work"], keys: ["shift+r"], title: "Restart work", group: "Work", hint: "R restart" },
+  { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work", group: "Work", hint: "x cancel" },
+  { id: "work.native", scope: "normal", contexts: ["work"], keys: ["o"], title: "Native session", group: "Navigate", hint: "o native" },
   { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Transcript", group: "Focus", hint: "tab chat" },
   { id: "leader", scope: "normal", contexts: ["work"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
   { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Back to transcript", group: "Navigation", listed: false },
