@@ -782,11 +782,34 @@ live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed"
 
 # Slice E settings frame: tab line keeps the live unfiltered memory total
 # with the active cursor (zero here — the memories flow below proves the
-# count at one plus edit and filter).
+# count at one plus edit and filter). v5.6 T5 (#83) also proves the shared
+# modal grammar: tabs, rows, action hints, and the statusline mode/context.
 live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings for tab check"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Settings" "statusline names Normal and the settings context"
+live_assert_text "$LIVE_TUI_SESSION" "h/l tabs" "settings teaches h/l tabs"
+live_assert_text "$LIVE_TUI_SESSION" "j/k rows" "settings teaches j/k rows"
+live_assert_text "$LIVE_TUI_SESSION" "enter edit" "settings teaches Enter"
+live_assert_text "$LIVE_TUI_SESSION" "s save" "settings teaches save"
+live_assert_text "$LIVE_TUI_SESSION" "esc close" "settings teaches the close step"
+live_assert_absence "$LIVE_TUI_SESSION" "a add ·" "the general tab does not promise an add row"
+live_assert_text "$LIVE_TUI_SESSION" "› Name" "the general tab starts on the first row"
 live_assert_text "$LIVE_TUI_SESSION" "› General" "settings tab cursor"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "settings tab keeps the live memory total"
+live_key "$LIVE_TUI_SESSION" "j"
+live_require_text "$LIVE_TUI_SESSION" "› Title" 10 "j moves to the next row"
+live_key "$LIVE_TUI_SESSION" "G"
+live_require_text "$LIVE_TUI_SESSION" "› Model" 10 "G jumps to the last row"
+live_key "$LIVE_TUI_SESSION" "g"
+live_key "$LIVE_TUI_SESSION" "g"
+live_require_text "$LIVE_TUI_SESSION" "› Name" 10 "gg jumps back to the first row"
+live_key "$LIVE_TUI_SESSION" "l"
+live_require_text "$LIVE_TUI_SESSION" "› Models" 10 "l switches to the next tab"
+live_require_text "$LIVE_TUI_SESSION" "a add · s save" 10 "models teaches add; no backup exists to delete"
+live_key "$LIVE_TUI_SESSION" "h"
+live_require_text "$LIVE_TUI_SESSION" "› General" 10 "h switches back to the previous tab"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "› Models" 10 "Tab also switches tabs"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
@@ -802,26 +825,31 @@ live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals closed"
 live_log "slice E help/settings/approvals chrome verified"
 
-# In-house overlays: the single-choice picker, the multiline text prompt, and
-# the confirm modal replace every interactive native dialog. The settings
-# "Edit field" flow proves picker select plus prompt submit (the draft goes
-# UNSAVED, then the discard confirm accepts and drops it); the memories flow
-# proves the prompt persists end to end through the snapshot. (The pre-existing
-# picker overlay renders word gaps as non-breaking spaces, hence NBSP.)
+# In-house pickers and confirms still back model choices and destructive
+# confirmations. Settings text fields now use the shared modal grammar
+# (#83): Insert -> field Normal -> settings Normal -> close. This proves the
+# ladder, the dirty mark, and the discard confirm; the memories flow below
+# proves field commits persist end to end. (The picker overlay renders word
+# gaps as non-breaking spaces, hence NBSP.)
 NBSP=$'\u00a0'
 live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings"
 live_key "$LIVE_TUI_SESSION" "e"
-live_require_text "$LIVE_TUI_SESSION" "Edit${NBSP}field" 10 "in-house edit-field picker"
-live_assert_text "$LIVE_TUI_SESSION" "enter${NBSP}confirm${NBSP}·${NBSP}esc${NBSP}cancel" "picker footer"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "enter submit · shift+enter newline · esc cancel" 10 "in-house text prompt footer"
+live_require_text "$LIVE_TUI_SESSION" "Name · INSERT" 10 "e opens the Name field in Insert"
+live_require_text "$LIVE_TUI_SESSION" "INSERT · Settings" 10 "the statusline names the field mode and context"
+live_assert_text "$LIVE_TUI_SESSION" "enter done · esc field normal" "the field teaches its first Esc"
 live_type "$LIVE_TUI_SESSION" "X"
-live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "FakeAgentX" 10 "typing edits the field buffer"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "Name · NORMAL" 10 "the first Esc returns to field Normal"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Settings" "field Normal still reports the settings context"
+live_assert_text "$LIVE_TUI_SESSION" "esc settings" "field Normal teaches the next Esc"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Name · NORMAL" 10 "the second Esc returns to settings Normal"
 live_require_text "$LIVE_TUI_SESSION" "UNSAVED" 10 "draft marked unsaved"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "in-house confirm modal"
+live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "the third Esc closes settings and confirms discard"
 live_assert_text "$LIVE_TUI_SESSION" "enter yes · esc cancel" "confirm footer"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "confirm accepted"
@@ -831,35 +859,77 @@ live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings reopened"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
-live_require_text "$LIVE_TUI_SESSION" "No memories yet. e adds one." 10 "memories empty state names the add action"
+live_require_text "$LIVE_TUI_SESSION" "No memories yet. a adds one." 10 "memories empty state names the add key"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "memories count renders at zero"
-live_key "$LIVE_TUI_SESSION" "e"
-live_require_text "$LIVE_TUI_SESSION" "Add memory" 10 "in-house add-memory prompt"
+live_assert_text "$LIVE_TUI_SESSION" "a add · s save" "memories teaches the add row before any row exists"
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "New memory · INSERT" 10 "a opens a new memory field"
 live_type "$LIVE_TUI_SESSION" "fake-live-memory"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_absence "$LIVE_TUI_SESSION" "enter submit · shift+enter" 10 "prompt submitted"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "new-memory field Normal"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "the second Esc commits and returns to settings Normal"
+live_require_text "$LIVE_TUI_SESSION" "Memories (1)" 10 "memories count renders the live total"
 memory_text=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
-[[ "$memory_text" == '["fake-live-memory"]' ]] || live_fail "memory prompt did not persist (got $memory_text)"
-live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "memories count renders the live total"
+[[ "$memory_text" == '["fake-live-memory"]' ]] || live_fail "memory field did not persist (got $memory_text)"
 live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "memory provenance line"
-# Slice D edit-in-place: e reopens the fact in the in-house multiline prompt;
-# appending keeps one row (no delete/re-add) with origin and history intact.
+# Slice D edit-in-place through the shared Vim adapter: e opens the fact,
+# Esc -> field Normal, $ -> end, i -> Insert, append. One row keeps its origin
+# and history (no delete/re-add).
 live_key "$LIVE_TUI_SESSION" "e"
-live_require_text "$LIVE_TUI_SESSION" "Edit memory" 10 "in-house edit-memory prompt"
+live_require_text "$LIVE_TUI_SESSION" "Edit memory · INSERT" 10 "e opens the selected memory field"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "memory field Normal"
+# p in a field is Vim paste, never the row promote action; undo any clipboard
+# content so the append below starts from the saved text.
+live_key "$LIVE_TUI_SESSION" "p"
+live_key "$LIVE_TUI_SESSION" "u"
+live_key "$LIVE_TUI_SESSION" "$"
+live_key "$LIVE_TUI_SESSION" "A"
+live_require_text "$LIVE_TUI_SESSION" "INSERT · Settings" 10 "A returns the field to Insert at the line end"
 live_type "$LIVE_TUI_SESSION" " v2"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_absence "$LIVE_TUI_SESSION" "enter submit · shift+enter" 10 "edit prompt submitted"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "edit field Normal before commit"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "edit memory committed"
 memory_edited=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
-[[ "$memory_edited" == '["v2fake-live-memory"]' ]] || live_fail "memory edit did not persist (got $memory_edited)"
+[[ "$memory_edited" == '["fake-live-memory v2"]' ]] || live_fail "memory edit did not persist (got $memory_edited)"
 memory_rows=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).length')
 [[ "$memory_rows" == '1' ]] || live_fail "edit re-added instead of updating in place (got $memory_rows rows)"
 memory_prov=$(live_snapshot_value '(function () { var m = Object.values(output.state.memories).filter(function (x) { return !x.deletedAt })[0]; return m.origin + "|" + m.scope + "|" + m.history.map(function (h) { return h.action }).join(",") })()')
 [[ "$memory_prov" == '"manual|project|created,edited"' ]] || live_fail "edit lost provenance history (got $memory_prov)"
-live_require_text "$LIVE_TUI_SESSION" "v2fake-live-memory" 10 "edited fact renders"
+live_require_text "$LIVE_TUI_SESSION" "fake-live-memory v2" 10 "edited fact renders"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count unchanged after edit"
-# Slice D inline filter (ticket #80): / now opens the shared command-line
-# search and filters the focused settings tab live; Enter commits, Esc would
-# restore the prior filter.
+# x deletes the selected memory row without a dialog. Add a scratch row so the
+# original fact survives for the later tabs.
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "New memory · INSERT" 10 "second memory field opens"
+live_type "$LIVE_TUI_SESSION" "scratch-memory"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "second memory field Normal"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "Memories (2)" 10 "second memory persisted"
+live_require_text "$LIVE_TUI_SESSION" "› scratch-memory" 10 "the new memory row holds the cursor"
+live_key "$LIVE_TUI_SESSION" "x"
+live_require_text "$LIVE_TUI_SESSION" "Memories (1)" 10 "x deletes the selected memory"
+live_require_absence "$LIVE_TUI_SESSION" "scratch-memory" 10 "deleted memory leaves the list"
+memory_left=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
+[[ "$memory_left" == '["fake-live-memory v2"]' ]] || live_fail "delete removed the wrong memory (got $memory_left)"
+# p promotes the selected memory into a pending approval. It is a memory-row
+# action, not row paste; paste stays inside text fields.
+live_key "$LIVE_TUI_SESSION" "p"
+sleep 0.5
+promotion=$(live_snapshot_value '(function () { var a = Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" }); return a.length + ":" + (a[0] ? a[0].detail : "") })()')
+[[ "$promotion" == '"1:fake-live-memory v2"' ]] || live_fail "p did not request a memory promotion (got $promotion)"
+promotion_id=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" })[0].id')
+live_invoke approval.resolve "{\"id\":$promotion_id,\"approve\":false}" >/dev/null
+sleep 0.3
+promotions_left=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" }).length')
+[[ "$promotions_left" == '0' ]] || live_fail "promotion approval was not cleaned up (got $promotions_left)"
+live_log "settings p promoted the selected memory through the approval flow"
+# Slice D inline filter (ticket #80): / opens the shared command-line search
+# and filters the focused settings tab live; Enter commits, Esc would restore
+# the prior filter.
 live_key "$LIVE_TUI_SESSION" "/"
 live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "settings search opens in the command line"
 live_type "$LIVE_TUI_SESSION" "zzz-no-match"
@@ -886,15 +956,18 @@ live_key "$LIVE_TUI_SESSION" "Tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "› Skillbox" 10 "skillbox tab active with cursor"
-live_key "$LIVE_TUI_SESSION" "C-f"
-live_require_text "$LIVE_TUI_SESSION" "typing… enter done · esc cancel" 10 "skill filter editing"
+live_assert_text "$LIVE_TUI_SESSION" "space toggle" "skillbox teaches Space"
+live_assert_text "$LIVE_TUI_SESSION" "/ filter" "skillbox teaches / filter"
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "skill filter opens in the command line"
 live_type "$LIVE_TUI_SESSION" "zzz-no-such-skill"
-live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "No matching skills" 10 "empty palette names the miss"
-live_key "$LIVE_TUI_SESSION" "C-f"
-live_key_repeat "$LIVE_TUI_SESSION" "BSpace" 20
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_absence "$LIVE_TUI_SESSION" "typing… enter done · esc cancel" 10 "filter editing submitted"
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "skill filter search reopens"
+live_require_absence "$LIVE_TUI_SESSION" "No matching skills" 10 "opening a new search clears the prior filter"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "filter search submitted"
 if live_capture_contains "$LIVE_TUI_SESSION" "[ ]"; then
   live_key "$LIVE_TUI_SESSION" "Space"
   live_require_text "$LIVE_TUI_SESSION" "[x]" 10 "fill mark shows the assignment"
@@ -927,14 +1000,14 @@ live_assert_text "$LIVE_TUI_SESSION" "Name       FakeAgent" "general label/value
 live_assert_text "$LIVE_TUI_SESSION" "Title      Engineering" "title row aligns with name row"
 live_assert_text "$LIVE_TUI_SESSION" "Model      ensemble-fake/ensemble-fake-model" "general model summary"
 live_assert_text "$LIVE_TUI_SESSION" "› General" "settings tab cursor"
-live_assert_text "$LIVE_TUI_SESSION" "e edits a field" "general action footer"
-live_assert_text "$LIVE_TUI_SESSION" "s save · Esc cancel" "shared save footer"
+live_assert_text "$LIVE_TUI_SESSION" "enter edit" "general statusline teaches Enter"
+live_assert_text "$LIVE_TUI_SESSION" "s save" "general statusline teaches save"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "Main + backups — main + 0 backups" 10 "models section header with counts"
 live_assert_text "$LIVE_TUI_SESSION" "(•)" "main slot fill mark"
 live_assert_text "$LIVE_TUI_SESSION" "Main       ensemble-fake/ensemble-fake-model" "main row aligns and names provider/model"
-live_assert_text "$LIVE_TUI_SESSION" "No backups yet. b adds one." "models empty state names the fix"
-live_assert_text "$LIVE_TUI_SESSION" "b add" "models action footer names add"
+live_assert_text "$LIVE_TUI_SESSION" "No backups yet. a adds one." "models empty state names the add key"
+live_assert_text "$LIVE_TUI_SESSION" "a add" "models statusline teaches add"
 # Model picker from the models tab: provider grouping, variant info, search
 # with a match count, and the current-selection fill mark. (The picker
 # overlay renders word gaps as non-breaking spaces, hence NBSP.)
@@ -949,13 +1022,13 @@ live_require_absence "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "model picker clo
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings kept with no dirty draft"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "Saved knowledge — Memories (1)" 10 "memories section header with count"
-live_assert_text "$LIVE_TUI_SESSION" "› v2fake-live-memory" "memories selection marker on the row"
+live_assert_text "$LIVE_TUI_SESSION" "› fake-live-memory v2" "memories selection marker on the row"
 live_assert_text "$LIVE_TUI_SESSION" "manual · project · reviewed" "memories provenance line kept"
-live_assert_text "$LIVE_TUI_SESSION" "Ctrl+D delete" "memories action footer"
+live_assert_text "$LIVE_TUI_SESSION" "x delete" "memories statusline teaches delete"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "› Skillbox" 10 "skillbox tab active with cursor"
 live_assert_text "$LIVE_TUI_SESSION" "Optional skills — Skillbox (" "skillbox section header with counts"
-live_assert_text "$LIVE_TUI_SESSION" "Space toggles" "skillbox action footer"
+live_assert_text "$LIVE_TUI_SESSION" "space toggle" "skillbox statusline teaches toggle"
 if live_capture_contains "$LIVE_TUI_SESSION" "[ ]"; then
   live_assert_text "$LIVE_TUI_SESSION" "[ ]" "skillbox fill-not-tick rows kept"
 else
@@ -965,6 +1038,35 @@ sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed with bindings intact"
 live_log "slice G settings stylization verified across all four tabs"
+
+# v5.6 T5 follow-up: backup reorder keeps j/k on the row cursor. Add two
+# backups with distinct variants, move the selected one up with K, save, and
+# inspect the persisted order.
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings reopened for backup reorder"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "Main + backups — main + 0 backups" 10 "models tab before adding backups"
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "first backup model picker"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Reasoning${NBSP}effort" 10 "first backup variant picker"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 1" 10 "first backup selected after add"
+live_require_text "$LIVE_TUI_SESSION" "J/K reorder" 10 "models teaches reorder once a backup row is selected"
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "second backup model picker"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Reasoning${NBSP}effort" 10 "second backup variant picker"
+live_key "$LIVE_TUI_SESSION" Down
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 2" 10 "second backup selected after add"
+live_key "$LIVE_TUI_SESSION" "K"
+live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 1" 10 "K moves the selected backup up"
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings saved after backup reorder"
+backup_order=$(live_snapshot_value '(function () { var a = Object.values(output.state.agents).filter(function (x) { return x.name === "FakeAgent" })[0]; return a.backupModels.map(function (m) { return m.variant }) })()')
+[[ "$backup_order" == '["medium","low"]' ]] || live_fail "K did not reorder the backups before save (got $backup_order)"
+live_log "settings J/K reordered backups and saved the persisted order"
 
 # v5.6 T7: composer Normal runs Vim motions, x/u/Ctrl+r, A, yy/p, dd, and
 # Enter sends from Normal. The statusline position is the text-observable

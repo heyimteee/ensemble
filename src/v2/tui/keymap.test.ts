@@ -48,6 +48,50 @@ test("group chat and direct conversation scroll the transcript and never expose 
   )
 })
 
+test("settings share the Normal grammar: h/l tabs, j/k rows, Enter, a/e/x, Space, s, /, Esc", () => {
+  const keys = keysFor("settings")
+  for (const sequence of ["h", "l", "tab", "shift+tab", "j", "k", "g g", "shift+g", "enter", "a", "e", "x", "space", "s", "/", "escape", "p", "shift+j", "shift+k"]) {
+    assert.ok(keys.includes(sequence), `settings keeps ${sequence}`)
+  }
+  assert.equal(entryId("settings", "h"), "settings.tab.prev")
+  assert.equal(entryId("settings", "l"), "settings.tab.next")
+  assert.equal(entryId("settings", "tab"), "settings.tab.cycle")
+  assert.equal(entryId("settings", "j"), "settings.down")
+  assert.equal(entryId("settings", "k"), "settings.up")
+  assert.equal(entryId("settings", "enter"), "settings.edit")
+  assert.equal(entryId("settings", "a"), "settings.add")
+  assert.equal(entryId("settings", "x"), "settings.delete")
+  assert.equal(entryId("settings", "space"), "settings.toggle")
+  assert.equal(entryId("settings", "s"), "settings.save")
+  assert.equal(entryId("settings", "/"), "settings.filter")
+  assert.equal(entryId("settings", "escape"), "settings.escape")
+  assert.equal(entryId("settings", "p"), "settings.promote", "p promotes a selected memory, never row paste")
+  assert.equal(entryId("settings", "shift+j"), "settings.backup.down", "J reorders the selected backup down")
+  assert.equal(entryId("settings", "shift+k"), "settings.backup.up", "K reorders the selected backup up")
+})
+
+test("settings promote and reorder teach their keys from the catalog", () => {
+  const promote = normalEntries("settings").find((entry) => entry.id === "settings.promote")
+  assert.equal(promote?.hint, "p promote")
+  assert.equal(promote?.title, "Promote memory")
+  const down = normalEntries("settings").find((entry) => entry.id === "settings.backup.down")
+  const up = normalEntries("settings").find((entry) => entry.id === "settings.backup.up")
+  assert.equal(down?.hint, "J/K reorder")
+  assert.equal(down?.title, "Move backup down")
+  assert.equal(up?.title, "Move backup up")
+  const hints = statuslineHints("settings")
+  assert.ok(hints.includes("p promote"), hints)
+  assert.ok(hints.includes("J/K reorder"), hints)
+})
+
+test("settings lists expose no Visual, yank, or paste and no per-tab filter chords", () => {
+  for (const entry of normalEntries("settings")) {
+    assert.ok(!/visual|yank|paste/i.test(`${entry.id} ${entry.title}`), `settings:${entry.id} is a list-surface action`)
+    assert.ok(!entry.keys.some((key) => key.startsWith("ctrl+")), `settings:${entry.id} must not use a Ctrl chord`)
+  }
+  assert.deepEqual(duplicateBindings(), [], "settings keys never collide in their context")
+})
+
 test("the work zone is reachable with Tab and keeps list navigation", () => {
   const keys = keysFor("work")
   for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "escape"]) {
@@ -174,6 +218,42 @@ test("statusline hints come from the same catalog and adapt to the work zone", (
   for (const hint of ["x cancel", "r retry", "R restart", "d delegate", "t reassign", "o native"]) {
     assert.ok(work.includes(hint), `work hints name ${hint} (${work})`)
   }
+})
+
+test("settings hints keep teaching keys only where that tab has the action", () => {
+  const enabled = (tab: "general" | "models" | "memories" | "skillbox") => (entry: { id: string }) => {
+    if (entry.id === "settings.add") return tab === "models" || tab === "memories"
+    if (entry.id === "settings.delete") return tab === "models" || tab === "memories"
+    if (entry.id === "settings.toggle") return tab === "skillbox"
+    if (entry.id === "settings.filter") return tab === "memories" || tab === "skillbox"
+    if (entry.id === "settings.promote") return tab === "memories"
+    if (entry.id === "settings.backup.down" || entry.id === "settings.backup.up") return tab === "models"
+    return true
+  }
+  const general = statuslineHints("settings", { filter: enabled("general") })
+  for (const hint of ["h/l tabs", "j/k rows", "enter edit", "s save", "esc close"]) {
+    assert.ok(general.includes(hint), `general teaches ${hint}: ${general}`)
+  }
+  assert.ok(!general.includes("a add"), "general has no add row")
+  assert.ok(!general.includes("/ filter"), "general has no filter tab")
+  assert.ok(!general.includes("p promote"), "general has no memory to promote")
+  assert.ok(!general.includes("J/K reorder"), "general has no backup to reorder")
+
+  const memories = statuslineHints("settings", { filter: enabled("memories") })
+  assert.ok(memories.includes("a add"), memories)
+  assert.ok(memories.includes("x delete"), memories)
+  assert.ok(memories.includes("/ filter"), memories)
+  assert.ok(memories.includes("p promote"), memories)
+
+  const models = statuslineHints("settings", { filter: enabled("models") })
+  assert.ok(models.includes("a add"), models)
+  assert.ok(models.includes("J/K reorder"), models)
+  assert.ok(!models.includes("p promote"), "models has no memory to promote")
+
+  const skillbox = statuslineHints("settings", { filter: enabled("skillbox") })
+  assert.ok(skillbox.includes("space toggle"), skillbox)
+  assert.ok(!skillbox.includes("a add"), "skillbox has no add row")
+  assert.ok(!skillbox.includes("p promote"), "skillbox has no memory to promote")
 })
 
 test("layer entries are single-key bindings the host can generate directly", () => {

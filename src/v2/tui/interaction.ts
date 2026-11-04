@@ -30,6 +30,9 @@ export type CommandInput = { kind: ":" | "/"; text: string }
 
 export type InteractionSelection = { kind: "char" | "line"; anchor: number; cursor: number }
 
+/** The focused text buffer inside an overlay context, if any. */
+export type InteractionField = "settings" | null
+
 export type TransientTone = "info" | "success" | "error"
 
 export type TransientMessage = { text: string; tone: TransientTone; at: number }
@@ -38,6 +41,7 @@ export type InteractionState = {
   mode: InteractionMode
   focus: InteractionFocus
   overlay: InteractionOverlay
+  field: InteractionField
   command: CommandInput | null
   pendingChord: string | null
   selection: InteractionSelection | null
@@ -48,6 +52,8 @@ export type InteractionEvent =
   | { type: "insert.enter" }
   | { type: "escape" }
   | { type: "leave.editor" }
+  | { type: "settings.field.open" }
+  | { type: "settings.field.close" }
   | { type: "focus.set"; focus: InteractionFocus }
   | { type: "overlay.set"; overlay: InteractionOverlay }
   | { type: "command.open"; kind: CommandInput["kind"]; text?: string }
@@ -76,6 +82,7 @@ export function initialInteractionState(overrides: Partial<InteractionState> = {
     mode: "normal",
     focus: "rail",
     overlay: "none",
+    field: null,
     command: null,
     pendingChord: null,
     selection: null,
@@ -102,6 +109,14 @@ function escape(state: InteractionState): InteractionResult {
       intents: [{ type: "blur-editor" }],
     }
   }
+  // Settings text fields sit above the settings overlay: Insert -> field
+  // Normal -> settings Normal, and only then does the overlay close.
+  if (state.field === "settings") {
+    if (state.mode === "insert") {
+      return { state: { ...state, mode: "normal" }, intents: [{ type: "blur-editor" }] }
+    }
+    return { state: { ...state, mode: "normal", field: null }, intents: [{ type: "blur-editor" }] }
+  }
   if (state.overlay !== "none") {
     return {
       state: { ...state, overlay: "none", mode: "normal" },
@@ -127,18 +142,40 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
     case "escape":
       return escape(state)
     case "leave.editor":
+      if (state.field === "settings") {
+        return {
+          state: { ...state, mode: "normal", focus: "settings", field: null },
+          intents: [{ type: "blur-editor" }],
+        }
+      }
       return { state: { ...state, mode: "normal", focus: "chat" }, intents: [{ type: "blur-editor" }] }
+    case "settings.field.open":
+      return {
+        state: { ...state, mode: "insert", focus: "settings", overlay: "settings", field: "settings" },
+        intents: [{ type: "focus-editor" }],
+      }
+    case "settings.field.close":
+      return {
+        state: { ...state, mode: "normal", focus: "settings", field: null },
+        intents: [{ type: "blur-editor" }],
+      }
     case "focus.set": {
       const composer = event.focus === "composer"
       const mode = composer ? state.mode : "normal"
+      const field = state.field !== null && event.focus !== "settings" ? null : state.field
       return {
-        state: { ...state, focus: event.focus, mode },
+        state: { ...state, focus: event.focus, mode, field },
         intents: [{ type: composer && mode === "insert" ? "focus-editor" : "blur-editor" }],
       }
     }
     case "overlay.set":
       return {
-        state: { ...state, overlay: event.overlay, mode: event.overlay === "none" ? state.mode : "normal" },
+        state: {
+          ...state,
+          overlay: event.overlay,
+          mode: event.overlay === "none" ? state.mode : "normal",
+          field: event.overlay === "none" || event.overlay !== "settings" ? null : state.field,
+        },
         intents: event.overlay === "none" ? [] : [{ type: "blur-editor" }],
       }
     case "command.open":

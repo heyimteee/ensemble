@@ -98,12 +98,12 @@ export function modelsSectionCount(backupCount: number): string {
 
 /** Models empty state: names the state and the add key. */
 export function modelsEmptyLine(): string {
-  return "No backups yet. b adds one."
+  return "No backups yet. a adds one."
 }
 
 /** Memories empty state (exact legacy copy, now pinned in one place). */
 export function memoriesEmptyLine(): string {
-  return "No memories yet. e adds one."
+  return "No memories yet. a adds one."
 }
 
 /** Memories filter zero state (exact legacy copy, now pinned in one place). */
@@ -131,29 +131,6 @@ export function skillsUnavailableLine(): string {
  *  this seam. */
 export function skillboxEmptyLine(): string {
   return skillsEmptyLine()
-}
-
-/** Per-tab action footer: the keys that act on this tab. The shared save
- *  line renders beneath it via settingsSaveFooter. */
-export function settingsTabFooter(tab: SettingsTabID): string {
-  // Ticket #77 keybinds: Ctrl+S and Ctrl+arrows collide with macOS window
-  // shortcuts, Cmd chords, and the Herdr leader. Save is a plain `s` inside
-  // the settings layer (no global conflict there); reorder uses Shift+arrows.
-  switch (tab) {
-    case "general":
-      return "e edits a field · s saves"
-    case "models":
-      return "e main · b add · Shift+↑/↓ move · Backspace remove"
-    case "memories":
-      return "e edit · n new · Ctrl+D delete · Ctrl+P promote · / filter"
-    case "skillbox":
-      return "Space toggles · PgUp/PgDn pages · empty means no optional skills"
-  }
-}
-
-/** Shared save/cancel footer grammar under every tab. */
-export function settingsSaveFooter(): string {
-  return "s save · Esc cancel"
 }
 
 /** Agent-list group header with its live count. */

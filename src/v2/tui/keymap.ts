@@ -147,6 +147,27 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "leader", scope: "normal", contexts: ["work"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
   { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Back to transcript", group: "Navigation", listed: false },
 
+  // Settings ---------------------------------------------------------------
+  { id: "settings.tab.prev", scope: "normal", contexts: ["settings"], keys: ["h"], title: "Previous tab", group: "Tabs", hint: "h/l tabs" },
+  { id: "settings.tab.next", scope: "normal", contexts: ["settings"], keys: ["l"], title: "Next tab", group: "Tabs" },
+  { id: "settings.tab.cycle", scope: "normal", contexts: ["settings"], keys: ["tab"], title: "Next tab", group: "Tabs" },
+  { id: "settings.tab.cycle.prev", scope: "normal", contexts: ["settings"], keys: ["shift+tab"], title: "Previous tab", group: "Tabs" },
+  { id: "settings.down", scope: "normal", contexts: ["settings"], keys: ["j"], title: "Next row", group: "Navigation", hint: "j/k rows" },
+  { id: "settings.up", scope: "normal", contexts: ["settings"], keys: ["k"], title: "Previous row", group: "Navigation" },
+  { id: "settings.top", scope: "normal", contexts: ["settings"], keys: ["g", "g"], title: "First row", group: "Navigation", listed: false },
+  { id: "settings.bottom", scope: "normal", contexts: ["settings"], keys: ["shift+g"], title: "Last row", group: "Navigation", listed: false },
+  { id: "settings.edit", scope: "normal", contexts: ["settings"], keys: ["enter"], title: "Edit or toggle row", group: "Edit", hint: "enter edit" },
+  { id: "settings.edit.alt", scope: "normal", contexts: ["settings"], keys: ["e"], title: "Edit row", group: "Edit" },
+  { id: "settings.add", scope: "normal", contexts: ["settings"], keys: ["a"], title: "Add row", group: "Create", hint: "a add" },
+  { id: "settings.delete", scope: "normal", contexts: ["settings"], keys: ["x"], title: "Delete row", group: "Delete", hint: "x delete" },
+  { id: "settings.backup.down", scope: "normal", contexts: ["settings"], keys: ["shift+j"], title: "Move backup down", group: "Reorder", hint: "J/K reorder" },
+  { id: "settings.backup.up", scope: "normal", contexts: ["settings"], keys: ["shift+k"], title: "Move backup up", group: "Reorder" },
+  { id: "settings.promote", scope: "normal", contexts: ["settings"], keys: ["p"], title: "Promote memory", group: "Edit", hint: "p promote" },
+  { id: "settings.toggle", scope: "normal", contexts: ["settings"], keys: ["space"], title: "Toggle skill", group: "Edit", hint: "space toggle" },
+  { id: "settings.save", scope: "normal", contexts: ["settings"], keys: ["s"], title: "Save settings", group: "State", hint: "s save" },
+  { id: "settings.filter", scope: "normal", contexts: ["settings"], keys: ["/"], title: "Filter tab", group: "Search", hint: "/ filter" },
+  { id: "settings.escape", scope: "normal", contexts: ["settings"], keys: ["escape"], title: "Close settings", group: "Navigation", hint: "esc close" },
+
   // Legacy Ctrl/agent/workspace actions remain available on the list
   // surfaces until later phase tickets move them to their own contexts.
   { id: "legacy.workspace.archive", scope: "normal", contexts: ["roster", "chat"], keys: ["ctrl+w"], title: "Archive workspace", group: "Legacy", listed: false, platform: true },
@@ -238,9 +259,13 @@ export function duplicateBindings(catalog: readonly KeyEntry[] = KEYMAP_CATALOG)
  * Statusline hints are generated from the same catalog that drives the
  * layers; only teaching entries carry a hint, so the bar stays short.
  */
-export function statuslineHints(context: KeyContext, options: { hasWork?: boolean } = {}): string {
+export function statuslineHints(
+  context: KeyContext,
+  options: { hasWork?: boolean; filter?: (entry: KeyEntry) => boolean } = {},
+): string {
   const hasWork = options.hasWork ?? true
   return normalEntries(context)
+    .filter((entry) => options.filter?.(entry) ?? true)
     .flatMap((entry) => {
       if (entry.listed === false) return []
       const hint = entry.requires === "work" && !hasWork ? entry.emptyHint : entry.hint
