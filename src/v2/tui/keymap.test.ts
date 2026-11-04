@@ -71,6 +71,11 @@ test("the catalog retires the tilde leader and list surfaces expose no Visual, y
   assert.equal(entryId("work", "space"), "leader")
 })
 
+test("the chat new-workspace key yields to active transcript search", () => {
+  const entry = normalEntries("chat").find((candidate) => candidate.id === "chat.new.workspace")
+  assert.equal(entry?.availability, "no-transcript-search")
+})
+
 test("the leader catalog covers the documented Normal actions with unique keys", () => {
   const ids = leaderEntries().map((entry) => entry.id)
   for (const id of [

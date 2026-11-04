@@ -43,6 +43,9 @@ import {
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
 import { layerEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
+import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
+import { createCommandHistory, recallHistory, rememberHistory, startHistory, type CommandHistory } from "./history.ts"
+import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { shouldApplySnapshot } from "../snapshot-guard.ts"
@@ -83,7 +86,7 @@ import {
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat"
 type PickerState = {
-  mode: "members" | "leader" | "workspace" | "choice"
+  mode: "members" | "leader" | "workspace" | "choice" | "agent"
   title: string
   candidates: Array<{ id: string; label: string }>
   selected: Set<string>
@@ -159,6 +162,21 @@ type Completion = {
   items: Array<{ title: string; value: string }>
 }
 
+/** Where a `/` search applies: the rail, the settings tab, or the transcript. */
+type CommandTarget = "roster" | "settings" | "transcript"
+
+type CommandSession = {
+  target: CommandTarget
+  previous: {
+    workspaceFilter: string
+    memoryFilter: string
+    skillFilter: string
+    search: { query: string; cursor: number } | null
+  }
+}
+
+type TranscriptSearch = { query: string; cursor: number }
+
 function directoryOf(context: any): string {
   return context.location?.directory ?? context.data.location.default().directory
 }
@@ -200,6 +218,9 @@ export function EnsembleV2App() {
   // transient statusline message. Focus areas elsewhere in the app read
   // through the compatibility accessors below.
   const [interaction, setInteraction] = createSignal<InteractionState>(initialInteractionState())
+  const [commandHistory, setCommandHistory] = createSignal<CommandHistory>(createCommandHistory())
+  const [transcriptSearch, setTranscriptSearch] = createSignal<TranscriptSearch | null>(null)
+  let commandSession: CommandSession | undefined
   const [railCursor, setRailCursor] = createSignal(0)
   const [taskCursor, setTaskCursor] = createSignal(0)
   const [chatContext, setChatContext] = createSignal<ChatContext | null>(null)
@@ -227,7 +248,6 @@ export function EnsembleV2App() {
   const [skillFilter, setSkillFilter] = createSignal("")
   const [backupCursor, setBackupCursor] = createSignal(0)
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
-  const [transcriptSearch, setTranscriptSearch] = createSignal("")
   const [composerDraft, setComposerDraft] = createSignal("")
   const [composerCursor, setComposerCursor] = createSignal(0)
   const [drafts, setDrafts] = createSignal<DraftStore>({})
@@ -249,7 +269,6 @@ export function EnsembleV2App() {
   // v5.6 T3: chord prefixes (gg) are app-local pending keys; the interaction
   // reducer mirrors them as `pendingChord` for the statusline.
   let pendingKeys: string[] = []
-  let searchTarget: "roster" | "chat" | null = null
   let textPromptRef: any
   let wizardRef: any
   let resultScrollRef: any
@@ -262,6 +281,7 @@ export function EnsembleV2App() {
   const focusArea = (): FocusArea => (interaction().focus === "rail" ? "rail" : "chat")
   const composerActive = () => interaction().focus === "composer"
   const interactionMode = (): InteractionMode => interaction().mode
+  const commandActive = () => interaction().command !== null
   const setFocusArea = (area: FocusArea) => { dispatchInteraction({ type: "focus.set", focus: area }) }
   const applyInteraction = (result: InteractionResult) => {
     setInteraction(result.state)
@@ -482,6 +502,47 @@ export function EnsembleV2App() {
   })
   const splitTranscript = createMemo(() => splitLiveFinalized(chatLines()))
   const finalizedLines = createMemo(() => splitTranscript().finalized)
+  // Ticket #80: search only the loaded transcript window (`chatLines` is
+  // already sliced to TRANSCRIPT_WINDOW). Matches are literal and
+  // case-insensitive; n/N moves the cursor with wraparound.
+  const transcriptSearchMatches = createMemo<TranscriptMatch[]>(() => {
+    const search = transcriptSearch()
+    if (!search || !search.query.trim()) return []
+    return transcriptMatches(chatLines(), search.query)
+  })
+  const searchLineState = (lineID: string) => {
+    const search = transcriptSearch()
+    if (!search) return null
+    let count = 0
+    let current = false
+    transcriptSearchMatches().forEach((match, index) => {
+      if (match.lineID !== lineID) return
+      count++
+      if (index === search.cursor) current = true
+    })
+    return count > 0 ? { count, current } : null
+  }
+  const chatRowID = (lineID: string) => `chat-${lineID.replace(/[^a-zA-Z0-9_-]/g, "_")}`
+  const scrollMatchIntoView = (lineID: string) => queueMicrotask(() => {
+    try { transcriptScrollRef?.scrollChildIntoView?.(chatRowID(lineID)) } catch {}
+  })
+  const moveSearchMatch = (direction: 1 | -1) => {
+    const search = transcriptSearch()
+    if (!search) return
+    const matches = transcriptSearchMatches()
+    if (matches.length === 0) { notify(`No matches: ${search.query}`, "info"); return }
+    const cursor = matchIndexAfter(matches.length, search.cursor, direction)
+    setTranscriptSearch({ ...search, cursor })
+    const match = matches[cursor]
+    notify(`Match ${cursor + 1}/${matches.length} · ${match.excerpt}`, "info")
+    scrollMatchIntoView(match.lineID)
+  }
+  const clearSearchAndFilter = (): boolean => {
+    let cleared = false
+    if (transcriptSearch()) { setTranscriptSearch(null); cleared = true }
+    if (workspaceFilter()) { setWorkspaceFilter(""); cleared = true }
+    return cleared
+  }
   // Active-work surface: every streaming message renders its own live row
   // with per-item text, so concurrent work stays watchable. Finalization
   // flips streaming off, which moves that id from this list into the
@@ -537,17 +598,6 @@ export function EnsembleV2App() {
     const stable = stabilizeMergedRows(previousMergedRows, fresh)
     previousMergedRows = stable
     return stable
-  })
-  // Ticket #81: `/` searches the loaded transcript window without a message
-  // cursor. The filter only narrows rendering; the scrollbox and mode stay
-  // unchanged. Ticket #80 replaces this with the shared search line.
-  const displayedRows = createMemo(() => {
-    const query = transcriptSearch().trim().toLowerCase()
-    if (!query) return mergedRows()
-    return mergedRows().filter((row) => {
-      const text = row.completion ? row.completion.text : `${row.message?.author ?? ""} ${row.message?.text ?? ""}`
-      return text.toLowerCase().includes(query)
-    })
   })
   const liveActivity = createMemo(() => {
     const taskLive: ActivityEntry[] = []
@@ -614,12 +664,17 @@ export function EnsembleV2App() {
   // correlation link, naming both parties; system/queued/task/approval/
   // interrupted rows carry concise suffix flags. No per-message timestamps.
   const headerForLine = (line: ChatLine): string => {
+    const decorate = (header: string) => {
+      const hit = searchLineState(line.id)
+      if (!hit) return header
+      return `${hit.current ? "▶" : "▸"} ${header} · /${transcriptSearch()?.query ?? ""}`
+    }
     let head = line.author
     if (line.role === "agent" && line.correlationID) {
       const relay = relayTaskForMessage({ correlationID: line.correlationID, agentID: line.agentID }, activeTasks())
       if (relay) {
         const parties = relayPartiesForTask(relay, (id) => agentName(state(), id))
-        if (parties) return bubbleHead(line.author, parties)
+        if (parties) return decorate(bubbleHead(line.author, parties))
       }
     }
     let header = head
@@ -631,7 +686,7 @@ export function EnsembleV2App() {
     if (line.kind === "task") header += " · task"
     if (line.kind === "approval") header += " · approval · v to resolve"
     if (line.interrupted) header += " · interrupted"
-    return header
+    return decorate(header)
   }
   const emptyChat = () => surface()?.kind === "agent"
     ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}\n\nSend a direct message. It goes to this agent's native OpenCode session.`
@@ -700,6 +755,165 @@ export function EnsembleV2App() {
   const isBusy = () => busy() || chatContext()?.busy === true
 
   const overlayOpen = () => picker() !== null || textPrompt() !== null || wizard() !== null || confirm() !== null || result() !== null
+
+  // v5.6 T2 command and search. `:`/`/` open a one-line input in the bottom
+  // bar; the pure commands/history/search modules own parsing, recall, and
+  // match navigation. The adapter here only previews filters, records
+  // history, and maps command names onto existing navigation and state
+  // actions.
+  const commandTarget = (): CommandTarget | null => {
+    if (settingsAgentID()) return "settings"
+    if (!surface() || focusArea() === "rail") return "roster"
+    return "transcript"
+  }
+  const canOpenCommand = () =>
+    !leaderMode() && !wizard() && !picker() && !textPrompt() && !confirm() && !result() &&
+    !helpOpen() && !approvalsOpen() && !skillFilterEditing() && !memoryFilterEditing()
+
+  const applySearchPreview = (target: CommandTarget, text: string) => {
+    if (target === "roster") { setTranscriptSearch(null); setWorkspaceFilter(text); return }
+    if (target === "settings") {
+      setTranscriptSearch(null)
+      if (settingsTab() === "memories") { setMemoryFilter(text); setMemoryCursor(0) }
+      else if (settingsTab() === "skillbox") { setSkillFilter(text); setSkillCursor(0) }
+      return
+    }
+    const query = text.trim()
+    setTranscriptSearch(query ? { query, cursor: 0 } : null)
+  }
+
+  const restoreCommandPreview = () => {
+    const session = commandSession
+    if (!session) return
+    setWorkspaceFilter(session.previous.workspaceFilter)
+    setMemoryFilter(session.previous.memoryFilter)
+    setSkillFilter(session.previous.skillFilter)
+    setTranscriptSearch(session.previous.search)
+  }
+
+  const openCommandLine = (kind: ":" | "/"): boolean => {
+    if (commandActive() || !canOpenCommand()) return false
+    const target = commandTarget()
+    if (kind === "/" && !target) {
+      notify("Search is available on the roster, a chat, or settings.", "info")
+      return false
+    }
+    commandSession = {
+      target: target ?? "roster",
+      previous: {
+        workspaceFilter: workspaceFilter(),
+        memoryFilter: memoryFilter(),
+        skillFilter: skillFilter(),
+        search: transcriptSearch(),
+      },
+    }
+    setCommandHistory((history) => startHistory(history, kind))
+    dispatchInteraction({ type: "command.open", kind, text: "" })
+    // A search starts from the whole surface so the typed query is the only
+    // filter visible; Esc restores the captured filter/state.
+    if (kind === "/" && target) applySearchPreview(target, "")
+    return true
+  }
+
+  const updateCommandText = (text: string) => {
+    const kind = interaction().command?.kind
+    dispatchInteraction({ type: "command.update", text })
+    if (kind === "/" && commandSession) applySearchPreview(commandSession.target, text)
+  }
+
+  const closeCommandLine = (restore: boolean) => {
+    if (restore) restoreCommandPreview()
+    commandSession = undefined
+    dispatchInteraction({ type: "command.close" })
+  }
+
+  const runNamedCommand = async (command: ParsedCommand): Promise<void> => {
+    switch (command.name) {
+      case "settings": openSettings(); return
+      case "approvals": setApprovalCursor(0); setApprovalsOpen(true); return
+      case "workspace": await pickWorkspace(); return
+      case "agent": await pickAgent(); return
+      case "new-agent": await createAgent(); return
+      case "new-workspace": await createWorkspace(); return
+      case "edit-workspace": await editWorkspace(); return
+      case "pause": await togglePause(true); return
+      case "resume": await togglePause(false); return
+      case "init": await initEnsemble(); return
+      case "native": openNative(); return
+      case "help": setHelpOpen(true); return
+      case "q": context.ui.router.navigate({ type: "home" }); return
+    }
+  }
+
+  const submitCommandLine = async (): Promise<void> => {
+    const current = interaction().command
+    if (!current) return
+    const { kind, text } = current
+    const session = commandSession
+    setCommandHistory((history) => rememberHistory(history, kind, text))
+    closeCommandLine(false)
+
+    if (kind === ":") {
+      const parsed = parseCommandLine(text)
+      if (!parsed) {
+        notify(text.trim() ? `Unknown command: ${text.trim()}` : "Enter a command.", "error")
+        return
+      }
+      await runNamedCommand(parsed)
+      return
+    }
+
+    if (!session) return
+    const query = text.trim()
+    if (session.target === "transcript") {
+      if (!query) { setTranscriptSearch(null); notify("Search cleared", "info"); return }
+      const matches = transcriptMatches(chatLines(), query)
+      if (matches.length === 0) { notify(`No matches: ${query}`, "info"); return }
+      setTranscriptSearch({ query, cursor: 0 })
+      notify(`Match 1/${matches.length} · ${matches[0].excerpt}`, "info")
+      scrollMatchIntoView(matches[0].lineID)
+      return
+    }
+    if (session.target === "roster") {
+      setWorkspaceFilter(text)
+      const count = railItems().length
+      notify(`${count} roster ${count === 1 ? "match" : "matches"} · /${query}`, "info")
+      return
+    }
+    const count = settingsTab() === "memories" ? filteredMemories().length : settingsTab() === "skillbox" ? filteredSkills().length : 0
+    notify(`${count} settings ${count === 1 ? "match" : "matches"} · /${query}`, "info")
+  }
+
+  const handleCommandKey = (event: any): boolean => {
+    const current = interaction().command
+    if (!current) return false
+    const name = String(event?.name ?? "")
+    const sequence = String(event?.sequence ?? "")
+    event?.preventDefault?.(); event?.stopPropagation?.()
+
+    if (name === "escape") { closeCommandLine(true); return true }
+    if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") {
+      void submitCommandLine().catch(showError)
+      return true
+    }
+    if (name === "up" || name === "down") {
+      const recalled = recallHistory(commandHistory(), current.kind, name === "up" ? "up" : "down", current.text)
+      setCommandHistory(recalled.history)
+      updateCommandText(recalled.text)
+      return true
+    }
+    if (name === "tab" && current.kind === ":") {
+      const completed = completeCommand(current.text)
+      if (completed) updateCommandText(completed)
+      return true
+    }
+    if (name === "backspace") { updateCommandText(current.text.slice(0, -1)); return true }
+    if (sequence.length === 1 && sequence >= " " && !event?.ctrl && !event?.meta && !event?.super) {
+      updateCommandText(`${current.text}${sequence}`)
+      return true
+    }
+    return true
+  }
 
   // Slice E single-focus model (brief §2.10): exactly one focus-colored border
   // renders at all times. Precedence is dialog, then composer, then the
@@ -847,6 +1061,7 @@ export function EnsembleV2App() {
     setFocusArea("chat")
     setChatContext(null)
     setLiveDm(null)
+    setTranscriptSearch(null)
     void refreshChat()
   }
 
@@ -855,6 +1070,7 @@ export function EnsembleV2App() {
     setSurface({ kind: "workspace", workspaceID: workspace.id })
     setFocusArea("chat")
     setTaskCursor(0)
+    setTranscriptSearch(null)
     await run("Activate workspace", async () => { await invoke(context, "workspace.activate", { id: workspace.id }) })
   }
 
@@ -1071,15 +1287,6 @@ export function EnsembleV2App() {
       composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6))
     }
   })
-  // Search belongs to one loaded surface; switching Workspace or Direct
-  // conversation clears the query rather than leaking it across transcripts.
-  let lastSearchKey: string | null | undefined = undefined
-  createEffect(() => {
-    const key = currentDraftKey()
-    if (key === lastSearchKey) return
-    lastSearchKey = key
-    setTranscriptSearch("")
-  })
   const handleNativeEvent = (event: any) => {
     const data = event?.data ?? event
     const session = String(data?.sessionID ?? "")
@@ -1113,44 +1320,9 @@ export function EnsembleV2App() {
     setLeaderMode(false)
     clearPendingChord()
   }
-  const applySearch = (target: "roster" | "chat" | null, query: string) => {
-    if (target === "roster") setWorkspaceFilter(query)
-    else if (target === "chat") setTranscriptSearch(query)
-  }
-  /** `/` routes to the focused surface's filter/search without changing mode. */
-  const startSearch = () => {
-    const keyContext = surfaceKeyContext()
-    if (keyContext !== "roster" && keyContext !== "chat") return
-    clearPendingChord()
-    searchTarget = keyContext
-    const text = keyContext === "roster" ? workspaceFilter() : transcriptSearch()
-    dispatchInteraction({ type: "command.open", kind: "/", text })
-  }
-  const handleSearchKey = (event: any): boolean => {
-    const command = interaction().command
-    if (!command || command.kind !== "/") return false
-    const next = filterEdit(command.text, {
-      name: String(event?.name ?? ""),
-      sequence: String(event?.sequence ?? ""),
-      ctrl: Boolean(event?.ctrl),
-      meta: Boolean(event?.meta),
-      super: Boolean(event?.super),
-    })
-    event?.preventDefault?.()
-    event?.stopPropagation?.()
-    applySearch(searchTarget, next.cancelled ? "" : next.query)
-    if (next.done) {
-      dispatchInteraction({ type: "command.close" })
-      searchTarget = null
-      return true
-    }
-    dispatchInteraction({ type: "command.update", text: next.query })
-    return true
-  }
   const surfaceEscape = () => {
     clearPendingChord()
-    if (workspaceFilter()) { setWorkspaceFilter(""); return }
-    if (transcriptSearch()) { setTranscriptSearch(""); return }
+    if (clearSearchAndFilter()) return
     if (interaction().focus === "work") dispatchInteraction({ type: "escape" })
   }
 
@@ -1246,6 +1418,12 @@ export function EnsembleV2App() {
     const selected = await openPicker("workspace", { selected: workspaceID() ? [workspaceID()!] : [] })
     const workspace = selected?.[0] ? state()?.workspaces[selected[0]] : undefined
     if (workspace) await openWorkspace(workspace)
+  }
+
+  const pickAgent = async () => {
+    const selected = await openPicker("agent")
+    const agent = selected?.[0] ? state()?.agents[selected[0]] : undefined
+    if (agent) openAgent(agent)
   }
 
   const initEnsemble = async () => {
@@ -1355,6 +1533,12 @@ export function EnsembleV2App() {
       return true
     }
     if (interaction().mode === "normal") {
+      const sequence = String(event?.sequence ?? "")
+      if (sequence === ":" || sequence === "/") {
+        event?.preventDefault?.(); event?.stopPropagation?.()
+        openCommandLine(sequence)
+        return true
+      }
       if (name === "i") {
         event?.preventDefault?.(); event?.stopPropagation?.()
         dispatchInteraction({ type: "insert.enter" })
@@ -1714,7 +1898,7 @@ export function EnsembleV2App() {
     approvals: () => { setApprovalCursor(0); setApprovalsOpen(true) },
     init: () => initEnsemble(),
     pause: () => togglePause(),
-    filter: () => startSearch(),
+    filter: () => openCommandLine("/"),
     leader: () => openLeader(),
     escape: () => surfaceEscape(),
     "chat.scroll.down": () => scrollTranscriptBy(1),
@@ -1738,7 +1922,7 @@ export function EnsembleV2App() {
       if (surface()?.kind === "agent" && (chatContext()?.queued ?? 0) > 0) return removeQueuedDm()
       return cancelSelected()
     },
-    "chat.filter": () => startSearch(),
+    "chat.filter": () => openCommandLine("/"),
     "chat.workspace.next": () => cycleWorkspace(1),
     "chat.workspace.prev": () => cycleWorkspace(-1),
     "chat.agent.next": () => cycleAgent(1),
@@ -1817,6 +2001,7 @@ export function EnsembleV2App() {
     })
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
+      if (interaction().command) { handleCommandKey(event); return }
       if (picker()) { handlePickerKey(event); return }
       if (wizard()) { handleWizardKey(event); return }
       if (textPrompt()) {
@@ -1838,16 +2023,39 @@ export function EnsembleV2App() {
       if (result()) { handleResultKey(event); return }
       if (skillFilterEditing()) { handleSkillFilterKey(event); return }
       if (memoryFilterEditing()) { handleMemoryFilterKey(event); return }
-      // v5.6 T2 will expand command mode; T3 owns the `/` filter/search line
-      // for the roster and conversation surfaces.
-      if (interaction().command?.kind === "/" && handleSearchKey(event)) return
       // v5.6 T1: the composer owns its Esc ladder at the raw key layer — the
       // focused textarea consumes Escape before the keymap layer can.
       if (composerActive() && !isModal() && handleComposerKey(event)) return
+      // v5.6 T2: n/N move through the committed transcript search, Esc
+      // clears a committed filter/search, and `:`/`/` open the command line.
+      // These run before the leader/chord layers so `n` cannot create a
+      // workspace while a search is active.
+      const pressed = String(event?.name ?? "")
+      const typed = String(event?.sequence ?? "")
+      if (!leaderMode() && !composerActive() && interaction().overlay === "none") {
+        if (focusArea() === "chat" && transcriptSearch() && (pressed === "n" || pressed === "N")) {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          const matches = transcriptSearchMatches()
+          if (matches.length === 0) notify(`No matches: ${transcriptSearch()!.query}`, "info")
+          else moveSearchMatch(pressed === "N" ? -1 : 1)
+          return
+        }
+        if (pressed === "escape" && clearSearchAndFilter()) {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          return
+        }
+      }
+      if (!leaderMode() && !composerActive() && (typed === ":" || typed === "/" || pressed === ":" || pressed === "/")) {
+        const kind = typed === "/" || pressed === "/" ? "/" : ":"
+        if (openCommandLine(kind)) {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          return
+        }
+      }
+      // v5.6 T3: the leader owns known keys through the generated leader
+      // layer; anything else closes which-key with a truthful warning.
       if (leaderMode()) {
         const token = normalizeKeyToken(event)
-        // Known leader keys and Esc are dispatched by the generated leader
-        // layer; anything else closes which-key with a truthful warning.
         if (token === "escape" || resolveLeaderKey(token).type === "action") return
         event?.preventDefault?.(); event?.stopPropagation?.()
         setLeaderMode(false)
@@ -1886,6 +2094,7 @@ export function EnsembleV2App() {
       id,
       title: `Ensemble: ${entry.title}`,
       bind: entry.keys[0],
+      enabled: entry.availability === "no-transcript-search" ? () => !transcriptSearch() : undefined,
       run: (_input: string | undefined, event: any) => {
         event?.preventDefault?.(); event?.stopPropagation?.()
         runKeyAction(entry.id)
@@ -1898,7 +2107,7 @@ export function EnsembleV2App() {
       const factory = () => ({
         mode: "global",
         priority: 100,
-        enabled: () => isOurRoute() && !isModal() && !leaderMode() && wizard() === null && !composerActive() && interaction().command === null && surfaceKeyContext() === keyContext,
+        enabled: () => isOurRoute() && !isModal() && !leaderMode() && !commandActive() && wizard() === null && !composerActive() && interaction().command === null && surfaceKeyContext() === keyContext,
         commands,
         bindings: commands.map((command) => command.id),
       })
@@ -1921,13 +2130,13 @@ export function EnsembleV2App() {
     context.keymap.layer(() => ({
       mode: "global",
       priority: 120,
-      enabled: () => isOurRoute() && !isModal() && leaderMode(),
+      enabled: () => isOurRoute() && !isModal() && leaderMode() && !commandActive(),
       commands: leaderCommands,
       bindings: leaderCommands.map((command) => command.id),
     }))
     platformLayer(() => ({
       mode: "global", priority: 130,
-      enabled: () => isOurRoute() && composerActive() && !isModal() && wizard() === null,
+      enabled: () => isOurRoute() && composerActive() && !isModal() && wizard() === null && !commandActive(),
       commands: [
         { id: "ensemble.v2.composer.cancel", title: "Ensemble: Composer Esc ladder", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); if (completion()) closeCompletion(); else dispatchInteraction({ type: "escape" }) } },
         // Host Escape handling can swallow the key while a native run is
@@ -1939,7 +2148,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 140,
-      enabled: () => isOurRoute() && composerActive() && completion() !== null && !modal() && wizard() === null,
+      enabled: () => isOurRoute() && composerActive() && completion() !== null && !modal() && wizard() === null && !commandActive(),
       commands: [
         { id: "ensemble.v2.completion.up", title: "Ensemble: Previous completion", bind: "up", run: () => moveCompletion(-1) },
         { id: "ensemble.v2.completion.down", title: "Ensemble: Next completion", bind: "down", run: () => moveCompletion(1) },
@@ -1953,7 +2162,7 @@ export function EnsembleV2App() {
     // Ctrl+letter binds that are true on every platform.
     context.keymap.layer(() => ({
       mode: "global", priority: 160,
-      enabled: () => isOurRoute() && wizard() !== null && !leaderMode(),
+      enabled: () => isOurRoute() && wizard() !== null && !leaderMode() && !commandActive(),
       commands: [
         { id: "ensemble.v2.wizard.prev", title: "Ensemble: Previous wizard step", bind: WIZARD_NAV_BINDINGS.back, run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardPrev() } },
         { id: "ensemble.v2.wizard.next", title: "Ensemble: Next wizard step", bind: WIZARD_NAV_BINDINGS.next, run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardNext() } },
@@ -1963,7 +2172,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode() && wizard() === null && !skillFilterEditing() && !memoryFilterEditing(),
+      enabled: () => isOurRoute() && !modal() && Boolean(settingsAgentID()) && !leaderMode() && !commandActive() && wizard() === null && !skillFilterEditing() && !memoryFilterEditing(),
       commands: [
         { id: "ensemble.v2.tab", title: "Ensemble: Settings tab", bind: "tab", run: () => { const tabs: SettingsTab[] = ["general", "models", "memories", "skillbox"]; setSettingsTab(tabs[(tabs.indexOf(settingsTab()) + 1) % tabs.length]) } },
         { id: "ensemble.v2.edit", title: "Ensemble: Edit", bind: "e", run: () => void editField().catch(showError) },
@@ -1978,7 +2187,7 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.skill", title: "Ensemble: Toggle skill", bind: "space", enabled: () => settingsTab() === "skillbox", run: () => toggleSkill() },
         { id: "ensemble.v2.filter", title: "Ensemble: Filter skills", bind: "ctrl+f", enabled: () => settingsTab() === "skillbox", run: () => { setSkillFilterEditing(true); setSkillCursor(0) } },
         { id: "ensemble.v2.memory.filter", title: "Ensemble: Filter memories", bind: "ctrl+f", enabled: () => settingsTab() === "memories", run: () => { setMemoryFilterEditing(true); setMemoryCursor(0) } },
-        { id: "ensemble.v2.memory.filter.slash", title: "Ensemble: Filter memories", bind: "/", enabled: () => settingsTab() === "memories", run: () => { setMemoryFilterEditing(true); setMemoryCursor(0) } },
+        { id: "ensemble.v2.memory.filter.slash", title: "Ensemble: Filter memories", bind: "/", enabled: () => settingsTab() === "memories", run: () => { openCommandLine("/") } },
         { id: "ensemble.v2.memory.delete", title: "Ensemble: Delete memory", bind: "ctrl+d", enabled: () => settingsTab() === "memories", run: () => void deleteMemory().catch(showError) },
         { id: "ensemble.v2.memory.promote", title: "Ensemble: Promote memory", bind: "ctrl+p", enabled: () => settingsTab() === "memories", run: () => void promoteMemory().catch(showError) },
         { id: "ensemble.v2.settings.up", title: "Ensemble: Up", bind: "up", run: () => moveSettingsCursor(-1) },
@@ -1989,7 +2198,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && approvalsOpen() && !leaderMode() && wizard() === null,
+      enabled: () => isOurRoute() && !modal() && approvalsOpen() && !leaderMode() && !commandActive() && wizard() === null,
       commands: [
         { id: "ensemble.v2.approval.up", title: "Ensemble: Previous approval", bind: "up", run: () => setApprovalCursor((cursor) => Math.max(0, cursor - 1)) },
         { id: "ensemble.v2.approval.down", title: "Ensemble: Next approval", bind: "down", run: () => setApprovalCursor((cursor) => Math.min(Math.max(0, pendingApprovals().length - 1), cursor + 1)) },
@@ -2000,7 +2209,7 @@ export function EnsembleV2App() {
     }))
     platformLayer(() => ({
       mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && helpOpen() && !leaderMode() && wizard() === null,
+      enabled: () => isOurRoute() && !modal() && helpOpen() && !leaderMode() && !commandActive() && wizard() === null,
       commands: [
         { id: "ensemble.v2.help.up", title: "Ensemble: Help page up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); helpScrollRef?.scrollBy?.(-10) } },
         { id: "ensemble.v2.help.down", title: "Ensemble: Help page down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); helpScrollRef?.scrollBy?.(10) } },
@@ -2045,7 +2254,7 @@ export function EnsembleV2App() {
         : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
     const state: PickerState = {
       mode,
-      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : "Switch workspace",
+      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : "Switch workspace",
       candidates,
       selected: new Set(options.selected ?? []),
       cursor: 0,
@@ -2606,6 +2815,23 @@ export function EnsembleV2App() {
   }
   const statusHints = () => {
     if (leaderMode()) return "which-key · ? help · q leave · esc cancel"
+    const command = interaction().command
+    if (command) {
+      if (command.kind === ":") {
+        const suggestions = commandCompletions(command.text).slice(0, 3).map((item) => item.name)
+        return `enter run · esc cancel · ↑↓ history · tab complete${suggestions.length > 0 ? ` · ${suggestions.join(" · ")}` : ""}`
+      }
+      return "enter search · esc cancel · ↑↓ history"
+    }
+    if (interaction().overlay === "none") {
+      const search = transcriptSearch()
+      if (search) {
+        const total = transcriptSearchMatches().length
+        const position = total > 0 ? Math.min(total, search.cursor + 1) : 0
+        return `match ${position}/${total} · n next · N previous · esc clear`
+      }
+      if (workspaceFilter()) return `filter “${workspaceFilter()}” · esc clear`
+    }
     if (selectedMissingSkills().length > 0) {
       return footerLine2({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })
     }
@@ -2655,12 +2881,9 @@ export function EnsembleV2App() {
                         </box>
                       }>
                         <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
-                          <Show when={transcriptSearch().trim()}>
-                            <text fg={colors.warn} bg={colors.bg} width="100%" flexShrink={0} truncate>search: {transcriptSearch()} · {displayedRows().length} matches</text>
-                          </Show>
                           <scrollbox ref={(value: any) => { transcriptScrollRef = value; if (value) queueMicrotask(() => syncTranscriptScroll()) }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" viewportCulling={false} width="100%">
                               <box flexDirection="column" width="100%" paddingRight={1}>
-                                <For each={displayedRows()}>{(row) => {
+                                <For each={mergedRows()}>{(row) => {
                                   // Ticket #67 muted inline completions: one
                                   // full-width muted system line per terminal
                                   // outcome at its finish position — no
@@ -2679,9 +2902,10 @@ export function EnsembleV2App() {
                                   // and unbubbled, visually distinct from the
                                   // conversation.
                                   if (!isBubbledRole(message.role)) {
+                                    const hit = searchLineState(message.id)
                                     return (
-                                    <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                      <text fg={message.queued ? colors.warn : authorColor({ agentID: message.agentID, author: message.author, role: message.role })} bg={colors.bg} width="100%" truncate>{headerForLine(message)}</text>
+                                    <box id={chatRowID(message.id)} flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
+                                      <text fg={hit ? (hit.current ? colors.warn : colors.focus) : message.queued ? colors.warn : authorColor({ agentID: message.agentID, author: message.author, role: message.role })} bg={hit ? colors.panel : colors.bg} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "agent" && syntaxStyle} fallback={
                                         <text fg={message.role === "system" || message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                       }>
@@ -2704,12 +2928,13 @@ export function EnsembleV2App() {
                                   // `<markdown>` width both use `wrapWidth`
                                   // (= bounded width − BUBBLE_CHROME), so the
                                   // height is consistent when paths swap.
-                                  const accent = authorColor({ agentID: message.agentID, author: message.author, role: message.role })
+                                  const hit = searchLineState(message.id)
+                                  const accent = hit ? (hit.current ? colors.warn : colors.focus) : authorColor({ agentID: message.agentID, author: message.author, role: message.role })
                                   const wrapWidth = bubbleContentWidth(messageWidth(), BUBBLE_CHROME)
                                   return (
-                                  <box flexDirection="column" width="100%" marginTop={1}>
+                                  <box id={chatRowID(message.id)} flexDirection="column" width="100%" marginTop={1}>
                                     <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={side === "left" ? accent : message.queued ? colors.warn : colors.good} backgroundColor={colors.panel} padding={1} flexDirection="column">
-                                      <text fg={message.queued ? colors.warn : accent} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
+                                      <text fg={message.queued && !hit ? colors.warn : accent} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "user"} fallback={
                                         <Show when={syntaxStyle} fallback={
                                           <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
@@ -2927,7 +3152,7 @@ export function EnsembleV2App() {
         </box>
       </Show>
       <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
-        <text fg={leaderMode() ? colors.warn : interactionMode() === "insert" ? colors.good : colors.muted} bg={colors.bg} width="100%" truncate>
+        <text fg={leaderMode() ? colors.warn : interactionMode() === "insert" ? colors.good : interactionMode() === "command" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate>
           {statuslineRow1({
             mode: interactionMode(),
             context: statusContext(),

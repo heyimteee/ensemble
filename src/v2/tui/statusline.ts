@@ -13,7 +13,9 @@ import type { CommandInput, InteractionFocus, InteractionMode, InteractionOverla
 export type StatuslineSurface = "none" | "agent" | "workspace"
 
 export function modeLabel(mode: InteractionMode): string {
-  return mode === "insert" ? "INSERT" : "NORMAL"
+  if (mode === "insert") return "INSERT"
+  if (mode === "command") return "COMMAND"
+  return "NORMAL"
 }
 
 /** Overlay precedence first, then the composer, then the focused surface. */

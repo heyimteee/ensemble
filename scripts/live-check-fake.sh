@@ -166,6 +166,84 @@ live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "streaming block after fi
 live_assert_text "$LIVE_TUI_SESSION" "fake-rich-fixture" "DM user line"
 live_assert_count "$LIVE_TUI_SESSION" "fake-rich-fixture" 1 "DM user line exactly once"
 
+# Ticket #80 command and search. `/` filters the focused roster, `:` opens a
+# command line with Tab completion and per-kind history, and `/` searches the
+# loaded transcript with n/N match navigation and visible row highlighting.
+live_key "$LIVE_TUI_SESSION" "h"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Roster" 10 "roster focus before search"
+live_require_text "$LIVE_TUI_SESSION" "AGENTS (1)" 10 "unfiltered roster count"
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND · Roster" 10 "search opens the command line on the roster"
+live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "search hint names Enter and Esc"
+live_type "$LIVE_TUI_SESSION" "zzz-no-roster-match"
+live_require_text "$LIVE_TUI_SESSION" "/zzz-no-roster-match" 10 "roster query renders in the bottom bar"
+live_require_absence "$LIVE_TUI_SESSION" "AGENTS (1)" 10 "roster filter hid the agent row"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "0 roster matches" 10 "committed roster search names its match count"
+live_require_text "$LIVE_TUI_SESSION" "filter “zzz-no-roster-match”" 10 "roster filter hint survives the committed search"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "AGENTS (1)" 10 "Esc restored the unfiltered roster"
+live_require_absence "$LIVE_TUI_SESSION" "filter “zzz-no-roster-match”" 10 "roster filter hint cleared"
+
+live_key "$LIVE_TUI_SESSION" "l"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Direct conversation" 10 "chat focus before transcript search"
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND · Direct conversation" 10 "search opens on the transcript"
+live_type "$LIVE_TUI_SESSION" "text"
+live_require_text "$LIVE_TUI_SESSION" "/text" 10 "transcript query renders in the bottom bar"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Match 1/2" 10 "first transcript match"
+live_require_text "$LIVE_TUI_SESSION" "▶ FakeAgent · /text" 10 "matching row is highlighted"
+live_require_text "$LIVE_TUI_SESSION" "match 1/2 · n next · N previous · esc clear" 10 "search statusline names n/N"
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_text "$LIVE_TUI_SESSION" "Match 2/2" 10 "n moves to the next match"
+live_key "$LIVE_TUI_SESSION" "N"
+live_require_text "$LIVE_TUI_SESSION" "Match 1/2" 10 "N moves back to the previous match"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "▶ FakeAgent · /text" 10 "Esc cleared transcript search highlighting"
+# Search may have scrolled to an older match; return to the newest line so the
+# rest of the walkthrough observes the live transcript again.
+live_key "$LIVE_TUI_SESSION" End
+sleep 0.25
+live_require_text "$LIVE_TUI_SESSION" "table cell marker" 10 "End returned the transcript to the newest content"
+
+live_type "$LIVE_TUI_SESSION" ":"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND · Direct conversation" 10 "colon opens Command mode"
+live_require_text "$LIVE_TUI_SESSION" "enter run · esc cancel" 10 "command hint names Enter and Esc"
+live_type "$LIVE_TUI_SESSION" "set"
+live_key "$LIVE_TUI_SESSION" Tab
+live_require_text "$LIVE_TUI_SESSION" ":settings" 10 "Tab completed the command"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" ":settings" 10 "Esc cancelled the command line"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Direct conversation" "cancel restored Normal mode"
+live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" "cancel never ran the completed command"
+
+live_type "$LIVE_TUI_SESSION" ":"
+live_type "$LIVE_TUI_SESSION" "help"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Keyboard shortcuts" 15 "command ran help"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed after the command"
+sleep 0.25
+live_type "$LIVE_TUI_SESSION" ":"
+live_key "$LIVE_TUI_SESSION" Up
+live_require_text "$LIVE_TUI_SESSION" ":help" 10 "Up recalled the command history"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.25
+live_type "$LIVE_TUI_SESSION" ":"
+live_key "$LIVE_TUI_SESSION" Up
+live_require_text "$LIVE_TUI_SESSION" ":help" 10 "command history survives cancellation and reuse"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.25
+
+live_type "$LIVE_TUI_SESSION" ":"
+live_type "$LIVE_TUI_SESSION" "approvals"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Approvals inbox" 15 "command opened approvals"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals closed"
+live_log "ticket #80 command line, completion, history, and transcript search verified"
+
 # Workspace wizard: Enter owns every non-text step, including the
 # leader-synthesis yes/no choice, and never opens a completion surface.
 live_key "$LIVE_TUI_SESSION" "n"
@@ -588,28 +666,6 @@ live_require_text "$LIVE_TUI_SESSION" "LEADER · which-key" 10 "Space opens the 
 live_require_text "$LIVE_TUI_SESSION" "Leave Ensemble" 10 "which-key lists leader actions"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "which-key" 10 "Esc closes the leader"
-# `/` routes to the focused surface without changing mode. Roster filters the
-# rail; the transcript search narrows the loaded window.
-live_key "$LIVE_TUI_SESSION" "h"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Roster" 10 "roster Normal before filter"
-live_key "$LIVE_TUI_SESSION" "/"
-live_type "$LIVE_TUI_SESSION" "Live"
-live_require_text "$LIVE_TUI_SESSION" "/Live" 10 "roster filter line receives text"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Roster" "filter keeps Normal mode"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "filter: Live" 10 "roster filter narrows the rail"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "filter: Live" 10 "Esc clears the roster filter"
-live_key "$LIVE_TUI_SESSION" "l"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "chat Normal after column switch"
-live_key "$LIVE_TUI_SESSION" "/"
-live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
-live_require_text "$LIVE_TUI_SESSION" "search: fake-rich-fixture" 10 "chat search narrows the transcript"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" "search keeps Normal mode"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "chat stays Normal after search"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "search: fake-rich-fixture" 10 "Esc clears the transcript search"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "composer Insert hints name the ladder"
 live_assert_absence "$LIVE_TUI_SESSION" "enter result" "composer footer hides dead work keys"
@@ -712,16 +768,18 @@ memory_prov=$(live_snapshot_value '(function () { var m = Object.values(output.s
 [[ "$memory_prov" == '"manual|project|created,edited"' ]] || live_fail "edit lost provenance history (got $memory_prov)"
 live_require_text "$LIVE_TUI_SESSION" "v2fake-live-memory" 10 "edited fact renders"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count unchanged after edit"
-# Slice D inline filter: / narrows to zero with an explicit empty state,
-# clearing restores the row without touching the snapshot.
+# Slice D inline filter (ticket #80): / now opens the shared command-line
+# search and filters the focused settings tab live; Enter commits, Esc would
+# restore the prior filter.
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "typing… enter done · esc cancel" 10 "memory filter editing"
+live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "settings search opens in the command line"
 live_type "$LIVE_TUI_SESSION" "zzz-no-match"
+live_require_text "$LIVE_TUI_SESSION" "Filter: zzz-no-match" 10 "settings filter follows the search line"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "No matching memories" 10 "memory filter zero state"
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "typing… enter done · esc cancel" 10 "memory filter re-editing"
-live_key_repeat "$LIVE_TUI_SESSION" "BSpace" 12
+live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "settings search reopens"
+live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "opening a new search clears the filter preview"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "provenance line restored after clearing filter"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count survives filtering"
@@ -821,17 +879,21 @@ live_log "slice G settings stylization verified across all four tabs"
 
 live_check_help
 
-# Ticket #77d: Escape must never leave Ensemble; only the leader chord does.
+# Ticket #77d / #80: Escape must never leave Ensemble; `:q` and `Space q` do.
 live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.5
 live_assert_text "$LIVE_TUI_SESSION" "ENSEMBLE" "Escape never quits Ensemble"
-live_key "$LIVE_TUI_SESSION" Space
-live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before leaving"
-live_key "$LIVE_TUI_SESSION" 'q'
-live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after leaving Ensemble"
-# Ticket #77d: F2 returns to Ensemble from any native session.
+# Ticket #80: `:q` is the deliberate command-line quit.
+live_type "$LIVE_TUI_SESSION" ":"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND · " 10 "colon opens Command mode"
+live_type "$LIVE_TUI_SESSION" "q"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after :q"
+# Ticket #77d: F2 returns to Ensemble from any native session. Keys only
+# after the round-trip, so the check does not depend on editor focus.
 live_key "$LIVE_TUI_SESSION" F2
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "F2 opens Ensemble from the native session"
+# v5.6 T3: the Space leader remains a deliberate quit path.
 live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode after F2 round-trip"
 live_key "$LIVE_TUI_SESSION" 'q'

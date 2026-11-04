@@ -97,11 +97,12 @@ test("an open overlay owns Esc first and closes via a typed intent", () => {
 test("a command input owns Esc before the composer ladder and closes cleanly", () => {
   const command = reduce(initialInteractionState(), { type: "command.open", kind: "/", text: "" })
   assert.deepEqual(command.state.command, { kind: "/", text: "" })
-  assert.equal(command.state.mode, "normal")
+  assert.equal(command.state.mode, "command", "Command is its own mode chip")
   const updated = reduce(command.state, { type: "command.update", text: "agent" })
   assert.deepEqual(updated.state.command, { kind: "/", text: "agent" })
   const closed = reduce(updated.state, { type: "escape" })
   assert.equal(closed.state.command, null)
+  assert.equal(closed.state.mode, "normal")
   assert.deepEqual(closed.intents, [{ type: "blur-editor" }])
 })
 

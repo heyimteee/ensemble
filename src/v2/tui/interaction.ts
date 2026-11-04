@@ -1,13 +1,13 @@
 /**
  * v5.6 interaction foundation (ticket #79).
  *
- * A pure modal state machine: Normal and Insert modes, focus, overlay,
- * command input, pending chord, selection, and a transient message. The
- * reducer maps normalized events to the next state plus adapter intents, so
- * tests never render OpenTUI and the adapter stays thin.
+ * A pure modal state machine: Normal, Insert, and Command modes, focus,
+ * overlay, command input, pending chord, selection, and a transient message.
+ * The reducer maps normalized events to the next state plus adapter intents,
+ * so tests never render OpenTUI and the adapter stays thin.
  */
 
-export type InteractionMode = "normal" | "insert"
+export type InteractionMode = "normal" | "insert" | "command"
 
 /**
  * Focus is separate from mode. Settings, wizards, dialogs, approvals, and
@@ -143,7 +143,7 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
       }
     case "command.open":
       return {
-        state: { ...state, command: { kind: event.kind, text: event.text ?? "" }, mode: "normal" },
+        state: { ...state, command: { kind: event.kind, text: event.text ?? "" }, mode: "command" },
         intents: [{ type: "blur-editor" }],
       }
     case "command.update":

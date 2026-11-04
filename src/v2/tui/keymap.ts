@@ -37,6 +37,8 @@ export type KeyEntry = {
   emptyHint?: string
   /** The binding only applies while the inline work list has rows. */
   requires?: "work"
+  /** The binding is unavailable while one of these transient modes is active. */
+  availability?: "no-transcript-search"
   /** Hide from which-key/help listings (chords, Esc, and plumbing). */
   listed?: boolean
   /** Legacy Ctrl binding that keeps the existing macOS Ctrl->Cmd transform. */
@@ -110,7 +112,7 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "compose", scope: "normal", contexts: ["chat"], keys: ["enter"], title: "Compose", group: "Open", hint: "enter/i compose" },
   { id: "compose.alt", scope: "normal", contexts: ["chat"], keys: ["i"], title: "Compose", group: "Open" },
   { id: "chat.new.agent", scope: "normal", contexts: ["chat"], keys: ["a"], title: "New agent", group: "Create" },
-  { id: "chat.new.workspace", scope: "normal", contexts: ["chat"], keys: ["n"], title: "New workspace", group: "Create" },
+  { id: "chat.new.workspace", scope: "normal", contexts: ["chat"], keys: ["n"], title: "New workspace", group: "Create", availability: "no-transcript-search" },
   { id: "chat.settings", scope: "normal", contexts: ["chat"], keys: ["s"], title: "Agent settings", group: "Edit" },
   { id: "chat.approvals", scope: "normal", contexts: ["chat"], keys: ["v"], title: "Approvals", group: "Navigate" },
   { id: "chat.init", scope: "normal", contexts: ["chat"], keys: ["shift+i"], title: "Init workspace files", group: "State", hint: "I init" },
