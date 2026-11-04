@@ -1,35 +1,8 @@
 /**
- * Pure decision helpers for the in-house overlays. Every interactive native
- * dialog migrates to one of these: a single-choice picker, an in-house
- * confirm modal, a scrollable result modal, a multiline text prompt (handled
- * by the existing overlay), or inline skill filtering. Toasts stay native.
+ * Pure decision helpers for the in-house overlays. v5.6 T6 moved confirm and
+ * result keys onto the shared dialog catalog (`confirm`/`result` contexts);
+ * this module keeps the picker value helper and the inline filter editor.
  */
-
-export type ConfirmKeyAction = "confirm" | "cancel"
-
-/**
- * Confirm modal keys: Enter (any return shape) or y confirms, Escape or n
- * cancels. Everything else is ignored so overlay focus stays trapped.
- */
-export function confirmKeyAction(name: string, sequence: string): ConfirmKeyAction | undefined {
-  if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") return "confirm"
-  if (name === "escape") return "cancel"
-  if (sequence === "y" || sequence === "Y") return "confirm"
-  if (sequence === "n" || sequence === "N") return "cancel"
-  return undefined
-}
-
-export type ResultKeyAction = "dismiss" | "up" | "down" | "pageUp" | "pageDown"
-
-/** Result modal keys: dismiss without a dialog; navigation scrolls. */
-export function resultKeyAction(name: string): ResultKeyAction | undefined {
-  if (name === "escape" || name === "return" || name === "enter" || name === "kpenter" || name === "q") return "dismiss"
-  if (name === "up") return "up"
-  if (name === "down") return "down"
-  if (name === "pageup") return "pageUp"
-  if (name === "pagedown") return "pageDown"
-  return undefined
-}
 
 /** Single-choice picker: Enter resolves the focused item, if any. */
 export function singleChoiceValue<Item>(items: readonly Item[], cursor: number): Item | undefined {

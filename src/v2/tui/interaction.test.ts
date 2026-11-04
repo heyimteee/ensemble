@@ -85,13 +85,51 @@ test("Esc returns from the work-list zone to the transcript", () => {
   assert.equal(chat.state.mode, "normal")
 })
 
-test("an open overlay owns Esc first and closes via a typed intent", () => {
-  const overlay = reduce(initialInteractionState(), { type: "overlay.set", overlay: "wizard" })
-  assert.equal(overlay.state.overlay, "wizard")
+test("an open dialog owns Esc first and closes via a typed intent", () => {
+  const overlay = reduce(initialInteractionState(), { type: "overlay.set", overlay: "dialog" })
+  assert.equal(overlay.state.overlay, "dialog")
   const closed = reduce(overlay.state, { type: "escape" })
   assert.equal(closed.state.overlay, "none")
   assert.equal(closed.state.mode, "normal")
-  assert.deepEqual(closed.intents, [{ type: "close-overlay", overlay: "wizard" }])
+  assert.deepEqual(closed.intents, [{ type: "close-overlay", overlay: "dialog" }])
+})
+
+test("a wizard Esc in step Normal asks the adapter to go back one step", () => {
+  const overlay = reduce(initialInteractionState(), { type: "overlay.set", overlay: "wizard" })
+  const back = reduce(overlay.state, { type: "escape" })
+  assert.equal(back.state.overlay, "wizard", "going back never closes the wizard itself")
+  assert.equal(back.state.mode, "normal")
+  assert.deepEqual(back.intents, [{ type: "wizard-back" }])
+})
+
+test("a dialog text field goes Insert -> field Normal -> cancel on the Esc ladder", () => {
+  const open = reduce(initialInteractionState(), { type: "overlay.set", overlay: "dialog" })
+  const editing = reduce(open.state, { type: "field.enter", target: "prompt" })
+  assert.equal(editing.state.mode, "insert")
+  assert.deepEqual(editing.intents, [{ type: "focus-editor", target: "prompt" }])
+
+  const fieldNormal = reduce(editing.state, { type: "escape" })
+  assert.equal(fieldNormal.state.mode, "normal")
+  assert.equal(fieldNormal.state.overlay, "dialog", "the first Esc only leaves the field")
+  assert.deepEqual(fieldNormal.intents, [])
+
+  const cancelled = reduce(fieldNormal.state, { type: "escape" })
+  assert.equal(cancelled.state.overlay, "none")
+  assert.equal(cancelled.state.mode, "normal")
+  assert.deepEqual(cancelled.intents, [{ type: "close-overlay", overlay: "dialog" }])
+})
+
+test("closing a dialog never leaks Insert into the surface underneath", () => {
+  const editing = reduce(
+    reduce(initialInteractionState(), { type: "overlay.set", overlay: "dialog" }).state,
+    { type: "field.enter", target: "prompt" },
+  )
+  const closed = reduce(editing.state, { type: "field.leave" })
+  assert.equal(closed.state.mode, "normal")
+  const reopened = reduce(editing.state, { type: "overlay.set", overlay: "none" })
+  assert.equal(reopened.state.mode, "normal", "closing an overlay restores Normal mode")
+  const dismissed = reduce(editing.state, { type: "overlay.set", overlay: "help" })
+  assert.equal(dismissed.state.mode, "normal", "switching overlays also clears Insert")
 })
 
 test("a command input owns Esc before the composer ladder and closes cleanly", () => {

@@ -118,6 +118,82 @@ test("keys resolve through the chord machine, including gg, G, and Ctrl+d", () =
   assert.equal(resolveNormalKey("roster", [], "escape").type, "action")
 })
 
+test("wizard steps carry list navigation, multi-select, filter, and the Esc ladder", () => {
+  const keys = keysFor("wizard")
+  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "space", "/", "escape"]) {
+    assert.ok(keys.includes(sequence), `wizard keeps ${sequence}`)
+  }
+  assert.equal(entryId("wizard", "j"), "wizard.down")
+  assert.equal(entryId("wizard", "enter"), "wizard.activate")
+  assert.equal(entryId("wizard", "space"), "wizard.toggle")
+  assert.equal(entryId("wizard", "/"), "wizard.filter")
+  assert.equal(entryId("wizard", "escape"), "wizard.back")
+  assert.equal(actionId(resolveNormalKey("wizard", ["g"], "g")), "wizard.top")
+  // `:` and the leader never claim keys inside a wizard.
+  assert.equal(resolveNormalKey("wizard", [], ":").type, "none")
+  assert.equal(entryId("wizard", ":"), undefined)
+  assert.ok(!keys.includes(":"), "wizard never opens the command line")
+})
+
+test("pickers, results, and approvals share the list grammar", () => {
+  for (const context of ["picker", "result", "approvals"] as const) {
+    const keys = keysFor(context)
+    for (const sequence of ["j", "k", "g g", "shift+g", "enter", "escape"]) {
+      assert.ok(keys.includes(sequence), `${context} keeps ${sequence}`)
+    }
+    assert.equal(actionId(resolveNormalKey(context, ["g"], "g")), `${context}.top`)
+    assert.equal(actionId(resolveNormalKey(context, [], "shift+g")), `${context}.bottom`)
+  }
+  assert.equal(entryId("picker", "space"), "picker.toggle")
+  assert.equal(entryId("picker", "/"), "picker.filter")
+  assert.equal(actionId(resolveNormalKey("result", [], "ctrl+d")), "result.half.down")
+  assert.equal(entryId("result", "enter"), "result.close.enter")
+  assert.equal(entryId("result", "escape"), "result.close.escape")
+  assert.equal(entryId("approvals", "enter"), "approvals.resolve")
+  assert.equal(entryId("approvals", "escape"), "approvals.close")
+})
+
+test("confirm accepts with y/Enter and cancels with n/Esc", () => {
+  assert.equal(actionId(resolveNormalKey("confirm", [], "enter")), "confirm.accept.enter")
+  assert.equal(actionId(resolveNormalKey("confirm", [], "y")), "confirm.accept")
+  assert.equal(actionId(resolveNormalKey("confirm", [], "escape")), "confirm.reject.escape")
+  assert.equal(actionId(resolveNormalKey("confirm", [], "n")), "confirm.reject")
+  assert.equal(resolveNormalKey("confirm", [], "j").type, "none", "confirm traps unrelated keys")
+})
+
+test("dialog hints come from the catalog and stay truthful about variants", () => {
+  const wizard = statuslineHints("wizard", { multiple: true })
+  assert.ok(wizard.includes("j/k move"), wizard)
+  assert.ok(wizard.includes("enter next"), wizard)
+  assert.ok(wizard.includes("space toggle"), wizard)
+  assert.ok(wizard.includes("/ filter"), wizard)
+  assert.ok(wizard.includes("esc back"), wizard)
+  const single = statuslineHints("wizard", { multiple: false })
+  assert.ok(!single.includes("space toggle"), "a single-choice step never promises Space")
+
+  const picker = statuslineHints("picker", { multiple: true })
+  for (const hint of ["j/k move", "enter select", "space toggle", "/ filter", "esc cancel"]) {
+    assert.ok(picker.includes(hint), `${hint} in ${picker}`)
+  }
+  assert.ok(!statuslineHints("picker", { multiple: false }).includes("space toggle"))
+
+  assert.ok(statuslineHints("confirm").includes("y/enter yes"))
+  assert.ok(statuslineHints("confirm").includes("n/esc no"))
+  assert.ok(statuslineHints("result").includes("enter/esc close"))
+  assert.ok(statuslineHints("approvals").includes("enter resolve"))
+  assert.ok(statuslineHints("approvals").includes("esc close"))
+})
+
+test("text-field hints share the dialog ladder vocabulary", () => {
+  assert.ok(statuslineHints("wizardField").includes("esc normal"))
+  assert.ok(statuslineHints("wizardText").includes("esc back"))
+  assert.ok(statuslineHints("promptField").includes("shift+enter newline"))
+  assert.ok(statuslineHints("promptText").includes("esc cancel"))
+  const filter = statuslineHints("filter")
+  assert.ok(filter.includes("enter done"), filter)
+  assert.ok(filter.includes("esc clear"), filter)
+})
+
 test("leader keys resolve and Esc cancels the leader", () => {
   assert.equal(actionId(resolveLeaderKey("?")), "leader.help")
   assert.equal(actionId(resolveLeaderKey("escape")), "leader.cancel")
@@ -175,6 +251,7 @@ test("key labels read like Vim/terminal keys", () => {
 test("raw keypresses normalize to catalog tokens", () => {
   assert.equal(normalizeKeyToken({ name: "space", sequence: " " }), "space")
   assert.equal(normalizeKeyToken({ name: "return" }), "enter")
+  assert.equal(normalizeKeyToken({ name: "return", shift: true }), "shift+enter")
   assert.equal(normalizeKeyToken({ name: "escape" }), "escape")
   assert.equal(normalizeKeyToken({ name: "tab" }), "tab")
   assert.equal(normalizeKeyToken({ name: "g", shift: true }), "shift+g")

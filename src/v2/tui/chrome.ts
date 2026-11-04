@@ -70,26 +70,6 @@ export function footerLine2(context: FooterContext): string {
   return "space leader · / search · p pause · s settings"
 }
 
-/** Picker footer: `↑/↓ move · [space toggle · ]enter confirm · esc cancel`. Spaces; callers render word gaps. */
-export function pickerFooter(multiple: boolean): string {
-  return `↑/↓ move · ${multiple ? "space toggle · " : ""}enter confirm · esc cancel`
-}
-
-/** Multiline prompt footer. */
-export function promptFooter(): string {
-  return "enter submit · shift+enter newline · esc cancel"
-}
-
-/** Confirm footer: yes/no decision with the shared `esc cancel` wording. */
-export function confirmFooter(): string {
-  return "enter yes · esc cancel"
-}
-
-/** Scrollable result footer: navigation plus the shared close wording. */
-export function resultFooter(): string {
-  return "↑/↓ scroll · pgup/pgdn · enter/esc close"
-}
-
 /** Rail empty state: names both fixes with their keys (brief §2.1). */
 export function railEmptyLine(): string {
   return "No agents or workspaces yet. n new workspace · a new agent"

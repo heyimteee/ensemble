@@ -1,35 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { confirmKeyAction, resultKeyAction, singleChoiceValue, filterEdit } from "./overlays.ts"
-
-test("confirm modal: enter or y confirms, escape or n cancels", () => {
-  assert.equal(confirmKeyAction("return", "\r"), "confirm")
-  assert.equal(confirmKeyAction("enter", "\n"), "confirm")
-  assert.equal(confirmKeyAction("kpenter", "\r"), "confirm")
-  assert.equal(confirmKeyAction("", "y"), "confirm")
-  assert.equal(confirmKeyAction("", "Y"), "confirm")
-  assert.equal(confirmKeyAction("escape", ""), "cancel")
-  assert.equal(confirmKeyAction("", "n"), "cancel")
-  assert.equal(confirmKeyAction("", "N"), "cancel")
-})
-
-test("confirm modal ignores unrelated keys so focus stays trapped", () => {
-  assert.equal(confirmKeyAction("up", ""), undefined)
-  assert.equal(confirmKeyAction("", "a"), undefined)
-  assert.equal(confirmKeyAction("", " "), undefined)
-})
-
-test("result modal: escape, enter, or q dismisses; navigation scrolls", () => {
-  assert.equal(resultKeyAction("escape"), "dismiss")
-  assert.equal(resultKeyAction("return"), "dismiss")
-  assert.equal(resultKeyAction("enter"), "dismiss")
-  assert.equal(resultKeyAction("q"), "dismiss")
-  assert.equal(resultKeyAction("up"), "up")
-  assert.equal(resultKeyAction("down"), "down")
-  assert.equal(resultKeyAction("pageup"), "pageUp")
-  assert.equal(resultKeyAction("pagedown"), "pageDown")
-  assert.equal(resultKeyAction("a"), undefined)
-})
+import { singleChoiceValue, filterEdit } from "./overlays.ts"
 
 test("single-choice picker resolves the focused item", () => {
   const items = [{ id: "a", label: "Alpha" }, { id: "b", label: "Beta" }]

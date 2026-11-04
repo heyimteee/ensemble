@@ -32,7 +32,6 @@ import {
   approvalsEmptyLine,
   helpEmptyLine,
   pickerEmptyLine,
-  pickerFooter,
   railEmptyLine,
 } from "./chrome.ts"
 import { platformLabel } from "./platform.ts"
@@ -164,7 +163,6 @@ export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cu
           <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
         </box>
       )}</For>
-      <text fg={props.colors.muted}>↑/↓ select · Enter approve/decline · esc cancel</text>
     </box>
   )
 }
@@ -289,13 +287,14 @@ export function PickerOverlay(props: {
   items: () => PickerItem[]
   cursor: () => number
   multiple: () => boolean
+  footer: () => string
 }) {
   const slots = Array.from({ length: 8 }, (_, index) => index)
   const solid = (value: string) => value.replaceAll(" ", "\u00A0")
   return (
     <box width="100%" height={16} minHeight={16} flexShrink={0} border borderStyle="double" borderColor={props.colors.focus} backgroundColor={props.colors.panel} flexDirection="column" padding={1}>
       <text fg={props.colors.focus} bg={props.colors.bg} width="100%" truncate>{solid(props.title())}</text>
-      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{solid(`search: ${props.query() || "type to filter"} · ${props.items().length} matches`)}</text>
+      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{solid(`filter: ${props.query() || "(none)"} · ${props.items().length} matches`)}</text>
       <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>────────────────────────────────────────────────────────────</text>
       <For each={slots}>{(slot) => (
         <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{(() => {
@@ -309,7 +308,7 @@ export function PickerOverlay(props: {
           return solid(`${offset + slot === cursor ? "›" : " "} ${marker}${item.label}`)
         })()}</text>
       )}</For>
-      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{solid(pickerFooter(props.multiple()))}</text>
+      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{solid(props.footer())}</text>
     </box>
   )
 }
