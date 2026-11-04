@@ -130,7 +130,8 @@ live_assert_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER" "composer keeps Insert
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "first Esc goes to composer Normal"
-live_assert_text "$LIVE_TUI_SESSION" "i insert · enter send · esc chat · ctrl+g leave" "composer Normal hints name the ladder"
+live_assert_text "$LIVE_TUI_SESSION" "i insert · h/j/k/l · x/d" "composer Normal hints name the Vim keys"
+live_assert_text "$LIVE_TUI_SESSION" "enter send · esc chat" "composer Normal hints name the ladder"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "second Esc returns to chat Normal"
 live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Direct conversation" "chat stays in Normal mode"
@@ -742,6 +743,65 @@ sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed with bindings intact"
 live_log "slice G settings stylization verified across all four tabs"
+
+# v5.6 T7: composer Normal runs Vim motions, x/u/Ctrl+r, A, yy/p, dd, and
+# Enter sends from Normal. The statusline position is the text-observable
+# cursor, so motions are proven without reading private state.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for Vim probe"
+live_type "$LIVE_TUI_SESSION" "vim alpha beta"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "Vim probe starts in composer Normal"
+live_require_text "$LIVE_TUI_SESSION" "vim alpha beta" 10 "Esc keeps the typed text"
+live_key "$LIVE_TUI_SESSION" "0"
+live_require_text "$LIVE_TUI_SESSION" " · 1:1 · " 10 "0 goes to the line start"
+live_key "$LIVE_TUI_SESSION" "w"
+live_require_text "$LIVE_TUI_SESSION" " · 1:5 · " 10 "w goes to the next word start"
+live_key "$LIVE_TUI_SESSION" '$'
+live_require_text "$LIVE_TUI_SESSION" " · 1:14 · " 10 "$ goes to the last character"
+live_key "$LIVE_TUI_SESSION" "b"
+live_require_text "$LIVE_TUI_SESSION" " · 1:11 · " 10 "b goes back to the word start"
+live_key "$LIVE_TUI_SESSION" "0"
+live_key "$LIVE_TUI_SESSION" "x"
+live_require_text "$LIVE_TUI_SESSION" "im alpha beta" 10 "x cuts the character at the cursor"
+live_key "$LIVE_TUI_SESSION" "u"
+live_require_text "$LIVE_TUI_SESSION" "vim alpha beta" 10 "u restores the cut character"
+live_key "$LIVE_TUI_SESSION" "C-r"
+live_require_text "$LIVE_TUI_SESSION" "im alpha beta" 10 "Ctrl+r redoes the cut"
+live_key "$LIVE_TUI_SESSION" "u"
+live_require_text "$LIVE_TUI_SESSION" "vim alpha beta" 10 "u restores the line for the paste probe"
+live_key "$LIVE_TUI_SESSION" "A"
+live_type "$LIVE_TUI_SESSION" "!"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "A returns to composer Normal"
+live_require_text "$LIVE_TUI_SESSION" "vim alpha beta!" 10 "A appends at the line end"
+live_key "$LIVE_TUI_SESSION" "y"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" "y"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" "p"
+sleep 0.5
+live_assert_count "$LIVE_TUI_SESSION" "vim alpha beta!" 2 "yy and p paste the line below"
+live_key "$LIVE_TUI_SESSION" "u"
+sleep 0.5
+live_assert_count "$LIVE_TUI_SESSION" "vim alpha beta!" 1 "u undoes the linewise paste"
+live_key "$LIVE_TUI_SESSION" "d"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" "d"
+live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "dd clears the composer line"
+live_key "$LIVE_TUI_SESSION" "i"
+live_type "$LIVE_TUI_SESSION" "vim-enter-check"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "Normal before Enter send"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "vim-enter-check" 15 "Enter sends from Normal"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" "send from Normal keeps the composer focused"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" C-g
+live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "Ctrl+G leaves the composer from Normal"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" "Ctrl+G returns to chat Normal"
 
 live_check_help
 
