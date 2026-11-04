@@ -46,8 +46,12 @@ export type RailItem = {
   id: string
   title: string
   detail?: string
-  /** Agent-list description: the agent's title, rendered after the name. */
+  /** Agent-list secondary line: the agent's title. */
   description?: string
+  /** Agent-list third line: the workspace it belongs to (`#name`) or "homeless". */
+  workspace?: string
+  /** True when the displayed workspace names this agent as leader. */
+  leader?: boolean
   group?: string
 }
 
@@ -92,7 +96,6 @@ export function Rail(props: {
         // Slice E single-cursor rule: the `›` position marker renders only on
         // the surface that owns the focus border, never on two surfaces at once.
         const agent = item.kind === "agent" ? props.state?.agents[item.id] : undefined
-        const leader = item.kind === "agent" && props.state?.workspaces[props.activeWorkspaceID ?? ""]?.leaderID === item.id
         const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
         const unread = workspace ? unreadCount(props.state, workspace) : 0
         const busy = workspace ? busyCount(props.state, workspace.id) : 0
@@ -108,15 +111,25 @@ export function Rail(props: {
               <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
             </Show>
             <box flexDirection="column">
-              <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>
-                {settingsCursorMark(selected && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
-                {workspace?.paused ? " ⏸" : ""}
-                {busy > 0 ? ` ◐${busy}` : ""}
-                {unread > 0 ? ` ●${unread}` : ""}
-              </text>
-              <Show when={item.kind === "agent" && (item.description || leader || item.detail)}>
+              <box flexDirection="row" width="100%">
+                <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
+                  {settingsCursorMark(selected && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
+                </text>
+                <Show when={item.kind === "agent" && item.leader}>
+                  <text fg={props.colors.bg} bg={props.colors.leader} attributes={TextAttributes.BOLD}>{" leader "}</text>
+                </Show>
+                <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg}> ⏸</text></Show>
+                <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg}> ◐{busy}</text></Show>
+                <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg}> ●{unread}</text></Show>
+              </box>
+              <Show when={item.kind === "agent"}>
+                <Show when={(item.description ?? "").trim()}>
+                  <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
+                    {"  ├ "}{short(item.description!, Math.max(8, props.width - 8))}
+                  </text>
+                </Show>
                 <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
-                  {"  "}{short([item.description, leader ? "leader" : "", item.detail].filter(Boolean).join(" · "), Math.max(8, props.width - 6))}
+                  {"  └ "}{short(item.detail ? `${item.workspace ?? "homeless"} · ${item.detail}` : item.workspace ?? "homeless", Math.max(8, props.width - 8))}
                 </text>
               </Show>
             </box>

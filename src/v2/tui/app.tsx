@@ -271,16 +271,28 @@ export function EnsembleV2App() {
   // approvalID, so the needs-you marker needs the subtask set too.
   const nativeBlockedSubtaskIDs = createMemo(() => new Set(pendingApprovals().filter((approval) => approval.kind === "native" && approval.subtaskID).map((approval) => approval.subtaskID!)))
   const selectedApproval = createMemo(() => pendingApprovals()[approvalCursor()])
+  // Ticket #77b: each agent row names the workspace it belongs to (active
+  // workspace first, else its most recent membership) and whether it leads
+  // it; agents outside every workspace read `homeless`.
+  const workspaceForAgent = (agentID: string) => {
+    const active = activeWorkspace()
+    if (active && active.memberIDs.includes(agentID)) return active
+    return workspaces().find((workspace) => workspace.memberIDs.includes(agentID))
+  }
   const railItems = createMemo<RailItem[]>(() => {
     const query = workspaceFilter().toLowerCase()
-    const agentItems: RailItem[] = rosterAgents().filter((agent) => !query || agent.name.toLowerCase().includes(query)).map((agent) => ({
-      kind: "agent" as const,
-      id: agent.id,
-      title: agent.name,
-      // Slice G agent list: the roster row carries the title description.
-      description: agent.title,
-      detail: activeWorkspace() && !activeWorkspace()!.memberIDs.includes(agent.id) ? "guest" : "",
-    }))
+    const agentItems: RailItem[] = rosterAgents().filter((agent) => !query || agent.name.toLowerCase().includes(query)).map((agent) => {
+      const workspace = workspaceForAgent(agent.id)
+      return {
+        kind: "agent" as const,
+        id: agent.id,
+        title: agent.name,
+        description: agent.title,
+        workspace: workspace ? `#${workspace.name}` : "homeless",
+        leader: workspace?.leaderID === agent.id,
+        detail: activeWorkspace() && !activeWorkspace()!.memberIDs.includes(agent.id) ? "guest" : "",
+      }
+    })
     const workspaceItems: RailItem[] = workspaces().filter((workspace) => !query || workspace.name.toLowerCase().includes(query) || workspace.directory.toLowerCase().includes(query)).map((workspace) => ({
       kind: "workspace" as const,
       id: workspace.id,
