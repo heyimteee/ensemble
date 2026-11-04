@@ -36,6 +36,7 @@ import {
 import { platformLabel } from "./platform.ts"
 import { helpGroups, helpKeyLabel, shortcutGroups } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
+import { MOUSE_PANE_IDS } from "./mouse.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
@@ -81,7 +82,7 @@ export function Rail(props: {
   filter: string
 }) {
   return (
-    <box width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
+    <box id={MOUSE_PANE_IDS.rail} width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
       <Show when={props.filter}>
         <text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>filter: {props.filter}</text>
       </Show>

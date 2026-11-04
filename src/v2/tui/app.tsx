@@ -58,6 +58,7 @@ import {
 } from "./interaction.ts"
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
+import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
 import { createVimRegisterStore, normalizeVimKey, visualSelectionSize, type VimBuffer, type VimOutcome } from "./vim.ts"
 import { dialogEscape, dialogFilterEdit, dialogKeyContext } from "./dialogs.ts"
 import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
@@ -306,6 +307,9 @@ export function EnsembleV2App() {
   let transcriptScrollRef: any
   let helpScrollRef: any
   let settingsFieldRef: any
+  // v5.6 T9: pane where the current mouse drag started. Set on the left
+  // button down (the renderer's selection event fires later, on release).
+  let mouseSelectionPane: string | null = null
   // Remember where settings was opened so closing returns to the same column.
   let settingsReturnFocus: InteractionFocus = "chat"
   let messageTimer: ReturnType<typeof setTimeout> | undefined
@@ -2493,6 +2497,31 @@ export function EnsembleV2App() {
     }
     keyInput.on("keypress", onKey)
 
+    // v5.6 T9: OpenTUI owns the drag gesture and emits one selection on
+    // release. The mouse module normalizes it to a pane-bounded payload and
+    // copies through the same system-first clipboard port as keyboard yank.
+    // Nothing here touches interaction mode or focus; the only state write is
+    // the transient toast in the bottom bar.
+    const onSelection = (selection: any) => {
+      const startPane = mouseSelectionPane
+      mouseSelectionPane = null
+      void handleMouseSelection(selection, startPane, {
+        writeClipboard: (text) => clipboardPort().write(text),
+        clearSelection: () => {
+          try {
+            // Only clear the selection that was copied: a new drag may have
+            // started while the asynchronous clipboard write was in flight.
+            if (context.renderer.getSelection() === selection) context.renderer.clearSelection()
+          } catch {}
+        },
+        notify: (message, tone) => {
+          notify(message, tone)
+          try { context.ui.toast.show({ title: "Ensemble", message, variant: tone }) } catch {}
+        },
+      })
+    }
+    context.renderer.on("selection", onSelection)
+
     // v5.6 T3: every surface layer is generated from the declarative catalog.
     // One context is active at a time; the composer, overlays, the command
     // line, and the leader own their keys before these layers.
@@ -2588,7 +2617,7 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.help.up", "ensemble.v2.help.down", "ensemble.v2.help.back"],
     }))
-    return () => { clearInterval(timer); keyInput.off("keypress", onKey); stopData() }
+    return () => { clearInterval(timer); keyInput.off("keypress", onKey); context.renderer.off("selection", onSelection); stopData() }
   })
 
   const showError = (error: any) => context.ui.toast.show({ title: "Ensemble", message: error?.message ?? String(error), variant: "error" })
@@ -3528,8 +3557,23 @@ export function EnsembleV2App() {
   const statusMessage = () => visibleMessage(interaction(), Date.now())?.text ?? null
 
   return (
-    <box flexDirection="column" width="100%" height="100%" backgroundColor={colors.bg} padding={1} gap={1}>
-      <box height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={overlayOpen() ? 0.35 : 1}>
+    <box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      backgroundColor={colors.bg}
+      padding={1}
+      gap={1}
+      onMouseDown={(event: any) => {
+        if (Number(event?.button) !== 0) return
+        // OpenTUI clears a fresh selection and focuses the nearest focusable
+        // ancestor on an unprevented left down. Preventing it keeps the drag
+        // selection alive and makes every mouse gesture focus/mode-neutral.
+        event?.preventDefault?.()
+        mouseSelectionPane = paneName(event?.target)
+      }}
+    >
+      <box id={MOUSE_PANE_IDS.header} height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={overlayOpen() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
           <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · which-key · esc cancel" : `${isBusy() ? "BUSY · " : ""}${status()}`}</text>
@@ -3537,7 +3581,7 @@ export function EnsembleV2App() {
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
           <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
-          <box flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
+          <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <text fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" flexShrink={0} truncate>{surfaceTitle()}</text>
             <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
@@ -3720,7 +3764,7 @@ export function EnsembleV2App() {
         </box>
       <Show when={picker()?.mode} keyed>
         <>
-          <box position="absolute" top={pickerGeometry().top} left={pickerGeometry().left} width={pickerGeometry().width} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column">
+          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={pickerGeometry().top} left={pickerGeometry().left} width={pickerGeometry().width} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column">
             <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={110}>
               <PickerOverlay colors={colors} title={() => picker()!.title} query={() => picker()!.query} items={() => pickerItems()} cursor={() => picker()!.cursor} multiple={() => picker()!.mode === "members"} footer={() => statuslineHints("picker", { multiple: picker()?.mode === "members" })} />
             </box>
@@ -3729,7 +3773,7 @@ export function EnsembleV2App() {
       </Show>
       <Show when={textPrompt()} keyed>
         <>
-          <box position="absolute" top={promptGeometry().top} left={promptGeometry().left} width={promptGeometry().width} zIndex={100} height={14} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={promptGeometry().top} left={promptGeometry().left} width={promptGeometry().width} zIndex={100} height={14} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{textPrompt()!.title}</text>
             <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{textPrompt()!.description}</text>
@@ -3743,7 +3787,7 @@ export function EnsembleV2App() {
       </Show>
       <Show when={confirm()} keyed>
         <>
-          <box position="absolute" top={confirmGeometry().top} left={confirmGeometry().left} width={confirmGeometry().width} zIndex={100} height={10} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={confirmGeometry().top} left={confirmGeometry().left} width={confirmGeometry().width} zIndex={100} height={10} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{confirm()!.title}</text>
             <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{confirm()!.message}</text>
@@ -3754,7 +3798,7 @@ export function EnsembleV2App() {
       </Show>
       <Show when={result()} keyed>
         <>
-          <box position="absolute" top={resultGeometry().top} left={resultGeometry().left} width={resultGeometry().width} zIndex={100} height={18} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={resultGeometry().top} left={resultGeometry().left} width={resultGeometry().width} zIndex={100} height={18} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{result()!.title}</text>
             <scrollbox ref={(value: any) => { resultScrollRef = value }} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
@@ -3766,7 +3810,7 @@ export function EnsembleV2App() {
         </>
       </Show>
       <Show when={wizard()}>
-        <box position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+        <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
           <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{wizard()!.title} · step {wizard()!.index + 1} / {wizard()!.steps.length}</text>
           <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
           <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
@@ -3810,6 +3854,7 @@ export function EnsembleV2App() {
       </Show>
       <Show when={leaderMode()}>
         <box
+          id={MOUSE_PANE_IDS.dialog}
           position="absolute"
           bottom={4}
           right={4}
@@ -3828,7 +3873,7 @@ export function EnsembleV2App() {
           <For each={whichKeyLines(leaderEntries())}>{(line) => <text fg={colors.text} bg={colors.panel} width="100%" truncate>{line}</text>}</For>
         </box>
       </Show>
-      <box height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
+      <box id={MOUSE_PANE_IDS.statusline} height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
         <text fg={leaderMode() ? colors.warn : interactionMode() === "insert" ? colors.good : interactionMode() === "visual" ? colors.warn : interactionMode() === "command" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate>
           {statuslineRow1({
             mode: interactionMode(),
