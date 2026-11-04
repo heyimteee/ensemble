@@ -579,12 +579,17 @@ live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "verbatim reply fina
 
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for queue dance"
-live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
+live_require_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER" 10 "composer focus for queue dance"
+# Deterministic queue window: the hold fixture streams for several seconds
+# (fake-queue-hold), so the second message stays parked while the harness
+# observes the queued row and removes it. It is one-shot and never leaks into
+# later replies through session history.
+live_type "$LIVE_TUI_SESSION" "fake-queue-hold"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while streaming"
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER" 10 "composer focus for queued probe"
 live_type "$LIVE_TUI_SESSION" "fake-queued-probe"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after queued probe"
@@ -595,6 +600,7 @@ live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "x"
 live_require_absence "$LIVE_TUI_SESSION" "fake-queued-probe" 15 "queued line removed by key"
 live_require_absence "$LIVE_TUI_SESSION" "[x remove]" 10 "affordance gone with the line"
+live_require_absence "$LIVE_TUI_SESSION" "· working…" 30 "queue hold reply finalized"
 live_log "verbatim user text and queued-line removal verified on the direct surface"
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "w"
