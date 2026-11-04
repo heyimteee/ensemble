@@ -141,3 +141,9 @@ test("slice C relay answers link by correlation instead of double-rendering", ()
   assert.equal(isAssignmentEvent({ kind: "task", taskID: "turn" }), true)
   assert.equal(isAssignmentEvent({ kind: "text" }), false)
 })
+
+test("short keeps the ellipsis glued to the last kept letter", () => {
+  assert.equal(short("Technical Architect/Code Reviewer", 26), "Technical Architect/Code…")
+  assert.equal(short("Smith   ", 20), "Smith   ")
+  assert.equal(short("ab cd ef", 5), "ab c…")
+})

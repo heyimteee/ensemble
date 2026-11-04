@@ -3,7 +3,7 @@ import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types
 
 export function short(value: string, width = 60): string {
   const single = value.replaceAll("\n", " ")
-  return single.length > width ? `${single.slice(0, width - 1)}…` : single
+  return single.length > width ? `${single.slice(0, width - 1).trimEnd()}…` : single
 }
 
 export function agentName(state: SnapshotState | null, agentID?: string): string {

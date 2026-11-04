@@ -116,11 +116,11 @@ export function Rail(props: {
                   {settingsCursorMark(selected && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
                 </text>
                 <Show when={item.kind === "agent" && item.leader}>
-                  <text fg={props.colors.bg} bg={props.colors.leader} attributes={TextAttributes.BOLD}>{" leader "}</text>
+                  <text fg={props.colors.leader} bg={props.colors.bg} flexShrink={0} attributes={TextAttributes.BOLD}>{" [leader]"}</text>
                 </Show>
-                <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg}> ⏸</text></Show>
-                <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg}> ◐{busy}</text></Show>
-                <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg}> ●{unread}</text></Show>
+                <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
+                <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ◐{busy}</text></Show>
+                <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ●{unread}</text></Show>
               </box>
               <Show when={item.kind === "agent"}>
                 <Show when={(item.description ?? "").trim()}>
