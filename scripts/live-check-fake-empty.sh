@@ -65,7 +65,15 @@ live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "main model step"
 live_require_text "$LIVE_TUI_SESSION" "0 options" 10 "empty option count"
 live_assert_text "$LIVE_TUI_SESSION" "No models available" "explained empty model state"
 
+# v5.6 T6: Esc backs one step at a time; the first step cancels the wizard.
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "Main model" 10 "wizard closed after cancel"
+live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "Esc goes back one wizard step"
+# Text steps need Insert -> field Normal -> previous step, so walk the rest.
+for _ in $(seq 1 8); do
+  sleep 0.25
+  live_key "$LIVE_TUI_SESSION" Escape
+done
+live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "wizard cancelled from its first step"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Roster" "cancel restored Normal mode"
 
 live_log "fake empty-catalog live-check passed ($LIVE_SERVER_URL)"
