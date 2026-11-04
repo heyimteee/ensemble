@@ -1,41 +1,11 @@
-export type WizardFilterKey = {
-  sequence?: string
-  ctrl?: boolean
-  meta?: boolean
-  super?: boolean
-}
-
-export function wizardFilterText(event: WizardFilterKey | undefined): string | undefined {
-  const sequence = String(event?.sequence ?? "")
-  if (sequence.length !== 1 || sequence < " ") return undefined
-  if (event?.ctrl || event?.meta || event?.super) return undefined
-  return sequence
-}
-
 /**
- * Wizard navigation is deliberately identical on every platform and bypasses
- * the macOS Ctrl→Cmd transform. Stock macOS terminals never deliver Cmd
- * chords to a TUI, so a "Cmd" wizard shortcut can never fire there. Plain
- * Ctrl+letter chords are the only family every common terminal delivers.
+ * Wizard Enter behavior. Text steps own Enter inside the field; every
+ * non-text step owns Enter — selecting the focused option, continuing a list
+ * step, or submitting the final step — and never reaches the composer
+ * completion popup. Wizard navigation keys live in the shared dialog catalog.
  */
-export const WIZARD_NAV_BINDINGS = { back: "ctrl+p", next: "ctrl+n" } as const
-
-/** Labels for the universal pair, identical on every platform. */
-export const WIZARD_NAV_LABELS = { back: "Ctrl+P", next: "Ctrl+N" } as const
-
-/** Footer labels for the universal pair; true on every platform. */
-export function wizardNavHint(final: boolean): string {
-  return `${WIZARD_NAV_LABELS.next} next · ${WIZARD_NAV_LABELS.back} back · enter ${final ? "submit" : "continue"} · esc cancel`
-}
-
 export type WizardEnterAction = "select" | "continue" | "submit" | "text"
 
-/**
- * What Enter does on a wizard step. Text steps keep Enter = continue inside
- * the field (Shift+Enter adds a line); every non-text step owns Enter —
- * selecting the focused option, continuing a list step, or submitting the
- * final step — and never reaches the composer completion popup.
- */
 export function wizardEnterAction(kind: string, final: boolean): WizardEnterAction {
   if (kind === "text") return "text"
   if (final) return "submit"

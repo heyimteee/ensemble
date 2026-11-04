@@ -2,10 +2,10 @@
  * Slice E chrome seam (ticket #65, brief §2.0/2.1/2.7–2.10).
  *
  * Pure helpers behind the final chrome polish: the single-focus model, the
- * context-sensitive footer, the unified overlay footer grammar, and the
- * empty-state copy. No rendering, no signals — callers wire these into the
- * Solid tree so exactly one focus-colored border renders at all times and
- * every hint matches the actions actually available.
+ * context-sensitive footer, and the empty-state copy. Overlay footer keys now
+ * come from the shared keymap catalog (v5.6 T6). No rendering, no signals —
+ * callers wire these into the Solid tree so exactly one focus-colored border
+ * renders at all times and every hint matches the actions actually available.
  */
 
 /** Columns that can own the chat-surface focus. The composer is a distinct focus state (brief §2.10). */
@@ -68,26 +68,6 @@ export function footerLine2(context: FooterContext): string {
   const workLive = context.hasWork && context.focus !== "composer" && context.focus !== "overlay"
   if (workLive) return "tab work · space leader · / search · p pause · s settings"
   return "space leader · / search · p pause · s settings"
-}
-
-/** Picker footer: `↑/↓ move · [space toggle · ]enter confirm · esc cancel`. Spaces; callers render word gaps. */
-export function pickerFooter(multiple: boolean): string {
-  return `↑/↓ move · ${multiple ? "space toggle · " : ""}enter confirm · esc cancel`
-}
-
-/** Multiline prompt footer. */
-export function promptFooter(): string {
-  return "enter submit · shift+enter newline · esc cancel"
-}
-
-/** Confirm footer: yes/no decision with the shared `esc cancel` wording. */
-export function confirmFooter(): string {
-  return "enter yes · esc cancel"
-}
-
-/** Scrollable result footer: navigation plus the shared close wording. */
-export function resultFooter(): string {
-  return "↑/↓ scroll · pgup/pgdn · enter/esc close"
 }
 
 /** Rail empty state: names both fixes with their keys (brief §2.1). */

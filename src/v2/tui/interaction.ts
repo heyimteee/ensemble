@@ -48,8 +48,13 @@ export type InteractionState = {
   message: TransientMessage | null
 }
 
+/** Which text buffer a dialog adapter should focus: a prompt or a wizard field. */
+export type DialogFieldTarget = "prompt" | "wizard"
+
 export type InteractionEvent =
   | { type: "insert.enter" }
+  | { type: "field.enter"; target: DialogFieldTarget }
+  | { type: "field.leave" }
   | { type: "escape" }
   | { type: "leave.editor" }
   | { type: "settings.field.open" }
@@ -67,9 +72,10 @@ export type InteractionEvent =
   | { type: "message.clear" }
 
 export type InteractionIntent =
-  | { type: "focus-editor" }
+  | { type: "focus-editor"; target?: DialogFieldTarget }
   | { type: "blur-editor" }
   | { type: "close-overlay"; overlay: InteractionOverlay }
+  | { type: "wizard-back" }
   | { type: "noop" }
 
 export type InteractionResult = { state: InteractionState; intents: InteractionIntent[] }
@@ -95,6 +101,10 @@ export function initialInteractionState(overrides: Partial<InteractionState> = {
  * The Esc ladder. Esc always goes up one level and never quits:
  * command/selection/overlay first, then Insert -> composer Normal, then
  * composer Normal -> chat Normal, otherwise a no-op.
+ *
+ * Dialogs follow the same ladder with one dialog-specific step: an Insert
+ * field goes to field Normal first. Wizard field Normal then goes back one
+ * step; every other dialog cancels. Closing never leaves Insert behind.
  */
 function escape(state: InteractionState): InteractionResult {
   if (state.command) {
@@ -118,6 +128,12 @@ function escape(state: InteractionState): InteractionResult {
     return { state: { ...state, mode: "normal", field: null }, intents: [{ type: "blur-editor" }] }
   }
   if (state.overlay !== "none") {
+    if (state.mode === "insert") {
+      return { state: { ...state, mode: "normal" }, intents: [] }
+    }
+    if (state.overlay === "wizard") {
+      return { state: { ...state, mode: "normal" }, intents: [{ type: "wizard-back" }] }
+    }
     return {
       state: { ...state, overlay: "none", mode: "normal" },
       intents: [{ type: "close-overlay", overlay: state.overlay }],
@@ -139,6 +155,13 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
   switch (event.type) {
     case "insert.enter":
       return { state: { ...state, mode: "insert", focus: "composer" }, intents: [{ type: "focus-editor" }] }
+    case "field.enter":
+      return {
+        state: { ...state, mode: "insert" },
+        intents: [{ type: "focus-editor", target: event.target }],
+      }
+    case "field.leave":
+      return { state: { ...state, mode: "normal" }, intents: [] }
     case "escape":
       return escape(state)
     case "leave.editor":
@@ -168,16 +191,19 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
         intents: [{ type: composer && mode === "insert" ? "focus-editor" : "blur-editor" }],
       }
     }
-    case "overlay.set":
+    case "overlay.set": {
+      const closing = state.overlay !== "none" && event.overlay === "none"
+      const opening = event.overlay !== "none"
       return {
         state: {
           ...state,
           overlay: event.overlay,
-          mode: event.overlay === "none" ? state.mode : "normal",
+          mode: opening || closing ? "normal" : state.mode,
           field: event.overlay === "none" || event.overlay !== "settings" ? null : state.field,
         },
-        intents: event.overlay === "none" ? [] : [{ type: "blur-editor" }],
+        intents: opening ? [{ type: "blur-editor" }] : [],
       }
+    }
     case "command.open":
       return {
         state: { ...state, command: { kind: event.kind, text: event.text ?? "" }, mode: "command" },

@@ -70,19 +70,40 @@ live_require_text "$LIVE_TUI_SESSION" "git:(" 10 "git metadata"
 live_check_help
 
 # The fake catalog contains one model with variants, so the agent wizard always
-# offers a Reasoning effort step. Select the first model and first variant.
+# offers a Reasoning effort step. T6: text steps enter Insert, Esc goes to
+# field Normal, and the next Esc goes back a step (or cancels at the first).
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
-live_assert_text "$LIVE_TUI_SESSION" "Ctrl+P back" "wizard nav hint back"
-live_assert_text "$LIVE_TUI_SESSION" "Ctrl+N next" "wizard nav hint next"
-live_key "$LIVE_TUI_SESSION" "C-n"
-live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "wizard next via Ctrl+N"
-live_key "$LIVE_TUI_SESSION" "C-p"
-live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "wizard back via Ctrl+P"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT · Wizard" "wizard text starts in Insert"
+live_assert_text "$LIVE_TUI_SESSION" "enter next · esc normal" "Insert field teaches its ladder"
+live_type "$LIVE_TUI_SESSION" "FakeAgent"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "first Esc goes to field Normal"
+live_assert_text "$LIVE_TUI_SESSION" "i/a insert" "field Normal teaches the Vim entries"
+live_assert_text "$LIVE_TUI_SESSION" "esc back" "field Normal teaches the back step"
+# The first step cancels on the second Esc; no surface underneath inherits Insert.
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "second Esc cancelled the wizard"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Roster" "cancel returns to roster Normal"
+# Reopen and walk the fields: back from Agent title restores Agent name in Insert,
+# and the title draft survives the round trip.
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard reopened"
 live_type "$LIVE_TUI_SESSION" "FakeAgent"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
 live_type "$LIVE_TUI_SESSION" "Engineering"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "second Esc goes back one step"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT · Wizard" "the previous text step re-enters Insert"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "Enter continues from the restored text field"
+live_require_text "$LIVE_TUI_SESSION" "Engineering" 10 "title draft survived the back step"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
 live_type "$LIVE_TUI_SESSION" "Renders deterministic Markdown."
@@ -91,6 +112,26 @@ live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memo
 live_type "$LIVE_TUI_SESSION" "Likes deterministic fixtures"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
+# `/` owns filtering; `:` and Space never open the command line or the leader.
+live_assert_text "$LIVE_TUI_SESSION" "j/k move" "wizard list uses the shared navigation"
+live_assert_text "$LIVE_TUI_SESSION" "/ filter" "wizard list names the filter key"
+live_assert_text "$LIVE_TUI_SESSION" "esc back" "wizard list names the back key"
+live_key "$LIVE_TUI_SESSION" ":"
+sleep 0.25
+live_assert_absence "$LIVE_TUI_SESSION" "COMMAND ·" "colon is disabled in a wizard"
+live_assert_text "$LIVE_TUI_SESSION" "Main model" "the wizard stayed open after colon"
+live_key "$LIVE_TUI_SESSION" Space
+sleep 0.25
+live_assert_absence "$LIVE_TUI_SESSION" "LEADER" "Space never opens the leader in a wizard"
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "type to filter · enter done · esc clear" 10 "wizard filter enters the shared filter mode"
+live_type "$LIVE_TUI_SESSION" "zzz-no-model"
+live_require_text "$LIVE_TUI_SESSION" "filter: zzz-no-model" 10 "wizard filter follows typing"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "filter: (none)" 10 "first Esc cleared the wizard filter"
+live_assert_text "$LIVE_TUI_SESSION" "Main model" "clearing the filter kept the wizard step"
+sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_any_text "$LIVE_TUI_SESSION" 15 "reasoning step or direct chat" "Reasoning effort" "FakeAgent · direct"
 if live_capture_contains "$LIVE_TUI_SESSION" "Reasoning effort"; then
@@ -245,16 +286,52 @@ live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals closed"
 live_log "ticket #80 command line, completion, history, and transcript search verified"
 
-# Workspace wizard: Enter owns every non-text step, including the
-# leader-synthesis yes/no choice, and never opens a completion surface.
+# Workspace wizard: list steps use j/k, gg/G, Enter, Space multi-select, /,
+# and Esc; text steps enter Insert; confirms accept y/Enter and reject n/Esc.
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "New workspace" 10 "workspace wizard"
 live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "directory step"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "wizard list step is Normal"
+live_assert_text "$LIVE_TUI_SESSION" "j/k move" "directory step names j/k"
+live_assert_text "$LIVE_TUI_SESSION" "/ filter" "directory step names the filter key"
+live_assert_text "$LIVE_TUI_SESSION" "esc back" "directory step names the back key"
+live_key "$LIVE_TUI_SESSION" ":"
+sleep 0.25
+live_assert_absence "$LIVE_TUI_SESSION" "COMMAND ·" "colon never opens Command inside a wizard"
+live_assert_text "$LIVE_TUI_SESSION" "Workspace directory" "the wizard stayed on its step after colon"
+live_key "$LIVE_TUI_SESSION" Space
+sleep 0.25
+live_assert_absence "$LIVE_TUI_SESSION" "LEADER" "Space never opens the leader in a wizard"
+live_assert_text "$LIVE_TUI_SESSION" "Workspace directory" "the wizard stayed on its step after Space"
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "type to filter · enter done · esc clear" 10 "wizard filter mode shares its hints"
+live_type "$LIVE_TUI_SESSION" "zzz-no-dir"
+live_require_text "$LIVE_TUI_SESSION" "filter: zzz-no-dir" 10 "wizard filter follows typing"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "filter: (none)" 10 "first Esc clears the wizard filter"
+live_assert_text "$LIVE_TUI_SESSION" "Workspace directory" "filter Esc stays on the step"
+sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT · Wizard" "name step starts in Insert"
 live_type "$LIVE_TUI_SESSION" "LiveSite"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "name step Esc goes to field Normal"
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "i re-enters Insert"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "members step"
+live_assert_text "$LIVE_TUI_SESSION" "space toggle" "members step names the multi-select key"
+live_require_text "$LIVE_TUI_SESSION" "[x]" 10 "the first member starts selected"
+live_key "$LIVE_TUI_SESSION" Space
+sleep 0.25
+live_require_text "$LIVE_TUI_SESSION" "[ ]" 10 "Space toggled the member off"
+live_key "$LIVE_TUI_SESSION" Space
+sleep 0.25
+live_require_text "$LIVE_TUI_SESSION" "[x]" 10 "Space toggled the member back on"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace leader" 10 "leader step"
 live_key "$LIVE_TUI_SESSION" Enter
@@ -263,9 +340,10 @@ live_assert_text "$LIVE_TUI_SESSION" "Yes — let the leader synthesize" "synthe
 live_key "$LIVE_TUI_SESSION" Enter
 live_assert_absence "$LIVE_TUI_SESSION" "\$ agents" "no completion popup from wizard Enter"
 live_require_text "$LIVE_TUI_SESSION" "Move FakeAgent into" 15 "move-home confirm"
+live_assert_text "$LIVE_TUI_SESSION" "y/enter yes · n/esc no" "confirm shares y/n and Enter/Esc"
 sleep 0.25
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "workspace created"
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "n rejected the confirm and created the workspace"
 live_require_text "$LIVE_TUI_SESSION" "leader FakeAgent" 15 "leader visible on group surface"
 synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synthesis')
 [[ "$synthesis" == "true" ]] || live_fail "synthesis choice did not persist as Yes (got $synthesis)"
@@ -849,10 +927,16 @@ live_require_absence "$LIVE_TUI_SESSION" "Name · NORMAL" 10 "the second Esc ret
 live_require_text "$LIVE_TUI_SESSION" "UNSAVED" 10 "draft marked unsaved"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "the third Esc closes settings and confirms discard"
-live_assert_text "$LIVE_TUI_SESSION" "enter yes · esc cancel" "confirm footer"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "confirm accepted"
+live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "in-house confirm modal"
+live_assert_text "$LIVE_TUI_SESSION" "y/enter yes · n/esc no" "confirm footer shares y/n and Enter/Esc"
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "n rejected the confirm"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgentX · settings" 10 "rejected discard keeps settings open"
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "confirm reopened"
+live_key "$LIVE_TUI_SESSION" "y"
+live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "y accepted the confirm"
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed after discard"
 
 live_key "$LIVE_TUI_SESSION" "s"

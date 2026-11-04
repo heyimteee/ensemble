@@ -4,9 +4,11 @@
  * One declarative catalog is the source of truth for the generated keymap
  * layers, the statusline hints, and the Space which-key popup. Later tickets
  * add their contexts and leader actions here instead of growing per-surface
- * key handler lists. Keys are canonical tokens (lower-case names, `shift+x`,
- * `ctrl+d`, named keys) so one pure resolver serves raw keypresses and the
- * host keymap alike.
+ * key handler lists. v5.6 T6 reuses the same grammar for wizards and dialogs:
+ * their surface keys and text-field footer hints are catalog entries, and the
+ * app resolves them through the one chord machine. Keys are canonical tokens
+ * (lower-case names, `shift+x`, `ctrl+d`, named keys) so one pure resolver
+ * serves raw keypresses and the host keymap alike.
  */
 
 export type KeyContext =
@@ -15,9 +17,22 @@ export type KeyContext =
   | "work"
   | "composer"
   | "settings"
+  /** Wizard list step: j/k, gg/G, Enter, Space multi-select, /, Esc back. */
   | "wizard"
-  | "dialog"
+  /** Wizard text field in Insert mode: Enter continues, Esc goes to field Normal. */
+  | "wizardField"
+  /** Wizard text field in Normal mode: the Vim subset plus continue/back. */
+  | "wizardText"
+  /** Single or multi-choice picker overlay. */
+  | "picker"
+  /** Text prompt in Insert mode. */
+  | "promptField"
+  /** Text prompt in Normal mode. */
+  | "promptText"
+  | "confirm"
+  | "result"
   | "approvals"
+  | "filter"
   | "help"
 
 /** List surfaces use Normal grammar; the leader is a second scope over them. */
@@ -36,7 +51,7 @@ export type KeyEntry = {
   /** Hint used when the work zone has no rows. */
   emptyHint?: string
   /** The binding only applies while the inline work list has rows. */
-  requires?: "work"
+  requires?: "work" | "multi"
   /** The binding is unavailable while one of these transient modes is active. */
   availability?: "no-transcript-search"
   /** Hide from which-key/help listings (chords, Esc, and plumbing). */
@@ -177,7 +192,100 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "legacy.reset", scope: "normal", contexts: ["roster", "chat"], keys: ["ctrl+shift+delete"], title: "Reset Ensemble", group: "Legacy", listed: false, platform: true },
 ]
 
-export const KEYMAP_CATALOG: readonly KeyEntry[] = [...NORMAL, ...LEADER]
+/**
+ * Wizard list steps reuse the Normal list grammar. `Space` only toggles on a
+ * multi-select step; `:` and the leader are absent by construction, so a
+ * wizard can never open the command line or the which-key menu.
+ */
+const WIZARD: readonly KeyEntry[] = [
+  { id: "wizard.down", scope: "normal", contexts: ["wizard"], keys: ["j"], title: "Next option", group: "Navigation", hint: "j/k move" },
+  { id: "wizard.up", scope: "normal", contexts: ["wizard"], keys: ["k"], title: "Previous option", group: "Navigation" },
+  { id: "wizard.down.arrow", scope: "normal", contexts: ["wizard"], keys: ["down"], title: "Next option", group: "Navigation", listed: false },
+  { id: "wizard.up.arrow", scope: "normal", contexts: ["wizard"], keys: ["up"], title: "Previous option", group: "Navigation", listed: false },
+  { id: "wizard.top", scope: "normal", contexts: ["wizard"], keys: ["g", "g"], title: "First option", group: "Navigation", listed: false },
+  { id: "wizard.bottom", scope: "normal", contexts: ["wizard"], keys: ["shift+g"], title: "Last option", group: "Navigation", listed: false },
+  { id: "wizard.activate", scope: "normal", contexts: ["wizard"], keys: ["enter"], title: "Select or continue", group: "Open", hint: "enter next" },
+  { id: "wizard.toggle", scope: "normal", contexts: ["wizard"], keys: ["space"], title: "Toggle option", group: "Select", hint: "space toggle", requires: "multi" },
+  { id: "wizard.filter", scope: "normal", contexts: ["wizard"], keys: ["/"], title: "Filter options", group: "Search", hint: "/ filter" },
+  { id: "wizard.back", scope: "normal", contexts: ["wizard"], keys: ["escape"], title: "Back one step or cancel", group: "Navigation", hint: "esc back" },
+]
+
+/**
+ * Dialogs share the list grammar; only the resolving key and the cancel
+ * wording differ per surface. Confirm accepts y/Enter and rejects n/Esc;
+ * results and approvals scroll before they resolve.
+ */
+const DIALOG: readonly KeyEntry[] = [
+  // Picker ----------------------------------------------------------------
+  { id: "picker.down", scope: "normal", contexts: ["picker"], keys: ["j"], title: "Next item", group: "Navigation", hint: "j/k move" },
+  { id: "picker.up", scope: "normal", contexts: ["picker"], keys: ["k"], title: "Previous item", group: "Navigation" },
+  { id: "picker.down.arrow", scope: "normal", contexts: ["picker"], keys: ["down"], title: "Next item", group: "Navigation", listed: false },
+  { id: "picker.up.arrow", scope: "normal", contexts: ["picker"], keys: ["up"], title: "Previous item", group: "Navigation", listed: false },
+  { id: "picker.top", scope: "normal", contexts: ["picker"], keys: ["g", "g"], title: "First item", group: "Navigation", listed: false },
+  { id: "picker.bottom", scope: "normal", contexts: ["picker"], keys: ["shift+g"], title: "Last item", group: "Navigation", listed: false },
+  { id: "picker.activate", scope: "normal", contexts: ["picker"], keys: ["enter"], title: "Select", group: "Open", hint: "enter select" },
+  { id: "picker.toggle", scope: "normal", contexts: ["picker"], keys: ["space"], title: "Toggle item", group: "Select", hint: "space toggle", requires: "multi" },
+  { id: "picker.filter", scope: "normal", contexts: ["picker"], keys: ["/"], title: "Filter items", group: "Search", hint: "/ filter" },
+  { id: "picker.cancel", scope: "normal", contexts: ["picker"], keys: ["escape"], title: "Cancel", group: "Navigation", hint: "esc cancel" },
+
+  // Confirm ---------------------------------------------------------------
+  { id: "confirm.accept", scope: "normal", contexts: ["confirm"], keys: ["y"], title: "Yes", group: "Decision", hint: "y/enter yes" },
+  { id: "confirm.accept.enter", scope: "normal", contexts: ["confirm"], keys: ["enter"], title: "Yes", group: "Decision", listed: false },
+  { id: "confirm.reject", scope: "normal", contexts: ["confirm"], keys: ["n"], title: "No", group: "Decision", hint: "n/esc no" },
+  { id: "confirm.reject.escape", scope: "normal", contexts: ["confirm"], keys: ["escape"], title: "No", group: "Decision", listed: false },
+
+  // Result ----------------------------------------------------------------
+  { id: "result.down", scope: "normal", contexts: ["result"], keys: ["j"], title: "Scroll down", group: "Scroll", hint: "j/k scroll" },
+  { id: "result.up", scope: "normal", contexts: ["result"], keys: ["k"], title: "Scroll up", group: "Scroll" },
+  { id: "result.down.arrow", scope: "normal", contexts: ["result"], keys: ["down"], title: "Scroll down", group: "Scroll", listed: false },
+  { id: "result.up.arrow", scope: "normal", contexts: ["result"], keys: ["up"], title: "Scroll up", group: "Scroll", listed: false },
+  { id: "result.top", scope: "normal", contexts: ["result"], keys: ["g", "g"], title: "Top of result", group: "Scroll", listed: false },
+  { id: "result.bottom", scope: "normal", contexts: ["result"], keys: ["shift+g"], title: "Bottom of result", group: "Scroll", listed: false },
+  { id: "result.half.down", scope: "normal", contexts: ["result"], keys: ["ctrl+d"], title: "Half page down", group: "Scroll", hint: "ctrl+d/u page" },
+  { id: "result.half.up", scope: "normal", contexts: ["result"], keys: ["ctrl+u"], title: "Half page up", group: "Scroll" },
+  { id: "result.page.down", scope: "normal", contexts: ["result"], keys: ["pagedown"], title: "Page down", group: "Scroll", listed: false },
+  { id: "result.page.up", scope: "normal", contexts: ["result"], keys: ["pageup"], title: "Page up", group: "Scroll", listed: false },
+  { id: "result.close.enter", scope: "normal", contexts: ["result"], keys: ["enter"], title: "Close", group: "Navigation", listed: false },
+  { id: "result.close.escape", scope: "normal", contexts: ["result"], keys: ["escape"], title: "Close", group: "Navigation", hint: "enter/esc close" },
+
+  // Approvals -------------------------------------------------------------
+  { id: "approvals.down", scope: "normal", contexts: ["approvals"], keys: ["j"], title: "Next approval", group: "Navigation", hint: "j/k move" },
+  { id: "approvals.up", scope: "normal", contexts: ["approvals"], keys: ["k"], title: "Previous approval", group: "Navigation" },
+  { id: "approvals.down.arrow", scope: "normal", contexts: ["approvals"], keys: ["down"], title: "Next approval", group: "Navigation", listed: false },
+  { id: "approvals.up.arrow", scope: "normal", contexts: ["approvals"], keys: ["up"], title: "Previous approval", group: "Navigation", listed: false },
+  { id: "approvals.top", scope: "normal", contexts: ["approvals"], keys: ["g", "g"], title: "First approval", group: "Navigation", listed: false },
+  { id: "approvals.bottom", scope: "normal", contexts: ["approvals"], keys: ["shift+g"], title: "Last approval", group: "Navigation", listed: false },
+  { id: "approvals.resolve", scope: "normal", contexts: ["approvals"], keys: ["enter"], title: "Resolve", group: "Open", hint: "enter resolve" },
+  { id: "approvals.close", scope: "normal", contexts: ["approvals"], keys: ["escape"], title: "Close", group: "Navigation", hint: "esc close" },
+]
+
+/**
+ * Text fields are edited by the shared Vim adapter (#85); their catalog
+ * entries exist so the statusline teaches the same Esc ladder everywhere.
+ * They are hint-only: the app routes keys through the editor, not the layer.
+ */
+const TEXT_FIELDS: readonly KeyEntry[] = [
+  { id: "wizardField.submit", scope: "normal", contexts: ["wizardField"], keys: ["enter"], title: "Continue", group: "Text", hint: "enter next" },
+  { id: "wizardField.normal", scope: "normal", contexts: ["wizardField"], keys: ["escape"], title: "Field Normal", group: "Text", hint: "esc normal" },
+  { id: "wizardText.submit", scope: "normal", contexts: ["wizardText"], keys: ["enter"], title: "Continue", group: "Text", hint: "enter next" },
+  { id: "wizardText.insert", scope: "normal", contexts: ["wizardText"], keys: ["i"], title: "Insert", group: "Text", hint: "i/a insert" },
+  { id: "wizardText.insert.alt", scope: "normal", contexts: ["wizardText"], keys: ["a"], title: "Insert", group: "Text", listed: false },
+  { id: "wizardText.motion", scope: "normal", contexts: ["wizardText"], keys: ["h"], title: "Move cursor", group: "Text", hint: "h/j/k/l move" },
+  { id: "wizardText.back", scope: "normal", contexts: ["wizardText"], keys: ["escape"], title: "Back one step", group: "Text", hint: "esc back" },
+  { id: "promptField.submit", scope: "normal", contexts: ["promptField"], keys: ["enter"], title: "Submit", group: "Text", hint: "enter submit" },
+  { id: "promptField.newline", scope: "normal", contexts: ["promptField"], keys: ["shift+enter"], title: "New line", group: "Text", hint: "shift+enter newline" },
+  { id: "promptField.normal", scope: "normal", contexts: ["promptField"], keys: ["escape"], title: "Field Normal", group: "Text", hint: "esc normal" },
+  { id: "promptText.submit", scope: "normal", contexts: ["promptText"], keys: ["enter"], title: "Submit", group: "Text", hint: "enter submit" },
+  { id: "promptText.insert", scope: "normal", contexts: ["promptText"], keys: ["i"], title: "Insert", group: "Text", hint: "i/a insert" },
+  { id: "promptText.insert.alt", scope: "normal", contexts: ["promptText"], keys: ["a"], title: "Insert", group: "Text", listed: false },
+  { id: "promptText.motion", scope: "normal", contexts: ["promptText"], keys: ["h"], title: "Move cursor", group: "Text", hint: "h/j/k/l move" },
+  { id: "promptText.cancel", scope: "normal", contexts: ["promptText"], keys: ["escape"], title: "Cancel", group: "Text", hint: "esc cancel" },
+  { id: "filter.edit", scope: "normal", contexts: ["filter"], keys: ["backspace"], title: "Type to filter", group: "Search", hint: "type to filter" },
+  { id: "filter.done", scope: "normal", contexts: ["filter"], keys: ["enter"], title: "Finish filtering", group: "Search", hint: "enter done" },
+  { id: "filter.cancel", scope: "normal", contexts: ["filter"], keys: ["escape"], title: "Clear filter", group: "Search", hint: "esc clear" },
+]
+
+export const KEYMAP_CATALOG: readonly KeyEntry[] = [...NORMAL, ...LEADER, ...WIZARD, ...DIALOG, ...TEXT_FIELDS]
 
 export type KeyActionResolution = { type: "action"; entry: KeyEntry }
 export type KeyPendingResolution = { type: "pending"; prefix: readonly string[]; entries: readonly KeyEntry[] }
@@ -261,13 +369,19 @@ export function duplicateBindings(catalog: readonly KeyEntry[] = KEYMAP_CATALOG)
  */
 export function statuslineHints(
   context: KeyContext,
-  options: { hasWork?: boolean; filter?: (entry: KeyEntry) => boolean } = {},
+  options: {
+    hasWork?: boolean
+    multiple?: boolean
+    filter?: (entry: KeyEntry) => boolean
+  } = {},
 ): string {
   const hasWork = options.hasWork ?? true
+  const multiple = options.multiple ?? false
   return normalEntries(context)
     .filter((entry) => options.filter?.(entry) ?? true)
     .flatMap((entry) => {
       if (entry.listed === false) return []
+      if (entry.requires === "multi" && !multiple) return []
       const hint = entry.requires === "work" && !hasWork ? entry.emptyHint : entry.hint
       return hint ? [hint] : []
     })
@@ -348,7 +462,7 @@ export function normalizeKeyToken(event: {
   const name = String(event?.name ?? "")
   const sequence = String(event?.sequence ?? "")
   if (name === "space" || sequence === " ") return "space"
-  if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") return "enter"
+  if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") return event?.shift ? "shift+enter" : "enter"
   if (name === "escape") return "escape"
   if (name === "tab") return event?.shift ? "shift+tab" : "tab"
   if (name === "backspace" || name === "pageup" || name === "pagedown" || name === "end" || name === "home") return name

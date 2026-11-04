@@ -4,17 +4,13 @@ import {
   approvalResolvingSuffix,
   approvalsEmptyLine,
   chromeOwnsFocus,
-  confirmFooter,
   dmEmptyDetail,
   footerLine1,
   footerLine2,
   helpEmptyLine,
   pickerEmptyLine,
-  pickerFooter,
-  promptFooter,
   railEmptyLine,
   resolveChromeFocus,
-  resultFooter,
   skillsEmptyLine,
   type ChromeFocus,
 } from "./chrome.ts"
@@ -69,17 +65,6 @@ test("slice E footer line 2 gates work keys and keeps missing-skills precedence"
   assert.ok(!composing.includes("tab work"), "composer hides dead work keys")
   const overlay = footerLine2({ focus: "overlay", hasWork: true, missingSkills: [] })
   assert.ok(!overlay.includes("tab work"), "dialog hides dead work keys")
-})
-
-test("slice E overlay footers share the keys-action grammar with consistent cancel", () => {
-  assert.equal(pickerFooter(false), "↑/↓ move · enter confirm · esc cancel")
-  assert.equal(pickerFooter(true), "↑/↓ move · space toggle · enter confirm · esc cancel")
-  assert.equal(promptFooter(), "enter submit · shift+enter newline · esc cancel")
-  assert.equal(confirmFooter(), "enter yes · esc cancel")
-  assert.equal(resultFooter(), "↑/↓ scroll · pgup/pgdn · enter/esc close")
-  for (const footer of [pickerFooter(false), promptFooter(), confirmFooter(), resultFooter()]) {
-    assert.ok(footer.includes("·"), "keys · action segments")
-  }
 })
 
 test("slice E empty states name the fix action and key", () => {

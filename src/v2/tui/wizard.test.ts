@@ -1,35 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { WIZARD_NAV_BINDINGS, overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint } from "./wizard.ts"
-import { platformBind } from "./platform.ts"
-
-test("wizard filter appends printable characters without modifiers", () => {
-  assert.equal(wizardFilterText({ sequence: "a" }), "a")
-  assert.equal(wizardFilterText({ sequence: "A" }), "A")
-  assert.equal(wizardFilterText({ sequence: "~?" }), undefined)
-  assert.equal(wizardFilterText({ sequence: "" }), undefined)
-  assert.equal(wizardFilterText(undefined), undefined)
-})
-
-test("wizard filter ignores modifier chords instead of throwing", () => {
-  assert.equal(wizardFilterText({ sequence: "a", ctrl: true }), undefined)
-  assert.equal(wizardFilterText({ sequence: "a", meta: true }), undefined)
-  assert.equal(wizardFilterText({ sequence: "a", super: true }), undefined)
-  assert.equal(wizardFilterText({ sequence: "a", ctrl: false }), "a")
-})
-
-test("wizard navigation uses one universal Ctrl pair with truthful labels", () => {
-  assert.equal(WIZARD_NAV_BINDINGS.back, "ctrl+p")
-  assert.equal(WIZARD_NAV_BINDINGS.next, "ctrl+n")
-  const hint = wizardNavHint(false)
-  assert.ok(hint.startsWith("Ctrl+N next · Ctrl+P back"), hint)
-  assert.doesNotMatch(hint, /Cmd/)
-  assert.match(hint, /enter continue/)
-  assert.match(wizardNavHint(true), /enter submit/)
-  // The generic platform transform would rewrite ctrl+ to super+ on macOS;
-  // the wizard layer deliberately bypasses it because Cmd never reaches the TUI.
-  assert.equal(platformBind(WIZARD_NAV_BINDINGS.next, true), "super+n")
-})
+import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions } from "./wizard.ts"
 
 test("overlay geometry centers a bounded box and recomputes on resize", () => {
   const wide = overlayGeometry(200, 60, 20)

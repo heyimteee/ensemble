@@ -13,18 +13,15 @@ import { palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { platformBind, platformLabel } from "./platform.ts"
-import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardFilterText, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions, wizardNavHint, WIZARD_NAV_BINDINGS } from "./wizard.ts"
+import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions } from "./wizard.ts"
 import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
 import {
   chromeOwnsFocus,
-  confirmFooter,
   dmEmptyDetail,
   footerLine1,
   footerLine2,
   pickerEmptyLine,
-  promptFooter,
   resolveChromeFocus,
-  resultFooter,
 } from "./chrome.ts"
 import { skillPageForCursor } from "./skills.ts"
 import { modelPickerLabel, sortModelsByProvider } from "./settings.ts"
@@ -46,7 +43,7 @@ import {
   reorderBackupList,
   type SettingsFieldID,
 } from "./settings-grammar.ts"
-import { confirmKeyAction, resultKeyAction, singleChoiceValue } from "./overlays.ts"
+import { singleChoiceValue } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import {
   initialInteractionState,
@@ -62,6 +59,7 @@ import {
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
 import { createVimRegisterStore, normalizeVimKey, type VimBuffer } from "./vim.ts"
+import { dialogEscape, dialogFilterEdit, dialogKeyContext } from "./dialogs.ts"
 import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
 import { layerEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
@@ -113,6 +111,8 @@ type PickerState = {
   selected: Set<string>
   cursor: number
   query: string
+  /** A `/` filter owns the keyboard until Enter or Esc. */
+  filtering: boolean
   resolve: (value: string[] | undefined) => void
 }
 
@@ -166,6 +166,8 @@ type WizardState = {
   steps: WizardStep[]
   index: number
   query: string
+  /** A `/` filter owns the keyboard until Enter or Esc. */
+  filtering: boolean
   cursor: number
   error?: string
   customDirectory?: boolean
@@ -319,13 +321,20 @@ export function EnsembleV2App() {
     setInteraction(result.state)
     for (const intent of result.intents) {
       if (intent.type === "focus-editor") {
+        const target = intent.target
         queueMicrotask(() => {
           if (result.state.field === "settings") settingsFieldRef?.focus?.()
+          else if (target === "prompt") textPromptRef?.focus?.()
+          else if (target === "wizard") wizardRef?.focus?.()
           else composerRef?.focus?.()
         })
       } else if (intent.type === "blur-editor") {
         try { composerRef?.blur?.() } catch {}
         try { settingsFieldRef?.blur?.() } catch {}
+      } else if (intent.type === "wizard-back") {
+        wizardPrev()
+      } else if (intent.type === "close-overlay") {
+        closeOverlay(intent.overlay)
       }
     }
   }
@@ -350,28 +359,31 @@ export function EnsembleV2App() {
   }
   onCleanup(() => { if (messageTimer !== undefined) clearTimeout(messageTimer) })
 
-  // v5.6 T7: Normal-mode Vim editing for the composer. One internal register
-  // is shared by every text buffer; the system clipboard is primary and the
-  // adapter writes/reads it asynchronously with the register as fallback.
+  // v5.6 T7: Normal-mode Vim editing for every text buffer. One internal
+  // register is shared by the composer, prompts, and wizard fields; the
+  // system clipboard is primary and the adapter writes/reads it
+  // asynchronously with the register as fallback.
   const vimRegister = createVimRegisterStore()
   let vimClipboard: ReturnType<typeof createClipboardPort> | null = null
-  let composerVim: VimBuffer | null = null
-  let composerVimRef: any
+  type EditorCache = { source: any; buffer: VimBuffer | null }
+  const composerCache: EditorCache = { source: null, buffer: null }
+  const promptCache: EditorCache = { source: null, buffer: null }
+  const wizardCache: EditorCache = { source: null, buffer: null }
   const clipboardPort = () => {
     if (!vimClipboard) vimClipboard = createClipboardPort(context.renderer)
     return vimClipboard
   }
-  const composerVimBuffer = (): VimBuffer | null => {
-    if (!composerRef) return null
-    if (composerVim && composerVimRef === composerRef) return composerVim
-    composerVimRef = composerRef
-    composerVim = createVimBuffer({
-      editor: createEditorPort(composerRef),
+  const editorBuffer = (ref: any, cache: EditorCache): VimBuffer | null => {
+    if (!ref) return null
+    if (cache.buffer && cache.source === ref) return cache.buffer
+    cache.source = ref
+    cache.buffer = createVimBuffer({
+      editor: createEditorPort(ref),
       clipboard: clipboardPort(),
       register: vimRegister,
       onMessage: (message) => notify(message.text, message.tone),
     })
-    return composerVim
+    return cache.buffer
   }
   // Ticket #83: settings text fields reuse the same Vim adapter, register, and
   // clipboard as the composer. The input remounts for every field, so the
@@ -390,6 +402,9 @@ export function EnsembleV2App() {
     })
     return settingsVim
   }
+  const composerVimBuffer = (): VimBuffer | null => editorBuffer(composerRef, composerCache)
+  const promptVimBuffer = (): VimBuffer | null => editorBuffer(textPromptRef, promptCache)
+  const wizardVimBuffer = (): VimBuffer | null => editorBuffer(wizardRef, wizardCache)
   const syncVimChord = (chord: string | null | undefined) => {
     if (chord) dispatchInteraction({ type: "chord.set", chord })
     else if (interaction().pendingChord) dispatchInteraction({ type: "chord.clear" })
@@ -397,7 +412,9 @@ export function EnsembleV2App() {
   onCleanup(() => {
     vimClipboard?.dispose()
     vimClipboard = null
-    composerVim = null
+    composerCache.buffer = null
+    promptCache.buffer = null
+    wizardCache.buffer = null
     settingsVim = null
   })
 
@@ -955,7 +972,7 @@ export function EnsembleV2App() {
   const runNamedCommand = async (command: ParsedCommand): Promise<void> => {
     switch (command.name) {
       case "settings": openSettings(); return
-      case "approvals": setApprovalCursor(0); setApprovalsOpen(true); return
+      case "approvals": openApprovals(); return
       case "workspace": await pickWorkspace(); return
       case "agent": await pickAgent(); return
       case "new-agent": await createAgent(); return
@@ -965,7 +982,7 @@ export function EnsembleV2App() {
       case "resume": await togglePause(false); return
       case "init": await initEnsemble(); return
       case "native": openNative(); return
-      case "help": setHelpOpen(true); return
+      case "help": openHelp(); return
       case "q": context.ui.router.navigate({ type: "home" }); return
     }
   }
@@ -1389,7 +1406,7 @@ export function EnsembleV2App() {
   const focusComposer = () => queueMicrotask(() => composerRef?.focus?.())
   const composerHeight = () => computeComposerHeight(composerDraft(), Math.max(12, messageWidth() - 6))
   const setComposerValue = (value: string) => {
-    composerVim?.invalidate()
+    composerCache.buffer?.invalidate()
     if (composerRef) {
       composerRef.setText?.(value)
       composerRef.cursorOffset = value.length
@@ -1408,7 +1425,7 @@ export function EnsembleV2App() {
     const key = currentDraftKey()
     if (key === lastDraftKey) return
     lastDraftKey = key
-    composerVim?.invalidate()
+    composerCache.buffer?.invalidate()
     const value = draftFor(drafts(), key)
     setComposerDraft(value)
     setComposerCursor(value.length)
@@ -1461,14 +1478,14 @@ export function EnsembleV2App() {
   const startCompose = () => {
     if (!surface()) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
     composerEpoch++
-    composerVim?.invalidate()
+    composerCache.buffer?.invalidate()
     dispatchInteraction({ type: "insert.enter" })
     focusComposer()
   }
   /** Esc/Ctrl+G leave the editor but keep its surface draft. */
   const leaveComposer = () => {
     composerEpoch++
-    composerVim?.invalidate()
+    composerCache.buffer?.invalidate()
     syncVimChord(null)
     try { composerRef?.blur?.() } catch {}
     closeCompletion()
@@ -1477,7 +1494,7 @@ export function EnsembleV2App() {
   /** Slash commands consume their text, so only this path clears a draft. */
   const resetComposer = () => {
     composerEpoch++
-    composerVim?.invalidate()
+    composerCache.buffer?.invalidate()
     syncVimChord(null)
     setDrafts((store) => clearDraft(store, currentDraftKey()))
     setComposerDraft("")
@@ -1594,11 +1611,11 @@ export function EnsembleV2App() {
       case "workspace": await pickWorkspace(); return
       case "agent": mention(); return
       case "settings": openSettings(); return
-      case "approvals": setApprovalsOpen(true); return
+      case "approvals": openApprovals(); return
       case "pause": await togglePause(true); return
       case "resume": await togglePause(false); return
       case "init": await initEnsemble(); return
-      case "help": setHelpOpen(true); return
+      case "help": openHelp(); return
       case "native": openNative(); return
       case "delegate": await delegateSelected(); return
       case "retry": await retrySelected(); return
@@ -1693,7 +1710,7 @@ export function EnsembleV2App() {
         return true
       }
       if (name === "return" || name === "enter" || name === "kpenter") {
-        composerVim?.invalidate()
+        composerCache.buffer?.invalidate()
         syncVimChord(null)
         void submitComposer(String(composerRef?.plainText ?? "")).catch(showError)
         return true
@@ -2228,7 +2245,7 @@ export function EnsembleV2App() {
     settings: () => openSettings(railAgent()),
     archive: () => archiveRailSelection(),
     delete: () => deleteRailSelection(),
-    approvals: () => { setApprovalCursor(0); setApprovalsOpen(true) },
+    approvals: () => openApprovals(),
     init: () => initEnsemble(),
     pause: () => togglePause(),
     filter: () => openCommandLine("/"),
@@ -2247,7 +2264,7 @@ export function EnsembleV2App() {
     "chat.new.agent": () => createAgent(),
     "chat.new.workspace": () => createWorkspace(),
     "chat.settings": () => openSettings(),
-    "chat.approvals": () => { setApprovalCursor(0); setApprovalsOpen(true) },
+    "chat.approvals": () => openApprovals(),
     "chat.init": () => initEnsemble(),
     "chat.pause": () => togglePause(),
     "chat.native": () => openNative(),
@@ -2302,7 +2319,7 @@ export function EnsembleV2App() {
     "settings.escape": () => closeSettings(),
   }
   const leaderActionHandlers: Record<string, () => unknown> = {
-    "leader.help": () => setHelpOpen(true),
+    "leader.help": () => openHelp(),
     "leader.leave": () => context.ui.router.navigate({ type: "home" }),
     "leader.cancel": () => closeLeader(),
     "leader.new.agent": () => createAgent(),
@@ -2313,7 +2330,7 @@ export function EnsembleV2App() {
     "leader.delete.workspace": () => deleteWorkspace(),
     "leader.archive.agent": () => archiveSelectedAgent(),
     "leader.delete.agent": () => deleteSelectedAgent(),
-    "leader.approvals": () => { setApprovalCursor(0); setApprovalsOpen(true) },
+    "leader.approvals": () => openApprovals(),
     "leader.pause": () => togglePause(),
     "leader.init": () => initEnsemble(),
     "leader.native": () => openNative(),
@@ -2362,25 +2379,10 @@ export function EnsembleV2App() {
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
       if (interaction().command) { handleCommandKey(event); return }
-      if (picker()) { handlePickerKey(event); return }
-      if (wizard()) { handleWizardKey(event); return }
-      if (textPrompt()) {
-        const name = String(event?.name ?? "")
-        if (name === "escape") {
-          event?.preventDefault?.(); event?.stopPropagation?.()
-          finishTextPrompt(undefined)
-          return
-        }
-        if (name === "return" || name === "enter" || name === "kpenter") {
-          if (event?.shift) return
-          event?.preventDefault?.(); event?.stopPropagation?.()
-          finishTextPrompt(String(textPromptRef?.plainText ?? ""))
-          return
-        }
-        return
-      }
-      if (confirm()) { handleConfirmKey(event); return }
-      if (result()) { handleResultKey(event); return }
+      // v5.6 T6: one catalog-driven handler owns wizards, pickers, prompts,
+      // confirms, results, and the approval inbox. It traps every key while a
+      // dialog is open so `:`/Space never leak to the surface underneath.
+      if (dialogDescriptor()) { handleDialogKey(event); return }
       // Ticket #83: a settings field owns every raw key. Insert lets the
       // input renderable type; field Normal runs the shared Vim adapter.
       if (settingsField()) { handleSettingsFieldKey(event); return }
@@ -2539,30 +2541,8 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
     }))
-    // The wizard layer is deliberately NOT wrapped in platformLayer: Cmd chords
-    // are never delivered by stock macOS terminals, so its navigation uses raw
-    // Ctrl+letter binds that are true on every platform.
-    context.keymap.layer(() => ({
-      mode: "global", priority: 160,
-      enabled: () => isOurRoute() && wizard() !== null && !leaderMode() && !commandActive(),
-      commands: [
-        { id: "ensemble.v2.wizard.prev", title: "Ensemble: Previous wizard step", bind: WIZARD_NAV_BINDINGS.back, run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardPrev() } },
-        { id: "ensemble.v2.wizard.next", title: "Ensemble: Next wizard step", bind: WIZARD_NAV_BINDINGS.next, run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardNext() } },
-        { id: "ensemble.v2.wizard.cancel", title: "Ensemble: Cancel wizard", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); wizardCancel() } },
-      ],
-      bindings: ["ensemble.v2.wizard.prev", "ensemble.v2.wizard.next", "ensemble.v2.wizard.cancel"],
-    }))
-    platformLayer(() => ({
-      mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && approvalsOpen() && !leaderMode() && !commandActive() && wizard() === null,
-      commands: [
-        { id: "ensemble.v2.approval.up", title: "Ensemble: Previous approval", bind: "up", run: () => setApprovalCursor((cursor) => Math.max(0, cursor - 1)) },
-        { id: "ensemble.v2.approval.down", title: "Ensemble: Next approval", bind: "down", run: () => setApprovalCursor((cursor) => Math.min(Math.max(0, pendingApprovals().length - 1), cursor + 1)) },
-        { id: "ensemble.v2.resolve", title: "Ensemble: Resolve approval", bind: "enter", run: () => { const approval = selectedApproval(); if (approval) void resolveApproval(approval).catch(showError) } },
-        { id: "ensemble.v2.approvals.back", title: "Ensemble: Close approvals", bind: "escape", run: () => setApprovalsOpen(false) },
-      ],
-      bindings: ["ensemble.v2.approval.up", "ensemble.v2.approval.down", "ensemble.v2.resolve", "ensemble.v2.approvals.back"],
-    }))
+    // v5.6 T6: the wizard/dialog catalog owns its keys through the raw
+    // listener above; only the settings and help surfaces keep layers here.
     platformLayer(() => ({
       mode: "global", priority: 110,
       enabled: () => isOurRoute() && !modal() && helpOpen() && !leaderMode() && !commandActive() && wizard() === null,
@@ -2598,11 +2578,13 @@ export function EnsembleV2App() {
     setPicker(null)
     setModal(false)
     state.resolve(value)
+    clearPendingChord()
   }
 
   const openPicker = (mode: PickerState["mode"], options: { selected?: string[]; candidates?: string[] } = {}): Promise<string[] | undefined> => new Promise((resolve) => {
     // Overlays never steal Enter/focus while a wizard owns the keyboard.
     if (wizard()) { resolve(undefined); return }
+    clearPendingChord()
     const candidates = mode === "workspace"
       ? workspaces().map((workspace) => ({ id: workspace.id, label: `#${workspace.name} · ${workspaceLabel(workspace.directory)}` }))
       : mode === "leader"
@@ -2615,41 +2597,54 @@ export function EnsembleV2App() {
       selected: new Set(options.selected ?? []),
       cursor: 0,
       query: "",
+      filtering: false,
       resolve,
     }
     setModal(true)
     setPicker(state)
+    dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
   })
 
-  const handlePickerKey = (event: any) => {
+  const pickerMove = (delta: number) => {
     const state = picker()
     if (!state) return
-    const name = String(event?.name ?? "")
-    const sequence = String(event?.sequence ?? "")
-    event?.preventDefault?.()
-    event?.stopPropagation?.()
-    if (name === "escape") { finishPicker(undefined); return }
-    if (name === "up") { setPicker({ ...state, cursor: Math.max(0, state.cursor - 1) }); return }
-    if (name === "down") { setPicker({ ...state, cursor: Math.min(Math.max(0, pickerItems().length - 1), state.cursor + 1) }); return }
-    if (name === "backspace") { setPicker({ ...state, query: state.query.slice(0, -1), cursor: 0 }); return }
-    if ((name === "space" || sequence === " ") && state.mode === "members") {
-      const item = pickerItems()[state.cursor]
-      if (item) setPicker({ ...state, selected: toggleSelected(state.selected, item.id) })
-      return
-    }
-    if (name === "enter" || name === "return" || name === "kpenter" || sequence === "\r" || sequence === "\n") {
-      if (state.mode === "members") {
-        if (state.selected.size === 0) { context.ui.toast.show({ title: "Ensemble", message: "Choose at least one member.", variant: "warning" }); return }
-        finishPicker([...state.selected])
-      } else {
-        const item = singleChoiceValue(pickerItems(), state.cursor)
-        if (item) finishPicker([item.id])
+    const length = pickerItems().length
+    setPicker({ ...state, cursor: Math.max(0, Math.min(Math.max(0, length - 1), state.cursor + delta)) })
+  }
+
+  const pickerJump = (index: number) => {
+    const state = picker()
+    if (!state) return
+    const length = pickerItems().length
+    setPicker({ ...state, cursor: Math.max(0, Math.min(Math.max(0, length - 1), index)) })
+  }
+
+  const pickerToggle = () => {
+    const state = picker()
+    if (!state || state.mode !== "members") return
+    const item = pickerItems()[state.cursor]
+    if (item) setPicker({ ...state, selected: toggleSelected(state.selected, item.id) })
+  }
+
+  const pickerActivate = () => {
+    const state = picker()
+    if (!state) return
+    if (state.mode === "members") {
+      if (state.selected.size === 0) {
+        context.ui.toast.show({ title: "Ensemble", message: "Choose at least one member.", variant: "warning" })
+        return
       }
+      finishPicker([...state.selected])
       return
     }
-    if (sequence.length === 1 && sequence >= " " && !event?.ctrl && !event?.meta && !event?.super) {
-      setPicker({ ...state, query: `${state.query}${sequence}`, cursor: 0 })
-    }
+    const item = singleChoiceValue(pickerItems(), state.cursor)
+    if (item) finishPicker([item.id])
+  }
+
+  const beginPickerFilter = () => {
+    const state = picker()
+    if (!state) return
+    setPicker({ ...state, filtering: true, query: "", cursor: 0 })
   }
 
   const finishTextPrompt = (value: string | undefined) => {
@@ -2658,10 +2653,12 @@ export function EnsembleV2App() {
     setTextPrompt(null)
     setModal(false)
     state.resolve(value)
+    clearPendingChord()
   }
 
   const openTextPrompt = (title: string, options: { description?: string; value?: string; placeholder?: string } = {}): Promise<string | undefined> => new Promise((resolve) => {
     if (wizard()) { resolve(undefined); return }
+    clearPendingChord()
     setModal(true)
     setTextPrompt({
       title,
@@ -2670,10 +2667,13 @@ export function EnsembleV2App() {
       placeholder: options.placeholder ?? "",
       resolve,
     })
+    dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
+    dispatchInteraction({ type: "field.enter", target: "prompt" })
   })
 
   const openChoice = (title: string, options: Array<{ title: string; value: string }>, current?: string): Promise<string | undefined> => new Promise((resolve) => {
     if (wizard()) { resolve(undefined); return }
+    clearPendingChord()
     const previous = leaderMode()
     setLeaderMode(false)
     setModal(true)
@@ -2685,12 +2685,15 @@ export function EnsembleV2App() {
       selected: new Set(current !== undefined ? [current] : []),
       cursor: Math.max(0, options.findIndex((option) => option.value === current)),
       query: "",
+      filtering: false,
       resolve: (value) => { setLeaderMode(previous); resolve(value?.[0]) },
     })
+    dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
   })
 
   const openConfirm = (title: string, message: string): Promise<boolean | undefined> => new Promise((resolve) => {
     if (wizard()) { resolve(undefined); return }
+    clearPendingChord()
     const previous = leaderMode()
     setLeaderMode(false)
     setModal(true)
@@ -2702,24 +2705,19 @@ export function EnsembleV2App() {
       message,
       resolve: (value) => { setConfirm(null); setModal(false); setLeaderMode(previous); resolve(value) },
     })
+    dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
   })
 
   const finishConfirm = (value: boolean | undefined) => {
     const state = confirm()
     if (!state) return
+    clearPendingChord()
     state.resolve(value)
-  }
-
-  const handleConfirmKey = (event: any) => {
-    const action = confirmKeyAction(String(event?.name ?? ""), String(event?.sequence ?? ""))
-    event?.preventDefault?.()
-    event?.stopPropagation?.()
-    if (!action) return
-    finishConfirm(action === "confirm")
   }
 
   const openResultModal = (title: string, text: string): Promise<void> => new Promise((resolve) => {
     if (wizard()) { resolve(); return }
+    clearPendingChord()
     const previous = leaderMode()
     setLeaderMode(false)
     setModal(true)
@@ -2731,22 +2729,48 @@ export function EnsembleV2App() {
       text,
       resolve: () => { setResult(null); setModal(false); setLeaderMode(previous); resolve() },
     })
+    dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
   })
 
   const finishResultModal = () => {
     const state = result()
     if (!state) return
+    clearPendingChord()
     state.resolve()
   }
 
-  const handleResultKey = (event: any) => {
-    const action = resultKeyAction(String(event?.name ?? ""))
-    event?.preventDefault?.()
-    event?.stopPropagation?.()
-    if (!action) return
-    if (action === "dismiss") { finishResultModal(); return }
-    const delta = action === "up" ? -3 : action === "down" ? 3 : action === "pageUp" ? -messageHeight() : messageHeight()
+  const resultScroll = (delta: number) => {
     try { resultScrollRef?.scrollBy?.(delta) } catch {}
+  }
+
+  const openApprovals = () => {
+    setApprovalCursor(0)
+    setApprovalsOpen(true)
+    dispatchInteraction({ type: "overlay.set", overlay: "approvals" })
+  }
+
+  const openHelp = () => {
+    setHelpOpen(true)
+    dispatchInteraction({ type: "overlay.set", overlay: "help" })
+  }
+
+  /**
+   * The reducer's typed close intent maps onto exactly one dialog. Signals
+   * update synchronously, so reading them here is the same surface the user
+   * saw when Esc was pressed.
+   */
+  const closeOverlay = (overlay: InteractionOverlay) => {
+    if (overlay === "dialog") {
+      if (textPrompt()) { finishTextPrompt(undefined); return }
+      if (picker()) { finishPicker(undefined); return }
+      if (confirm()) { finishConfirm(undefined); return }
+      if (result()) { finishResultModal(); return }
+      return
+    }
+    if (overlay === "wizard") { wizardCancel(); return }
+    if (overlay === "approvals") { setApprovalsOpen(false); return }
+    if (overlay === "help") { setHelpOpen(false); return }
+    if (overlay === "settings") void closeSettings()
   }
 
   const directoryChoices = (): WizardOption[] => {
@@ -2925,13 +2949,16 @@ export function EnsembleV2App() {
   const completeWizard = (state: WizardState, value: WizardDraft | undefined) => {
     setWizard(null)
     setModal(false)
+    clearPendingChord()
     state.resolve(value)
   }
 
   const submitWizard = (state: WizardState) => {
     const error = validateWizard(state)
     if (error) {
-      setWizard({ ...state, index: wizardInvalidIndex(state), error, query: "", cursor: 0 })
+      const next = { ...state, index: wizardInvalidIndex(state), error, query: "", filtering: false, cursor: 0 }
+      setWizard(next)
+      syncWizardMode(next)
       return
     }
     completeWizard(state, state.draft)
@@ -2954,10 +2981,27 @@ export function EnsembleV2App() {
     })
   }
 
+  const wizardStepFor = (state: WizardState): WizardStep | undefined =>
+    state.customDirectory
+      ? { key: "directoryPath", title: "Workspace directory", description: "Type or paste a directory path. Enter continues.", kind: "text", placeholder: "~/dev/project" }
+      : state.steps[state.index]
+
+  /**
+   * Text steps own an editor: entering one starts Insert, every list step
+   * stays in Normal. The shared Vim adapter owns motions inside the field.
+   */
+  const syncWizardMode = (state: WizardState) => {
+    const step = wizardStepFor(state)
+    if (step?.kind === "text") dispatchInteraction({ type: "field.enter", target: "wizard" })
+    else dispatchInteraction({ type: "field.leave" })
+  }
+
   const advanceWizard = (state: WizardState | undefined) => {
     if (!state) return
     if (wizardFinal(state)) { submitWizard(state); return }
-    setWizard({ ...state, index: state.index + 1, query: "", cursor: 0, error: undefined, steps: makeWizardSteps(state) })
+    const next = { ...state, index: state.index + 1, query: "", filtering: false, cursor: 0, error: undefined, steps: makeWizardSteps(state) }
+    setWizard(next)
+    syncWizardMode(next)
   }
 
   const wizardNext = () => {
@@ -2978,15 +3022,20 @@ export function EnsembleV2App() {
   const wizardPrev = () => {
     const state = wizard()
     if (!state) return
+    if (state.filtering) { setWizard({ ...state, filtering: false, query: "", cursor: 0 }); return }
     if (state.customDirectory) {
-      setWizard({ ...state, customDirectory: false, query: "", cursor: 0, error: undefined })
+      const next = { ...state, customDirectory: false, query: "", filtering: false, cursor: 0, error: undefined }
+      setWizard(next)
+      syncWizardMode(next)
       return
     }
     const step = wizardStep()
     const saved = step?.kind === "text" ? saveWizardText() : state
     const next = saved ?? state
-    if (next.index <= 0) return
-    setWizard({ ...next, index: next.index - 1, query: "", cursor: 0, error: undefined, steps: makeWizardSteps(next) })
+    if (next.index <= 0) { completeWizard(next, undefined); return }
+    const previous = { ...next, index: next.index - 1, query: "", filtering: false, cursor: 0, error: undefined, steps: makeWizardSteps(next) }
+    setWizard(previous)
+    syncWizardMode(previous)
   }
 
   const wizardMove = (delta: number) => {
@@ -2994,6 +3043,61 @@ export function EnsembleV2App() {
     if (!state) return
     const length = wizardItems().length
     setWizard({ ...state, cursor: Math.max(0, Math.min(Math.max(0, length - 1), wizardCursor() + delta)) })
+  }
+
+  const wizardJump = (index: number) => {
+    const state = wizard()
+    if (!state) return
+    const length = wizardItems().length
+    setWizard({ ...state, cursor: Math.max(0, Math.min(Math.max(0, length - 1), index)) })
+  }
+
+  const wizardBeginFilter = () => {
+    const state = wizard()
+    if (!state) return
+    setWizard({ ...state, filtering: true, query: "", cursor: 0 })
+  }
+
+  const wizardApplyFilter = (event: any) => {
+    const state = wizard()
+    if (!state) return
+    const edit = dialogFilterEdit(state.query, {
+      name: String(event?.name ?? ""),
+      sequence: String(event?.sequence ?? ""),
+      ctrl: Boolean(event?.ctrl),
+      meta: Boolean(event?.meta),
+      super: Boolean(event?.super),
+    })
+    if (edit.cancelled) {
+      setWizard({ ...state, filtering: false, query: "", cursor: 0 })
+      return
+    }
+    if (edit.done) {
+      setWizard({ ...state, filtering: false, query: edit.query, cursor: 0 })
+      return
+    }
+    setWizard({ ...state, query: edit.query, cursor: 0 })
+  }
+
+  const pickerApplyFilter = (event: any) => {
+    const state = picker()
+    if (!state) return
+    const edit = dialogFilterEdit(state.query, {
+      name: String(event?.name ?? ""),
+      sequence: String(event?.sequence ?? ""),
+      ctrl: Boolean(event?.ctrl),
+      meta: Boolean(event?.meta),
+      super: Boolean(event?.super),
+    })
+    if (edit.cancelled) {
+      setPicker({ ...state, filtering: false, query: "", cursor: 0 })
+      return
+    }
+    if (edit.done) {
+      setPicker({ ...state, filtering: false, query: edit.query, cursor: 0 })
+      return
+    }
+    setPicker({ ...state, query: edit.query, cursor: 0 })
   }
 
   const wizardToggle = () => {
@@ -3018,7 +3122,9 @@ export function EnsembleV2App() {
     const item = wizardItems()[wizardCursor()]
     if (!state || !step || !item) return
     if (step.key === "directory" && item.id === "__manual__") {
-      setWizard({ ...state, customDirectory: true, query: "", cursor: 0, error: undefined })
+      const next = { ...state, customDirectory: true, query: "", filtering: false, cursor: 0, error: undefined }
+      setWizard(next)
+      syncWizardMode(next)
       return
     }
     const next = patchWizard((candidate) => {
@@ -3042,41 +3148,24 @@ export function EnsembleV2App() {
     else advanceWizard(next)
   }
 
+  const wizardActivate = () => {
+    const state = wizard()
+    const step = wizardStep()
+    if (!state || !step) return
+    if (step.kind === "text") { wizardNext(); return }
+    const action = wizardEnterAction(step.kind, wizardFinal(state))
+    if (wizardItems().length === 0) return
+    if (action === "continue") advanceWizard(state)
+    else wizardSelect()
+  }
+
   const wizardCancel = () => {
     const state = wizard()
     if (state) completeWizard(state, undefined)
   }
 
-  const handleWizardKey = (event: any) => {
-    const state = wizard()
-    const step = wizardStep()
-    if (!state || !step) return
-    const name = String(event?.name ?? "")
-    const sequence = String(event?.sequence ?? "")
-    if (step.kind === "text") return
-    if (name === "up") { event?.preventDefault?.(); wizardMove(-1); return }
-    if (name === "down") { event?.preventDefault?.(); wizardMove(1); return }
-    if (name === "backspace") { event?.preventDefault?.(); setWizard({ ...state, query: state.query.slice(0, -1), cursor: 0 }); return }
-    if ((name === "space" || sequence === " ") && step.kind === "multi") { event?.preventDefault?.(); wizardToggle(); return }
-    if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") {
-      const action = wizardEnterAction(step.kind, wizardFinal(state))
-      if (action === "text") return
-      event?.preventDefault?.()
-      event?.stopPropagation?.()
-      closeCompletion()
-      if (wizardItems().length === 0) return
-      if (action === "continue") { advanceWizard(state); return }
-      wizardSelect()
-      return
-    }
-    const filterText = wizardFilterText(event)
-    if (filterText) {
-      event?.preventDefault?.()
-      setWizard({ ...state, query: `${state.query}${filterText}`, cursor: 0 })
-    }
-  }
-
   const openWizard = (flow: "workspace" | "agent", edit?: Workspace): Promise<WizardDraft | undefined> => new Promise((resolve) => {
+    clearPendingChord()
     const first = rosterAgents()[0]
     const model = models()[0]
     const draft: WizardDraft = flow === "workspace"
@@ -3091,6 +3180,7 @@ export function EnsembleV2App() {
       steps: [],
       index: 0,
       query: "",
+      filtering: false,
       cursor: 0,
       directoryOptions: flow === "workspace" ? directoryChoices() : [],
       modelOptions: wizardModelOptions(models()),
@@ -3110,7 +3200,164 @@ export function EnsembleV2App() {
     setComposerActive(false)
     try { composerRef?.blur?.() } catch {}
     setWizard(state)
+    dispatchInteraction({ type: "overlay.set", overlay: "wizard" })
+    syncWizardMode(state)
   })
+
+  type DialogDescriptor =
+    | { surface: "wizard"; field?: "insert" | "normal"; filtering: boolean }
+    | { surface: "picker"; filtering: boolean }
+    | { surface: "prompt"; field: "insert" | "normal" }
+    | { surface: "confirm" }
+    | { surface: "result" }
+    | { surface: "approvals" }
+
+  const dialogDescriptor = (): DialogDescriptor | null => {
+    if (wizard()) {
+      const step = wizardStep()
+      if (step?.kind === "text") return { surface: "wizard", field: interaction().mode === "insert" ? "insert" : "normal", filtering: false }
+      return { surface: "wizard", filtering: wizard()!.filtering }
+    }
+    if (picker()) return { surface: "picker", filtering: picker()!.filtering }
+    if (textPrompt()) return { surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }
+    if (confirm()) return { surface: "confirm" }
+    if (result()) return { surface: "result" }
+    if (approvalsOpen() && !helpOpen() && !settingsAgentID()) return { surface: "approvals" }
+    return null
+  }
+
+  const runDialogAction = (id: string) => {
+    switch (id) {
+      case "wizard.down": case "wizard.down.arrow": return wizardMove(1)
+      case "wizard.up": case "wizard.up.arrow": return wizardMove(-1)
+      case "wizard.top": return wizardJump(0)
+      case "wizard.bottom": return wizardJump(Math.max(0, wizardItems().length - 1))
+      case "wizard.activate": return wizardActivate()
+      case "wizard.toggle": return wizardToggle()
+      case "wizard.filter": return wizardBeginFilter()
+      case "wizard.back": return wizardPrev()
+      case "picker.down": case "picker.down.arrow": return pickerMove(1)
+      case "picker.up": case "picker.up.arrow": return pickerMove(-1)
+      case "picker.top": return pickerJump(0)
+      case "picker.bottom": return pickerJump(Math.max(0, pickerItems().length - 1))
+      case "picker.activate": return pickerActivate()
+      case "picker.toggle": return pickerToggle()
+      case "picker.filter": return beginPickerFilter()
+      case "picker.cancel": return finishPicker(undefined)
+      case "confirm.accept": case "confirm.accept.enter": return finishConfirm(true)
+      case "confirm.reject": case "confirm.reject.escape": return finishConfirm(false)
+      case "result.down": case "result.down.arrow": return resultScroll(3)
+      case "result.up": case "result.up.arrow": return resultScroll(-3)
+      case "result.top": return resultScroll(-1_000_000)
+      case "result.bottom": return resultScroll(1_000_000)
+      case "result.half.down": return resultScroll(Math.max(3, Math.floor(messageHeight() / 2)))
+      case "result.half.up": return resultScroll(-Math.max(3, Math.floor(messageHeight() / 2)))
+      case "result.page.down": return resultScroll(messageHeight())
+      case "result.page.up": return resultScroll(-messageHeight())
+      case "result.close.enter": case "result.close.escape": return finishResultModal()
+      case "approvals.down": case "approvals.down.arrow": return setApprovalCursor((cursor) => Math.min(Math.max(0, pendingApprovals().length - 1), cursor + 1))
+      case "approvals.up": case "approvals.up.arrow": return setApprovalCursor((cursor) => Math.max(0, cursor - 1))
+      case "approvals.top": return setApprovalCursor(0)
+      case "approvals.bottom": return setApprovalCursor(Math.max(0, pendingApprovals().length - 1))
+      case "approvals.resolve": { const approval = selectedApproval(); if (approval) void resolveApproval(approval).catch(showError); return }
+      case "approvals.close": dispatchInteraction({ type: "escape" }); return
+    }
+  }
+
+  const fieldEnter = (surface: "wizard" | "prompt") => dispatchInteraction({ type: "field.enter", target: surface })
+
+  const handleFieldInsertKey = (surface: "wizard" | "prompt", event: any): boolean => {
+    const ctrl = Boolean(event?.ctrl)
+    const token = normalizeKeyToken(event)
+    if (token === "escape" && !ctrl) {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      if (dialogEscape({ surface, field: true }) === "field-normal") dispatchInteraction({ type: "field.leave" })
+      const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
+      vim?.invalidate()
+      vim?.normalizeCursor()
+      return true
+    }
+    // Enter stays with the textarea's `onSubmit`; Shift+Enter adds a line.
+    // Insert is otherwise the editor's own mode: printable keys, Backspace,
+    // arrows, and the system clipboard all belong to the renderable.
+    return false
+  }
+
+  const handleFieldNormalKey = (surface: "wizard" | "prompt", event: any): boolean => {
+    const token = normalizeKeyToken(event)
+    if (token === "escape") {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      const action = dialogEscape({ surface })
+      const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
+      vim?.invalidate()
+      dispatchInteraction({ type: "field.leave" })
+      if (action === "back") wizardPrev()
+      else finishTextPrompt(undefined)
+      return true
+    }
+    if (token === "enter" || token === "shift+enter") {
+      // The focused textarea owns submit/newline in both modes; this keeps
+      // Enter from double-firing through the raw listener and the renderable.
+      return false
+    }
+    event?.preventDefault?.(); event?.stopPropagation?.()
+    const rawName = String(event?.name ?? "")
+    const ctrl = Boolean(event?.ctrl) || rawName.startsWith("ctrl+")
+    const name = rawName.startsWith("ctrl+") ? rawName.slice("ctrl+".length) : rawName
+    const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
+    const key = normalizeVimKey({ name, ctrl, shift: Boolean(event?.shift) })
+    if (!vim || !key) return true
+    void vim
+      .press(key)
+      .then((outcome) => {
+        syncVimChord(outcome.pendingChord)
+        if (outcome.mode === "insert") fieldEnter(surface)
+      })
+      .catch(showError)
+    return true
+  }
+
+  /**
+   * One catalog-driven handler for every dialog. Text fields follow the
+   * Insert -> field Normal -> back/cancel ladder and route motions through
+   * the shared Vim adapter; list surfaces route j/k, gg/G, Enter, Space, /,
+   * and Esc through the same keymap catalog as the roster and chat.
+   */
+  const handleDialogKey = (event: any): boolean => {
+    const dialog = dialogDescriptor()
+    if (!dialog) return false
+    if (dialog.surface === "wizard" && dialog.field === "insert") return handleFieldInsertKey("wizard", event)
+    if (dialog.surface === "prompt" && dialog.field === "insert") return handleFieldInsertKey("prompt", event)
+    if (dialog.surface === "wizard" && dialog.field === "normal") return handleFieldNormalKey("wizard", event)
+    if (dialog.surface === "prompt" && dialog.field === "normal") return handleFieldNormalKey("prompt", event)
+    if ((dialog.surface === "wizard" || dialog.surface === "picker") && dialog.filtering) {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      if (dialog.surface === "wizard") wizardApplyFilter(event)
+      else pickerApplyFilter(event)
+      return true
+    }
+
+    event?.preventDefault?.(); event?.stopPropagation?.()
+    const token = normalizeKeyToken(event)
+    if (token === "escape") {
+      dispatchInteraction({ type: "escape" })
+      return true
+    }
+    const context: KeyContext = dialog.surface === "approvals" ? "approvals" : dialogKeyContext({ surface: dialog.surface })
+    const resolved = resolveNormalKey(context, pendingKeys, token)
+    if (resolved.type === "pending") {
+      setPendingChord([...resolved.prefix])
+      return true
+    }
+    if (resolved.type === "action") {
+      runDialogAction(resolved.entry.id)
+      return true
+    }
+    if (pendingKeys.length > 0) clearPendingChord()
+    // A dialog traps every other key: `:` and Space never reach the surface
+    // underneath, and the wizard never opens the command line or the leader.
+    return true
+  }
 
   const completionWindow = (state: NonNullable<ReturnType<typeof completion>>) => {
     const max = 6
@@ -3137,11 +3384,41 @@ export function EnsembleV2App() {
     if (settingsField()) return composerPosition(settingsFieldText(), settingsFieldCursor())
     if (composerActive()) return composerPosition(composerDraft(), composerCursor())
     if (settingsAgentID()) return listPosition(settingsCursorClamped(), settingsRowTotal())
+    const activeWizard = wizard()
+    if (activeWizard) {
+      if (wizardStep()?.kind === "text") return composerPosition(String(wizardRef?.plainText ?? ""), Number(wizardRef?.cursorOffset ?? 0))
+      return listPosition(wizardCursor(), wizardItems().length)
+    }
+    if (picker()) return listPosition(picker()!.cursor, pickerItems().length)
+    const prompt = textPrompt()
+    if (prompt) return composerPosition(String(textPromptRef?.plainText ?? prompt.value), Number(textPromptRef?.cursorOffset ?? 0))
     if (interaction().focus === "rail") return listPosition(railCursor(), railItems().length)
     if (interaction().focus === "work") return listPosition(taskCursor(), orderedTasks().length)
     return atBottom() ? "100%" : "scrolled"
   }
   const settingsEntryEnabled = (entry: KeyEntry) => settingsActionEnabled(entry.id)
+  const wizardHint = () => {
+    const state = wizard()
+    if (!state) return ""
+    const step = wizardStep()
+    if (state.filtering) return statuslineHints("filter")
+    if (step?.kind === "text") {
+      return statuslineHints(dialogKeyContext({ surface: "wizard", field: interaction().mode === "insert" ? "insert" : "normal" }))
+    }
+    return statuslineHints("wizard", { multiple: step?.kind === "multi" })
+  }
+  const dialogHint = () => {
+    const prompt = textPrompt()
+    if (prompt) {
+      return statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))
+    }
+    const chooser = picker()
+    if (chooser?.filtering) return statuslineHints("filter")
+    if (chooser) return statuslineHints("picker", { multiple: chooser.mode === "members" })
+    if (confirm()) return statuslineHints("confirm")
+    if (result()) return statuslineHints("result")
+    return ""
+  }
   const statusHints = () => {
     if (leaderMode()) return "which-key · ? help · q leave · esc cancel"
     const command = interaction().command
@@ -3152,6 +3429,9 @@ export function EnsembleV2App() {
       }
       return "enter search · esc cancel · ↑↓ history"
     }
+    if (wizard()) return wizardHint()
+    if (picker() || textPrompt() || confirm() || result()) return dialogHint()
+    if (approvalsOpen() && !helpOpen() && !settingsAgentID()) return statuslineHints("approvals")
     if (interaction().overlay === "none") {
       const search = transcriptSearch()
       if (search) {
@@ -3170,7 +3450,6 @@ export function EnsembleV2App() {
         : `h/j/k/l move · i/a insert · x/d edit · yy/p yank · esc settings`
     }
     if (settingsAgentID()) return statuslineHints("settings", { filter: settingsEntryEnabled })
-    if (interaction().overlay === "approvals") return "enter resolve · esc close"
     if (interaction().overlay === "help") return "esc close"
     if (composerActive()) {
       return interaction().mode === "insert"
@@ -3379,7 +3658,7 @@ export function EnsembleV2App() {
         <>
           <box position="absolute" top={pickerGeometry().top} left={pickerGeometry().left} width={pickerGeometry().width} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column">
             <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={110}>
-              <PickerOverlay colors={colors} title={() => picker()!.title} query={() => picker()!.query} items={() => pickerItems()} cursor={() => picker()!.cursor} multiple={() => picker()!.mode === "members"} />
+              <PickerOverlay colors={colors} title={() => picker()!.title} query={() => picker()!.query} items={() => pickerItems()} cursor={() => picker()!.cursor} multiple={() => picker()!.mode === "members"} footer={() => statuslineHints("picker", { multiple: picker()?.mode === "members" })} />
             </box>
           </box>
         </>
@@ -3393,7 +3672,7 @@ export function EnsembleV2App() {
             <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
               <textarea ref={(value: any) => { textPromptRef = value; queueMicrotask(() => value?.focus?.()) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
             </box>
-            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{promptFooter()}</text>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))}</text>
             </box>
           </box>
         </>
@@ -3404,7 +3683,7 @@ export function EnsembleV2App() {
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{confirm()!.title}</text>
             <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{confirm()!.message}</text>
-            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{confirmFooter()}</text>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{statuslineHints("confirm")}</text>
             </box>
           </box>
         </>
@@ -3417,7 +3696,7 @@ export function EnsembleV2App() {
             <scrollbox ref={(value: any) => { resultScrollRef = value }} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
               <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{result()!.text || " "}</text>
             </scrollbox>
-            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{resultFooter()}</text>
+            <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{statuslineHints("result")}</text>
             </box>
           </box>
         </>
@@ -3429,7 +3708,7 @@ export function EnsembleV2App() {
           <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
           <Show when={wizardStep()?.kind === "text"} fallback={
             <box flexDirection="column" height={9}>
-              <text fg={colors.faint} bg={colors.panel} width="100%" truncate>search: {wizard()!.query || "type to filter"} · {wizardItems().length} options</text>
+              <text fg={colors.faint} bg={colors.panel} width="100%" truncate>filter: {wizard()!.query || "(none)"} · {wizardItems().length} options{wizard()!.filtering ? " · typing" : ""}</text>
               <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
                 <Show when={wizardItems().length === 0} fallback={
                 <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
@@ -3461,7 +3740,7 @@ export function EnsembleV2App() {
           </Show>
           <Show when={wizard()?.error}><text fg={colors.bad} bg={colors.panel} width="100%" truncate>{wizard()!.error}</text></Show>
           <box width="100%" flexDirection="row" justifyContent="center" flexShrink={0}>
-            <text fg={colors.faint} bg={colors.panel} truncate>{wizardNavHint(Boolean(wizard() && wizardFinal(wizard()!)))}</text>
+            <text fg={colors.faint} bg={colors.panel} truncate>{wizardHint()}</text>
           </box>
         </box>
       </Show>
