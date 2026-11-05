@@ -18,12 +18,7 @@ Ensemble extends OpenCode's TUI with persistent agent teams. Keep changes within
 
 ## End-of-turn handoff (mandatory, ticket #71)
 
-- Every non-leader agent turn must end with a handoff to another workspace member: explicit via `ensemble_handoff`, or automatic server default to the workspace leader carrying the finished task content. The group shows `Handed to $Recipient`. Leader turns may end normally or hand off voluntarily.
-- A handoff is delegation: write the recipient a clear, self-authored instruction in your own words — never a copy of the user's message. `task` stays the short display title; the recipient's work item uses your instruction.
-- Answer first: write your own answer in the group chat before handing off. A handoff forwards a completed result or clearly scoped work; it is never a substitute for answering your assignment.
-- Multiple pending completion handoffs for one recipient coalesce into one consolidated batch review turn after a short quiet window (~1s) or when the recipient is free. Decide each item with `ensemble_review` (`delegate` | `start` | `end` | `dismiss`); the batch closes only when every item is acted on or dismissed. Non-leader recipients hand the batch onward (default leader); the leader may end it.
-- Loop guards apply: maximum handoff chain depth, no immediate back-and-forth to the previous sender, repeated-recipient detection, forced leader or termination fallback at the cap. Mandatory handoff never calls `ensemble_delegate` after a handoff (leader-only; would double-queue) and never queues duplicate work.
-- Mention syntax throughout: `$Name` (or `!Name` alias) for agents; `@` is file-only and never addresses an agent.
+Every non-leader agent turn must end with a handoff to another workspace member before the turn closes. Read the [handoff contract](docs/agents/handoff.md) for delegation content, batched review, loop guards, and mention syntax.
 
 ## Agent skills
 
