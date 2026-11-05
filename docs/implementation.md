@@ -112,7 +112,7 @@ Message {
 - `$`, `@`, and `/` open an inline bordered completion popup above the composer. The composer stays focused; typing filters the list, `↑/↓` move, `Enter` inserts an agent/file token or runs a command, and `Esc` closes. No host completion dialog opens.
 - Agent and file completion insert stable references in place. Slash selection executes through the same command path as a typed `/command`.
 - Workspace creation and editing share a centered wizard: Directory → Name → Members → Leader → Synthesis. Editing an existing workspace uses Members → Leader → Synthesis. The leader step lists every member selected in the previous step and preselects the current leader when still selected.
-- Agent creation uses a centered wizard: Name → Title → Role → Model → Variant. `Ctrl+N` / `Ctrl+P` move forward/back between steps, identical on every platform (Cmd chords are not delivered by stock macOS terminals), `Enter` advances or submits, the footer advertises only the universal pair, and `Shift+Enter` adds a newline in text steps. Normal left/right move the caret. Next/Back do not validate; the final submit validates and jumps to the first invalid step with an inline error. The Main model step tracks the live model catalog and explains an empty catalog instead of showing a bare zero.
+- Agent creation uses a centered wizard: Name → Title → Role → Model → Variant. Wizard list steps use `j`/`k` (`gg`/`G`), `Enter`, `Space` on multi-select steps, `/` to filter, and `Esc` to go back one step or cancel at the first step. Text steps use the shared Insert/Normal/Visual grammar: `Enter` continues, `Esc` goes to field Normal, and the next `Esc` goes back a step. `Shift+Enter` adds a newline in text steps. Next/Back do not validate; the final submit validates and jumps to the first invalid step with an inline error. The Main model step tracks the live model catalog and explains an empty catalog instead of showing a bare zero.
 - Agent name, title, and role fields are wrapping textareas. Workspace and agent drafts remain in the modal while navigating; `Esc` cancels the wizard.
 - Modal panels use an opaque raised surface and a double focus border. The page bars dim while a modal is open.
 - Rail agent names are predictable: selected agents use the success/accent color, every unselected agent uses normal text. Agent identity colors are not shuffled per row.
@@ -144,7 +144,7 @@ init.json            AGENTS.md block version
 
 `I` or `/init` runs native `/init` in a temporary workspace session, waits for the agent to update `AGENTS.md`, then places the versioned `<!-- ensemble:start v2 -->` block at the top. Existing content outside the markers is preserved. Init failures leave no partial block.
 
-Reset is available through `/reset-ensemble` and `Ctrl+Shift+Delete`, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
+Reset is available through the `/reset-ensemble` composer command, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
 ## Native tools
 
@@ -233,11 +233,11 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 
 ## Leader key
 
-- `~` enters leader mode outside text entry.
-- `~ ?` opens the full grouped shortcut list.
-- `~ q` leaves Ensemble for the native TUI.
-- `Esc` cancels leader mode.
-- `~` inside a dialog or message remains text.
+- `Space` enters the which-key leader menu outside text entry.
+- `Space ?` opens the full grouped shortcut list.
+- `Space q` leaves Ensemble for the native TUI; `:q` is the equivalent command.
+- `Esc` cancels leader mode and never leaves Ensemble.
+- `Space` inside a dialog or message remains text.
 
 ## Ticket map
 
@@ -267,8 +267,9 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 - One process-level service registry owns a single Ensemble service/store, with reference-counted location setup and changes broadcast to every RPC registration. Stores also merge roster/membership/binding updates and reconcile every workspace config when snapshots are read.
 - Direct-chat assistant messages use the same `agent` transcript role as group replies.
 - Markdown styling covers heading levels, strong, italic, strikethrough, inline/block code, links, lists, quotes, images, and syntax token scopes. Styling failures are reported instead of silently downgrading.
-- `Ctrl` bindings are translated to `Cmd` on macOS. Shortcut labels use `Cmd` on macOS and `Ctrl` elsewhere.
-- `~ ?` opens a searchable shortcut reference with fuzzy filtering, a scrollable list, and all archive/delete/reset/scroll/wizard shortcuts.
+- The interaction layer is modal: Normal, Insert, Visual, and Command share one binding catalog and one Esc ladder. `Space` is the leader, `Esc` never leaves, and the old Ctrl app shortcuts are gone.
+- `Space ?` opens a searchable shortcut reference with fuzzy filtering and a scrollable list generated from the binding catalog.
+- The Leader key is `Space`; `Space q` and `:q` leave Ensemble deliberately, and `Esc` never leaves.
 - The versioned team contract is v2. It explicitly defines `$Name` chat mentions, `@path` file references, and Ensemble tools as the work-dispatch mechanism.
 - Agent replies that write `@KnownAgent` are display-normalized to `$KnownAgent`; a system note clarifies that a mention does not dispatch work.
 - The shared service is the root fix for the stale-location lost update: Jessy's profile and binding remained in storage, but one location held a workspace row without her. Both locations now reconcile to three members.

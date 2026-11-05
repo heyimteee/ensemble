@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { SyntaxStyle } from "@opentui/core"
-import { usePlugin, type Plugin } from "@opencode/plugin/tui"
+import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
@@ -12,7 +12,6 @@ import { filterMemories } from "./memories.ts"
 import { palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
-import { platformBind, platformLabel } from "./platform.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions } from "./wizard.ts"
 import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
 import {
@@ -65,6 +64,8 @@ import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslin
 import { layerEntries, globalEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
+import { createPageActivation } from "./page-activation.ts"
+import { focusWhenReady } from "./focus.ts"
 import { createCommandHistory, recallHistory, rememberHistory, startHistory, type CommandHistory } from "./history.ts"
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
 import { normalizeAgentMentions } from "../routing.ts"
@@ -215,6 +216,10 @@ function directoryOf(context: any): string {
   return context.location?.directory ?? context.data.location.default().directory
 }
 
+// v5.6 T11: the host keeps earlier plugin pages mounted, so their raw key
+// listeners outlive the navigation. Only the newest page may handle keys.
+const pageActivation = createPageActivation()
+
 async function callRpc<T = any>(context: any, method: string, input: any): Promise<T> {
   const response = await context.client.rpc.call({ rpcID: "ensemble.v2", method, location: { directory: directoryOf(context) }, input })
   return response?.output ?? response
@@ -228,12 +233,8 @@ async function invoke(context: any, action: string, payload: any = {}): Promise<
 
 export function EnsembleV2App() {
   const context = usePlugin()
+  const pageToken = {}
   const colors = palette(context.theme as any)
-  type KeymapLayerFactory = Parameters<Plugin.Context["keymap"]["layer"]>[0]
-  const platformLayer = (factory: KeymapLayerFactory) => context.keymap.layer(() => {
-    const value = factory()
-    return { ...value, commands: value.commands?.map((command) => typeof command.bind === "string" ? { ...command, bind: platformBind(command.bind) } : command) }
-  })
   const syntaxStyle = (() => {
     try {
       return SyntaxStyle.fromStyles(markdownStyles(context.theme), (context.renderer as any).nativeScene)
@@ -333,12 +334,11 @@ export function EnsembleV2App() {
     for (const intent of result.intents) {
       if (intent.type === "focus-editor") {
         const target = intent.target
-        queueMicrotask(() => {
-          if (result.state.field === "settings") settingsFieldRef?.focus?.()
-          else if (target === "prompt") textPromptRef?.focus?.()
-          else if (target === "wizard") wizardRef?.focus?.()
-          else composerRef?.focus?.()
-        })
+        const field = result.state.field
+        if (field === "settings") focusWhenReady(() => settingsFieldRef)
+        else if (target === "prompt") focusWhenReady(() => textPromptRef)
+        else if (target === "wizard") focusWhenReady(() => wizardRef)
+        else focusWhenReady(() => composerRef)
       } else if (intent.type === "blur-editor") {
         try { composerRef?.blur?.() } catch {}
         try { settingsFieldRef?.blur?.() } catch {}
@@ -1183,7 +1183,7 @@ export function EnsembleV2App() {
       // Ticket #77d: keep the composer focused across snapshot repaints. A
       // poll that lands between typing and Enter must not silently drop the
       // key because the textarea lost focus.
-      if (composerActive() && interaction().mode === "insert") queueMicrotask(() => composerRef?.focus?.())
+      if (composerActive() && interaction().mode === "insert") focusWhenReady(() => composerRef)
       syncTranscriptScroll()
       try { (context.renderer as any)?.requestRender?.() } catch {}
       if (next.configError && next.configError !== lastConfigError) {
@@ -1436,7 +1436,7 @@ export function EnsembleV2App() {
     })
   }
 
-  const focusComposer = () => queueMicrotask(() => composerRef?.focus?.())
+  const focusComposer = () => focusWhenReady(() => composerRef)
   const composerHeight = () => computeComposerHeight(composerDraft(), Math.max(12, messageWidth() - 6))
   const setComposerValue = (value: string) => {
     composerCache.buffer?.invalidate()
@@ -1738,9 +1738,9 @@ export function EnsembleV2App() {
       event?.preventDefault?.(); event?.stopPropagation?.()
       // Command and search still open from composer Normal (#80); the rest of
       // Normal is the Vim grammar (#85). Visual owns every other key (#86).
-      const sequence = String(event?.sequence ?? "")
-      if (mode === "normal" && (sequence === ":" || sequence === "/")) {
-        openCommandLine(sequence)
+      const commandToken = normalizeKeyToken(event)
+      if (mode === "normal" && (commandToken === ":" || commandToken === "/")) {
+        openCommandLine(commandToken)
         return true
       }
       if (name === "return" || name === "enter" || name === "kpenter") {
@@ -1829,7 +1829,7 @@ export function EnsembleV2App() {
         applyVimOutcome(outcome, {
           insert: () => {
             dispatchInteraction({ type: "settings.field.open" })
-            queueMicrotask(() => settingsFieldRef?.focus?.())
+            focusWhenReady(() => settingsFieldRef)
           },
           cursor: syncSettingsFieldFromEditor,
         }),
@@ -2337,11 +2337,6 @@ export function EnsembleV2App() {
     "work.restart": () => restartSelected(),
     "work.cancel": () => cancelSelected(),
     "work.native": () => openNative(),
-    "legacy.workspace.archive": () => archiveWorkspace(),
-    "legacy.workspace.delete": () => deleteWorkspace(),
-    "legacy.agent.archive": () => archiveSelectedAgent(),
-    "legacy.agent.delete": () => deleteSelectedAgent(),
-    "legacy.reset": () => resetEnsemble(),
     // Settings grammar (#83): the keys live in the catalog; these handlers
     // only mutate the cursor or dispatch the row action.
     "settings.tab.prev": () => setSettingsTabTo(settingsTabStep(settingsTab(), -1)),
@@ -2397,6 +2392,7 @@ export function EnsembleV2App() {
   }
 
   onMount(() => {
+    pageActivation.mount(pageToken)
     void refresh()
     const timer = setInterval(() => {
       if (surface()?.kind === "agent") void refreshChat()
@@ -2424,6 +2420,8 @@ export function EnsembleV2App() {
     })
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
+      // A stale stacked page must never consume a key before the visible page.
+      if (!pageActivation.isActive(pageToken)) return
       if (interaction().command) { handleCommandKey(event); return }
       // v5.6 T10: the help overlay owns every key while open. Its grammar is
       // local to the overlay and never changes interaction mode or focus.
@@ -2443,7 +2441,7 @@ export function EnsembleV2App() {
       // These run before the leader/chord layers so `n` cannot create a
       // workspace while a search is active.
       const pressed = String(event?.name ?? "")
-      const typed = String(event?.sequence ?? "")
+      const token = normalizeKeyToken(event)
       if (!leaderMode() && !composerActive() && interaction().overlay === "none") {
         if (focusArea() === "chat" && transcriptSearch() && (pressed === "n" || pressed === "N")) {
           event?.preventDefault?.(); event?.stopPropagation?.()
@@ -2457,9 +2455,8 @@ export function EnsembleV2App() {
           return
         }
       }
-      if (!leaderMode() && !composerActive() && (typed === ":" || typed === "/" || pressed === ":" || pressed === "/")) {
-        const kind = typed === "/" || pressed === "/" ? "/" : ":"
-        if (openCommandLine(kind)) {
+      if (!leaderMode() && !composerActive() && (token === ":" || token === "/")) {
+        if (openCommandLine(token)) {
           event?.preventDefault?.(); event?.stopPropagation?.()
           return
         }
@@ -2468,7 +2465,7 @@ export function EnsembleV2App() {
       // is the catalog's global binding, so help cannot invent it.
       if (!leaderMode() && !composerActive() && !isModal() && interaction().overlay === "none") {
         const globalHelp = globalEntries().find((entry) => entry.id === "global.help")
-        if (globalHelp && normalizeKeyToken(event) === globalHelp.keys[0]) {
+        if (globalHelp && token === globalHelp.keys[0]) {
           event?.preventDefault?.(); event?.stopPropagation?.()
           openHelp()
           return
@@ -2477,7 +2474,6 @@ export function EnsembleV2App() {
       // v5.6 T3: the leader owns known keys through the generated leader
       // layer; anything else closes which-key with a truthful warning.
       if (leaderMode()) {
-        const token = normalizeKeyToken(event)
         if (token === "escape" || resolveLeaderKey(token).type === "action") return
         event?.preventDefault?.(); event?.stopPropagation?.()
         setLeaderMode(false)
@@ -2489,7 +2485,6 @@ export function EnsembleV2App() {
       // to the generated layers, prefixes set the statusline pending chord.
       const keyContext = surfaceKeyContext()
       if (!keyContext) return
-      const token = normalizeKeyToken(event)
       if (!token) return
       const sequence = [...pendingKeys, token]
       const resolved = resolveNormalKey(keyContext, pendingKeys, token)
@@ -2555,23 +2550,21 @@ export function EnsembleV2App() {
         runKeyAction(entry.id)
       },
     })
-    const surfaceLayer = (keyContext: "roster" | "chat" | "work", platform: boolean) => {
-      const entries = layerEntries(keyContext).filter((entry) => Boolean(entry.platform) === platform)
+    const surfaceLayer = (keyContext: "roster" | "chat" | "work") => {
+      const entries = layerEntries(keyContext)
       if (entries.length === 0) return
       const commands = entries.map((entry) => catalogCommand(entry, `ensemble.v2.key.${keyContext}.${entry.id}`))
       const factory = () => ({
         mode: "global",
         priority: 100,
-        enabled: () => isOurRoute() && !isModal() && !leaderMode() && !commandActive() && wizard() === null && !composerActive() && interaction().command === null && surfaceKeyContext() === keyContext,
+        enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && !isModal() && !leaderMode() && !commandActive() && wizard() === null && !composerActive() && interaction().command === null && surfaceKeyContext() === keyContext,
         commands,
         bindings: commands.map((command) => command.id),
       })
-      if (platform) platformLayer(factory)
-      else context.keymap.layer(factory)
+      context.keymap.layer(factory)
     }
     for (const keyContext of ["roster", "chat", "work"] as const) {
-      surfaceLayer(keyContext, false)
-      surfaceLayer(keyContext, true)
+      surfaceLayer(keyContext)
     }
     // Ticket #83: settings is generated from its own catalog context. The
     // layer is disabled while a text field owns the keyboard so Insert typing
@@ -2579,10 +2572,10 @@ export function EnsembleV2App() {
     const settingsCommands = layerEntries("settings").map((entry) =>
       catalogCommand(entry, `ensemble.v2.key.settings.${entry.id}`, () => settingsActionEnabled(entry.id)),
     )
-    platformLayer(() => ({
+    context.keymap.layer(() => ({
       mode: "global",
       priority: 110,
-      enabled: () => isOurRoute() && Boolean(settingsAgentID()) && settingsField() === null && !overlayOpen() && !leaderMode() && !commandActive() && wizard() === null && interaction().command === null,
+      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && Boolean(settingsAgentID()) && settingsField() === null && !overlayOpen() && !leaderMode() && !commandActive() && wizard() === null && interaction().command === null,
       commands: settingsCommands,
       bindings: settingsCommands.map((command) => command.id),
     }))
@@ -2598,13 +2591,13 @@ export function EnsembleV2App() {
     context.keymap.layer(() => ({
       mode: "global",
       priority: 120,
-      enabled: () => isOurRoute() && !isModal() && leaderMode() && !commandActive(),
+      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && !isModal() && leaderMode() && !commandActive(),
       commands: leaderCommands,
       bindings: leaderCommands.map((command) => command.id),
     }))
-    platformLayer(() => ({
+    context.keymap.layer(() => ({
       mode: "global", priority: 130,
-      enabled: () => isOurRoute() && composerActive() && !isModal() && wizard() === null && !commandActive(),
+      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && composerActive() && !isModal() && wizard() === null && !commandActive(),
       commands: [
         { id: "ensemble.v2.composer.cancel", title: "Ensemble: Composer Esc ladder", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); if (completion()) closeCompletion(); else dispatchInteraction({ type: "escape" }) } },
         // Host Escape handling can swallow the key while a native run is
@@ -2614,9 +2607,9 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.composer.cancel", "ensemble.v2.composer.leave", "ensemble.v2.composer.stop"],
     }))
-    platformLayer(() => ({
+    context.keymap.layer(() => ({
       mode: "global", priority: 140,
-      enabled: () => isOurRoute() && composerActive() && completion() !== null && !modal() && wizard() === null && !commandActive(),
+      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && composerActive() && completion() !== null && !modal() && wizard() === null && !commandActive(),
       commands: [
         { id: "ensemble.v2.completion.up", title: "Ensemble: Previous completion", bind: "up", run: () => moveCompletion(-1) },
         { id: "ensemble.v2.completion.down", title: "Ensemble: Next completion", bind: "down", run: () => moveCompletion(1) },
@@ -2628,9 +2621,9 @@ export function EnsembleV2App() {
     // v5.6 T10: the raw listener owns help navigation, but the host may
     // consume a lone Escape before it reaches that listener. Keep a thin
     // generated layer for the close/page keys so help always closes.
-    platformLayer(() => ({
+    context.keymap.layer(() => ({
       mode: "global", priority: 115,
-      enabled: () => isOurRoute() && helpOpen() && !leaderMode() && !commandActive() && wizard() === null,
+      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && helpOpen() && !leaderMode() && !commandActive() && wizard() === null,
       commands: [
         { id: "ensemble.v2.help.close", title: "Ensemble: Close help", bind: "escape", run: () => closeHelp() },
         { id: "ensemble.v2.help.up", title: "Ensemble: Help page up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); scrollHelpBy(-10) } },
@@ -2640,7 +2633,7 @@ export function EnsembleV2App() {
     }))
     // v5.6 T6: the wizard/dialog catalog owns its keys through the raw
     // listener above; the help overlay owns its grammar there too (T10).
-    return () => { clearInterval(timer); keyInput.off("keypress", onKey); context.renderer.off("selection", onSelection); stopData() }
+    return () => { pageActivation.unmount(pageToken); clearInterval(timer); keyInput.off("keypress", onKey); context.renderer.off("selection", onSelection); stopData() }
   })
 
   const showError = (error: any) => context.ui.toast.show({ title: "Ensemble", message: error?.message ?? String(error), variant: "error" })
@@ -3890,7 +3883,7 @@ export function EnsembleV2App() {
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{textPrompt()!.title}</text>
             <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{textPrompt()!.description}</text>
             <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-              <textarea ref={(value: any) => { textPromptRef = value; queueMicrotask(() => value?.focus?.()) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+              <textarea ref={(value: any) => { textPromptRef = value; if (value) focusWhenReady(() => value) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
             </box>
             <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{interaction().mode === "visual" ? visualHint : statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))}</text>
             </box>
@@ -3954,7 +3947,7 @@ export function EnsembleV2App() {
           }>
             <Show when={wizardStepKey()} keyed>
               <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                <textarea ref={(value: any) => { wizardRef = value; queueMicrotask(() => value?.focus?.()) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                <textarea ref={(value: any) => { wizardRef = value; if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
               </box>
             </Show>
           </Show>

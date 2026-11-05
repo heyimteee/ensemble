@@ -51,6 +51,6 @@ _Avoid_: Channel, room, group (when referring to this concept).
 
 **Session binding**: The association between a workspace, an agent, and that agent's persistent native session and behavioral version.
 
-**Leader key**: The `~` prefix that opens Ensemble keyboard navigation outside text entry. `~?` shows all shortcuts; `~q` leaves Ensemble.
+**Leader key**: The `Space` prefix that opens Ensemble keyboard navigation outside text entry. `Space ?` shows all shortcuts; `Space q` leaves Ensemble. `:q` is the equivalent command-line quit.
 
 **Backup model**: An alternative model in an agent's ordered fallback list, used for eligible model availability failures.

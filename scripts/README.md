@@ -11,9 +11,9 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   HTTP server binds an ephemeral loopback port and streams fixed rich Markdown.
   Checks observe streaming, finalized content, single occurrences of reply
   markers, no remaining streaming label, no stale lines after navigation,
-  searchable help, the current platform's shortcut labels, and that the wizard
-  footer advertises `Ctrl+P back` / `Ctrl+N next` with both chords actually
-  advancing and returning a step.
+  searchable help, the modal grammar, composer drafts and queued messages, the
+  wizard Esc ladder, and that `:`/`/` still open Command mode after an F2
+  native-session round-trip.
 - `npm run test:live:fake:empty`: same isolated fake provider, but configured
   with no models. Walks the New-agent wizard to the Main model step and asserts
   the explained empty state (`0 options` plus `No models available …`) and that

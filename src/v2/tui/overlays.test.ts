@@ -20,5 +20,5 @@ test("inline skill filter edits the query without a dialog", () => {
 
 test("inline skill filter ignores modifier chords and multi-character sequences", () => {
   assert.deepEqual(filterEdit("a", { name: "", sequence: "b", ctrl: true }), { query: "a", done: false, cancelled: false })
-  assert.deepEqual(filterEdit("a", { name: "", sequence: "~?" }), { query: "a", done: false, cancelled: false })
+  assert.deepEqual(filterEdit("a", { name: "", sequence: "Z?" }), { query: "a", done: false, cancelled: false })
 })
