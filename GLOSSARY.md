@@ -51,6 +51,8 @@ _Avoid_: Channel, room, group (when referring to this concept).
 
 **Session binding**: The association between a workspace, an agent, and that agent's persistent native session and behavioral version.
 
-**Leader key**: The `Space` prefix that opens Ensemble keyboard navigation outside text entry. `Space ?` shows all shortcuts; `Space q` leaves Ensemble. `:q` is the equivalent command-line quit.
+**Mode**: The global interaction state—Normal, Insert, Visual, or Command—that decides whether keys act on lists or type into the focused editor. It persists across focus, overlay, wizard-step, and surface changes; only explicit mode keys change it, never `Enter`.
+
+**Leader key**: The `Space` prefix that opens Ensemble keyboard navigation outside text entry. `Space ?` shows all shortcuts; `Space q` leaves Ensemble. `:q` is the equivalent command-line quit. Leaving Ensemble hands the keyboard to the native OpenCode prompt; `F2` returns.
 
 **Backup model**: An alternative model in an agent's ordered fallback list, used for eligible model availability failures.

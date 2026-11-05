@@ -508,11 +508,13 @@ live_check_help() {
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "match 1/1" 10 "filtered help names the first match"
   live_key "$LIVE_TUI_SESSION" "/"
-  live_type "$LIVE_TUI_SESSION" "quit"
+  # v5.7 adds the native-quit policy row, so the stable quit-path filter is
+  # `Space q`: both documented quit rows plus the leader chord entry.
+  live_type "$LIVE_TUI_SESSION" "Space q"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_text "$LIVE_TUI_SESSION" "match 1/2" 10 "filtered help counts both quit rows"
+  live_require_text "$LIVE_TUI_SESSION" "match 1/3" 10 "filtered help counts all three quit paths"
   live_key "$LIVE_TUI_SESSION" n
-  live_require_text "$LIVE_TUI_SESSION" "match 2/2" 10 "n moves to the next match"
+  live_require_text "$LIVE_TUI_SESSION" "match 2/3" 10 "n moves to the next match"
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed"
 }
