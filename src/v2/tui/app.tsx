@@ -936,6 +936,10 @@ export function EnsembleV2App() {
     const route = context.ui.router.current()
     return route.type === "plugin" && route.name === "ensemble"
   }
+  // Ticket #91: a page left mounted behind the native route must not own raw
+  // keys. The newest mount alone is not enough; the Ensemble route must be
+  // visible too.
+  const ownsRawKeys = () => pageActivation.ownsRawKeys(pageToken, isOurRoute())
   const isModal = () => modal() || helpOpen() || approvalsOpen() || Boolean(settingsAgentID())
   const isBusy = () => busy() || chatContext()?.busy === true
 
@@ -1538,10 +1542,46 @@ export function EnsembleV2App() {
     clearPendingChord()
   }
   onCleanup(() => { if (leaderPopupTimer !== undefined) { clearTimeout(leaderPopupTimer); leaderPopupTimer = undefined } })
+  /**
+   * Ticket #91: leaving Ensemble keeps the page mounted for F2, but the
+   * native route must own the keyboard immediately. Blur every Ensemble
+   * editor, settle any awaited overlay, drop the leader/command/pending
+   * state, and reset the interaction reducer to Normal.
+   */
+  const clearInteractionForLeave = () => {
+    try { composerRef?.blur?.() } catch {}
+    try { settingsFieldRef?.blur?.() } catch {}
+    try { textPromptRef?.blur?.() } catch {}
+    try { wizardRef?.blur?.() } catch {}
+    composerCache.buffer?.invalidate()
+    promptCache.buffer?.invalidate()
+    wizardCache.buffer?.invalidate()
+    settingsVim?.invalidate()
+    settingsVim = null
+    settingsVimRef = null
+    if (textPrompt()) finishTextPrompt(undefined)
+    if (picker()) finishPicker(undefined)
+    if (confirm()) finishConfirm(undefined)
+    if (result()) finishResultModal()
+    const activeWizard = wizard()
+    if (activeWizard) completeWizard(activeWizard, undefined)
+    if (settingsAgentID()) finishSettingsClose()
+    if (helpOpen()) closeHelp()
+    setApprovalsOpen(false)
+    setModal(false)
+    setCompletion(null)
+    closeLeader()
+    if (commandActive()) closeCommandLine(true)
+    clearPendingChord()
+    if (messageTimer !== undefined) {
+      clearTimeout(messageTimer)
+      messageTimer = undefined
+    }
+    dispatchInteraction({ type: "route.leave" })
+  }
   /** The one deliberate quit path behind `:q` and `Space q`. */
   const leaveEnsemble = () => {
-    closeLeader()
-    clearPendingChord()
+    clearInteractionForLeave()
     context.ui.router.navigate({ type: "home" })
   }
   const surfaceEscape = () => {
@@ -1959,12 +1999,19 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     if (surface()?.kind === "agent") {
       const sessionID = chatContext()?.sessionID
-      if (sessionID) { context.ui.router.navigate({ type: "session", sessionID }); return }
+      if (sessionID) {
+        clearInteractionForLeave()
+        context.ui.router.navigate({ type: "session", sessionID })
+        return
+      }
     }
     const agentID = selectedTask()?.assigneeID ?? workspace?.leaderID
     if (!workspace || !agentID) return
     const binding = state()?.bindings[`${workspace.id}:${agentID}`]
-    if (binding) context.ui.router.navigate({ type: "session", sessionID: binding.sessionID })
+    if (binding) {
+      clearInteractionForLeave()
+      context.ui.router.navigate({ type: "session", sessionID: binding.sessionID })
+    }
   }
 
   const restoreSettingsFocus = () => {
@@ -2478,8 +2525,9 @@ export function EnsembleV2App() {
     })
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
-      // A stale stacked page must never consume a key before the visible page.
-      if (!pageActivation.isActive(pageToken)) return
+      // Ticket #91: a stale stacked page or a hidden Ensemble route must never
+      // consume a key before the native prompt sees it.
+      if (!ownsRawKeys()) return
       if (interaction().command) { handleCommandKey(event); return }
       // v5.6 T10: the help overlay owns every key while open. Its grammar is
       // local to the overlay and never changes interaction mode or focus.
@@ -2615,7 +2663,7 @@ export function EnsembleV2App() {
       const factory = () => ({
         mode: "global",
         priority: 100,
-        enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && !isModal() && !leaderMode() && !commandActive() && wizard() === null && !composerActive() && interaction().command === null && surfaceKeyContext() === keyContext,
+        enabled: () => ownsRawKeys() && !isModal() && !leaderMode() && !commandActive() && wizard() === null && !composerActive() && interaction().command === null && surfaceKeyContext() === keyContext,
         commands,
         bindings: commands.map((command) => command.id),
       })
@@ -2633,7 +2681,7 @@ export function EnsembleV2App() {
     context.keymap.layer(() => ({
       mode: "global",
       priority: 110,
-      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && Boolean(settingsAgentID()) && settingsField() === null && !overlayOpen() && !leaderMode() && !commandActive() && wizard() === null && interaction().command === null,
+      enabled: () => ownsRawKeys() && Boolean(settingsAgentID()) && settingsField() === null && !overlayOpen() && !leaderMode() && !commandActive() && wizard() === null && interaction().command === null,
       commands: settingsCommands,
       bindings: settingsCommands.map((command) => command.id),
     }))
@@ -2649,13 +2697,13 @@ export function EnsembleV2App() {
     context.keymap.layer(() => ({
       mode: "global",
       priority: 120,
-      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && !isModal() && leaderMode() && !commandActive(),
+      enabled: () => ownsRawKeys() && !isModal() && leaderMode() && !commandActive(),
       commands: leaderCommands,
       bindings: leaderCommands.map((command) => command.id),
     }))
     context.keymap.layer(() => ({
       mode: "global", priority: 130,
-      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && composerActive() && !isModal() && wizard() === null && !commandActive(),
+      enabled: () => ownsRawKeys() && composerActive() && !isModal() && wizard() === null && !commandActive(),
       commands: [
         { id: "ensemble.v2.composer.cancel", title: "Ensemble: Composer Esc ladder", bind: "escape", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); if (completion()) closeCompletion(); else dispatchInteraction({ type: "escape" }) } },
         // Host Escape handling can swallow the key while a native run is
@@ -2667,7 +2715,7 @@ export function EnsembleV2App() {
     }))
     context.keymap.layer(() => ({
       mode: "global", priority: 140,
-      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && composerActive() && completion() !== null && !modal() && wizard() === null && !commandActive(),
+      enabled: () => ownsRawKeys() && composerActive() && completion() !== null && !modal() && wizard() === null && !commandActive(),
       commands: [
         { id: "ensemble.v2.completion.up", title: "Ensemble: Previous completion", bind: "up", run: () => moveCompletion(-1) },
         { id: "ensemble.v2.completion.down", title: "Ensemble: Next completion", bind: "down", run: () => moveCompletion(1) },
@@ -2681,7 +2729,7 @@ export function EnsembleV2App() {
     // generated layer for the close/page keys so help always closes.
     context.keymap.layer(() => ({
       mode: "global", priority: 115,
-      enabled: () => pageActivation.isActive(pageToken) && isOurRoute() && helpOpen() && !leaderMode() && !commandActive() && wizard() === null,
+      enabled: () => ownsRawKeys() && helpOpen() && !leaderMode() && !commandActive() && wizard() === null,
       commands: [
         { id: "ensemble.v2.help.close", title: "Ensemble: Close help", bind: "escape", run: () => closeHelp() },
         { id: "ensemble.v2.help.up", title: "Ensemble: Help page up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); scrollHelpBy(-10) } },

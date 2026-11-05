@@ -60,6 +60,7 @@ export type InteractionEvent =
   | { type: "field.leave" }
   | { type: "escape" }
   | { type: "leave.editor" }
+  | { type: "route.leave" }
   | { type: "settings.field.open" }
   | { type: "settings.field.close" }
   | { type: "focus.set"; focus: InteractionFocus }
@@ -172,6 +173,26 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
       return { state: { ...state, mode: "normal", selection: null }, intents: [] }
     case "escape":
       return escape(state)
+    case "route.leave":
+      // Ticket #91: the page stays mounted for F2, but the native route owns
+      // the keyboard. Drop every transient surface so a hidden Ensemble page
+      // cannot consume a key or revisit a stale command/overlay on return.
+      return {
+        state: {
+          ...state,
+          mode: "normal",
+          focus: state.focus === "rail" || state.focus === "chat" || state.focus === "work" || state.focus === "composer"
+            ? state.focus
+            : "rail",
+          overlay: "none",
+          field: null,
+          command: null,
+          pendingChord: null,
+          selection: null,
+          message: null,
+        },
+        intents: [{ type: "blur-editor" }],
+      }
     case "leave.editor":
       if (state.field === "settings") {
         return {

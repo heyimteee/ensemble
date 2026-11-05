@@ -1268,6 +1268,21 @@ live_require_text "$LIVE_TUI_SESSION" "COMMAND · " 10 "colon opens Command mode
 live_type "$LIVE_TUI_SESSION" "q"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after :q"
+# Ticket #91: the mounted Ensemble page must not consume native keys after
+# leaving. Type immediately without an Esc, then prove `/` reaches the native
+# prompt (the slash menu) and the command text follows it.
+live_type "$LIVE_TUI_SESSION" "native-after-quit"
+live_require_text "$LIVE_TUI_SESSION" "native-after-quit" 10 "native prompt accepts letters immediately after :q"
+live_key "$LIVE_TUI_SESSION" C-u
+live_require_text "$LIVE_TUI_SESSION" "Ask anything" 10 "native prompt cleared for the slash probe"
+live_type "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "Switch agent" 10 "slash reaches the native prompt and opens its command menu"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.25
+live_type "$LIVE_TUI_SESSION" "agents"
+live_require_text "$LIVE_TUI_SESSION" "/agents" 10 "native command text follows the slash"
+live_key "$LIVE_TUI_SESSION" C-u
+live_require_text "$LIVE_TUI_SESSION" "Ask anything" 10 "native prompt cleared after the slash probe"
 # Ticket #77d: F2 returns to Ensemble from any native session. Keys only
 # after the round-trip, so the check does not depend on editor focus.
 live_key "$LIVE_TUI_SESSION" F2
