@@ -9,7 +9,9 @@ set -uo pipefail
 #   bash scripts/live-matrix.sh all    # fake + empty catalog + real host
 #
 # `fake` is the local/CI guardrail. `all` is the full local matrix and needs a
-# real model catalog (see scripts/README.md).
+# real model catalog (see scripts/README.md). Local runs report a missing
+# prerequisite as SKIP and exit zero. ENSEMBLE_LIVE_REQUIRE=1 turns SKIP into a
+# failure so CI cannot look green on a suite that did not run.
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
@@ -42,9 +44,16 @@ case "$mode" in
     ;;
 esac
 
+require_mode="${ENSEMBLE_LIVE_REQUIRE:-0}"
+export ENSEMBLE_LIVE_REQUIRE="$require_mode"
+
 matrix_tmp=$(mktemp -d "${TMPDIR:-/tmp}/opencode/ensemble-matrix-XXXXXX") || exit 1
 trap 'rm -rf "$matrix_tmp"' EXIT
 trap 'exit 130' INT TERM
+
+if [[ "$require_mode" == "1" ]]; then
+  printf 'live-matrix: require mode (skips are failures)\n'
+fi
 
 run_start=$SECONDS
 passed=0
@@ -97,6 +106,17 @@ for ((i = 0; i < ${#scenarios[@]}; i++)); do
   fi
 
   if grep -q '; skipping$' "$log" 2>/dev/null; then
+    if [[ "$require_mode" == "1" ]]; then
+      printf 'live-matrix: %s: FAIL (%ss; SKIP is not allowed in require mode)\n' "$name" "$elapsed" >&2
+      summary+=("FAIL  $name (${elapsed}s): prerequisites missing in require mode")
+      failed=$((failed + 1))
+      failed_status=1
+      for ((j = i + 1; j < ${#scenarios[@]}; j++)); do
+        summary+=("NOT RUN ${scenarios[j]}")
+        not_run=$((not_run + 1))
+      done
+      break
+    fi
     printf 'live-matrix: %s: SKIP (%ss; prerequisites missing, not a pass)\n' "$name" "$elapsed"
     summary+=("SKIP  $name (${elapsed}s; prerequisites missing)")
     skipped=$((skipped + 1))

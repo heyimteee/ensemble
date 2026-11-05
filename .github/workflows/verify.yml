@@ -7,6 +7,11 @@ on:
 permissions:
   contents: read
 
+env:
+  NODE_VERSION: "26.12.1"
+  OPENCODE_VERSION: "2.2.5"
+  FD_VERSION: "10.2.0"
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -14,7 +19,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "26.12.1"
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
       - run: npm run verify
+
+  live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install tmux and fd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux
+          curl -fsSL -o /tmp/fd.tar.gz \
+            "https://github.com/sharkdp/fd/releases/download/v${FD_VERSION}/fd-v${FD_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -xzf /tmp/fd.tar.gz -C /tmp
+          sudo install -m 0755 "/tmp/fd-v${FD_VERSION}-x86_64-unknown-linux-gnu/fd" /usr/local/bin/fd
+      - name: Install OpenCode
+        run: npm install --global "@opencode/cli@${OPENCODE_VERSION}"
+      - run: npm ci
+      - name: Preflight live host tools
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+        run: npm run test:live:preflight
+      - name: Deterministic fake and empty live suite
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+        run: npm run test:live:fake:all

@@ -18,6 +18,7 @@ Ensemble is in developer preview. The server and TUI parts load directly from Ty
 - Apply the [reviewer standards](docs/agents/review-standards.md) to judgement calls; keep mechanical rules in automated checks. The [review workflow](docs/agents/review-workflow.md) describes the two-axis review.
 - State what was verified, the OpenCode version used, and any remaining uncertainty.
 - Include regression checks for ordinary OpenCode sessions when changing integration behavior.
+- CI runs `npm run verify` plus the deterministic fake and empty live suite on push and pull request, with pinned host tools and `ENSEMBLE_LIVE_REQUIRE=1` so a missing tool fails instead of skipping. Real-model live checks remain local; see [the live harness instructions](scripts/README.md#ci).
 - Update documentation when externally visible behavior changes.
 - Reference the implementation ticket in a pull request; completing it must not close its parent specification.
 
