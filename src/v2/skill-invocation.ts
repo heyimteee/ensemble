@@ -20,6 +20,12 @@ export const COMPOSER_COMMANDS = [
 
 const COMMAND_NAMES = new Set<string>(COMPOSER_COMMANDS.map((command) => command.name))
 
+/** Built-in Ensemble skill: visible as General, executed by the System Agent init job. */
+export const ENSEMBLE_INIT_SKILL = "ensemble-init"
+export const GENERAL_SKILL_FLAG = "Skill | General"
+
+type SkillOwner = Agent | undefined
+
 export type SkillInvocationRecipient = {
   agentID: string
   assignedSkills: string[]
@@ -48,6 +54,8 @@ export type SkillInvocationInput = {
   agents: Record<string, Agent>
   skills: readonly SkillOption[]
   maxSkills?: number
+  /** TUI owner-picker resolutions keyed by message-start skill id. */
+  ownerSelections?: Record<string, string>
 }
 
 export type SkillPaletteRow = {
@@ -59,6 +67,8 @@ export type SkillPaletteRow = {
   skillID?: string
   ownerID?: string
   insert?: string
+  /** Built-in system executor; selecting it runs the init job, not a host skill. */
+  executor?: "init"
 }
 
 export type SkillPalette = {
@@ -174,9 +184,10 @@ function matchesQuery(query: string, values: readonly string[]): boolean {
 
 /**
  * Cursor-scoped composer completion context. `/` at message start lists
- * commands and assigned skills; `$Agent /` lists only that agent's assigned
- * skills. The same mention/slash parser as the planner keeps palette and
- * server validation from drifting.
+ * commands, the built-in Ensemble init skill, assigned skills, and General
+ * skills; `$Agent /` lists only that agent's assigned skills. The same
+ * mention/slash parser as the planner keeps palette and server validation
+ * from drifting.
  */
 export function skillPaletteAt(input: SkillPaletteInput): SkillPalette | undefined {
   const { text, cursor } = input
@@ -191,6 +202,9 @@ export function skillPaletteAt(input: SkillPaletteInput): SkillPalette | undefin
   const rows: SkillPaletteRow[] = []
   if (scope === "start") {
     for (const command of COMPOSER_COMMANDS) {
+      // `/init` is the built-in Ensemble skill row below, not a duplicate
+      // command row. Recognition still treats the token as the init command.
+      if (command.name === "init") continue
       if (!matchesQuery(query, [command.name, command.description])) continue
       rows.push({
         kind: "command",
@@ -200,13 +214,25 @@ export function skillPaletteAt(input: SkillPaletteInput): SkillPalette | undefin
         flag: "Command",
       })
     }
+    const init = COMPOSER_COMMANDS.find((command) => command.name === "init")!
+    if (matchesQuery(query, [ENSEMBLE_INIT_SKILL, init.name, init.description])) {
+      rows.push({
+        kind: "skill",
+        id: ENSEMBLE_INIT_SKILL,
+        skillID: ENSEMBLE_INIT_SKILL,
+        label: `/${init.name} — ${init.description}`,
+        flag: GENERAL_SKILL_FLAG,
+        insert: `/${init.name} `,
+        executor: "init",
+      })
+    }
   }
 
   const catalog = new Map(input.skills.map((skill) => [skill.id, skill]))
   const agentScope = anchor?.agentID
     ? input.workspace.memberIDs.includes(anchor.agentID) ? input.agents[anchor.agentID] : undefined
     : undefined
-  const entries: Array<{ skill: SkillOption; owner: Agent }> = []
+  const entries: Array<{ skill: SkillOption; owner: SkillOwner }> = []
   if (scope === "agent" && agentScope && !agentScope.archived) {
     for (const skillID of agentScope.skillbox) {
       const skill = catalog.get(skillID)
@@ -214,21 +240,24 @@ export function skillPaletteAt(input: SkillPaletteInput): SkillPalette | undefin
     }
   } else if (scope === "start") {
     for (const skill of input.skills) {
-      for (const owner of owners.get(skill.id) ?? []) entries.push({ skill, owner })
+      if (skill.id === ENSEMBLE_INIT_SKILL) continue
+      const assigned = owners.get(skill.id) ?? []
+      if (assigned.length === 0) entries.push({ skill, owner: undefined })
+      else for (const owner of assigned) entries.push({ skill, owner })
     }
   }
-  entries.sort((a, b) => a.skill.name.localeCompare(b.skill.name) || a.owner.name.localeCompare(b.owner.name))
+  entries.sort((a, b) => a.skill.name.localeCompare(b.skill.name) || (a.owner?.name ?? "").localeCompare(b.owner?.name ?? ""))
   for (const { skill, owner } of entries) {
     const label = skillLabel(skill)
-    if (!matchesQuery(query, [skill.id, skill.name, skill.description ?? "", owner.name])) continue
+    if (!matchesQuery(query, [skill.id, skill.name, skill.description ?? "", owner?.name ?? "General"])) continue
     rows.push({
       kind: "skill",
       id: skill.id,
       skillID: skill.id,
-      ownerID: owner.id,
+      ownerID: owner?.id,
       label,
-      flag: `Skill | ${owner.name}`,
-      insert: scope === "agent" || owner.id === input.workspace.leaderID
+      flag: owner ? `Skill | ${owner.name}` : GENERAL_SKILL_FLAG,
+      insert: scope === "agent" || !owner || owner.id === input.workspace.leaderID
         ? `/${skill.id} `
         : `$${owner.name} /${skill.id} `,
     })
@@ -284,17 +313,15 @@ export function skillWorkTitle(text: string, recipient: SkillInvocationRecipient
 /**
  * The pure skill invocation planner shared by the composer palette and the
  * server. It parses the exact user text into `$Agent` anchors and `/skill`
- * tokens, resolves the Skillbox assignment, and returns recipients plus
- * specific validation errors. It never rewrites the user text and never
- * extracts per-skill bodies.
+ * tokens, resolves the Skillbox assignment, and returns recipients, owner
+ * choices, and specific validation errors. It never rewrites the user text
+ * and never extracts per-skill bodies.
  *
- * Ticket #102 delivers multi-anchor and mixed normal/skill routing: every
- * unique addressed agent is one recipient, all of that agent's skills are
- * grouped into it, and a normal-only anchor is a normal peer turn. General
- * skills and leader triage remain the extension point owned by ticket #103:
- * the recipient shape already carries `generalSkills` and `triage`, and
- * catalog skills without a workspace owner are intentionally not recipients
- * yet.
+ * Ticket #103: catalog skills without a workspace owner are General. They
+ * route to the leader for triage even when no anchor is present. A General
+ * skill under a non-leader anchor is a specific error rather than a silent
+ * retarget. A message-start skill assigned outside the leader returns the
+ * owner picker choices instead of failing.
  */
 export function planSkillInvocation(input: SkillInvocationInput): SkillInvocationPlan {
   const { text, workspace, agents } = input
@@ -305,11 +332,18 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
   const colonCommand = text.trimStart().startsWith(":")
     ? text.trimStart().slice(1).split(/[\s:]/, 1)[0]
     : undefined
+  const initToken = (id: string | undefined) => id === "init" || id === ENSEMBLE_INIT_SKILL
+  if (startToken && initToken(startToken.id)) {
+    return { kind: "init", recipients: [], errors: [] }
+  }
   if (startToken && COMMAND_NAMES.has(startToken.id)) {
-    return { kind: startToken.id === "init" ? "init" : "command", recipients: [], errors: [] }
+    return { kind: "command", recipients: [], errors: [] }
+  }
+  if (colonCommand && initToken(colonCommand)) {
+    return { kind: "init", recipients: [], errors: [] }
   }
   if (colonCommand && COMMAND_NAMES.has(colonCommand)) {
-    return { kind: colonCommand === "init" ? "init" : "command", recipients: [], errors: [] }
+    return { kind: "command", recipients: [], errors: [] }
   }
   const anchorTokens = new Map<Mention, SlashToken[]>()
   for (const token of tokens) {
@@ -329,6 +363,7 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
   const bySkill = new Map(input.skills.map((skill) => [skill.id, skill]))
   const owners = ownerMap(workspace, agents)
   const recipients = new Map<string, SkillInvocationRecipient>()
+  const ownerChoices: Array<{ skillID: string; ownerIDs: string[] }> = []
 
   const recipientFor = (target: Agent): SkillInvocationRecipient => {
     const recipient = recipients.get(target.id) ?? {
@@ -340,6 +375,12 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
     }
     recipients.set(target.id, recipient)
     return recipient
+  }
+
+  const addGeneral = (target: Agent, skillID: string): void => {
+    const recipient = recipientFor(target)
+    if (!recipient.generalSkills.includes(skillID)) recipient.generalSkills.push(skillID)
+    recipient.triage = true
   }
 
   const resolveToken = (token: SlashToken, target: Agent): void => {
@@ -355,15 +396,27 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
       }
       return
     }
+    const assigned = owners.get(token.id) ?? []
+    if (assigned.length === 0) {
+      if (target.id === workspace.leaderID) {
+        addGeneral(target, token.id)
+      } else {
+        const leaderName = agents[workspace.leaderID]?.name ?? workspace.leaderID
+        errors.push({
+          code: "general_skill_non_leader",
+          skillID: token.id,
+          agentName: target.name,
+          message: `Skill /${token.id} is General, so it routes to $${leaderName} for leader triage. Mention $${leaderName} or invoke it at message start.`,
+        })
+      }
+      return
+    }
     if (!target.skillbox.includes(token.id)) {
-      const assigned = owners.get(token.id) ?? []
       errors.push({
         code: "skill_not_assigned",
         skillID: token.id,
         agentName: target.name,
-        message: assigned.length > 0
-          ? `Skill /${token.id} is assigned to ${ownerNames(assigned)}, not $${target.name}.`
-          : `Skill /${token.id} is not assigned to any workspace member.`,
+        message: `Skill /${token.id} is assigned to ${ownerNames(assigned)}, not $${target.name}.`,
       })
       return
     }
@@ -372,7 +425,9 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
   }
 
   // A message-start skill belongs to the leader, before any anchor changes
-  // the target for the tokens that follow it.
+  // the target for the tokens that follow it. A skill owned only outside the
+  // leader returns owner choices; assigning it to the leader silently would
+  // violate the Skillbox.
   if (startToken) {
     const leader = agents[workspace.leaderID]
     if (!leader) {
@@ -390,18 +445,30 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
       }
     } else {
       const assigned = owners.get(startToken.id) ?? []
-      if (!leader.skillbox.includes(startToken.id)) {
-        errors.push({
-          code: "skill_not_assigned",
-          skillID: startToken.id,
-          agentName: leader.name,
-          message: assigned.length > 0
-            ? `Skill /${startToken.id} is assigned to ${ownerNames(assigned)}; mention the owner to invoke it.`
-            : `Skill /${startToken.id} is not assigned to any workspace member.`,
-        })
-      } else {
+      if (assigned.length === 0) {
+        addGeneral(leader, startToken.id)
+      } else if (leader.skillbox.includes(startToken.id)) {
         const recipient = recipientFor(leader)
         if (!recipient.assignedSkills.includes(startToken.id)) recipient.assignedSkills.push(startToken.id)
+      } else {
+        const selectedID = input.ownerSelections?.[startToken.id]
+        if (!selectedID) {
+          ownerChoices.push({ skillID: startToken.id, ownerIDs: assigned.map((owner) => owner.id) })
+        } else {
+          const selected = agents[selectedID]
+          if (!selected || selected.archived || !workspace.memberIDs.includes(selected.id) || !assigned.some((owner) => owner.id === selected.id)) {
+            const selectedName = selected ? `$${selected.name}` : selectedID
+            errors.push({
+              code: "owner_not_assigned",
+              skillID: startToken.id,
+              agentName: selected?.name,
+              message: `Skill /${startToken.id} is assigned to ${ownerNames(assigned)}, not ${selectedName}.`,
+            })
+          } else {
+            const recipient = recipientFor(selected)
+            if (!recipient.assignedSkills.includes(startToken.id)) recipient.assignedSkills.push(startToken.id)
+          }
+        }
       }
     }
   }
@@ -455,5 +522,61 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
     })
   }
   if (errors.length > 0) return { kind: "skills", recipients: [], errors }
+  if (ownerChoices.length > 0) return { kind: "skills", recipients: [], ownerChoices, errors: [] }
   return { kind: "skills", recipients: recipientList, errors: [] }
+}
+
+export type DirectSkillInput = {
+  text: string
+  agent: Agent
+  workspace?: Workspace
+  agents: Record<string, Agent>
+  skills: readonly SkillOption[]
+}
+
+/**
+ * Direct conversations have no leader triage. A General skill there is
+ * rejected with a pointer to the workspace group chat; the DM agent's own
+ * assigned skills pass through unchanged.
+ */
+export function directSkillIssue(input: DirectSkillInput): SkillInvocationError | undefined {
+  const bySkill = new Map(input.skills.map((skill) => [skill.id, skill]))
+  const owners = input.workspace ? ownerMap(input.workspace, input.agents) : new Map<string, Agent[]>()
+  for (const token of slashTokens(input.text)) {
+    if (token.id.length === 0) continue
+    if (token.id === "init" || token.id === ENSEMBLE_INIT_SKILL) {
+      return {
+        code: "init_direct",
+        skillID: token.id,
+        message: "Init is workspace-only. Open the workspace group chat and rerun /init.",
+      }
+    }
+    if (COMMAND_NAMES.has(token.id)) continue
+    if (!bySkill.has(token.id)) {
+      if (owners.has(token.id)) {
+        return {
+          code: "skill_unavailable",
+          skillID: token.id,
+          message: `Skill /${token.id} is assigned but is not available from the host skill catalog.`,
+        }
+      }
+      return { code: "unknown_skill", skillID: token.id, message: `Unknown skill: /${token.id}.` }
+    }
+    if (input.agent.skillbox.includes(token.id)) continue
+    const assigned = owners.get(token.id) ?? []
+    if (assigned.length === 0) {
+      return {
+        code: "general_skill_direct",
+        skillID: token.id,
+        message: `Skill /${token.id} is General. Direct conversations cannot triage General skills; use the workspace group chat so the leader can triage it.`,
+      }
+    }
+    return {
+      code: "skill_not_assigned_direct",
+      skillID: token.id,
+      agentName: input.agent.name,
+      message: `Skill /${token.id} is assigned to ${ownerNames(assigned)}, so it cannot run in the direct chat with $${input.agent.name}. Use the workspace group chat and mention the owner.`,
+    }
+  }
+  return undefined
 }

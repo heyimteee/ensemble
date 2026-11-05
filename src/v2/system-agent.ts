@@ -11,16 +11,17 @@ export const INIT_COMMAND = "/init"
 export const INIT_START_TEXT = "Initializing workspace…"
 export const INIT_PROGRESS_TEXT = "Inspecting AGENTS.md and .ensemble/init.json with native /init…"
 
-const INIT_TOKEN = /(^|\s)\/init(?=\s|$)/
+const INIT_TOKEN = /(^|\s)\/(?:init|ensemble-init)(?=\s|$)/
 
 /**
  * The composer must never fall through to native `/init`. `/init` is a solo
  * Ensemble command: any other token (an agent anchor, a skill, or extra text)
- * is rejected before a message or task is created.
+ * is rejected before a message or task is created. `/ensemble-init` is the
+ * built-in skill alias and follows the same rule.
  */
 export function initComposerIssue(value: string): string | undefined {
   const text = value.trim()
-  if (!INIT_TOKEN.test(text) || text === INIT_COMMAND) return undefined
+  if (!INIT_TOKEN.test(text) || text === INIT_COMMAND || text === "/ensemble-init") return undefined
   return "Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text."
 }
 

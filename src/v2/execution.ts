@@ -61,16 +61,22 @@ export function promptForTask(task: Subtask, senderName?: string): string {
     return `Synthesize the completed subtasks into one clear answer for the user.\n\nOriginal request: ${task.instruction}`
   }
   const body = [task.instruction, task.constraints ? `Constraints: ${task.constraints}` : "", task.expected ? `Expected: ${task.expected}` : ""].filter(Boolean).join("\n\n")
+  const triageSkills = task.triage ? task.skillGrants ?? [] : []
+  const oneTriage = triageSkills.length === 1
+  const triagePronoun = oneTriage ? "it" : "them"
+  const triage = triageSkills.length > 0
+    ? `\n\nLeader triage: this turn invoked General skill${oneTriage ? "" : "s"} ${triageSkills.map((skill) => `/${skill}`).join(", ")}. You have a one-run native skill grant for ${triagePronoun}. Read ${triagePronoun} with the native skill tool, then use ${triagePronoun} yourself if ${oneTriage ? "it fits" : "they fit"}, or delegate with a self-authored instruction. A delegatee receives your guidance, not a host skill grant.`
+    : ""
   if (task.workKind === "handoff" && senderName) {
     const ref = task.handoff?.correlationID ? ` (ref ${task.handoff.correlationID})` : ""
-    return `$${senderName} has asked you to help with this${ref}.\n\n${body}\n\nAnswer in this conversation as yourself.`
+    return `$${senderName} has asked you to help with this${ref}.\n\n${body}${triage}\n\nAnswer in this conversation as yourself.`
   }
   if (task.workKind === "turn" && task.turn) {
     const asker = senderName ? `$${senderName}` : "the group chat"
     const ref = ` (ref ${task.turn.correlationID})`
-    return `${asker} asked in the group chat${ref}:\n\n${body}\n\nAnswer in this conversation as yourself.`
+    return `${asker} asked in the group chat${ref}:\n\n${body}${triage}\n\nAnswer in this conversation as yourself.`
   }
-  return body
+  return `${body}${triage}`
 }
 
 export function contextForTask(state: SnapshotState, task: Subtask, workspace: Workspace, agent: Agent): string {

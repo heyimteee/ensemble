@@ -95,3 +95,18 @@ test("System Agent display authors render as left bubbles and never fall through
 })
 
 
+
+test("ticket103: General triage, owner choice, and direct rejection stay on the shared planner", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const planner = readFileSync(new URL("../skill-invocation.ts", import.meta.url), "utf8")
+  assert.ok(planner.includes("Skill | General"), "General palette rows carry the General flag")
+  assert.ok(planner.includes("ensemble-init"), "the built-in init skill is part of the palette/planner")
+  assert.ok(planner.includes("ownerChoices"), "message-start assigned skills return owner choices")
+  assert.ok(app.includes("directSkillIssue("), "direct conversations reject General skills through the shared helper")
+  assert.ok(app.includes("const directSurface = surface()?.kind === \"agent\""), "Direct slash tokens are validated as skills, not unknown commands")
+  assert.ok(app.includes('await openChoice(\n          `Owner for /${choice.skillID}`'), "the TUI offers the owner picker before sending")
+  assert.ok(app.includes("ownerSelections"), "the chosen owner is sent to the server authoritative re-plan")
+  assert.ok(app.includes('row.executor === "init" ? "init"'), "the built-in init row runs the System Agent init job")
+  assert.ok(app.includes('case "ensemble-init":'), "the built-in alias executes init rather than the host skill path")
+  assert.ok(!app.includes("skills: [value]"), "no composer path attaches skills to a prompt")
+})

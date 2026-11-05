@@ -40,6 +40,30 @@ description: Second deterministic Ensemble live skill for multi-anchor routing.
 Use this fixture only to verify grouped and multi-agent skill routing in the
 fake live harness. It contains no project instructions.
 EOF
+mkdir -p "$LIVE_PROJECT/.opencode/skills/ensemble-live-skill-general"
+cat >"$LIVE_PROJECT/.opencode/skills/ensemble-live-skill-general/SKILL.md" <<'EOF'
+---
+name: ensemble-live-skill-general
+description: Unassigned General skill for leader-triage routing.
+---
+
+# Ensemble live general skill
+
+Use this fixture only to verify General-skill leader triage. It is assigned to
+no agent, so the planner routes it to the workspace leader.
+EOF
+mkdir -p "$LIVE_PROJECT/.opencode/skills/ensemble-live-skill-helper"
+cat >"$LIVE_PROJECT/.opencode/skills/ensemble-live-skill-helper/SKILL.md" <<'EOF'
+---
+name: ensemble-live-skill-helper
+description: Helper-only assigned skill for the owner-picker probe.
+---
+
+# Ensemble live helper skill
+
+Use this fixture only to verify the message-start owner picker when the leader
+does not own the skill.
+EOF
 
 # Ticket #77: keep fake streams long enough that the parked-queue probe is
 # deterministic — the queued line must still be parked when the removal key
@@ -1660,9 +1684,28 @@ for _ in $(seq 1 20); do
   sleep 0.25
 done
 [[ "$skill_two_found" == "1" ]] || live_fail "second project skill fixture missing from the host catalog"
+for name in ensemble-live-skill-general ensemble-live-skill-helper; do
+  found=0
+  for _ in $(seq 1 40); do
+    found=$(live_snapshot_value "output.skills.filter(function (s) { return s.id === \"$name\" }).length")
+    [[ "$found" == "1" ]] && break
+    sleep 0.25
+  done
+  [[ "$found" == "1" ]] || live_fail "ticket #103 skill fixture missing from the host catalog: $name"
+done
+
+# The composer has no Ctrl+U clear binding; enter the editor and erase the
+# draft so the next probe starts clean even after an error preserved it.
+clear_composer_text() {
+  live_key "$LIVE_TUI_SESSION" C-g
+  live_key "$LIVE_TUI_SESSION" "i"
+  sleep 0.2
+  live_key_repeat "$LIVE_TUI_SESSION" BSpace 160
+  sleep 0.5
+}
 fake_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "FakeAgent" }).id' | tr -d '"')
 live_invoke "agent.update" "{\"id\":\"$fake_id\",\"skillbox\":[\"ensemble-live-skill\",\"ensemble-live-skill-two\"]}" >/dev/null
-live_invoke "agent.update" "{\"id\":\"$helper_id\",\"skillbox\":[\"ensemble-live-skill-two\"]}" >/dev/null
+live_invoke "agent.update" "{\"id\":\"$helper_id\",\"skillbox\":[\"ensemble-live-skill-two\",\"ensemble-live-skill-helper\"]}" >/dev/null
 sleep 0.5
 assigned=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "FakeAgent" }).skillbox.join(",")' | tr -d '"')
 [[ "$assigned" == "ensemble-live-skill,ensemble-live-skill-two" ]] || live_fail "skill assignment did not persist (got $assigned)"
@@ -1675,6 +1718,7 @@ live_require_text "$LIVE_TUI_SESSION" "/ commands │ skills" 10 "message-start 
 live_require_text "$LIVE_TUI_SESSION" "Command" 10 "command rows carry the Command flag"
 live_type "$LIVE_TUI_SESSION" "ensemble-live"
 live_require_text "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "assigned skill row carries the owner flag"
+live_require_text "$LIVE_TUI_SESSION" "Skill | General" 10 "unassigned skill row carries the General flag"
 live_assert_absence "$LIVE_TUI_SESSION" "Skill ·" "skill flags never use a middle dot"
 live_assert_absence "$LIVE_TUI_SESSION" "Command ·" "command flags never use a middle dot"
 live_key "$LIVE_TUI_SESSION" Enter
@@ -1686,6 +1730,18 @@ live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-li
 skill_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.creatorType === "user" && t.instruction === "/ensemble-live-skill palette-check" }).pop(); return task ? task.instruction : "missing" })()')
 [[ "$skill_exact" == '"/ensemble-live-skill palette-check"' ]] || live_fail "skill turn did not keep the exact user text (got $skill_exact)"
 
+# The built-in Ensemble init skill is General in the palette but executes the
+# System Agent init job; it is not a host skill row and remains solo-only.
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for the built-in init skill"
+live_type "$LIVE_TUI_SESSION" "/init"
+live_require_text "$LIVE_TUI_SESSION" "Skill | General" 10 "the built-in init skill carries the General flag"
+live_require_text "$LIVE_TUI_SESSION" "/init" 10 "the built-in init skill keeps the /init alias"
+live_key "$LIVE_TUI_SESSION" Escape
+clear_composer_text
+live_log "ticket #103 built-in init skill is a General system executor"
+
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for agent-scoped skill palette"
@@ -1696,6 +1752,7 @@ live_require_absence "$LIVE_TUI_SESSION" "\$ agents" 10 "agent anchor accepted"
 live_type "$LIVE_TUI_SESSION" "/ens"
 live_require_text "$LIVE_TUI_SESSION" "\$FakeAgent / │ skills" 10 "agent-scoped palette title"
 live_require_text "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "agent-scoped palette lists its assigned skill"
+live_assert_absence "$LIVE_TUI_SESSION" "Skill | General" "agent-scoped palette hides General skills"
 live_assert_absence "$LIVE_TUI_SESSION" "/ commands" "agent-scoped palette hides commands"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_absence "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "agent-scoped selection closes the palette"
@@ -1813,5 +1870,146 @@ cap_messages=$(live_snapshot_value 'Object.keys(output.state.messages).reduce(fu
 [[ "$cap_messages" == "0" ]] || live_fail "cap rejection appended a transcript line (got $cap_messages rows)"
 live_invoke "settings.update" "{\"maxDelegations\":$previous_max}" >/dev/null
 live_log "ticket #102 skill batch cap rejected the whole message atomically"
+
+# v5.8 T4 (ticket #103): General-skill leader triage. The leader receives a
+# one-run native skill grant while the turn runs and the Skillbox baseline is
+# restored afterwards; a delegatee gets leader guidance with no host grant;
+# the owner picker resolves a non-leader message-start skill; a General skill
+# under a non-leader mention and a General skill in a Direct conversation are
+# rejected with actionable messages.
+live_session_permissions() {
+  local session_id="$1"
+  curl -fsS --max-time 10 -u "opencode:$LIVE_SERVER_PASSWORD" \
+    "$LIVE_SERVER_URL/api/session/$session_id" | "$LIVE_NODE_BIN" -e '
+      let value = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => { value += chunk });
+      process.stdin.on("end", () => {
+        try {
+          const parsed = JSON.parse(value);
+          const info = parsed?.data ?? parsed;
+          const permissions = Array.isArray(info?.permissions) ? info.permissions : [];
+          process.stdout.write(permissions.map((rule) => `${rule.action}:${rule.resource}:${rule.effect}`).join(","));
+        } catch {
+          process.exit(1);
+        }
+      });
+    '
+}
+
+general_text='/ensemble-live-skill-general general-triage-check fake-queue-hold'
+clear_composer_text
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for General triage"
+live_type "$LIVE_TUI_SESSION" "$general_text"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill-general" 20 "General skill triage is assigned to the leader"
+general_state=""
+for _ in $(seq 1 40); do
+  general_state=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("general-triage-check") >= 0 }).pop(); return task ? task.state + ":" + (task.triage === true) + ":" + (task.skillGrants || []).join(",") : "missing" })()')
+  [[ "$general_state" == '"working:true:ensemble-live-skill-general"' ]] && break
+  sleep 0.25
+done
+[[ "$general_state" == '"working:true:ensemble-live-skill-general"' ]] || live_fail "General triage work row missed the leader/triage/grant (got $general_state)"
+leader_session=$(live_snapshot_value "(function () { var ws = Object.values(output.state.workspaces)[0]; var binding = Object.values(output.state.bindings).filter(function (b) { return b.workspaceID === ws.id && b.agentID === \"$fake_id\" }).pop(); return binding ? binding.sessionID : \"missing\" })()" | tr -d '"')
+[[ -n "$leader_session" && "$leader_session" != "missing" ]] || live_fail "leader native session binding missing for the grant probe"
+granted_live=0
+for _ in $(seq 1 40); do
+  permissions=$(live_session_permissions "$leader_session" 2>/dev/null || true)
+  [[ "$permissions" == *"skill:ensemble-live-skill-general:allow"* ]] && { granted_live=1; break; }
+  sleep 0.2
+done
+[[ "$granted_live" == "1" ]] || live_fail "leader never received the one-run General skill grant (saw ${permissions:-no permissions})"
+general_task_id=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("general-triage-check") >= 0 }).pop(); return task ? task.id : "missing" })()' | tr -d '"')
+[[ "$general_task_id" != "missing" ]] || live_fail "General triage work row lost its id"
+general_replied=""
+for _ in $(seq 1 80); do
+  general_replied=$(live_snapshot_value "(function () { var task = output.state.subtasks[\"$general_task_id\"]; return task ? task.state : \"missing\" })()")
+  [[ "$general_replied" == '"replied"' ]] && break
+  sleep 0.5
+done
+[[ "$general_replied" == '"replied"' ]] || live_fail "General triage turn did not reply (got $general_replied)"
+restored_live=0
+for _ in $(seq 1 40); do
+  permissions=$(live_session_permissions "$leader_session" 2>/dev/null || true)
+  if [[ "$permissions" == *"skill:*:deny"* && "$permissions" != *"ensemble-live-skill-general:allow"* ]]; then restored_live=1; break; fi
+  sleep 0.2
+done
+[[ "$restored_live" == "1" ]] || live_fail "leader grant was not restored after the turn (saw ${permissions:-no permissions})"
+live_log "ticket #103 leader triage grant issued for one run and restored"
+
+# The leader's follow-up delegation carries a self-authored instruction and no
+# host skill grant; the delegatee runs it as an ordinary work row.
+guided_instruction='Apply the general-skill guidance to the release notes and return a short source list.'
+live_invoke "task.delegate" "{\"workspaceID\":\"$ws_id\",\"parentID\":\"$general_task_id\",\"assigneeID\":\"$helper_id\",\"title\":\"Guided follow-up\",\"instruction\":\"$guided_instruction\"}" >/dev/null
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: Guided follow-up" 20 "the leader guidance reaches the delegatee as ordinary work"
+guided_state=""
+for _ in $(seq 1 60); do
+  guided_state=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("Apply the general-skill guidance") >= 0 }).pop(); return task ? task.state + ":" + (task.triage === true) + ":" + ((task.skillGrants || []).length) : "missing" })()')
+  [[ "$guided_state" == '"replied:false:0"' ]] && break
+  sleep 0.5
+done
+[[ "$guided_state" == '"replied:false:0"' ]] || live_fail "delegatee work row carried a host grant or did not reply (got $guided_state)"
+guided_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("Apply the general-skill guidance") >= 0 }).pop(); return task ? task.instruction : "missing" })()')
+[[ "$guided_exact" == "\"$guided_instruction\"" ]] || live_fail "delegatee lost the leader's self-authored instruction (got $guided_exact)"
+live_log "ticket #103 leader delegation delivered guidance without a delegatee grant"
+
+# A message-start skill owned outside the leader opens the owner picker and
+# keeps the exact user text after the owner is chosen.
+owner_text='/ensemble-live-skill-helper owner-picker-check'
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for the owner picker"
+live_type "$LIVE_TUI_SESSION" "$owner_text"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "║ Owner" 30 "the owner picker opens for the message-start skill"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: /ensemble-live-skill-helper" 30 "the chosen owner receives the message-start skill"
+owner_exact=""
+for _ in $(seq 1 40); do
+  owner_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("owner-picker-check") >= 0 }).pop(); return task ? task.instruction + "|" + task.assigneeID : "missing" })()')
+  [[ "$owner_exact" == "\"$owner_text|$helper_id\"" ]] && break
+  sleep 0.25
+done
+[[ "$owner_exact" == "\"$owner_text|$helper_id\"" ]] || live_fail "owner picker rewrote or misrouted the text (got $owner_exact)"
+live_log "ticket #103 owner picker routed the message-start skill without rewriting the text"
+
+# A General skill under a non-leader mention is rejected before appending.
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for the General rejection"
+live_type "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill-general nonleader-general-check"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Skill /ensemble-live-skill-general is General, so it routes to \$FakeAgent for leader triage." 10 "the General rejection names the leader and the fix"
+live_assert_text "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill-general nonleader-general-check" "the General rejection keeps the draft"
+clear_composer_text
+nonleader_tasks=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("nonleader-general-check") >= 0 }).length')
+[[ "$nonleader_tasks" == "0" ]] || live_fail "General under a non-leader mention created work (got $nonleader_tasks rows)"
+live_log "ticket #103 non-leader General mention rejected atomically"
+
+# Direct conversations reject a General skill with a workspace-chat pointer.
+direct_general=$(live_invoke "chat.send" "{\"agentID\":\"$helper_id\",\"workspaceID\":\"$ws_id\",\"text\":\"/ensemble-live-skill-general direct-check\"}")
+[[ "$direct_general" == *'"code":"general_skill_direct"'* ]] || live_fail "Direct General skill was not rejected (got $direct_general)"
+[[ "$direct_general" == *"workspace group chat"* ]] || live_fail "Direct General rejection did not point at the workspace chat (got $direct_general)"
+live_log "ticket #103 Direct General skill rejection pointed at the workspace group chat"
+
+# Init stays solo-only even though its palette row is a General skill.
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for init solo-only"
+live_type "$LIVE_TUI_SESSION" "/init extra"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Init is solo-only." 10 "init rejects a mixed composer line"
+clear_composer_text
+live_log "ticket #103 init General row remains solo-only"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

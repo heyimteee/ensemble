@@ -22,6 +22,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   const movedSessions: Array<{ sessionID: string; directory: string }> = []
   const commands: Array<{ sessionID: string; name: string; text?: string }> = []
   const prompts: any[] = []
+  const permissionUpdates: Array<{ sessionID: string; permissions: any[] }> = []
   const instructions: Array<{ sessionID: string; key: string; value: string }> = []
   const createdSessionIDs: string[] = []
   let sessions = 0
@@ -71,6 +72,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
       instructions: { entry: { put: async (input: any) => { instructions.push(input) } } },
       switchModel: async () => undefined,
       prompt: async (input: any) => { prompts.push({ ...input }) },
+      update: async (input: any) => { permissionUpdates.push({ sessionID: String(input.sessionID), permissions: input.permissions }) },
       wait: async () => { await new Promise((resolve) => setTimeout(resolve, 5)) },
       context: async () => ({
         data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "OK" }] }],
@@ -94,7 +96,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     skill: { list: async (): Promise<any[]> => [] },
     event,
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, instructions, createdSessionIDs, tools, emitEvent }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, createdSessionIDs, tools, emitEvent }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -3401,6 +3403,271 @@ test("the skill batch cap honors settings and rejects the whole message atomical
     const next = await handlers.snapshot({ directory })
     assert.deepEqual(next.state.messages.w ?? [], [], "the rejected message never appends")
     assert.deepEqual(Object.values(next.state.subtasks), [], "the rejected message never creates work")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+// --- v5.8 ticket #103: General-skill leader triage ---------------------------
+
+test("a General skill routes to the leader with a one-run native grant, then restores it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-general-"))
+  const { ctx, prompts, permissionUpdates } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 250)) }
+  ctx.skill.list = async () => [
+    { id: "review", name: "Review", description: "Thorough code review" },
+    { id: "public-research", name: "Public research", description: "Find primary sources" },
+  ]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", ["review"]),
+    skillAgent("sage", "Sage", []),
+  ], { synthesis: false })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
+    const text = "/public-research leader-triage-check"
+    const response = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+    assert.equal(response.ok, true, JSON.stringify(response.error))
+    assert.deepEqual(response.result.recipients, ["nova"], "the leader receives General triage")
+    const next = await handlers.snapshot({ directory })
+    const task = Object.values(next.state.subtasks).find((item: any) => item.creatorType === "user") as any
+    assert.ok(task)
+    assert.equal(task.assigneeID, "nova")
+    assert.equal(task.triage, true)
+    assert.deepEqual(task.skillGrants, ["public-research"])
+    assert.equal(task.instruction, text, "the exact user text stays the instruction")
+    assert.equal(task.title, `/public-research — ${text}`)
+    const binding = Object.values(next.state.bindings).find((item: any) => item.workspaceID === "w" && item.agentID === "nova") as any
+    assert.ok(binding)
+    await waitFor(async () => prompts.some((prompt) => prompt.sessionID === binding.sessionID && prompt.text.includes(text)))
+    const leaderPrompt = prompts.find((prompt) => prompt.sessionID === binding.sessionID && prompt.text.includes(text))
+    assert.ok(leaderPrompt, "the leader receives the exact message")
+    assert.ok(leaderPrompt.text.includes("Leader triage"), "the leader gets a triage directive outside the user text")
+    assert.ok(leaderPrompt.text.includes("/public-research"))
+    assert.equal("skills" in leaderPrompt, false, "no prompt skill attachment bypass")
+    await waitFor(async () => permissionUpdates.some((update) => update.sessionID === binding.sessionID && update.permissions.some((rule: any) => rule.resource === "public-research" && rule.effect === "allow")))
+    const grants = permissionUpdates.filter((update) => update.sessionID === binding.sessionID)
+    const grant = grants.find((update) => update.permissions.some((rule: any) => rule.resource === "public-research" && rule.effect === "allow"))
+    assert.ok(grant, "the leader session receives a one-run allow rule")
+    assert.ok(grant.permissions.some((rule: any) => rule.action === "skill" && rule.resource === "*" && rule.effect === "deny"), "the Skillbox baseline remains")
+    await waitFor(async () => {
+      const current = await handlers.snapshot({ directory })
+      return current.state.subtasks[task.id].state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const restored = permissionUpdates.filter((update) => update.sessionID === binding.sessionID).at(-1)
+    assert.deepEqual(restored?.permissions, [
+      { action: "skill", resource: "*", effect: "deny" },
+      { action: "skill", resource: "review", effect: "allow" },
+    ], "the grant is restored after the turn")
+    assert.equal(after.state.subtasks[task.id].outcome, "succeeded")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a General skill under a non-leader mention is rejected atomically", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-general-nonleader-"))
+  const { ctx } = fakeContext()
+  ctx.skill.list = async () => [{ id: "public-research", name: "Public research", description: "Find primary sources" }]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", []),
+    skillAgent("sage", "Sage", []),
+  ])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
+    const text = "$Sage /public-research leader-only-check"
+    const response = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+    assert.equal(response.ok, false)
+    assert.equal(response.error?.code, "general_skill_non_leader")
+    assert.ok(response.error?.message.includes("$Nova"), response.error?.message)
+    assert.ok(response.error?.message.includes("leader"), response.error?.message)
+    const next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.messages.w ?? [], [], "the rejected message never appends")
+    assert.deepEqual(Object.values(next.state.subtasks), [], "the rejected message never creates work")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("message-start assigned skills use the owner picker and keep the exact text", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-owner-picker-"))
+  const { ctx, prompts } = fakeContext()
+  ctx.skill.list = async () => [{ id: "deploy", name: "Deploy", description: "Ship the release" }]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", []),
+    skillAgent("sage", "Sage", ["deploy"]),
+  ])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
+    const text = "/deploy ship the release"
+    const unresolved = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+    assert.equal(unresolved.ok, false)
+    assert.equal(unresolved.error?.code, "owner_choice_required")
+    assert.ok(unresolved.error?.message.includes("$Sage"), unresolved.error?.message)
+    let next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.messages.w ?? [], [], "no message before an owner is chosen")
+    assert.deepEqual(Object.values(next.state.subtasks), [], "no work before an owner is chosen")
+
+    const invalid = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text, ownerSelections: { deploy: "nova" } } })
+    assert.equal(invalid.ok, false)
+    assert.equal(invalid.error?.code, "owner_not_assigned")
+    next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.messages.w ?? [], [], "an invalid owner appends nothing")
+    assert.deepEqual(Object.values(next.state.subtasks), [], "an invalid owner creates no work")
+
+    const response = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text, ownerSelections: { deploy: "sage" } } })
+    assert.equal(response.ok, true, JSON.stringify(response.error))
+    assert.deepEqual(response.result.recipients, ["sage"])
+    next = await handlers.snapshot({ directory })
+    const task = Object.values(next.state.subtasks).find((item: any) => item.creatorType === "user") as any
+    assert.equal(task.assigneeID, "sage")
+    assert.equal(task.instruction, text, "the picker does not rewrite the user text")
+    assert.equal(next.state.messages.w.find((message: any) => message.author === "user")?.text, text)
+    await waitFor(async () => prompts.some((prompt) => prompt.text.includes(text)))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a delegatee receives leader guidance without a host skill grant", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-delegate-grant-"))
+  const { ctx, prompts, permissionUpdates, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  ctx.skill.list = async () => [{ id: "public-research", name: "Public research", description: "Find primary sources" }]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", []),
+    skillAgent("sage", "Sage", []),
+  ], { synthesis: false })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
+    const text = "/public-research triage-delegate-check"
+    await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+    let leaderSession = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const task = Object.values(next.state.subtasks).find((item: any) => item.triage) as any
+      const binding = Object.values(next.state.bindings).find((item: any) => item.workspaceID === "w" && item.agentID === "nova") as any
+      leaderSession = binding?.sessionID ?? ""
+      return task?.state === "working" && Boolean(leaderSession)
+    })
+    const guidance = "Apply the public-research method to the release notes; return a concise source list."
+    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Research follow-up", instruction: guidance }, { sessionID: leaderSession })
+    assert.match(delegated.content, /Delegated to Sage/)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const child = Object.values(next.state.subtasks).find((item: any) => item.title === "Research follow-up") as any
+      return child?.state === "replied"
+    }, 10_000)
+    const next = await handlers.snapshot({ directory })
+    const child = Object.values(next.state.subtasks).find((item: any) => item.title === "Research follow-up") as any
+    assert.ok(child)
+    assert.equal(child.instruction, guidance, "the delegatee receives the leader's self-authored instruction")
+    assert.equal(child.triage, undefined)
+    assert.equal(child.skillGrants, undefined, "no host skill grant is attached to the delegatee task")
+    const sageBinding = Object.values(next.state.bindings).find((item: any) => item.workspaceID === "w" && item.agentID === "sage") as any
+    const sageUpdates = permissionUpdates.filter((update) => update.sessionID === sageBinding.sessionID)
+    assert.deepEqual(sageUpdates, [], "the delegatee session never receives the leader's General-skill grant")
+    const childPrompt = prompts.find((prompt) => prompt.sessionID === sageBinding.sessionID && prompt.text.includes(guidance))
+    assert.ok(childPrompt)
+    assert.equal("skills" in childPrompt, false, "delegation never uses a prompt skill attachment")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("direct conversations reject General skills and /init before creating a DM line", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-direct-"))
+  const { ctx } = fakeContext()
+  ctx.skill.list = async () => [
+    { id: "review", name: "Review", description: "Thorough code review" },
+    { id: "public-research", name: "Public research", description: "Find primary sources" },
+  ]
+  await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", ["review"])])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
+    const general = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "nova", workspaceID: "w", text: "/public-research direct-check" } })
+    assert.equal(general.ok, false)
+    assert.equal(general.error?.code, "general_skill_direct")
+    assert.ok(general.error?.message.includes("workspace group chat"), general.error?.message)
+    const init = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "nova", workspaceID: "w", text: "/init" } })
+    assert.equal(init.ok, false)
+    assert.equal(init.error?.code, "init_direct")
+    assert.ok(init.error?.message.includes("workspace group chat"), init.error?.message)
+    let next = await handlers.snapshot({ directory })
+    assert.equal(Object.keys(next.state.dmTranscripts).length, 0, "rejected direct messages never persist a line")
+    const assigned = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "nova", workspaceID: "w", text: "/review direct-check" } })
+    assert.equal(assigned.ok, true, JSON.stringify(assigned.error))
+    next = await handlers.snapshot({ directory })
+    assert.ok(Object.values(next.state.dmTranscripts).some((lines: any) => lines.some((line: any) => line.text === "/review direct-check")))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a leader triage task cannot be reassigned away from the leader", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-triage-reassign-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  ctx.skill.list = async () => [{ id: "public-research", name: "Public research", description: "Find primary sources" }]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", []),
+    skillAgent("sage", "Sage", []),
+  ], { synthesis: false })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
+    await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text: "/public-research reassign-check" } })
+    const next = await handlers.snapshot({ directory })
+    const task = Object.values(next.state.subtasks).find((item: any) => item.triage) as any
+    assert.ok(task)
+    const refused = await handlers.invoke({ directory, action: "task.reassign", payload: { id: task.id, assigneeID: "sage" } })
+    assert.equal(refused.ok, false)
+    assert.equal(refused.error?.code, "triage_leader_only")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("the deliberate skill action never falls through to a native /init turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-init-bypass-"))
+  const { ctx } = fakeContext()
+  await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", [])])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    for (const text of ["/init", "/ensemble-init"]) {
+      const response = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+      assert.equal(response.ok, false, text)
+      assert.equal(response.error?.code, "init_command", text)
+    }
+    const next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.messages.w ?? [], [], "init never becomes a leader peer turn")
+    assert.deepEqual(Object.values(next.state.subtasks), [], "init never becomes work")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
