@@ -4,7 +4,7 @@
 
 Ensemble is a TUI workspace where you and a team of named agents share one group chat, delegate visible subtasks, and inspect each agent's native OpenCode session underneath.
 
-> **Status: developer preview.** The v2 runtime is the default. It is not published, versioned, or licensed. Tested against OpenCode 2.2.2.
+> **Status: developer preview.** The v2 runtime is the default. It is not published, versioned, or licensed. Compatibility is recorded against OpenCode 2.2.1; the v5.8 live matrix was run on OpenCode 2.2.5.
 
 ## What it does
 
@@ -16,10 +16,11 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **Subtasks have three states:** Pending, Working, Replied.
 - **Replies stream and stay readable.** Group and direct replies stream token by token, then settle into rich colored Markdown with author lines, tables, fenced code, headings, quotes, and links. The transcript keeps a stable scroll position, scrolls with `PageUp` / `PageDown`, and jumps to the newest reply with `End`.
 - **Workspace config is human-editable.** `<workspace>/.ensemble/config.json` is authoritative for its name, leader, members, synthesis, and pause state. History stays in OpenCode storage, not the repository.
-- **Init writes the team contract.** `I` or `/init` runs native `/init`, then places the versioned Ensemble block at the top of `AGENTS.md`.
+- **Init writes the team contract.** `I`, `:init`, or `/init` appends a visible `/init` line and starts a System Agent init job. Progress streams into the chat and finalizes into a report; on success Ensemble writes the versioned block at the top of `AGENTS.md` and `.ensemble/init.json`, and on failure it restores the previous `AGENTS.md`. Init is solo-only and workspace-only, and the composer never falls through to native `/init`.
 - **Completions stay in the composer.** The composer is a wrapping textarea. `$`, `@`, and `/` open a bordered popup above it; typing filters, arrows move, Enter inserts or runs, and `Shift+Enter` adds a line. Workspace and agent creation use a centered multi-step wizard. List steps take `j`/`k`, `Enter`, `Space`, `/`, and `Esc`; text steps use the shared editor grammar. Move between steps with `n` next and `N` previous; `Esc` cancels, with a discard confirm when the draft is dirty. The optional memories step lists entries one by one with `a` add, `e` edit, and `x` delete.
-- **One modal grammar, one persistent mode.** Normal, Insert, Visual, and Command are global interaction states shared by the roster, chats, settings, wizards, and dialogs. Focus moves, overlays, wizard steps, and surface changes never change the mode; only explicit mode keys do, and `Enter` never does. Every text editor uses the same caret: a block in Normal, a line in Insert, Visual, and Command, and no caret when unfocused. `Esc` goes up one level and never quits; `Ctrl+G` leaves the focused editor and sets Normal. Leaving Ensemble hands the keyboard back to OpenCode immediately, so typing and `/` work in the native prompt without an `Esc`; `F2` returns. The two-row statusline uses typed segments (mode chip, context, git, position, hints) and faint `│` chrome separators with an ASCII `|` fallback. `Space` opens the leader menu and `?` opens the generated, searchable help catalog. App bindings are designed to avoid `Ctrl+letter` collisions with macOS and Herdr, but that intent has not been verified on a macOS/Herdr host; see the remaining limits in the v5.7 verification record.
+- **One modal grammar, one persistent mode.** Normal, Insert, Visual, and Command are global interaction states shared by the roster, chats, settings, wizards, and dialogs. Focus moves, overlays, wizard steps, and surface changes never change the mode; only explicit mode keys do, and `Enter` never does. Every text editor uses the same caret: a block in Normal, a line in Insert, Visual, and Command, and no caret when unfocused. `Esc` goes up one level and never quits; `Ctrl+G` leaves the focused editor and sets Normal. Leaving Ensemble hands the keyboard back to OpenCode immediately, so typing and `/` work in the native prompt without an `Esc`; `F2` returns. The two-row statusline uses typed segments (mode chip, context, git, position, hints) and faint `│` chrome separators with an ASCII `|` fallback. `Space` opens the leader menu and `?` opens the generated, searchable help catalog. App bindings are designed to avoid `Ctrl+letter` collisions with macOS and Herdr, but that intent has not been verified on a macOS/Herdr host; see the remaining limits in the v5.8 verification record.
 - **Mentions and team work are explicit.** `$Name` addresses a teammate in chat, `@path` is file-only, and work is assigned through Ensemble tools. The agent contract includes the same rules.
+- **Skills are deliberate.** `/` at message start lists commands and every catalog skill with `Command`, `Skill | General`, or `Skill | <Owner>` flags; `$Agent /` lists only that agent's assigned skills. Assigned skills stay with their owner, General skills go to the leader for triage, and multiple `/skill` tokens for one agent group into one prompt carrying the exact user text. Invalid references reject the whole message and keep the draft. The built-in `/init` row is a General system executor, not a host skill.
 - **One team state across locations.** All OpenCode locations share the same Ensemble roster, workspace membership, and bindings; config remains authoritative.
 - **Skillboxes and models are per-agent.** Only assigned skills are available; backup models recover from availability failures.
 - **Memory and approvals are scoped.** Project memory, workspace memory, and global memory have provenance and approval rules.
@@ -91,7 +92,11 @@ saves and keeps the field focused, an add clears for the next entry, and `Esc`
 returns to the rows. Press `i` to focus the bottom composer; the leader only
 acts when the composer and dialogs are inactive. In the composer, `$Name`
 addresses an agent, `@path` references a workspace file, and `/` opens Ensemble
-commands.
+commands or the skill palette. At message start `/` shows commands and every
+skill; `$Agent /` shows only that agent's assigned skills, and General skills
+are hidden under a non-leader mention. A General skill routes to the leader for
+triage; `/init` is solo-only and workspace-only. A rejected skill or agent
+reference keeps the draft and names the exact problem to fix.
 
 Wizard steps open in the mode you arrived with. `n` next, `N` previous, and
 `Enter` advance or select; `Esc` in a text field goes to field Normal, and the
@@ -107,7 +112,7 @@ own agent memory on creation; an empty list skips cleanly.
 npm test
 ```
 
-The unit suite covers routing, config discovery, workspace canonicalization, message sequencing, streaming, direct-chat queues, recovery, approvals, scheduling, init, reset, and reassignment races, plus the interaction reducer's persistent mode, caret mapping, wizard navigation/memory list, statusline segments/contrast, and page-activation route gate. `npm run test:live:fake` runs the deterministic fake provider, `npm run test:live:fake:empty` covers the empty model catalog, and `npm run test:live` boots an isolated OpenCode server and TUI against the real host catalog to verify the packaged plugin, empty state, agent creation, direct chat, leader help, and composer completions. Live checks are recorded in [docs/verification/2026-11-05-v57.md](docs/verification/2026-11-05-v57.md).
+The unit suite covers routing, config discovery, workspace canonicalization, message sequencing, streaming, direct-chat queues, recovery, approvals, scheduling, init jobs, skill invocation planning, one-run leader grants, reset, and reassignment races, plus the interaction reducer's persistent mode, caret mapping, wizard navigation/memory list, statusline segments/contrast, and page-activation route gate. `npm run test:live:fake` runs the deterministic fake provider and covers the v5.8 System Agent init progress/report, `/init` audit lines, `|` skill flags, assigned-skill invocation, grouped skills, multi-agent and mixed anchors, leader triage, and validation errors. `npm run test:live:fake:empty` covers the empty model catalog, and `npm run test:live` boots an isolated OpenCode server and TUI against the real host catalog to verify the packaged plugin, empty state, agent creation, direct chat, leader help, and composer completions. Live checks are recorded in [docs/verification/2026-11-05-v58.md](docs/verification/2026-11-05-v58.md).
 
 ### Runtime diagnosis
 
@@ -128,6 +133,7 @@ Every requested directory is queried on the **one selected service**, sequential
 ## Documentation
 
 - [v2 implementation notes](docs/implementation.md)
+- [v5.8 verification record](docs/verification/2026-11-05-v58.md)
 - [v5.7 verification record](docs/verification/2026-11-05-v57.md)
 - [v2 specification](https://github.com/heyimteee/ensemble/issues/17)
 - [v2 tickets](https://github.com/heyimteee/ensemble/issues)

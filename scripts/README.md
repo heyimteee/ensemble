@@ -17,7 +17,12 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   parity, statusline segments and `│` separators, the leader badge spacing,
   composer drafts and queued messages, the wizard Esc ladder, and that typing
   plus `/` reach the native prompt immediately after `:q`, while `:`/`/` still
-  open Command mode after an F2 round-trip.
+  open Command mode after an F2 round-trip. The v5.8 section adds deterministic
+  project skill fixtures and checks visible System Agent init progress and
+  reports for `I`/`:init`/`/init`, the visible `/init` audit line, `|` palette
+  flags, assigned-skill invocation with exact text, multi-skill grouping,
+  multi-agent and mixed anchors, one-run General-skill leader triage, the owner
+  picker, and atomic validation errors that preserve the draft.
 - `npm run test:live:fake:empty`: same isolated fake provider, but configured
   with no models. Walks the New-agent wizard through the empty one-by-one
   memory list to the Main model step and asserts the explained empty state
@@ -50,7 +55,7 @@ When finished, kill each listed session and remove only the printed temporary
 directory. Logs and configuration are local diagnostic artifacts; inspect for
 sensitive content before sharing. Successful runs always clean up.
 
-The fake checks are the primary regression net for the v5.7 behavior; run
+The fake checks are the primary regression net for the v5.7 and v5.8 behavior; run
 `test:live:fake` more than once when changing focus, caret, or native
 key-ownership code. The real scenario covers the packaged plugin against the
 host catalog but has fewer interaction assertions.

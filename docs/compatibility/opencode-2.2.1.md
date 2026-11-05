@@ -120,7 +120,7 @@ These are user-facing/experimental activation paths, not the `skill` tool path.
 
 **Decision:** Ensemble must not use either path to grant an agent an unassigned skill. Restrict UI skill attachments to the agent's Skillbox, and rely on the native per-agent `skill` permissions for agent-invoked loads. Validate this again in the final integration ticket.
 
-**v5.8 deliberate skill delivery:** General-skill leader triage keeps this boundary. Exact user text is the prompt body; no prompt `skills` attachment and no experimental skill activation is used. The leader receives a one-run permission update on its native session (`session.update` with the Skillbox baseline plus the requested General skill allow rules), and the baseline is restored after the turn. A delegatee receives the leader's self-authored guidance without that host grant. The built-in Ensemble init skill is a System Agent job, not a host skill load.
+**v5.8 deliberate skill delivery:** General-skill leader triage keeps this boundary. Exact user text is the prompt body; no prompt `skills` attachment and no experimental skill activation is used. One message creates at most one prompt per unique addressed agent: multiple `/skill` tokens for that agent are grouped into that prompt, separate messages remain separate queued items, and the planner never extracts per-skill bodies or creates per-skill child tasks. The leader receives a one-run permission update on its native session (`session.update` with the Skillbox baseline plus the requested General skill allow rules), and the baseline is restored after the turn. A delegatee receives the leader's self-authored guidance without that host grant. The built-in Ensemble init skill is a System Agent job, not a host skill load: the job creates a temporary native session in the workspace and deliberately calls the native `init` command with Ensemble's full instruction text (`session.command`), then removes the session. The composer never forwards `/init` to native OpenCode, and native `/init` in a native prompt is not shadowed.
 
 ### 3. Registry reads during plugin `setup` can be incomplete
 
@@ -156,6 +156,15 @@ Still unverified at the compatibility boundary:
 - Multiple TUI clients resolving the same approval.
 - Worktree-based parallel editing and cross-checkout coordination beyond the in-process editing queue.
 - GUI or web clients; these are out of scope.
+
+## v5.8 skill delivery and System Agent init
+
+The v5.8 integration matrix ran on 2026-11-05 against OpenCode **2.2.5** on Linux/tmux with Node 26.12.1. The 2.2.1 constraints above still govern the design; the live behavior was observed on 2.2.5 and the source is type-checked against the pinned 2.2.1 declarations. The full record is [v5.8 integration verification](../verification/2026-11-05-v58.md).
+
+- **Exact-text routing.** The shared planner resolves `$Agent` anchors and `/skill` tokens without rewriting the request. One message creates at most one prompt per unique addressed agent; multiple skills for that agent are grouped, separate messages remain separate queued items, and no per-skill body extraction or per-skill child task exists.
+- **No attachment bypass.** General skills are not delivered with a prompt `skills` attachment or through the experimental skill-activation endpoint. The leader receives a one-run `session.update` permission allow for the requested General skills, reads them with the native skill tool, and the Skillbox baseline is restored after the turn. A delegatee receives the leader's guidance with no host grant.
+- **Deliberate internal native init.** The built-in `/init` palette entry is a General system executor, not a host skill. The System Agent init job creates a temporary native session in the workspace and deliberately calls the native `init` command with Ensemble's full instruction text through `session.command`; it waits, writes the canonical block and `.ensemble/init.json` only on success, restores `AGENTS.md` on failure or cancellation, and removes the temporary session. The user-facing composer never forwards `/init` to native OpenCode, and native `/init` in a native prompt is not globally shadowed.
+- **Remaining host check.** macOS/Herdr behavior is not verified. The manual check covers shortcut collisions, the inline leader label, `Esc`/`Ctrl+G` under a live run, System Agent streaming, the `/` and `$Agent /` palettes, and `/init` under Herdr.
 
 ## Conclusion
 
