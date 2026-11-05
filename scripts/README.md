@@ -76,3 +76,28 @@ The fake provider is infrastructure only and is never imported by the plugin.
 It implements `/v1/models` and `/v1/chat/completions` (also without `/v1`).
 `fake-rich-fixture` selects the Markdown reply; other prompts get a short
 onboarding reply. SSE ends with `finish_reason: "stop"` and `[DONE]`.
+
+## Issue hygiene
+
+`npm run issue:hygiene` is a read-only GitHub listing for tracker cleanup. It
+lists parent issues whose sub-issues are all closed. The default filter is open
+parents, which are the ones awaiting a closure decision:
+
+```sh
+npm run issue:hygiene
+```
+
+Use `--all` to audit already-closed parents against the records in
+`docs/verification/`:
+
+```sh
+npm run issue:hygiene -- --all
+```
+
+Each row shows the issue number, state, closed/total child count, matching
+verification record (or `missing` for a versioned spec), and title. The command
+never edits or closes an issue. It needs an authenticated `gh` CLI; pass
+`--repo owner/name` to inspect another repository, `--input <file>` to read
+`gh issue list` JSON offline, or `--root <dir>` to resolve a different
+verification directory. Follow the closure rule in the [issue tracker
+guide](../docs/agents/issue-tracker.md#closing-a-completed-version-specification).
