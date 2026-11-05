@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { applySkillPaletteSelection, planSkillInvocation, skillPaletteAt } from "./skill-invocation.ts"
+import { applySkillPaletteSelection, planSkillInvocation, skillPaletteAt, skillWorkTitle } from "./skill-invocation.ts"
 import type { Agent, SkillOption, Workspace } from "./types.ts"
 
 const agent = (patch: Partial<Agent> & Pick<Agent, "id" | "name">): Agent => ({
@@ -121,12 +121,53 @@ test("a message-start skill resolves only when the leader owns it", () => {
   assert.ok(otherOwner.errors[0]?.message.includes("mention the owner"), otherOwner.errors[0]?.message)
 })
 
-test("multiple addressed agents are rejected until multi-anchor routing exists", () => {
+test("multiple anchors route each skill to its own agent", () => {
   const bothSkills = planSkillInvocation({ text: "$Nova /review and $Sage /deploy", workspace: workspace(), agents: roster(), skills })
-  assert.equal(bothSkills.errors[0]?.code, "unsupported_multi_agent")
+  assert.deepEqual(bothSkills.errors, [])
+  assert.equal(bothSkills.kind, "skills")
+  assert.deepEqual(bothSkills.recipients, [
+    { agentID: "nova", assignedSkills: ["review"], generalSkills: [], normal: false, triage: false },
+    { agentID: "sage", assignedSkills: ["deploy"], generalSkills: [], normal: false, triage: false },
+  ])
+})
 
-  const mixed = planSkillInvocation({ text: "$Nova /review and $Sage please review too", workspace: workspace(), agents: roster(), skills })
-  assert.equal(mixed.errors[0]?.code, "unsupported_multi_agent")
+test("a new anchor changes the target for the following skill tokens", () => {
+  const agents = roster()
+  agents.nova.skillbox = ["review", "notes"]
+  const plan = planSkillInvocation({ text: "!Sage /deploy and !Nova /review then !Nova /notes", workspace: workspace(), agents, skills })
+  assert.deepEqual(plan.errors, [])
+  assert.deepEqual(plan.recipients, [
+    { agentID: "sage", assignedSkills: ["deploy"], generalSkills: [], normal: false, triage: false },
+    { agentID: "nova", assignedSkills: ["review", "notes"], generalSkills: [], normal: false, triage: false },
+  ])
+})
+
+test("repeated anchors for one agent group every skill into one recipient", () => {
+  const agents = roster()
+  agents.nova.skillbox = ["review", "notes"]
+  const plan = planSkillInvocation({ text: "$Nova /review and $Sage /deploy and $Nova /notes", workspace: workspace(), agents, skills })
+  assert.deepEqual(plan.errors, [])
+  assert.deepEqual(plan.recipients, [
+    { agentID: "nova", assignedSkills: ["review", "notes"], generalSkills: [], normal: false, triage: false },
+    { agentID: "sage", assignedSkills: ["deploy"], generalSkills: [], normal: false, triage: false },
+  ])
+})
+
+test("mixed normal and skill anchors keep the normal agent as a recipient", () => {
+  const plan = planSkillInvocation({ text: "$Nova /review and $Sage please review too", workspace: workspace(), agents: roster(), skills })
+  assert.deepEqual(plan.errors, [])
+  assert.deepEqual(plan.recipients, [
+    { agentID: "nova", assignedSkills: ["review"], generalSkills: [], normal: false, triage: false },
+    { agentID: "sage", assignedSkills: [], generalSkills: [], normal: true, triage: false },
+  ])
+})
+
+test("a normal anchor with a skill later in the message stays one skilled recipient", () => {
+  const plan = planSkillInvocation({ text: "$Sage please look, and $Sage /deploy this", workspace: workspace(), agents: roster(), skills })
+  assert.deepEqual(plan.errors, [])
+  assert.deepEqual(plan.recipients, [
+    { agentID: "sage", assignedSkills: ["deploy"], generalSkills: [], normal: false, triage: false },
+  ])
 })
 
 test("the skill batch cap rejects the whole message", () => {
@@ -142,6 +183,36 @@ test("the skill batch cap rejects the whole message", () => {
   assert.deepEqual(plan.recipients, [])
   assert.equal(plan.errors[0]?.code, "skill_limit")
   assert.ok(plan.errors[0]?.message.includes("at most 2"), plan.errors[0]?.message)
+})
+
+test("the skill batch cap never exceeds eight regardless of the configured limit", () => {
+  const many = Array.from({ length: 9 }, (_, index) => ({ id: `s${index}`, name: `Skill ${index}` }))
+  const agentRoster = roster()
+  agentRoster.nova.skillbox = many.map((skill) => skill.id)
+  const plan = planSkillInvocation({
+    text: `$Nova ${many.map((skill) => `/${skill.id}`).join(" ")}`,
+    workspace: workspace(),
+    agents: agentRoster,
+    skills: many,
+    maxSkills: 20,
+  })
+  assert.deepEqual(plan.recipients, [])
+  assert.equal(plan.errors[0]?.code, "skill_limit")
+  assert.ok(plan.errors[0]?.message.includes("at most 8"), plan.errors[0]?.message)
+})
+
+test("the work title names only this agent's resolved skills and the request", () => {
+  const text = "$Nova /review /notes and $Sage /deploy please check"
+  const plan = planSkillInvocation({
+    text,
+    workspace: workspace(),
+    agents: { ...roster(), nova: agent({ id: "nova", name: "Nova", skillbox: ["review", "notes"] }) },
+    skills,
+  })
+  assert.deepEqual(plan.errors, [])
+  assert.equal(skillWorkTitle(text, plan.recipients[0]!), "/review /notes — $Nova /review /notes and $Sage /deploy please check")
+  const normal = { agentID: "sage", assignedSkills: [], generalSkills: [], normal: true, triage: false }
+  assert.equal(skillWorkTitle(text, normal), text.slice(0, 80))
 })
 
 test("message-start slash shows commands and assigned skills with flags", () => {
@@ -190,6 +261,17 @@ test("moving the cursor between anchors recomputes the palette", () => {
   const onNova = skillPaletteAt({ text, cursor: novaToken + 3, workspace: workspace(), agents, skills })
   assert.equal(onNova?.scope, "agent")
   assert.deepEqual(onNova?.rows.map((row) => row.skillID), ["review"])
+})
+
+test("every slash after one anchor keeps that agent's skill scope", () => {
+  const agents = roster()
+  agents.nova.skillbox = ["review", "notes"]
+  const text = "$Nova /review /note"
+  const palette = skillPaletteAt({ text, cursor: text.length, workspace: workspace(), agents, skills })
+  assert.ok(palette)
+  assert.equal(palette.scope, "agent")
+  assert.equal(palette.ownerID, "nova")
+  assert.deepEqual(palette.rows.map((row) => row.skillID), ["notes"])
 })
 
 test("slash completion stays scoped and leaves ordinary prose alone", () => {

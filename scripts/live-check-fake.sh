@@ -13,8 +13,8 @@ live_require_runtime
 live_require_node
 live_setup "fake"
 
-# v5.8 T2: a deterministic project skill gives the composer palette a real
-# host catalog row to assign and invoke. OpenCode discovers project skills
+# v5.8 T2/T3: deterministic project skills give the composer palette real
+# host catalog rows to assign and invoke. OpenCode discovers project skills
 # from .opencode/skills/<name>/SKILL.md before the server starts.
 mkdir -p "$LIVE_PROJECT/.opencode/skills/ensemble-live-skill"
 cat >"$LIVE_PROJECT/.opencode/skills/ensemble-live-skill/SKILL.md" <<'EOF'
@@ -27,6 +27,18 @@ description: Deterministic Ensemble live skill for composer invocation.
 
 Use this fixture only to verify deliberate skill routing in the fake live
 harness. It contains no project instructions.
+EOF
+mkdir -p "$LIVE_PROJECT/.opencode/skills/ensemble-live-skill-two"
+cat >"$LIVE_PROJECT/.opencode/skills/ensemble-live-skill-two/SKILL.md" <<'EOF'
+---
+name: ensemble-live-skill-two
+description: Second deterministic Ensemble live skill for multi-anchor routing.
+---
+
+# Ensemble live skill two
+
+Use this fixture only to verify grouped and multi-agent skill routing in the
+fake live harness. It contains no project instructions.
 EOF
 
 # Ticket #77: keep fake streams long enough that the parked-queue probe is
@@ -1641,11 +1653,19 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 [[ "$skill_found" == "1" ]] || live_fail "project skill fixture missing from the host catalog"
+skill_two_found=0
+for _ in $(seq 1 20); do
+  skill_two_found=$(live_snapshot_value 'output.skills.filter(function (s) { return s.id === "ensemble-live-skill-two" }).length')
+  [[ "$skill_two_found" == "1" ]] && break
+  sleep 0.25
+done
+[[ "$skill_two_found" == "1" ]] || live_fail "second project skill fixture missing from the host catalog"
 fake_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "FakeAgent" }).id' | tr -d '"')
-live_invoke "agent.update" "{\"id\":\"$fake_id\",\"skillbox\":[\"ensemble-live-skill\"]}" >/dev/null
+live_invoke "agent.update" "{\"id\":\"$fake_id\",\"skillbox\":[\"ensemble-live-skill\",\"ensemble-live-skill-two\"]}" >/dev/null
+live_invoke "agent.update" "{\"id\":\"$helper_id\",\"skillbox\":[\"ensemble-live-skill-two\"]}" >/dev/null
 sleep 0.5
 assigned=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "FakeAgent" }).skillbox.join(",")' | tr -d '"')
-[[ "$assigned" == "ensemble-live-skill" ]] || live_fail "skill assignment did not persist (got $assigned)"
+[[ "$assigned" == "ensemble-live-skill,ensemble-live-skill-two" ]] || live_fail "skill assignment did not persist (got $assigned)"
 
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
@@ -1662,7 +1682,7 @@ live_require_absence "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "skill selection
 live_assert_text "$LIVE_TUI_SESSION" "/ensemble-live-skill" "leader-owned skill inserts the bare template"
 live_type "$LIVE_TUI_SESSION" "palette-check"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill palette-check" 20 "skill turn assigned to its owner"
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill — /ensemble-live-skill palette-check" 20 "skill turn assigned to its owner"
 skill_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.creatorType === "user" && t.instruction === "/ensemble-live-skill palette-check" }).pop(); return task ? task.instruction : "missing" })()')
 [[ "$skill_exact" == '"/ensemble-live-skill palette-check"' ]] || live_fail "skill turn did not keep the exact user text (got $skill_exact)"
 
@@ -1683,12 +1703,89 @@ live_assert_text "$LIVE_TUI_SESSION" "\$FakeAgent /ensemble-live-skill" "anchore
 sleep 0.4
 live_type "$LIVE_TUI_SESSION" "anchored-check"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent /ensemble-live-skill anchored-check" 20 "anchored skill turn assigned to the owner"
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill — \$FakeAgent /ensemble-live-skill anchored-check" 20 "anchored skill turn assigned to the owner"
 anchored_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.creatorType === "user" && t.instruction === "$FakeAgent /ensemble-live-skill anchored-check" }).pop(); return task ? task.instruction : "missing" })()')
 [[ "$anchored_exact" == '"$FakeAgent /ensemble-live-skill anchored-check"' ]] || live_fail "anchored skill turn did not keep the exact user text (got $anchored_exact)"
 
+# v5.8 T3 (ticket #102): multiple skills under one anchor group into one
+# prompt, multiple anchors create one work row per unique agent, a normal-only
+# anchor keeps a normal peer turn, the exact text reaches every recipient, and
+# each reply stays attributed to its own agent.
+multi_text='$FakeAgent /ensemble-live-skill /ensemble-live-skill-two multi-skill-check'
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for grouped skills"
+live_type "$LIVE_TUI_SESSION" "$multi_text"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill /ensemble-live-skill-two —" 20 "grouped skills share one assignment row"
+multi_state=""
+for _ in $(seq 1 40); do
+  multi_state=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("multi-skill-check") >= 0 }); return tasks.length + ":" + (tasks[0] ? tasks[0].state : "missing") })()')
+  [[ "$multi_state" == '"1:replied"' ]] && break
+  sleep 0.5
+done
+[[ "$multi_state" == '"1:replied"' ]] || live_fail "grouped skill message did not produce one replied turn (got $multi_state)"
+multi_instruction=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("multi-skill-check") >= 0 })[0]; return task ? task.instruction : "missing" })()')
+[[ "$multi_instruction" == "\"$multi_text\"" ]] || live_fail "grouped skill turn lost the exact user text (got $multi_instruction)"
+multi_title=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("multi-skill-check") >= 0 })[0]; return task ? task.title : "missing" })()')
+multi_expected=$(printf '/ensemble-live-skill /ensemble-live-skill-two — %s' "$multi_text")
+[[ "$multi_title" == "\"$multi_expected\"" ]] || live_fail "grouped skill title missed the resolved skills (got $multi_title)"
+multi_reply=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("multi-skill-check") >= 0 })[0]; if (!task) return "missing"; var messages = output.state.messages[task.workspaceID] || []; var replies = messages.filter(function (m) { return m.author === "agent" && m.agentID === task.assigneeID && m.taskID === task.id }); return task.state + ":" + task.assigneeID + ":" + replies.length })()')
+[[ "$multi_reply" == "\"replied:$fake_id:1\"" ]] || live_fail "grouped skill reply was not attributed to its agent (got $multi_reply)"
+
+anchor_text='$FakeAgent /ensemble-live-skill !Helper /ensemble-live-skill-two multi-anchor'
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for multiple anchors"
+live_type "$LIVE_TUI_SESSION" "$anchor_text"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill —" 20 "first anchor assigned to its owner"
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: /ensemble-live-skill-two —" 20 "second anchor assigned to its owner"
+anchor_state=""
+for _ in $(seq 1 40); do
+  anchor_state=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("multi-anchor") >= 0 }); var replied = tasks.filter(function (t) { return t.state === "replied" }).length; return tasks.length + ":" + replied })()')
+  [[ "$anchor_state" == '"2:2"' ]] && break
+  sleep 0.5
+done
+[[ "$anchor_state" == '"2:2"' ]] || live_fail "multi-anchor message did not produce two replied turns (got $anchor_state)"
+fake_anchor_title=$(live_snapshot_value "(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === \"turn\" && t.instruction.indexOf(\"multi-anchor\") >= 0 && t.assigneeID === \"$fake_id\" })[0]; return task ? task.title : \"missing\" })()")
+helper_anchor_title=$(live_snapshot_value "(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === \"turn\" && t.instruction.indexOf(\"multi-anchor\") >= 0 && t.assigneeID === \"$helper_id\" })[0]; return task ? task.title : \"missing\" })()")
+[[ "$fake_anchor_title" == "\"$(printf '/ensemble-live-skill — %s' "$anchor_text")\"" ]] || live_fail "first anchor title missed its resolved skill (got $fake_anchor_title)"
+[[ "$helper_anchor_title" == "\"$(printf '/ensemble-live-skill-two — %s' "$anchor_text")\"" ]] || live_fail "second anchor title missed its resolved skill (got $helper_anchor_title)"
+anchor_fake_reply=$(live_snapshot_value "(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === \"turn\" && t.instruction.indexOf(\"multi-anchor\") >= 0 && t.assigneeID === \"$fake_id\" })[0]; if (!task) return \"missing\"; var messages = output.state.messages[task.workspaceID] || []; var replies = messages.filter(function (m) { return m.author === \"agent\" && m.agentID === task.assigneeID && m.taskID === task.id }); return task.state + \":\" + replies.length })()")
+anchor_helper_reply=$(live_snapshot_value "(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === \"turn\" && t.instruction.indexOf(\"multi-anchor\") >= 0 && t.assigneeID === \"$helper_id\" })[0]; if (!task) return \"missing\"; var messages = output.state.messages[task.workspaceID] || []; var replies = messages.filter(function (m) { return m.author === \"agent\" && m.agentID === task.assigneeID && m.taskID === task.id }); return task.state + \":\" + replies.length })()")
+[[ "$anchor_fake_reply" == '"replied:1"' ]] || live_fail "first anchor reply was not independently attributed (got $anchor_fake_reply)"
+[[ "$anchor_helper_reply" == '"replied:1"' ]] || live_fail "second anchor reply was not independently attributed (got $anchor_helper_reply)"
+
+mixed_text='$FakeAgent /ensemble-live-skill !Helper mixed-anchor'
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for mixed anchors"
+live_type "$LIVE_TUI_SESSION" "$mixed_text"
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill —" 20 "mixed skill anchor keeps its resolved skill"
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: $mixed_text" 20 "normal anchor keeps a normal peer turn"
+mixed_state=""
+for _ in $(seq 1 40); do
+  mixed_state=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("mixed-anchor") >= 0 }); var replied = tasks.filter(function (t) { return t.state === "replied" }).length; return tasks.length + ":" + replied })()')
+  [[ "$mixed_state" == '"2:2"' ]] && break
+  sleep 0.5
+done
+[[ "$mixed_state" == '"2:2"' ]] || live_fail "mixed anchors did not produce two replied turns (got $mixed_state)"
+mixed_helper_title=$(live_snapshot_value "(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === \"turn\" && t.instruction.indexOf(\"mixed-anchor\") >= 0 && t.assigneeID === \"$helper_id\" })[0]; return task ? task.title : \"missing\" })()")
+[[ "$mixed_helper_title" == "\"$mixed_text\"" ]] || live_fail "normal-only work row did not keep the request snippet (got $mixed_helper_title)"
+mixed_exact=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("mixed-anchor") >= 0 }); return tasks.length === 2 && tasks.every(function (t) { return t.instruction === tasks[0].instruction }) ? tasks[0].instruction : "mismatch" })()')
+[[ "$mixed_exact" == "\"$mixed_text\"" ]] || live_fail "mixed anchors did not deliver the same exact text (got $mixed_exact)"
+live_log "ticket #102 multi-skill grouping, multi-anchor routing, mixed anchors, work rows, and replies verified"
+
 # Validation is atomic and preserves the draft. Helper is a workspace member
-# with no assigned skills, so the planner names both the skill and its owner.
+# with no assigned first skill, so the planner names both the skill and its owner.
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for skill validation"
@@ -1702,5 +1799,19 @@ live_assert_text "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill wrong-owner" 
 invalid_skill_tasks=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("wrong-owner") >= 0 }).length')
 [[ "$invalid_skill_tasks" == "0" ]] || live_fail "invalid skill reference created work (got $invalid_skill_tasks rows)"
 live_log "ticket #101 composer skill palette, insertion, routing, and validation verified"
+
+# v5.8 T3 cap: min(settings.maxDelegations, 8) skill tokens per message. The
+# server rejects the whole message before appending a line or creating work.
+previous_max=$(live_snapshot_value 'output.state.settings.maxDelegations')
+live_invoke "settings.update" '{"maxDelegations":2}' >/dev/null
+cap_response=$(live_invoke "skill.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"!FakeAgent /ensemble-live-skill /ensemble-live-skill-two /ensemble-live-skill cap-check\"}")
+[[ "$cap_response" == *'"code":"skill_limit"'* ]] || live_fail "cap rejection did not return skill_limit (got $cap_response)"
+[[ "$cap_response" == *"at most 2"* ]] || live_fail "cap rejection did not name the configured limit (got $cap_response)"
+cap_tasks=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("cap-check") >= 0 }).length')
+[[ "$cap_tasks" == "0" ]] || live_fail "cap rejection created work (got $cap_tasks rows)"
+cap_messages=$(live_snapshot_value 'Object.keys(output.state.messages).reduce(function (count, key) { return count + output.state.messages[key].filter(function (m) { return m.text.indexOf("cap-check") >= 0 }).length }, 0)')
+[[ "$cap_messages" == "0" ]] || live_fail "cap rejection appended a transcript line (got $cap_messages rows)"
+live_invoke "settings.update" "{\"maxDelegations\":$previous_max}" >/dev/null
+live_log "ticket #102 skill batch cap rejected the whole message atomically"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

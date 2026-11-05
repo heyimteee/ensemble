@@ -269,17 +269,32 @@ export function applySkillPaletteSelection(
 }
 
 /**
+ * Work-row title for one addressed agent: the skills resolved for that agent
+ * plus the request snippet. Normal-only recipients keep the existing request
+ * snippet with no skill prefix. Display-only; the delivered instruction stays
+ * the exact user text.
+ */
+export function skillWorkTitle(text: string, recipient: SkillInvocationRecipient): string {
+  const skills = [...recipient.assignedSkills, ...recipient.generalSkills]
+  const snippet = text.trim().slice(0, 80)
+  if (skills.length === 0) return snippet
+  return `${skills.map((skill) => `/${skill}`).join(" ")} — ${snippet}`
+}
+
+/**
  * The pure skill invocation planner shared by the composer palette and the
  * server. It parses the exact user text into `$Agent` anchors and `/skill`
  * tokens, resolves the Skillbox assignment, and returns recipients plus
  * specific validation errors. It never rewrites the user text and never
  * extracts per-skill bodies.
  *
- * Ticket #101 delivers the assigned-skill path only. General skills,
- * multi-agent routing, and init jobs are the extension points owned by
- * tickets #100, #102, and #103: the recipient shape already carries
- * `generalSkills` and `triage`, and catalog skills without a workspace owner
- * are intentionally not recipients yet.
+ * Ticket #102 delivers multi-anchor and mixed normal/skill routing: every
+ * unique addressed agent is one recipient, all of that agent's skills are
+ * grouped into it, and a normal-only anchor is a normal peer turn. General
+ * skills and leader triage remain the extension point owned by ticket #103:
+ * the recipient shape already carries `generalSkills` and `triage`, and
+ * catalog skills without a workspace owner are intentionally not recipients
+ * yet.
  */
 export function planSkillInvocation(input: SkillInvocationInput): SkillInvocationPlan {
   const { text, workspace, agents } = input
@@ -315,6 +330,18 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
   const owners = ownerMap(workspace, agents)
   const recipients = new Map<string, SkillInvocationRecipient>()
 
+  const recipientFor = (target: Agent): SkillInvocationRecipient => {
+    const recipient = recipients.get(target.id) ?? {
+      agentID: target.id,
+      assignedSkills: [],
+      generalSkills: [],
+      normal: false,
+      triage: false,
+    }
+    recipients.set(target.id, recipient)
+    return recipient
+  }
+
   const resolveToken = (token: SlashToken, target: Agent): void => {
     if (!bySkill.has(token.id)) {
       if (owners.has(token.id)) {
@@ -340,48 +367,12 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
       })
       return
     }
-    const recipient = recipients.get(target.id) ?? {
-      agentID: target.id,
-      assignedSkills: [],
-      generalSkills: [],
-      normal: false,
-      triage: false,
-    }
+    const recipient = recipientFor(target)
     if (!recipient.assignedSkills.includes(token.id)) recipient.assignedSkills.push(token.id)
-    recipients.set(target.id, recipient)
   }
 
-  for (const anchor of anchors) {
-    const tokensForAnchor = anchorTokens.get(anchor) ?? []
-    if (tokensForAnchor.length === 0) continue
-    const target = anchor.agentID ? agents[anchor.agentID] : undefined
-    if (!target) {
-      errors.push({
-        code: "unknown_agent",
-        agentName: anchor.name,
-        message: `Unknown agent: ${anchor.token}.`,
-      })
-      continue
-    }
-    if (target.archived) {
-      errors.push({
-        code: "agent_archived",
-        agentName: target.name,
-        message: `$${target.name} is archived and cannot take a skill turn.`,
-      })
-      continue
-    }
-    if (!workspace.memberIDs.includes(target.id)) {
-      errors.push({
-        code: "not_member",
-        agentName: target.name,
-        message: `$${target.name} is not a workspace member; add them before invoking a skill.`,
-      })
-      continue
-    }
-    for (const token of tokensForAnchor) resolveToken(token, target)
-  }
-
+  // A message-start skill belongs to the leader, before any anchor changes
+  // the target for the tokens that follow it.
   if (startToken) {
     const leader = agents[workspace.leaderID]
     if (!leader) {
@@ -409,29 +400,53 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
             : `Skill /${startToken.id} is not assigned to any workspace member.`,
         })
       } else {
-        const recipient = recipients.get(leader.id) ?? {
-          agentID: leader.id,
-          assignedSkills: [],
-          generalSkills: [],
-          normal: false,
-          triage: false,
-        }
+        const recipient = recipientFor(leader)
         if (!recipient.assignedSkills.includes(startToken.id)) recipient.assignedSkills.push(startToken.id)
-        recipients.set(leader.id, recipient)
       }
     }
   }
 
-  const recipientList = [...recipients.values()]
-  const addressed = new Set<string>()
-  for (const anchor of anchors) if (anchor.agentID) addressed.add(anchor.agentID)
-  if (startToken && agents[workspace.leaderID]) addressed.add(workspace.leaderID)
-  if (addressed.size > 1) {
-    errors.push({
-      code: "unsupported_multi_agent",
-      message: "Skill invocation is limited to one addressed agent in this version; split the message by agent.",
-    })
+  for (const anchor of anchors) {
+    const tokensForAnchor = anchorTokens.get(anchor) ?? []
+    const target = anchor.agentID ? agents[anchor.agentID] : undefined
+    if (tokensForAnchor.length === 0) {
+      // A normal anchor is a normal peer turn for a valid member. Unknown,
+      // archived, and outside-roster normal mentions keep the existing
+      // group-chat refusal path instead of rejecting a skill batch.
+      if (target && !target.archived && workspace.memberIDs.includes(target.id)) recipientFor(target)
+      continue
+    }
+    if (!target) {
+      errors.push({
+        code: "unknown_agent",
+        agentName: anchor.name,
+        message: `Unknown agent: ${anchor.token}.`,
+      })
+      continue
+    }
+    if (target.archived) {
+      errors.push({
+        code: "agent_archived",
+        agentName: target.name,
+        message: `$${target.name} is archived and cannot take a skill turn.`,
+      })
+      continue
+    }
+    if (!workspace.memberIDs.includes(target.id)) {
+      errors.push({
+        code: "not_member",
+        agentName: target.name,
+        message: `$${target.name} is not a workspace member; add them before invoking a skill.`,
+      })
+      continue
+    }
+    for (const token of tokensForAnchor) resolveToken(token, target)
   }
+
+  for (const recipient of recipients.values()) {
+    recipient.normal = recipient.assignedSkills.length === 0 && recipient.generalSkills.length === 0
+  }
+  const recipientList = [...recipients.values()]
   const cap = Math.max(1, Math.min(input.maxSkills ?? 8, 8))
   if (allSkillTokens.length > cap) {
     errors.push({
