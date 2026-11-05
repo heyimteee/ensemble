@@ -74,7 +74,8 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
 # T4: the empty list skips without creating a blob. Arrival keeps Insert with
 # no text target; Enter advances to the empty model step.
-live_require_text "$LIVE_TUI_SESSION" "INSERT │ no text target │ Esc normal" 10 "the empty memory list has no text target"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "the empty memory list keeps Insert"
+live_require_text "$LIVE_TUI_SESSION" "no text target │ Esc normal" 10 "the empty memory list has no text target"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "main model step after an empty memory list"
 live_require_text "$LIVE_TUI_SESSION" "0 options" 10 "empty option count"

@@ -50,7 +50,7 @@ test("the visible cap keeps 12 rows and names the overflow explicitly", () => {
   const capped = capSkills(many)
   assert.equal(capped.visible.length, 12)
   assert.equal(capped.overflow, 3)
-  assert.equal(capLineText(capped.overflow), "· +3 more — refine filter")
+  assert.equal(capLineText(capped.overflow), "+3 more │ refine filter")
   const exact = capSkills(many.slice(0, 12))
   assert.equal(exact.overflow, 0)
   assert.equal(exact.visible.length, 12)

@@ -1,4 +1,5 @@
 import type { SkillOption } from "../types.ts"
+import { chromeJoin } from "./separators.ts"
 
 /** Settings tabs that share the settings frame header. */
 export type SettingsTabID = "general" | "models" | "memories" | "skillbox"
@@ -49,7 +50,7 @@ export function capSkills<T>(list: readonly T[], limit: number = SKILL_VISIBLE_L
 
 /** Overflow line shown when the catalog/filter exceeds the viewport. */
 export function capLineText(overflow: number): string {
-  return `· +${overflow} more — refine filter`
+  return chromeJoin([`+${overflow} more`, "refine filter"])
 }
 
 /** Pagination helpers for the Skillbox tab (ticket #77): 12 rows per page. */
@@ -91,7 +92,7 @@ export function settingsTabLine(tab: SettingsTabID, memoryCount: number, assigne
     ["general", "General"],
     ["models", "Models"],
     ["memories", `Memories (${memoryCount})`],
-    ["skillbox", `Skillbox (${assignedCount}/${catalogCount} · Tab)`],
+    ["skillbox", `Skillbox (${assignedCount}/${catalogCount}) │ Tab`],
   ]
-  return segments.map(([id, label]) => (id === tab ? `› ${label}` : label)).join(" · ")
+  return chromeJoin(segments.map(([id, label]) => (id === tab ? `› ${label}` : label)))
 }

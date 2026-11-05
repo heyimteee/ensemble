@@ -1,7 +1,9 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import {
+  COMMAND_CARET,
   buildStatuslineSegments,
+  commandCaretLayout,
   composerPosition,
   contextLabel,
   fitStatuslineSegments,
@@ -14,6 +16,7 @@ import {
   statuslineRow1,
   statuslineRow2,
   statuslineRow2Parts,
+  statuslineRow2PromptParts,
   transcriptPosition,
 } from "./statusline.ts"
 
@@ -148,6 +151,25 @@ test("a leader chip stays distinct from the persistent mode", () => {
   assert.deepEqual(segments[0].parts, [{ text: "NORMAL", tone: "chip", chip: "leader" }])
 })
 
+test("an Insert-without-target notice keeps core status segments", () => {
+  const segments = buildStatuslineSegments({
+    mode: "insert",
+    context: "Wizard",
+    notice: "no text target",
+    git: { branch: "main", dirty: false, ahead: 0, behind: 0 },
+    position: "1/3",
+    selectionSize: "2 chars",
+    pendingChord: "g",
+    hints: "Esc normal",
+  })
+  assert.deepEqual(
+    segments.map((segment) => segment.kind),
+    ["mode", "context", "selection", "git", "position", "chord", "notice", "hint"],
+  )
+  assert.deepEqual(segments.find((segment) => segment.kind === "notice")?.parts, [{ text: "no text target", tone: "muted" }])
+  assert.equal(formatStatuslineSegments(segments), "INSERT │ Wizard │ 2 chars │ git:(main) │ 1/3 │ chord g │ no text target │ Esc normal")
+})
+
 test("fitting drops hint segments from the right before any core segment", () => {
   const segments = buildStatuslineSegments({
     mode: "insert",
@@ -175,27 +197,58 @@ test("the mode chip survives every width; optional core segments drop after hint
   assert.deepEqual(fitStatuslineSegments(segments, 1).map((segment) => segment.kind), ["mode"])
 })
 
-test("row two renders command input, else a transient message, else a reserved blank", () => {
-  assert.equal(statuslineRow2({ command: { kind: ":", text: "", returnMode: "normal" } }), ":", "an empty command line stays visible")
-  assert.equal(statuslineRow2({ command: { kind: ":", text: "settings", returnMode: "normal" } }), ":settings")
-  assert.equal(statuslineRow2({ command: { kind: "/", text: "", returnMode: "normal" } }), "/", "an empty search line stays visible")
-  assert.equal(statuslineRow2({ command: { kind: "/", text: "agent", returnMode: "normal" } }), "/agent")
-  assert.equal(statuslineRow2({ message: "Message sent" }), "Message sent")
-  assert.equal(statuslineRow2({}), " ")
-  assert.equal(statuslineRow2({ command: null, message: "" }), " ", "an empty message keeps the reserved row")
+test("zero and negative widths keep the mandatory mode chip instead of leaking every segment", () => {
+  const segments = buildStatuslineSegments({
+    mode: "insert",
+    context: "Direct conversation",
+    git: { branch: "main", dirty: false, ahead: 0, behind: 0 },
+    position: "1:1",
+    hints: "enter send",
+  })
+  for (const width of [0, -1, -100]) {
+    const fitted = fitStatuslineSegments(segments, width)
+    assert.deepEqual(fitted.map((segment) => segment.kind), ["mode"], `width ${width} keeps only the mode chip`)
+  }
+  assert.deepEqual(fitStatuslineSegments(segments, Number.NaN).map((segment) => segment.kind), segments.map((segment) => segment.kind), "an unknown width is not treated as zero")
 })
 
-test("row two keeps the full command input and colors its prompt, success, and error", () => {
+test("row two renders the prompt, a visible line caret, else a transient message, else a reserved blank", () => {
+  assert.equal(statuslineRow2({ prompt: ":", text: "", cursor: 0 }), `:${COMMAND_CARET}`, "an empty command line keeps its caret")
+  assert.equal(statuslineRow2({ prompt: ":", text: "settings", cursor: 8 }), `:settings${COMMAND_CARET}`)
+  assert.equal(statuslineRow2({ prompt: "/", text: "", cursor: 0 }), `/${COMMAND_CARET}`, "an empty search line keeps its caret")
+  assert.equal(statuslineRow2({ prompt: "/", text: "agent", cursor: 5 }), `/agent${COMMAND_CARET}`)
+  assert.equal(statuslineRow2({ prompt: "/", text: "agent", cursor: 2 }), `/ag${COMMAND_CARET}ent`, "the caret sits at the cursor")
+  assert.equal(statuslineRow2({ message: "Message sent" }), "Message sent")
+  assert.equal(statuslineRow2({}), " ")
+  assert.equal(statuslineRow2({ prompt: null, message: "" }), " ", "an empty message keeps the reserved row")
+})
+
+test("the command prompt renders separately from the caret line and never truncates", () => {
+  assert.deepEqual(statuslineRow2PromptParts({ prompt: ":", text: "settings", cursor: 8 }), [{ text: ":", tone: "accent" }])
+  assert.deepEqual(statuslineRow2PromptParts({ prompt: "/", text: "agent", cursor: 5 }), [{ text: "/", tone: "accent" }])
+  assert.deepEqual(statuslineRow2PromptParts({ message: "Saved" }), [])
+})
+
+test("row two colors the prompt and caret, and keeps the full input at any width", () => {
   const long = "a".repeat(300)
-  assert.equal(statuslineRow2({ command: { kind: ":", text: long, returnMode: "normal" } }), `:${long}`)
-  assert.deepEqual(statuslineRow2Parts({ command: { kind: ":", text: "settings", returnMode: "normal" } }), [
-    { text: ":", tone: "accent" },
+  assert.equal(statuslineRow2({ prompt: ":", text: long, cursor: long.length }), `:${long}${COMMAND_CARET}`)
+  assert.deepEqual(statuslineRow2Parts({ prompt: ":", text: "settings", cursor: 8 }), [
     { text: "settings", tone: "text" },
+    { text: COMMAND_CARET, tone: "accent" },
   ])
   assert.deepEqual(statuslineRow2Parts({ message: "Saved", tone: "success" }), [{ text: "Saved", tone: "good" }])
   assert.deepEqual(statuslineRow2Parts({ message: "Failed", tone: "error" }), [{ text: "Failed", tone: "bad" }])
   assert.deepEqual(statuslineRow2Parts({ message: "Note" }), [{ text: "Note", tone: "faint" }])
   assert.deepEqual(statuslineRow2Parts({}), [{ text: " ", tone: "faint" }])
+})
+
+test("command caret layout scrolls horizontally so the caret stays visible", () => {
+  assert.deepEqual(commandCaretLayout("settings", 8, 20), { before: "settings", after: "", scrolled: false })
+  assert.deepEqual(commandCaretLayout("abcdef", 4, 3), { before: "cd", after: "", scrolled: true })
+  assert.deepEqual(commandCaretLayout("abc", 2, 1), { before: "", after: "", scrolled: true }, "a one-cell viewport still shows the caret")
+  assert.deepEqual(commandCaretLayout("日x", 1, 3), { before: "日", after: "", scrolled: false }, "wide cells count as two columns")
+  assert.deepEqual(commandCaretLayout("abcdef", 99, 4), { before: "def", after: "", scrolled: true }, "a stale cursor clamps before laying out")
+  assert.deepEqual(commandCaretLayout("abc", 1, 20), { before: "a", after: "bc", scrolled: false })
 })
 
 test("transcript position is a real scroll percentage, not a boolean label", () => {

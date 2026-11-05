@@ -26,8 +26,9 @@ export type InteractionFocus =
 
 export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "approvals" | "help"
 
-export type CommandInput = { kind: ":" | "/"; text: string; returnMode: InteractionMode }
+export type CommandInput = { kind: ":" | "/"; text: string; cursor: number; returnMode: InteractionMode }
 
+import { clampLineCursor } from "./line-editor.ts"
 import type { VimVisualSelection } from "./vim.ts"
 
 /** The interaction selection is the Vim Visual range type (one shape). */
@@ -52,6 +53,8 @@ export type InteractionState = {
   pendingChord: string | null
   selection: InteractionSelection | null
   message: TransientMessage | null
+  /** Editor that owned the caret when the current overlay opened. */
+  overlayReturnEditor: InteractionEditor | null
 }
 
 /** Which text buffer a dialog adapter should focus: a prompt or a wizard field. */
@@ -68,9 +71,9 @@ export type InteractionEvent =
   | { type: "settings.field.open" }
   | { type: "settings.field.close" }
   | { type: "focus.set"; focus: InteractionFocus }
-  | { type: "overlay.set"; overlay: InteractionOverlay }
-  | { type: "command.open"; kind: CommandInput["kind"]; text?: string }
-  | { type: "command.update"; text: string }
+  | { type: "overlay.set"; overlay: InteractionOverlay; returnEditor?: InteractionEditor }
+  | { type: "command.open"; kind: CommandInput["kind"]; text?: string; cursor?: number }
+  | { type: "command.update"; text: string; cursor?: number }
   | { type: "command.close" }
   | { type: "chord.set"; chord: string }
   | { type: "chord.clear" }
@@ -104,6 +107,7 @@ export function initialInteractionState(overrides: Partial<InteractionState> = {
     pendingChord: null,
     selection: null,
     message: null,
+    overlayReturnEditor: null,
     ...overrides,
   }
 }
@@ -269,6 +273,7 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
           pendingChord: null,
           selection: null,
           message: null,
+          overlayReturnEditor: null,
         },
         intents: [{ type: "blur-editor" }],
       }
@@ -335,26 +340,41 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
     }
     case "overlay.set": {
       const opening = state.overlay !== event.overlay
+      const closing = opening && event.overlay === "none"
       // Opening or closing an overlay leaves the editor context. The mode is
-      // never assigned here; a field must be re-focused deliberately.
+      // never assigned here; a field must be re-focused deliberately. Remember
+      // which editor owned the caret so closing the overlay in Insert can put
+      // the user back where they were instead of leaving every editor blurred.
+      const returnEditor = opening
+        ? event.returnEditor ?? state.overlayReturnEditor ?? (state.overlay === "none" && state.focus === "composer" ? "composer" : null)
+        : state.overlayReturnEditor
       const next: InteractionState = {
         ...state,
         overlay: event.overlay,
         field: opening ? null : state.field,
+        overlayReturnEditor: closing ? null : returnEditor,
       }
       const intents: InteractionIntent[] = opening ? [{ type: "blur-editor" }] : []
-      if (!opening && event.overlay === "none") {
-        const target = textTargetOf(next)
-        if (target) intents.push({ type: "focus-editor", target })
+      if (closing) {
+        const target = state.mode === "insert" ? state.overlayReturnEditor : null
+        if (target) {
+          next.field = target === "composer" ? null : target
+          if (target === "composer" || target === "settings") next.focus = target
+          intents.push({ type: "focus-editor", target })
+        } else {
+          const fallback = textTargetOf(next)
+          if (fallback) intents.push({ type: "focus-editor", target: fallback })
+        }
       }
       return { state: next, intents }
     }
     case "command.open": {
       const returnMode = state.mode === "command" ? state.command?.returnMode ?? "normal" : state.mode
+      const text = event.text ?? ""
       return {
         state: {
           ...state,
-          command: { kind: event.kind, text: event.text ?? "", returnMode },
+          command: { kind: event.kind, text, cursor: clampLineCursor(text, event.cursor ?? text.length), returnMode },
           mode: "command",
           selection: null,
         },
@@ -363,7 +383,16 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
     }
     case "command.update":
       return {
-        state: state.command ? { ...state, command: { ...state.command, text: event.text } } : state,
+        state: state.command
+          ? {
+              ...state,
+              command: {
+                ...state.command,
+                text: event.text,
+                cursor: clampLineCursor(event.text, event.cursor ?? event.text.length),
+              },
+            }
+          : state,
         intents: [],
       }
     case "command.close":

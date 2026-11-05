@@ -49,15 +49,16 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_type "$LIVE_TUI_SESSION" "Reviews changes and keeps the build green."
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
-  live_require_text "$LIVE_TUI_SESSION" "INSERT │ no text target" 10 "the memory list is honest about Insert with no target"
+  live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "the memory list keeps Insert"
+  live_require_text "$LIVE_TUI_SESSION" "no text target │ Esc normal" 10 "the memory list is honest about Insert with no target"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_any_text "$LIVE_TUI_SESSION" 20 "reasoning step or direct chat" "Reasoning effort" "LiveAgent · direct"
+  live_require_any_text "$LIVE_TUI_SESSION" 20 "reasoning step or direct chat" "Reasoning effort" "LiveAgent │ direct"
   if live_capture_contains "$LIVE_TUI_SESSION" "Reasoning effort"; then
     live_key "$LIVE_TUI_SESSION" Enter
   fi
-  live_require_text "$LIVE_TUI_SESSION" "LiveAgent · direct" 20 "direct chat opened"
+  live_require_text "$LIVE_TUI_SESSION" "LiveAgent │ direct" 20 "direct chat opened"
   live_require_text "$LIVE_TUI_SESSION" "LiveAgent" 10 "agent roster entry"
   # The wizard preserved the Insert mode through its list steps; leave it
   # explicitly before using Normal roster/chat keys. Ctrl+G is the reliable

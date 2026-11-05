@@ -1,4 +1,5 @@
 import type { Memory } from "../types.ts"
+import { chromeJoin } from "./separators.ts"
 
 export type MemoryStatus = "reviewed" | "needs review" | "promoted"
 
@@ -22,9 +23,9 @@ export function memoryNeedsReview(memory: Memory): boolean {
   return memoryStatus(memory) === "needs review"
 }
 
-/** Second-line grammar: `origin · scope · status` (brief section 2.6). */
+/** Second-line grammar: `origin │ scope │ status` (brief section 2.6). */
 export function memoryProvenanceLine(memory: Memory): string {
-  return `${memory.origin} · ${memory.scope} · ${memoryStatus(memory)}`
+  return chromeJoin([memory.origin, memory.scope, memoryStatus(memory)])
 }
 
 /** Inline substring filter over fact text plus the provenance line. */

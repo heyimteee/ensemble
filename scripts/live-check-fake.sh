@@ -125,7 +125,8 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
 # T4: the memories step is an ordered one-by-one list. Insert arrival stays
 # Insert with no text target; Esc returns to Normal before list keys act.
-live_assert_text "$LIVE_TUI_SESSION" "INSERT │ no text target │ Esc normal" "the memories step has no text target"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" "the memories step keeps Insert"
+live_assert_text "$LIVE_TUI_SESSION" "no text target │ Esc normal" "the memories step has no text target and keeps its core segments"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc leaves Insert on the memory list"
 live_assert_text "$LIVE_TUI_SESSION" "j/k select" "the memory list uses j/k"
@@ -205,11 +206,11 @@ live_require_text "$LIVE_TUI_SESSION" "filter: (none)" 10 "first Esc cleared the
 live_assert_text "$LIVE_TUI_SESSION" "Main model" "clearing the filter kept the wizard step"
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_any_text "$LIVE_TUI_SESSION" 15 "reasoning step or direct chat" "Reasoning effort" "FakeAgent · direct"
+live_require_any_text "$LIVE_TUI_SESSION" 15 "reasoning step or direct chat" "Reasoning effort" "FakeAgent │ direct"
 if live_capture_contains "$LIVE_TUI_SESSION" "Reasoning effort"; then
   live_key "$LIVE_TUI_SESSION" Enter
 fi
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 20 "direct chat opened"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ direct" 20 "direct chat opened"
 agent_memories=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
 [[ "$agent_memories" == '["Likes deterministic fixtures v2","Uses pnpm"]' ]] || live_fail "wizard memories did not persist one by one (got $agent_memories)"
 # Clear them so later memory-count probes stay meaningful.
@@ -333,7 +334,31 @@ live_require_text "$LIVE_TUI_SESSION" ":settings" 10 "Tab completed the command"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" ":settings" 10 "Esc cancelled the command line"
 live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Direct conversation" "cancel restored Normal mode"
-live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" "cancel never ran the completed command"
+live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" "cancel never ran the completed command"
+
+# Review fix: the command line has a real cursor. Insert a missing letter in
+# the middle, then prove Home/End and Delete also edit at the cursor.
+live_type "$LIVE_TUI_SESSION" ":setings"
+live_key "$LIVE_TUI_SESSION" Left
+live_key "$LIVE_TUI_SESSION" Left
+live_key "$LIVE_TUI_SESSION" Left
+live_key "$LIVE_TUI_SESSION" Left
+live_type "$LIVE_TUI_SESSION" "t"
+live_key "$LIVE_TUI_SESSION" End
+live_require_text "$LIVE_TUI_SESSION" ":settings" 10 "Left and insertion edit at the command cursor"
+live_key "$LIVE_TUI_SESSION" BSpace
+live_require_text "$LIVE_TUI_SESSION" ":setting" 10 "Backspace removes the character before the cursor"
+live_type "$LIVE_TUI_SESSION" "s"
+live_key "$LIVE_TUI_SESSION" Home
+live_key "$LIVE_TUI_SESSION" Delete
+live_key "$LIVE_TUI_SESSION" End
+live_require_text "$LIVE_TUI_SESSION" ":ettings" 10 "Delete removes the character under the cursor"
+live_key "$LIVE_TUI_SESSION" Home
+live_type "$LIVE_TUI_SESSION" "s"
+live_key "$LIVE_TUI_SESSION" End
+live_require_text "$LIVE_TUI_SESSION" ":settings" 10 "Home and insertion restore the command"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Direct conversation" 10 "command editing canceled back to Normal"
 
 live_type "$LIVE_TUI_SESSION" ":"
 live_type "$LIVE_TUI_SESSION" "help"
@@ -401,7 +426,8 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "i re-enters Insert"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "members step"
-live_assert_text "$LIVE_TUI_SESSION" "INSERT │ no text target │ Esc normal" "a list step reports Insert with no target"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" "a list step keeps Insert"
+live_assert_text "$LIVE_TUI_SESSION" "no text target │ Esc normal" "a list step reports Insert with no target and keeps its core segments"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc returns the list step to Normal"
 live_assert_text "$LIVE_TUI_SESSION" "space toggle" "members step names the multi-select key"
@@ -660,7 +686,7 @@ live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent p
 live_key "$LIVE_TUI_SESSION" C-g
 live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "Ctrl+G leaves the composer"
 live_key "$LIVE_TUI_SESSION" "z"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 10 "direct surface for the assignment check"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ direct" 10 "direct surface for the assignment check"
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "w"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "back on the group surface"
@@ -773,7 +799,7 @@ live_log "long multi-element bubble reply verified with no clipped markers"
 # `· queued · [x remove]` with removal by key.
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "z"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 10 "direct surface for verbatim probe"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ direct" 10 "direct surface for verbatim probe"
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on DM surface"
@@ -954,7 +980,7 @@ live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed"
 # count at one plus edit and filter). v5.6 T5 (#83) also proves the shared
 # modal grammar: tabs, rows, action hints, and the statusline mode/context.
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings for tab check"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "agent settings for tab check"
 live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Settings" "statusline names Normal and the settings context"
 live_assert_text "$LIVE_TUI_SESSION" "h/l tabs" "settings teaches h/l tabs"
 live_assert_text "$LIVE_TUI_SESSION" "j/k rows" "settings teaches j/k rows"
@@ -981,7 +1007,7 @@ live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "› Models" 10 "Tab also switches tabs"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed"
 
 # Slice E approvals: the empty inbox names that no action is needed. The
 # `Resolving…` pending row is unit-covered (no live fixture produces a
@@ -1002,7 +1028,7 @@ live_log "slice E help/settings/approvals chrome verified"
 # gaps as non-breaking spaces, hence NBSP.)
 NBSP=$'\u00a0'
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "agent settings"
 live_key "$LIVE_TUI_SESSION" "e"
 live_require_text "$LIVE_TUI_SESSION" "Name │ NORMAL" 10 "e opens the Name field in the current Normal mode"
 live_key "$LIVE_TUI_SESSION" "A"
@@ -1024,16 +1050,16 @@ live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "in-house confirm mo
 live_assert_text "$LIVE_TUI_SESSION" "y/enter yes │ n/esc no" "confirm footer shares y/n and Enter/Esc"
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "n rejected the confirm"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgentX · settings" 10 "rejected discard keeps settings open"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgentX │ settings" 10 "rejected discard keeps settings open"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "confirm reopened"
 live_key "$LIVE_TUI_SESSION" "y"
 live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "y accepted the confirm"
-live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed after discard"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed after discard"
 
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings reopened"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "agent settings reopened"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "No memories yet. a adds one." 10 "memories empty state names the add key"
@@ -1148,20 +1174,20 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "No matching memories" 10 "memory filter zero state"
 live_key "$LIVE_TUI_SESSION" "/"
 live_require_text "$LIVE_TUI_SESSION" "enter search │ esc cancel" 10 "settings search reopens"
-live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "opening a new search clears the filter preview"
+live_require_text "$LIVE_TUI_SESSION" "manual │ project │ reviewed" 10 "opening a new search clears the filter preview"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "provenance line restored after clearing filter"
+live_require_text "$LIVE_TUI_SESSION" "manual │ project │ reviewed" 10 "provenance line restored after clearing filter"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count survives filtering"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed"
 
 # Slice D (ticket #61): the Skillbox tab is a searchable skill palette with
 # `name — description` rows, inline filtering, fill-not-tick assignment, and
 # an explicit overflow line past the viewport cap (cap overflow itself is
 # unit-covered: the host catalog here is too small to page).
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings reopened for skillbox"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "agent settings reopened for skillbox"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
@@ -1186,12 +1212,12 @@ if live_capture_contains "$LIVE_TUI_SESSION" "[ ]"; then
 live_key "$LIVE_TUI_SESSION" Escape
   live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "skill draft discards via confirm"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed after skill discard"
+  live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed after skill discard"
 else
   live_log "host skill catalog is empty; toggle covered by unit tests"
   sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-  live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed"
+  live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed"
 fi
 
 # Slice G (ticket #69) settings stylization: one designed language across all
@@ -1200,7 +1226,7 @@ fi
 # model picker. Earlier blocks prove save/dirty and approval flows; this
 # block proves the styled grammar with no behavior change.
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings header names the agent"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings header names the agent"
 live_assert_text "$LIVE_TUI_SESSION" "AGENTS (1)" "agent list names its count"
 live_assert_text "$LIVE_TUI_SESSION" "WORKSPACES (1)" "workspace list names its count"
 live_assert_text "$LIVE_TUI_SESSION" "FakeAgent" "agent list names the agent"
@@ -1229,11 +1255,11 @@ live_assert_text "$LIVE_TUI_SESSION" "(•)${NBSP}Ensemble" "model picker marks 
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "3${NBSP}variants" 10 "model picker closed"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings kept with no dirty draft"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings kept with no dirty draft"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "Saved knowledge — Memories (1)" 10 "memories section header with count"
 live_assert_text "$LIVE_TUI_SESSION" "› fake-live-memory v2" "memories selection marker on the row"
-live_assert_text "$LIVE_TUI_SESSION" "manual · project · reviewed" "memories provenance line kept"
+live_assert_text "$LIVE_TUI_SESSION" "manual │ project │ reviewed" "memories provenance line kept"
 live_assert_text "$LIVE_TUI_SESSION" "x delete" "memories statusline teaches delete"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "› Skillbox" 10 "skillbox tab active with cursor"
@@ -1246,14 +1272,14 @@ else
 fi
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings closed with bindings intact"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed with bindings intact"
 live_log "slice G settings stylization verified across all four tabs"
 
 # v5.6 T5 follow-up: backup reorder keeps j/k on the row cursor. Add two
 # backups with distinct variants, move the selected one up with K, save, and
 # inspect the persisted order.
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings reopened for backup reorder"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings reopened for backup reorder"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "Main + backups — main + 0 backups" 10 "models tab before adding backups"
 live_key "$LIVE_TUI_SESSION" "a"
@@ -1273,7 +1299,7 @@ live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 2" 10 "second backup selec
 live_key "$LIVE_TUI_SESSION" "K"
 live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 1" 10 "K moves the selected backup up"
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "settings saved after backup reorder"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings saved after backup reorder"
 backup_order=$(live_snapshot_value '(function () { var a = Object.values(output.state.agents).filter(function (x) { return x.name === "FakeAgent" })[0]; return a.backupModels.map(function (m) { return m.variant }) })()')
 [[ "$backup_order" == '["medium","low"]' ]] || live_fail "K did not reorder the backups before save (got $backup_order)"
 live_log "settings J/K reordered backups and saved the persisted order"

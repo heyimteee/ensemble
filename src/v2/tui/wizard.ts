@@ -5,6 +5,7 @@
  * completion popup. Wizard navigation keys live in the shared dialog catalog.
  */
 import type { InteractionEvent } from "./interaction.ts"
+import { chromeJoin } from "./separators.ts"
 
 export type WizardEnterAction = "select" | "continue" | "submit" | "text"
 
@@ -45,7 +46,7 @@ export type WizardNavOption = {
 }
 
 export function wizardModelOptions(models: readonly WizardModelSource[]): WizardNavOption[] {
-  return models.map((item) => ({ id: `${item.providerID}/${item.modelID}`, label: `${item.name} · ${item.providerID}/${item.modelID}` }))
+  return models.map((item) => ({ id: `${item.providerID}/${item.modelID}`, label: chromeJoin([item.name, `${item.providerID}/${item.modelID}`]) }))
 }
 
 export function sameWizardOptions(a: readonly WizardNavOption[], b: readonly WizardNavOption[]): boolean {
@@ -62,8 +63,8 @@ export function wizardModelKeyFor(currentKey: string, options: readonly WizardNa
 export function wizardModelEmptyHint(modelsError: string | undefined): string {
   const reason = String(modelsError ?? "").trim()
   return reason
-    ? `No models available · ${reason}`
-    : "No models reported by OpenCode yet · options refresh automatically"
+    ? chromeJoin(["No models available", reason])
+    : chromeJoin(["No models reported by OpenCode yet", "options refresh automatically"])
 }
 
 export type OverlayGeometry = { width: number; left: number; top: number }
@@ -102,6 +103,11 @@ export function wizardDraftDirty(initial: WizardDraft, current: WizardDraft): bo
  */
 export function wizardStepArrival(kind: string | undefined): InteractionEvent {
   return kind === "text" ? { type: "field.enter", target: "wizard" } : { type: "field.leave" }
+}
+
+/** Memory add/edit/delete only exist on the one-by-one memories step. */
+export function isWizardMemoryStep(stepKey: string | undefined): boolean {
+  return stepKey === "memories"
 }
 
 /** Append one trimmed memory; blank input is a no-op. */
