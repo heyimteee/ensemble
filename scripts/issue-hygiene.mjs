@@ -30,7 +30,7 @@ Lists parent issues whose sub-issues are all closed.
 `
 }
 
-export function parseArgs(argv) {
+function parseArgs(argv) {
   const args = { all: false, repo: null, input: null, root: REPO_ROOT, help: false }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -50,7 +50,7 @@ function requireValue(argv, index, flag) {
   return value
 }
 
-export function normalizeIssues(raw) {
+function normalizeIssues(raw) {
   const list = Array.isArray(raw) ? raw : raw.issues
   if (!Array.isArray(list)) throw new Error("Expected an array of issues or an object with an issues array")
   return list.map((issue) => {
@@ -65,7 +65,7 @@ export function normalizeIssues(raw) {
   })
 }
 
-export function loadIssues(args) {
+function loadIssues(args) {
   if (args.input) return normalizeIssues(JSON.parse(readFileSync(args.input, "utf8")))
   const command = ["issue", "list", "--state", "all", "--limit", "1000", "--json", "number,title,state,subIssuesSummary"]
   if (args.repo) command.push("--repo", args.repo)
@@ -73,32 +73,34 @@ export function loadIssues(args) {
   return normalizeIssues(JSON.parse(output))
 }
 
-export function versionFromTitle(title) {
+function versionFromTitle(title) {
   const match = /Ensemble\s+v(\d+(?:\.\d+)*)/i.exec(title)
   return match ? match[1] : null
 }
 
-export function verificationRecord(version, root) {
+function verificationRecord(version, root) {
   if (!version) return { label: "n/a", path: null }
   const directory = join(root, "docs", "verification")
   if (!existsSync(directory)) return { label: "missing", path: null }
   const token = `v${version.replaceAll(".", "")}`.toLowerCase()
-  const exact = new RegExp(`(?:^|[-_.])${token}(?:[-_.]|$)`, "i")
+  // A ticket record such as `...-v59-t2.md` is not the delivered spec's own
+  // evidence; only the final `<version>.md` record counts.
+  const final = new RegExp(`(?:^|[-_.])${token}\\.md$`, "i")
   const match = readdirSync(directory)
     .filter((name) => name.endsWith(".md"))
-    .find((name) => exact.test(name))
+    .find((name) => final.test(name))
   if (!match) return { label: "missing", path: null }
   return { label: `docs/verification/${match}`, path: join(directory, match) }
 }
 
-export function completedParents(issues, options) {
+function completedParents(issues, options) {
   return issues
     .filter((issue) => issue.total > 0 && issue.completed === issue.total)
     .filter((issue) => options.all || issue.state === "OPEN")
     .sort((left, right) => right.number - left.number)
 }
 
-export function render(issues, args) {
+function render(issues, args) {
   const parents = completedParents(issues, args)
   const lines = [
     "Issue hygiene — parent issues whose sub-issues are all closed",
@@ -123,7 +125,7 @@ export function render(issues, args) {
   return lines.join("\n")
 }
 
-export function main(argv = process.argv.slice(2)) {
+function main(argv = process.argv.slice(2)) {
   let args
   try {
     args = parseArgs(argv)

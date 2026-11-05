@@ -46,15 +46,14 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   `j`/`k` navigation; it is a measurement, not a pass/fail threshold. Set
   `ENSEMBLE_LATENCY_SAMPLES` (default 10) to change the sample count.
 - `npm run test:live:preflight`: resolves the harness binaries and prints the
-  Node, OpenCode, tmux, and fd versions. In local mode a missing tool skips; with
-  `ENSEMBLE_LIVE_REQUIRE=1` it fails. Set `ENSEMBLE_LIVE_EXPECT_NODE` and
+  Node, OpenCode, and tmux versions. The default fake scope does not require
+  `fd`; `npm run test:live:preflight -- all` also requires and prints it for the
+  real scenario. Set `ENSEMBLE_LIVE_EXPECT_NODE` and
   `ENSEMBLE_LIVE_EXPECT_OPENCODE` to fail on a present-but-wrong version.
 
 The aggregate runner streams each scenario's output unchanged and never
 retries. A failing scenario stops the run and later scenarios are reported as
-`NOT RUN`. A scenario that prints the harness skip line is reported as `SKIP`,
-not `PASS`. Its exit stays zero locally to match the individual commands, so
-read the summary: a `SKIP` means the scenario did not run.
+`NOT RUN`. Skip handling follows the contract below.
 
 ## CI
 
@@ -62,21 +61,29 @@ CI keeps the existing `verify` job (`npm ci` then `npm run verify`) and adds a
 `live` job on every push and pull request. The live job pins the host toolset:
 Ubuntu 24.04, Node 26.12.1 through `actions/setup-node`, OpenCode 2.2.5 through
 `npm install --global @opencode/cli@2.2.5`, the runner's `tmux`, and fd 10.2.0
-from its release archive. It then runs `npm run test:live:preflight` followed by
-`npm run test:live:fake:all`; both steps set `ENSEMBLE_LIVE_REQUIRE=1`. The
-preflight prints the resolved versions and fails if a tool is missing or the
-pinned Node/OpenCode version differs. The suite is the deterministic fake and
-empty-catalog matrix. Real-model checks stay local and are never required in
-CI.
+from its release archive. It then runs `npm run test:live:preflight` (fake
+scope) followed by `npm run test:live:fake:all`; both steps set
+`ENSEMBLE_LIVE_REQUIRE=1`. The preflight prints the resolved versions and fails
+if a required tool is missing or the pinned Node/OpenCode version differs. The
+fake/empty suite does not use fd; the job still installs it so the same pinned
+toolset can validate the full local matrix with `npm run test:live:preflight --
+all`. Real-model checks stay local and are never required in CI.
 
-Skip versus fail:
+## Skip versus fail
+
+This is the authoritative contract; other documents point here instead of
+restating it.
 
 - Local runs keep the historical contract: a missing prerequisite prints
-  `...; skipping` and exits zero. Read the aggregate summary's `SKIP` rows and
-  report the scenario as **not run**, not as a pass.
-- `ENSEMBLE_LIVE_REQUIRE=1` turns every prerequisite skip into a failure, and
-  the aggregate runner also treats a `SKIP` row as a failure.
+  `...; skipping` and exits zero. The aggregate runner reads a structural skip
+  marker from the harness, reports that scenario as `SKIP`, and keeps the
+  overall exit zero. Read the summary and report a `SKIP` as **not run**, not
+  as a pass.
+- `ENSEMBLE_LIVE_REQUIRE=1` turns every prerequisite skip into a failure, so
+  the aggregate runner reports `FAIL` and stops.
 - A present-but-wrong pinned version in preflight is always a failure.
+- Invalid binary overrides (`OPENCODE_BIN`, `TMUX_BIN`, or `NODE_BIN` set but
+  not executable) fail rather than skip.
 
 The equivalent local CI check is:
 
@@ -96,13 +103,9 @@ inherited API keys or OpenCode overrides.
 Only the repository plugin is loaded. No real workspace is used. The resolved
 absolute OpenCode binary is invoked because HOME-dependent wrappers cannot run
 with an isolated HOME. The harness prefers an installed nvm binary; override
-with `OPENCODE_BIN`, `TMUX_BIN`, or `NODE_BIN` (executable absolute paths).
-
-Missing OpenCode, tmux, or Node prints an explicit skip and exits zero; the real
-scenario also explicitly skips when `fd` is missing. Invalid binary overrides
-fail rather than skip. A green live command is not evidence of execution if it
-printed a skip. Set `ENSEMBLE_LIVE_REQUIRE=1` to convert those skips into
-failures, as CI does.
+with `OPENCODE_BIN`, `TMUX_BIN`, or `NODE_BIN` (executable absolute paths). The
+[Skip versus fail](#skip-versus-fail) contract defines what happens when one is
+missing or invalid.
 
 ## Failure inspection
 

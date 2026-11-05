@@ -89,10 +89,17 @@ live_require_text "$LIVE_TUI_SESSION" "#LatencyProbe" 15 "latency fixture worksp
 live_key "$LIVE_TUI_SESSION" "h"
 live_require_text "$LIVE_TUI_SESSION" "ProbeAgent" 10 "rail visible before sampling"
 
-# The rail cursor marker is `› ` (settingsCursorMark) and renders only on the
-# surface that owns the focus border.
-AGENT_MARK="› ProbeAgent"
-WORKSPACE_MARK="› #LatencyProbe"
+# Read the rail cursor marker from the TUI helper rather than restating its
+# literal here. It renders only on the surface that owns the focus border.
+CURSOR_MARK=$("$LIVE_NODE_BIN" --experimental-strip-types -e '
+  const { pathToFileURL } = require("node:url");
+  import(pathToFileURL(process.argv[1]).href).then((module) => {
+    process.stdout.write(module.settingsCursorMark(true));
+  });
+' "$LIVE_ROOT/src/v2/tui/settings.ts") || live_fail "could not read settingsCursorMark"
+[[ -n "$CURSOR_MARK" ]] || live_fail "settingsCursorMark returned an empty marker"
+AGENT_MARK="${CURSOR_MARK}ProbeAgent"
+WORKSPACE_MARK="${CURSOR_MARK}#LatencyProbe"
 
 wait_for_marker() {
   local marker="$1" seconds="$2"

@@ -139,11 +139,6 @@ export function railGroupLine(kind: "agent" | "workspace", count: number): strin
   return `${kind === "agent" ? "AGENTS" : "WORKSPACES"} (${count})`
 }
 
-/** Agent-list row label: the name plus its title description when set. */
-export function railAgentLabel(name: string, title: string): string {
-  return title.trim() ? `${name} — ${title.trim()}` : name
-}
-
 /** Model picker row: display name, provider/model grouping, variant depth. */
 export function modelPickerLabel(model: ModelOption): string {
   const identity = `${model.providerID}/${model.modelID}`
