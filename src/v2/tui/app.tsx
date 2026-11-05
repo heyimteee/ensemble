@@ -42,7 +42,7 @@ import {
   reorderBackupList,
   type SettingsFieldID,
 } from "./settings-grammar.ts"
-import { singleChoiceValue } from "./overlays.ts"
+import { filterEdit, singleChoiceValue } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import {
   initialInteractionState,
@@ -59,13 +59,14 @@ import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type Draf
 import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
 import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
 import { createVimRegisterStore, normalizeVimKey, visualSelectionSize, type VimBuffer, type VimOutcome } from "./vim.ts"
-import { dialogEscape, dialogFilterEdit, dialogKeyContext } from "./dialogs.ts"
-import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
-import { layerEntries, globalEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
+import { dialogEscape, dialogKeyContext } from "./dialogs.ts"
+import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, transcriptPosition, type StatuslineSurface } from "./statusline.ts"
+import { commandStatusHints, layerEntries, globalEntries, leaderEntries, leaderHints, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, singleKeyEntry, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
 import { createPageActivation } from "./page-activation.ts"
-import { focusWhenReady } from "./focus.ts"
+import { focusWhenReady, halfPageCursor, nextFocusZone, type FocusZone } from "./focus.ts"
+import { LEADER_POPUP_DELAY_MS } from "./leader.ts"
 import { createCommandHistory, recallHistory, rememberHistory, startHistory, type CommandHistory } from "./history.ts"
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
 import { normalizeAgentMentions } from "../routing.ts"
@@ -264,13 +265,16 @@ export function EnsembleV2App() {
   const [draft, setDraft] = createSignal<Agent | null>(null)
   const [dirty, setDirty] = createSignal(false)
   const [leaderMode, setLeaderMode] = createSignal(false)
+  // The which-key popup waits a short beat; leader keys act immediately.
+  const [leaderPopup, setLeaderPopup] = createSignal(false)
+  let leaderPopupTimer: ReturnType<typeof setTimeout> | undefined
   const [helpOpen, setHelpOpen] = createSignal(false)
   // Help owns a local filter so its keys never touch interaction mode/focus.
   const [helpFiltering, setHelpFiltering] = createSignal(false)
   const [helpQuery, setHelpQuery] = createSignal("")
   const [helpMatch, setHelpMatch] = createSignal(0)
   const helpCatalogSections = helpSections()
-  let helpPendingG = false
+  let helpPendingKeys: string[] = []
   const [approvalsOpen, setApprovalsOpen] = createSignal(false)
   const [status, setStatus] = createSignal("Loading workspace…")
   const [gitState, setGitState] = createSignal<GitState | null>(null)
@@ -301,6 +305,7 @@ export function EnsembleV2App() {
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
   const [atBottom, setAtBottom] = createSignal(true)
+  const [transcriptScroll, setTranscriptScroll] = createSignal({ top: 0, height: 0, viewport: 0 })
   let composerRef: any
   // Ticket #77d: identifies the current composer session. A send that is
   // still in flight must not re-focus (or wipe) a composer the user already
@@ -342,6 +347,8 @@ export function EnsembleV2App() {
       } else if (intent.type === "blur-editor") {
         try { composerRef?.blur?.() } catch {}
         try { settingsFieldRef?.blur?.() } catch {}
+        try { textPromptRef?.blur?.() } catch {}
+        try { wizardRef?.blur?.() } catch {}
       } else if (intent.type === "wizard-back") {
         wizardPrev()
       } else if (intent.type === "close-overlay") {
@@ -420,8 +427,7 @@ export function EnsembleV2App() {
     if (chord) dispatchInteraction({ type: "chord.set", chord })
     else if (interaction().pendingChord) dispatchInteraction({ type: "chord.clear" })
   }
-  const visualHint =
-    "h/j/k/l extend · 0/^/$ · w/b/e · gg/G · o swap · y copy · d/x cut · c change · p/P paste · esc normal"
+  const visualHint = statuslineHints("composerVisual")
   /**
    * Ticket #86: the Vim controller owns the selection while a text buffer is
    * focused; mirror its mode and range into the interaction state so the
@@ -835,13 +841,17 @@ export function EnsembleV2App() {
     const box = transcriptScrollRef
     if (!box) { setAtBottom(true); return }
     const height = Number(box.height ?? messageHeight())
-    const max = Math.max(0, Number(box.scrollHeight ?? 0) - height)
-    setAtBottom(Number(box.scrollTop ?? 0) >= max - 1)
+    const scrollHeight = Number(box.scrollHeight ?? 0)
+    const scrollTop = Number(box.scrollTop ?? 0)
+    const max = Math.max(0, scrollHeight - height)
+    setAtBottom(scrollTop >= max - 1)
+    setTranscriptScroll({ top: scrollTop, height: scrollHeight, viewport: height })
   }
   const jumpToBottom = () => {
     const box = transcriptScrollRef
     if (box) box.scrollTop = Number(box.scrollHeight ?? 0)
     setAtBottom(true)
+    queueMicrotask(() => syncTranscriptScroll())
   }
 
   const settingsAgent = createMemo(() => settingsAgentID() ? state()?.agents[settingsAgentID()!] : undefined)
@@ -1016,7 +1026,7 @@ export function EnsembleV2App() {
       case "init": await initEnsemble(); return
       case "native": openNative(); return
       case "help": openHelp(); return
-      case "q": context.ui.router.navigate({ type: "home" }); return
+      case "q": leaveEnsemble(); return
     }
   }
 
@@ -1062,30 +1072,38 @@ export function EnsembleV2App() {
   const handleCommandKey = (event: any): boolean => {
     const current = interaction().command
     if (!current) return false
-    const name = String(event?.name ?? "")
-    const sequence = String(event?.sequence ?? "")
     event?.preventDefault?.(); event?.stopPropagation?.()
-
-    if (name === "escape") { closeCommandLine(true); return true }
-    if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") {
-      void submitCommandLine().catch(showError)
-      return true
+    const token = normalizeKeyToken(event)
+    const entry = singleKeyEntry("command", token)
+    if (entry) {
+      switch (entry.id) {
+        case "command.run":
+          void submitCommandLine().catch(showError)
+          return true
+        case "command.cancel":
+          closeCommandLine(true)
+          return true
+        case "command.history.up":
+        case "command.history.down": {
+          const recalled = recallHistory(commandHistory(), current.kind, entry.id === "command.history.up" ? "up" : "down", current.text)
+          setCommandHistory(recalled.history)
+          updateCommandText(recalled.text)
+          return true
+        }
+        case "command.complete":
+          if (current.kind === ":") {
+            const completed = completeCommand(current.text)
+            if (completed) updateCommandText(completed)
+          }
+          return true
+        case "command.backspace":
+          updateCommandText(current.text.slice(0, -1))
+          return true
+      }
     }
-    if (name === "up" || name === "down") {
-      const recalled = recallHistory(commandHistory(), current.kind, name === "up" ? "up" : "down", current.text)
-      setCommandHistory(recalled.history)
-      updateCommandText(recalled.text)
-      return true
-    }
-    if (name === "tab" && current.kind === ":") {
-      const completed = completeCommand(current.text)
-      if (completed) updateCommandText(completed)
-      return true
-    }
-    if (name === "backspace") { updateCommandText(current.text.slice(0, -1)); return true }
+    const sequence = String(event?.sequence ?? "")
     if (sequence.length === 1 && sequence >= " " && !event?.ctrl && !event?.meta && !event?.super) {
       updateCommandText(`${current.text}${sequence}`)
-      return true
     }
     return true
   }
@@ -1274,28 +1292,36 @@ export function EnsembleV2App() {
     if (await enterRail()) startCompose()
   }
 
+  const listPage = () => Math.max(1, Math.floor(messageHeight() / 2))
   const moveRail = (delta: number) => {
     const length = railItems().length
     if (length === 0) return
     setRailCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
+  }
+  const moveRailHalf = (direction: 1 | -1) => {
+    setRailCursor((cursor) => halfPageCursor(cursor, railItems().length, direction, listPage()))
   }
   const moveTask = (delta: number) => {
     const length = orderedTasks().length
     if (length === 0) return
     setTaskCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
   }
+  const moveTaskHalf = (direction: 1 | -1) => {
+    setTaskCursor((cursor) => halfPageCursor(cursor, orderedTasks().length, direction, listPage()))
+  }
   /**
-   * Tab moves focus zones: roster -> chat -> work list -> chat. A group chat
-   * with no inline work falls back to the rail; Direct conversations have no
-   * work list. Esc from the work zone returns to the transcript.
+   * Tab/Shift+Tab move focus zones. Forward: roster -> chat -> work list ->
+   * chat; reverse mirrors it, and the rail reaches the work zone directly.
+   * A group chat with no inline work falls back to the rail; Direct
+   * conversations have no work list. The composer is entered with i/Enter,
+   * never Tab.
    */
-  const cycleFocusZone = () => {
+  const cycleFocusZone = (direction: 1 | -1 = 1) => {
     clearPendingChord()
-    if (interaction().focus === "rail") { dispatchInteraction({ type: "focus.set", focus: "chat" }); return }
-    if (interaction().focus === "work") { dispatchInteraction({ type: "focus.set", focus: "chat" }); return }
-    if (interaction().focus === "chat") {
-      dispatchInteraction({ type: "focus.set", focus: hasWorkZone() ? "work" : "rail" })
-    }
+    const focus = interaction().focus
+    if (focus !== "rail" && focus !== "chat" && focus !== "work") return
+    const next: FocusZone = nextFocusZone(focus, direction, hasWorkZone())
+    dispatchInteraction({ type: "focus.set", focus: next })
   }
 
   const scrollTranscriptBy = (delta: number) => {
@@ -1305,6 +1331,7 @@ export function EnsembleV2App() {
   const scrollTranscriptTop = () => {
     if (transcriptScrollRef) transcriptScrollRef.scrollTop = 0
     setAtBottom(false)
+    queueMicrotask(() => syncTranscriptScroll())
   }
   const scrollTranscriptHalf = (direction: 1 | -1) => {
     scrollTranscriptBy(direction * Math.max(1, Math.floor(messageHeight() / 2)))
@@ -1496,11 +1523,26 @@ export function EnsembleV2App() {
   const openLeader = () => {
     clearPendingChord()
     setLeaderMode(true)
+    setLeaderPopup(false)
+    if (leaderPopupTimer !== undefined) clearTimeout(leaderPopupTimer)
+    leaderPopupTimer = setTimeout(() => {
+      leaderPopupTimer = undefined
+      setLeaderPopup(true)
+    }, LEADER_POPUP_DELAY_MS)
     setInteraction((state) => interactionReducer(state, { type: "chord.set", chord: "space" }).state)
   }
   const closeLeader = () => {
+    if (leaderPopupTimer !== undefined) { clearTimeout(leaderPopupTimer); leaderPopupTimer = undefined }
+    setLeaderPopup(false)
     setLeaderMode(false)
     clearPendingChord()
+  }
+  onCleanup(() => { if (leaderPopupTimer !== undefined) { clearTimeout(leaderPopupTimer); leaderPopupTimer = undefined } })
+  /** The one deliberate quit path behind `:q` and `Space q`. */
+  const leaveEnsemble = () => {
+    closeLeader()
+    clearPendingChord()
+    context.ui.router.navigate({ type: "home" })
   }
   const surfaceEscape = () => {
     clearPendingChord()
@@ -1598,7 +1640,7 @@ export function EnsembleV2App() {
     ["workspace", "switch workspace"], ["agent", "mention an agent"], ["settings", "agent settings"], ["approvals", "approval inbox"],
     ["pause", "pause workspace"], ["resume", "resume workspace"], ["init", "initialize workspace files (initialisation, not routing)"], ["help", "shortcut help"],
     ["native", "open native session"], ["delegate", "delegate selected subtask"], ["retry", "retry selected subtask"], ["restart", "restart selected subtask"],
-    ["cancel", "cancel selected subtask"], ["reset-ensemble", "delete all Ensemble data"], ["leave", "leave Ensemble"],
+    ["cancel", "cancel selected subtask"], ["reset-ensemble", "delete all Ensemble data"],
   ] as const
 
   const pickWorkspace = async () => {
@@ -1655,7 +1697,6 @@ export function EnsembleV2App() {
       case "restart": await restartSelected(); return
       case "cancel": await cancelSelected(); return
       case "reset-ensemble": await resetEnsemble(); return
-      case "leave": context.ui.router.navigate({ type: "home" }); return
       default: context.ui.toast.show({ title: "Ensemble", message: `Unknown command: /${command}`, variant: "warning" })
     }
   }
@@ -1710,69 +1751,77 @@ export function EnsembleV2App() {
     const rawName = String(event?.name ?? "")
     const ctrl = Boolean(event?.ctrl) || rawName.startsWith("ctrl+")
     const name = rawName.startsWith("ctrl+") ? rawName.slice("ctrl+".length) : rawName
-    if (name === "escape" && !ctrl) {
-      event?.preventDefault?.(); event?.stopPropagation?.()
-      if (completion()) closeCompletion()
-      else {
-        const wasInsert = interaction().mode === "insert"
-        dispatchInteraction({ type: "escape" })
-        const vim = composerVimBuffer()
-        vim?.invalidate()
-        if (wasInsert) {
-          vim?.normalizeCursor()
-          if (composerRef) setComposerCursor(Number(composerRef.cursorOffset ?? 0))
-        }
-        syncVimChord(null)
-      }
-      return true
-    }
-    if (ctrl && name === "g") {
-      event?.preventDefault?.(); event?.stopPropagation?.()
+    const token = normalizeKeyToken(event)
+    const prevent = () => { event?.preventDefault?.(); event?.stopPropagation?.() }
+    const leaveEditor = () => {
+      prevent()
       leaveComposer()
       return true
     }
-    // Stop-running work stays on the shared keymap layer; do not swallow it.
-    if (ctrl && name === "c") return false
-    const mode = interaction().mode
-    if (mode === "normal" || mode === "visual") {
-      event?.preventDefault?.(); event?.stopPropagation?.()
-      // Command and search still open from composer Normal (#80); the rest of
-      // Normal is the Vim grammar (#85). Visual owns every other key (#86).
-      const commandToken = normalizeKeyToken(event)
-      if (mode === "normal" && (commandToken === ":" || commandToken === "/")) {
-        openCommandLine(commandToken)
-        return true
-      }
-      if (name === "return" || name === "enter" || name === "kpenter") {
-        if (mode === "visual") return true
-        composerCache.buffer?.invalidate()
-        syncVimChord(null)
-        void submitComposer(String(composerRef?.plainText ?? "")).catch(showError)
-        return true
-      }
-      // Normal and Visual own the composer's keys: motions, operators, insert
-      // entries, selection, yank/paste, undo/redo. Unbound keys are swallowed
-      // so app actions never fire while the composer holds focus.
+    const escapeEditor = (wasInsert: boolean) => {
+      prevent()
+      if (completion()) { closeCompletion(); return true }
+      dispatchInteraction({ type: "escape" })
       const vim = composerVimBuffer()
-      const key = normalizeVimKey({ name, ctrl, shift: Boolean(event?.shift) })
-      if (!vim || !key) return true
-      void vim
-        .press(key)
-        .then((outcome) =>
-          applyVimOutcome(outcome, {
-            insert: () => {
-              dispatchInteraction({ type: "insert.enter" })
-              focusComposer()
-            },
-            cursor: () => {
-              if (composerRef) setComposerCursor(Number(composerRef.cursorOffset ?? 0))
-            },
-          }),
-        )
-        .catch(showError)
+      vim?.invalidate()
+      if (wasInsert) {
+        vim?.normalizeCursor()
+        if (composerRef) setComposerCursor(Number(composerRef.cursorOffset ?? 0))
+      }
+      syncVimChord(null)
       return true
     }
-    return false
+
+    // Ctrl+C stays on the shared keymap layer so it can stop running work in
+    // any composer mode.
+    if (singleKeyEntry("composerInsert", token)?.id === "composerInsert.stop") return false
+
+    const mode = interaction().mode
+    if (mode === "insert") {
+      const entry = singleKeyEntry("composerInsert", token)
+      if (entry?.id === "composerInsert.escape") return escapeEditor(true)
+      if (entry?.id === "composerInsert.leave") return leaveEditor()
+      return false
+    }
+
+    const context: KeyContext = mode === "visual" ? "composerVisual" : "composerNormal"
+    const entry = singleKeyEntry(context, token)
+    if (entry?.id === `${context}.escape`) return escapeEditor(false)
+    if (entry?.id === `${context}.leave`) return leaveEditor()
+    if (mode === "normal" && entry?.id === "composerNormal.command") { prevent(); openCommandLine(":"); return true }
+    if (mode === "normal" && entry?.id === "composerNormal.search") { prevent(); openCommandLine("/"); return true }
+    if (entry?.id === "composerNormal.enter") {
+      prevent()
+      composerCache.buffer?.invalidate()
+      syncVimChord(null)
+      void submitComposer(String(composerRef?.plainText ?? "")).catch(showError)
+      return true
+    }
+    // Visual swallows Enter: a pending selection is never submitted.
+    if (mode === "visual" && token === "enter") { prevent(); return true }
+
+    // Normal and Visual own the composer's keys: motions, operators, insert
+    // entries, selection, yank/paste, undo/redo. Unbound keys are swallowed
+    // so app actions never fire while the composer holds focus.
+    prevent()
+    const vim = composerVimBuffer()
+    const key = normalizeVimKey({ name, ctrl, shift: Boolean(event?.shift) })
+    if (!vim || !key) return true
+    void vim
+      .press(key)
+      .then((outcome) =>
+        applyVimOutcome(outcome, {
+          insert: () => {
+            dispatchInteraction({ type: "insert.enter" })
+            focusComposer()
+          },
+          cursor: () => {
+            if (composerRef) setComposerCursor(Number(composerRef.cursorOffset ?? 0))
+          },
+        }),
+      )
+      .catch(showError)
+    return true
   }
 
   const handleSettingsFieldKey = (event: any) => {
@@ -2208,6 +2257,9 @@ export function EnsembleV2App() {
   const moveSettingsCursor = (delta: number) => {
     setSettingsCursor(moveSettingsRow(settingsCursorClamped(), delta, settingsRowTotal()))
   }
+  const moveSettingsHalf = (direction: 1 | -1) => {
+    setSettingsCursor(halfPageCursor(settingsCursorClamped(), settingsRowTotal(), direction, listPage()))
+  }
 
   // Slice B motion gate: the 4 fps clock runs only while something is in
   // flight (busy, live streaming text, task-backed activity lines, or the
@@ -2281,9 +2333,12 @@ export function EnsembleV2App() {
     "nav.up": () => moveRail(-1),
     "nav.top": () => setRailCursor(0),
     "nav.bottom": () => setRailCursor(Math.max(0, railItems().length - 1)),
+    "nav.half.down": () => moveRailHalf(1),
+    "nav.half.up": () => moveRailHalf(-1),
     "nav.left": () => setFocusArea("rail"),
     "nav.right": () => setFocusArea("chat"),
-    "focus.tab": () => cycleFocusZone(),
+    "focus.tab": () => cycleFocusZone(1),
+    "focus.shift.tab": () => cycleFocusZone(-1),
     open: () => openRailAndCompose(),
     "new.agent": () => createAgent(),
     "new.workspace": () => createWorkspace(),
@@ -2330,6 +2385,8 @@ export function EnsembleV2App() {
     "work.up": () => moveTask(-1),
     "work.top": () => setTaskCursor(0),
     "work.bottom": () => setTaskCursor(Math.max(0, orderedTasks().length - 1)),
+    "work.half.down": () => moveTaskHalf(1),
+    "work.half.up": () => moveTaskHalf(-1),
     "work.open": () => openResult(),
     "work.delegate": () => delegateSelected(),
     "work.reassign": () => reassignSelected(),
@@ -2347,6 +2404,8 @@ export function EnsembleV2App() {
     "settings.up": () => moveSettingsCursor(-1),
     "settings.top": () => setSettingsCursor(0),
     "settings.bottom": () => setSettingsCursor(Math.max(0, settingsRowTotal() - 1)),
+    "settings.half.down": () => moveSettingsHalf(1),
+    "settings.half.up": () => moveSettingsHalf(-1),
     "settings.edit": () => editSettingsRow(),
     "settings.edit.alt": () => editSettingsRow(),
     "settings.add": () => addSettingsRow(),
@@ -2361,7 +2420,7 @@ export function EnsembleV2App() {
   }
   const leaderActionHandlers: Record<string, () => unknown> = {
     "leader.help": () => openHelp(),
-    "leader.leave": () => context.ui.router.navigate({ type: "home" }),
+    "leader.leave": () => leaveEnsemble(),
     "leader.cancel": () => closeLeader(),
     "leader.new.agent": () => createAgent(),
     "leader.new.workspace": () => createWorkspace(),
@@ -2386,8 +2445,7 @@ export function EnsembleV2App() {
     runAction(keyActionHandlers[id])
   }
   const runLeaderAction = (id: string) => {
-    setLeaderMode(false)
-    clearPendingChord()
+    closeLeader()
     runAction(leaderActionHandlers[id])
   }
 
@@ -2851,7 +2909,7 @@ export function EnsembleV2App() {
     setHelpFiltering(false)
     setHelpQuery("")
     setHelpMatch(0)
-    helpPendingG = false
+    helpPendingKeys = []
   }
   const moveHelpMatch = (direction: 1 | -1) => {
     const matches = helpMatchEntries()
@@ -2868,36 +2926,40 @@ export function EnsembleV2App() {
     event?.stopPropagation?.()
     const token = normalizeKeyToken(event)
     if (helpFiltering()) {
-      if (token === "escape") { resetHelpFilter(); return }
-      if (token === "enter") { setHelpFiltering(false); return }
-      if (token === "backspace") { setHelpQuery((query) => query.slice(0, -1)); setHelpMatch(0); return }
-      const sequence = String(event?.sequence ?? "")
-      if (sequence.length === 1 && sequence >= " " && !event?.ctrl && !event?.meta && !event?.super) {
-        setHelpQuery((query) => `${query}${sequence}`)
-        setHelpMatch(0)
-      }
+      const edit = filterEdit(helpQuery(), {
+        name: String(event?.name ?? ""),
+        sequence: String(event?.sequence ?? ""),
+        ctrl: Boolean(event?.ctrl),
+        meta: Boolean(event?.meta),
+        super: Boolean(event?.super),
+      })
+      if (edit.cancelled) { resetHelpFilter(); return }
+      if (edit.done) { setHelpFiltering(false); return }
+      setHelpQuery(edit.query)
+      setHelpMatch(0)
       return
     }
-    if (token !== "g") helpPendingG = false
-    if (token === "escape") {
-      closeHelp()
+    const resolved = resolveNormalKey("help", helpPendingKeys, token)
+    if (resolved.type === "pending") {
+      helpPendingKeys = [...resolved.prefix]
       return
     }
-    if (token === "/") { setHelpFiltering(true); setHelpQuery(""); setHelpMatch(0); return }
-    if (token === "n") { moveHelpMatch(1); return }
-    if (token === "shift+n") { moveHelpMatch(-1); return }
-    if (token === "j") { scrollHelpBy(1); return }
-    if (token === "k") { scrollHelpBy(-1); return }
-    if (token === "ctrl+d") { scrollHelpBy(10); return }
-    if (token === "ctrl+u") { scrollHelpBy(-10); return }
-    if (token === "pageup") { scrollHelpBy(-10); return }
-    if (token === "pagedown") { scrollHelpBy(10); return }
-    if (token === "g") {
-      if (helpPendingG) { helpPendingG = false; scrollHelpTo(0) }
-      else helpPendingG = true
-      return
+    helpPendingKeys = []
+    if (resolved.type !== "action") return
+    switch (resolved.entry.id) {
+      case "help.down": scrollHelpBy(1); return
+      case "help.up": scrollHelpBy(-1); return
+      case "help.half.down": scrollHelpBy(10); return
+      case "help.half.up": scrollHelpBy(-10); return
+      case "help.page.down": scrollHelpBy(10); return
+      case "help.page.up": scrollHelpBy(-10); return
+      case "help.top": scrollHelpTo(0); return
+      case "help.bottom": scrollHelpTo(1_000_000); return
+      case "help.filter": setHelpFiltering(true); setHelpQuery(""); setHelpMatch(0); return
+      case "help.match.next": moveHelpMatch(1); return
+      case "help.match.prev": moveHelpMatch(-1); return
+      case "help.close": closeHelp(); return
     }
-    if (token === "shift+g") { scrollHelpTo(1_000_000); return }
   }
   const openHelp = () => {
     clearPendingChord()
@@ -3218,7 +3280,7 @@ export function EnsembleV2App() {
   const wizardApplyFilter = (event: any) => {
     const state = wizard()
     if (!state) return
-    const edit = dialogFilterEdit(state.query, {
+    const edit = filterEdit(state.query, {
       name: String(event?.name ?? ""),
       sequence: String(event?.sequence ?? ""),
       ctrl: Boolean(event?.ctrl),
@@ -3239,7 +3301,7 @@ export function EnsembleV2App() {
   const pickerApplyFilter = (event: any) => {
     const state = picker()
     if (!state) return
-    const edit = dialogFilterEdit(state.query, {
+    const edit = filterEdit(state.query, {
       name: String(event?.name ?? ""),
       sequence: String(event?.sequence ?? ""),
       ctrl: Boolean(event?.ctrl),
@@ -3423,15 +3485,28 @@ export function EnsembleV2App() {
 
   const fieldEnter = (surface: "wizard" | "prompt") => dispatchInteraction({ type: "field.enter", target: surface })
 
+  const fieldInsertContext = (surface: "wizard" | "prompt"): KeyContext =>
+    surface === "wizard" ? "wizardField" : "promptField"
+  const fieldNormalContext = (surface: "wizard" | "prompt"): KeyContext =>
+    surface === "wizard" ? "wizardText" : "promptText"
+
   const handleFieldInsertKey = (surface: "wizard" | "prompt", event: any): boolean => {
-    const ctrl = Boolean(event?.ctrl)
+    const context = fieldInsertContext(surface)
     const token = normalizeKeyToken(event)
-    if (token === "escape" && !ctrl) {
+    const entry = singleKeyEntry(context, token)
+    const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
+    if (entry?.id === `${context}.escape`) {
       event?.preventDefault?.(); event?.stopPropagation?.()
       if (dialogEscape({ surface, field: true }) === "field-normal") dispatchInteraction({ type: "field.leave" })
-      const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
       vim?.invalidate()
       vim?.normalizeCursor()
+      return true
+    }
+    if (entry?.id === `${context}.leave`) {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      vim?.invalidate()
+      syncVimChord(null)
+      dispatchInteraction({ type: "leave.editor" })
       return true
     }
     // Enter stays with the textarea's `onSubmit`; Shift+Enter adds a line.
@@ -3441,11 +3516,13 @@ export function EnsembleV2App() {
   }
 
   const handleFieldNormalKey = (surface: "wizard" | "prompt", event: any): boolean => {
+    const context = fieldNormalContext(surface)
     const token = normalizeKeyToken(event)
     const mode = interaction().mode
-    if (token === "escape") {
+    const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
+    const entry = singleKeyEntry(context, token)
+    if (entry?.id === `${context}.escape`) {
       event?.preventDefault?.(); event?.stopPropagation?.()
-      const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
       if (mode === "visual") {
         dispatchInteraction({ type: "escape" })
         vim?.invalidate()
@@ -3459,7 +3536,14 @@ export function EnsembleV2App() {
       else finishTextPrompt(undefined)
       return true
     }
-    if (token === "enter" || token === "shift+enter") {
+    if (entry?.id === `${context}.leave`) {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      vim?.invalidate()
+      syncVimChord(null)
+      dispatchInteraction({ type: "leave.editor" })
+      return true
+    }
+    if (entry?.id === `${context}.submit` || token === "shift+enter") {
       // The focused textarea owns submit/newline in both Normal and Insert;
       // Visual swallows them so a pending selection is never submitted.
       if (mode === "visual") {
@@ -3472,7 +3556,6 @@ export function EnsembleV2App() {
     const rawName = String(event?.name ?? "")
     const ctrl = Boolean(event?.ctrl) || rawName.startsWith("ctrl+")
     const name = rawName.startsWith("ctrl+") ? rawName.slice("ctrl+".length) : rawName
-    const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
     const key = normalizeVimKey({ name, ctrl, shift: Boolean(event?.shift) })
     if (!vim || !key) return true
     void vim
@@ -3563,7 +3646,8 @@ export function EnsembleV2App() {
     if (prompt) return composerPosition(String(textPromptRef?.plainText ?? prompt.value), Number(textPromptRef?.cursorOffset ?? 0))
     if (interaction().focus === "rail") return listPosition(railCursor(), railItems().length)
     if (interaction().focus === "work") return listPosition(taskCursor(), orderedTasks().length)
-    return atBottom() ? "100%" : "scrolled"
+    const metrics = transcriptScroll()
+    return transcriptPosition(metrics.top, metrics.height, metrics.viewport)
   }
   const statusTextValue = (): string => {
     if (settingsField()) return settingsFieldText()
@@ -3605,14 +3689,15 @@ export function EnsembleV2App() {
     return ""
   }
   const statusHints = () => {
-    if (leaderMode()) return "which-key · ? help · q leave · esc cancel"
+    if (leaderMode()) return leaderHints()
     const command = interaction().command
     if (command) {
+      const hints = commandStatusHints(command.kind)
       if (command.kind === ":") {
         const suggestions = commandCompletions(command.text).slice(0, 3).map((item) => item.name)
-        return `enter run · esc cancel · ↑↓ history · tab complete${suggestions.length > 0 ? ` · ${suggestions.join(" · ")}` : ""}`
+        return `${hints}${suggestions.length > 0 ? ` · ${suggestions.join(" · ")}` : ""}`
       }
-      return "enter search · esc cancel · ↑↓ history"
+      return hints
     }
     if (interaction().mode === "visual") return visualHint
     if (wizard()) return wizardHint()
@@ -3623,7 +3708,7 @@ export function EnsembleV2App() {
       if (search) {
         const total = transcriptSearchMatches().length
         const position = total > 0 ? Math.min(total, search.cursor + 1) : 0
-        return `match ${position}/${total} · n next · N previous · esc clear`
+        return `match ${position}/${total} · ${statuslineHints("search")}`
       }
       if (workspaceFilter()) return `filter “${workspaceFilter()}” · esc clear`
     }
@@ -3632,20 +3717,22 @@ export function EnsembleV2App() {
     }
     if (settingsField()) {
       return interaction().mode === "insert"
-        ? `${settingsField()!.label} · type to edit · enter done · esc field normal`
-        : `h/j/k/l move · i/a insert · x/d edit · yy/p yank · esc settings`
+        ? statuslineHints("settingsField")
+        : statuslineHints("settingsText")
     }
     if (settingsAgentID()) return statuslineHints("settings", { filter: settingsEntryEnabled })
     if (interaction().overlay === "help") {
       if (helpFiltering()) return statuslineHints("filter")
       const matches = helpMatchEntries().length
-      if (helpQuery()) return `match ${matches > 0 ? Math.min(matches, helpMatch() + 1) : 0}/${matches} · n/N move · esc close`
+      if (helpQuery()) return `match ${matches > 0 ? Math.min(matches, helpMatch() + 1) : 0}/${matches} · ${statuslineHints("help")}`
       return statuslineHints("help")
     }
     if (composerActive()) {
-      return interaction().mode === "insert"
-        ? footerLine1({ focus: "composer", hasWork: showWorkBlock() ?? false })
-        : "i insert · h/j/k/l · x/d · yy/p · enter send · esc chat"
+      if (interaction().mode === "visual") return visualHint
+      if (interaction().mode === "normal") return statuslineHints("composerNormal")
+      return statuslineHints("composerInsert", {
+        filter: (entry) => entry.id !== "composerInsert.stop" || stoppable(),
+      })
     }
     if (interaction().focus === "work") return statuslineHints("work", { hasWork: hasWorkZone() })
     const keyContext = surfaceKeyContext()
@@ -3653,6 +3740,22 @@ export function EnsembleV2App() {
     return footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false })
   }
   const statusMessage = () => visibleMessage(interaction(), Date.now())?.text ?? null
+  /** The in-chat line under the composer, from the same catalog as the bar. */
+  const composerInlineHint = () => {
+    if (completion()) return statuslineHints("completion")
+    if (!composerActive()) {
+      const compose = statuslineHints("chat", { filter: (entry) => entry.id === "compose.alt" })
+      const insert = statuslineHints("composerInsert", {
+        filter: (entry) => ["composerInsert.mention", "composerInsert.file", "composerInsert.slash"].includes(entry.id),
+      })
+      return [compose, insert].filter(Boolean).join(" · ")
+    }
+    if (interaction().mode === "visual") return visualHint
+    if (interaction().mode === "normal") return statuslineHints("composerNormal")
+    return statuslineHints("composerInsert", {
+      filter: (entry) => entry.id !== "composerInsert.stop" || stoppable(),
+    })
+  }
 
   return (
     <box
@@ -3846,7 +3949,7 @@ export function EnsembleV2App() {
                       <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{completion() ? "↑/↓ select · enter insert · esc close" : composerActive() ? (interaction().mode === "visual" ? `COMPOSER · ${interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL"} · y copy · d cut · c change · p paste · esc cancel` : interaction().mode === "normal" ? "COMPOSER · NORMAL · i/a insert · h/j/k/l move · x/d edit · yy/p yank · esc chat" : stoppable() ? "COMPOSER · enter send · esc normal · Ctrl+C stop" : "COMPOSER · enter send · esc normal") : "i compose · $ agent · @ file · / command"}</text>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{composerActive() && interaction().mode === "visual" ? `COMPOSER · ${interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL"} · ${composerInlineHint()}` : composerActive() ? `COMPOSER · ${interaction().mode === "normal" ? "NORMAL · " : ""}${composerInlineHint()}` : composerInlineHint()}</text>
                     </>
                   </Show>
                 }>
@@ -3957,7 +4060,7 @@ export function EnsembleV2App() {
           </box>
         </box>
       </Show>
-      <Show when={leaderMode()}>
+      <Show when={leaderMode() && leaderPopup()}>
         <box
           id={MOUSE_PANE_IDS.dialog}
           position="absolute"

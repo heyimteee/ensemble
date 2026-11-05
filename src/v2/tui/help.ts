@@ -88,6 +88,8 @@ const CONTEXT_SECTIONS: Record<KeyContext, HelpSectionID> = {
   work: "work",
   composer: "composer-insert",
   settings: "settings",
+  settingsField: "settings",
+  settingsText: "settings",
   wizard: "wizard",
   wizardField: "wizard",
   wizardText: "wizard",
@@ -133,9 +135,10 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
     info("modes", "escape.command", "Esc", "Command → Normal, restoring the previous filter."),
     info("modes", "escape.chat", "Esc", "Clear a filter or committed search; otherwise a no-op."),
     info("modes", "escape.never", "Esc", "Esc never leaves Ensemble. Quit deliberately with :q or Space q."),
-    info("modes", "escape.ctrl-g", "Ctrl+G", "Leave the composer immediately when the host consumes Esc."),
+    info("modes", "escape.ctrl-g", "Ctrl+G", "Leave the focused composer, settings, wizard, or prompt text field immediately when the host consumes Esc."),
   ],
   global: [
+    info("global", "focus.zones", "Tab / Shift+Tab", "Move focus zones between the roster, transcript, and work list. Enter the composer with i or Enter, not Tab."),
     info("global", "esc", "Esc", "Go up one level. The full ladder is in Modes and Esc ladder."),
     info("global", "quit", ":q / Space q", "Leave Ensemble deliberately; no other key quits."),
   ],
@@ -158,10 +161,10 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
     info("composer-visual", "extend", "motions", "Motions extend the selection; o swaps its ends."),
   ],
   settings: [
-    info("settings", "text", "Insert / Normal / Visual", "Text fields use the composer grammar; Esc returns to the settings rows."),
+    info("settings", "text", "Insert / Normal / Visual", "Text fields use the composer grammar; Esc returns to the settings rows, and Ctrl+G leaves the field directly."),
   ],
   wizard: [
-    info("wizard", "text", "Insert / Normal / Visual", "Text fields use the composer grammar; Esc returns to the step."),
+    info("wizard", "text", "Insert / Normal / Visual", "Text fields use the composer grammar; Esc returns to the step, and Ctrl+G leaves the field immediately."),
   ],
   dialogs: [
     info("dialogs", "shared", "", "Pickers, prompts, confirms, results, and approvals share one grammar: j/k, Enter, Space, /, Esc."),

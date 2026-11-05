@@ -8,6 +8,8 @@
  * renders at all times and every hint matches the actions actually available.
  */
 
+import { statuslineHints } from "./keymap.ts"
+
 /** Columns that can own the chat-surface focus. The composer is a distinct focus state (brief §2.10). */
 export type ChromeFocusArea = "rail" | "chat"
 
@@ -45,15 +47,15 @@ export type FooterContext = {
 export function footerLine1(context: { focus: ChromeFocus; hasWork: boolean }): string {
   switch (context.focus) {
     case "composer":
-      return "enter send · esc normal · ctrl+g leave · $ agent · @ file · / command"
+      return statuslineHints("composerInsert", {
+        filter: (entry) => entry.id !== "composerInsert.stop",
+      })
     case "overlay":
       return "esc cancel · dialog open — close to return"
     case "rail":
-      return "j/k move · enter open · h/l column · / filter · space leader"
+      return statuslineHints("roster")
     case "chat":
-      return context.hasWork
-        ? "j/k scroll · tab work · enter compose · / search · space leader"
-        : "j/k scroll · tab rail · enter compose · / search · space leader"
+      return statuslineHints("chat", { hasWork: context.hasWork })
   }
 }
 

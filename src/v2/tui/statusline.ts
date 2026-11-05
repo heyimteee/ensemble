@@ -25,44 +25,32 @@ export function modeLabel(mode: InteractionMode, visualKind?: InteractionSelecti
   return "NORMAL"
 }
 
+const OVERLAY_LABELS: Record<Exclude<InteractionOverlay, "none">, string> = {
+  settings: "Settings",
+  wizard: "Wizard",
+  dialog: "Dialog",
+  approvals: "Approvals",
+  help: "Help",
+}
+
+const FOCUS_LABELS: Partial<Record<InteractionFocus, string>> = {
+  settings: "Settings",
+  wizard: "Wizard",
+  dialog: "Dialog",
+  approvals: "Approvals",
+  help: "Help",
+  work: "Work list",
+}
+
 /** Overlay precedence first, then the composer, then the focused surface. */
 export function contextLabel(input: {
   focus: InteractionFocus
   overlay: InteractionOverlay
   surface: StatuslineSurface
 }): string {
-  switch (input.overlay) {
-    case "settings":
-      return "Settings"
-    case "wizard":
-      return "Wizard"
-    case "dialog":
-      return "Dialog"
-    case "approvals":
-      return "Approvals"
-    case "help":
-      return "Help"
-    case "none":
-      break
-  }
-  switch (input.focus) {
-    case "settings":
-      return "Settings"
-    case "wizard":
-      return "Wizard"
-    case "dialog":
-      return "Dialog"
-    case "approvals":
-      return "Approvals"
-    case "help":
-      return "Help"
-    case "work":
-      return "Work list"
-    case "rail":
-    case "chat":
-    case "composer":
-      break
-  }
+  if (input.overlay !== "none") return OVERLAY_LABELS[input.overlay]
+  const focused = FOCUS_LABELS[input.focus]
+  if (focused) return focused
   if (input.focus === "composer") {
     if (input.surface === "agent") return "COMPOSER · Direct conversation"
     if (input.surface === "workspace") return "COMPOSER · Group chat"
@@ -90,6 +78,18 @@ export function composerPosition(text: string, offset: number): string {
   const lastBreak = before.lastIndexOf("\n")
   const column = clamped - lastBreak
   return `${line}:${column}`
+}
+
+/**
+ * Transcript scroll position as a real percentage of the scrollable range.
+ * A transcript shorter than its viewport is fully visible, so it reads 100%;
+ * top is 0% and bottom is 100%.
+ */
+export function transcriptPosition(scrollTop: number, scrollHeight: number, viewportHeight: number): string {
+  const max = Math.max(0, Number(scrollHeight) - Number(viewportHeight))
+  if (max <= 0) return "100%"
+  const top = Math.max(0, Math.min(max, Number(scrollTop)))
+  return `${Math.round((top / max) * 100)}%`
 }
 
 /** List position as `row/total`; an empty list still renders a stable `0/0`. */

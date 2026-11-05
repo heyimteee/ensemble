@@ -92,6 +92,8 @@ test("catalog contexts land in the correct help section", () => {
     composerVisual: "composer-visual",
     completion: "composer-insert",
     settings: "settings",
+    settingsField: "settings",
+    settingsText: "settings",
     wizard: "wizard",
     wizardField: "wizard",
     wizardText: "wizard",
@@ -193,8 +195,9 @@ test("the composer catalog is exactly the Vim resolver's Normal and Visual gramm
     return { type: "unhandled" as const }
   }
 
+  const appLevel = new Set(["composerNormal.command", "composerNormal.search", "composerNormal.enter", "composerNormal.escape", "composerNormal.leave"])
   for (const entry of normal) {
-    if (entry.keys.length === 1 && entry.keys[0] === "escape") continue
+    if (appLevel.has(entry.id)) continue
     const resolution = resolveNormal(entry.keys)
     const prefix = entry.keys.length === 1 && ["d", "y", "g"].includes(entry.keys[0])
     assert.ok(
@@ -202,8 +205,9 @@ test("the composer catalog is exactly the Vim resolver's Normal and Visual gramm
       `composerNormal:${entry.id} resolves (${resolution.type})`,
     )
   }
+  const visualAppLevel = new Set(["composerVisual.escape", "composerVisual.leave"])
   for (const entry of visual) {
-    if (entry.keys.length === 1 && entry.keys[0] === "escape") continue
+    if (visualAppLevel.has(entry.id)) continue
     const resolution = resolveVisual(entry.keys)
     const prefix = entry.keys.length === 1 && entry.keys[0] === "g"
     assert.ok(
@@ -213,7 +217,7 @@ test("the composer catalog is exactly the Vim resolver's Normal and Visual gramm
   }
 
   const normalKeys = new Set(normal.map((entry) => entry.keys.join(" ")))
-  const singleNormal = ["h", "j", "k", "l", "w", "b", "e", "0", "^", "$", "shift+g", "i", "a", "shift+i", "shift+a", "o", "shift+o", "v", "shift+v", "x", "shift+d", "d", "y", "g", "p", "shift+p", "u", "ctrl+r", "escape"]
+  const singleNormal = ["h", "j", "k", "l", "w", "b", "e", "0", "^", "$", "shift+g", "i", "a", "shift+i", "shift+a", "o", "shift+o", "v", "shift+v", "x", "shift+d", "d", "y", "g", "p", "shift+p", "u", "ctrl+r", "escape", "enter", "ctrl+g", ":", "/"]
   for (const key of singleNormal) assert.ok(normalKeys.has(key), `Normal ${key} is catalogued`)
   for (const motion of ["h", "j", "k", "l", "w", "b", "e", "0", "$", "shift+g"]) {
     assert.ok(normalKeys.has(`d ${motion}`), `delete motion ${motion} is catalogued`)
@@ -224,7 +228,35 @@ test("the composer catalog is exactly the Vim resolver's Normal and Visual gramm
   assert.ok(normalKeys.has("g g"))
 
   const visualKeys = new Set(visual.map((entry) => entry.keys.join(" ")))
-  const singleVisual = ["h", "j", "k", "l", "w", "b", "e", "0", "^", "$", "shift+g", "o", "y", "d", "x", "c", "p", "shift+p", "g", "v", "shift+v", "escape"]
+  const singleVisual = ["h", "j", "k", "l", "w", "b", "e", "0", "^", "$", "shift+g", "o", "y", "d", "x", "c", "p", "shift+p", "g", "v", "shift+v", "escape", "ctrl+g"]
   for (const key of singleVisual) assert.ok(visualKeys.has(key), `Visual ${key} is catalogued`)
   assert.ok(visualKeys.has("g g"))
+})
+
+test("help covers the special-case composer and text-field bindings", () => {
+  const sections = helpSections()
+  const sources = new Set(
+    sections.flatMap((section) =>
+      section.entries.flatMap((entry) =>
+        entry.source.kind === "keymap" ? [`${entry.source.context}:${entry.source.id}`] : [],
+      ),
+    ),
+  )
+  for (const source of [
+    "composerNormal:composerNormal.enter",
+    "composerNormal:composerNormal.leave",
+    "composerNormal:composerNormal.command",
+    "composerNormal:composerNormal.search",
+    "composerVisual:composerVisual.leave",
+    "wizardField:wizardField.leave",
+    "wizardText:wizardText.motion.h",
+    "wizardText:wizardText.delete",
+    "wizardText:wizardText.leave",
+    "promptText:promptText.paste",
+    "promptText:promptText.leave",
+    "settingsField:settingsField.leave",
+    "settingsText:settingsText.escape",
+  ]) {
+    assert.ok(sources.has(source), `help lists ${source}`)
+  }
 })

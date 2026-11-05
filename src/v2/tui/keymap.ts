@@ -17,6 +17,10 @@ export type KeyContext =
   | "work"
   | "composer"
   | "settings"
+  /** Settings text field in Insert mode. */
+  | "settingsField"
+  /** Settings text field in Normal or Visual mode. */
+  | "settingsText"
   /** Wizard list step: j/k, gg/G, Enter, Space multi-select, /, Esc back. */
   | "wizard"
   /** Wizard text field in Insert mode: Enter continues, Esc goes to field Normal. */
@@ -75,9 +79,9 @@ export type KeyEntry = {
 const SURFACES: readonly KeyContext[] = ["roster", "chat", "work"]
 
 const LEADER: readonly KeyEntry[] = [
-  { id: "leader.help", scope: "leader", contexts: SURFACES, keys: ["?"], title: "Help", group: "Leader" },
-  { id: "leader.leave", scope: "leader", contexts: SURFACES, keys: ["q"], title: "Leave Ensemble", group: "Leader" },
-  { id: "leader.cancel", scope: "leader", contexts: SURFACES, keys: ["escape"], title: "Cancel", group: "Leader" },
+  { id: "leader.help", scope: "leader", contexts: SURFACES, keys: ["?"], title: "Help", group: "Leader", hint: "? help" },
+  { id: "leader.leave", scope: "leader", contexts: SURFACES, keys: ["q"], title: "Leave Ensemble", group: "Leader", hint: "q leave" },
+  { id: "leader.cancel", scope: "leader", contexts: SURFACES, keys: ["escape"], title: "Cancel", group: "Leader", hint: "esc cancel" },
   { id: "leader.new.agent", scope: "leader", contexts: SURFACES, keys: ["a"], title: "New agent", group: "Create" },
   { id: "leader.new.workspace", scope: "leader", contexts: SURFACES, keys: ["n"], title: "New workspace", group: "Create" },
   { id: "leader.edit.workspace", scope: "leader", contexts: SURFACES, keys: ["e"], title: "Edit workspace", group: "Edit" },
@@ -109,9 +113,12 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "nav.up", scope: "normal", contexts: ["roster"], keys: ["k"], title: "Move up", group: "Navigation" },
   { id: "nav.top", scope: "normal", contexts: ["roster"], keys: ["g", "g"], title: "First item", group: "Navigation", listed: false },
   { id: "nav.bottom", scope: "normal", contexts: ["roster"], keys: ["shift+g"], title: "Last item", group: "Navigation", listed: false },
+  { id: "nav.half.down", scope: "normal", contexts: ["roster"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
+  { id: "nav.half.up", scope: "normal", contexts: ["roster"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
   { id: "nav.left", scope: "normal", contexts: ["roster"], keys: ["h"], title: "Rail column", group: "Focus", hint: "h/l column" },
   { id: "nav.right", scope: "normal", contexts: ["roster"], keys: ["l"], title: "Chat column", group: "Focus" },
   { id: "focus.tab", scope: "normal", contexts: ["roster"], keys: ["tab"], title: "Chat column", group: "Focus", hint: "tab chat" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["roster"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
   { id: "open", scope: "normal", contexts: ["roster"], keys: ["enter"], title: "Open and compose", group: "Open", hint: "enter open" },
   { id: "new.agent", scope: "normal", contexts: ["roster"], keys: ["a"], title: "New agent", group: "Create" },
   { id: "new.workspace", scope: "normal", contexts: ["roster"], keys: ["n"], title: "New workspace", group: "Create" },
@@ -136,8 +143,9 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "chat.nav.left", scope: "normal", contexts: ["chat"], keys: ["h"], title: "Rail column", group: "Focus", hint: "h/l column" },
   { id: "chat.nav.right", scope: "normal", contexts: ["chat"], keys: ["l"], title: "Chat column", group: "Focus" },
   { id: "focus.tab", scope: "normal", contexts: ["chat"], keys: ["tab"], title: "Work list", group: "Focus", hint: "tab work", emptyHint: "tab rail", requires: "work" },
-  { id: "compose", scope: "normal", contexts: ["chat"], keys: ["enter"], title: "Compose", group: "Open", hint: "enter/i compose" },
-  { id: "compose.alt", scope: "normal", contexts: ["chat"], keys: ["i"], title: "Compose", group: "Open" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["chat"], keys: ["shift+tab"], title: "Roster", group: "Focus" },
+  { id: "compose", scope: "normal", contexts: ["chat"], keys: ["enter"], title: "Compose", group: "Open", hint: "enter compose" },
+  { id: "compose.alt", scope: "normal", contexts: ["chat"], keys: ["i"], title: "Compose", group: "Open", hint: "i compose" },
   { id: "chat.new.agent", scope: "normal", contexts: ["chat"], keys: ["a"], title: "New agent", group: "Create" },
   { id: "chat.new.workspace", scope: "normal", contexts: ["chat"], keys: ["n"], title: "New workspace", group: "Create", availability: "no-transcript-search" },
   { id: "chat.settings", scope: "normal", contexts: ["chat"], keys: ["s"], title: "Agent settings", group: "Edit" },
@@ -162,6 +170,8 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.up", scope: "normal", contexts: ["work"], keys: ["k"], title: "Previous work row", group: "Navigation" },
   { id: "work.top", scope: "normal", contexts: ["work"], keys: ["g", "g"], title: "First work row", group: "Navigation", listed: false },
   { id: "work.bottom", scope: "normal", contexts: ["work"], keys: ["shift+g"], title: "Last work row", group: "Navigation", listed: false },
+  { id: "work.half.down", scope: "normal", contexts: ["work"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
+  { id: "work.half.up", scope: "normal", contexts: ["work"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
   { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result", group: "Open", hint: "enter result" },
   // `d` is contextual: delegate here, never the text-buffer delete operator.
   { id: "work.delegate", scope: "normal", contexts: ["work"], keys: ["d"], title: "Delegate work", group: "Work", hint: "d delegate" },
@@ -171,6 +181,7 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work", group: "Work", hint: "x cancel" },
   { id: "work.native", scope: "normal", contexts: ["work"], keys: ["o"], title: "Native session", group: "Navigate", hint: "o native" },
   { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Transcript", group: "Focus", hint: "tab chat" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Transcript", group: "Focus" },
   { id: "leader", scope: "normal", contexts: ["work"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
   { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Back to transcript", group: "Navigation", listed: false },
 
@@ -183,6 +194,8 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "settings.up", scope: "normal", contexts: ["settings"], keys: ["k"], title: "Previous row", group: "Navigation" },
   { id: "settings.top", scope: "normal", contexts: ["settings"], keys: ["g", "g"], title: "First row", group: "Navigation", listed: false },
   { id: "settings.bottom", scope: "normal", contexts: ["settings"], keys: ["shift+g"], title: "Last row", group: "Navigation", listed: false },
+  { id: "settings.half.down", scope: "normal", contexts: ["settings"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
+  { id: "settings.half.up", scope: "normal", contexts: ["settings"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
   { id: "settings.edit", scope: "normal", contexts: ["settings"], keys: ["enter"], title: "Edit or toggle row", group: "Edit", hint: "enter edit" },
   { id: "settings.edit.alt", scope: "normal", contexts: ["settings"], keys: ["e"], title: "Edit row", group: "Edit" },
   { id: "settings.add", scope: "normal", contexts: ["settings"], keys: ["a"], title: "Add row", group: "Create", hint: "a add" },
@@ -264,26 +277,247 @@ const DIALOG: readonly KeyEntry[] = [
 ]
 
 /**
+ * Text buffers share one Vim grammar table. Composer, settings, wizard, and
+ * prompt fields resolve the same Normal/Visual bindings; only the
+ * per-context Enter/Esc/Ctrl+G entries differ. Generating the catalog from
+ * this table keeps help and the statusline complete without duplicating key
+ * lists, and the Vim resolver remains the executor.
+ */
+type TextKeySpec = {
+  suffix: string
+  keys: readonly string[]
+  title: string
+  group: string
+  hint?: string
+  listed?: boolean
+}
+
+const VIM_NORMAL_SPECS: readonly TextKeySpec[] = [
+  // Motions
+  { suffix: "motion.h", keys: ["h"], title: "Move left", group: "Motion" },
+  { suffix: "motion.j", keys: ["j"], title: "Move down", group: "Motion" },
+  { suffix: "motion.k", keys: ["k"], title: "Move up", group: "Motion" },
+  { suffix: "motion.l", keys: ["l"], title: "Move right", group: "Motion" },
+  { suffix: "motion.w", keys: ["w"], title: "Next word", group: "Motion" },
+  { suffix: "motion.b", keys: ["b"], title: "Previous word", group: "Motion" },
+  { suffix: "motion.e", keys: ["e"], title: "End of word", group: "Motion" },
+  { suffix: "motion.0", keys: ["0"], title: "Line start", group: "Motion" },
+  { suffix: "motion.caret", keys: ["^"], title: "First non-blank character", group: "Motion" },
+  { suffix: "motion.lineEnd", keys: ["$"], title: "Line end", group: "Motion" },
+  { suffix: "motion.gg", keys: ["g", "g"], title: "Buffer start", group: "Motion" },
+  { suffix: "motion.G", keys: ["shift+g"], title: "Buffer end", group: "Motion" },
+  // Insert entries
+  { suffix: "insert.i", keys: ["i"], title: "Insert before the cursor", group: "Insert" },
+  { suffix: "insert.a", keys: ["a"], title: "Insert after the cursor", group: "Insert" },
+  { suffix: "insert.I", keys: ["shift+i"], title: "Insert at line start", group: "Insert" },
+  { suffix: "insert.A", keys: ["shift+a"], title: "Insert at line end", group: "Insert" },
+  { suffix: "insert.o", keys: ["o"], title: "Open a line below", group: "Insert" },
+  { suffix: "insert.O", keys: ["shift+o"], title: "Open a line above", group: "Insert" },
+  // Edit operators
+  { suffix: "delete", keys: ["d"], title: "Delete operator (then a motion, d, or gg)", group: "Edit" },
+  { suffix: "yank", keys: ["y"], title: "Yank operator (yy)", group: "Edit" },
+  { suffix: "prefix.g", keys: ["g"], title: "Chord prefix (gg)", group: "Edit" },
+  { suffix: "x", keys: ["x"], title: "Delete the character", group: "Edit" },
+  { suffix: "dd", keys: ["d", "d"], title: "Delete the line", group: "Edit" },
+  { suffix: "D", keys: ["shift+d"], title: "Delete to the line end", group: "Edit" },
+  { suffix: "dh", keys: ["d", "h"], title: "Delete left", group: "Edit" },
+  { suffix: "dj", keys: ["d", "j"], title: "Delete down", group: "Edit" },
+  { suffix: "dk", keys: ["d", "k"], title: "Delete up", group: "Edit" },
+  { suffix: "dl", keys: ["d", "l"], title: "Delete right", group: "Edit" },
+  { suffix: "dw", keys: ["d", "w"], title: "Delete the next word", group: "Edit" },
+  { suffix: "db", keys: ["d", "b"], title: "Delete the previous word", group: "Edit" },
+  { suffix: "de", keys: ["d", "e"], title: "Delete to the word end", group: "Edit" },
+  { suffix: "d0", keys: ["d", "0"], title: "Delete to the line start", group: "Edit" },
+  { suffix: "d$", keys: ["d", "$"], title: "Delete to the line end", group: "Edit" },
+  { suffix: "dgg", keys: ["d", "g", "g"], title: "Delete to the buffer start", group: "Edit" },
+  { suffix: "dG", keys: ["d", "shift+g"], title: "Delete to the buffer end", group: "Edit" },
+  { suffix: "undo", keys: ["u"], title: "Undo", group: "Edit" },
+  { suffix: "redo", keys: ["ctrl+r"], title: "Redo", group: "Edit" },
+  // Yank, paste, and Visual entry
+  { suffix: "yy", keys: ["y", "y"], title: "Yank the line", group: "Yank" },
+  { suffix: "paste", keys: ["p"], title: "Paste after the cursor", group: "Paste" },
+  { suffix: "paste.before", keys: ["shift+p"], title: "Paste before the cursor", group: "Paste" },
+  { suffix: "visual", keys: ["v"], title: "Start character Visual", group: "Visual" },
+  { suffix: "visual.line", keys: ["shift+v"], title: "Start line Visual", group: "Visual" },
+]
+
+const VIM_VISUAL_SPECS: readonly TextKeySpec[] = [
+  // Motions extend the selection
+  { suffix: "motion.h", keys: ["h"], title: "Extend left", group: "Motion" },
+  { suffix: "motion.j", keys: ["j"], title: "Extend down", group: "Motion" },
+  { suffix: "motion.k", keys: ["k"], title: "Extend up", group: "Motion" },
+  { suffix: "motion.l", keys: ["l"], title: "Extend right", group: "Motion" },
+  { suffix: "motion.w", keys: ["w"], title: "Extend to the next word", group: "Motion" },
+  { suffix: "motion.b", keys: ["b"], title: "Extend to the previous word", group: "Motion" },
+  { suffix: "motion.e", keys: ["e"], title: "Extend to the word end", group: "Motion" },
+  { suffix: "motion.0", keys: ["0"], title: "Extend to the line start", group: "Motion" },
+  { suffix: "motion.caret", keys: ["^"], title: "Extend to the first non-blank", group: "Motion" },
+  { suffix: "motion.lineEnd", keys: ["$"], title: "Extend to the line end", group: "Motion" },
+  { suffix: "motion.gg", keys: ["g", "g"], title: "Extend to the buffer start", group: "Motion" },
+  { suffix: "motion.G", keys: ["shift+g"], title: "Extend to the buffer end", group: "Motion" },
+  { suffix: "prefix.g", keys: ["g"], title: "Chord prefix (gg)", group: "Motion" },
+  // Selection actions
+  { suffix: "swap", keys: ["o"], title: "Swap the selection ends", group: "Selection" },
+  { suffix: "yank", keys: ["y"], title: "Copy the selection", group: "Selection" },
+  { suffix: "delete", keys: ["d"], title: "Cut the selection", group: "Selection" },
+  { suffix: "delete.x", keys: ["x"], title: "Cut the selection", group: "Selection" },
+  { suffix: "change", keys: ["c"], title: "Cut the selection and insert", group: "Selection" },
+  { suffix: "paste", keys: ["p"], title: "Replace the selection with the clipboard", group: "Selection" },
+  { suffix: "paste.before", keys: ["shift+p"], title: "Replace the selection with the clipboard", group: "Selection" },
+  { suffix: "visual.off", keys: ["v"], title: "Leave Visual", group: "Navigation" },
+  { suffix: "line", keys: ["shift+v"], title: "Switch to line selection", group: "Selection" },
+]
+
+function textEntries(
+  prefix: string,
+  context: KeyContext,
+  specs: readonly TextKeySpec[],
+  hints: Readonly<Record<string, string>> = {},
+): KeyEntry[] {
+  return specs.map((spec) => {
+    const hint = hints[spec.suffix] ?? spec.hint
+    return {
+      id: `${prefix}.${spec.suffix}`,
+      scope: "normal" as const,
+      contexts: [context],
+      keys: spec.keys,
+      title: spec.title,
+      group: spec.group,
+      ...(hint ? { hint } : {}),
+      ...(spec.listed === false ? { listed: false } : {}),
+    }
+  })
+}
+
+function textAction(
+  prefix: string,
+  context: KeyContext,
+  suffix: string,
+  keys: readonly string[],
+  title: string,
+  group: string,
+  hint?: string,
+): KeyEntry {
+  return {
+    id: `${prefix}.${suffix}`,
+    scope: "normal",
+    contexts: [context],
+    keys,
+    title,
+    group,
+    ...(hint ? { hint } : {}),
+  }
+}
+
+const WIZARD_INSERT = "wizardField"
+const WIZARD_NORMAL = "wizardText"
+const PROMPT_INSERT = "promptField"
+const PROMPT_NORMAL = "promptText"
+const SETTINGS_INSERT = "settingsField"
+const SETTINGS_NORMAL = "settingsText"
+
+const FONT_HINTS = { "motion.h": "i/a insert · h/j/k/l" }
+const COMPOSER_HINTS = { "motion.h": "i insert · h/j/k/l" }
+
+/**
+ * The shared text-buffer grammar (#85/#86) is catalogued alongside every
+ * list binding: Composer Insert, Normal, and Visual, plus the same Vim subset
+ * for settings, wizard, and prompt fields. Help and the statusline read these
+ * entries directly; the app resolves the same ids through one helper.
+ */
+const COMPOSER: readonly KeyEntry[] = [
+  // Composer Insert -------------------------------------------------------
+  { id: "composerInsert.enter", scope: "normal", contexts: ["composerInsert"], keys: ["enter"], title: "Send message", group: "Insert", hint: "enter send" },
+  { id: "composerInsert.newline", scope: "normal", contexts: ["composerInsert"], keys: ["shift+enter"], title: "Insert a new line", group: "Insert" },
+  { id: "composerInsert.escape", scope: "normal", contexts: ["composerInsert"], keys: ["escape"], title: "Go to composer Normal", group: "Insert", hint: "esc normal" },
+  { id: "composerInsert.leave", scope: "normal", contexts: ["composerInsert"], keys: ["ctrl+g"], title: "Leave the composer immediately", group: "Insert", hint: "ctrl+g leave" },
+  { id: "composerInsert.stop", scope: "normal", contexts: ["composerInsert"], keys: ["ctrl+c"], title: "Stop running work", group: "Insert", hint: "ctrl+c stop" },
+  { id: "composerInsert.mention", scope: "normal", contexts: ["composerInsert"], keys: ["$"], title: "Open agent mentions", group: "Completion", hint: "$ agent" },
+  { id: "composerInsert.file", scope: "normal", contexts: ["composerInsert"], keys: ["@"], title: "Open file references", group: "Completion", hint: "@ file" },
+  { id: "composerInsert.slash", scope: "normal", contexts: ["composerInsert"], keys: ["/"], title: "Run a slash command", group: "Completion", hint: "/ command" },
+
+  // Composer Normal -------------------------------------------------------
+  ...textEntries("composerNormal", "composerNormal", VIM_NORMAL_SPECS, COMPOSER_HINTS).map((entry) => {
+    if (entry.id === "composerNormal.x") return { ...entry, hint: "x/d edit" }
+    if (entry.id === "composerNormal.yy") return { ...entry, hint: "yy/p yank" }
+    return entry
+  }),
+  textAction("composerNormal", "composerNormal", "command", [":"], "Open the command line", "Navigation"),
+  textAction("composerNormal", "composerNormal", "search", ["/"], "Search the transcript", "Navigation"),
+  textAction("composerNormal", "composerNormal", "enter", ["enter"], "Send message", "Insert", "enter send"),
+  textAction("composerNormal", "composerNormal", "escape", ["escape"], "Go to chat Normal", "Navigation", "esc chat"),
+  textAction("composerNormal", "composerNormal", "leave", ["ctrl+g"], "Leave the composer immediately", "Insert", "ctrl+g leave"),
+
+  // Composer Visual -------------------------------------------------------
+  ...textEntries("composerVisual", "composerVisual", VIM_VISUAL_SPECS, {
+    "motion.h": "h/j/k/l extend",
+    "motion.0": "0/^/$",
+    "motion.w": "w/b/e",
+    "motion.gg": "gg/G",
+    swap: "o swap",
+    yank: "y copy",
+    delete: "d/x cut",
+    change: "c change",
+    paste: "p/P paste",
+  }),
+  textAction("composerVisual", "composerVisual", "escape", ["escape"], "Leave Visual", "Navigation", "esc normal"),
+  textAction("composerVisual", "composerVisual", "leave", ["ctrl+g"], "Leave the composer immediately", "Navigation", "ctrl+g leave"),
+]
+
+/**
  * Text fields are edited by the shared Vim adapter (#85); their catalog
  * entries exist so the statusline teaches the same Esc ladder everywhere.
  * They are hint-only: the app routes keys through the editor, not the layer.
  */
 const TEXT_FIELDS: readonly KeyEntry[] = [
-  { id: "wizardField.submit", scope: "normal", contexts: ["wizardField"], keys: ["enter"], title: "Continue", group: "Text", hint: "enter next" },
-  { id: "wizardField.normal", scope: "normal", contexts: ["wizardField"], keys: ["escape"], title: "Field Normal", group: "Text", hint: "esc normal" },
-  { id: "wizardText.submit", scope: "normal", contexts: ["wizardText"], keys: ["enter"], title: "Continue", group: "Text", hint: "enter next" },
-  { id: "wizardText.insert", scope: "normal", contexts: ["wizardText"], keys: ["i"], title: "Insert", group: "Text", hint: "i/a insert" },
-  { id: "wizardText.insert.alt", scope: "normal", contexts: ["wizardText"], keys: ["a"], title: "Insert", group: "Text", listed: false },
-  { id: "wizardText.motion", scope: "normal", contexts: ["wizardText"], keys: ["h"], title: "Move cursor", group: "Text", hint: "h/j/k/l move" },
-  { id: "wizardText.back", scope: "normal", contexts: ["wizardText"], keys: ["escape"], title: "Back one step", group: "Text", hint: "esc back" },
-  { id: "promptField.submit", scope: "normal", contexts: ["promptField"], keys: ["enter"], title: "Submit", group: "Text", hint: "enter submit" },
-  { id: "promptField.newline", scope: "normal", contexts: ["promptField"], keys: ["shift+enter"], title: "New line", group: "Text", hint: "shift+enter newline" },
-  { id: "promptField.normal", scope: "normal", contexts: ["promptField"], keys: ["escape"], title: "Field Normal", group: "Text", hint: "esc normal" },
-  { id: "promptText.submit", scope: "normal", contexts: ["promptText"], keys: ["enter"], title: "Submit", group: "Text", hint: "enter submit" },
-  { id: "promptText.insert", scope: "normal", contexts: ["promptText"], keys: ["i"], title: "Insert", group: "Text", hint: "i/a insert" },
-  { id: "promptText.insert.alt", scope: "normal", contexts: ["promptText"], keys: ["a"], title: "Insert", group: "Text", listed: false },
-  { id: "promptText.motion", scope: "normal", contexts: ["promptText"], keys: ["h"], title: "Move cursor", group: "Text", hint: "h/j/k/l move" },
-  { id: "promptText.cancel", scope: "normal", contexts: ["promptText"], keys: ["escape"], title: "Cancel", group: "Text", hint: "esc cancel" },
+  // Wizard Insert ---------------------------------------------------------
+  textAction("wizardField", WIZARD_INSERT, "submit", ["enter"], "Continue", "Text", "enter next"),
+  textAction("wizardField", WIZARD_INSERT, "newline", ["shift+enter"], "New line", "Text"),
+  textAction("wizardField", WIZARD_INSERT, "escape", ["escape"], "Field Normal", "Text", "esc normal"),
+  textAction("wizardField", WIZARD_INSERT, "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Wizard Normal ---------------------------------------------------------
+  ...textEntries("wizardText", WIZARD_NORMAL, VIM_NORMAL_SPECS, FONT_HINTS).map((entry) => {
+    if (entry.id === "wizardText.x") return { ...entry, hint: "x/d edit" }
+    if (entry.id === "wizardText.yy") return { ...entry, hint: "yy/p yank" }
+    return entry
+  }),
+  textAction("wizardText", WIZARD_NORMAL, "submit", ["enter"], "Continue", "Text", "enter next"),
+  textAction("wizardText", WIZARD_NORMAL, "escape", ["escape"], "Back one step", "Text", "esc back"),
+  textAction("wizardText", WIZARD_NORMAL, "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Prompt Insert ---------------------------------------------------------
+  textAction("promptField", PROMPT_INSERT, "submit", ["enter"], "Submit", "Text", "enter submit"),
+  textAction("promptField", PROMPT_INSERT, "newline", ["shift+enter"], "New line", "Text", "shift+enter newline"),
+  textAction("promptField", PROMPT_INSERT, "escape", ["escape"], "Field Normal", "Text", "esc normal"),
+  textAction("promptField", PROMPT_INSERT, "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Prompt Normal ---------------------------------------------------------
+  ...textEntries("promptText", PROMPT_NORMAL, VIM_NORMAL_SPECS, FONT_HINTS).map((entry) => {
+    if (entry.id === "promptText.x") return { ...entry, hint: "x/d edit" }
+    if (entry.id === "promptText.yy") return { ...entry, hint: "yy/p yank" }
+    return entry
+  }),
+  textAction("promptText", PROMPT_NORMAL, "submit", ["enter"], "Submit", "Text", "enter submit"),
+  textAction("promptText", PROMPT_NORMAL, "escape", ["escape"], "Cancel", "Text", "esc cancel"),
+  textAction("promptText", PROMPT_NORMAL, "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Settings Insert -------------------------------------------------------
+  textAction("settingsField", SETTINGS_INSERT, "submit", ["enter"], "Finish editing", "Text", "enter done"),
+  textAction("settingsField", SETTINGS_INSERT, "escape", ["escape"], "Field Normal", "Text", "esc field normal"),
+  textAction("settingsField", SETTINGS_INSERT, "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Settings Normal -------------------------------------------------------
+  ...textEntries("settingsText", SETTINGS_NORMAL, VIM_NORMAL_SPECS, FONT_HINTS).map((entry) => {
+    if (entry.id === "settingsText.x") return { ...entry, hint: "x/d edit" }
+    if (entry.id === "settingsText.yy") return { ...entry, hint: "yy/p yank" }
+    return entry
+  }),
+  textAction("settingsText", SETTINGS_NORMAL, "submit", ["enter"], "Finish editing", "Text", "enter done"),
+  textAction("settingsText", SETTINGS_NORMAL, "escape", ["escape"], "Return to settings", "Text", "esc settings"),
+  textAction("settingsText", SETTINGS_NORMAL, "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Inline `/` filter -----------------------------------------------------
   { id: "filter.edit", scope: "normal", contexts: ["filter"], keys: ["backspace"], title: "Type to filter", group: "Search", hint: "type to filter" },
   { id: "filter.done", scope: "normal", contexts: ["filter"], keys: ["enter"], title: "Finish filtering", group: "Search", hint: "enter done" },
   { id: "filter.cancel", scope: "normal", contexts: ["filter"], keys: ["escape"], title: "Clear filter", group: "Search", hint: "esc clear" },
@@ -305,6 +539,8 @@ const HELP_KEYS: readonly KeyEntry[] = [
   { id: "help.up", scope: "normal", contexts: ["help"], keys: ["k"], title: "Scroll up", group: "Navigation" },
   { id: "help.half.down", scope: "normal", contexts: ["help"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
   { id: "help.half.up", scope: "normal", contexts: ["help"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
+  { id: "help.page.down", scope: "normal", contexts: ["help"], keys: ["pagedown"], title: "Page down", group: "Navigation", listed: false },
+  { id: "help.page.up", scope: "normal", contexts: ["help"], keys: ["pageup"], title: "Page up", group: "Navigation", listed: false },
   { id: "help.top", scope: "normal", contexts: ["help"], keys: ["g", "g"], title: "Top of help", group: "Navigation", hint: "gg/G top/bottom" },
   { id: "help.bottom", scope: "normal", contexts: ["help"], keys: ["shift+g"], title: "Bottom of help", group: "Navigation" },
   { id: "help.filter", scope: "normal", contexts: ["help"], keys: ["/"], title: "Filter help", group: "Search", hint: "/ filter" },
@@ -336,102 +572,6 @@ const COMPLETION_KEYS: readonly KeyEntry[] = [
   { id: "completion.next", scope: "normal", contexts: ["completion"], keys: ["down"], title: "Next completion", group: "Completion" },
   { id: "completion.accept", scope: "normal", contexts: ["completion"], keys: ["enter"], title: "Accept the completion", group: "Completion", hint: "enter insert" },
   { id: "completion.close", scope: "normal", contexts: ["completion"], keys: ["escape"], title: "Close the completion popup", group: "Completion", hint: "esc close" },
-]
-
-/**
- * The shared text-buffer grammar (#85/#86) is catalogued alongside every
- * list binding: Composer Insert, Normal, and Visual are the same engine used
- * by settings, wizard, and prompt text fields. The Vim resolver remains the
- * executor; the catalog is the single help/statusline source of truth.
- */
-const COMPOSER: readonly KeyEntry[] = [
-  // Insert ----------------------------------------------------------------
-  { id: "composerInsert.enter", scope: "normal", contexts: ["composerInsert"], keys: ["enter"], title: "Send message", group: "Insert", hint: "enter send" },
-  { id: "composerInsert.newline", scope: "normal", contexts: ["composerInsert"], keys: ["shift+enter"], title: "Insert a new line", group: "Insert", hint: "shift+enter newline" },
-  { id: "composerInsert.escape", scope: "normal", contexts: ["composerInsert"], keys: ["escape"], title: "Go to composer Normal", group: "Insert", hint: "esc normal" },
-  { id: "composerInsert.stop", scope: "normal", contexts: ["composerInsert"], keys: ["ctrl+c"], title: "Stop running work", group: "Insert", hint: "ctrl+c stop" },
-  { id: "composerInsert.leave", scope: "normal", contexts: ["composerInsert"], keys: ["ctrl+g"], title: "Leave the composer immediately", group: "Insert", hint: "ctrl+g leave" },
-  { id: "composerInsert.mention", scope: "normal", contexts: ["composerInsert"], keys: ["$"], title: "Open agent mentions", group: "Completion", hint: "$ agent" },
-  { id: "composerInsert.file", scope: "normal", contexts: ["composerInsert"], keys: ["@"], title: "Open file references", group: "Completion", hint: "@ file" },
-  { id: "composerInsert.slash", scope: "normal", contexts: ["composerInsert"], keys: ["/"], title: "Run a slash command", group: "Completion", hint: "/ command" },
-
-  // Normal: motions --------------------------------------------------------
-  { id: "composerNormal.motion.h", scope: "normal", contexts: ["composerNormal"], keys: ["h"], title: "Move left", group: "Motion" },
-  { id: "composerNormal.motion.j", scope: "normal", contexts: ["composerNormal"], keys: ["j"], title: "Move down", group: "Motion" },
-  { id: "composerNormal.motion.k", scope: "normal", contexts: ["composerNormal"], keys: ["k"], title: "Move up", group: "Motion" },
-  { id: "composerNormal.motion.l", scope: "normal", contexts: ["composerNormal"], keys: ["l"], title: "Move right", group: "Motion" },
-  { id: "composerNormal.motion.w", scope: "normal", contexts: ["composerNormal"], keys: ["w"], title: "Next word", group: "Motion" },
-  { id: "composerNormal.motion.b", scope: "normal", contexts: ["composerNormal"], keys: ["b"], title: "Previous word", group: "Motion" },
-  { id: "composerNormal.motion.e", scope: "normal", contexts: ["composerNormal"], keys: ["e"], title: "End of word", group: "Motion" },
-  { id: "composerNormal.motion.0", scope: "normal", contexts: ["composerNormal"], keys: ["0"], title: "Line start", group: "Motion" },
-  { id: "composerNormal.motion.caret", scope: "normal", contexts: ["composerNormal"], keys: ["^"], title: "First non-blank character", group: "Motion" },
-  { id: "composerNormal.motion.lineEnd", scope: "normal", contexts: ["composerNormal"], keys: ["$"], title: "Line end", group: "Motion" },
-  { id: "composerNormal.motion.gg", scope: "normal", contexts: ["composerNormal"], keys: ["g", "g"], title: "Buffer start", group: "Motion" },
-  { id: "composerNormal.motion.G", scope: "normal", contexts: ["composerNormal"], keys: ["shift+g"], title: "Buffer end", group: "Motion" },
-
-  // Normal: insert entries ------------------------------------------------
-  { id: "composerNormal.insert.i", scope: "normal", contexts: ["composerNormal"], keys: ["i"], title: "Insert before the cursor", group: "Insert", hint: "i insert" },
-  { id: "composerNormal.insert.a", scope: "normal", contexts: ["composerNormal"], keys: ["a"], title: "Insert after the cursor", group: "Insert" },
-  { id: "composerNormal.insert.I", scope: "normal", contexts: ["composerNormal"], keys: ["shift+i"], title: "Insert at line start", group: "Insert" },
-  { id: "composerNormal.insert.A", scope: "normal", contexts: ["composerNormal"], keys: ["shift+a"], title: "Insert at line end", group: "Insert" },
-  { id: "composerNormal.insert.o", scope: "normal", contexts: ["composerNormal"], keys: ["o"], title: "Open a line below", group: "Insert" },
-  { id: "composerNormal.insert.O", scope: "normal", contexts: ["composerNormal"], keys: ["shift+o"], title: "Open a line above", group: "Insert" },
-
-  // Normal: edit operators ------------------------------------------------
-  { id: "composerNormal.delete", scope: "normal", contexts: ["composerNormal"], keys: ["d"], title: "Delete operator (then a motion, d, or gg)", group: "Edit", hint: "x/d edit" },
-  { id: "composerNormal.yank", scope: "normal", contexts: ["composerNormal"], keys: ["y"], title: "Yank operator (yy)", group: "Edit" },
-  { id: "composerNormal.prefix.g", scope: "normal", contexts: ["composerNormal"], keys: ["g"], title: "Chord prefix (gg)", group: "Edit" },
-  { id: "composerNormal.x", scope: "normal", contexts: ["composerNormal"], keys: ["x"], title: "Delete the character", group: "Edit" },
-  { id: "composerNormal.dd", scope: "normal", contexts: ["composerNormal"], keys: ["d", "d"], title: "Delete the line", group: "Edit" },
-  { id: "composerNormal.D", scope: "normal", contexts: ["composerNormal"], keys: ["shift+d"], title: "Delete to the line end", group: "Edit" },
-  { id: "composerNormal.dh", scope: "normal", contexts: ["composerNormal"], keys: ["d", "h"], title: "Delete left", group: "Edit" },
-  { id: "composerNormal.dj", scope: "normal", contexts: ["composerNormal"], keys: ["d", "j"], title: "Delete down", group: "Edit" },
-  { id: "composerNormal.dk", scope: "normal", contexts: ["composerNormal"], keys: ["d", "k"], title: "Delete up", group: "Edit" },
-  { id: "composerNormal.dl", scope: "normal", contexts: ["composerNormal"], keys: ["d", "l"], title: "Delete right", group: "Edit" },
-  { id: "composerNormal.dw", scope: "normal", contexts: ["composerNormal"], keys: ["d", "w"], title: "Delete the next word", group: "Edit" },
-  { id: "composerNormal.db", scope: "normal", contexts: ["composerNormal"], keys: ["d", "b"], title: "Delete the previous word", group: "Edit" },
-  { id: "composerNormal.de", scope: "normal", contexts: ["composerNormal"], keys: ["d", "e"], title: "Delete to the word end", group: "Edit" },
-  { id: "composerNormal.d0", scope: "normal", contexts: ["composerNormal"], keys: ["d", "0"], title: "Delete to the line start", group: "Edit" },
-  { id: "composerNormal.d$", scope: "normal", contexts: ["composerNormal"], keys: ["d", "$"], title: "Delete to the line end", group: "Edit" },
-  { id: "composerNormal.dgg", scope: "normal", contexts: ["composerNormal"], keys: ["d", "g", "g"], title: "Delete to the buffer start", group: "Edit" },
-  { id: "composerNormal.dG", scope: "normal", contexts: ["composerNormal"], keys: ["d", "shift+g"], title: "Delete to the buffer end", group: "Edit" },
-  { id: "composerNormal.undo", scope: "normal", contexts: ["composerNormal"], keys: ["u"], title: "Undo", group: "Edit" },
-  { id: "composerNormal.redo", scope: "normal", contexts: ["composerNormal"], keys: ["ctrl+r"], title: "Redo", group: "Edit" },
-
-  // Normal: yank, paste, visual, leave -----------------------------------
-  { id: "composerNormal.yy", scope: "normal", contexts: ["composerNormal"], keys: ["y", "y"], title: "Yank the line", group: "Yank", hint: "yy/p yank" },
-  { id: "composerNormal.paste", scope: "normal", contexts: ["composerNormal"], keys: ["p"], title: "Paste after the cursor", group: "Paste" },
-  { id: "composerNormal.paste.before", scope: "normal", contexts: ["composerNormal"], keys: ["shift+p"], title: "Paste before the cursor", group: "Paste" },
-  { id: "composerNormal.visual", scope: "normal", contexts: ["composerNormal"], keys: ["v"], title: "Start character Visual", group: "Visual" },
-  { id: "composerNormal.visual.line", scope: "normal", contexts: ["composerNormal"], keys: ["shift+v"], title: "Start line Visual", group: "Visual" },
-  { id: "composerNormal.escape", scope: "normal", contexts: ["composerNormal"], keys: ["escape"], title: "Go to chat Normal", group: "Navigation", hint: "esc chat" },
-
-  // Visual: motions extend the selection ---------------------------------
-  { id: "composerVisual.motion.h", scope: "normal", contexts: ["composerVisual"], keys: ["h"], title: "Extend left", group: "Motion" },
-  { id: "composerVisual.motion.j", scope: "normal", contexts: ["composerVisual"], keys: ["j"], title: "Extend down", group: "Motion" },
-  { id: "composerVisual.motion.k", scope: "normal", contexts: ["composerVisual"], keys: ["k"], title: "Extend up", group: "Motion" },
-  { id: "composerVisual.motion.l", scope: "normal", contexts: ["composerVisual"], keys: ["l"], title: "Extend right", group: "Motion" },
-  { id: "composerVisual.motion.w", scope: "normal", contexts: ["composerVisual"], keys: ["w"], title: "Extend to the next word", group: "Motion" },
-  { id: "composerVisual.motion.b", scope: "normal", contexts: ["composerVisual"], keys: ["b"], title: "Extend to the previous word", group: "Motion" },
-  { id: "composerVisual.motion.e", scope: "normal", contexts: ["composerVisual"], keys: ["e"], title: "Extend to the word end", group: "Motion" },
-  { id: "composerVisual.motion.0", scope: "normal", contexts: ["composerVisual"], keys: ["0"], title: "Extend to the line start", group: "Motion" },
-  { id: "composerVisual.motion.caret", scope: "normal", contexts: ["composerVisual"], keys: ["^"], title: "Extend to the first non-blank", group: "Motion" },
-  { id: "composerVisual.motion.lineEnd", scope: "normal", contexts: ["composerVisual"], keys: ["$"], title: "Extend to the line end", group: "Motion" },
-  { id: "composerVisual.motion.gg", scope: "normal", contexts: ["composerVisual"], keys: ["g", "g"], title: "Extend to the buffer start", group: "Motion" },
-  { id: "composerVisual.motion.G", scope: "normal", contexts: ["composerVisual"], keys: ["shift+g"], title: "Extend to the buffer end", group: "Motion" },
-  { id: "composerVisual.prefix.g", scope: "normal", contexts: ["composerVisual"], keys: ["g"], title: "Chord prefix (gg)", group: "Motion" },
-
-  // Visual: selection actions --------------------------------------------
-  { id: "composerVisual.swap", scope: "normal", contexts: ["composerVisual"], keys: ["o"], title: "Swap the selection ends", group: "Selection" },
-  { id: "composerVisual.yank", scope: "normal", contexts: ["composerVisual"], keys: ["y"], title: "Copy the selection", group: "Selection", hint: "y copy" },
-  { id: "composerVisual.delete", scope: "normal", contexts: ["composerVisual"], keys: ["d"], title: "Cut the selection", group: "Selection", hint: "d cut" },
-  { id: "composerVisual.delete.x", scope: "normal", contexts: ["composerVisual"], keys: ["x"], title: "Cut the selection", group: "Selection" },
-  { id: "composerVisual.change", scope: "normal", contexts: ["composerVisual"], keys: ["c"], title: "Cut the selection and insert", group: "Selection", hint: "c change" },
-  { id: "composerVisual.paste", scope: "normal", contexts: ["composerVisual"], keys: ["p"], title: "Replace the selection with the clipboard", group: "Selection", hint: "p paste" },
-  { id: "composerVisual.paste.before", scope: "normal", contexts: ["composerVisual"], keys: ["shift+p"], title: "Replace the selection with the clipboard", group: "Selection" },
-  { id: "composerVisual.leave", scope: "normal", contexts: ["composerVisual"], keys: ["v"], title: "Leave Visual", group: "Navigation", hint: "esc cancel" },
-  { id: "composerVisual.line", scope: "normal", contexts: ["composerVisual"], keys: ["shift+v"], title: "Switch to line selection", group: "Selection" },
-  { id: "composerVisual.escape", scope: "normal", contexts: ["composerVisual"], keys: ["escape"], title: "Leave Visual", group: "Navigation" },
 ]
 
 export const KEYMAP_CATALOG: readonly KeyEntry[] = [
@@ -501,6 +641,16 @@ export function resolveNormalKey(context: KeyContext, pending: readonly string[]
   return { type: "none" }
 }
 
+/**
+ * Resolve one canonical token as a direct action in a context. The app's
+ * special-case handlers use this instead of repeating key strings: every key
+ * they consume is a catalog entry, and a missing entry is caught by tests.
+ */
+export function singleKeyEntry(context: KeyContext, token: string): KeyEntry | null {
+  const resolution = resolveNormalKey(context, [], token)
+  return resolution.type === "action" ? resolution.entry : null
+}
+
 /** Leader keys are a single chord level; no further pending state exists. */
 export function resolveLeaderKey(token: string): KeyResolution {
   const entry = leaderEntries().find((candidate) => candidate.keys.length === 1 && candidate.keys[0] === token)
@@ -555,6 +705,34 @@ export function statuslineHints(
     .join(" · ")
 }
 
+/**
+ * Leader statusline hints, generated from the same leader table as the
+ * which-key popup and layer. Only teaching entries carry a hint.
+ */
+export function leaderHints(): string {
+  return leaderEntries()
+    .flatMap((entry) => entry.hint && entry.listed !== false ? [entry.hint] : [])
+    .filter((hint, index, all) => all.indexOf(hint) === index)
+    .join(" · ")
+}
+
+/**
+ * Command/search hints. The Enter label depends on the input kind (`run` vs
+ * `search`); every key and the rest of the vocabulary still come from the
+ * command catalog.
+ */
+export function commandStatusHints(kind: ":" | "/"): string {
+  const entries = normalEntries("command")
+  const run = entries.find((entry) => entry.id === "command.run")
+  if (!run) return ""
+  const runLabel = kind === ":" ? (run.hint ?? "enter run") : `${keyChordLabel(run.keys).toLowerCase()} search`
+  const rest = entries
+    .filter((entry) => entry.id !== "command.run" && entry.listed !== false)
+    .filter((entry) => kind === ":" || entry.id !== "command.complete")
+    .flatMap((entry) => entry.hint ? [entry.hint] : [])
+  return [runLabel, ...rest].filter((hint, index, all) => all.indexOf(hint) === index).join(" · ")
+}
+
 const NAMED_KEY_LABELS: Record<string, string> = {
   enter: "Enter",
   escape: "Esc",
@@ -571,14 +749,8 @@ const NAMED_KEY_LABELS: Record<string, string> = {
   "?": "?",
 }
 
-export function keyLabel(keys: readonly string[]): string {
-  if (keys.length === 0) return ""
-  if (keys.length > 1 && keys.every((key) => /^[a-z]$/.test(key))) return keys.join("")
-  return keys.map(labelForKey).join(" ")
-}
-
 /**
- * Vim-style chord label: single-character tokens join without a space
+ * The one key-label formatter. Single-character tokens join without a space
  * (`gg`, `dG`, `d$`); named tokens keep their readable spacing.
  */
 export function keyChordLabel(keys: readonly string[]): string {
@@ -624,7 +796,7 @@ export function whichKeyLines(entries: readonly KeyEntry[], columns = 2): string
     for (let column = 0; column < columnCount; column++) {
       const entry = listed[row + column * rows]
       if (!entry) continue
-      const cell = `${keyLabel(entry.keys)} ${entry.title}`
+      const cell = `${keyChordLabel(entry.keys)} ${entry.title}`
       cells.push(column < columnCount - 1 ? cell.padEnd(width) : cell)
     }
     const line = cells.join("").trimEnd()

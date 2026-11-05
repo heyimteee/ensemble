@@ -687,4 +687,3 @@ test("a visual paste is discarded when another key intervenes", async () => {
   assert.equal(editor.text(), "one two")
   assert.deepEqual(buffer.visualSelection, { kind: "char", anchor: 0, cursor: 3 })
 })
-

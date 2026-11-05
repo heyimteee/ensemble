@@ -18,7 +18,7 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **Workspace config is human-editable.** `<workspace>/.ensemble/config.json` is authoritative for its name, leader, members, synthesis, and pause state. History stays in OpenCode storage, not the repository.
 - **Init writes the team contract.** `I` or `/init` runs native `/init`, then places the versioned Ensemble block at the top of `AGENTS.md`.
 - **Completions stay in the composer.** The composer is a wrapping textarea. `$`, `@`, and `/` open a bordered popup above it; typing filters, arrows move, Enter inserts or runs, and `Shift+Enter` adds a line. Workspace and agent creation use a centered multi-step wizard with Back/Next; member selection is a searchable checklist.
-- **One modal grammar.** Normal, Insert, Visual, and Command modes are shared by the roster, chats, settings, wizards, and dialogs. `Esc` goes up a level and never quits; `Space` opens the leader menu and `?` opens the generated, searchable help catalog. No `Ctrl+letter` app shortcuts collide with macOS or Herdr.
+- **One modal grammar.** Normal, Insert, Visual, and Command modes are shared by the roster, chats, settings, wizards, and dialogs. `Esc` goes up a level and never quits; `Space` opens the leader menu and `?` opens the generated, searchable help catalog. App bindings are designed to avoid `Ctrl+letter` collisions with macOS and Herdr, but that intent has not been verified on a macOS/Herdr host; see the remaining limits in the v5.6 verification record.
 - **Mentions and team work are explicit.** `$Name` addresses a teammate in chat, `@path` is file-only, and work is assigned through Ensemble tools. The agent contract includes the same rules.
 - **One team state across locations.** All OpenCode locations share the same Ensemble roster, workspace membership, and bindings; config remains authoritative.
 - **Skillboxes and models are per-agent.** Only assigned skills are available; backup models recover from availability failures.
@@ -51,7 +51,7 @@ binding below.
 | `j` / `k`, `gg` / `G` | Move rows or scroll; `Ctrl+d` / `Ctrl+u` move a half page |
 | `h` / `l` | Move between the rail and the chat, or switch settings tabs |
 | `Enter` | Open the selection, send, or confirm |
-| `Tab` / `Shift+Tab` | Move focus zones (rail → chat → work list → composer) |
+| `Tab` / `Shift+Tab` | Move focus zones (rail ↔ chat ↔ work list); enter the composer with `i` or `Enter` |
 | `Esc` | Go up one level; it never quits |
 | `i` | Focus the composer in Insert |
 | `Space` | Leader key: which-key menu for create, edit, archive, delete, settings, approvals, pause/resume, init, native, delegate, reassign, retry, restart, cancel, leave, and help |
@@ -74,7 +74,8 @@ In the **composer**, Insert mode sends with `Enter`, adds a line with
 the documented Vim subset (`i a I A o O`, motions, `x`/`d`/`dd`/`D`,
 `u`/`Ctrl+r`, `yy`/`p`/`P`, `v`/`V`). Each Workspace or Direct conversation
 keeps its own draft. There are no `Ctrl+letter` app shortcuts beyond the
-documented editor keys; the Leader is `Space`.
+documented editor keys; the Leader is `Space`. The macOS/Herdr shortcut check
+is still unperformed, so treat the collision-free intent as unverified there.
 
 Settings use `h`/`l` for tabs, `j`/`k` for rows, `Enter` to edit or toggle,
 `a`/`e`/`x` to add or remove, `Space` to toggle a skill, `p` to promote a

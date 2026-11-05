@@ -44,7 +44,7 @@ export const COMMANDS: readonly CommandSpec[] = [
 
 const COMMAND_NAMES = new Set<string>(COMMANDS.map((command) => command.name))
 
-export type ParsedCommand = { name: CommandName; args: string[] }
+export type ParsedCommand = { name: CommandName }
 
 /**
  * Parse a command line. The leading `:` is optional because the caller also
@@ -55,9 +55,9 @@ export function parseCommandLine(input: string): ParsedCommand | null {
   const trimmed = input.trim()
   const withoutColon = trimmed.startsWith(":") ? trimmed.slice(1).trim() : trimmed
   if (!withoutColon) return null
-  const [name, ...args] = withoutColon.split(/\s+/)
+  const name = withoutColon.split(/\s+/)[0]
   if (!COMMAND_NAMES.has(name)) return null
-  return { name: name as CommandName, args }
+  return { name: name as CommandName }
 }
 
 function commandQuery(input: string): string | undefined {

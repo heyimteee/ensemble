@@ -36,6 +36,7 @@ import {
 import { helpEntryKey, type HelpEntry, type HelpSection } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
 import { MOUSE_PANE_IDS } from "./mouse.ts"
+import { statuslineHints } from "./keymap.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
@@ -297,7 +298,7 @@ export function SettingsView(props: {
         <Show when={props.field}>
           <box flexDirection="column" marginTop={1}>
             <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>
-              {props.field!.label} · {fieldMode() === "insert" ? "INSERT · enter done · esc field normal" : fieldMode() === "visual" ? "VISUAL · y copy · d cut · c change · p paste · esc cancel" : "NORMAL · i/a insert · h/j/k/l move · esc settings"}
+              {props.field!.label} · {fieldMode() === "insert" ? "INSERT · " : fieldMode() === "visual" ? "VISUAL · " : "NORMAL · "}{fieldMode() === "insert" ? statuslineHints("settingsField") : fieldMode() === "visual" ? statuslineHints("composerVisual") : statuslineHints("settingsText")}
             </text>
             <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.focus} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
               <input ref={props.fieldRef} value={props.field!.value} width="100%" backgroundColor={props.colors.bg} textColor={props.colors.text} onContentChange={() => props.onFieldContentChange?.()} onCursorChange={() => props.onFieldCursorChange?.()} />

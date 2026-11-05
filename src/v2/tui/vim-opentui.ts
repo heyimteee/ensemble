@@ -7,7 +7,7 @@
  * undo history; edits use cursor seeks, insertText, and selection deletion.
  */
 
-import * as core from "@opentui/core"
+import { createRuntimeClipboard } from "./opentui-clipboard.ts"
 import {
   createVimRegisterStore,
   VimBuffer,
@@ -71,18 +71,6 @@ export function createEditorPort(renderable: RenderableEditor): VimEditorPort {
   }
 }
 
-type ClipboardCore = {
-  createHostClipboard?: (options?: { timeoutMs?: number; maxReadBytes?: number; maxWriteBytes?: number }) => any
-  createClipboard?: (options: { host: any; terminal: any }) => any
-  createRendererClipboardAdapter?: (renderer: any) => any
-}
-
-type ClipboardService = {
-  read(options: { preferredTypes: string[]; signal?: AbortSignal }): Promise<any>
-  writeText(text: string, options: { destination: string; signal?: AbortSignal }): Promise<any>
-  dispose?(): Promise<void>
-}
-
 const CLIPBOARD_TIMEOUT_MS = 800
 const decoder = new TextDecoder()
 
@@ -93,25 +81,17 @@ function clipboardSignal(): AbortSignal | undefined {
 }
 
 /**
- * System clipboard first with the internal register as fallback. OpenTUI's
- * clipboard exports are present at runtime but missing from the package type
- * entry, so the adapter keeps a narrow local view of them.
+ * System clipboard first with the internal register as fallback. The typed
+ * shim owns the runtime-version guard; this adapter only maps its results to
+ * the Vim clipboard port.
  */
-export function createClipboardPort(renderer: unknown): VimClipboardPort & { dispose(): void } {
-  const runtime = core as unknown as ClipboardCore
-  let service: ClipboardService | null = null
+export function createClipboardPort(renderer: Parameters<typeof createRuntimeClipboard>[0]): VimClipboardPort & { dispose(): void } {
+  let service: ReturnType<typeof createRuntimeClipboard> = null
 
-  const ensure = (): ClipboardService | null => {
+  const ensure = (): ReturnType<typeof createRuntimeClipboard> => {
     if (service) return service
-    try {
-      if (!runtime.createHostClipboard || !runtime.createClipboard || !runtime.createRendererClipboardAdapter) return null
-      const host = runtime.createHostClipboard({ timeoutMs: CLIPBOARD_TIMEOUT_MS })
-      const terminal = runtime.createRendererClipboardAdapter(renderer)
-      service = runtime.createClipboard({ host, terminal })
-      return service
-    } catch {
-      return null
-    }
+    service = createRuntimeClipboard(renderer, { timeoutMs: CLIPBOARD_TIMEOUT_MS })
+    return service
   }
 
   return {
