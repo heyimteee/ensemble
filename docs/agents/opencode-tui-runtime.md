@@ -112,10 +112,10 @@ Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` insta
 | `npm run test:live:fake:all` | Fake then empty-catalog scenarios in order; fails fast and prints a compact `PASS`/`FAIL`/`SKIP` summary. Deterministic fake-and-empty suite. |
 | `npm run test:live:all` | The full local matrix: fake, empty catalog, then real host catalog. Same fail-fast summary; the real scenario is not deterministic and stays local. |
 | `npm run test:live:latency` | Reproducible keypress-to-repaint probe on the isolated fake host: rail `j`/`k` from `tmux send-keys` to the first capture showing the moved cursor. Reports samples and percentiles; no threshold gate. |
-| `npm run test:live:preflight` | Resolve and print the live Node/OpenCode/tmux/fd versions. Missing tools skip locally; `ENSEMBLE_LIVE_REQUIRE=1` makes them fail. |
+| `npm run test:live:preflight` | Resolve and print the live Node/OpenCode/tmux versions; pass `all` to include the real scenario's `fd`. Missing tools follow the [skip-versus-fail contract](../../scripts/README.md#skip-versus-fail). |
 | `ENSEMBLE_LIVE_KEEP=1 npm run test:live:fake` | Preserve this run's processes/files **on failure** for inspection; also works with `test:live`. Success still cleans up. |
 
-See [the harness instructions](../../scripts/README.md) for prerequisites, binary overrides, isolation, timeouts, CI tool setup, and exact cleanup. Missing prerequisites can exit zero with an explicit skip; report that as **not run**, not a pass, and read the aggregate summary's `SKIP` rows rather than assuming a green run executed. With `ENSEMBLE_LIVE_REQUIRE=1`, a missing prerequisite or a `SKIP` row fails; CI uses that mode for `test:live:fake:all`. The real scenario also needs `fd` and stays local. Preserved output lists the owned tmux sessions and fixture path; clean up only those artifacts and review logs for sensitive content before sharing. Documentation-only acceptance is content/link review, not a new test framework.
+See [the harness instructions](../../scripts/README.md) for prerequisites, binary overrides, isolation, timeouts, CI tool setup, exact cleanup, and the authoritative [skip-versus-fail contract](../../scripts/README.md#skip-versus-fail). The real scenario also needs `fd` and stays local. Preserved output lists the owned tmux sessions and fixture path; clean up only those artifacts and review logs for sensitive content before sharing. Documentation-only acceptance is content/link review, not a new test framework.
 
 ## Editing discipline
 

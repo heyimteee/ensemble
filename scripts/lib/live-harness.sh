@@ -46,15 +46,21 @@ LIVE_TMUX_BIN=""
 LIVE_NODE_BIN=""
 LIVE_SESSION_NAMES=()
 LIVE_PROCESS_ENV=()
+LIVE_SKIP_MARKER="${ENSEMBLE_LIVE_SKIP_MARKER:-}"
 
 live_log() { printf 'live: %s\n' "$*"; }
 live_debug() { [[ "${ENSEMBLE_LIVE_DEBUG:-0}" == "1" ]] && printf 'live: %s\n' "$*" >&2 || true; }
 live_require_enabled() { [[ "${ENSEMBLE_LIVE_REQUIRE:-0}" == "1" ]]; }
 # Local runs keep the skip contract. Require mode (CI) treats the same missing
-# prerequisite as a hard failure instead of exiting zero.
+# prerequisite as a hard failure instead of exiting zero. When a caller sets
+# ENSEMBLE_LIVE_SKIP_MARKER, the local path also records the skip structurally
+# so an aggregate runner never has to scrape log text.
 live_skip() {
   if live_require_enabled; then
     live_fail "$* (required; ENSEMBLE_LIVE_REQUIRE=1)"
+  fi
+  if [[ -n "$LIVE_SKIP_MARKER" ]]; then
+    : >"$LIVE_SKIP_MARKER" || live_fail "could not write skip marker: $LIVE_SKIP_MARKER"
   fi
   live_log "$*; skipping"
   exit 0
@@ -675,19 +681,46 @@ live_snapshot_value() {
 
 # --- subtask waits and diagnostics ----------------------------------------
 
-# Read one field from the subtask with the given exact title. Prints nothing
-# when the row or field is absent, so callers can poll without special cases.
-live_subtask_field() {
-  local title="$1" field="$2"
+# One reader for subtask rows. `field` prints one value and stays silent when
+# the row/field is absent; `report` prints the timeout diagnostic to stderr.
+# Keeping one parser means polling and diagnostics cannot drift apart.
+live_subtask_read() {
+  local mode="$1" title="$2" field="${3:-}"
   live_snapshot 2>/dev/null | live_snapshot_output 2>/dev/null | "$LIVE_NODE_BIN" -e '
     const raw = require("fs").readFileSync(0, "utf8");
     if (!raw) process.exit(0);
     const output = JSON.parse(raw);
-    const task = Object.values(output.state?.subtasks ?? {}).find((item) => item.title === process.argv[1]);
-    const value = task?.[process.argv[2]];
-    if (value === undefined || value === null) process.exit(0);
-    process.stdout.write(typeof value === "object" ? JSON.stringify(value) : String(value));
-  ' "$title" "$field" 2>/dev/null || true
+    const title = process.argv[1];
+    const mode = process.argv[2];
+    const tasks = Object.values(output.state?.subtasks ?? {});
+    const task = tasks.find((item) => item.title === title);
+    if (mode === "field") {
+      const value = task?.[process.argv[3]];
+      if (value !== undefined && value !== null) {
+        process.stdout.write(typeof value === "object" ? JSON.stringify(value) : String(value));
+      }
+    } else {
+      const counts = { pending: 0, working: 0, replied: 0 };
+      for (const item of tasks) if (counts[item.state] !== undefined) counts[item.state] += 1;
+      const fields = ["id", "workspaceID", "assigneeID", "state", "stage", "outcome", "attempts", "activeRunID", "claimedBy", "awaitingChildren", "approvalID", "error", "createdAt", "startedAt", "repliedAt", "runSummary"];
+      const row = task
+        ? Object.fromEntries(fields.filter((name) => task[name] !== undefined).map((name) => [name, task[name]]))
+        : null;
+      const workspaces = Object.values(output.state?.workspaces ?? {})
+        .map((workspace) => `#${workspace.name}${workspace.paused ? " (paused)" : ""}`)
+        .join(", ") || "none";
+      console.error(`live: task: ${row ? JSON.stringify(row) : "not found"}`);
+      console.error(`live: tasks: pending=${counts.pending} working=${counts.working} replied=${counts.replied} total=${tasks.length}`);
+      console.error(`live: rows: ${tasks.map((item) => `${item.title}=${item.state}`).join(", ") || "none"}`);
+      console.error(`live: workspaces: ${workspaces}`);
+    }
+  ' "$title" "$mode" "$field"
+}
+
+# Read one field from the subtask with the given exact title. Prints nothing
+# when the row or field is absent, so callers can poll without special cases.
+live_subtask_field() {
+  live_subtask_read field "$1" "$2" 2>/dev/null || true
 }
 
 # Print a compact snapshot diagnostic when a scheduled task does not reach its
@@ -696,26 +729,7 @@ live_subtask_field() {
 live_report_subtasks() {
   local title="$1" seconds="$2"
   echo "live: subtask diagnostic after ${seconds}s waiting for \"$title\"" >&2
-  live_snapshot 2>/dev/null | live_snapshot_output 2>/dev/null | "$LIVE_NODE_BIN" -e '
-    const raw = require("fs").readFileSync(0, "utf8");
-    const output = JSON.parse(raw);
-    const title = process.argv[1];
-    const tasks = Object.values(output.state?.subtasks ?? {});
-    const task = tasks.find((item) => item.title === title);
-    const counts = { pending: 0, working: 0, replied: 0 };
-    for (const item of tasks) if (counts[item.state] !== undefined) counts[item.state] += 1;
-    const fields = ["id", "workspaceID", "assigneeID", "state", "stage", "outcome", "attempts", "activeRunID", "claimedBy", "awaitingChildren", "approvalID", "error", "createdAt", "startedAt", "repliedAt", "runSummary"];
-    const row = task
-      ? Object.fromEntries(fields.filter((field) => task[field] !== undefined).map((field) => [field, task[field]]))
-      : null;
-    const workspaces = Object.values(output.state?.workspaces ?? {})
-      .map((workspace) => `#${workspace.name}${workspace.paused ? " (paused)" : ""}`)
-      .join(", ") || "none";
-    console.error(`live: task: ${row ? JSON.stringify(row) : "not found"}`);
-    console.error(`live: tasks: pending=${counts.pending} working=${counts.working} replied=${counts.replied} total=${tasks.length}`);
-    console.error(`live: rows: ${tasks.map((item) => `${item.title}=${item.state}`).join(", ") || "none"}`);
-    console.error(`live: workspaces: ${workspaces}`);
-  ' "$title" >&2 || echo "live: subtask diagnostic unavailable" >&2
+  live_subtask_read report "$title" || echo "live: subtask diagnostic unavailable" >&2
 }
 
 # Bounded wait for a subtask state. The caller chooses the bound; a timeout

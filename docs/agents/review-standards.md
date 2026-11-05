@@ -50,4 +50,4 @@ When a change touches a payload that neighboring features also construct or cons
 
 ## Reporting
 
-Cite the standard by section for each judgement finding. Quote the failing command for mechanical failures. State which checks are manual or unexecuted; a skipped check is not a pass.
+Cite the standard by section for each judgement finding. Quote the failing command for mechanical failures. State which checks are manual or unexecuted; the [live harness contract](../../scripts/README.md#skip-versus-fail) defines skip reporting, and a skipped check is not a pass.

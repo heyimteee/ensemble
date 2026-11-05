@@ -11,7 +11,8 @@ set -uo pipefail
 # `fake` is the local/CI guardrail. `all` is the full local matrix and needs a
 # real model catalog (see scripts/README.md). Local runs report a missing
 # prerequisite as SKIP and exit zero. ENSEMBLE_LIVE_REQUIRE=1 turns SKIP into a
-# failure so CI cannot look green on a suite that did not run.
+# failure so CI cannot look green on a suite that did not run. Skip detection
+# reads the harness's marker file, never log prose.
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
@@ -47,7 +48,9 @@ esac
 require_mode="${ENSEMBLE_LIVE_REQUIRE:-0}"
 export ENSEMBLE_LIVE_REQUIRE="$require_mode"
 
-matrix_tmp=$(mktemp -d "${TMPDIR:-/tmp}/opencode/ensemble-matrix-XXXXXX") || exit 1
+tmp_parent="${TMPDIR:-/tmp}/opencode"
+mkdir -p "$tmp_parent" || exit 1
+matrix_tmp=$(mktemp -d "$tmp_parent/ensemble-matrix-XXXXXX") || exit 1
 trap 'rm -rf "$matrix_tmp"' EXIT
 trap 'exit 130' INT TERM
 
@@ -79,9 +82,13 @@ for ((i = 0; i < ${#scenarios[@]}; i++)); do
   fi
 
   log="$matrix_tmp/$name.log"
+  skip_marker="$matrix_tmp/$name.skip"
   printf 'live-matrix: %s: start\n' "$name"
   started=$SECONDS
-  if bash "$script" 2>&1 | tee "$log"; then
+  # The harness writes this marker when it takes the local skip path. Reading a
+  # structure beats scraping log prose: a scenario that only mentions a skip
+  # cannot be misclassified.
+  if ENSEMBLE_LIVE_SKIP_MARKER="$skip_marker" bash "$script" 2>&1 | tee "$log"; then
     status=0
   else
     status=$?
@@ -105,7 +112,7 @@ for ((i = 0; i < ${#scenarios[@]}; i++)); do
     break
   fi
 
-  if grep -q '; skipping$' "$log" 2>/dev/null; then
+  if [[ -f "$skip_marker" ]]; then
     if [[ "$require_mode" == "1" ]]; then
       printf 'live-matrix: %s: FAIL (%ss; SKIP is not allowed in require mode)\n' "$name" "$elapsed" >&2
       summary+=("FAIL  $name (${elapsed}s): prerequisites missing in require mode")

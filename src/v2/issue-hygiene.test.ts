@@ -12,6 +12,7 @@ function fixtureRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "ensemble-issue-hygiene-"))
   mkdirSync(join(root, "docs", "verification"), { recursive: true })
   writeFileSync(join(root, "docs", "verification", "2026-11-05-v58.md"), "# v5.8\n")
+  writeFileSync(join(root, "docs", "verification", "2026-11-05-v59-t2.md"), "# v5.9 T2\n")
   return root
 }
 
@@ -35,6 +36,12 @@ function issuesFile(root: string): string {
       title: "Spec: Ensemble v5.9 - children still open",
       state: "OPEN",
       subIssuesSummary: { completed: 0, total: 7 },
+    },
+    {
+      number: 300,
+      title: "Spec: Ensemble v5.9 - delivered but only a ticket record exists",
+      state: "CLOSED",
+      subIssuesSummary: { completed: 7, total: 7 },
     },
     {
       number: 201,
@@ -112,6 +119,23 @@ test("a base version does not match a later minor record", () => {
     const result = run(root, ["--all"])
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /#42.*verification: missing/i)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("a version spec needs its own final record, not a ticket record", () => {
+  const root = fixtureRoot()
+  try {
+    const ticketOnly = run(root, ["--all"])
+    assert.equal(ticketOnly.status, 0, ticketOnly.stderr)
+    assert.match(ticketOnly.stdout, /#300.*verification: missing/i)
+    assert.doesNotMatch(ticketOnly.stdout, /#300.*2026-11-05-v59-t2\.md/i)
+
+    writeFileSync(join(root, "docs", "verification", "2026-11-06-v59.md"), "# v5.9\n")
+    const withFinal = run(root, ["--all"])
+    assert.equal(withFinal.status, 0, withFinal.stderr)
+    assert.match(withFinal.stdout, /#300.*docs\/verification\/2026-11-06-v59\.md/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

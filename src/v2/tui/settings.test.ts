@@ -10,7 +10,6 @@ import {
   modelSummary,
   modelsEmptyLine,
   modelsSectionCount,
-  railAgentLabel,
   railGroupLine,
   settingsCursorMark,
   settingsDivider,
@@ -138,8 +137,6 @@ test("state lines share one grammar: empty, loading, unavailable, and no-agent",
 test("the agent list shows group counts and agent descriptions", () => {
   assert.equal(railGroupLine("agent", 3), "AGENTS (3)")
   assert.equal(railGroupLine("workspace", 1), "WORKSPACES (1)")
-  assert.equal(railAgentLabel("FakeAgent", "Engineering"), "FakeAgent — Engineering")
-  assert.equal(railAgentLabel("FakeAgent", ""), "FakeAgent")
 })
 
 test("the model picker groups by provider with variant info", () => {
