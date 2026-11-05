@@ -12,6 +12,16 @@ _Avoid_: Bot, worker (when referring to the lasting teammate).
 **Skillbox**: The exclusive collection of optional skills assigned to an agent. A skill is reusable guidance, not a grant of tool permissions.
 _Avoid_: Toolbox (when referring to assigned skills).
 
+**Skill**: Reusable guidance that an agent loads deliberately through OpenCode's native skill tool. The host catalog supplies skills; assignment decides which agent may load one. A skill is not a tool permission.
+
+**General skill**: A catalog skill that is not assigned in the Skillbox of any workspace member. It has no owner, so the workspace leader triages it.
+
+**Skill invocation**: An explicit `/skill` token in composer text. The shared invocation planner resolves it to one recipient per addressed agent; it never splits the user's text or extracts per-skill bodies.
+
+**System Agent**: The visible non-roster identity that reports workspace-level jobs such as init. It has no model, Skillbox, or mention route.
+
+**Init job**: A durable workspace-level job that runs native `/init` in a temporary session and streams a System Agent report. It is not a Subtask and does not enter the work queue.
+
 **Workspace**: A directory-bound project room with a group chat, a roster, and exactly one leader. One canonical directory belongs to one workspace.
 _Avoid_: Channel, room, group (when referring to this concept).
 

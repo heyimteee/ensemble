@@ -27,6 +27,7 @@ OpenCode engine
 - **`src/v2/service.ts`** — domain service and orchestrator. Workspaces, agents, messages, subtasks, delegation, approvals, memory, model fallback, scheduling, recovery.
 - **`src/v2/catalog.ts`** — model/skill catalog refresh with a timeout guard.
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
+- **`src/v2/skill-invocation.ts`** — the shared pure skill invocation planner used by composer completion and server validation: anchors, assigned/General skills, owner choices, direct-chat rejection, and work titles.
 - **`src/v2/tui/`** — page shell, presentational components, palette, formatting, and keymap layers.
 - **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval.
 - **`src/v2/routing.ts`** — `$`/`!` mention routing and leader fallback.
@@ -107,6 +108,17 @@ Message {
 - Direct chats render the native OpenCode transcript in the center column and stream deltas into a live assistant block. `o` opens that native session as a normal OpenCode route.
 - Selecting an agent opens its DM; selecting a workspace opens the group chat. The empty state appears when no chat is open.
 
+## Skill invocation and leader triage
+
+`/` at message start shows commands, the built-in Ensemble init skill, assigned skills as `Skill | <Owner>`, and unassigned catalog skills as `Skill | General`. `$Agent /` shows only that agent's Skillbox. The TUI and server run the same pure planner; the server re-validates against authoritative state before appending a message or creating work.
+
+- Assigned skills route only to their owner. A message-start skill owned by the leader runs on the leader; one owned elsewhere opens an owner picker. With no mention, the leader is tried first, then the picker.
+- General skills route to the leader for triage, even with no anchor. A General skill under a non-leader mention is rejected with a fix message naming the leader.
+- The leader receives a one-run native `skill` permission allow for exactly the requested General skills and a prompt directive to read them with the native skill tool, then use or delegate them. The Skillbox permission baseline is restored after the turn. A delegatee receives the leader's self-authored instruction and no host skill grant.
+- Direct conversations reject General skills with a pointer to the workspace group chat. The DM agent's own assigned skills pass through.
+- The built-in `/init` palette entry is displayed as General but executes the System Agent init job. It is not assignable in the Skillbox and remains solo-only.
+- Exact user text is the prompt body. No prompt `skills` attachment or experimental skill activation is used.
+
 ## v3 composer, transcript, and visual system
 
 - `$`, `@`, and `/` open an inline bordered completion popup above the composer. The composer stays focused; typing filters the list, `↑/↓` move, `Enter` inserts an agent/file token or runs a command, and `Esc` closes. No host completion dialog opens.
@@ -130,6 +142,7 @@ Message {
 - Every agent has a direct chat. If the agent belongs to the active workspace, the DM uses that workspace’s native session; otherwise it uses a no-workspace session in `~/.ensemble/agents/<id>/`.
 - Direct chat messages are queued while the agent is running and flushed when the native session becomes idle.
 - Native session transcripts are authoritative; Ensemble stores only queue and UI state.
+- A Direct conversation accepts the DM agent's own assigned `/skill` tokens. General skills are rejected with a pointer to the workspace group chat, where the leader can triage them.
 - Adding an agent with no workspace to a workspace can move its session with `session.move`; `/cd` is the human-facing equivalent in OpenCode 2.2.2.
 
 ## Configuration and init
@@ -142,7 +155,7 @@ handoffs/            typed Markdown handoffs
 init.json            AGENTS.md block version
 ```
 
-`I` or `/init` runs native `/init` in a temporary workspace session, waits for the agent to update `AGENTS.md`, then places the versioned `<!-- ensemble:start v2 -->` block at the top. Existing content outside the markers is preserved. Init failures leave no partial block.
+`I` or `/init` appends a visible `/init` audit line and starts a System Agent init job. The job runs native `/init` with Ensemble's full instructions in a temporary workspace session, streams progress into a System Agent message, and finalizes a report. On success it places the versioned `<!-- ensemble:start v2 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; the Ensemble composer never falls through to native `/init`.
 
 Reset is available through the `/reset-ensemble` composer command, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
@@ -182,7 +195,8 @@ Subtask {
   mode: "research" | "edit",
   state: "pending" | "working" | "replied",
   outcome, stage, interrupted, approvalID?,
-  resultMessageID?, error?, attempts
+  resultMessageID?, error?, attempts,
+  triage?, skillGrants?
 }
 ```
 

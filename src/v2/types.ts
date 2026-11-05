@@ -231,6 +231,14 @@ export type Subtask = {
   handoff?: HandoffInfo
   /** Peer-turn record (ticket #57). Present only on workKind "turn". */
   turn?: TurnInfo
+  /**
+   * General-skill leader triage (ticket #103): the turn must read and either
+   * use or delegate the listed skills. The host session receives a one-run
+   * native skill grant for exactly these ids, restored after the turn.
+   */
+  triage?: boolean
+  /** One-run native skill permissions issued for this turn only. */
+  skillGrants?: string[]
 }
 
 export type HandoffDecision = "delegated" | "started" | "ended" | "dismissed"

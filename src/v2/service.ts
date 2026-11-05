@@ -14,7 +14,7 @@ import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalT
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
-import { planSkillInvocation, skillWorkTitle } from "./skill-invocation.ts"
+import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type {
   Agent,
@@ -654,6 +654,19 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     const agent = state.agents[agentID]
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    // Ticket #103: direct conversations have no leader triage. General
+    // skills are rejected before a DM line or prompt is created; the DM
+    // agent's own assigned skills pass through unchanged.
+    if (!envelope?.fromID) {
+      const issue = directSkillIssue({
+        text: value,
+        agent,
+        workspace: workspaceID ? state.workspaces[workspaceID] : undefined,
+        agents: state.agents,
+        skills: this.catalog.skillOptions,
+      })
+      if (issue) throw Object.assign(new Error(issue.message), { code: issue.code })
+    }
     const target = await this.ensureChatSession(agent, workspaceID)
     const workspaceKey = target.bindingKeyID
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
@@ -1510,16 +1523,29 @@ export class EnsembleV2Service {
     if (!text) throw Object.assign(new Error("Message is empty."), { code: "empty" })
     // Ticket #101: the server re-runs the shared planner against authoritative
     // workspace state before touching the transcript or the queue. Any invalid
-    // skill/owner pair rejects the whole message atomically.
+    // skill/owner pair rejects the whole message atomically. Ticket #103 adds
+    // General-skill leader triage and owner-picker resolutions.
+    const ownerSelections = payload.ownerSelections && typeof payload.ownerSelections === "object"
+      ? Object.fromEntries(Object.entries(payload.ownerSelections as Record<string, unknown>).map(([key, value]) => [String(key), String(value)]))
+      : undefined
     const plan = planSkillInvocation({
       text,
       workspace,
       agents: state.agents,
       skills: this.catalog.skillOptions,
       maxSkills: Math.min(state.settings.maxDelegations, 8),
+      ownerSelections,
     })
     const planError = plan.errors[0]
     if (planError) throw Object.assign(new Error(planError.message), { code: planError.code })
+    if (plan.kind === "init") {
+      throw Object.assign(new Error("Init runs through the System Agent. Use /init from the workspace composer."), { code: "init_command" })
+    }
+    const ownerChoice = plan.ownerChoices?.[0]
+    if (ownerChoice) {
+      const owners = ownerChoice.ownerIDs.map((ownerID) => `$${state.agents[ownerID]?.name ?? ownerID}`).join(", ")
+      throw Object.assign(new Error(`Skill /${ownerChoice.skillID} is assigned to ${owners}. Choose an owner before sending.`), { code: "owner_choice_required" })
+    }
     // Ticket #102: every planner recipient is one unique prompt for this
     // message. Skill recipients carry their grouped skill list; a normal-only
     // anchor is an ordinary peer turn for that agent.
@@ -1555,6 +1581,8 @@ export class EnsembleV2Service {
           title: recipient ? skillWorkTitle(text, recipient) : text.slice(0, 80),
           instruction: text,
           mode: payload.mode === "edit" ? "edit" : "research",
+          triage: recipient?.triage,
+          skillGrants: recipient?.generalSkills,
         })
       }
       this.schedule()
@@ -1644,6 +1672,8 @@ export class EnsembleV2Service {
         title: recipient ? skillWorkTitle(text, recipient) : text.slice(0, 80),
         instruction,
         mode: payload.mode === "edit" ? "edit" : "research",
+        triage: recipient?.triage,
+        skillGrants: recipient?.generalSkills,
       })
     }
     this.schedule()
@@ -1681,6 +1711,8 @@ export class EnsembleV2Service {
     mode?: "research" | "edit"
     stage?: "initial" | "synthesis"
     kind?: string
+    triage?: boolean
+    skillGrants?: string[]
     turn?: { correlationID?: string; askerKind: "user" | "agent"; askerID?: string }
   }): Promise<{ subtask: Subtask; deduped: boolean }> {
     const kind: WorkKind = parseWorkKind(input.kind ?? "delegation") ?? (() => { throw invalidInput(`Unknown work kind: ${String(input.kind)}.`) })()
@@ -1723,6 +1755,8 @@ export class EnsembleV2Service {
       workKind: kind,
       queueKey: key,
       deadlineAt: at + DEADLINE_MS,
+      ...(input.triage ? { triage: true } : {}),
+      ...(input.skillGrants && input.skillGrants.length > 0 ? { skillGrants: [...new Set(input.skillGrants)] } : {}),
     }
     if (input.turn) {
       // The turn correlation derives from the work key (outside the fan-out
@@ -1765,6 +1799,8 @@ export class EnsembleV2Service {
     constraints?: string
     expected?: string
     mode?: "research" | "edit"
+    triage?: boolean
+    skillGrants?: string[]
   }): Promise<{ subtask: Subtask; deduped: boolean }> {
     return this.createWorkItem({
       workspace: input.workspace,
@@ -1778,6 +1814,8 @@ export class EnsembleV2Service {
       expected: input.expected,
       mode: input.mode,
       kind: "turn",
+      triage: input.triage,
+      skillGrants: input.skillGrants,
       turn: { correlationID: input.correlationID, askerKind: input.askerKind, askerID: input.askerID },
     })
   }
@@ -1794,6 +1832,8 @@ export class EnsembleV2Service {
     expected?: string
     mode?: "research" | "edit"
     stage?: "initial" | "synthesis"
+    triage?: boolean
+    skillGrants?: string[]
   }): Promise<Subtask> {
     return (await this.createWorkItem(input)).subtask
   }
@@ -1934,6 +1974,9 @@ export class EnsembleV2Service {
     const subtask = state.subtasks[subtaskID]
     const workspace = subtask ? state.workspaces[subtask.workspaceID] : undefined
     if (!subtask || !workspace) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
+    if (subtask.triage && assigneeID !== workspace.leaderID) {
+      throw Object.assign(new Error("A leader triage task can only be reassigned to the workspace leader."), { code: "triage_leader_only" })
+    }
     if (!workspace.memberIDs.includes(assigneeID)) throw Object.assign(new Error("That agent is not a workspace member."), { code: "not_member" })
     await this.stopSubtaskRun(subtask)
     await this.settlePendingApprovals(subtask.id, "Subtask reassigned by the user.")
@@ -3756,6 +3799,7 @@ export class EnsembleV2Service {
     await this.store.saveAgent(agent)
     let live: Message | undefined
     let attemptStartedAt = now()
+    let granted = false
     try {
       await this.ctx.session.instructions.entry.put({ sessionID: binding.sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
       live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true, correlationID: task.handoff?.correlationID ?? task.turn?.correlationID, updatedAt: now() })
@@ -3775,6 +3819,16 @@ export class EnsembleV2Service {
         key: "ensemble.v2.context",
         value: contextForTask(state, task, workspace, agent),
       }).catch(() => undefined)
+      // Ticket #103: General skills are a one-run leader grant. Apply the
+      // extra allow rules before the prompt; the finally block restores the
+      // Skillbox-permission baseline after the turn.
+      if (task.skillGrants && task.skillGrants.length > 0) {
+        await this.ctx.session.update({
+          sessionID: binding.sessionID,
+          permissions: skillPermissions([...agent.skillbox, ...task.skillGrants]),
+        })
+        granted = true
+      }
       const models = [agent.mainModel, ...agent.backupModels]
       let result: { text: string; tools: string[]; failure?: any } | undefined
       for (let index = 0; index < models.length; index++) {
@@ -3945,6 +3999,12 @@ export class EnsembleV2Service {
         await this.finalizeStream(live, failureText, true, globalEpoch, workspaceEpoch, task.workspaceID)
       }
     } finally {
+      if (granted) {
+        await this.ctx.session.update({
+          sessionID: binding.sessionID,
+          permissions: skillPermissions(agent.skillbox),
+        }).catch(() => undefined)
+      }
       clearInterval(heartbeat)
       this.liveBySession.delete(binding.sessionID)
       if (live?.streaming) await this.finalizeStream(live, live.text || "Reply interrupted.", true, globalEpoch, workspaceEpoch, task.workspaceID)

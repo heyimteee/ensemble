@@ -47,3 +47,9 @@ test("failure and interruption reports tell the user whether AGENTS.md was rolle
   assert.match(cancelled, /AGENTS\.md/)
   assert.match(cancelled, /rerun/i)
 })
+
+test("the built-in ensemble-init alias follows the same solo-only init rule", () => {
+  assert.equal(initComposerIssue("/ensemble-init"), undefined)
+  assert.match(initComposerIssue("/ensemble-init /review") ?? "", /solo/i)
+  assert.match(initComposerIssue("$Nova /ensemble-init") ?? "", /solo/i)
+})

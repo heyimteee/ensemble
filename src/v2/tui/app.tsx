@@ -7,7 +7,7 @@ import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
-import { planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
+import { COMPOSER_COMMANDS, directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue } from "../system-agent.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
@@ -1558,7 +1558,7 @@ export function EnsembleV2App() {
     })
   }
 
-  const composerPlan = (text: string) => {
+  const composerPlan = (text: string, ownerSelections?: Record<string, string>) => {
     const current = surface()
     if (!current || current.kind !== "workspace") return undefined
     const workspace = state()?.workspaces[current.workspaceID]
@@ -1569,6 +1569,7 @@ export function EnsembleV2App() {
       agents: state()?.agents ?? {},
       skills: skills(),
       maxSkills: Math.min(state()?.settings.maxDelegations ?? 8, 8),
+      ownerSelections,
     })
   }
 
@@ -1577,12 +1578,40 @@ export function EnsembleV2App() {
     if (!value) return false
     const current = surface()
     if (!current) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return false }
-    const plan = current.kind === "workspace" ? composerPlan(value) : undefined
-    const error = plan?.errors[0]
-    if (error) {
-      notify(error.message, "error")
-      context.ui.toast.show({ title: "Ensemble", message: error.message, variant: "error" })
+    const failure = (message: string) => {
+      notify(message, "error")
+      context.ui.toast.show({ title: "Ensemble", message, variant: "error" })
       return false
+    }
+    if (current.kind === "agent") {
+      const agent = state()?.agents[current.agentID]
+      if (!agent) return failure("Agent not found.")
+      const issue = directSkillIssue({
+        text: value,
+        agent,
+        workspace: current.workspaceID ? state()?.workspaces[current.workspaceID] : undefined,
+        agents: state()?.agents ?? {},
+        skills: skills(),
+      })
+      if (issue) return failure(issue.message)
+    }
+    let plan = current.kind === "workspace" ? composerPlan(value) : undefined
+    const error = plan?.errors[0]
+    if (error) return failure(error.message)
+    let ownerSelections: Record<string, string> | undefined
+    if (plan?.kind === "skills" && plan.ownerChoices?.length) {
+      ownerSelections = {}
+      for (const choice of plan.ownerChoices) {
+        const picked = await openChoice(
+          `Owner for /${choice.skillID}`,
+          choice.ownerIDs.map((ownerID) => ({ title: state()?.agents[ownerID]?.name ?? ownerID, value: ownerID })),
+        )
+        if (!picked) return false
+        ownerSelections[choice.skillID] = picked
+      }
+      plan = composerPlan(value, ownerSelections)
+      const resolvedError = plan?.errors[0]
+      if (resolvedError) return failure(resolvedError.message)
     }
     return run("Send message", async () => {
       if (current.kind === "agent") {
@@ -1590,7 +1619,12 @@ export function EnsembleV2App() {
         await refreshChat()
       } else {
         const action = plan?.kind === "skills" ? "skill.send" : "message.send"
-        await invoke(context, action, { workspaceID: current.workspaceID, text: value, recipientIDs })
+        await invoke(context, action, {
+          workspaceID: current.workspaceID,
+          text: value,
+          recipientIDs,
+          ...(ownerSelections ? { ownerSelections } : {}),
+        })
       }
     })
   }
@@ -1788,8 +1822,8 @@ export function EnsembleV2App() {
     const sameToken = previous?.kind === "command" && previous.start === palette.tokenStart && previous.scope === palette.scope
     const items = palette.rows.map((row) => ({
       title: chromeJoin([row.label, row.flag]),
-      value: row.kind === "command" ? row.command! : row.skillID!,
-      action: row.kind,
+      value: row.executor === "init" ? "init" : row.kind === "command" ? row.command! : row.skillID!,
+      action: row.executor === "init" ? "command" as const : row.kind,
       insert: row.insert,
     }))
     setCompletion({
@@ -1907,6 +1941,7 @@ export function EnsembleV2App() {
       case "pause": await togglePause(true); return
       case "resume": await togglePause(false); return
       case "init":
+      case "ensemble-init":
         if ((parsed?.args.length ?? 0) > 0) {
           notify("Init is solo-only. Send /init by itself.", "error")
           return
@@ -1952,7 +1987,14 @@ export function EnsembleV2App() {
     if (initIssue) { notify(initIssue, "error"); return }
     const plan = composerPlan(text)
     if (plan?.kind === "command" || plan?.kind === "init") { await runSlashCommand(text); return }
-    if (!plan && parseSlashCommand(text)) { await runSlashCommand(text); return }
+    const parsed = parseSlashCommand(text)
+    // A Direct conversation's slash token is a skill request, not an Ensemble
+    // command, unless the command is a real composer command. Known commands
+    // keep their workspace-wide behavior (for example /init explains that init
+    // is workspace-only); skill tokens go through send() for DM validation.
+    const directSurface = surface()?.kind === "agent"
+    const knownCommand = parsed ? COMPOSER_COMMANDS.some((command) => command.name === parsed.command) : false
+    if (!plan && parsed && (!directSurface || knownCommand)) { await runSlashCommand(text); return }
     // v5.6 T1: Enter sends and keeps Insert focus. The draft is owned by the
     // surface, cleared only after a successful send; busy/failed sends keep
     // it. A send can outlive the composer session, and a newer draft typed

@@ -120,6 +120,8 @@ These are user-facing/experimental activation paths, not the `skill` tool path.
 
 **Decision:** Ensemble must not use either path to grant an agent an unassigned skill. Restrict UI skill attachments to the agent's Skillbox, and rely on the native per-agent `skill` permissions for agent-invoked loads. Validate this again in the final integration ticket.
 
+**v5.8 deliberate skill delivery:** General-skill leader triage keeps this boundary. Exact user text is the prompt body; no prompt `skills` attachment and no experimental skill activation is used. The leader receives a one-run permission update on its native session (`session.update` with the Skillbox baseline plus the requested General skill allow rules), and the baseline is restored after the turn. A delegatee receives the leader's self-authored guidance without that host grant. The built-in Ensemble init skill is a System Agent job, not a host skill load.
+
 ### 3. Registry reads during plugin `setup` can be incomplete
 
 A server plugin that called `ctx.skill.list()` and `ctx.agent.list()` immediately in `setup` saw only built-in skills and no config-defined agents. Later API reads saw the probe agents and project skills. Reading early did not produce a stable snapshot.
