@@ -11,13 +11,19 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   HTTP server binds an ephemeral loopback port and streams fixed rich Markdown.
   Checks observe streaming, finalized content, single occurrences of reply
   markers, no remaining streaming label, no stale lines after navigation,
-  searchable help, the modal grammar, composer drafts and queued messages, the
-  wizard Esc ladder, and that `:`/`/` still open Command mode after an F2
-  native-session round-trip.
+  searchable help, the v5.7 persistent mode (roster/chat `Enter` keeps the
+  mode; wizard steps keep their arrival mode), block/line caret transitions,
+  one-by-one wizard memories with `n`/`N`/`Esc` navigation, settings memory
+  parity, statusline segments and `│` separators, the leader badge spacing,
+  composer drafts and queued messages, the wizard Esc ladder, and that typing
+  plus `/` reach the native prompt immediately after `:q`, while `:`/`/` still
+  open Command mode after an F2 round-trip.
 - `npm run test:live:fake:empty`: same isolated fake provider, but configured
-  with no models. Walks the New-agent wizard to the Main model step and asserts
-  the explained empty state (`0 options` plus `No models available …`) and that
-  Escape still cancels the wizard.
+  with no models. Walks the New-agent wizard through the empty one-by-one
+  memory list to the Main model step and asserts the explained empty state
+  (`0 options` plus `No models available …`), `n`/`N` step navigation, and that
+  Escape cancels through the dirty-draft confirm. It also proves the empty
+  memory list writes nothing.
 
 Both scenarios source `scripts/lib/live-harness.sh`. Each run owns a temporary
 project and HOME, plus isolated XDG config/data/state/cache. Child processes
@@ -43,6 +49,11 @@ and tmux session names. Attach using the printed `tmux attach -t <session>`.
 When finished, kill each listed session and remove only the printed temporary
 directory. Logs and configuration are local diagnostic artifacts; inspect for
 sensitive content before sharing. Successful runs always clean up.
+
+The fake checks are the primary regression net for the v5.7 behavior; run
+`test:live:fake` more than once when changing focus, caret, or native
+key-ownership code. The real scenario covers the packaged plugin against the
+host catalog but has fewer interaction assertions.
 
 Waits poll observable conditions with bounded timeouts. Slow machines may set
 `ENSEMBLE_LIVE_START_TIMEOUT` (30s), `ENSEMBLE_LIVE_TUI_TIMEOUT` (60s), or

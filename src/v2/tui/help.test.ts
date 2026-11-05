@@ -151,6 +151,33 @@ test("help retires stale hand-written Settings and wizard chords", () => {
   assert.ok(keys.includes("p"), "promote stays documented under the settings syntax")
 })
 
+test("v5.7 help states the persistent-mode, caret, native, separator, badge, and memory contract", () => {
+  const entries = helpSections().flatMap((section) => section.entries.map((entry) => ({ section: section.id, ...entry })))
+  const entry = (key: string) => entries.find((candidate) => `${candidate.section}:${candidate.id}` === key)
+  const title = (key: string) => entry(key)?.title ?? ""
+
+  assert.match(title("modes:mode.persistent"), /explicit|focus|overlay|step|surface/i)
+  assert.match(title("modes:mode.persistent"), /never|not/i)
+  assert.match(title("modes:mode.caret"), /block/i)
+  assert.match(title("modes:mode.caret"), /line/i)
+  assert.match(title("modes:mode.caret"), /Insert|Visual|Command/)
+  assert.match(title("modes:escape.wizard.field"), /cancel/i)
+  assert.doesNotMatch(title("modes:escape.wizard.field"), /step Normal/i, "Esc in field Normal cancels, it does not return to a step")
+  assert.match(title("modes:escape.wizard"), /cancel/i)
+  assert.doesNotMatch(title("modes:escape.wizard"), /previous step/i, "N is previous; Esc cancels")
+  assert.match(title("wizard:wizard.memory"), /list/i)
+  assert.match(title("wizard:wizard.memory"), /add|edit|delete/i)
+  assert.match(title("settings:settings.memory"), /memory/i)
+  assert.match(title("settings:settings.memory"), /Enter|field/i)
+  assert.match(title("statusline:statusline.separators"), /│/)
+  assert.match(title("statusline:statusline.separators"), /ASCII|\|/)
+  assert.match(title("statusline:statusline.badge"), /LEADER/i)
+  assert.match(title("statusline:statusline.badge"), /cutout|contrast/i)
+  assert.match(title("native:native.quit"), /\/|native/i)
+  assert.match(title("native:native.quit"), /F2/i)
+  assert.ok(entry("modes:escape.ctrl-g"), "Ctrl+G stays documented")
+})
+
 test("help filtering is fuzzy and n/N wrap through matches", () => {
   const sections = helpSections()
   assert.deepEqual(filterHelpSections(sections, ""), sections)

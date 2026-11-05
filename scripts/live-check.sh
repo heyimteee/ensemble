@@ -34,15 +34,22 @@ MODELS=$(live_snapshot_value '.models.length')
 if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" "a"
   live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
+  # v5.7: a text step keeps the arrival mode (Normal from the roster). `i` is
+  # the explicit Insert entry; Insert then persists across the text steps.
+  live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "agent text step keeps the arrival mode"
+  live_key "$LIVE_TUI_SESSION" "i"
+  live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "i enters Insert in the agent name field"
   live_type "$LIVE_TUI_SESSION" "LiveAgent"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
+  live_assert_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" "title step keeps the Insert mode"
   live_type "$LIVE_TUI_SESSION" "Engineering"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
   live_type "$LIVE_TUI_SESSION" "Reviews changes and keeps the build green."
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
+  live_require_text "$LIVE_TUI_SESSION" "INSERT │ no text target" 10 "the memory list is honest about Insert with no target"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
   live_key "$LIVE_TUI_SESSION" Enter
@@ -52,11 +59,19 @@ if [[ "$MODELS" -gt 0 ]]; then
   fi
   live_require_text "$LIVE_TUI_SESSION" "LiveAgent · direct" 20 "direct chat opened"
   live_require_text "$LIVE_TUI_SESSION" "LiveAgent" 10 "agent roster entry"
+  # The wizard preserved the Insert mode through its list steps; leave it
+  # explicitly before using Normal roster/chat keys. Ctrl+G is the reliable
+  # chord while the onboarding run is streaming (the host may swallow Esc).
+  live_key "$LIVE_TUI_SESSION" C-g
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Direct conversation" 10 "leaving the wizard leaves Normal behind"
 
   live_key "$LIVE_TUI_SESSION" "n"
   live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "workspace wizard"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step"
+  live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "workspace name keeps the arrival mode"
+  live_key "$LIVE_TUI_SESSION" "i"
+  live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "i enters Insert in the workspace name field"
   live_type "$LIVE_TUI_SESSION" "live"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "workspace members step"
@@ -67,9 +82,16 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "#live" 20 "workspace created and opened"
   if live_try_text "$LIVE_TUI_SESSION" "Move LiveAgent into #live" 5; then
-    live_key "$LIVE_TUI_SESSION" Escape
+    # The wizard kept Insert, and Esc changes mode before moving up a context
+    # level. Normalize with Ctrl+G, then reject the confirm with its own key.
+    live_key "$LIVE_TUI_SESSION" C-g
+    live_key "$LIVE_TUI_SESSION" "n"
     live_require_absence "$LIVE_TUI_SESSION" "Move LiveAgent into #live" 10 "move-home prompt dismissed"
   fi
+  # The workspace wizard also kept Insert through its list steps. Reset to
+  # Normal before the composer and Normal-surface probes below.
+  live_key "$LIVE_TUI_SESSION" C-g
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Group chat" 10 "leaving the workspace wizard leaves Normal behind"
 
   live_wait_for 20 "created agent and workspace in snapshot" \
     live_snapshot_has_agent_named "LiveAgent" \
@@ -133,5 +155,14 @@ live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before leaving"
 live_key "$LIVE_TUI_SESSION" 'q'
 live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after leaving Ensemble"
+# v5.7: the hidden Ensemble page owns no keys. Type immediately without Esc,
+# then prove `/` reaches the native prompt instead of opening Command mode.
+live_type "$LIVE_TUI_SESSION" "native-after-quit"
+live_require_text "$LIVE_TUI_SESSION" "native-after-quit" 10 "native prompt accepts letters immediately after leaving"
+live_key "$LIVE_TUI_SESSION" C-u
+live_require_text "$LIVE_TUI_SESSION" "Ask anything" 10 "native prompt cleared for the slash probe"
+live_type "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "Switch agent" 10 "slash reaches the native prompt after leaving"
+live_key "$LIVE_TUI_SESSION" Escape
 
 live_log "live-check passed ($LIVE_SERVER_URL)"

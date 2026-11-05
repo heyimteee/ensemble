@@ -127,13 +127,15 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
     info("modes", "mode.insert", "INSERT", "Type into the focused composer or text field."),
     info("modes", "mode.visual", "VISUAL / V-LINE", "Select text by character or line, then yank, cut, or change."),
     info("modes", "mode.command", "COMMAND", "The : command line or the / search/filter input."),
+    info("modes", "mode.persistent", "mode", "Mode is global and persistent: focus, overlay, wizard-step, and surface changes never assign it; Enter never changes it. Only explicit mode keys do."),
+    info("modes", "mode.caret", "caret", "Every text editor shows a block caret in Normal and a line caret in Insert, Visual, and Command; an unfocused editor shows none."),
     info("modes", "escape.insert", "Esc", "Insert → Normal (composer or text field)."),
     info("modes", "escape.visual", "Esc", "Visual → Normal."),
     info("modes", "escape.composer", "Esc", "Composer Normal → chat Normal."),
     info("modes", "escape.settings.field", "Esc", "Settings text field Normal → settings Normal."),
     info("modes", "escape.settings", "Esc", "Settings Normal → close settings."),
-    info("modes", "escape.wizard.field", "Esc", "Wizard text field Normal → step Normal."),
-    info("modes", "escape.wizard", "Esc", "Wizard step Normal → previous step, or cancel at the first step."),
+    info("modes", "escape.wizard.field", "Esc", "Wizard text field Insert → field Normal; field Normal → cancel the wizard (a dirty draft asks first)."),
+    info("modes", "escape.wizard", "Esc", "Wizard step Normal → cancel the wizard. n next and N previous move between steps; Enter advances."),
     info("modes", "escape.dialog", "Esc", "Cancel the dialog, picker, confirm, result, or approval inbox."),
     info("modes", "escape.command", "Esc", "Command → Normal, restoring the previous filter."),
     info("modes", "escape.chat", "Esc", "Clear a filter or committed search; otherwise a no-op."),
@@ -165,9 +167,11 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   ],
   settings: [
     info("settings", "text", "Insert / Normal / Visual", "Text fields use the composer grammar; Esc returns to the settings rows, and Ctrl+G leaves the field directly."),
+    info("settings", "settings.memory", "a / e / Enter", "Memory add/edit uses the same persistent field: Enter saves, an add clears for the next entry, an edit keeps its text, and the field stays focused."),
   ],
   wizard: [
-    info("wizard", "text", "Insert / Normal / Visual", "Text fields use the composer grammar; Esc returns to the step, and Ctrl+G leaves the field immediately."),
+    info("wizard", "text", "Insert / Normal / Visual", "Text fields use the composer grammar; Esc goes to field Normal, and another Esc cancels (dirty asks first). Ctrl+G leaves the field immediately."),
+    info("wizard", "wizard.memory", "a / e / x", "Memories are an ordered list: a adds, e edits, x deletes, j/k selects, and n/N move between steps. Enter saves one memory and keeps the field focused for the next."),
   ],
   dialogs: [
     info("dialogs", "shared", "", "Pickers, prompts, confirms, results, and approvals share one grammar: j/k, Enter, Space, /, Esc."),
@@ -193,10 +197,13 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
     info("statusline", "position", "position", "line:col in a text buffer, row/total in a list, or percent in the transcript."),
     info("statusline", "chord", "chord", "Pending multi-key prefix, e.g. g."),
     info("statusline", "hints", "hints", "Context keys generated from the binding catalog, e.g. enter open │ / filter │ space leader."),
+    info("statusline", "statusline.separators", "│", "Chrome joins segments with a faint │ and one space; ASCII | is the fallback. Chat message content is never rewritten."),
+    info("statusline", "statusline.badge", "LEADER", "The LEADER rail badge is a true cutout on an opaque surface; when no surface is guaranteed, black/white contrast is chosen from the accent."),
     info("statusline", "row2", "row 2", ": or / input while active; otherwise the latest transient message; otherwise blank."),
   ],
   native: [
-    info("native", "scope", "", "Native-session keys are owned by the host; F2 returns to Ensemble."),
+    info("native", "scope", "", "Native-session keys are owned by the host; a hidden Ensemble page never consumes them."),
+    info("native", "native.quit", "quit / F2", "Leaving Ensemble hides the page; native keys, including /, go to the host immediately. F2 returns to Ensemble."),
   ],
 }
 
