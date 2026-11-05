@@ -109,9 +109,12 @@ Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` insta
 | `npm run verify` | Required local gate: check followed by unit tests. |
 | `npm run test:live` | Real OpenCode/TUI acceptance against the available host/default model catalog. Record any skipped model-dependent portions. |
 | `npm run test:live:fake` | Real host with deterministic local fake-provider streaming, rich output/finalization, stale-line markers, help, and platform labels; no API key/external model request. |
+| `npm run test:live:fake:all` | Fake then empty-catalog scenarios in order; fails fast and prints a compact `PASS`/`FAIL`/`SKIP` summary. Deterministic fake-and-empty suite. |
+| `npm run test:live:all` | The full local matrix: fake, empty catalog, then real host catalog. Same fail-fast summary; the real scenario is not deterministic and stays local. |
+| `npm run test:live:latency` | Reproducible keypress-to-repaint probe on the isolated fake host: rail `j`/`k` from `tmux send-keys` to the first capture showing the moved cursor. Reports samples and percentiles; no threshold gate. |
 | `ENSEMBLE_LIVE_KEEP=1 npm run test:live:fake` | Preserve this run's processes/files **on failure** for inspection; also works with `test:live`. Success still cleans up. |
 
-See [the harness instructions](../../scripts/README.md) for prerequisites, binary overrides, isolation, timeouts, and exact cleanup. Missing prerequisites can exit zero with an explicit skip; report that as **not run**, not a pass. The real scenario also needs `fd`. Preserved output lists the owned tmux sessions and fixture path; clean up only those artifacts and review logs for sensitive content before sharing. Live checks remain separate from `verify`/CI. Documentation-only acceptance is content/link review, not a new test framework.
+See [the harness instructions](../../scripts/README.md) for prerequisites, binary overrides, isolation, timeouts, and exact cleanup. Missing prerequisites can exit zero with an explicit skip; report that as **not run**, not a pass, and read the aggregate summary's `SKIP` rows rather than assuming a green run executed. The real scenario also needs `fd`. Preserved output lists the owned tmux sessions and fixture path; clean up only those artifacts and review logs for sensitive content before sharing. Live checks remain separate from `verify`/CI. Documentation-only acceptance is content/link review, not a new test framework.
 
 ## Editing discipline
 
