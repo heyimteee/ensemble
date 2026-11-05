@@ -13,6 +13,7 @@ Ensemble is in developer preview. The server and TUI parts load directly from Ty
 
 - Make narrow, demoable changes with evidence of observable behavior.
 - Preserve OpenCode's native experience and permissions.
+- Preserve the [native-skill boundary](docs/adr/0001-native-skill-boundary.md) when changing skill routing or init.
 - Test the highest practical public boundary rather than internal implementation details.
 - Apply the [reviewer standards](docs/agents/review-standards.md) to judgement calls; keep mechanical rules in automated checks. The [review workflow](docs/agents/review-workflow.md) describes the two-axis review.
 - State what was verified, the OpenCode version used, and any remaining uncertainty.
