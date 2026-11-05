@@ -22,6 +22,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   const movedSessions: Array<{ sessionID: string; directory: string }> = []
   const commands: Array<{ sessionID: string; name: string; text?: string }> = []
   const prompts: any[] = []
+  const instructions: Array<{ sessionID: string; key: string; value: string }> = []
   const createdSessionIDs: string[] = []
   let sessions = 0
   const handlers: Partial<Handlers> = {}
@@ -67,7 +68,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     session: {
       hook: async () => ({ dispose: async () => undefined }),
       create: async ({ title }: any) => { const id = `session_${++sessions}`; createdSessionIDs.push(id); return { data: { id, title } } },
-      instructions: { entry: { put: async () => undefined } },
+      instructions: { entry: { put: async (input: any) => { instructions.push(input) } } },
       switchModel: async () => undefined,
       prompt: async (input: any) => { prompts.push({ ...input }) },
       wait: async () => { await new Promise((resolve) => setTimeout(resolve, 5)) },
@@ -93,7 +94,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     skill: { list: async (): Promise<any[]> => [] },
     event,
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, createdSessionIDs, tools, emitEvent }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, instructions, createdSessionIDs, tools, emitEvent }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -3168,11 +3169,11 @@ const skillWorkspace: Workspace = {
   lastActiveAt: 1,
 }
 
-async function seedSkillWorkspace(directory: string, ctx: any, agents: Agent[]): Promise<void> {
+async function seedSkillWorkspace(directory: string, ctx: any, agents: Agent[], patch: Partial<Workspace> = {}): Promise<void> {
   const seed = new V2Store(ctx)
   await seed.load()
   for (const agent of agents) await seed.saveAgent(agent)
-  await seed.saveWorkspace({ ...skillWorkspace, directory })
+  await seed.saveWorkspace({ ...skillWorkspace, directory, ...patch })
 }
 
 test("skill.send delivers the exact text to the assigned owner as one peer turn", async () => {
@@ -3281,6 +3282,125 @@ test("invalid skill references reject atomically before any message or task", as
       assert.deepEqual(next.state.messages.w ?? [], [], `${item.text} must not append a message`)
       assert.deepEqual(Object.values(next.state.subtasks), [], `${item.text} must not create work`)
     }
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("skill.send creates one exact prompt per unique agent with resolved titles and independent replies", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-multi-"))
+  const { ctx, prompts, instructions } = fakeContext()
+  ctx.skill.list = async () => [
+    { id: "review", name: "Review", description: "Thorough code review" },
+    { id: "deploy", name: "Deploy", description: "Ship the release" },
+    { id: "notes", name: "Notes", description: "Write the notes" },
+  ]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", ["review", "notes"]),
+    skillAgent("sage", "Sage", ["deploy"]),
+    skillAgent("echo", "Echo", []),
+  ], { memberIDs: ["nova", "sage", "echo"] })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 3)
+    const text = "$Nova /review /notes and $Sage /deploy and $Echo please check"
+    const response = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+    assert.equal(response.ok, true, JSON.stringify(response.error))
+    assert.deepEqual(response.result.recipients, ["nova", "sage", "echo"])
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks)
+        .filter((task: any) => task.creatorType === "user" && task.instruction === text)
+        .every((task: any) => task.state === "replied")
+    }, 10_000)
+    const next = await handlers.snapshot({ directory })
+    const tasks = Object.values(next.state.subtasks).filter((task: any) => task.creatorType === "user" && task.instruction === text) as any[]
+    assert.equal(tasks.length, 3, "one work row per addressed agent")
+    const byAgent = new Map(tasks.map((task) => [task.assigneeID, task]))
+    assert.deepEqual(byAgent.get("nova")?.title, `/review /notes — ${text.slice(0, 80)}`)
+    assert.deepEqual(byAgent.get("sage")?.title, `/deploy — ${text.slice(0, 80)}`)
+    assert.deepEqual(byAgent.get("echo")?.title, text.slice(0, 80), "a normal-only agent keeps the request snippet")
+    for (const task of tasks) {
+      assert.equal(task.instruction, text, "the exact user text is the core instruction")
+      const replies = next.state.messages.w.filter((message: any) => message.author === "agent" && message.agentID === task.assigneeID && message.taskID === task.id)
+      assert.equal(replies.length, 1, `one reply for ${task.assigneeID}`)
+      assert.equal(replies[0].agentID, task.assigneeID, "the reply is attributed to the addressed agent")
+      assert.equal(replies[0].text, "OK")
+    }
+    const peerPrompts = prompts.filter((prompt) => prompt.text?.includes(text))
+    assert.equal(peerPrompts.length, 3, "one prompt per unique addressed agent, not per skill")
+    for (const prompt of peerPrompts) assert.equal("skills" in prompt, false, "no prompt skill attachment bypass")
+    assert.ok(
+      instructions.some((entry) => entry.value.includes("When a user message addresses multiple agents") && entry.value.includes("ensemble_task_status")),
+      "the identity contract tells each agent to handle only its addressed part",
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("skill.send groups repeated anchors and separate messages stay separate work", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-separate-"))
+  const { ctx } = fakeContext()
+  ctx.skill.list = async () => [
+    { id: "review", name: "Review", description: "Thorough code review" },
+    { id: "notes", name: "Notes", description: "Write the notes" },
+  ]
+  await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", ["review", "notes"])])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
+    const first = "$Nova /review /notes first request"
+    const second = "$Nova /review second request"
+    assert.equal((await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text: first } })).ok, true)
+    assert.equal((await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text: second } })).ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).filter((task: any) => task.creatorType === "user").every((task: any) => task.state === "replied")
+    }, 10_000)
+    const next = await handlers.snapshot({ directory })
+    const userTasks = Object.values(next.state.subtasks).filter((task: any) => task.creatorType === "user") as any[]
+    assert.equal(userTasks.length, 2, "separate messages create separate work rows")
+    assert.deepEqual(userTasks.map((task) => task.instruction).sort(), [first, second].sort())
+    assert.deepEqual(userTasks.map((task) => task.title).sort(), [
+      `/review /notes — ${first.slice(0, 80)}`,
+      `/review — ${second.slice(0, 80)}`,
+    ].sort())
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("the skill batch cap honors settings and rejects the whole message atomically", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-cap-"))
+  const { ctx } = fakeContext()
+  ctx.skill.list = async () => [
+    { id: "review", name: "Review", description: "Thorough code review" },
+    { id: "notes", name: "Notes", description: "Write the notes" },
+    { id: "deploy", name: "Deploy", description: "Ship the release" },
+  ]
+  await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", ["review", "notes", "deploy"])])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 3)
+    await handlers.invoke({ directory, action: "settings.update", payload: { maxDelegations: 2 } })
+    const text = "$Nova /review /notes /deploy cap request"
+    const response = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+    assert.equal(response.ok, false)
+    assert.equal(response.error?.code, "skill_limit")
+    assert.ok(response.error?.message.includes("at most 2"), response.error?.message)
+    const next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.messages.w ?? [], [], "the rejected message never appends")
+    assert.deepEqual(Object.values(next.state.subtasks), [], "the rejected message never creates work")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
