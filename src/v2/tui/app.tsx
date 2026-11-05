@@ -16,6 +16,7 @@ import {
   addWizardMemory,
   clampWizardMemoryCursor,
   deleteWizardMemory,
+  isWizardMemoryStep,
   overlayGeometry,
   sameWizardOptions,
   updateWizardMemory,
@@ -77,7 +78,8 @@ import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-op
 import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
 import { createVimRegisterStore, normalizeVimKey, visualSelectionSize, type VimBuffer, type VimOutcome } from "./vim.ts"
 import { dialogEscape, dialogKeyContext } from "./dialogs.ts"
-import { buildStatuslineSegments, composerPosition, contextLabel, listPosition, statuslineRow2Parts, transcriptPosition, type StatuslineSurface } from "./statusline.ts"
+import { buildStatuslineSegments, composerPosition, contextLabel, listPosition, statuslineRow2Parts, statuslineRow2PromptParts, transcriptPosition, type StatuslineRow2Input, type StatuslineSurface } from "./statusline.ts"
+import { editLine } from "./line-editor.ts"
 import { commandStatusHints, layerEntries, globalEntries, leaderEntries, leaderHints, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, singleKeyEntry, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
@@ -526,7 +528,9 @@ export function EnsembleV2App() {
   createEffect(() => {
     const overlay = interactionOverlay()
     if (interaction().overlay === overlay) return
-    setInteraction((state) => interactionReducer(state, { type: "overlay.set", overlay }).state)
+    // Apply the reducer's intents too: closing a picker/prompt/confirm/result
+    // in Insert restores the editor that owned the caret before the overlay.
+    dispatchInteraction({ type: "overlay.set", overlay })
   })
 
   const lineCache = new Map<string, ChatLine>()
@@ -1078,9 +1082,9 @@ export function EnsembleV2App() {
     return true
   }
 
-  const updateCommandText = (text: string) => {
+  const updateCommandText = (text: string, cursor = text.length) => {
     const kind = interaction().command?.kind
-    dispatchInteraction({ type: "command.update", text })
+    dispatchInteraction({ type: "command.update", text, cursor })
     if (kind === "/" && commandSession) applySearchPreview(commandSession.target, text)
   }
 
@@ -1174,14 +1178,34 @@ export function EnsembleV2App() {
             if (completed) updateCommandText(completed)
           }
           return true
-        case "command.backspace":
-          updateCommandText(current.text.slice(0, -1))
+        case "command.left":
+          updateCommandText(current.text, current.cursor - 1)
           return true
+        case "command.right":
+          updateCommandText(current.text, current.cursor + 1)
+          return true
+        case "command.home":
+          updateCommandText(current.text, 0)
+          return true
+        case "command.end":
+          updateCommandText(current.text, current.text.length)
+          return true
+        case "command.backspace": {
+          const edited = editLine(current.text, current.cursor, "backspace")
+          updateCommandText(edited.text, edited.cursor)
+          return true
+        }
+        case "command.delete": {
+          const edited = editLine(current.text, current.cursor, "delete")
+          updateCommandText(edited.text, edited.cursor)
+          return true
+        }
       }
     }
     const sequence = String(event?.sequence ?? "")
     if (sequence.length === 1 && sequence >= " " && !event?.ctrl && !event?.meta && !event?.super) {
-      updateCommandText(`${current.text}${sequence}`)
+      const edited = editLine(current.text, current.cursor, { insert: sequence })
+      updateCommandText(edited.text, edited.cursor)
     }
     return true
   }
@@ -1712,7 +1736,7 @@ export function EnsembleV2App() {
     if (composerActive()) dispatchInteraction({ type: "focus.set", focus: "chat" })
   }
 
-  const agentItems = () => activeAgents().map((agent) => ({ title: `${agent.name}${activeWorkspace()?.leaderID === agent.id ? " · leader" : ""}`, value: agent.name }))
+  const agentItems = () => activeAgents().map((agent) => ({ title: activeWorkspace()?.leaderID === agent.id ? chromeJoin([agent.name, "leader"]) : agent.name, value: agent.name }))
 
   const fileItems = () => {
     const workspace = activeWorkspace()
@@ -1726,12 +1750,12 @@ export function EnsembleV2App() {
   }
 
   const openCompletion = (kind: Completion["kind"], value: string, start: number) => {
-    const source = kind === "agent" ? agentItems() : kind === "file" ? fileItems() : slashCommands.map(([command, description]) => ({ title: `/${command} · ${description}`, value: command }))
+    const source = kind === "agent" ? agentItems() : kind === "file" ? fileItems() : slashCommands.map(([command, description]) => ({ title: chromeJoin([`/${command}`, description]), value: command }))
     setCompletion({ kind, query: value.slice(start + 1).toLowerCase(), start, cursor: 0, items: source })
   }
 
   const filterCompletion = (state: Completion, query: string) => {
-    const source = state.kind === "agent" ? agentItems() : state.kind === "file" ? fileItems() : slashCommands.map(([command, description]) => ({ title: `/${command} · ${description}`, value: command }))
+    const source = state.kind === "agent" ? agentItems() : state.kind === "file" ? fileItems() : slashCommands.map(([command, description]) => ({ title: chromeJoin([`/${command}`, description]), value: command }))
     const items = source.filter((item) => fuzzyMatch(query, item.title))
     return { ...state, query, cursor: Math.min(state.cursor, Math.max(0, items.length - 1)), items }
   }
@@ -2939,7 +2963,7 @@ export function EnsembleV2App() {
     if (wizard()) { resolve(undefined); return }
     clearPendingChord()
     const candidates = mode === "workspace"
-      ? workspaces().map((workspace) => ({ id: workspace.id, label: `#${workspace.name} · ${workspaceLabel(workspace.directory)}` }))
+      ? workspaces().map((workspace) => ({ id: workspace.id, label: chromeJoin([`#${workspace.name}`, workspaceLabel(workspace.directory)]) }))
       : mode === "leader"
         ? (options.candidates ?? []).map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent)).map((agent) => ({ id: agent.id, label: agent.name }))
         : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
@@ -3017,7 +3041,7 @@ export function EnsembleV2App() {
     setModal(true)
     setTextPrompt({
       title,
-      description: options.description ?? "Enter submits · Shift+Enter adds a line",
+      description: options.description ?? chromeJoin(["Enter submits", "Shift+Enter adds a line"]),
       value: options.value ?? "",
       placeholder: options.placeholder ?? "",
       resolve,
@@ -3050,6 +3074,7 @@ export function EnsembleV2App() {
     if (wizard()) { resolve(undefined); return }
     clearPendingChord()
     const previous = leaderMode()
+    const returnEditor = composerActive() ? "composer" as const : undefined
     setLeaderMode(false)
     setModal(true)
     setCompletion(null)
@@ -3060,7 +3085,7 @@ export function EnsembleV2App() {
       message,
       resolve: (value) => { setConfirm(null); setModal(false); setLeaderMode(previous); resolve(value) },
     })
-    dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
+    dispatchInteraction({ type: "overlay.set", overlay: "dialog", returnEditor })
   })
 
   const finishConfirm = (value: boolean | undefined) => {
@@ -3074,6 +3099,7 @@ export function EnsembleV2App() {
     if (wizard()) { resolve(); return }
     clearPendingChord()
     const previous = leaderMode()
+    const returnEditor = composerActive() ? "composer" as const : undefined
     setLeaderMode(false)
     setModal(true)
     setCompletion(null)
@@ -3084,7 +3110,7 @@ export function EnsembleV2App() {
       text,
       resolve: () => { setResult(null); setModal(false); setLeaderMode(previous); resolve() },
     })
-    dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
+    dispatchInteraction({ type: "overlay.set", overlay: "dialog", returnEditor })
   })
 
   const finishResultModal = () => {
@@ -3222,7 +3248,7 @@ export function EnsembleV2App() {
     return [
       ...unique.map((directory) => ({
         id: directory,
-        label: directory === current ? `Use current directory · ${workspaceLabel(directory)}` : workspaceLabel(directory),
+        label: directory === current ? chromeJoin(["Use current directory", workspaceLabel(directory)]) : workspaceLabel(directory),
         detail: known.includes(directory) ? "recent" : undefined,
       })),
       { id: "__manual__", label: "Type a path…" },
@@ -3316,7 +3342,7 @@ export function EnsembleV2App() {
     return step.options.filter((option) => option.id === "__manual__" || !query || fuzzyMatch(query, option.label))
   }
 
-  const wizardIsMemoryStep = () => wizardStep()?.key === "memories"
+  const wizardIsMemoryStep = () => isWizardMemoryStep(wizardStep()?.key)
 
   const wizardMemories = (): string[] => wizard()?.draft.memories ?? []
 
@@ -3669,7 +3695,7 @@ export function EnsembleV2App() {
 
   const openWizardMemoryField = (mode: "add" | "edit", index: number | null) => {
     const state = wizard()
-    if (!state) return
+    if (!state || !wizardIsMemoryStep()) return
     const text = mode === "edit" && index !== null ? (state.draft.memories[index] ?? "") : state.memoryDraft
     setWizardMemoryInput(text)
     const next: WizardState = {
@@ -3693,13 +3719,13 @@ export function EnsembleV2App() {
 
   const wizardMemoryStartEdit = () => {
     const state = wizard()
-    if (!state || state.draft.memories.length === 0) return
+    if (!wizardIsMemoryStep() || !state || state.draft.memories.length === 0) return
     openWizardMemoryField("edit", wizardMemoryCursor())
   }
 
   const wizardMemoryDelete = () => {
     const state = wizard()
-    if (!state || state.draft.memories.length === 0) return
+    if (!wizardIsMemoryStep() || !state || state.draft.memories.length === 0) return
     const index = wizardMemoryCursor()
     const memories = deleteWizardMemory(state.draft.memories, index)
     setWizard({
@@ -3715,7 +3741,7 @@ export function EnsembleV2App() {
     const state = wizard()
     const editor = state?.memoryEditor
     const raw = String(wizardMemoryRef?.plainText ?? wizardMemoryInput())
-    if (!state || !editor) return
+    if (!wizardIsMemoryStep() || !state || !editor) return
     if (editor.mode === "add") {
       const memories = addWizardMemory(state.draft.memories, raw)
       const saved = memories.length !== state.draft.memories.length
@@ -3748,7 +3774,7 @@ export function EnsembleV2App() {
   /** Esc leaves the persistent field for the step Normal list. */
   const wizardMemoryClose = () => {
     const state = wizard()
-    if (!state?.memoryEditor) return
+    if (!wizardIsMemoryStep() || !state?.memoryEditor) return
     const raw = String(wizardMemoryRef?.plainText ?? wizardMemoryInput())
     dispatchInteraction({ type: "editor.normal" })
     dispatchInteraction({ type: "field.leave" })
@@ -3838,7 +3864,7 @@ export function EnsembleV2App() {
       : { directory: "", name: "", memberIDs: [], leaderID: "", synthesis: true, title: "", role: "", memories: [], modelKey: model ? `${model.providerID}/${model.modelID}` : "", variant: model?.variants[0] ?? "none" }
     const state: WizardState = {
       flow,
-      title: edit ? `Edit workspace · #${edit.name}` : flow === "workspace" ? "New workspace" : "New agent",
+      title: edit ? chromeJoin(["Edit workspace", `#${edit.name}`]) : flow === "workspace" ? "New workspace" : "New agent",
       draft,
       initialDraft: structuredClone(draft),
       steps: [],
@@ -3865,10 +3891,11 @@ export function EnsembleV2App() {
     setTextPrompt(null)
     setPicker(null)
     setCompletion(null)
+    const returnEditor = composerActive() ? "composer" as const : undefined
     setComposerActive(false)
     try { composerRef?.blur?.() } catch {}
     setWizard(state)
-    dispatchInteraction({ type: "overlay.set", overlay: "wizard" })
+    dispatchInteraction({ type: "overlay.set", overlay: "wizard", returnEditor })
     syncWizardMode(state)
   })
 
@@ -3882,7 +3909,7 @@ export function EnsembleV2App() {
 
   const dialogDescriptor = (): DialogDescriptor | null => {
     if (wizard()) {
-      if (wizard()!.memoryEditor) return { surface: "wizard", field: "insert", filtering: false }
+      if (wizardIsMemoryStep() && wizard()!.memoryEditor) return { surface: "wizard", field: "insert", filtering: false }
       const step = wizardStep()
       if (step?.kind === "text") return { surface: "wizard", field: interaction().mode === "insert" ? "insert" : "normal", filtering: false }
       return { surface: "wizard", filtering: wizard()!.filtering }
@@ -3904,9 +3931,13 @@ export function EnsembleV2App() {
       case "wizard.activate": return wizardActivate()
       case "wizard.next": return wizardNext()
       case "wizard.prev": return wizardPrev()
-      case "wizard.memory.add": return wizardMemoryStartAdd()
-      case "wizard.memory.edit": return wizardMemoryStartEdit()
-      case "wizard.memory.delete": return wizardMemoryDelete()
+      // Memory actions only exist on the memories step. Keymap hints already
+      // filter these entries; the handlers also guard so a stray catalog
+      // resolution on a list step cannot open an unmounted field or delete a
+      // saved memory.
+      case "wizard.memory.add": if (wizardIsMemoryStep()) wizardMemoryStartAdd(); return
+      case "wizard.memory.edit": if (wizardIsMemoryStep()) wizardMemoryStartEdit(); return
+      case "wizard.memory.delete": if (wizardIsMemoryStep()) wizardMemoryDelete(); return
       case "wizard.toggle": return wizardToggle()
       case "wizard.filter": if (!wizardIsMemoryStep()) wizardBeginFilter(); return
       case "wizard.cancel": return wizardCancel()
@@ -4126,16 +4157,16 @@ export function EnsembleV2App() {
     if (!current) return "No chat open"
     if (current.kind === "agent") {
       const workspace = current.workspaceID ? state()?.workspaces[current.workspaceID] : undefined
-      return `${surfaceAgent()?.name ?? "Agent"} · direct${workspace ? ` · #${workspace.name}` : " · no workspace"}`
+      return chromeJoin([surfaceAgent()?.name ?? "Agent", "direct", workspace ? `#${workspace.name}` : "no workspace"])
     }
     const workspace = state()?.workspaces[current.workspaceID]
     if (!workspace) return "Workspace"
     const leader = state()?.agents[workspace.leaderID]?.name ?? workspace.leaderID
-    return `#${workspace.name} · ${workspaceLabel(workspace.directory)} · leader ${leader}`
+    return chromeJoin([`#${workspace.name}`, workspaceLabel(workspace.directory), `leader ${leader}`])
   }
 
   const statusSurface = (): StatuslineSurface => surface()?.kind ?? "none"
-  const statusContext = () => insertWithoutTarget(interaction()) ? "no text target" : contextLabel({ focus: interaction().focus, overlay: interaction().overlay, surface: statusSurface() })
+  const statusContext = () => contextLabel({ focus: interaction().focus, overlay: interaction().overlay, surface: statusSurface() })
   const statusPosition = () => {
     if (settingsField()) return composerPosition(settingsFieldText(), settingsFieldCursor())
     if (composerActive()) return composerPosition(composerDraft(), composerCursor())
@@ -4260,17 +4291,27 @@ export function EnsembleV2App() {
     visualKind: interaction().selection?.kind,
     leader: leaderMode(),
     context: statusContext(),
-    git: insertWithoutTarget(interaction()) ? undefined : gitState(),
-    position: insertWithoutTarget(interaction()) ? undefined : statusPosition(),
-    selectionSize: insertWithoutTarget(interaction()) ? undefined : statusSelectionSize(),
-    pendingChord: insertWithoutTarget(interaction()) ? undefined : interaction().pendingChord,
+    // Insert without a target only replaces the typing hints with a notice;
+    // git, position, selection size, and the pending chord stay visible.
+    notice: insertWithoutTarget(interaction()) ? "no text target" : undefined,
+    git: gitState(),
+    position: statusPosition(),
+    selectionSize: statusSelectionSize(),
+    pendingChord: interaction().pendingChord,
     hints: statusHints(),
   })
-  const statusRow2 = () => statuslineRow2Parts({
-    command: helpFiltering() ? { kind: "/", text: helpQuery(), returnMode: "normal" } : interaction().command,
-    message: statusMessage(),
-    tone: interaction().message?.tone,
-  })
+  // Row two has two display shapes: the Command/Search line (a fixed prompt
+  // cell plus a horizontally scrolling input with a visible caret) and a
+  // transient message. Help filtering uses the same line shape but is not a
+  // CommandInput.
+  const statusRow2Input = (): StatuslineRow2Input => {
+    const command = interaction().command
+    if (command) return { prompt: command.kind, text: command.text, cursor: command.cursor, width: Math.max(1, statuslineWidth() - 1) }
+    if (helpFiltering()) return { prompt: "/", text: helpQuery(), cursor: helpQuery().length, width: Math.max(1, statuslineWidth() - 1) }
+    return { message: statusMessage(), tone: interaction().message?.tone }
+  }
+  const statusRow2Prompt = () => statuslineRow2PromptParts(statusRow2Input())
+  const statusRow2 = () => statuslineRow2Parts(statusRow2Input())
   /** The in-chat line under the composer, from the same catalog as the bar. */
   const composerInlineHint = () => {
     if (completion()) return statuslineHints("completion")
@@ -4307,14 +4348,14 @@ export function EnsembleV2App() {
     >
       <box id={MOUSE_PANE_IDS.header} height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={overlayOpen() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
-          <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{chromeJoin(["ENSEMBLE", ...(activeWorkspace() ? [`#${activeWorkspace()!.name}`, ...(activeWorkspace()!.paused ? ["paused"] : []), workspaceLabel(activeWorkspace()!.directory)] : ["no workspace"])])}</text>
-          <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? chromeJoin(["LEADER", "which-key", "esc cancel"]) : `${isBusy() ? `${chromeJoin(["BUSY", status()])}` : status()}`}</text>
+          <ChromeText colors={colors} fg={colors.accent} bg={colors.bg} width="100%" truncate text={chromeJoin(["ENSEMBLE", ...(activeWorkspace() ? [`#${activeWorkspace()!.name}`, ...(activeWorkspace()!.paused ? ["paused"] : []), workspaceLabel(activeWorkspace()!.directory)] : ["no workspace"])])} />
+          <ChromeText colors={colors} fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={leaderMode() ? chromeJoin(["LEADER", "which-key", "esc cancel"]) : `${isBusy() ? `${chromeJoin(["BUSY", status()])}` : status()}`} />
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
           <Rail colors={colors} surface={railSurface()} badge={railBadge()} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
-            <text fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" flexShrink={0} truncate>{surfaceTitle()}</text>
+            <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
                 <Show when={approvalsOpen()} fallback={
@@ -4428,7 +4469,7 @@ export function EnsembleV2App() {
                                 </box>
                               )}</For>
                               <Show when={liveActivity().overflow > 0}>
-                                <text fg={colors.faint} bg={colors.bg} width="100%" truncate>· +{liveActivity().overflow} more</text>
+                                <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{liveActivity().overflow} more</text>
                               </Show>
                             </box>
                           </Show>
@@ -4453,7 +4494,7 @@ export function EnsembleV2App() {
                                 />
                                 )
                               }}</For>
-                              <text fg={colors.faint} bg={colors.bg} width="100%" truncate>d delegate │ t reassign │ ↵ result │ r retry │ R restart │ x cancel │ o native</text>
+                              <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{chromeJoin(["d delegate", "t reassign", "↵ result", "r retry", "R restart", "x cancel", "o native"])}</text>
                             </box>
                           </Show>
                           <Show when={!atBottom()}>
@@ -4469,7 +4510,7 @@ export function EnsembleV2App() {
                             const state = completion()
                             if (!state) return ""
                             const title = state.kind === "agent" ? "$ agents" : state.kind === "file" ? "@ files" : "/ commands"
-                            return `${title}${state.query ? ` · ${state.query}` : ""}`
+                            return state.query ? chromeJoin([title, state.query]) : title
                           })()}</text>
                           <For each={[0, 1, 2, 3, 4, 5]}>{(slot) => (
                             <text fg={colors.text} bg={colors.bg} width="100%" truncate>{(() => {
@@ -4484,9 +4525,9 @@ export function EnsembleV2App() {
                         </box>
                       </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()}</text>
+                      <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
                     </>
                   </Show>
                 }>
@@ -4556,13 +4597,13 @@ export function EnsembleV2App() {
       </Show>
       <Show when={wizard()}>
         <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
-          <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{chromeJoin([wizard()!.title, `step ${wizard()!.index + 1} / ${wizard()!.steps.length}`])}</text>
+          <ChromeText colors={colors} fg={colors.focus} bg={colors.panel} width="100%" truncate text={chromeJoin([wizard()!.title, `step ${wizard()!.index + 1} / ${wizard()!.steps.length}`])} />
           <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
           <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
           <Show when={wizardIsMemoryStep()} fallback={
             <Show when={wizardStep()?.kind === "text"} fallback={
               <box flexDirection="column" height={9}>
-                <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])}</text>
+                <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])} />
                 <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
                   <Show when={wizardItems().length === 0} fallback={
                   <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
@@ -4575,7 +4616,7 @@ export function EnsembleV2App() {
                       const item = items[offset + slot]
                       if (!item) return ""
                       const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
-                      return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.label}${item.detail ? ` · ${item.detail}` : ""}`
+                      return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.detail ? chromeJoin([item.label, item.detail]) : item.label}`
                     })()}</text>
                   )}</For>
                   }>
@@ -4594,7 +4635,7 @@ export function EnsembleV2App() {
             </Show>
           }>
             <box flexDirection="column" height={6} flexShrink={0}>
-              <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{chromeJoin([`memories: ${wizardMemories().length}`, ...(wizardMemories().length > 0 ? [`${wizardMemoryCursor() + 1}/${wizardMemories().length}`] : [])])}</text>
+              <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`memories: ${wizardMemories().length}`, ...(wizardMemories().length > 0 ? [`${wizardMemoryCursor() + 1}/${wizardMemories().length}`] : [])])} />
               <Show when={wizardMemories().length === 0} fallback={
                 <For each={[0, 1, 2, 3]}>{(slot) => (
                   <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
@@ -4640,13 +4681,13 @@ export function EnsembleV2App() {
           paddingRight={1}
           flexDirection="column"
         >
-          <text fg={colors.leader} bg={colors.panel} width="100%" truncate>{chromeJoin(["LEADER", "Space"])}</text>
+          <ChromeText colors={colors} fg={colors.leader} bg={colors.panel} width="100%" truncate text={chromeJoin(["LEADER", "Space"])} />
           <For each={whichKeyLines(leaderEntries())}>{(line) => <text fg={colors.text} bg={colors.panel} width="100%" truncate>{line}</text>}</For>
         </box>
       </Show>
       <box id={MOUSE_PANE_IDS.statusline} height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
         <StatuslineRow colors={colors} segments={statusSegments()} width={statuslineWidth()} bg={colors.bg} />
-        <StatuslineMessage colors={colors} parts={statusRow2()} bg={colors.bg} />
+        <StatuslineMessage colors={colors} prompt={statusRow2Prompt()} parts={statusRow2()} width={statuslineWidth()} bg={colors.bg} />
       </box>
     </box>
   )

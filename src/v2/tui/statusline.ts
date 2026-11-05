@@ -15,13 +15,13 @@
 
 import type { GitState } from "./git.ts"
 import type {
-  CommandInput,
   InteractionFocus,
   InteractionMode,
   InteractionOverlay,
   InteractionSelection,
 } from "./interaction.ts"
-import { CHROME_SEPARATOR, chromeJoin, chromeSeparator, chromeSplit } from "./separators.ts"
+import { clampLineCursor } from "./line-editor.ts"
+import { chromeJoin, chromeSeparator, chromeSplit } from "./separators.ts"
 
 export type StatuslineSurface = "none" | "agent" | "workspace"
 
@@ -113,7 +113,7 @@ export type StatuslinePart = {
   /** A filled chip background role; the renderer pairs it with contrast text. */
   chip?: StatuslineChipRole
 }
-export type StatuslineSegmentKind = "mode" | "context" | "selection" | "git" | "position" | "chord" | "hint"
+export type StatuslineSegmentKind = "mode" | "context" | "selection" | "git" | "position" | "chord" | "notice" | "hint"
 export type StatuslineSegment = { kind: StatuslineSegmentKind; parts: StatuslinePart[] }
 
 /** Theme chip role for the current mode. */
@@ -161,6 +161,11 @@ export function chordSegment(chord: string): StatuslineSegment {
   return { kind: "chord", parts: [{ text: `chord ${chord}`, tone: "warn" }] }
 }
 
+/** A short, non-key notice such as Insert without a text target. */
+export function noticeSegment(notice: string): StatuslineSegment {
+  return { kind: "notice", parts: [{ text: notice, tone: "muted" }] }
+}
+
 /**
  * Split a catalog hint list into accent key + muted description segments.
  * Hints are the only droppable segments when the bar is narrow.
@@ -191,6 +196,8 @@ export type StatuslineRow1Input = {
   /** Visual selection size, e.g. `3 chars` or `2 lines`. */
   selectionSize?: string
   pendingChord?: string | null
+  /** Transient non-key state, e.g. Insert with no text target. */
+  notice?: string
   hints?: string
 }
 
@@ -200,6 +207,7 @@ export function buildStatuslineSegments(input: StatuslineRow1Input, separator: s
   if (input.git !== undefined) segments.push(gitSegments(input.git))
   if (input.position) segments.push(positionSegment(input.position))
   if (input.pendingChord) segments.push(chordSegment(input.pendingChord))
+  if (input.notice) segments.push(noticeSegment(input.notice))
   segments.push(...hintSegments(input.hints, separator))
   return segments
 }
@@ -226,8 +234,15 @@ export function fitStatuslineSegments(
   maxWidth: number,
   separator: string = chromeSeparator(),
 ): StatuslineSegment[] {
-  if (!Number.isFinite(maxWidth) || maxWidth <= 0) return [...segments]
+  if (!Number.isFinite(maxWidth)) return [...segments]
   const kept = [...segments]
+  // A zero or negative width cannot fit optional chrome. Keep the mandatory
+  // mode chip rather than handing the renderer every segment (which would then
+  // truncate from the left or clip the chip).
+  if (maxWidth <= 0) {
+    const modeIndex = kept.findIndex((segment) => segment.kind === "mode")
+    return modeIndex >= 0 ? [kept[modeIndex]] : kept.slice(0, 1)
+  }
   while (kept.length > 1 && statuslineWidth(kept, separator) > maxWidth) {
     const hintIndex = lastIndexWhere(kept, (segment) => segment.kind === "hint")
     if (hintIndex >= 0) {
@@ -282,16 +297,78 @@ function isWideCodePoint(code: number): boolean {
 
 export type StatuslineMessageTone = "info" | "success" | "error"
 
-export function statuslineRow2Parts(input: {
-  command?: CommandInput | null
+/** A thin vertical line, matching the line caret Command/Search uses. */
+export const COMMAND_CARET = "▏"
+
+export type StatuslineRow2Input = {
+  /** `:` for commands, `/` for search. Rendered separately from the text. */
+  prompt?: string | null
+  /** The editable command/search text. */
+  text?: string | null
+  /** Cursor position in `text`; defaults to the end. */
+  cursor?: number | null
+  /** Available cells for the scrolling input, including its caret. */
+  width?: number
   message?: string | null
   tone?: StatuslineMessageTone
-}): StatuslinePart[] {
-  if (input.command) {
-    return [
-      { text: input.command.kind, tone: "accent" },
-      { text: input.command.text, tone: "text" },
-    ]
+}
+
+export type CommandCaretLayout = {
+  /** Text shown before the caret after horizontal scrolling. */
+  before: string
+  /** Text shown after the caret that fits in the viewport. */
+  after: string
+  /** True when the leading text scrolled out to keep the caret visible. */
+  scrolled: boolean
+}
+
+/**
+ * Lay out one command/search line around its caret. The caret always occupies
+ * one cell; leading text scrolls out first so the cursor cannot disappear off
+ * the right edge. A wide character counts as two cells, and a stale cursor is
+ * clamped before layout.
+ */
+export function commandCaretLayout(text: string, cursor: number, width?: number): CommandCaretLayout {
+  const safeWidth = width === undefined || !Number.isFinite(width) ? Number.POSITIVE_INFINITY : Math.max(1, Math.trunc(width))
+  const at = clampLineCursor(text, cursor)
+  let start = 0
+  while (start < at && displayWidth(text.slice(start, at)) + 1 > safeWidth) {
+    const code = text.codePointAt(start) ?? 0
+    start += code > 0xffff ? 2 : 1
+  }
+  const before = text.slice(start, at)
+  let remaining = safeWidth - displayWidth(before) - 1
+  let end = at
+  while (end < text.length) {
+    const code = text.codePointAt(end) ?? 0
+    const length = code > 0xffff ? 2 : 1
+    const cells = displayWidth(text.slice(end, end + length))
+    if (cells > remaining) break
+    remaining -= cells
+    end += length
+  }
+  return { before, after: text.slice(at, end), scrolled: start > 0 }
+}
+
+/** The fixed prompt cell. It renders outside the scrolling input. */
+export function statuslineRow2PromptParts(input: StatuslineRow2Input): StatuslinePart[] {
+  return input.prompt ? [{ text: input.prompt, tone: "accent" }] : []
+}
+
+/**
+ * The scrolling part of row two. Command/Search text carries a visible line
+ * caret; a transient message keeps its tone; otherwise the row is reserved.
+ */
+export function statuslineRow2Parts(input: StatuslineRow2Input): StatuslinePart[] {
+  if (input.prompt) {
+    const text = input.text ?? ""
+    const cursor = input.cursor ?? text.length
+    const layout = commandCaretLayout(text, cursor, input.width ?? Number.POSITIVE_INFINITY)
+    const parts: StatuslinePart[] = []
+    if (layout.before) parts.push({ text: layout.before, tone: "text" })
+    parts.push({ text: COMMAND_CARET, tone: "accent" })
+    if (layout.after) parts.push({ text: layout.after, tone: "text" })
+    return parts
   }
   if (input.message) {
     const tone: StatuslineTone = input.tone === "error" ? "bad" : input.tone === "success" ? "good" : "faint"
@@ -300,15 +377,8 @@ export function statuslineRow2Parts(input: {
   return [{ text: " ", tone: "faint" }]
 }
 
-export function statuslineRow2(input: {
-  command?: CommandInput | null
-  message?: string | null
-  tone?: StatuslineMessageTone
-}): string {
-  return statuslineRow2Parts(input)
+export function statuslineRow2(input: StatuslineRow2Input): string {
+  return [...statuslineRow2PromptParts(input), ...statuslineRow2Parts(input)]
     .map((part) => part.text)
     .join("")
 }
-
-/** Exposed for tests that pin the shared chrome glyph. */
-export const STATUSLINE_SEPARATOR = CHROME_SEPARATOR

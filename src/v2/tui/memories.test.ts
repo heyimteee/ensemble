@@ -25,7 +25,7 @@ const memory = (patch: Partial<Memory> = {}): Memory => ({
 
 test("manual memories are reviewed", () => {
   assert.equal(memoryStatus(memory()), "reviewed")
-  assert.equal(memoryProvenanceLine(memory()), "manual · project · reviewed")
+  assert.equal(memoryProvenanceLine(memory()), "manual │ project │ reviewed")
   assert.equal(memoryNeedsReview(memory()), false)
 })
 
@@ -33,7 +33,7 @@ test("automatic memories need review until edited or promoted", () => {
   const fresh = memory({ origin: "automatic", source: "agent:nova", history: [{ at: 1, action: "created", by: "agent" }] })
   assert.equal(memoryStatus(fresh), "needs review")
   assert.equal(memoryNeedsReview(fresh), true)
-  assert.equal(memoryProvenanceLine(fresh), "automatic · project · needs review")
+  assert.equal(memoryProvenanceLine(fresh), "automatic │ project │ needs review")
 
   const edited = memory({
     origin: "automatic",
@@ -54,11 +54,11 @@ test("promoted history maps to promoted status", () => {
     ],
   })
   assert.equal(memoryStatus(promoted), "promoted")
-  assert.equal(memoryProvenanceLine(promoted), "manual · global · promoted")
+  assert.equal(memoryProvenanceLine(promoted), "manual │ global │ promoted")
 })
 
 test("provenance line covers workspace scope", () => {
-  assert.equal(memoryProvenanceLine(memory({ scope: "workspace" })), "manual · workspace · reviewed")
+  assert.equal(memoryProvenanceLine(memory({ scope: "workspace" })), "manual │ workspace │ reviewed")
 })
 
 test("filter matches text, origin, scope, and status", () => {

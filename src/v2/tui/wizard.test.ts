@@ -1,10 +1,12 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import { initialInteractionState, insertWithoutTarget, interactionReducer } from "./interaction.ts"
 import {
   addWizardMemory,
   clampWizardMemoryCursor,
   deleteWizardMemory,
+  isWizardMemoryStep,
   overlayGeometry,
   sameWizardOptions,
   updateWizardMemory,
@@ -36,7 +38,7 @@ test("overlay geometry centers a bounded box and recomputes on resize", () => {
 
 test("wizard model options derive from the live catalog", () => {
   const first = wizardModelOptions([{ providerID: "fake", modelID: "m1", name: "One" }])
-  assert.deepEqual(first, [{ id: "fake/m1", label: "One · fake/m1" }])
+  assert.deepEqual(first, [{ id: "fake/m1", label: "One │ fake/m1" }])
   const second = wizardModelOptions([
     { providerID: "fake", modelID: "m1", name: "One" },
     { providerID: "fake", modelID: "m2", name: "Two" },
@@ -137,4 +139,28 @@ test("wizard dirty compares the draft with the draft opened", () => {
   assert.equal(wizardDraftDirty(initial, draft({ memories: ["pnpm only"] })), true)
   assert.equal(wizardDraftDirty(initial, draft({ memberIDs: ["a"], leaderID: "a" })), true)
   assert.equal(wizardDraftDirty(draft({ name: "Nova" }), draft({ name: "Nova" })), false, "an edit wizard that is unchanged is clean")
+})
+
+test("memory actions only exist on the memories step", () => {
+  assert.equal(isWizardMemoryStep("memories"), true)
+  for (const step of ["name", "title", "role", "model", "variant", "directory", "members", "leader", undefined]) {
+    assert.equal(isWizardMemoryStep(step), false, `${step} is not a memory step`)
+  }
+})
+
+test("the app guards every memory action and the Enter path behind the memories step", () => {
+  const source = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  for (const fn of ["openWizardMemoryField", "wizardMemoryStartEdit", "wizardMemoryDelete", "wizardMemorySubmit", "wizardMemoryClose"]) {
+    const declaration = source.indexOf(`const ${fn} =`)
+    assert.ok(declaration >= 0, `${fn} exists`)
+    const body = source.slice(declaration, declaration + 400)
+    assert.ok(body.includes("wizardIsMemoryStep()"), `${fn} checks wizardIsMemoryStep() before acting`)
+  }
+  const add = source.indexOf("const wizardMemoryStartAdd")
+  assert.ok(source.slice(add, add + 200).includes("openWizardMemoryField"), "add delegates to the guarded field opener")
+  const actions = source.indexOf('case "wizard.memory.add"')
+  for (const id of ["add", "edit", "delete"]) {
+    assert.ok(source.includes(`case "wizard.memory.${id}": if (wizardIsMemoryStep())`), `${id} action is guarded in runDialogAction`)
+  }
+  assert.ok(source.includes("wizardIsMemoryStep() && wizard()!.memoryEditor"), "a stale memory editor cannot swallow Enter on another step")
 })

@@ -87,7 +87,7 @@ test("leaving the Ensemble route resets Normal and clears every transient field"
     focus: "settings",
     overlay: "settings",
     field: "settings",
-    command: { kind: ":", text: "q", returnMode: "insert" },
+    command: { kind: ":", text: "q", cursor: 1, returnMode: "insert" },
     pendingChord: "space",
     selection: { kind: "char", anchor: 0, cursor: 2 },
     message: { text: "pending", tone: "info", at: 1 },
@@ -188,10 +188,14 @@ test("closing a dialog keeps the mode it was opened over and clears the field", 
 
 test("a command input owns Esc before the composer ladder and closes cleanly", () => {
   const command = reduce(initialInteractionState(), { type: "command.open", kind: "/", text: "" })
-  assert.deepEqual(command.state.command, { kind: "/", text: "", returnMode: "normal" })
+  assert.deepEqual(command.state.command, { kind: "/", text: "", cursor: 0, returnMode: "normal" })
   assert.equal(command.state.mode, "command", "Command is its own mode chip")
   const updated = reduce(command.state, { type: "command.update", text: "agent" })
-  assert.deepEqual(updated.state.command, { kind: "/", text: "agent", returnMode: "normal" })
+  assert.deepEqual(updated.state.command, { kind: "/", text: "agent", cursor: 5, returnMode: "normal" })
+  const moved = reduce(updated.state, { type: "command.update", text: "agent", cursor: 2 })
+  assert.deepEqual(moved.state.command, { kind: "/", text: "agent", cursor: 2, returnMode: "normal" })
+  const stale = reduce(updated.state, { type: "command.update", text: "age", cursor: 99 })
+  assert.equal(stale.state.command?.cursor, 3, "an out-of-range command cursor clamps to the text")
   const closed = reduce(updated.state, { type: "escape" })
   assert.equal(closed.state.command, null)
   assert.equal(closed.state.mode, "normal")
@@ -358,6 +362,45 @@ test("opening and closing an overlay keeps the mode and only blurs the editor", 
 
   const closed = reduce(opened.state, { type: "overlay.set", overlay: "none" })
   assert.equal(closed.state.mode, "insert", "closing an overlay never assigns Normal")
+})
+
+test("closing a picker in Insert restores the composer that owned the caret", () => {
+  const insert = reduce(initialInteractionState(), { type: "insert.enter" }).state
+  const opened = reduce(insert, { type: "overlay.set", overlay: "dialog" })
+  assert.equal(opened.state.overlayReturnEditor, "composer")
+  const closed = reduce(opened.state, { type: "overlay.set", overlay: "none" })
+  assert.equal(closed.state.focus, "composer")
+  assert.equal(closed.state.field, null)
+  assert.deepEqual(closed.intents, [{ type: "blur-editor" }, { type: "focus-editor", target: "composer" }])
+})
+
+test("closing a prompt in Insert returns focus after the field blurs", () => {
+  const insert = reduce(initialInteractionState(), { type: "insert.enter" }).state
+  const dialog = reduce(insert, { type: "overlay.set", overlay: "dialog" }).state
+  const editing = reduce(dialog, { type: "field.enter", target: "prompt" }).state
+  const left = reduce(editing, { type: "field.leave" })
+  assert.deepEqual(left.intents, [{ type: "blur-editor" }])
+  const closed = reduce(left.state, { type: "overlay.set", overlay: "none" })
+  assert.equal(closed.state.focus, "composer")
+  assert.deepEqual(closed.intents, [{ type: "blur-editor" }, { type: "focus-editor", target: "composer" }])
+})
+
+test("a confirm opened after composer focus moved still remembers the editor", () => {
+  const insert = reduce(initialInteractionState(), { type: "insert.enter" }).state
+  const moved = reduce(insert, { type: "focus.set", focus: "chat" }).state
+  const opened = reduce(moved, { type: "overlay.set", overlay: "dialog", returnEditor: "composer" })
+  const closed = reduce(opened.state, { type: "overlay.set", overlay: "none" })
+  assert.equal(closed.state.mode, "insert", "the mode persists")
+  assert.equal(closed.state.focus, "composer")
+  assert.deepEqual(closed.intents, [{ type: "blur-editor" }, { type: "focus-editor", target: "composer" }])
+})
+
+test("closing an overlay in Normal keeps Normal focus semantics", () => {
+  const normal = initialInteractionState({ focus: "chat" })
+  const opened = reduce(normal, { type: "overlay.set", overlay: "dialog" })
+  const closed = reduce(opened.state, { type: "overlay.set", overlay: "none" })
+  assert.equal(closed.state.focus, "chat")
+  assert.ok(!closed.intents.some((intent) => intent.type === "focus-editor"), "Normal close does not steal focus")
 })
 
 test("field focus and wizard step changes keep the mode", () => {

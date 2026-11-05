@@ -38,13 +38,13 @@ test("the selection marker is one consistent grammar across settings surfaces", 
 })
 
 test("the settings header names the agent, dirty, and pending states", () => {
-  assert.equal(settingsHeader("FakeAgent", false, false), "FakeAgent · settings")
+  assert.equal(settingsHeader("FakeAgent", false, false), "FakeAgent │ settings")
   assert.ok(settingsHeader("FakeAgent", true, false).includes("UNSAVED"), "dirty names UNSAVED")
   assert.ok(
     settingsHeader("FakeAgent", false, true).includes("pending next task"),
     "pending names the next-task deferral",
   )
-  assert.equal(settingsHeader("FakeAgent", true, true), "FakeAgent · settings · UNSAVED · pending next task")
+  assert.equal(settingsHeader("FakeAgent", true, true), "FakeAgent │ settings │ UNSAVED │ pending next task")
 })
 
 test("every tab renders a section header carrying its counts", () => {
@@ -145,11 +145,11 @@ test("the agent list shows group counts and agent descriptions", () => {
 test("the model picker groups by provider with variant info", () => {
   assert.equal(
     modelPickerLabel(model()),
-    "Ensemble Fake Model — ensemble-fake/ensemble-fake-model · 3 variants",
+    "Ensemble Fake Model — ensemble-fake/ensemble-fake-model │ 3 variants",
   )
   assert.equal(
     modelPickerLabel(model({ variants: ["low"] })),
-    "Ensemble Fake Model — ensemble-fake/ensemble-fake-model · 1 variant",
+    "Ensemble Fake Model — ensemble-fake/ensemble-fake-model │ 1 variant",
   )
   assert.equal(
     modelPickerLabel(model({ name: "Plain", variants: [] })),

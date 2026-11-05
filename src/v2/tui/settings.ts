@@ -1,5 +1,6 @@
 import type { ModelOption } from "../types.ts"
 import { short } from "./format.ts"
+import { chromeJoin } from "./separators.ts"
 import type { SettingsTabID } from "./skills.ts"
 import { skillsEmptyLine } from "./chrome.ts"
 
@@ -25,9 +26,9 @@ export function settingsCursorMark(selected: boolean): string {
   return selected ? "› " : "  "
 }
 
-/** Header grammar: `Name · settings` plus dirty and pending-deferral flags. */
+/** Header grammar: `Name │ settings` plus dirty and pending-deferral flags. */
 export function settingsHeader(agentName: string, dirty: boolean, pending: boolean): string {
-  return `${agentName} · settings${dirty ? " · UNSAVED" : ""}${pending ? " · pending next task" : ""}`
+  return chromeJoin([agentName, "settings", ...(dirty ? ["UNSAVED"] : []), ...(pending ? ["pending next task"] : [])])
 }
 
 /** Per-tab section header naming the section plus its live counts. */
@@ -37,7 +38,7 @@ export function settingsSectionHeader(
 ): string {
   switch (tab) {
     case "general":
-      return "Identity — name · title · role · color · model"
+      return `Identity — ${chromeJoin(["name", "title", "role", "color", "model"])}`
     case "models":
       return `Main + backups — ${modelsSectionCount(counts.backups)}`
     case "memories":
@@ -148,11 +149,9 @@ export function modelPickerLabel(model: ModelOption): string {
   const identity = `${model.providerID}/${model.modelID}`
   const variants =
     model.variants.length === 0
-      ? ""
-      : model.variants.length === 1
-        ? " · 1 variant"
-        : ` · ${model.variants.length} variants`
-  return `${model.name} — ${identity}${variants}`
+      ? []
+      : [model.variants.length === 1 ? "1 variant" : `${model.variants.length} variants`]
+  return chromeJoin([`${model.name} — ${identity}`, ...variants])
 }
 
 /** Provider grouping for the flat picker window: providers cluster, then

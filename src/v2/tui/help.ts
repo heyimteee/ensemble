@@ -178,6 +178,7 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   ],
   command: [
     info("command", "scope", ":", "Commands navigate or change state only; destructive actions stay on keys and the leader with their confirms."),
+    info("command", "command.edit", "←/→ Home/End", "The : and / input keeps a cursor: Left/Right, Home/End, Backspace, Delete, and insertion at the cursor all edit in place; history and Tab completion still apply."),
   ],
   leader: [
     info("leader", "space", "Space", "Leader key opens the which-key menu; Esc cancels it."),

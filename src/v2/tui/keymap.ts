@@ -591,7 +591,12 @@ const COMMAND_KEYS: readonly KeyEntry[] = [
   { id: "command.history.up", scope: "normal", contexts: ["command"], keys: ["up"], title: "Recall an older entry", group: "History", hint: "↑↓ history" },
   { id: "command.history.down", scope: "normal", contexts: ["command"], keys: ["down"], title: "Recall a newer entry", group: "History" },
   { id: "command.complete", scope: "normal", contexts: ["command"], keys: ["tab"], title: "Complete the command name", group: "Command", hint: "tab complete" },
+  { id: "command.left", scope: "normal", contexts: ["command"], keys: ["left"], title: "Move the caret left", group: "Editing", listed: false },
+  { id: "command.right", scope: "normal", contexts: ["command"], keys: ["right"], title: "Move the caret right", group: "Editing", listed: false },
+  { id: "command.home", scope: "normal", contexts: ["command"], keys: ["home"], title: "Move the caret to the start", group: "Editing", listed: false },
+  { id: "command.end", scope: "normal", contexts: ["command"], keys: ["end"], title: "Move the caret to the end", group: "Editing", listed: false },
   { id: "command.backspace", scope: "normal", contexts: ["command"], keys: ["backspace"], title: "Delete the previous character", group: "Editing" },
+  { id: "command.delete", scope: "normal", contexts: ["command"], keys: ["delete"], title: "Delete the character under the caret", group: "Editing", listed: false },
 ]
 
 /** Committed transcript search: n/N cycle matches, Esc clears. */

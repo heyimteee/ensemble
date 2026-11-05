@@ -37,7 +37,7 @@ import { helpEntryKey, type HelpEntry, type HelpSection } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
 import { MOUSE_PANE_IDS } from "./mouse.ts"
 import { statuslineHints } from "./keymap.ts"
-import { fitStatuslineSegments, type StatuslinePart, type StatuslineSegment, type StatuslineTone } from "./statusline.ts"
+import { displayWidth, fitStatuslineSegments, type StatuslinePart, type StatuslineSegment, type StatuslineTone } from "./statusline.ts"
 import { chromeJoin, chromeSeparator, chromeSeparatorParts } from "./separators.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
@@ -110,11 +110,15 @@ export function ChromeText(props: {
   width?: number | string
   truncate?: boolean
   attributes?: number
+  flexShrink?: number
+  /** Keep spaces visible in fixed-width overlay rows. */
+  nbsp?: boolean
 }) {
+  const text = (value: string) => (props.nbsp ? value.replaceAll(" ", "\u00A0") : value)
   return (
-    <text fg={props.fg} bg={props.bg} width={props.width as any} truncate={props.truncate} attributes={props.attributes}>
+    <text fg={props.fg} bg={props.bg} width={props.width as any} truncate={props.truncate} attributes={props.attributes} flexShrink={props.flexShrink}>
       <For each={chromeSeparatorParts(props.text)}>{(part) =>
-        part.separator ? <InlineSpan fg={props.colors.faint}>{part.text}</InlineSpan> : <span>{part.text}</span>
+        part.separator ? <InlineSpan fg={props.colors.faint}>{text(part.text)}</InlineSpan> : <span>{text(part.text)}</span>
       }</For>
     </text>
   )
@@ -152,12 +156,26 @@ export function StatuslineRow(props: {
   )
 }
 
-/** Row two: the command input or a success/error/info message. */
-export function StatuslineMessage(props: { colors: Palette; parts: StatuslinePart[]; bg: ThemeColor }) {
+/**
+ * Row two: the fixed Command/Search prompt cell plus the scrolling input or a
+ * success/error/info message. The prompt renders outside the input so it can
+ * never be scrolled away or truncated; the input was already laid out around
+ * its caret by `statuslineRow2Parts`.
+ */
+export function StatuslineMessage(props: { colors: Palette; prompt: StatuslinePart[]; parts: StatuslinePart[]; width: number; bg: ThemeColor }) {
+  const promptWidth = () => props.prompt.reduce((total, part) => total + displayWidth(part.text), 0)
+  const inputWidth = () => Math.max(1, props.width - promptWidth())
   return (
-    <text fg={props.colors.faint} bg={props.bg} width="100%" truncate>
-      <For each={props.parts}>{(part) => <InlineSpan fg={toneColor(props.colors, part.tone)}>{part.text}</InlineSpan>}</For>
-    </text>
+    <box flexDirection="row" width="100%">
+      <Show when={props.prompt.length > 0}>
+        <text fg={props.colors.accent} bg={props.bg} flexShrink={0} wrapMode="none">
+          <For each={props.prompt}>{(part) => <InlineSpan fg={toneColor(props.colors, part.tone)}>{part.text}</InlineSpan>}</For>
+        </text>
+      </Show>
+      <text fg={props.colors.faint} bg={props.bg} width={inputWidth()} wrapMode="none" truncate={props.prompt.length === 0}>
+        <For each={props.parts}>{(part) => <InlineSpan fg={toneColor(props.colors, part.tone)}>{part.text}</InlineSpan>}</For>
+      </text>
+    </box>
   )
 }
 
@@ -230,9 +248,7 @@ export function Rail(props: {
                     {"  ├ "}{short(item.description!, Math.max(8, props.width - 8))}
                   </text>
                 </Show>
-                <text fg={props.colors.faint} bg={props.surface} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
-                  {"  └ "}{short(item.detail ? chromeJoin([item.workspace ?? "homeless", item.detail]) : item.workspace ?? "homeless", Math.max(8, props.width - 8))}
-                </text>
+                <ChromeText colors={props.colors} fg={props.colors.faint} bg={props.surface} width="100%" truncate attributes={TextAttributes.DIM} text={`  └ ${short(item.detail ? chromeJoin([item.workspace ?? "homeless", item.detail]) : item.workspace ?? "homeless", Math.max(8, props.width - 8))}`} />
               </Show>
             </box>
           </>
@@ -301,13 +317,19 @@ export function HelpView(props: {
   return (
     <box flexGrow={1} flexDirection="column" minHeight={0}>
       <text fg={props.colors.text} flexShrink={0}>Keyboard shortcuts</text>
-      <text fg={props.filtering ? props.colors.focus : props.colors.muted} flexShrink={0} width="100%" truncate>
-        {props.filtering
+      <ChromeText
+        colors={props.colors}
+        fg={props.filtering ? props.colors.focus : props.colors.muted}
+        bg={props.colors.bg}
+        width="100%"
+        truncate
+        flexShrink={0}
+        text={props.filtering
           ? `/${props.query}`
           : props.query
             ? chromeJoin([`/ ${props.query}`, "n/N match", "esc close"])
             : chromeJoin(["? help", "/ filter", "n/N match", "j/k scroll", "ctrl+d/u", "gg/G", "esc close"])}
-      </text>
+      />
       <scrollbox ref={(value: any) => props.scrollRef?.(value)} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
         <Show when={hasMatches()} fallback={<text fg={props.colors.muted}>{helpEmptyLine()}</text>}>
           <HelpEntries colors={props.colors} sections={props.sections} matchKey={props.matchKey} />
@@ -355,10 +377,10 @@ export function SettingsView(props: {
   return (
     <Show when={props.agent} fallback={<text fg={props.colors.muted}>{settingsNoAgentLine()}</text>}>
       <box flexDirection="column">
-        <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>{settingsHeader(props.agent!.name, props.dirty, props.agent!.pendingSettings)}</text>
-        <text fg={props.colors.muted}>{settingsTabLine(props.tab, props.memoryTotal, props.agent!.skillbox.length, props.skillCatalog.length)}</text>
+        <ChromeText colors={props.colors} fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate text={settingsHeader(props.agent!.name, props.dirty, props.agent!.pendingSettings)} />
+        <ChromeText colors={props.colors} fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate text={settingsTabLine(props.tab, props.memoryTotal, props.agent!.skillbox.length, props.skillCatalog.length)} />
         <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{settingsDivider()}</text>
-        <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsSectionHeader(props.tab, sectionCounts())}</text>
+        <ChromeText colors={props.colors} fg={props.colors.text} bg={props.colors.bg} width="100%" truncate text={settingsSectionHeader(props.tab, sectionCounts())} />
         <box border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" paddingLeft={1} paddingRight={1}>
         <Show when={props.tab === "general"}>
           <For each={generalFieldRows(props.agent!, props.agent!.mainModel)}>{([label, value], index) => (
@@ -371,11 +393,11 @@ export function SettingsView(props: {
           <Show when={props.agent!.backupModels.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{modelsEmptyLine()}</text></Show>
         </Show>
         <Show when={props.tab === "memories"}>
-          <text fg={props.colors.muted}>{chromeJoin([`Filter: ${props.memoryFilter || "(none)"}`, "/ filter"])}</text>
+          <ChromeText colors={props.colors} fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate text={chromeJoin([`Filter: ${props.memoryFilter || "(none)"}`, "/ filter"])} />
           <For each={props.memories}>{(memory, index) => (
             <box flexDirection="column">
               <text fg={props.cursor === index() ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" wrapMode="word">{settingsCursorMark(props.cursor === index())}{memory.text}</text>
-              <text fg={memoryNeedsReview(memory) ? props.colors.warn : props.colors.muted} bg={props.colors.bg} width="100%" truncate>    {memoryProvenanceLine(memory)}{memoryNeedsReview(memory) ? " ◆" : ""}</text>
+              <ChromeText colors={props.colors} fg={memoryNeedsReview(memory) ? props.colors.warn : props.colors.muted} bg={props.colors.bg} width="100%" truncate text={`    ${memoryProvenanceLine(memory)}${memoryNeedsReview(memory) ? " ◆" : ""}`} />
             </box>
           )}</For>
           <Show when={props.memoryTotal === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{memoriesEmptyLine()}</text></Show>
@@ -383,7 +405,7 @@ export function SettingsView(props: {
         </Show>
         <Show when={props.tab === "skillbox"}>
           <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
-          <text fg={props.colors.muted}>{chromeJoin([`Filter: ${props.skillFilter || "(none)"}`, "/ filter", ...(skillPaginationText(props.skills.length, props.skillPage ?? 1) ? [skillPaginationText(props.skills.length, props.skillPage ?? 1)] : [])])}</text>
+          <ChromeText colors={props.colors} fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate text={chromeJoin([`Filter: ${props.skillFilter || "(none)"}`, "/ filter", ...(skillPaginationText(props.skills.length, props.skillPage ?? 1) ? [skillPaginationText(props.skills.length, props.skillPage ?? 1)] : [])])} />
           <Show when={props.skillCatalog.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillsUnavailableLine()}</text></Show>
 <Show when={props.skillCatalog.length > 0 && props.skills.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillboxEmptyLine()}</text></Show>
           <For each={skillPageItems(props.skills, props.skillPage ?? 1)}>{(entry) => (
@@ -398,9 +420,7 @@ export function SettingsView(props: {
         </box>
         <Show when={props.field}>
           <box flexDirection="column" marginTop={1}>
-            <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>
-              {chromeJoin([props.field!.label, fieldMode() === "insert" ? "INSERT" : fieldMode() === "visual" ? "VISUAL" : "NORMAL", fieldHints()])}
-            </text>
+            <ChromeText colors={props.colors} fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate text={chromeJoin([props.field!.label, fieldMode() === "insert" ? "INSERT" : fieldMode() === "visual" ? "VISUAL" : "NORMAL", fieldHints()])} />
             <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.focus} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
               <input ref={props.fieldRef} value={props.field!.value} width="100%" backgroundColor={props.colors.bg} textColor={props.colors.text} onContentChange={() => props.onFieldContentChange?.()} onCursorChange={() => props.onFieldCursorChange?.()} />
             </box>
@@ -428,7 +448,7 @@ export function PickerOverlay(props: {
   return (
     <box width="100%" height={16} minHeight={16} flexShrink={0} border borderStyle="double" borderColor={props.colors.focus} backgroundColor={props.colors.panel} flexDirection="column" padding={1}>
       <text fg={props.colors.focus} bg={props.colors.bg} width="100%" truncate>{solid(props.title())}</text>
-      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{solid(chromeJoin([`filter: ${props.query() || "(none)"}`, `${props.items().length} matches`]))}</text>
+      <ChromeText colors={props.colors} fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate nbsp text={chromeJoin([`filter: ${props.query() || "(none)"}`, `${props.items().length} matches`])} />
       <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>────────────────────────────────────────────────────────────</text>
       <For each={slots}>{(slot) => (
         <text fg={props.colors.text} bg={props.colors.bg} width="100%" truncate>{(() => {
@@ -442,7 +462,7 @@ export function PickerOverlay(props: {
           return solid(`${offset + slot === cursor ? "›" : " "} ${marker}${item.label}`)
         })()}</text>
       )}</For>
-      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{solid(props.footer())}</text>
+      <ChromeText colors={props.colors} fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate nbsp text={props.footer()} />
     </box>
   )
 }
