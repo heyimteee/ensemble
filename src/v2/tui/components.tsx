@@ -1,5 +1,5 @@
-import { For, Show } from "solid-js"
-import { TextAttributes } from "@opentui/core"
+import { For, Show, createEffect } from "solid-js"
+import { StyledText, TextAttributes, bg as bgStyle, fg as fgStyle } from "@opentui/core"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import { approvalSource } from "../types.ts"
 import type { InteractionMode } from "./interaction.ts"
@@ -93,9 +93,56 @@ function toneColor(colors: Palette, tone: StatuslineTone): ThemeColor {
 }
 
 
-/** OpenTUI's span props omit fg/bg in its public type though the runtime accepts them. */
-function InlineSpan(props: { fg?: ThemeColor; bg?: ThemeColor; attributes?: number; children?: any }) {
-  return <span {...({ fg: props.fg, bg: props.bg, attributes: props.attributes } as any)}>{props.children}</span>
+type StyledLinePart = { text: string; fg: ThemeColor; bg?: ThemeColor; attributes?: number }
+
+/**
+ * Build a native StyledText line. Nested span children inside a
+ * `<text>` do not keep their foreground/background on every OpenTUI build,
+ * so the statusline and chrome rows use styled chunks instead. This is the
+ * public text-content API and preserves colors under `truncate`.
+ */
+function styledLine(parts: StyledLinePart[]): StyledText {
+  return new StyledText(parts.map((part) => {
+    let chunk = fgStyle(part.fg)(part.text)
+    if (part.bg) chunk = bgStyle(part.bg)(chunk)
+    if (part.attributes) chunk = { ...chunk, attributes: (chunk.attributes ?? 0) | part.attributes }
+    return chunk
+  }))
+}
+
+/**
+ * Render a StyledText line through the native content setter. Solid's JSX
+ * `content` prop stringifies an object on some OpenTUI builds, which showed
+ * `[object Object]` instead of the statusline; setting the property after
+ * mount keeps the chunks and their colors.
+ */
+function StyledLineText(props: {
+  parts: () => StyledLinePart[]
+  fg?: ThemeColor
+  bg?: ThemeColor
+  width?: number | string
+  truncate?: boolean
+  attributes?: number
+  flexShrink?: number
+  wrapMode?: "none" | "char" | "word"
+}) {
+  let ref: any
+  const content = () => styledLine(props.parts())
+  createEffect(() => {
+    if (ref) ref.content = content()
+  })
+  return (
+    <text
+      ref={(value: any) => { ref = value; if (value) value.content = content() }}
+      fg={props.fg}
+      bg={props.bg}
+      width={props.width as any}
+      truncate={props.truncate}
+      attributes={props.attributes}
+      flexShrink={props.flexShrink}
+      wrapMode={props.wrapMode}
+    />
+  )
 }
 
 /**
@@ -115,12 +162,13 @@ export function ChromeText(props: {
   nbsp?: boolean
 }) {
   const text = (value: string) => (props.nbsp ? value.replaceAll(" ", "\u00A0") : value)
+  const parts = () => chromeSeparatorParts(props.text).map((part) => ({
+    text: text(part.text),
+    fg: part.separator ? props.colors.faint : props.fg,
+    attributes: props.attributes,
+  }))
   return (
-    <text fg={props.fg} bg={props.bg} width={props.width as any} truncate={props.truncate} attributes={props.attributes} flexShrink={props.flexShrink}>
-      <For each={chromeSeparatorParts(props.text)}>{(part) =>
-        part.separator ? <InlineSpan fg={props.colors.faint}>{text(part.text)}</InlineSpan> : <span>{text(part.text)}</span>
-      }</For>
-    </text>
+    <StyledLineText parts={parts} fg={props.fg} bg={props.bg} width={props.width} truncate={props.truncate} attributes={props.attributes} flexShrink={props.flexShrink} />
   )
 }
 
@@ -134,25 +182,23 @@ export function StatuslineRow(props: {
   width: number
   bg: ThemeColor
 }) {
-  const rendered = () => {
-    const parts: Array<{ text: string; fg: ThemeColor; bg?: ThemeColor; attributes?: number }> = []
+  const parts = () => {
+    const next: StyledLinePart[] = []
     fitStatuslineSegments(props.segments, props.width).forEach((segment, index) => {
-      if (index > 0) parts.push({ text: ` ${chromeSeparator()} `, fg: props.colors.faint })
+      if (index > 0) next.push({ text: ` ${chromeSeparator()} `, fg: props.colors.faint })
       for (const part of segment.parts) {
         if (part.chip) {
           const background = props.colors[part.chip]
-          parts.push({ text: part.text, fg: contrastText(background), bg: background, attributes: TextAttributes.BOLD })
+          next.push({ text: part.text, fg: contrastText(background), bg: background, attributes: TextAttributes.BOLD })
         } else {
-          parts.push({ text: part.text, fg: toneColor(props.colors, part.tone) })
+          next.push({ text: part.text, fg: toneColor(props.colors, part.tone) })
         }
       }
     })
-    return parts
+    return next
   }
   return (
-    <text fg={props.colors.text} bg={props.bg} width="100%" truncate>
-      <For each={rendered()}>{(part) => <InlineSpan fg={part.fg} bg={part.bg} attributes={part.attributes}>{part.text}</InlineSpan>}</For>
-    </text>
+    <StyledLineText parts={parts} fg={props.colors.text} bg={props.bg} width="100%" truncate />
   )
 }
 
@@ -165,24 +211,20 @@ export function StatuslineRow(props: {
 export function StatuslineMessage(props: { colors: Palette; prompt: StatuslinePart[]; parts: StatuslinePart[]; width: number; bg: ThemeColor }) {
   const promptWidth = () => props.prompt.reduce((total, part) => total + displayWidth(part.text), 0)
   const inputWidth = () => Math.max(1, props.width - promptWidth())
+  const promptParts = () => props.prompt.map((part) => ({ text: part.text, fg: toneColor(props.colors, part.tone) }))
+  const inputParts = () => props.parts.map((part) => ({ text: part.text, fg: toneColor(props.colors, part.tone) }))
   return (
     <box flexDirection="row" width="100%">
       <Show when={props.prompt.length > 0}>
-        <text fg={props.colors.accent} bg={props.bg} flexShrink={0} wrapMode="none">
-          <For each={props.prompt}>{(part) => <InlineSpan fg={toneColor(props.colors, part.tone)}>{part.text}</InlineSpan>}</For>
-        </text>
+        <StyledLineText parts={promptParts} fg={props.colors.accent} bg={props.bg} flexShrink={0} wrapMode="none" />
       </Show>
-      <text fg={props.colors.faint} bg={props.bg} width={inputWidth()} wrapMode="none" truncate={props.prompt.length === 0}>
-        <For each={props.parts}>{(part) => <InlineSpan fg={toneColor(props.colors, part.tone)}>{part.text}</InlineSpan>}</For>
-      </text>
+      <StyledLineText parts={inputParts} fg={props.colors.faint} bg={props.bg} width={inputWidth()} wrapMode="none" truncate={props.prompt.length === 0} />
     </box>
   )
 }
 
 export function Rail(props: {
   colors: Palette
-  /** Opaque surface painted behind the rail and reused for the badge cutout. */
-  surface: ThemeColor
   badge: LeaderBadge
   items: RailItem[]
   cursor: number
@@ -195,9 +237,9 @@ export function Rail(props: {
   filter: string
 }) {
   return (
-    <box id={MOUSE_PANE_IDS.rail} width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.surface} flexDirection="column" padding={1}>
+    <box id={MOUSE_PANE_IDS.rail} width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
       <Show when={props.filter}>
-        <text fg={props.colors.warn} bg={props.surface} width="100%" truncate>filter: {props.filter}</text>
+        <text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>filter: {props.filter}</text>
       </Show>
       <For each={props.items}>{(item, index) => {
         const previous = index() > 0 ? props.items[index() - 1] : undefined
@@ -217,17 +259,17 @@ export function Rail(props: {
         return (
           <>
             <Show when={kindHeader === railGroupLine("workspace", workspaceCount)}>
-              <text fg={props.colors.faint} bg={props.surface} width="100%" truncate>────────</text>
+              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>────────</text>
             </Show>
             <Show when={kindHeader}>
-              <text fg={props.colors.faint} bg={props.surface} width="100%" truncate>{kindHeader}</text>
+              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{kindHeader}</text>
             </Show>
             <Show when={groupHeader}>
-              <text fg={props.colors.faint} bg={props.surface} width="100%" truncate>  {groupHeader}</text>
+              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
             </Show>
             <box flexDirection="column">
               <box flexDirection="row" width="100%">
-                <text fg={selected ? props.colors.good : props.colors.text} bg={props.surface} flexShrink={1} wrapMode="none" truncate>
+                <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
                   {settingsCursorMark(selected && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
                 </text>
                 <Show when={item.kind === "agent" && item.leader}>
@@ -235,29 +277,29 @@ export function Rail(props: {
                     <text fg={props.badge.foreground} attributes={TextAttributes.BOLD}>LEADER</text>
                   </box>
                 </Show>
-                <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.surface} flexShrink={0}> ⏸</text></Show>
-                <Show when={busy > 0}><text fg={props.colors.muted} bg={props.surface} flexShrink={0}> ◐{busy}</text></Show>
-                <Show when={unread > 0}><text fg={props.colors.muted} bg={props.surface} flexShrink={0}> ●{unread}</text></Show>
+                <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
+                <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ◐{busy}</text></Show>
+                <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ●{unread}</text></Show>
               </box>
               <Show when={item.kind === "agent"}>
                 <Show when={item.leader}>
-                  <text bg={props.surface}> </text>
+                  <text bg={props.colors.bg}> </text>
                 </Show>
                 <Show when={(item.description ?? "").trim()}>
-                  <text fg={props.colors.faint} bg={props.surface} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
+                  <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
                     {"  ├ "}{short(item.description!, Math.max(8, props.width - 8))}
                   </text>
                 </Show>
-                <ChromeText colors={props.colors} fg={props.colors.faint} bg={props.surface} width="100%" truncate attributes={TextAttributes.DIM} text={`  └ ${short(item.detail ? chromeJoin([item.workspace ?? "homeless", item.detail]) : item.workspace ?? "homeless", Math.max(8, props.width - 8))}`} />
+                <ChromeText colors={props.colors} fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate attributes={TextAttributes.DIM} text={`  └ ${short(item.detail ? chromeJoin([item.workspace ?? "homeless", item.detail]) : item.workspace ?? "homeless", Math.max(8, props.width - 8))}`} />
               </Show>
             </box>
           </>
         )
       }}</For>
-      <Show when={props.items.length === 0}><text fg={props.colors.muted} bg={props.surface} width="100%" wrapMode="word">{railEmptyLine()}</text></Show>
+      <Show when={props.items.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{railEmptyLine()}</text></Show>
       <text> </text>
-      <text fg={props.colors.accent} bg={props.surface} width="100%" truncate>APPROVALS {props.pendingApprovals > 0 ? `(${props.pendingApprovals})` : ""}</text>
-      <text fg={props.colors.muted} bg={props.surface} width="100%" truncate>v opens inbox</text>
+      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>APPROVALS {props.pendingApprovals > 0 ? `(${props.pendingApprovals})` : ""}</text>
+      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>v opens inbox</text>
     </box>
   )
 }

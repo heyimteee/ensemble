@@ -91,23 +91,6 @@ export function contrastText(color: ThemeColor): "#000000" | "#ffffff" {
   return luminance > 0.179 ? "#000000" : "#ffffff"
 }
 
-/** Last-resort opaque surface when neither the terminal nor the theme reports one. */
-export const OPAQUE_FALLBACK = "#101010"
-
-/**
- * Opaque surface painted behind the rail and the leader badge. The terminal
- * default background wins when the palette detection reported a real color;
- * otherwise the opaque panel color is used, then a constant. Always returns a
- * hex color so the badge text can be a true cutout.
- */
-export function opaqueSurface(
-  candidate: ThemeColor | null | undefined,
-  fallback: ThemeColor | null | undefined,
-): string {
-  const chosen = isOpaqueColor(candidate) ? candidate! : isOpaqueColor(fallback) ? fallback! : OPAQUE_FALLBACK
-  return colorToHex(chosen) ?? OPAQUE_FALLBACK
-}
-
 export type LeaderBadge = { background: ThemeColor; foreground: string }
 
 /**

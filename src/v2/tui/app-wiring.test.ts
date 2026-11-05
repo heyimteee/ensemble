@@ -38,3 +38,21 @@ test("Insert without a target keeps git, position, selection, and chord segments
   }
   assert.ok(source.includes('if (insertWithoutTarget(interaction())) return "Esc normal"'), "only the typing hint becomes the Esc notice")
 })
+
+test("statusline and chrome render StyledText through the native content setter", () => {
+  const source = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  assert.ok(!source.includes("InlineSpan"), "no nested span styling helper")
+  assert.ok(!source.includes("<span"), "no inline span children whose fg/bg are dropped")
+  assert.ok(source.includes("function StyledLineText"), "the styled-line component exists")
+  assert.ok(source.includes("value.content = content()"), "StyledText is assigned through the ref, not the JSX content prop")
+})
+
+test("the rail pane stays transparent and only the badge uses the opaque cutout", () => {
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const rail = components.slice(components.indexOf("export function Rail"), components.indexOf("export function ApprovalList"))
+  assert.ok(!rail.includes("backgroundColor={props.surface}"), "the rail no longer paints the opaque cutout surface")
+  assert.ok(rail.includes("backgroundColor={props.colors.bg}"), "the rail uses the transparent theme background")
+  assert.ok(app.includes("leaderBadge(colors.leader, terminalBackground())"), "the badge uses the detected terminal background only")
+  assert.ok(!app.includes("railSurface()"), "the rail surface is not computed or painted")
+})

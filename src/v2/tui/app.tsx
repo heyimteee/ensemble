@@ -9,7 +9,7 @@ import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, 
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
-import { leaderBadge, opaqueSurface, palette } from "./theme.ts"
+import { leaderBadge, palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import {
@@ -994,8 +994,10 @@ export function EnsembleV2App() {
     })
   })
   const statuslineWidth = () => Math.max(10, renderSize().width - 2)
-  const railSurface = () => opaqueSurface(terminalBackground(), colors.panel)
-  const railBadge = () => leaderBadge(colors.leader, railSurface())
+  // The rail stays transparent. The badge text uses the terminal's reported
+  // default background for a true cutout; without it, leaderBadge falls back
+  // to automatic contrast instead of painting the pane opaque.
+  const railBadge = () => leaderBadge(colors.leader, terminalBackground())
   const viewWidth = () => Math.max(60, renderSize().width - 2)
   const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
   // Two-column layout (ticket #56): the task board is gone and the chat
@@ -4353,7 +4355,7 @@ export function EnsembleV2App() {
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} surface={railSurface()} badge={railBadge()} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
+          <Rail colors={colors} badge={railBadge()} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={settingsAgentID()} fallback={
