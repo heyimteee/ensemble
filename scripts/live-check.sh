@@ -94,6 +94,46 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" C-g
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "leaving the workspace wizard leaves Normal behind"
 
+  # v5.8: the message-start palette distinguishes commands from skills, the
+  # built-in init entry is General, and flags never use a middle dot.
+  live_key "$LIVE_TUI_SESSION" "i"
+  live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for the v5.8 palette"
+  live_type "$LIVE_TUI_SESSION" "/"
+  live_require_text "$LIVE_TUI_SESSION" "/ commands │ skills" 10 "message-start palette title"
+  live_require_text "$LIVE_TUI_SESSION" "Command" 10 "command rows carry the Command flag"
+  live_type "$LIVE_TUI_SESSION" "init"
+  live_require_text "$LIVE_TUI_SESSION" "Skill | General" 10 "the built-in init skill carries the General flag"
+  live_require_text "$LIVE_TUI_SESSION" "/init" 10 "the built-in init skill keeps the /init alias"
+  live_assert_absence "$LIVE_TUI_SESSION" "Skill ·" "skill flags never use a middle dot"
+  live_key "$LIVE_TUI_SESSION" Escape
+  live_key "$LIVE_TUI_SESSION" C-g
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "palette probe leaves Normal"
+
+  # Prose `/init` is ordinary text and must not start an init job. The real
+  # `I` trigger then starts the visible System Agent job and reaches a report.
+  live_key "$LIVE_TUI_SESSION" "i"
+  live_key_repeat "$LIVE_TUI_SESSION" BSpace 20
+  sleep 0.3
+  live_type "$LIVE_TUI_SESSION" "hello /init prose-check"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$LiveAgent: hello /init prose-check" 20 "prose /init is an ordinary group message"
+  live_key "$LIVE_TUI_SESSION" C-g
+  prose_init_jobs=$(live_snapshot_value 'Object.values(output.state.initJobs).length')
+  [[ "$prose_init_jobs" == "0" ]] || live_fail "prose /init started an init job (got $prose_init_jobs)"
+  live_key "$LIVE_TUI_SESSION" "I"
+  live_require_text "$LIVE_TUI_SESSION" "System Agent" 20 "I starts a visible System Agent init"
+  init_state=""
+  for _ in $(seq 1 240); do
+    init_state=$(live_snapshot_value 'Object.values(output.state.initJobs).map(function (job) { return job.state }).join(",")')
+    [[ "$init_state" != "" && "$init_state" != *"running"* ]] && break
+    sleep 0.5
+  done
+  [[ "$init_state" != "" && "$init_state" != *"running"* ]] || live_fail "real init did not reach a terminal state (got $init_state)"
+  live_require_any_text "$LIVE_TUI_SESSION" 30 "System Agent final init report" "Ensemble init complete" "Ensemble init failed"
+  init_audit=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces).find(function (w) { return w.name === "live" }); return (output.state.messages[ws.id] || []).filter(function (m) { return m.author === "user" && m.text === "/init" }).length })()')
+  [[ "$init_audit" == "1" ]] || live_fail "expected one visible /init audit line, found $init_audit"
+  live_log "v5.8 palette, prose guard, and visible System Agent init verified"
+
   live_wait_for 20 "created agent and workspace in snapshot" \
     live_snapshot_has_agent_named "LiveAgent" \
     || live_fail "snapshot never contained LiveAgent"

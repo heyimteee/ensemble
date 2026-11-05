@@ -61,7 +61,7 @@ export function promptForTask(task: Subtask, senderName?: string): string {
     return `Synthesize the completed subtasks into one clear answer for the user.\n\nOriginal request: ${task.instruction}`
   }
   const body = [task.instruction, task.constraints ? `Constraints: ${task.constraints}` : "", task.expected ? `Expected: ${task.expected}` : ""].filter(Boolean).join("\n\n")
-  const triageSkills = task.triage ? task.skillGrants ?? [] : []
+  const triageSkills = task.skillGrants ?? []
   const oneTriage = triageSkills.length === 1
   const triagePronoun = oneTriage ? "it" : "them"
   const triage = triageSkills.length > 0

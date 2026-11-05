@@ -159,7 +159,7 @@ handoffs/            typed Markdown handoffs
 init.json            AGENTS.md block version
 ```
 
-`I`, `:init`, or `/init` appends a visible `/init` audit line and starts a System Agent init job. The job creates a temporary native session in the workspace, calls native `/init` with Ensemble's full instructions (`session.command` with the `init` command), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the versioned `<!-- ensemble:start v2 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
+`I`, `:init`, or a message-start `/init` appends a visible `/init` audit line and starts a System Agent init job. An init alias attached to an agent anchor is rejected as a mixed solo request; a prose `/init` is ordinary text. The job creates a temporary native session in the workspace, calls native `/init` with the full `initInstructions()` text (inspect the project, preserve project guidance, replace one Ensemble block), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the versioned `<!-- ensemble:start v2 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
 
 Reset is available through the `/reset-ensemble` composer command, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
@@ -200,7 +200,7 @@ Subtask {
   state: "pending" | "working" | "replied",
   outcome, stage, interrupted, approvalID?,
   resultMessageID?, error?, attempts,
-  triage?, skillGrants?
+  skillGrants?
 }
 ```
 
@@ -309,7 +309,7 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 
 - **System Agent identity.** A non-roster display identity for workspace-level jobs. It has no model, Skillbox, or mention route; its messages use the normal left-side agent bubble and streaming lifecycle.
 - **Visible init job.** `I`, `:init`, and `/init` append the same visible `/init` line, then start a durable init job. The System Agent row starts as `Initializing workspace…`, receives progress, and finalizes into the full report. The job survives navigation; reset/archive/delete cancel it, and restart marks it interrupted with a rerun instruction.
-- **Deliberate internal native init.** The job owns a temporary native session in the workspace and calls the native `init` command with Ensemble's instruction text. Only the success path writes the canonical block and `init.json`; every failure path restores the prior `AGENTS.md`. The composer never falls through to native `/init`, and native `/init` outside Ensemble is unchanged.
+- **Deliberate internal native init.** The job owns a temporary native session in the workspace and calls the native `init` command with the full `initInstructions()` text. Only the success path writes the canonical block and `init.json`; every failure path restores the prior `AGENTS.md`. Only a message-start trigger or an anchor-attached alias is init; prose `/init` is ordinary text. The composer never falls through to native `/init`, and native `/init` outside Ensemble is unchanged.
 - **Exact-text routing.** The shared planner resolves `$Agent` anchors and `/skill` tokens but never rewrites the request. Each unique addressed agent receives one prompt containing the exact user text; multiple skills for that agent are grouped, separate messages stay sequential, and there are no per-skill bodies or per-skill tasks.
 - **General-skill leader triage.** Assigned skills stay with their owner. General skills route to the leader, who reads them under a one-run native permission grant and either uses them or delegates with a self-authored instruction. The grant is restored after the turn; a delegatee receives guidance, not a host grant.
 - **No attachment bypass.** General skills are never delivered through prompt `skills` attachments or the experimental skill-activation endpoint. Native per-agent skill permissions remain authoritative, and the identity contract tells agents to load deliberate `/skill` tokens with the native skill tool.

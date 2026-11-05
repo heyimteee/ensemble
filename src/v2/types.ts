@@ -105,7 +105,11 @@ export type Message = {
   seq: number
   author: "user" | "agent" | "system"
   agentID?: Id
-  /** Display-only author for non-roster identities such as the System Agent. */
+  /**
+   * Final displayed author (and therefore its transcript color) for
+   * non-roster identities such as the System Agent. Roster authors resolve by
+   * agentID; the transcript carries one attribution source, never both.
+   */
   displayAuthor?: string
   text: string
   kind: MessageKind
@@ -233,11 +237,11 @@ export type Subtask = {
   turn?: TurnInfo
   /**
    * General-skill leader triage (ticket #103): the turn must read and either
-   * use or delegate the listed skills. The host session receives a one-run
-   * native skill grant for exactly these ids, restored after the turn.
+   * use or delegate the listed skills. This is the single triage source of
+   * truth: a non-empty grant identifies a leader triage task. The host session
+   * receives a one-run native skill grant for exactly these ids, restored
+   * after the turn.
    */
-  triage?: boolean
-  /** One-run native skill permissions issued for this turn only. */
   skillGrants?: string[]
 }
 

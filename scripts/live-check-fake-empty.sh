@@ -102,6 +102,21 @@ live_require_text "$LIVE_TUI_SESSION" "discard draft?" 10 "cancel confirm reopen
 live_key "$LIVE_TUI_SESSION" "y"
 live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "y cancelled the wizard"
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Roster" 10 "cancel restored Normal mode"
+
+# v5.8 init routing with an empty catalog: `:init` is an Ensemble System Agent
+# command, not a host skill, and extra mentions are rejected instead of being
+# discarded. Both paths work without a model catalog.
+live_require_text "$LIVE_TUI_SESSION" "I init" 10 "I init shortcut survives an empty catalog"
+live_key "$LIVE_TUI_SESSION" ":"
+live_type "$LIVE_TUI_SESSION" "init"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Open a workspace first." 10 ":init routes to the Ensemble init path"
+live_key "$LIVE_TUI_SESSION" ":"
+live_type "$LIVE_TUI_SESSION" 'init $FakeAgent'
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Init is solo-only." 10 ":init with an extra mention is rejected"
+live_log "v5.8 init routing and solo guard verified with an empty catalog"
+
 empty_memory_count=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).length')
 [[ "$empty_memory_count" == "0" ]] || live_fail "empty memory list wrote memories (got $empty_memory_count)"
 

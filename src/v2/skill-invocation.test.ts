@@ -86,6 +86,21 @@ test("plain messages and recognized slash commands do not create skill recipient
   assert.deepEqual(bareSlash.errors, [])
 })
 
+test("init is recognized only at message start or as an anchor skill token", () => {
+  const prose = planSkillInvocation({ text: "hello /init", workspace: workspace(), agents: roster(), skills })
+  assert.equal(prose.kind, "message", "prose /init stays ordinary text")
+  assert.deepEqual(prose.errors, [])
+
+  const start = planSkillInvocation({ text: "/init", workspace: workspace(), agents: roster(), skills })
+  assert.equal(start.kind, "init")
+
+  const anchor = planSkillInvocation({ text: "$Nova /init", workspace: workspace(), agents: roster(), skills })
+  assert.equal(anchor.kind, "init", "an init alias after an anchor is an init request")
+
+  const mixedAnchor = planSkillInvocation({ text: "$Nova /review /init", workspace: workspace(), agents: roster(), skills })
+  assert.equal(mixedAnchor.kind, "init", "an init alias among anchor skills is still init")
+})
+
 test("invalid assigned-skill references fail atomically with specific errors", () => {
   const agents = roster()
   agents.echo = agent({ id: "echo", name: "Echo", skillbox: ["review"] })
@@ -423,6 +438,9 @@ test("direct conversations reject general skills with a workspace pointer", () =
   const init = directSkillIssue({ text: "/init", agent: leader, workspace: workspace(), agents: roster(), skills })
   assert.equal(init?.code, "init_direct")
   assert.ok(init?.message.includes("workspace group chat"), init?.message)
+
+  const proseInit = directSkillIssue({ text: "hello /init", agent: leader, workspace: workspace(), agents: roster(), skills })
+  assert.equal(proseInit, undefined, "prose /init in a Direct conversation is ordinary text")
 
   const unknown = directSkillIssue({ text: "/ghost check this", agent: leader, workspace: workspace(), agents: roster(), skills })
   assert.equal(unknown?.code, "unknown_skill")

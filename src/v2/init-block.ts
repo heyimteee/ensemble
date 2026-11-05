@@ -138,3 +138,26 @@ export function initInstruction(): string {
     "</ensemble_init>",
   ].join("\n")
 }
+
+/**
+ * Full text passed to the native `/init` command inside the System Agent job.
+ * The deterministic block write that follows is the final authority, but the
+ * native run must inspect the project and produce the project-owned guidance
+ * around that block without duplicating or stale-copying Ensemble instructions.
+ */
+export function initInstructions(): string {
+  return [
+    "<ensemble_init>",
+    "Initialize this repository as an Ensemble workspace.",
+    "",
+    "Inspect the repository before writing: the existing AGENTS.md, .ensemble/init.json, README, package manifests, build, test, and lint configuration, documentation, and the source layout.",
+    "Write concise, verified project guidance in AGENTS.md: what the project is, how to set up, build, test, and lint it, how the code is organized, and the conventions or gotchas a teammate must know.",
+    "Preserve the project's own guidance. Do not delete, reorder, or rewrite project-owned content that is still accurate.",
+    "Use only facts you verified in the repository. Do not invent commands, paths, or conventions, and do not include credentials, conversation content, or runtime memories.",
+    "Do not edit .ensemble/init.json; Ensemble records its own init metadata there.",
+    "Report what you inspected and what you changed when you finish.",
+    "",
+    initInstruction(),
+    "</ensemble_init>",
+  ].join("\n")
+}
