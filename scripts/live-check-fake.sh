@@ -70,11 +70,14 @@ live_require_text "$LIVE_TUI_SESSION" "git:(" 10 "git metadata"
 live_check_help
 
 # The fake catalog contains one model with variants, so the agent wizard always
-# offers a Reasoning effort step. T6: text steps enter Insert, Esc goes to
-# field Normal, and the next Esc goes back a step (or cancels at the first).
+# offers a Reasoning effort step. T2: a text step keeps the mode it arrived
+# with (Normal from the roster); `i` is the explicit Insert entry.
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
-live_assert_text "$LIVE_TUI_SESSION" "INSERT · Wizard" "wizard text starts in Insert"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "wizard text keeps the arrival mode"
+live_assert_text "$LIVE_TUI_SESSION" "i/a insert" "field Normal teaches the Vim entries"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "i enters Insert in the wizard field"
 live_assert_text "$LIVE_TUI_SESSION" "enter next · esc normal" "Insert field teaches its ladder"
 live_type "$LIVE_TUI_SESSION" "FakeAgent"
 sleep 0.25
@@ -87,10 +90,11 @@ sleep 0.3
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "second Esc cancelled the wizard"
 live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Roster" "cancel returns to roster Normal"
-# Reopen and walk the fields: back from Agent title restores Agent name in Insert,
-# and the title draft survives the round trip.
+# Reopen and walk the fields: back from Agent title restores Agent name in
+# field Normal, and the title draft survives the round trip.
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard reopened"
+live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "FakeAgent"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
@@ -100,18 +104,24 @@ live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "second Esc goes back one step"
-live_assert_text "$LIVE_TUI_SESSION" "INSERT · Wizard" "the previous text step re-enters Insert"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "the previous text step keeps Normal"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "Enter continues from the restored text field"
 live_require_text "$LIVE_TUI_SESSION" "Engineering" 10 "title draft survived the back step"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
+live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "Renders deterministic Markdown."
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
 live_type "$LIVE_TUI_SESSION" "Likes deterministic fixtures"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
+# Entering a list step keeps Insert but there is no text target; Esc returns
+# to Normal before the list grammar applies.
+live_assert_text "$LIVE_TUI_SESSION" "INSERT · no text target · Esc normal" "a list step has no text target"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc leaves Insert on the list step"
 # `/` owns filtering; `:` and Space never open the command line or the leader.
 live_assert_text "$LIVE_TUI_SESSION" "j/k move" "wizard list uses the shared navigation"
 live_assert_text "$LIVE_TUI_SESSION" "/ filter" "wizard list names the filter key"
@@ -314,7 +324,9 @@ live_assert_text "$LIVE_TUI_SESSION" "Workspace directory" "filter Esc stays on 
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step"
-live_assert_text "$LIVE_TUI_SESSION" "INSERT · Wizard" "name step starts in Insert"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "the name step keeps the arrival mode"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "i enters Insert for the name"
 live_type "$LIVE_TUI_SESSION" "LiveSite"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
@@ -324,6 +336,9 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "i re-enters Insert"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "members step"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT · no text target · Esc normal" "a list step reports Insert with no target"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc returns the list step to Normal"
 live_assert_text "$LIVE_TUI_SESSION" "space toggle" "members step names the multi-select key"
 live_require_text "$LIVE_TUI_SESSION" "[x]" 10 "the first member starts selected"
 live_key "$LIVE_TUI_SESSION" Space
@@ -813,17 +828,19 @@ live_key "$LIVE_TUI_SESSION" "h"
 live_require_text "$LIVE_TUI_SESSION" "enter open" 10 "rail focus footer names the open action"
 live_assert_absence "$LIVE_TUI_SESSION" "enter result" "idle rail footer hides work results"
 
-# v5.6 T3: roster Enter opens the surface and focuses the composer in Insert.
-# Rail order is agents then workspaces, so j selects #LiveSite.
+# v5.7 T2: roster Enter opens/focuses the target but keeps the mode; chat
+# Enter focuses the composer target without entering Insert. `i` stays the
+# explicit Insert entry. Rail order is agents then workspaces, so j selects
+# #LiveSite.
 live_require_text "$LIVE_TUI_SESSION" "NORMAL · Roster" 10 "roster uses Normal grammar"
 live_key "$LIVE_TUI_SESSION" "j"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER · Group chat" 15 "roster Enter focuses the composer in Insert"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 15 "roster Enter opens the target and keeps Normal"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "chat Enter focuses the composer and keeps Normal"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "composer Normal after one Esc"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "second Esc returns to the transcript"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "Esc returns to the transcript"
 # Space opens the which-key leader; the retired tilde prefix is gone.
 live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER · which-key" 10 "Space opens the which-key leader"
@@ -912,7 +929,9 @@ NBSP=$'\u00a0'
 live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings"
 live_key "$LIVE_TUI_SESSION" "e"
-live_require_text "$LIVE_TUI_SESSION" "Name · INSERT" 10 "e opens the Name field in Insert"
+live_require_text "$LIVE_TUI_SESSION" "Name · NORMAL" 10 "e opens the Name field in the current Normal mode"
+live_key "$LIVE_TUI_SESSION" "A"
+live_require_text "$LIVE_TUI_SESSION" "Name · INSERT" 10 "A enters Insert at the line end in the settings field"
 live_require_text "$LIVE_TUI_SESSION" "INSERT · Settings" 10 "the statusline names the field mode and context"
 live_assert_text "$LIVE_TUI_SESSION" "enter done · esc field normal" "the field teaches its first Esc"
 live_type "$LIVE_TUI_SESSION" "X"
@@ -946,7 +965,8 @@ live_require_text "$LIVE_TUI_SESSION" "No memories yet. a adds one." 10 "memorie
 live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "memories count renders at zero"
 live_assert_text "$LIVE_TUI_SESSION" "a add · s save" "memories teaches the add row before any row exists"
 live_key "$LIVE_TUI_SESSION" "a"
-live_require_text "$LIVE_TUI_SESSION" "New memory · INSERT" 10 "a opens a new memory field"
+live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "a opens a new memory field in Normal"
+live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "fake-live-memory"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "new-memory field Normal"
@@ -960,9 +980,7 @@ live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "memory
 # Esc -> field Normal, $ -> end, i -> Insert, append. One row keeps its origin
 # and history (no delete/re-add).
 live_key "$LIVE_TUI_SESSION" "e"
-live_require_text "$LIVE_TUI_SESSION" "Edit memory · INSERT" 10 "e opens the selected memory field"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "memory field Normal"
+live_require_text "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "e opens the selected memory field in Normal"
 # p in a field is Vim paste, never the row promote action; undo any clipboard
 # content so the append below starts from the saved text.
 live_key "$LIVE_TUI_SESSION" "p"
@@ -986,7 +1004,8 @@ live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count unchanged after edit"
 # x deletes the selected memory row without a dialog. Add a scratch row so the
 # original fact survives for the later tabs.
 live_key "$LIVE_TUI_SESSION" "a"
-live_require_text "$LIVE_TUI_SESSION" "New memory · INSERT" 10 "second memory field opens"
+live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "second memory field opens in Normal"
+live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "scratch-memory"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "second memory field Normal"

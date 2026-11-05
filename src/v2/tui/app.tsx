@@ -45,7 +45,9 @@ import {
 import { filterEdit, singleChoiceValue } from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import {
+  caretStyleForMode,
   initialInteractionState,
+  insertWithoutTarget,
   interactionReducer,
   visibleMessage,
   type InteractionEvent,
@@ -327,6 +329,26 @@ export function EnsembleV2App() {
   let settingsReturnFocus: InteractionFocus = "chat"
   let messageTimer: ReturnType<typeof setTimeout> | undefined
 
+  // v5.7 T2: every text editor paints the same mode-driven caret. A block in
+  // Normal shows the character Vim acts on; a line in Insert/Visual/Command
+  // shows the insertion point. The editor stays focused across Insert ->
+  // Normal, so the shape change is always visible.
+  const applyEditorCaret = (ref: any) => {
+    if (!ref) return
+    try { ref.cursorStyle = caretStyleForMode(interaction().mode) } catch {}
+  }
+  const syncEditorCarets = () => {
+    applyEditorCaret(composerRef)
+    applyEditorCaret(settingsFieldRef)
+    applyEditorCaret(textPromptRef)
+    applyEditorCaret(wizardRef)
+  }
+  createEffect(() => {
+    // Track the mode: caret shape must change on every explicit transition.
+    caretStyleForMode(interaction().mode)
+    syncEditorCarets()
+  })
+
   // Focus/mode compatibility accessors: existing call sites keep reading
   // `focusArea()` and `composerActive()` while the reducer owns the values.
   const focusArea = (): FocusArea => (interaction().focus === "rail" ? "rail" : "chat")
@@ -338,9 +360,8 @@ export function EnsembleV2App() {
     setInteraction(result.state)
     for (const intent of result.intents) {
       if (intent.type === "focus-editor") {
-        const target = intent.target
-        const field = result.state.field
-        if (field === "settings") focusWhenReady(() => settingsFieldRef)
+        const target = intent.target ?? result.state.field ?? "composer"
+        if (target === "settings") focusWhenReady(() => settingsFieldRef)
         else if (target === "prompt") focusWhenReady(() => textPromptRef)
         else if (target === "wizard") focusWhenReady(() => wizardRef)
         else focusWhenReady(() => composerRef)
@@ -1291,9 +1312,22 @@ export function EnsembleV2App() {
     return true
   }
 
-  /** Roster Enter opens the surface and focuses the composer in Insert. */
-  const openRailAndCompose = async () => {
-    if (await enterRail()) startCompose()
+  /** Roster Enter opens the target and focuses chat without changing mode. */
+  const openRailSelection = async () => {
+    await enterRail()
+  }
+  /**
+   * Chat Enter focuses the composer target but keeps the current mode. `i`
+   * remains the explicit Insert entry.
+   */
+  const focusComposerKeepingMode = () => {
+    if (!surface()) {
+      context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" })
+      return
+    }
+    composerCache.buffer?.invalidate()
+    dispatchInteraction({ type: "focus.set", focus: "composer" })
+    focusComposer()
   }
 
   const listPage = () => Math.max(1, Math.floor(messageHeight() / 2))
@@ -1620,7 +1654,9 @@ export function EnsembleV2App() {
       composerRef.height = computeComposerHeight("", Math.max(12, messageWidth() - 6))
     }
     try { composerRef?.blur?.() } catch {}
-    dispatchInteraction({ type: "leave.editor" })
+    // Running a slash command consumes the editor but is not a mode command:
+    // focus returns to chat and the current mode persists.
+    if (composerActive()) dispatchInteraction({ type: "focus.set", focus: "chat" })
   }
 
   const agentItems = () => activeAgents().map((agent) => ({ title: `${agent.name}${activeWorkspace()?.leaderID === agent.id ? " · leader" : ""}`, value: agent.name }))
@@ -1897,7 +1933,7 @@ export function EnsembleV2App() {
     }
     if (ctrl && name === "g") {
       prevent()
-      finishSettingsField()
+      finishSettingsField({ leaveEditor: true })
       return true
     }
     if (name === "return" || name === "enter" || name === "kpenter") {
@@ -1917,8 +1953,7 @@ export function EnsembleV2App() {
       .then((outcome) =>
         applyVimOutcome(outcome, {
           insert: () => {
-            dispatchInteraction({ type: "settings.field.open" })
-            focusWhenReady(() => settingsFieldRef)
+            dispatchInteraction({ type: "insert.enter", target: "settings" })
           },
           cursor: syncSettingsFieldFromEditor,
         }),
@@ -2188,7 +2223,7 @@ export function EnsembleV2App() {
     await run("Edit memory", async () => { await invoke(context, "memory.update", { id: field.memoryID!, text }) })
   }
 
-  const finishSettingsField = () => {
+  const finishSettingsField = (options: { leaveEditor?: boolean } = {}) => {
     const field = settingsField()
     if (!field) return
     const raw = String(settingsFieldRef?.plainText ?? field.value)
@@ -2196,7 +2231,9 @@ export function EnsembleV2App() {
     settingsVim = null
     settingsVimRef = null
     syncVimChord(null)
-    dispatchInteraction({ type: "settings.field.close" })
+    // Ctrl+G leaves the editor and always sets Normal; finishing a field by
+    // Enter or field-Normal Esc is a focus move and keeps the current mode.
+    dispatchInteraction({ type: options.leaveEditor ? "leave.editor" : "settings.field.close" })
     setSettingsField(null)
     setSettingsFieldText("")
     setSettingsFieldCursor(0)
@@ -2386,7 +2423,7 @@ export function EnsembleV2App() {
     "nav.right": () => setFocusArea("chat"),
     "focus.tab": () => cycleFocusZone(1),
     "focus.shift.tab": () => cycleFocusZone(-1),
-    open: () => openRailAndCompose(),
+    open: () => openRailSelection(),
     "new.agent": () => createAgent(),
     "new.workspace": () => createWorkspace(),
     edit: () => editRailSelection(),
@@ -2407,7 +2444,7 @@ export function EnsembleV2App() {
     "chat.half.up": () => scrollTranscriptHalf(-1),
     "chat.nav.left": () => setFocusArea("rail"),
     "chat.nav.right": () => setFocusArea("chat"),
-    compose: () => startCompose(),
+    compose: () => focusComposerKeepingMode(),
     "compose.alt": () => startCompose(),
     "chat.new.agent": () => createAgent(),
     "chat.new.workspace": () => createWorkspace(),
@@ -2529,6 +2566,26 @@ export function EnsembleV2App() {
       // consume a key before the native prompt sees it.
       if (!ownsRawKeys()) return
       if (interaction().command) { handleCommandKey(event); return }
+      // v5.7 T2: Insert without a text target is honest but inert for text.
+      // Enter, Esc, Tab/Shift+Tab, and Ctrl+G stay structural; every other
+      // key is swallowed so a letter can never fire a Normal action.
+      if (insertWithoutTarget(interaction())) {
+        const token = normalizeKeyToken(event)
+        if (token === "escape") {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          dispatchInteraction({ type: "escape" })
+          return
+        }
+        if (token === "ctrl+g") {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          dispatchInteraction({ type: "leave.editor" })
+          return
+        }
+        if (token !== "enter" && token !== "tab" && token !== "shift+tab") {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          return
+        }
+      }
       // v5.6 T10: the help overlay owns every key while open. Its grammar is
       // local to the overlay and never changes interaction mode or focus.
       if (helpOpen()) { handleHelpKey(event); return }
@@ -2838,6 +2895,8 @@ export function EnsembleV2App() {
     if (!state) return
     setTextPrompt(null)
     setModal(false)
+    // The prompt's field target ends with the prompt; the mode persists.
+    dispatchInteraction({ type: "field.leave" })
     state.resolve(value)
     clearPendingChord()
   }
@@ -3217,6 +3276,8 @@ export function EnsembleV2App() {
     setWizard(null)
     setModal(false)
     clearPendingChord()
+    // Closing the wizard drops its field target without changing the mode.
+    dispatchInteraction({ type: "field.leave" })
     state.resolve(value)
   }
 
@@ -3254,8 +3315,9 @@ export function EnsembleV2App() {
       : state.steps[state.index]
 
   /**
-   * Text steps own an editor: entering one starts Insert, every list step
-   * stays in Normal. The shared Vim adapter owns motions inside the field.
+   * Text steps focus an editor; list steps have no text target. Arrival
+   * keeps the current mode: Insert stays Insert, Normal stays Normal, and a
+   * list step honestly reports Insert without a target.
    */
   const syncWizardMode = (state: WizardState) => {
     const step = wizardStepFor(state)
@@ -3531,7 +3593,8 @@ export function EnsembleV2App() {
     }
   }
 
-  const fieldEnter = (surface: "wizard" | "prompt") => dispatchInteraction({ type: "field.enter", target: surface })
+  const fieldEnter = (surface: "wizard" | "prompt") =>
+    dispatchInteraction({ type: "insert.enter", target: surface })
 
   const fieldInsertContext = (surface: "wizard" | "prompt"): KeyContext =>
     surface === "wizard" ? "wizardField" : "promptField"
@@ -3545,7 +3608,9 @@ export function EnsembleV2App() {
     const vim = surface === "wizard" ? wizardVimBuffer() : promptVimBuffer()
     if (entry?.id === `${context}.escape`) {
       event?.preventDefault?.(); event?.stopPropagation?.()
-      if (dialogEscape({ surface, field: true }) === "field-normal") dispatchInteraction({ type: "field.leave" })
+      // Insert -> field Normal. The field stays focused; the raw handler owns
+      // keys in Normal and the caret changes to a block.
+      if (dialogEscape({ surface, field: true }) === "field-normal") dispatchInteraction({ type: "editor.normal" })
       vim?.invalidate()
       vim?.normalizeCursor()
       return true
@@ -3679,7 +3744,7 @@ export function EnsembleV2App() {
   }
 
   const statusSurface = (): StatuslineSurface => surface()?.kind ?? "none"
-  const statusContext = () => contextLabel({ focus: interaction().focus, overlay: interaction().overlay, surface: statusSurface() })
+  const statusContext = () => insertWithoutTarget(interaction()) ? "no text target" : contextLabel({ focus: interaction().focus, overlay: interaction().overlay, surface: statusSurface() })
   const statusPosition = () => {
     if (settingsField()) return composerPosition(settingsFieldText(), settingsFieldCursor())
     if (composerActive()) return composerPosition(composerDraft(), composerCursor())
@@ -3747,6 +3812,7 @@ export function EnsembleV2App() {
       }
       return hints
     }
+    if (insertWithoutTarget(interaction())) return "Esc normal"
     if (interaction().mode === "visual") return visualHint
     if (wizard()) return wizardHint()
     if (picker() || textPrompt() || confirm() || result()) return dialogHint()
@@ -3995,7 +4061,7 @@ export function EnsembleV2App() {
                         </box>
                       </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{composerActive() && interaction().mode === "visual" ? `COMPOSER · ${interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL"} · ${composerInlineHint()}` : composerActive() ? `COMPOSER · ${interaction().mode === "normal" ? "NORMAL · " : ""}${composerInlineHint()}` : composerInlineHint()}</text>
                     </>
@@ -4014,7 +4080,7 @@ export function EnsembleV2App() {
                 />
               </Show>
             }>
-              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value) }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
             </Show>
           </box>
         </box>
@@ -4034,7 +4100,7 @@ export function EnsembleV2App() {
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{textPrompt()!.title}</text>
             <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{textPrompt()!.description}</text>
             <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-              <textarea ref={(value: any) => { textPromptRef = value; if (value) focusWhenReady(() => value) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+              <textarea ref={(value: any) => { textPromptRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={textPrompt()!.value} placeholder={textPrompt()!.placeholder} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => finishTextPrompt(String(textPromptRef?.plainText ?? ""))} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
             </box>
             <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{interaction().mode === "visual" ? visualHint : statuslineHints(dialogKeyContext({ surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }))}</text>
             </box>
@@ -4098,7 +4164,7 @@ export function EnsembleV2App() {
           }>
             <Show when={wizardStepKey()} keyed>
               <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                <textarea ref={(value: any) => { wizardRef = value; if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
               </box>
             </Show>
           </Show>
@@ -4135,15 +4201,15 @@ export function EnsembleV2App() {
             mode: interactionMode(),
             visualKind: interaction().selection?.kind,
             context: statusContext(),
-            git: gitState(),
-            position: statusPosition(),
-            selectionSize: statusSelectionSize(),
-            pendingChord: interaction().pendingChord,
+            git: insertWithoutTarget(interaction()) ? undefined : gitState(),
+            position: insertWithoutTarget(interaction()) ? undefined : statusPosition(),
+            selectionSize: insertWithoutTarget(interaction()) ? undefined : statusSelectionSize(),
+            pendingChord: insertWithoutTarget(interaction()) ? undefined : interaction().pendingChord,
             hints: statusHints(),
           })}
         </text>
         <text fg={interaction().message?.tone === "error" ? colors.bad : interaction().message?.tone === "success" ? colors.good : colors.faint} bg={colors.bg} width="100%" truncate>
-          {statuslineRow2({ command: helpFiltering() ? { kind: "/", text: helpQuery() } : interaction().command, message: statusMessage() })}
+          {statuslineRow2({ command: helpFiltering() ? { kind: "/", text: helpQuery(), returnMode: "normal" } : interaction().command, message: statusMessage() })}
         </text>
       </box>
     </box>

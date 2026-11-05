@@ -88,10 +88,10 @@ test("row one names the Visual kind and the selection size", () => {
 })
 
 test("row two renders command input, else a transient message, else a reserved blank", () => {
-  assert.equal(statuslineRow2({ command: { kind: ":", text: "" } }), ":", "an empty command line stays visible")
-  assert.equal(statuslineRow2({ command: { kind: ":", text: "settings" } }), ":settings")
-  assert.equal(statuslineRow2({ command: { kind: "/", text: "" } }), "/", "an empty search line stays visible")
-  assert.equal(statuslineRow2({ command: { kind: "/", text: "agent" } }), "/agent")
+  assert.equal(statuslineRow2({ command: { kind: ":", text: "", returnMode: "normal" } }), ":", "an empty command line stays visible")
+  assert.equal(statuslineRow2({ command: { kind: ":", text: "settings", returnMode: "normal" } }), ":settings")
+  assert.equal(statuslineRow2({ command: { kind: "/", text: "", returnMode: "normal" } }), "/", "an empty search line stays visible")
+  assert.equal(statuslineRow2({ command: { kind: "/", text: "agent", returnMode: "normal" } }), "/agent")
   assert.equal(statuslineRow2({ message: "Message sent" }), "Message sent")
   assert.equal(statuslineRow2({}), " ")
   assert.equal(statuslineRow2({ command: null, message: "" }), " ", "an empty message keeps the reserved row")
