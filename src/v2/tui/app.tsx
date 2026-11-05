@@ -62,7 +62,8 @@ import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
 import { createVimRegisterStore, normalizeVimKey, visualSelectionSize, type VimBuffer, type VimOutcome } from "./vim.ts"
 import { dialogEscape, dialogFilterEdit, dialogKeyContext } from "./dialogs.ts"
 import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, type StatuslineSurface } from "./statusline.ts"
-import { layerEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
+import { layerEntries, globalEntries, leaderEntries, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
+import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
 import { createCommandHistory, recallHistory, rememberHistory, startHistory, type CommandHistory } from "./history.ts"
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
@@ -263,6 +264,12 @@ export function EnsembleV2App() {
   const [dirty, setDirty] = createSignal(false)
   const [leaderMode, setLeaderMode] = createSignal(false)
   const [helpOpen, setHelpOpen] = createSignal(false)
+  // Help owns a local filter so its keys never touch interaction mode/focus.
+  const [helpFiltering, setHelpFiltering] = createSignal(false)
+  const [helpQuery, setHelpQuery] = createSignal("")
+  const [helpMatch, setHelpMatch] = createSignal(0)
+  const helpCatalogSections = helpSections()
+  let helpPendingG = false
   const [approvalsOpen, setApprovalsOpen] = createSignal(false)
   const [status, setStatus] = createSignal("Loading workspace…")
   const [gitState, setGitState] = createSignal<GitState | null>(null)
@@ -2418,6 +2425,9 @@ export function EnsembleV2App() {
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
       if (interaction().command) { handleCommandKey(event); return }
+      // v5.6 T10: the help overlay owns every key while open. Its grammar is
+      // local to the overlay and never changes interaction mode or focus.
+      if (helpOpen()) { handleHelpKey(event); return }
       // v5.6 T6: one catalog-driven handler owns wizards, pickers, prompts,
       // confirms, results, and the approval inbox. It traps every key while a
       // dialog is open so `:`/Space never leak to the surface underneath.
@@ -2451,6 +2461,16 @@ export function EnsembleV2App() {
         const kind = typed === "/" || pressed === "/" ? "/" : ":"
         if (openCommandLine(kind)) {
           event?.preventDefault?.(); event?.stopPropagation?.()
+          return
+        }
+      }
+      // v5.6 T10: `?` opens the full help from any Normal surface. The key
+      // is the catalog's global binding, so help cannot invent it.
+      if (!leaderMode() && !composerActive() && !isModal() && interaction().overlay === "none") {
+        const globalHelp = globalEntries().find((entry) => entry.id === "global.help")
+        if (globalHelp && normalizeKeyToken(event) === globalHelp.keys[0]) {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          openHelp()
           return
         }
       }
@@ -2605,18 +2625,21 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
     }))
-    // v5.6 T6: the wizard/dialog catalog owns its keys through the raw
-    // listener above; only the settings and help surfaces keep layers here.
+    // v5.6 T10: the raw listener owns help navigation, but the host may
+    // consume a lone Escape before it reaches that listener. Keep a thin
+    // generated layer for the close/page keys so help always closes.
     platformLayer(() => ({
-      mode: "global", priority: 110,
-      enabled: () => isOurRoute() && !modal() && helpOpen() && !leaderMode() && !commandActive() && wizard() === null,
+      mode: "global", priority: 115,
+      enabled: () => isOurRoute() && helpOpen() && !leaderMode() && !commandActive() && wizard() === null,
       commands: [
-        { id: "ensemble.v2.help.up", title: "Ensemble: Help page up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); helpScrollRef?.scrollBy?.(-10) } },
-        { id: "ensemble.v2.help.down", title: "Ensemble: Help page down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); helpScrollRef?.scrollBy?.(10) } },
-        { id: "ensemble.v2.help.back", title: "Ensemble: Close help", bind: "escape", run: () => setHelpOpen(false) },
+        { id: "ensemble.v2.help.close", title: "Ensemble: Close help", bind: "escape", run: () => closeHelp() },
+        { id: "ensemble.v2.help.up", title: "Ensemble: Help page up", bind: "pageup", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); scrollHelpBy(-10) } },
+        { id: "ensemble.v2.help.down", title: "Ensemble: Help page down", bind: "pagedown", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); scrollHelpBy(10) } },
       ],
-      bindings: ["ensemble.v2.help.up", "ensemble.v2.help.down", "ensemble.v2.help.back"],
+      bindings: ["ensemble.v2.help.close", "ensemble.v2.help.up", "ensemble.v2.help.down"],
     }))
+    // v5.6 T6: the wizard/dialog catalog owns its keys through the raw
+    // listener above; the help overlay owns its grammar there too (T10).
     return () => { clearInterval(timer); keyInput.off("keypress", onKey); context.renderer.off("selection", onSelection); stopData() }
   })
 
@@ -2813,9 +2836,86 @@ export function EnsembleV2App() {
     dispatchInteraction({ type: "overlay.set", overlay: "approvals" })
   }
 
+  // v5.6 T10: help navigation is local to the overlay. It never dispatches
+  // focus or mode changes; opening/closing only sets the overlay, so the
+  // underlying mode/focus is exactly where it was.
+  const helpVisibleSections = () => filterHelpSections(helpCatalogSections, helpQuery())
+  const helpMatchEntries = () => helpVisibleSections().flatMap((section) =>
+    section.entries.map((entry) => ({ section, entry })),
+  )
+  const helpMatchKey = () => {
+    if (!helpQuery() && !helpFiltering()) return null
+    const current = helpMatchEntries()[helpMatch()]
+    return current ? helpEntryKey(current.section, current.entry) : null
+  }
+  const scrollHelpBy = (delta: number) => {
+    try { helpScrollRef?.scrollBy?.(delta) } catch {}
+  }
+  const scrollHelpTo = (position: number) => {
+    try { helpScrollRef?.scrollTo?.(position) } catch {}
+  }
+  const resetHelpFilter = () => {
+    setHelpFiltering(false)
+    setHelpQuery("")
+    setHelpMatch(0)
+    helpPendingG = false
+  }
+  const moveHelpMatch = (direction: 1 | -1) => {
+    const matches = helpMatchEntries()
+    if (matches.length === 0) return
+    const next = helpMatchAfter(matches.length, helpMatch(), direction)
+    setHelpMatch(next)
+    const target = matches[next]
+    if (target) queueMicrotask(() => {
+      try { helpScrollRef?.scrollChildIntoView?.(`help-${helpEntryKey(target.section, target.entry)}`) } catch {}
+    })
+  }
+  const handleHelpKey = (event: any): void => {
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    const token = normalizeKeyToken(event)
+    if (helpFiltering()) {
+      if (token === "escape") { resetHelpFilter(); return }
+      if (token === "enter") { setHelpFiltering(false); return }
+      if (token === "backspace") { setHelpQuery((query) => query.slice(0, -1)); setHelpMatch(0); return }
+      const sequence = String(event?.sequence ?? "")
+      if (sequence.length === 1 && sequence >= " " && !event?.ctrl && !event?.meta && !event?.super) {
+        setHelpQuery((query) => `${query}${sequence}`)
+        setHelpMatch(0)
+      }
+      return
+    }
+    if (token !== "g") helpPendingG = false
+    if (token === "escape") {
+      closeHelp()
+      return
+    }
+    if (token === "/") { setHelpFiltering(true); setHelpQuery(""); setHelpMatch(0); return }
+    if (token === "n") { moveHelpMatch(1); return }
+    if (token === "shift+n") { moveHelpMatch(-1); return }
+    if (token === "j") { scrollHelpBy(1); return }
+    if (token === "k") { scrollHelpBy(-1); return }
+    if (token === "ctrl+d") { scrollHelpBy(10); return }
+    if (token === "ctrl+u") { scrollHelpBy(-10); return }
+    if (token === "pageup") { scrollHelpBy(-10); return }
+    if (token === "pagedown") { scrollHelpBy(10); return }
+    if (token === "g") {
+      if (helpPendingG) { helpPendingG = false; scrollHelpTo(0) }
+      else helpPendingG = true
+      return
+    }
+    if (token === "shift+g") { scrollHelpTo(1_000_000); return }
+  }
   const openHelp = () => {
+    clearPendingChord()
+    resetHelpFilter()
     setHelpOpen(true)
     dispatchInteraction({ type: "overlay.set", overlay: "help" })
+  }
+  const closeHelp = () => {
+    setHelpOpen(false)
+    resetHelpFilter()
+    dispatchInteraction({ type: "overlay.set", overlay: "none" })
   }
 
   /**
@@ -2833,7 +2933,7 @@ export function EnsembleV2App() {
     }
     if (overlay === "wizard") { wizardCancel(); return }
     if (overlay === "approvals") { setApprovalsOpen(false); return }
-    if (overlay === "help") { setHelpOpen(false); return }
+    if (overlay === "help") { closeHelp(); return }
     if (overlay === "settings") void closeSettings()
   }
 
@@ -3543,7 +3643,12 @@ export function EnsembleV2App() {
         : `h/j/k/l move · i/a insert · x/d edit · yy/p yank · esc settings`
     }
     if (settingsAgentID()) return statuslineHints("settings", { filter: settingsEntryEnabled })
-    if (interaction().overlay === "help") return "esc close"
+    if (interaction().overlay === "help") {
+      if (helpFiltering()) return statuslineHints("filter")
+      const matches = helpMatchEntries().length
+      if (helpQuery()) return `match ${matches > 0 ? Math.min(matches, helpMatch() + 1) : 0}/${matches} · n/N move · esc close`
+      return statuslineHints("help")
+    }
     if (composerActive()) {
       return interaction().mode === "insert"
         ? footerLine1({ focus: "composer", hasWork: showWorkBlock() ?? false })
@@ -3755,7 +3860,14 @@ export function EnsembleV2App() {
                   <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} resolvingID={resolvingApprovalID()} state={state()} onResolve={resolveApproval} />
                 </Show>
               }>
-                <HelpView colors={colors} scrollRef={(value: any) => { helpScrollRef = value }} />
+                <HelpView
+                  colors={colors}
+                  sections={helpVisibleSections()}
+                  query={helpQuery()}
+                  filtering={helpFiltering()}
+                  matchKey={helpMatchKey()}
+                  scrollRef={(value: any) => { helpScrollRef = value }}
+                />
               </Show>
             }>
               <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
@@ -3887,7 +3999,7 @@ export function EnsembleV2App() {
           })}
         </text>
         <text fg={interaction().message?.tone === "error" ? colors.bad : interaction().message?.tone === "success" ? colors.good : colors.faint} bg={colors.bg} width="100%" truncate>
-          {statuslineRow2({ command: interaction().command, message: statusMessage() })}
+          {statuslineRow2({ command: helpFiltering() ? { kind: "/", text: helpQuery() } : interaction().command, message: statusMessage() })}
         </text>
       </box>
     </box>

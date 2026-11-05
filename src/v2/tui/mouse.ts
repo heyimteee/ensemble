@@ -18,6 +18,25 @@ export const MOUSE_PANE_IDS = {
   dialog: "ensemble-pane-dialog",
 } as const
 
+/**
+ * Mouse gestures are catalogued next to keyboard bindings so help cannot
+ * invent or omit one. OpenTUI owns the actual gesture; this table is the
+ * single description the help and tests share.
+ */
+export type MouseGestureSpec = {
+  id: string
+  gesture: string
+  title: string
+}
+
+export const MOUSE_GESTURES: readonly MouseGestureSpec[] = [
+  { id: "mouse.wheel", gesture: "Wheel", title: "Scroll the scrollable pane under the pointer" },
+  { id: "mouse.drag", gesture: "Drag", title: "Select text in the pane where the drag starts" },
+  { id: "mouse.release", gesture: "Release", title: "Copy the selection to the system clipboard and show a toast" },
+  { id: "mouse.double", gesture: "Double-click", title: "Select a word" },
+  { id: "mouse.triple", gesture: "Triple-click", title: "Select a line" },
+]
+
 const PANE_ID_PREFIX = "ensemble-pane-"
 
 export type MousePane = string | null

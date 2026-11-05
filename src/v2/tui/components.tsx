@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from "solid-js"
+import { For, Show } from "solid-js"
 import { TextAttributes } from "@opentui/core"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import { approvalSource } from "../types.ts"
@@ -33,8 +33,7 @@ import {
   pickerEmptyLine,
   railEmptyLine,
 } from "./chrome.ts"
-import { platformLabel } from "./platform.ts"
-import { helpGroups, helpKeyLabel, shortcutGroups } from "./help.ts"
+import { helpEntryKey, type HelpEntry, type HelpSection } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
 import { MOUSE_PANE_IDS } from "./mouse.ts"
 
@@ -167,32 +166,55 @@ export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cu
   )
 }
 
-function HelpEntries(props: { colors: Palette; groups: Array<{ title: string; entries: Array<[string, string]> }> }) {
+function helpRowText(entry: HelpEntry, selected: boolean): string {
+  const prefix = selected ? "› " : "  "
+  if (!entry.keys) return `${prefix}${entry.title}`
+  return `${prefix}${entry.keys.padEnd(18)} ${entry.title}`
+}
+
+function HelpEntries(props: { colors: Palette; sections: readonly HelpSection[]; matchKey?: string | null }) {
   return (
     <box flexDirection="column">
-      <For each={props.groups}>{(group) => (
+      <For each={props.sections}>{(section) => (
         <>
-          <text fg={props.colors.muted}>{group.title}</text>
-          <For each={group.entries}>{(entry) => <text fg={props.colors.text}>{helpKeyLabel(entry[0]).padEnd(16)} {platformLabel(entry[1])}</text>}</For>
+          <text fg={props.colors.muted}>{section.title}</text>
+          <For each={section.entries}>{(entry) => {
+            const selected = () => props.matchKey === helpEntryKey(section, entry)
+            return (
+              <text id={`help-${helpEntryKey(section, entry)}`} fg={selected() ? props.colors.accent : props.colors.text}>
+                {helpRowText(entry, selected())}
+              </text>
+            )
+          }}</For>
         </>
       )}</For>
-      <Show when={props.groups.length === 0}><text fg={props.colors.muted}>{helpEmptyLine()}</text></Show>
-      <text fg={props.colors.muted}>Space opens the leader; Esc goes up one level and never quits.</text>
+      <Show when={props.sections.length === 0}><text fg={props.colors.muted}>{helpEmptyLine()}</text></Show>
     </box>
   )
 }
 
-export function HelpView(props: { colors: Palette; scrollRef?: (value: any) => void }) {
-  const [query, setQuery] = createSignal("")
+export function HelpView(props: {
+  colors: Palette
+  sections: readonly HelpSection[]
+  query: string
+  filtering: boolean
+  matchKey?: string | null
+  scrollRef?: (value: any) => void
+}) {
+  const hasMatches = () => props.sections.some((section) => section.entries.length > 0)
   return (
     <box flexGrow={1} flexDirection="column" minHeight={0}>
       <text fg={props.colors.text} flexShrink={0}>Keyboard shortcuts</text>
-      <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
-        <input ref={(value: any) => queueMicrotask(() => value?.focus?.())} placeholder="search shortcuts by key or action…" onInput={(value: string) => setQuery(value)} />
-      </box>
+      <text fg={props.filtering ? props.colors.focus : props.colors.muted} flexShrink={0} width="100%" truncate>
+        {props.filtering
+          ? `/${props.query}`
+          : props.query
+            ? `/ ${props.query} · n/N match · esc close`
+            : "? help · / filter · n/N match · j/k scroll · ctrl+d/u · gg/G · esc close"}
+      </text>
       <scrollbox ref={(value: any) => props.scrollRef?.(value)} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
-        <Show when={query()} keyed fallback={<HelpEntries colors={props.colors} groups={shortcutGroups} />}>
-          <HelpEntries colors={props.colors} groups={helpGroups(query())} />
+        <Show when={hasMatches()} fallback={<text fg={props.colors.muted}>{helpEmptyLine()}</text>}>
+          <HelpEntries colors={props.colors} sections={props.sections} matchKey={props.matchKey} />
         </Show>
       </scrollbox>
     </box>

@@ -497,15 +497,30 @@ live_platform_modifier() {
 live_check_help() {
   local modifier
   modifier=$(live_platform_modifier)
+  live_key "$LIVE_TUI_SESSION" '?'
+  live_require_text "$LIVE_TUI_SESSION" "Keyboard shortcuts" 15 "? opens help from Normal"
+  live_key "$LIVE_TUI_SESSION" G
+  live_require_text "$LIVE_TUI_SESSION" "Native-session scope" 10 "G reaches the end of help"
+  live_key "$LIVE_TUI_SESSION" g
+  live_key "$LIVE_TUI_SESSION" g
+  live_require_text "$LIVE_TUI_SESSION" "Modes and Esc ladder" 10 "gg returns to the top of help"
+  live_key "$LIVE_TUI_SESSION" Escape
+  live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed from Normal"
   live_key "$LIVE_TUI_SESSION" Space
   live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode"
   live_key "$LIVE_TUI_SESSION" '?'
   live_require_text "$LIVE_TUI_SESSION" "Keyboard shortcuts" 15 "searchable shortcut help"
+  live_require_text "$LIVE_TUI_SESSION" "Modes and Esc ladder" 10 "help is sectioned"
   live_require_text "$LIVE_TUI_SESSION" "${modifier}+Shift+W" 10 "platform delete-workspace shortcut"
   live_assert_text "$LIVE_TUI_SESSION" "${modifier}+W" "platform archive-workspace shortcut"
+  live_key "$LIVE_TUI_SESSION" "/"
   live_type "$LIVE_TUI_SESSION" "delete workspace"
   live_require_text "$LIVE_TUI_SESSION" "${modifier}+Shift+W" 10 "filtered shortcut help"
-  live_require_absence "$LIVE_TUI_SESSION" "Leader key" 10 "help filter hid unrelated shortcuts"
+  live_require_absence "$LIVE_TUI_SESSION" "Scroll transcript down" 10 "help filter hid unrelated shortcuts"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "match 1/3" 10 "filtered help names the first match"
+  live_key "$LIVE_TUI_SESSION" n
+  live_require_text "$LIVE_TUI_SESSION" "match 2/3" 10 "n moves to the next match"
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed"
 }

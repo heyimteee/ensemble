@@ -34,6 +34,20 @@ export type KeyContext =
   | "approvals"
   | "filter"
   | "help"
+  /** Bindings available from any Normal surface, outside every overlay. */
+  | "global"
+  /** The `:`/`/` input row: run, cancel, history, completion, editing. */
+  | "command"
+  /** Committed transcript search: n/N move, Esc clears. */
+  | "search"
+  /** Composer completion popup (Up/Down/Enter/Esc). */
+  | "completion"
+  /** Composer text buffer, Insert mode. */
+  | "composerInsert"
+  /** Composer text buffer, Normal mode: the shared Vim subset. */
+  | "composerNormal"
+  /** Composer text buffer, Visual mode: char or line selection. */
+  | "composerVisual"
 
 /** List surfaces use Normal grammar; the leader is a second scope over them. */
 export type KeyScope = "normal" | "leader"
@@ -54,7 +68,7 @@ export type KeyEntry = {
   requires?: "work" | "multi"
   /** The binding is unavailable while one of these transient modes is active. */
   availability?: "no-transcript-search"
-  /** Hide from which-key/help listings (chords, Esc, and plumbing). */
+  /** Hide from which-key and compact statusline hints; help still lists it. */
   listed?: boolean
   /** Legacy Ctrl binding that keeps the existing macOS Ctrl->Cmd transform. */
   platform?: boolean
@@ -285,7 +299,164 @@ const TEXT_FIELDS: readonly KeyEntry[] = [
   { id: "filter.cancel", scope: "normal", contexts: ["filter"], keys: ["escape"], title: "Clear filter", group: "Search", hint: "esc clear" },
 ]
 
-export const KEYMAP_CATALOG: readonly KeyEntry[] = [...NORMAL, ...LEADER, ...WIZARD, ...DIALOG, ...TEXT_FIELDS]
+/**
+ * Global help and native-return bindings live outside every surface context.
+ * They are catalog entries even though the host plugin owns F2 and the raw
+ * Normal handler owns `?`, so help can never invent a binding.
+ */
+const GLOBAL: readonly KeyEntry[] = [
+  { id: "global.help", scope: "normal", contexts: ["global"], keys: ["?"], title: "Open help", group: "Global", hint: "? help" },
+  { id: "global.native", scope: "normal", contexts: ["global"], keys: ["f2"], title: "Open Ensemble from a native session", group: "Global" },
+]
+
+/** Help overlay grammar: the same dialog grammar used by every other list. */
+const HELP_KEYS: readonly KeyEntry[] = [
+  { id: "help.down", scope: "normal", contexts: ["help"], keys: ["j"], title: "Scroll down", group: "Navigation", hint: "j/k scroll" },
+  { id: "help.up", scope: "normal", contexts: ["help"], keys: ["k"], title: "Scroll up", group: "Navigation" },
+  { id: "help.half.down", scope: "normal", contexts: ["help"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
+  { id: "help.half.up", scope: "normal", contexts: ["help"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
+  { id: "help.top", scope: "normal", contexts: ["help"], keys: ["g", "g"], title: "Top of help", group: "Navigation", hint: "gg/G top/bottom" },
+  { id: "help.bottom", scope: "normal", contexts: ["help"], keys: ["shift+g"], title: "Bottom of help", group: "Navigation" },
+  { id: "help.filter", scope: "normal", contexts: ["help"], keys: ["/"], title: "Filter help", group: "Search", hint: "/ filter" },
+  { id: "help.match.next", scope: "normal", contexts: ["help"], keys: ["n"], title: "Next match", group: "Search", hint: "n/N match" },
+  { id: "help.match.prev", scope: "normal", contexts: ["help"], keys: ["shift+n"], title: "Previous match", group: "Search" },
+  { id: "help.close", scope: "normal", contexts: ["help"], keys: ["escape"], title: "Close help", group: "Navigation", hint: "esc close" },
+]
+
+/** The `:`/`/` row is a text input, but its grammar is catalogued too. */
+const COMMAND_KEYS: readonly KeyEntry[] = [
+  { id: "command.run", scope: "normal", contexts: ["command"], keys: ["enter"], title: "Run command or search", group: "Command", hint: "enter run" },
+  { id: "command.cancel", scope: "normal", contexts: ["command"], keys: ["escape"], title: "Cancel and restore the previous filter", group: "Command", hint: "esc cancel" },
+  { id: "command.history.up", scope: "normal", contexts: ["command"], keys: ["up"], title: "Recall an older entry", group: "History", hint: "↑↓ history" },
+  { id: "command.history.down", scope: "normal", contexts: ["command"], keys: ["down"], title: "Recall a newer entry", group: "History" },
+  { id: "command.complete", scope: "normal", contexts: ["command"], keys: ["tab"], title: "Complete the command name", group: "Command", hint: "tab complete" },
+  { id: "command.backspace", scope: "normal", contexts: ["command"], keys: ["backspace"], title: "Delete the previous character", group: "Editing" },
+]
+
+/** Committed transcript search: n/N cycle matches, Esc clears. */
+const SEARCH_KEYS: readonly KeyEntry[] = [
+  { id: "search.next", scope: "normal", contexts: ["search"], keys: ["n"], title: "Next match", group: "Search", hint: "n next" },
+  { id: "search.prev", scope: "normal", contexts: ["search"], keys: ["shift+n"], title: "Previous match", group: "Search", hint: "N previous" },
+  { id: "search.clear", scope: "normal", contexts: ["search"], keys: ["escape"], title: "Clear the committed search", group: "Search", hint: "esc clear" },
+]
+
+/** Composer completion popup; Up/Down stay literal in the text buffer. */
+const COMPLETION_KEYS: readonly KeyEntry[] = [
+  { id: "completion.previous", scope: "normal", contexts: ["completion"], keys: ["up"], title: "Previous completion", group: "Completion", hint: "↑/↓ select" },
+  { id: "completion.next", scope: "normal", contexts: ["completion"], keys: ["down"], title: "Next completion", group: "Completion" },
+  { id: "completion.accept", scope: "normal", contexts: ["completion"], keys: ["enter"], title: "Accept the completion", group: "Completion", hint: "enter insert" },
+  { id: "completion.close", scope: "normal", contexts: ["completion"], keys: ["escape"], title: "Close the completion popup", group: "Completion", hint: "esc close" },
+]
+
+/**
+ * The shared text-buffer grammar (#85/#86) is catalogued alongside every
+ * list binding: Composer Insert, Normal, and Visual are the same engine used
+ * by settings, wizard, and prompt text fields. The Vim resolver remains the
+ * executor; the catalog is the single help/statusline source of truth.
+ */
+const COMPOSER: readonly KeyEntry[] = [
+  // Insert ----------------------------------------------------------------
+  { id: "composerInsert.enter", scope: "normal", contexts: ["composerInsert"], keys: ["enter"], title: "Send message", group: "Insert", hint: "enter send" },
+  { id: "composerInsert.newline", scope: "normal", contexts: ["composerInsert"], keys: ["shift+enter"], title: "Insert a new line", group: "Insert", hint: "shift+enter newline" },
+  { id: "composerInsert.escape", scope: "normal", contexts: ["composerInsert"], keys: ["escape"], title: "Go to composer Normal", group: "Insert", hint: "esc normal" },
+  { id: "composerInsert.stop", scope: "normal", contexts: ["composerInsert"], keys: ["ctrl+c"], title: "Stop running work", group: "Insert", hint: "ctrl+c stop" },
+  { id: "composerInsert.leave", scope: "normal", contexts: ["composerInsert"], keys: ["ctrl+g"], title: "Leave the composer immediately", group: "Insert", hint: "ctrl+g leave" },
+  { id: "composerInsert.mention", scope: "normal", contexts: ["composerInsert"], keys: ["$"], title: "Open agent mentions", group: "Completion", hint: "$ agent" },
+  { id: "composerInsert.file", scope: "normal", contexts: ["composerInsert"], keys: ["@"], title: "Open file references", group: "Completion", hint: "@ file" },
+  { id: "composerInsert.slash", scope: "normal", contexts: ["composerInsert"], keys: ["/"], title: "Run a slash command", group: "Completion", hint: "/ command" },
+
+  // Normal: motions --------------------------------------------------------
+  { id: "composerNormal.motion.h", scope: "normal", contexts: ["composerNormal"], keys: ["h"], title: "Move left", group: "Motion" },
+  { id: "composerNormal.motion.j", scope: "normal", contexts: ["composerNormal"], keys: ["j"], title: "Move down", group: "Motion" },
+  { id: "composerNormal.motion.k", scope: "normal", contexts: ["composerNormal"], keys: ["k"], title: "Move up", group: "Motion" },
+  { id: "composerNormal.motion.l", scope: "normal", contexts: ["composerNormal"], keys: ["l"], title: "Move right", group: "Motion" },
+  { id: "composerNormal.motion.w", scope: "normal", contexts: ["composerNormal"], keys: ["w"], title: "Next word", group: "Motion" },
+  { id: "composerNormal.motion.b", scope: "normal", contexts: ["composerNormal"], keys: ["b"], title: "Previous word", group: "Motion" },
+  { id: "composerNormal.motion.e", scope: "normal", contexts: ["composerNormal"], keys: ["e"], title: "End of word", group: "Motion" },
+  { id: "composerNormal.motion.0", scope: "normal", contexts: ["composerNormal"], keys: ["0"], title: "Line start", group: "Motion" },
+  { id: "composerNormal.motion.caret", scope: "normal", contexts: ["composerNormal"], keys: ["^"], title: "First non-blank character", group: "Motion" },
+  { id: "composerNormal.motion.lineEnd", scope: "normal", contexts: ["composerNormal"], keys: ["$"], title: "Line end", group: "Motion" },
+  { id: "composerNormal.motion.gg", scope: "normal", contexts: ["composerNormal"], keys: ["g", "g"], title: "Buffer start", group: "Motion" },
+  { id: "composerNormal.motion.G", scope: "normal", contexts: ["composerNormal"], keys: ["shift+g"], title: "Buffer end", group: "Motion" },
+
+  // Normal: insert entries ------------------------------------------------
+  { id: "composerNormal.insert.i", scope: "normal", contexts: ["composerNormal"], keys: ["i"], title: "Insert before the cursor", group: "Insert", hint: "i insert" },
+  { id: "composerNormal.insert.a", scope: "normal", contexts: ["composerNormal"], keys: ["a"], title: "Insert after the cursor", group: "Insert" },
+  { id: "composerNormal.insert.I", scope: "normal", contexts: ["composerNormal"], keys: ["shift+i"], title: "Insert at line start", group: "Insert" },
+  { id: "composerNormal.insert.A", scope: "normal", contexts: ["composerNormal"], keys: ["shift+a"], title: "Insert at line end", group: "Insert" },
+  { id: "composerNormal.insert.o", scope: "normal", contexts: ["composerNormal"], keys: ["o"], title: "Open a line below", group: "Insert" },
+  { id: "composerNormal.insert.O", scope: "normal", contexts: ["composerNormal"], keys: ["shift+o"], title: "Open a line above", group: "Insert" },
+
+  // Normal: edit operators ------------------------------------------------
+  { id: "composerNormal.delete", scope: "normal", contexts: ["composerNormal"], keys: ["d"], title: "Delete operator (then a motion, d, or gg)", group: "Edit", hint: "x/d edit" },
+  { id: "composerNormal.yank", scope: "normal", contexts: ["composerNormal"], keys: ["y"], title: "Yank operator (yy)", group: "Edit" },
+  { id: "composerNormal.prefix.g", scope: "normal", contexts: ["composerNormal"], keys: ["g"], title: "Chord prefix (gg)", group: "Edit" },
+  { id: "composerNormal.x", scope: "normal", contexts: ["composerNormal"], keys: ["x"], title: "Delete the character", group: "Edit" },
+  { id: "composerNormal.dd", scope: "normal", contexts: ["composerNormal"], keys: ["d", "d"], title: "Delete the line", group: "Edit" },
+  { id: "composerNormal.D", scope: "normal", contexts: ["composerNormal"], keys: ["shift+d"], title: "Delete to the line end", group: "Edit" },
+  { id: "composerNormal.dh", scope: "normal", contexts: ["composerNormal"], keys: ["d", "h"], title: "Delete left", group: "Edit" },
+  { id: "composerNormal.dj", scope: "normal", contexts: ["composerNormal"], keys: ["d", "j"], title: "Delete down", group: "Edit" },
+  { id: "composerNormal.dk", scope: "normal", contexts: ["composerNormal"], keys: ["d", "k"], title: "Delete up", group: "Edit" },
+  { id: "composerNormal.dl", scope: "normal", contexts: ["composerNormal"], keys: ["d", "l"], title: "Delete right", group: "Edit" },
+  { id: "composerNormal.dw", scope: "normal", contexts: ["composerNormal"], keys: ["d", "w"], title: "Delete the next word", group: "Edit" },
+  { id: "composerNormal.db", scope: "normal", contexts: ["composerNormal"], keys: ["d", "b"], title: "Delete the previous word", group: "Edit" },
+  { id: "composerNormal.de", scope: "normal", contexts: ["composerNormal"], keys: ["d", "e"], title: "Delete to the word end", group: "Edit" },
+  { id: "composerNormal.d0", scope: "normal", contexts: ["composerNormal"], keys: ["d", "0"], title: "Delete to the line start", group: "Edit" },
+  { id: "composerNormal.d$", scope: "normal", contexts: ["composerNormal"], keys: ["d", "$"], title: "Delete to the line end", group: "Edit" },
+  { id: "composerNormal.dgg", scope: "normal", contexts: ["composerNormal"], keys: ["d", "g", "g"], title: "Delete to the buffer start", group: "Edit" },
+  { id: "composerNormal.dG", scope: "normal", contexts: ["composerNormal"], keys: ["d", "shift+g"], title: "Delete to the buffer end", group: "Edit" },
+  { id: "composerNormal.undo", scope: "normal", contexts: ["composerNormal"], keys: ["u"], title: "Undo", group: "Edit" },
+  { id: "composerNormal.redo", scope: "normal", contexts: ["composerNormal"], keys: ["ctrl+r"], title: "Redo", group: "Edit" },
+
+  // Normal: yank, paste, visual, leave -----------------------------------
+  { id: "composerNormal.yy", scope: "normal", contexts: ["composerNormal"], keys: ["y", "y"], title: "Yank the line", group: "Yank", hint: "yy/p yank" },
+  { id: "composerNormal.paste", scope: "normal", contexts: ["composerNormal"], keys: ["p"], title: "Paste after the cursor", group: "Paste" },
+  { id: "composerNormal.paste.before", scope: "normal", contexts: ["composerNormal"], keys: ["shift+p"], title: "Paste before the cursor", group: "Paste" },
+  { id: "composerNormal.visual", scope: "normal", contexts: ["composerNormal"], keys: ["v"], title: "Start character Visual", group: "Visual" },
+  { id: "composerNormal.visual.line", scope: "normal", contexts: ["composerNormal"], keys: ["shift+v"], title: "Start line Visual", group: "Visual" },
+  { id: "composerNormal.escape", scope: "normal", contexts: ["composerNormal"], keys: ["escape"], title: "Go to chat Normal", group: "Navigation", hint: "esc chat" },
+
+  // Visual: motions extend the selection ---------------------------------
+  { id: "composerVisual.motion.h", scope: "normal", contexts: ["composerVisual"], keys: ["h"], title: "Extend left", group: "Motion" },
+  { id: "composerVisual.motion.j", scope: "normal", contexts: ["composerVisual"], keys: ["j"], title: "Extend down", group: "Motion" },
+  { id: "composerVisual.motion.k", scope: "normal", contexts: ["composerVisual"], keys: ["k"], title: "Extend up", group: "Motion" },
+  { id: "composerVisual.motion.l", scope: "normal", contexts: ["composerVisual"], keys: ["l"], title: "Extend right", group: "Motion" },
+  { id: "composerVisual.motion.w", scope: "normal", contexts: ["composerVisual"], keys: ["w"], title: "Extend to the next word", group: "Motion" },
+  { id: "composerVisual.motion.b", scope: "normal", contexts: ["composerVisual"], keys: ["b"], title: "Extend to the previous word", group: "Motion" },
+  { id: "composerVisual.motion.e", scope: "normal", contexts: ["composerVisual"], keys: ["e"], title: "Extend to the word end", group: "Motion" },
+  { id: "composerVisual.motion.0", scope: "normal", contexts: ["composerVisual"], keys: ["0"], title: "Extend to the line start", group: "Motion" },
+  { id: "composerVisual.motion.caret", scope: "normal", contexts: ["composerVisual"], keys: ["^"], title: "Extend to the first non-blank", group: "Motion" },
+  { id: "composerVisual.motion.lineEnd", scope: "normal", contexts: ["composerVisual"], keys: ["$"], title: "Extend to the line end", group: "Motion" },
+  { id: "composerVisual.motion.gg", scope: "normal", contexts: ["composerVisual"], keys: ["g", "g"], title: "Extend to the buffer start", group: "Motion" },
+  { id: "composerVisual.motion.G", scope: "normal", contexts: ["composerVisual"], keys: ["shift+g"], title: "Extend to the buffer end", group: "Motion" },
+  { id: "composerVisual.prefix.g", scope: "normal", contexts: ["composerVisual"], keys: ["g"], title: "Chord prefix (gg)", group: "Motion" },
+
+  // Visual: selection actions --------------------------------------------
+  { id: "composerVisual.swap", scope: "normal", contexts: ["composerVisual"], keys: ["o"], title: "Swap the selection ends", group: "Selection" },
+  { id: "composerVisual.yank", scope: "normal", contexts: ["composerVisual"], keys: ["y"], title: "Copy the selection", group: "Selection", hint: "y copy" },
+  { id: "composerVisual.delete", scope: "normal", contexts: ["composerVisual"], keys: ["d"], title: "Cut the selection", group: "Selection", hint: "d cut" },
+  { id: "composerVisual.delete.x", scope: "normal", contexts: ["composerVisual"], keys: ["x"], title: "Cut the selection", group: "Selection" },
+  { id: "composerVisual.change", scope: "normal", contexts: ["composerVisual"], keys: ["c"], title: "Cut the selection and insert", group: "Selection", hint: "c change" },
+  { id: "composerVisual.paste", scope: "normal", contexts: ["composerVisual"], keys: ["p"], title: "Replace the selection with the clipboard", group: "Selection", hint: "p paste" },
+  { id: "composerVisual.paste.before", scope: "normal", contexts: ["composerVisual"], keys: ["shift+p"], title: "Replace the selection with the clipboard", group: "Selection" },
+  { id: "composerVisual.leave", scope: "normal", contexts: ["composerVisual"], keys: ["v"], title: "Leave Visual", group: "Navigation", hint: "esc cancel" },
+  { id: "composerVisual.line", scope: "normal", contexts: ["composerVisual"], keys: ["shift+v"], title: "Switch to line selection", group: "Selection" },
+  { id: "composerVisual.escape", scope: "normal", contexts: ["composerVisual"], keys: ["escape"], title: "Leave Visual", group: "Navigation" },
+]
+
+export const KEYMAP_CATALOG: readonly KeyEntry[] = [
+  ...NORMAL,
+  ...LEADER,
+  ...WIZARD,
+  ...DIALOG,
+  ...TEXT_FIELDS,
+  ...GLOBAL,
+  ...HELP_KEYS,
+  ...COMMAND_KEYS,
+  ...SEARCH_KEYS,
+  ...COMPOSER,
+  ...COMPLETION_KEYS,
+]
 
 export type KeyActionResolution = { type: "action"; entry: KeyEntry }
 export type KeyPendingResolution = { type: "pending"; prefix: readonly string[]; entries: readonly KeyEntry[] }
@@ -298,6 +469,11 @@ export function normalEntries(context: KeyContext): readonly KeyEntry[] {
 
 export function leaderEntries(): readonly KeyEntry[] {
   return KEYMAP_CATALOG.filter((entry) => entry.scope === "leader")
+}
+
+/** Global Normal bindings (`?` help, F2 native return). */
+export function globalEntries(): readonly KeyEntry[] {
+  return KEYMAP_CATALOG.filter((entry) => entry.scope === "normal" && entry.contexts.includes("global"))
 }
 
 export function layerEntries(context: KeyContext): readonly KeyEntry[] {
@@ -399,6 +575,9 @@ const NAMED_KEY_LABELS: Record<string, string> = {
   pagedown: "PageDown",
   end: "End",
   home: "Home",
+  delete: "Delete",
+  up: "Up",
+  down: "Down",
   "?": "?",
 }
 
@@ -408,6 +587,16 @@ export function keyLabel(keys: readonly string[]): string {
   return keys.map(labelForKey).join(" ")
 }
 
+/**
+ * Vim-style chord label: single-character tokens join without a space
+ * (`gg`, `dG`, `d$`); named tokens keep their readable spacing.
+ */
+export function keyChordLabel(keys: readonly string[]): string {
+  if (keys.length === 0) return ""
+  const labels = keys.map(labelForKey)
+  return labels.every((label) => label.length === 1) ? labels.join("") : labels.join(" ")
+}
+
 function labelForKey(key: string): string {
   const named = NAMED_KEY_LABELS[key]
   if (named) return named
@@ -415,10 +604,18 @@ function labelForKey(key: string): string {
     const rest = key.slice("shift+".length)
     return /^[a-z]$/.test(rest) ? rest.toUpperCase() : `Shift+${labelForKey(rest)}`
   }
-  if (key.startsWith("ctrl+")) return `Ctrl+${labelForKey(key.slice("ctrl+".length))}`
-  if (key.startsWith("super+")) return `Cmd+${labelForKey(key.slice("super+".length))}`
-  if (key.startsWith("alt+")) return `Alt+${labelForKey(key.slice("alt+".length))}`
-  return key.length === 1 ? key.toUpperCase() : key
+  if (key.startsWith("ctrl+")) return `Ctrl+${modifierLabel(key.slice("ctrl+".length))}`
+  if (key.startsWith("super+")) return `Cmd+${modifierLabel(key.slice("super+".length))}`
+  if (key.startsWith("alt+")) return `Alt+${modifierLabel(key.slice("alt+".length))}`
+  if (/^f\d+$/.test(key)) return key.toUpperCase()
+  return key
+}
+
+/** Modifier children read as terminal keys: `Ctrl+D`, `Ctrl+Shift+W`. */
+function modifierLabel(key: string): string {
+  if (key.startsWith("shift+")) return `Shift+${modifierLabel(key.slice("shift+".length))}`
+  const label = labelForKey(key)
+  return label.length === 1 ? label.toUpperCase() : label
 }
 
 /**
