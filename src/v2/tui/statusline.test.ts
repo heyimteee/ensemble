@@ -58,18 +58,20 @@ test("git state renders branch, dirty mark, ahead, and behind", () => {
   assert.equal(gitLabel({ branch: "main", dirty: true, ahead: 2, behind: 3 }), "git:(main*) ↑2 ↓3")
 })
 
-test("git segments color the branch accent, dirty warn, ahead good, behind warn", () => {
+test("git segments color the label, branch, dirty mark, ahead, and behind with distinct tones", () => {
   const segment = gitSegments({ branch: "main", dirty: true, ahead: 2, behind: 1 })
   assert.equal(segment.kind, "git")
   assert.deepEqual(
     segment.parts.map((part) => [part.text, part.tone]),
     [
-      ["git:(", "accent"],
-      ["main", "accent"],
+      ["git", "muted"],
+      [":", "faint"],
+      ["(", "faint"],
+      ["main", "info"],
       ["*", "warn"],
-      [")", "accent"],
+      [")", "faint"],
       [" ↑2", "good"],
-      [" ↓1", "warn"],
+      [" ↓1", "bad"],
     ],
   )
 })
@@ -131,7 +133,7 @@ test("typed segments color the mode chip, context, selection, position, chord, a
     hints: "enter send │ esc normal",
   })
   assert.deepEqual(segments.map((segment) => segment.kind), ["mode", "context", "selection", "git", "position", "chord", "hint", "hint"])
-  assert.deepEqual(segments[0].parts, [{ text: "INSERT", tone: "chip", chip: "good" }])
+  assert.deepEqual(segments[0].parts, [{ text: "INSERT", tone: "chip", chip: "good", padding: 1 }])
   assert.deepEqual(segments[1].parts, [{ text: "Roster", tone: "muted" }])
   assert.deepEqual(segments[2].parts, [{ text: "3 chars", tone: "warn" }])
   assert.deepEqual(segments[4].parts, [{ text: "1:1", tone: "accent" }])
@@ -148,7 +150,7 @@ test("typed segments color the mode chip, context, selection, position, chord, a
 
 test("a leader chip stays distinct from the persistent mode", () => {
   const segments = buildStatuslineSegments({ mode: "normal", context: "Roster", leader: true, hints: "j/k move" })
-  assert.deepEqual(segments[0].parts, [{ text: "NORMAL", tone: "chip", chip: "leader" }])
+  assert.deepEqual(segments[0].parts, [{ text: "NORMAL", tone: "chip", chip: "leader", padding: 1 }])
 })
 
 test("an Insert-without-target notice keeps core status segments", () => {
@@ -179,7 +181,7 @@ test("fitting drops hint segments from the right before any core segment", () =>
     pendingChord: "g",
     hints: "j/k move │ enter open │ esc back",
   })
-  const width = "INSERT │ Roster │ git:(main) │ 1:1 │ chord g │ j/k move".length
+  const width = "INSERT │ Roster │ git:(main) │ 1:1 │ chord g │ j/k move".length + 2
   const fitted = fitStatuslineSegments(segments, width)
   assert.deepEqual(fitted.map((segment) => segment.kind), ["mode", "context", "git", "position", "chord", "hint"])
   assert.equal(formatStatuslineSegments(fitted), "INSERT │ Roster │ git:(main) │ 1:1 │ chord g │ j/k move")

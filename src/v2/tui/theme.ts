@@ -2,6 +2,7 @@ import { RGBA } from "@opentui/core"
 
 export type Palette = {
   accent: RGBA | string
+  info: RGBA | string
   muted: RGBA | string
   faint: RGBA | string
   good: RGBA | string
@@ -32,6 +33,7 @@ export function palette(theme: {
   const panel = background && typeof background === "object" && background.a >= 1 ? background : "#101010"
   return {
     accent: (theme as any).hue?.accent?.[200] ?? theme.text.feedback.info.base,
+    info: theme.text.feedback.info.base,
     muted: theme.text.muted,
     faint: theme.text.faint,
     good: theme.text.feedback.success.base,

@@ -105,13 +105,15 @@ export function listPosition(cursor: number, total: number): string {
   return `${Math.max(1, Math.min(total, Math.trunc(cursor) + 1))}/${total}`
 }
 
-export type StatuslineTone = "text" | "muted" | "faint" | "accent" | "good" | "warn" | "bad" | "leader" | "chip"
+export type StatuslineTone = "text" | "muted" | "faint" | "accent" | "info" | "good" | "warn" | "bad" | "leader" | "chip"
 export type StatuslineChipRole = "muted" | "accent" | "good" | "warn" | "leader"
 export type StatuslinePart = {
   text: string
   tone: StatuslineTone
   /** A filled chip background role; the renderer pairs it with contrast text. */
   chip?: StatuslineChipRole
+  /** Extra inner padding cells on each side of a chip part. */
+  padding?: number
 }
 export type StatuslineSegmentKind = "mode" | "context" | "selection" | "git" | "position" | "chord" | "notice" | "hint"
 export type StatuslineSegment = { kind: StatuslineSegmentKind; parts: StatuslinePart[] }
@@ -128,7 +130,7 @@ export function modeChipRole(mode: InteractionMode, leader = false): StatuslineC
 export function modeSegment(mode: InteractionMode, visualKind?: InteractionSelection["kind"], leader = false): StatuslineSegment {
   return {
     kind: "mode",
-    parts: [{ text: modeLabel(mode, visualKind), tone: "chip", chip: modeChipRole(mode, leader) }],
+    parts: [{ text: modeLabel(mode, visualKind), tone: "chip", chip: modeChipRole(mode, leader), padding: 1 }],
   }
 }
 
@@ -139,13 +141,15 @@ export function contextSegment(context: string): StatuslineSegment {
 export function gitSegments(git: GitState | null): StatuslineSegment {
   if (!git) return { kind: "git", parts: [{ text: gitLabel(null), tone: "muted" }] }
   const parts: StatuslinePart[] = [
-    { text: "git:(", tone: "accent" },
-    { text: git.branch, tone: "accent" },
+    { text: "git", tone: "muted" },
+    { text: ":", tone: "faint" },
+    { text: "(", tone: "faint" },
+    { text: git.branch, tone: "info" },
   ]
   if (git.dirty) parts.push({ text: "*", tone: "warn" })
-  parts.push({ text: ")", tone: "accent" })
+  parts.push({ text: ")", tone: "faint" })
   if (git.ahead > 0) parts.push({ text: ` ↑${git.ahead}`, tone: "good" })
-  if (git.behind > 0) parts.push({ text: ` ↓${git.behind}`, tone: "warn" })
+  if (git.behind > 0) parts.push({ text: ` ↓${git.behind}`, tone: "bad" })
   return { kind: "git", parts }
 }
 
@@ -257,9 +261,13 @@ export function fitStatuslineSegments(
   return kept
 }
 
+function segmentPadding(segment: StatuslineSegment): number {
+  return segment.parts.reduce((total, part) => total + (part.padding ? part.padding * 2 : 0), 0)
+}
+
 function statuslineWidth(segments: readonly StatuslineSegment[], separator: string): number {
   if (segments.length === 0) return 0
-  const content = segments.reduce((total, segment) => total + displayWidth(segmentText(segment)), 0)
+  const content = segments.reduce((total, segment) => total + displayWidth(segmentText(segment)) + segmentPadding(segment), 0)
   return content + displayWidth(` ${separator} `) * (segments.length - 1)
 }
 

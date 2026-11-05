@@ -79,6 +79,8 @@ function toneColor(colors: Palette, tone: StatuslineTone): ThemeColor {
       return colors.faint
     case "accent":
       return colors.accent
+    case "info":
+      return colors.info
     case "good":
       return colors.good
     case "warn":
@@ -189,7 +191,14 @@ export function StatuslineRow(props: {
       for (const part of segment.parts) {
         if (part.chip) {
           const background = props.colors[part.chip]
-          next.push({ text: part.text, fg: contrastText(background), bg: background, attributes: TextAttributes.BOLD })
+          // Normal mode uses the muted grey chip; the user wants black text
+          // there even when luminance contrast would pick white. Other modes
+          // keep automatic contrast.
+          const foreground = part.chip === "muted" ? "#000000" : contrastText(background)
+          const padding = " ".repeat(part.padding ?? 0)
+          if (padding) next.push({ text: padding, fg: foreground, bg: background, attributes: TextAttributes.BOLD })
+          next.push({ text: part.text, fg: foreground, bg: background, attributes: TextAttributes.BOLD })
+          if (padding) next.push({ text: padding, fg: foreground, bg: background, attributes: TextAttributes.BOLD })
         } else {
           next.push({ text: part.text, fg: toneColor(props.colors, part.tone) })
         }
@@ -282,9 +291,6 @@ export function Rail(props: {
                 <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ●{unread}</text></Show>
               </box>
               <Show when={item.kind === "agent"}>
-                <Show when={item.leader}>
-                  <text bg={props.colors.bg}> </text>
-                </Show>
                 <Show when={(item.description ?? "").trim()}>
                   <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
                     {"  ├ "}{short(item.description!, Math.max(8, props.width - 8))}

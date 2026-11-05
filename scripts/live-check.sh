@@ -36,20 +36,20 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
   # v5.7: a text step keeps the arrival mode (Normal from the roster). `i` is
   # the explicit Insert entry; Insert then persists across the text steps.
-  live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "agent text step keeps the arrival mode"
+  live_assert_text "$LIVE_TUI_SESSION" "NORMAL  │ Wizard" "agent text step keeps the arrival mode"
   live_key "$LIVE_TUI_SESSION" "i"
-  live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "i enters Insert in the agent name field"
+  live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "i enters Insert in the agent name field"
   live_type "$LIVE_TUI_SESSION" "LiveAgent"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
-  live_assert_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" "title step keeps the Insert mode"
+  live_assert_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" "title step keeps the Insert mode"
   live_type "$LIVE_TUI_SESSION" "Engineering"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
   live_type "$LIVE_TUI_SESSION" "Reviews changes and keeps the build green."
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
-  live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "the memory list keeps Insert"
+  live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "the memory list keeps Insert"
   live_require_text "$LIVE_TUI_SESSION" "no text target │ Esc normal" 10 "the memory list is honest about Insert with no target"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
@@ -64,15 +64,15 @@ if [[ "$MODELS" -gt 0 ]]; then
   # explicitly before using Normal roster/chat keys. Ctrl+G is the reliable
   # chord while the onboarding run is streaming (the host may swallow Esc).
   live_key "$LIVE_TUI_SESSION" C-g
-  live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Direct conversation" 10 "leaving the wizard leaves Normal behind"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Direct conversation" 10 "leaving the wizard leaves Normal behind"
 
   live_key "$LIVE_TUI_SESSION" "n"
   live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "workspace wizard"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step"
-  live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "workspace name keeps the arrival mode"
+  live_assert_text "$LIVE_TUI_SESSION" "NORMAL  │ Wizard" "workspace name keeps the arrival mode"
   live_key "$LIVE_TUI_SESSION" "i"
-  live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "i enters Insert in the workspace name field"
+  live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "i enters Insert in the workspace name field"
   live_type "$LIVE_TUI_SESSION" "live"
   live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "workspace members step"
@@ -92,7 +92,7 @@ if [[ "$MODELS" -gt 0 ]]; then
   # The workspace wizard also kept Insert through its list steps. Reset to
   # Normal before the composer and Normal-surface probes below.
   live_key "$LIVE_TUI_SESSION" C-g
-  live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Group chat" 10 "leaving the workspace wizard leaves Normal behind"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "leaving the workspace wizard leaves Normal behind"
 
   live_wait_for 20 "created agent and workspace in snapshot" \
     live_snapshot_has_agent_named "LiveAgent" \
@@ -142,7 +142,7 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_absence "$LIVE_TUI_SESSION" "/ commands" 10 "slash command palette closed"
   live_key "$LIVE_TUI_SESSION" Escape
-  live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "composer Normal after the palette"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ COMPOSER" 10 "composer Normal after the palette"
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer closed"
 
