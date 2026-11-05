@@ -15,6 +15,10 @@
 # Scenarios must call live_require_runtime (and live_require_node when they
 # need Node) before live_setup, and live_setup before any live_start_* helper.
 # Linux-first by design because it uses tmux.
+#
+# Set ENSEMBLE_LIVE_REQUIRE=1 to turn a missing prerequisite into a failure.
+# Local runs keep the historical skip-and-exit-zero behavior; CI uses require
+# mode so a skipped suite cannot look green.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   echo "live-harness: source this file; do not execute it" >&2
@@ -45,7 +49,16 @@ LIVE_PROCESS_ENV=()
 
 live_log() { printf 'live: %s\n' "$*"; }
 live_debug() { [[ "${ENSEMBLE_LIVE_DEBUG:-0}" == "1" ]] && printf 'live: %s\n' "$*" >&2 || true; }
-live_skip() { live_log "$*; skipping"; exit 0; }
+live_require_enabled() { [[ "${ENSEMBLE_LIVE_REQUIRE:-0}" == "1" ]]; }
+# Local runs keep the skip contract. Require mode (CI) treats the same missing
+# prerequisite as a hard failure instead of exiting zero.
+live_skip() {
+  if live_require_enabled; then
+    live_fail "$* (required; ENSEMBLE_LIVE_REQUIRE=1)"
+  fi
+  live_log "$*; skipping"
+  exit 0
+}
 live_fail() { printf 'live: %s\n' "$*" >&2; exit 1; }
 
 # Resolve the absolute binary. The nvm installation is preferred over the
@@ -117,10 +130,20 @@ live_resolve_node() {
   return 1
 }
 
+# The harness itself invokes these after the runtime gates. They were never
+# optional, so a missing curl or git fails in every mode rather than skipping.
+live_require_support_tool() {
+  local tool="$1"
+  command -v "$tool" >/dev/null 2>&1 \
+    || live_fail "$tool is required by the live harness but is not installed or on PATH"
+}
+
 # Scenarios normally call this before live_setup. Missing tools skip cleanly;
 # an explicitly configured but unusable binary fails instead of hiding.
 live_require_runtime() {
   local explicit
+  live_require_support_tool curl
+  live_require_support_tool git
   explicit="${OPENCODE_BIN:-}"
   if [[ -n "$explicit" && ! -x "$explicit" ]]; then
     live_fail "OPENCODE_BIN is set but not executable: $explicit"

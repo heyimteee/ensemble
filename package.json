@@ -21,6 +21,7 @@
     "test:live": "bash scripts/live-check.sh",
     "test:live:fake": "bash scripts/live-check-fake.sh",
     "test:live:fake:empty": "bash scripts/live-check-fake-empty.sh",
+    "test:live:preflight": "bash scripts/live-preflight.sh",
     "test:live:fake:all": "bash scripts/live-matrix.sh fake",
     "test:live:all": "bash scripts/live-matrix.sh all",
     "test:live:latency": "bash scripts/live-latency-probe.sh",
