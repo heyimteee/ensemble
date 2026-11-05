@@ -1,4 +1,4 @@
-import type { Agent, SnapshotState, Workspace } from "./types.ts"
+import type { Agent, SnapshotState } from "./types.ts"
 import { runPrefixHash, stableHash } from "./queue.ts"
 
 /**
@@ -294,7 +294,6 @@ export type HandoffRecipient =
  */
 export function resolveHandoffRecipient(
   state: SnapshotState,
-  workspace: Workspace,
   ref: string,
 ): HandoffRecipient {
   const trimmed = ref.trim()

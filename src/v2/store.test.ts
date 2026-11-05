@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
-import type { Agent, Approval, Memory, Message, Subtask, Workspace } from "./types.ts"
+import type { Agent, Subtask, Workspace } from "./types.ts"
 
 function fakeContext() {
   const values = new Map<string, unknown>()
@@ -30,9 +30,6 @@ const agent = (patch: Partial<Agent> = {}): Agent => ({
 const workspace = (patch: Partial<Workspace> = {}): Workspace => ({
   id: "w", name: "site", directory: "/repo", leaderID: "a", memberIDs: ["a"], synthesis: true,
   archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1, ...patch,
-})
-const message = (patch: Partial<Message> = {}): Message => ({
-  id: "m", workspaceID: "w", seq: 1, author: "user", text: "hello", kind: "text", createdAt: 1, ...patch,
 })
 const subtask = (patch: Partial<Subtask> = {}): Subtask => ({
   id: "t", workspaceID: "w", creatorType: "user", title: "Task", instruction: "Do", mode: "research",

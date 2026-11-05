@@ -510,8 +510,8 @@ export class EnsembleV2Service {
 
   private async dispatch(directory: string, action: string, payload: Json): Promise<any> {
     switch (action) {
-      case "agent.create": return this.createAgent(directory, payload)
-      case "agent.update": return this.updateAgent(directory, payload)
+      case "agent.create": return this.createAgent(payload)
+      case "agent.update": return this.updateAgent(payload)
       case "agent.archive": return this.archiveAgent(payload.id, payload.replacementLeaderID)
       case "agent.delete": return this.deleteAgent(payload.id, payload.replacementLeaderID, Boolean(payload.deleteNativeSessions))
       case "agent.moveHome": return this.moveHomeSession(payload.agentID, payload.workspaceID)
@@ -527,15 +527,15 @@ export class EnsembleV2Service {
       case "workspace.resume": return this.pauseWorkspace(payload.id, false)
       case "workspace.archive": return this.archiveWorkspace(payload.id)
       case "workspace.delete": return this.deleteWorkspace(payload.id, Boolean(payload.deleteNativeSessions))
-      case "message.send": return this.sendMessage(directory, payload)
-      case "skill.send": return this.sendMessage(directory, payload)
+      case "message.send": return this.sendMessage(payload)
+      case "skill.send": return this.sendMessage(payload)
       case "task.delegate": return this.delegateFromUser(payload)
       case "task.retry": return this.retryTask(payload.id)
       case "task.restart": return this.restartTask(payload.id)
       case "task.cancel": return this.cancelTask(payload.id)
       case "task.reassign": return this.reassignTask(payload.id, payload.assigneeID)
       case "approval.resolve": return this.resolveApproval(payload)
-      case "memory.add": return this.addMemory(directory, payload)
+      case "memory.add": return this.addMemory(payload)
       case "memory.update": return this.updateMemory(payload)
       case "memory.delete": return this.deleteMemory(payload)
       case "memory.promote": return this.promoteMemory(payload)
@@ -772,7 +772,7 @@ export class EnsembleV2Service {
     }
   }
 
-  private async createAgent(directory: string, payload: Json): Promise<Agent> {
+  private async createAgent(payload: Json): Promise<Agent> {
     const models = await this.catalog.ensureModels()
     const mainModel = payload.mainModel ?? (models[0] ? { providerID: models[0].providerID, modelID: models[0].modelID, variant: models[0].variants[0] } : undefined)
     if (!mainModel) throw Object.assign(new Error("No model is available."), { code: "no_model" })
@@ -816,8 +816,8 @@ export class EnsembleV2Service {
     await this.ctx.session.prompt({ sessionID: home.sessionID, text: onboardingPrompt(agent), delivery: "steer" })
   }
 
-  private async updateAgent(directory: string, payload: Json): Promise<Agent> {
-    const models = await this.catalog.ensureModels()
+  private async updateAgent(payload: Json): Promise<Agent> {
+    await this.catalog.ensureModels()
     const state = this.store.snapshot()
     const agent = state.agents[payload.id]
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
@@ -1502,7 +1502,7 @@ export class EnsembleV2Service {
     }
   }
 
-  private async sendMessage(directory: string, payload: Json): Promise<any> {
+  private async sendMessage(payload: Json): Promise<any> {
     const state = this.store.snapshot()
     const workspace = state.workspaces[payload.workspaceID]
     if (!workspace || workspace.archived) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
@@ -2282,7 +2282,7 @@ export class EnsembleV2Service {
     return approval
   }
 
-  private async addMemory(directory: string, payload: Json): Promise<Memory> {
+  private async addMemory(payload: Json): Promise<Memory> {
     const text = String(payload.text ?? "").trim()
     if (!text) throw Object.assign(new Error("Memory text is required."), { code: "empty" })
     const scope = (payload.scope ?? "project") as MemoryScope
@@ -2737,7 +2737,7 @@ export class EnsembleV2Service {
     const brief = tailored ?? (summary ? `${task}\n\n${summary}` : task)
     const recipientRef = (typeof input.to === "string" && input.to.trim()) || parsed.data.to || ""
     if (!recipientRef) return fail("The handoff must name a recipient; no recipient was given.")
-    const resolved = resolveHandoffRecipient(state, workspace, recipientRef)
+    const resolved = resolveHandoffRecipient(state, recipientRef)
     if (resolved.status === "unknown") return fail(`No agent matches "${resolved.ref}".`)
     if (resolved.status === "ambiguous") return fail(`"${resolved.ref}" matches more than one agent; name one explicitly.`)
     if (resolved.status === "archived") return fail(`${resolved.agent.name} is archived and cannot receive handoffs.`)

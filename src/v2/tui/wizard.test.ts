@@ -158,7 +158,6 @@ test("the app guards every memory action and the Enter path behind the memories 
   }
   const add = source.indexOf("const wizardMemoryStartAdd")
   assert.ok(source.slice(add, add + 200).includes("openWizardMemoryField"), "add delegates to the guarded field opener")
-  const actions = source.indexOf('case "wizard.memory.add"')
   for (const id of ["add", "edit", "delete"]) {
     assert.ok(source.includes(`case "wizard.memory.${id}": if (wizardIsMemoryStep())`), `${id} action is guarded in runDialogAction`)
   }

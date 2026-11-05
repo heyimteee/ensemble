@@ -105,7 +105,6 @@ test("ordered work shows active only, never terminal rows", () => {
 })
 
 test("terminal outcomes announce exactly once as transcript system lines", () => {
-  const agentOf = (item: Subtask) => (item.assigneeID === "a" ? "Nova" : "Sage")
   assert.equal(
     terminalAnnouncement(task({ state: "replied", outcome: "succeeded", title: "Check the build" }), "Nova", 1000),
     "● Nova finished: Check the build",

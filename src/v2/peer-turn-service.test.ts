@@ -75,7 +75,7 @@ async function waitFor(check: () => Promise<boolean>, timeout = 5000): Promise<v
   throw new Error("Timed out waiting for condition")
 }
 
-async function setupPair(directory: string, ctx: any, handlers: Handlers) {
+async function setupPair(directory: string, handlers: Handlers) {
   const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
   const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
   const workspace = await handlers.invoke({
@@ -105,7 +105,7 @@ test("a $mention peer turn runs to completed with asking/answered attribution an
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
     const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage please summarize" } })
     assert.equal(sent.ok, true)
     assert.deepEqual(sent.result.recipients, [sage.id])
@@ -159,7 +159,7 @@ test("unmentioned messages still go only to the leader", async () => {
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
     const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "hello all" } })
     assert.equal(sent.ok, true)
     assert.deepEqual(sent.result.recipients, [nova.id])
@@ -182,7 +182,7 @@ test("an unknown mention beside a valid one refuses loudly without aborting the 
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { sage, workspace } = await setupPair(directory, handlers)
     const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage and $Ghost go" } })
     assert.equal(sent.ok, true)
     assert.deepEqual(sent.result.recipients, [sage.id])
@@ -207,7 +207,7 @@ test("a purely unknown mention fails loudly with a visible refusal and no leader
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { workspace } = await setupPair(directory, ctx, handlers)
+    const { workspace } = await setupPair(directory, handlers)
     const response = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Ghost take a look" } })
     assert.equal(response.ok, false)
     assert.equal(response.error?.code, "unknown_member")
@@ -229,7 +229,7 @@ test("an archived member mention fails loudly instead of routing to the leader",
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
     const archived = await handlers.invoke({ directory, action: "agent.archive", payload: { id: sage.id } })
     assert.equal(archived.ok, true)
     const response = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage take a look" } })
@@ -252,7 +252,7 @@ test("a user mention of an outside-roster agent fails loudly with no leader fall
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, workspace } = await setupPair(directory, handlers)
     const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
     assert.equal(echo.ok, true)
     // The user is the authorizer: a user post naming a roster agent outside
@@ -282,7 +282,7 @@ test("per-agent serialization holds under parallel user peer turns", async () =>
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { sage, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage first job" } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage second job" } })
     await waitFor(async () => {
@@ -352,7 +352,7 @@ test("cancelling a peer turn records a terminal state with correlation intact", 
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { workspace } = await setupPair(directory, ctx, handlers)
+    const { workspace } = await setupPair(directory, handlers)
     const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage long job" } })
     assert.equal(sent.ok, true)
     let turnID = ""
@@ -386,7 +386,7 @@ test("an agent group-chat $mention creates a peer turn with asker attribution an
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const posted = await tools.get("send_message").execute({ kind: "workspace", text: "$Sage please help with this" }, { sessionID })
@@ -423,7 +423,7 @@ test("agent mention depth and per-run caps refuse visibly without queueing", asy
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "settings.update", payload: { maxDepth: 1, maxDelegations: 1 } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
@@ -467,7 +467,7 @@ test("an agent self-mention never creates a self turn", async () => {
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const posted = await tools.get("send_message").execute({ kind: "workspace", text: "$Nova do it myself" }, { sessionID })
@@ -488,7 +488,7 @@ test("an agent mention of an outside-roster agent needs approval, then runs once
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, workspace } = await setupPair(directory, handlers)
     const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
