@@ -501,20 +501,20 @@ test("the catalog covers every app-level key the handlers consume", () => {
 
 test("statusline hints for special text buffers are catalog-generated", () => {
   const composer = statuslineHints("composerNormal")
-  assert.ok(composer.includes("i insert · h/j/k/l"), composer)
-  assert.ok(composer.includes("enter send · esc chat"), composer)
+  assert.ok(composer.includes("i insert │ h/j/k/l"), composer)
+  assert.ok(composer.includes("enter send │ esc chat"), composer)
   const insert = statuslineHints("composerInsert")
-  assert.ok(insert.includes("enter send · esc normal · ctrl+g leave"), insert)
+  assert.ok(insert.includes("enter send │ esc normal │ ctrl+g leave"), insert)
   const wizard = statuslineHints("wizardText")
-  assert.ok(wizard.includes("i/a insert · h/j/k/l"), wizard)
+  assert.ok(wizard.includes("i/a insert │ h/j/k/l"), wizard)
   assert.ok(wizard.includes("esc cancel"), wizard)
-  assert.ok(wizard.includes("n next · N previous"), wizard)
+  assert.ok(wizard.includes("n next │ N previous"), wizard)
   const prompt = statuslineHints("promptText")
   assert.ok(prompt.includes("esc cancel"), prompt)
   const settings = statuslineHints("settingsText")
   assert.ok(settings.includes("esc settings"), settings)
   const field = statuslineHints("settingsField")
-  assert.ok(field.includes("enter done · esc field normal"), field)
+  assert.ok(field.includes("enter done │ esc field normal"), field)
 })
 
 test("leader and command hints are generated from their catalogs", () => {

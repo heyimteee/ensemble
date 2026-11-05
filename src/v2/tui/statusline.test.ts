@@ -1,13 +1,19 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import {
+  buildStatuslineSegments,
   composerPosition,
   contextLabel,
+  fitStatuslineSegments,
+  formatStatuslineSegments,
   gitLabel,
+  gitSegments,
   listPosition,
+  modeChipRole,
   modeLabel,
   statuslineRow1,
   statuslineRow2,
+  statuslineRow2Parts,
   transcriptPosition,
 } from "./statusline.ts"
 
@@ -19,13 +25,21 @@ test("mode chip names Normal, Insert, Command, and both Visual kinds in text", (
   assert.equal(modeLabel("visual", "line"), "V-LINE")
 })
 
+test("each mode gets its own theme chip role, with a leader override", () => {
+  assert.equal(modeChipRole("normal"), "muted")
+  assert.equal(modeChipRole("insert"), "good")
+  assert.equal(modeChipRole("visual"), "warn")
+  assert.equal(modeChipRole("command"), "accent")
+  assert.equal(modeChipRole("normal", true), "leader")
+})
+
 test("context names the active surface and overlay precedence", () => {
   assert.equal(contextLabel({ focus: "rail", overlay: "none", surface: "none" }), "Roster")
   assert.equal(contextLabel({ focus: "chat", overlay: "none", surface: "workspace" }), "Group chat")
   assert.equal(contextLabel({ focus: "work", overlay: "none", surface: "workspace" }), "Work list")
   assert.equal(contextLabel({ focus: "chat", overlay: "none", surface: "agent" }), "Direct conversation")
-  assert.equal(contextLabel({ focus: "composer", overlay: "none", surface: "workspace" }), "COMPOSER · Group chat")
-  assert.equal(contextLabel({ focus: "composer", overlay: "none", surface: "agent" }), "COMPOSER · Direct conversation")
+  assert.equal(contextLabel({ focus: "composer", overlay: "none", surface: "workspace" }), "COMPOSER │ Group chat")
+  assert.equal(contextLabel({ focus: "composer", overlay: "none", surface: "agent" }), "COMPOSER │ Direct conversation")
   assert.equal(contextLabel({ focus: "chat", overlay: "settings", surface: "agent" }), "Settings")
   assert.equal(contextLabel({ focus: "chat", overlay: "wizard", surface: "workspace" }), "Wizard")
   assert.equal(contextLabel({ focus: "chat", overlay: "dialog", surface: "workspace" }), "Dialog")
@@ -41,6 +55,22 @@ test("git state renders branch, dirty mark, ahead, and behind", () => {
   assert.equal(gitLabel({ branch: "main", dirty: true, ahead: 2, behind: 3 }), "git:(main*) ↑2 ↓3")
 })
 
+test("git segments color the branch accent, dirty warn, ahead good, behind warn", () => {
+  const segment = gitSegments({ branch: "main", dirty: true, ahead: 2, behind: 1 })
+  assert.equal(segment.kind, "git")
+  assert.deepEqual(
+    segment.parts.map((part) => [part.text, part.tone]),
+    [
+      ["git:(", "accent"],
+      ["main", "accent"],
+      ["*", "warn"],
+      [")", "accent"],
+      [" ↑2", "good"],
+      [" ↓1", "warn"],
+    ],
+  )
+})
+
 test("position names composer line:col and list row/total", () => {
   assert.equal(composerPosition("hello", 5), "1:6")
   assert.equal(composerPosition("hello\nworld", 8), "2:3")
@@ -53,21 +83,21 @@ test("position names composer line:col and list row/total", () => {
 test("row one always carries mode, context, git, position, chord, and hints", () => {
   const row = statuslineRow1({
     mode: "insert",
-    context: "Composer · Group chat",
+    context: "Composer │ Group chat",
     git: { branch: "main", dirty: true, ahead: 1, behind: 0 },
     position: "2:4",
     pendingChord: "g",
-    hints: "enter send · esc normal",
+    hints: "enter send │ esc normal",
   })
   assert.equal(
     row,
-    "INSERT · Composer · Group chat · git:(main*) ↑1 · 2:4 · chord g · enter send · esc normal",
+    "INSERT │ Composer │ Group chat │ git:(main*) ↑1 │ 2:4 │ chord g │ enter send │ esc normal",
   )
   assert.ok(row.startsWith("INSERT"), "mode is the first visible segment")
 })
 
 test("row one omits empty optional segments but still names mode and context", () => {
-  assert.equal(statuslineRow1({ mode: "normal", context: "Roster" }), "NORMAL · Roster")
+  assert.equal(statuslineRow1({ mode: "normal", context: "Roster" }), "NORMAL │ Roster")
 })
 
 test("row one names the Visual kind and the selection size", () => {
@@ -75,16 +105,74 @@ test("row one names the Visual kind and the selection size", () => {
     statuslineRow1({
       mode: "visual",
       visualKind: "line",
-      context: "COMPOSER · Group chat",
+      context: "COMPOSER │ Group chat",
       position: "1:1",
       selectionSize: "2 lines",
     }),
-    "V-LINE · COMPOSER · Group chat · 2 lines · 1:1",
+    "V-LINE │ COMPOSER │ Group chat │ 2 lines │ 1:1",
   )
   assert.equal(
     statuslineRow1({ mode: "visual", visualKind: "char", context: "Settings", selectionSize: "5 chars" }),
-    "VISUAL · Settings · 5 chars",
+    "VISUAL │ Settings │ 5 chars",
   )
+})
+
+test("typed segments color the mode chip, context, selection, position, chord, and hint parts", () => {
+  const segments = buildStatuslineSegments({
+    mode: "insert",
+    context: "Roster",
+    git: { branch: "main", dirty: false, ahead: 0, behind: 0 },
+    position: "1:1",
+    selectionSize: "3 chars",
+    pendingChord: "g",
+    hints: "enter send │ esc normal",
+  })
+  assert.deepEqual(segments.map((segment) => segment.kind), ["mode", "context", "selection", "git", "position", "chord", "hint", "hint"])
+  assert.deepEqual(segments[0].parts, [{ text: "INSERT", tone: "chip", chip: "good" }])
+  assert.deepEqual(segments[1].parts, [{ text: "Roster", tone: "muted" }])
+  assert.deepEqual(segments[2].parts, [{ text: "3 chars", tone: "warn" }])
+  assert.deepEqual(segments[4].parts, [{ text: "1:1", tone: "accent" }])
+  assert.deepEqual(segments[5].parts, [{ text: "chord g", tone: "warn" }])
+  assert.deepEqual(segments[6].parts, [
+    { text: "enter", tone: "accent" },
+    { text: " send", tone: "muted" },
+  ])
+  assert.deepEqual(segments[7].parts, [
+    { text: "esc", tone: "accent" },
+    { text: " normal", tone: "muted" },
+  ])
+})
+
+test("a leader chip stays distinct from the persistent mode", () => {
+  const segments = buildStatuslineSegments({ mode: "normal", context: "Roster", leader: true, hints: "j/k move" })
+  assert.deepEqual(segments[0].parts, [{ text: "NORMAL", tone: "chip", chip: "leader" }])
+})
+
+test("fitting drops hint segments from the right before any core segment", () => {
+  const segments = buildStatuslineSegments({
+    mode: "insert",
+    context: "Roster",
+    git: { branch: "main", dirty: false, ahead: 0, behind: 0 },
+    position: "1:1",
+    pendingChord: "g",
+    hints: "j/k move │ enter open │ esc back",
+  })
+  const width = "INSERT │ Roster │ git:(main) │ 1:1 │ chord g │ j/k move".length
+  const fitted = fitStatuslineSegments(segments, width)
+  assert.deepEqual(fitted.map((segment) => segment.kind), ["mode", "context", "git", "position", "chord", "hint"])
+  assert.equal(formatStatuslineSegments(fitted), "INSERT │ Roster │ git:(main) │ 1:1 │ chord g │ j/k move")
+})
+
+test("the mode chip survives every width; optional core segments drop after hints", () => {
+  const segments = buildStatuslineSegments({
+    mode: "normal",
+    context: "A very long context label",
+    git: { branch: "main", dirty: false, ahead: 0, behind: 0 },
+    position: "1:1",
+    hints: "j/k move │ enter open",
+  })
+  assert.deepEqual(fitStatuslineSegments(segments, 40).map((segment) => segment.kind), ["mode", "context"])
+  assert.deepEqual(fitStatuslineSegments(segments, 1).map((segment) => segment.kind), ["mode"])
 })
 
 test("row two renders command input, else a transient message, else a reserved blank", () => {
@@ -95,6 +183,19 @@ test("row two renders command input, else a transient message, else a reserved b
   assert.equal(statuslineRow2({ message: "Message sent" }), "Message sent")
   assert.equal(statuslineRow2({}), " ")
   assert.equal(statuslineRow2({ command: null, message: "" }), " ", "an empty message keeps the reserved row")
+})
+
+test("row two keeps the full command input and colors its prompt, success, and error", () => {
+  const long = "a".repeat(300)
+  assert.equal(statuslineRow2({ command: { kind: ":", text: long, returnMode: "normal" } }), `:${long}`)
+  assert.deepEqual(statuslineRow2Parts({ command: { kind: ":", text: "settings", returnMode: "normal" } }), [
+    { text: ":", tone: "accent" },
+    { text: "settings", tone: "text" },
+  ])
+  assert.deepEqual(statuslineRow2Parts({ message: "Saved", tone: "success" }), [{ text: "Saved", tone: "good" }])
+  assert.deepEqual(statuslineRow2Parts({ message: "Failed", tone: "error" }), [{ text: "Failed", tone: "bad" }])
+  assert.deepEqual(statuslineRow2Parts({ message: "Note" }), [{ text: "Note", tone: "faint" }])
+  assert.deepEqual(statuslineRow2Parts({}), [{ text: " ", tone: "faint" }])
 })
 
 test("transcript position is a real scroll percentage, not a boolean label", () => {

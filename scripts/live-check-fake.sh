@@ -74,15 +74,15 @@ live_check_help
 # with (Normal from the roster); `i` is the explicit Insert entry.
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "wizard text keeps the arrival mode"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "wizard text keeps the arrival mode"
 live_assert_text "$LIVE_TUI_SESSION" "i/a insert" "field Normal teaches the Vim entries"
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "i enters Insert in the wizard field"
-live_assert_text "$LIVE_TUI_SESSION" "enter next · esc normal" "Insert field teaches its ladder"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "i enters Insert in the wizard field"
+live_assert_text "$LIVE_TUI_SESSION" "enter next │ esc normal" "Insert field teaches its ladder"
 live_type "$LIVE_TUI_SESSION" "FakeAgent"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "first Esc goes to field Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "first Esc goes to field Normal"
 live_assert_text "$LIVE_TUI_SESSION" "i/a insert" "field Normal teaches the Vim entries"
 live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "field Normal Esc cancels the wizard"
 # T4: a dirty cancel asks first; n keeps the draft, the second Esc confirms.
@@ -93,12 +93,12 @@ live_assert_text "$LIVE_TUI_SESSION" "y/enter discard" "discard confirm teaches 
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_absence "$LIVE_TUI_SESSION" "discard draft?" 10 "n keeps the wizard draft"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "the draft stays on the step"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "keeping the draft keeps the mode"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "keeping the draft keeps the mode"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "discard draft?" 10 "cancel confirm reopened"
 live_key "$LIVE_TUI_SESSION" "y"
 live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "y discarded the wizard"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Roster" 10 "cancel returns to roster Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Roster" 10 "cancel returns to roster Normal"
 # Reopen and walk the fields: N goes back to Agent name and n returns; the
 # title draft survives the round trip.
 live_key "$LIVE_TUI_SESSION" "a"
@@ -110,10 +110,10 @@ live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
 live_type "$LIVE_TUI_SESSION" "Engineering"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "title Esc goes to field Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "title Esc goes to field Normal"
 live_key "$LIVE_TUI_SESSION" "N"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "N goes back one step"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "the previous text step keeps Normal"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "the previous text step keeps Normal"
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "n returns to the next step"
 live_require_text "$LIVE_TUI_SESSION" "Engineering" 10 "title draft survived the back step"
@@ -125,9 +125,9 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
 # T4: the memories step is an ordered one-by-one list. Insert arrival stays
 # Insert with no text target; Esc returns to Normal before list keys act.
-live_assert_text "$LIVE_TUI_SESSION" "INSERT · no text target · Esc normal" "the memories step has no text target"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ no text target │ Esc normal" "the memories step has no text target"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc leaves Insert on the memory list"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc leaves Insert on the memory list"
 live_assert_text "$LIVE_TUI_SESSION" "j/k select" "the memory list uses j/k"
 live_assert_text "$LIVE_TUI_SESSION" "a add" "the memory list teaches add"
 live_assert_text "$LIVE_TUI_SESSION" "e edit" "the memory list teaches edit"
@@ -137,31 +137,31 @@ live_assert_text "$LIVE_TUI_SESSION" "N previous" "the memory list teaches N pre
 live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "the memory list teaches cancel"
 live_require_text "$LIVE_TUI_SESSION" "No memories yet. a adds one." 10 "the empty memory list names add"
 live_key "$LIVE_TUI_SESSION" "a"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "a opens the memory field in Insert"
-live_assert_text "$LIVE_TUI_SESSION" "enter save · esc list" "the memory field teaches its persistent ladder"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "a opens the memory field in Insert"
+live_assert_text "$LIVE_TUI_SESSION" "enter save │ esc list" "the memory field teaches its persistent ladder"
 live_require_text "$LIVE_TUI_SESSION" "The team uses pnpm." 10 "the memory input is mounted"
 sleep 0.2
 live_type "$LIVE_TUI_SESSION" "Likes deterministic fixtures"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "Enter saves and keeps the add field focused"
-live_assert_text "$LIVE_TUI_SESSION" "memories: 1" "the first memory joined the list"
-live_assert_count "$LIVE_TUI_SESSION" "Likes deterministic fixtures" 1 "the add field cleared after Enter"
+live_require_text "$LIVE_TUI_SESSION" "memories: 1" 10 "the first memory joined the list"
+live_require_text "$LIVE_TUI_SESSION" "The team uses pnpm." 10 "the add field cleared after Enter"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" "the add field stayed in Insert"
 sleep 0.2
 live_type "$LIVE_TUI_SESSION" "Never edit generated files"
 live_key "$LIVE_TUI_SESSION" Enter
-live_assert_text "$LIVE_TUI_SESSION" "memories: 2" "the second memory joined the list"
-live_assert_count "$LIVE_TUI_SESSION" "Never edit generated files" 1 "the second entry cleared for the next one"
+live_require_text "$LIVE_TUI_SESSION" "memories: 2" 10 "the second memory joined the list"
+live_require_text "$LIVE_TUI_SESSION" "The team uses pnpm." 10 "the second entry cleared for the next one"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc returns the memory field to the list"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc returns the memory field to the list"
 sleep 0.25
 # e opens the selected memory in Insert; Enter saves in place and keeps it.
 live_key "$LIVE_TUI_SESSION" "k"
 live_key "$LIVE_TUI_SESSION" "e"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "e opens the memory in Insert"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "e opens the memory in Insert"
 sleep 0.2
 live_type "$LIVE_TUI_SESSION" " v2"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "edit Enter saves and keeps the field"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "edit Enter saves and keeps the field"
 live_assert_count "$LIVE_TUI_SESSION" "Likes deterministic fixtures v2" 2 "edited text is in the field and the list"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "memories: 2" 10 "the edit field returned to the list"
@@ -173,7 +173,7 @@ live_require_text "$LIVE_TUI_SESSION" "memories: 1" 10 "x deletes the selected m
 live_require_absence "$LIVE_TUI_SESSION" "Never edit generated files" 10 "the deleted memory leaves the list"
 # Add another entry so creation saves a multi-item list one by one.
 live_key "$LIVE_TUI_SESSION" "a"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "the add field reopens in Insert"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "the add field reopens in Insert"
 sleep 0.2
 live_type "$LIVE_TUI_SESSION" "Uses pnpm"
 live_key "$LIVE_TUI_SESSION" Enter
@@ -184,19 +184,19 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "Enter advances from the memory list"
 # A list step arrives in Normal; `/` owns filtering on option steps. `:` and
 # Space never open the command line or the leader.
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "the model step keeps the arrival mode"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "the model step keeps the arrival mode"
 live_assert_text "$LIVE_TUI_SESSION" "j/k select" "wizard list uses the shared navigation"
 live_assert_text "$LIVE_TUI_SESSION" "/ filter" "wizard list names the filter key"
 live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "wizard list names the cancel key"
 live_key "$LIVE_TUI_SESSION" ":"
 sleep 0.25
-live_assert_absence "$LIVE_TUI_SESSION" "COMMAND ·" "colon is disabled in a wizard"
+live_assert_absence "$LIVE_TUI_SESSION" "COMMAND │" "colon is disabled in a wizard"
 live_assert_text "$LIVE_TUI_SESSION" "Main model" "the wizard stayed open after colon"
 live_key "$LIVE_TUI_SESSION" Space
 sleep 0.25
 live_assert_absence "$LIVE_TUI_SESSION" "LEADER" "Space never opens the leader in a wizard"
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "type to filter · enter done · esc clear" 10 "wizard filter enters the shared filter mode"
+live_require_text "$LIVE_TUI_SESSION" "type to filter │ enter done │ esc clear" 10 "wizard filter enters the shared filter mode"
 live_type "$LIVE_TUI_SESSION" "zzz-no-model"
 live_require_text "$LIVE_TUI_SESSION" "filter: zzz-no-model" 10 "wizard filter follows typing"
 sleep 0.25
@@ -227,30 +227,30 @@ live_require_absence "$LIVE_TUI_SESSION" "streaming…" 15 "onboarding finalizat
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus"
 # v5.6 T1: Insert mode, context, and the new Esc ladder are visible in the bar.
-live_assert_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER · Direct conversation" "statusline names Insert and context"
-live_assert_text "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" "statusline names the composer ladder"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ COMPOSER │ Direct conversation" "statusline names Insert and context"
+live_assert_text "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leave" "statusline names the composer ladder"
 # Slice B: the COMPOSER hint is focus-border-only — no blink glyph anywhere.
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no composer blink glyph"
 live_type "$LIVE_TUI_SESSION" "fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "· working…" 15 "per-agent activity line while live"
+live_require_text "$LIVE_TUI_SESSION" "│ working…" 15 "per-agent activity line while live"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 live_require_text "$LIVE_TUI_SESSION" "Rich Markdown Fixture" 20 "finalized rich reply"
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 20 "final table row"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "in-place finalization"
-live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "activity line unmounts after finalize"
+live_require_absence "$LIVE_TUI_SESSION" "│ working…" 20 "activity line unmounts after finalize"
 # v5.6 T1: Enter keeps Insert focus; Esc goes composer Insert -> composer
 # Normal -> chat Normal, and never leaves Ensemble.
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after send but still focused"
-live_assert_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER" "composer keeps Insert focus after Enter send"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ COMPOSER" "composer keeps Insert focus after Enter send"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "first Esc goes to composer Normal"
-live_assert_text "$LIVE_TUI_SESSION" "i insert · h/j/k/l · x/d" "composer Normal hints name the Vim keys"
-live_assert_text "$LIVE_TUI_SESSION" "enter send · esc chat" "composer Normal hints name the ladder"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "first Esc goes to composer Normal"
+live_assert_text "$LIVE_TUI_SESSION" "i insert │ h/j/k/l │ x/d" "composer Normal hints name the Vim keys"
+live_assert_text "$LIVE_TUI_SESSION" "enter send │ esc chat" "composer Normal hints name the ladder"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "second Esc returns to chat Normal"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Direct conversation" "chat stays in Normal mode"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Direct conversation" "chat stays in Normal mode"
 
 # Ticket #70 determinism: rich Markdown lays out over several frames, so an
 # instant assert can catch a partial render — a different missing element per
@@ -287,11 +287,11 @@ live_assert_count "$LIVE_TUI_SESSION" "fake-rich-fixture" 1 "DM user line exactl
 # command line with Tab completion and per-kind history, and `/` searches the
 # loaded transcript with n/N match navigation and visible row highlighting.
 live_key "$LIVE_TUI_SESSION" "h"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Roster" 10 "roster focus before search"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Roster" 10 "roster focus before search"
 live_require_text "$LIVE_TUI_SESSION" "AGENTS (1)" 10 "unfiltered roster count"
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "COMMAND · Roster" 10 "search opens the command line on the roster"
-live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "search hint names Enter and Esc"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND │ Roster" 10 "search opens the command line on the roster"
+live_require_text "$LIVE_TUI_SESSION" "enter search │ esc cancel" 10 "search hint names Enter and Esc"
 live_type "$LIVE_TUI_SESSION" "zzz-no-roster-match"
 live_require_text "$LIVE_TUI_SESSION" "/zzz-no-roster-match" 10 "roster query renders in the bottom bar"
 live_require_absence "$LIVE_TUI_SESSION" "AGENTS (1)" 10 "roster filter hid the agent row"
@@ -303,15 +303,15 @@ live_require_text "$LIVE_TUI_SESSION" "AGENTS (1)" 10 "Esc restored the unfilter
 live_require_absence "$LIVE_TUI_SESSION" "filter “zzz-no-roster-match”" 10 "roster filter hint cleared"
 
 live_key "$LIVE_TUI_SESSION" "l"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Direct conversation" 10 "chat focus before transcript search"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Direct conversation" 10 "chat focus before transcript search"
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "COMMAND · Direct conversation" 10 "search opens on the transcript"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND │ Direct conversation" 10 "search opens on the transcript"
 live_type "$LIVE_TUI_SESSION" "text"
 live_require_text "$LIVE_TUI_SESSION" "/text" 10 "transcript query renders in the bottom bar"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Match 1/2" 10 "first transcript match"
 live_require_text "$LIVE_TUI_SESSION" "▶ FakeAgent · /text" 10 "matching row is highlighted"
-live_require_text "$LIVE_TUI_SESSION" "match 1/2 · n next · N previous · esc clear" 10 "search statusline names n/N"
+live_require_text "$LIVE_TUI_SESSION" "match 1/2 │ n next │ N previous │ esc clear" 10 "search statusline names n/N"
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "Match 2/2" 10 "n moves to the next match"
 live_key "$LIVE_TUI_SESSION" "N"
@@ -325,14 +325,14 @@ sleep 0.25
 live_require_text "$LIVE_TUI_SESSION" "table cell marker" 10 "End returned the transcript to the newest content"
 
 live_type "$LIVE_TUI_SESSION" ":"
-live_require_text "$LIVE_TUI_SESSION" "COMMAND · Direct conversation" 10 "colon opens Command mode"
-live_require_text "$LIVE_TUI_SESSION" "enter run · esc cancel" 10 "command hint names Enter and Esc"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND │ Direct conversation" 10 "colon opens Command mode"
+live_require_text "$LIVE_TUI_SESSION" "enter run │ esc cancel" 10 "command hint names Enter and Esc"
 live_type "$LIVE_TUI_SESSION" "set"
 live_key "$LIVE_TUI_SESSION" Tab
 live_require_text "$LIVE_TUI_SESSION" ":settings" 10 "Tab completed the command"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" ":settings" 10 "Esc cancelled the command line"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Direct conversation" "cancel restored Normal mode"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Direct conversation" "cancel restored Normal mode"
 live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent · settings" "cancel never ran the completed command"
 
 live_type "$LIVE_TUI_SESSION" ":"
@@ -366,20 +366,20 @@ live_log "ticket #80 command line, completion, history, and transcript search ve
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "New workspace" 10 "workspace wizard"
 live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "directory step"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "wizard list step is Normal"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "wizard list step is Normal"
 live_assert_text "$LIVE_TUI_SESSION" "j/k select" "directory step names j/k"
 live_assert_text "$LIVE_TUI_SESSION" "/ filter" "directory step names the filter key"
 live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "directory step names the cancel key"
 live_key "$LIVE_TUI_SESSION" ":"
 sleep 0.25
-live_assert_absence "$LIVE_TUI_SESSION" "COMMAND ·" "colon never opens Command inside a wizard"
+live_assert_absence "$LIVE_TUI_SESSION" "COMMAND │" "colon never opens Command inside a wizard"
 live_assert_text "$LIVE_TUI_SESSION" "Workspace directory" "the wizard stayed on its step after colon"
 live_key "$LIVE_TUI_SESSION" Space
 sleep 0.25
 live_assert_absence "$LIVE_TUI_SESSION" "LEADER" "Space never opens the leader in a wizard"
 live_assert_text "$LIVE_TUI_SESSION" "Workspace directory" "the wizard stayed on its step after Space"
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "type to filter · enter done · esc clear" 10 "wizard filter mode shares its hints"
+live_require_text "$LIVE_TUI_SESSION" "type to filter │ enter done │ esc clear" 10 "wizard filter mode shares its hints"
 live_type "$LIVE_TUI_SESSION" "zzz-no-dir"
 live_require_text "$LIVE_TUI_SESSION" "filter: zzz-no-dir" 10 "wizard filter follows typing"
 sleep 0.25
@@ -389,21 +389,21 @@ live_assert_text "$LIVE_TUI_SESSION" "Workspace directory" "filter Esc stays on 
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" "the name step keeps the arrival mode"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "the name step keeps the arrival mode"
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "i enters Insert for the name"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "i enters Insert for the name"
 live_type "$LIVE_TUI_SESSION" "LiveSite"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "name step Esc goes to field Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "name step Esc goes to field Normal"
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Wizard" 10 "i re-enters Insert"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "i re-enters Insert"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "members step"
-live_assert_text "$LIVE_TUI_SESSION" "INSERT · no text target · Esc normal" "a list step reports Insert with no target"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ no text target │ Esc normal" "a list step reports Insert with no target"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc returns the list step to Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc returns the list step to Normal"
 live_assert_text "$LIVE_TUI_SESSION" "space toggle" "members step names the multi-select key"
 live_require_text "$LIVE_TUI_SESSION" "[x]" 10 "the first member starts selected"
 live_key "$LIVE_TUI_SESSION" Space
@@ -420,7 +420,7 @@ live_assert_text "$LIVE_TUI_SESSION" "Yes — let the leader synthesize" "synthe
 live_key "$LIVE_TUI_SESSION" Enter
 live_assert_absence "$LIVE_TUI_SESSION" "\$ agents" "no completion popup from wizard Enter"
 live_require_text "$LIVE_TUI_SESSION" "Move FakeAgent into" 15 "move-home confirm"
-live_assert_text "$LIVE_TUI_SESSION" "y/enter yes · n/esc no" "confirm shares y/n and Enter/Esc"
+live_assert_text "$LIVE_TUI_SESSION" "y/enter yes │ n/esc no" "confirm shares y/n and Enter/Esc"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "n rejected the confirm and created the workspace"
@@ -429,6 +429,16 @@ synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synth
 [[ "$synthesis" == "true" ]] || live_fail "synthesis choice did not persist as Yes (got $synthesis)"
 leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')
 [[ "$leader_name" == '"FakeAgent"' ]] || live_fail "unexpected roster leader (got $leader_name)"
+# v5.7 T3: the LEADER badge is a true cutout on an opaque rail surface (the
+# text capture cannot see color), and the extra connector stem is gone: the
+# badge row is followed by exactly one blank row before the title branch.
+live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader badge visible in the rail"
+pane_leader=$(live_capture "$LIVE_TUI_SESSION")
+leader_at=$(grep -nF "LEADER" <<<"$pane_leader" | head -1 | cut -d: -f1)
+title_at=$(grep -nF "Engineering" <<<"$pane_leader" | head -1 | cut -d: -f1)
+[[ -n "$leader_at" && -n "$title_at" ]] || live_fail "leader badge or title branch missing (badge @$leader_at title @$title_at)"
+[[ "$title_at" -eq "$((leader_at + 2))" ]] || live_fail "leader badge needs one blank row before the title branch (badge @$leader_at title @$title_at)"
+live_log "leader badge visible with one blank row before the title branch"
 
 # Inline work progress at this layer (ticket #56, slice A ticket #64): group
 # messages create leader work that starts with no further TUI action — no
@@ -446,8 +456,8 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message posted"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "ephemeral work block mounts while active"
-live_require_text "$LIVE_TUI_SESSION" "· FakeAgent · working" 15 "work row loading state with assignee"
+live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "ephemeral work block mounts while active"
+live_require_text "$LIVE_TUI_SESSION" "│ FakeAgent │ working" 15 "work row loading state with assignee"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 # Slice B: live activity lines animate across the named working frames
 # (◐◑◒◓). Bursts finalize in about half a second on this fixture, so a slow
@@ -463,7 +473,7 @@ collect_work_frames() {
   for _ in $(seq 1 "$rounds"); do
     pane=$(live_capture "$LIVE_TUI_SESSION")
     for frame in "◐" "◑" "◒" "◓"; do
-      if grep -qF -- "${frame} FakeAgent · working" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
+      if grep -qF -- "${frame} FakeAgent │ working" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
         seen_which="${seen_which}${frame}"
         seen_frames=$((seen_frames + 1))
       fi
@@ -499,10 +509,10 @@ done
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-alpha" 15 "terminal announcement for first work"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-beta" 15 "terminal announcement for second work"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal outcome announced exactly once"
-live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts when all work is terminal"
-live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · working" "no active rows remain in the block"
-live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · replied" "no finished rows remain in the block"
-live_assert_absence "$LIVE_TUI_SESSION" "· working…" "no activity lines when idle"
+live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "work block unmounts when all work is terminal"
+live_assert_absence "$LIVE_TUI_SESSION" "│ FakeAgent │ working" "no active rows remain in the block"
+live_assert_absence "$LIVE_TUI_SESSION" "│ FakeAgent │ replied" "no finished rows remain in the block"
+live_assert_absence "$LIVE_TUI_SESSION" "│ working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
 # and no needs-you marker appears without user-blocked work in this flow.
 live_assert_absence "$LIVE_TUI_SESSION" "Stopping…" "no stuck stop label after terminal"
@@ -546,10 +556,10 @@ live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
 # flight the live row reads `Asking $Name…` instead of the generic verb.
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 15 "assignment line for the peer turn"
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "peer assignment emitted exactly once"
-live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "work block mounts fresh for the new burst"
+live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "work block mounts fresh for the new burst"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
 live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking row exactly once, no duplicate turn row"
-live_assert_count "$LIVE_TUI_SESSION" "· FakeAgent · working" 1 "fresh burst lists only its own active row"
+live_assert_count "$LIVE_TUI_SESSION" "│ FakeAgent │ working" 1 "fresh burst lists only its own active row"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
 # Review fix (finding 1): queued rows are DM-only by construction, so the
 # group surface never offers `[x remove]` — `x` there keeps cancelling work.
@@ -563,8 +573,8 @@ done
 [[ "$peer_replied" == "1" ]] || live_fail "peer turn did not run to replied with no further action (got $peer_replied replied)"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished:" 15 "peer turn announced once"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 3 "two delegation rows plus one peer row, no duplicates"
-live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts after the peer burst"
-live_assert_absence "$LIVE_TUI_SESSION" "· FakeAgent · working" "no active rows remain after the peer burst"
+live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "work block unmounts after the peer burst"
+live_assert_absence "$LIVE_TUI_SESSION" "│ FakeAgent │ working" "no active rows remain after the peer burst"
 live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
 # Slice C: the relayed answer lands headed `Answer from $Name` (correlation
 # link, not a second independent turn); the asking row is gone with it, and
@@ -630,10 +640,10 @@ live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "probe asking ro
 # v5.6 T3: the long fixture keeps the work zone live while Tab focuses it.
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" Tab
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab focuses the work list"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Work list" 10 "Tab focuses the work list"
 live_require_text "$LIVE_TUI_SESSION" "enter result" 10 "work list names its open action"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "Esc returns to the transcript"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Group chat" 10 "Esc returns to the transcript"
 # Slice C third probe (direct surface): the `!Name` alias needs no completion
 # popup, so it posts in one shot while the probe turn is still streaming its
 # long reply — per-agent serialization parks it as pending, giving a wide,
@@ -771,23 +781,23 @@ live_type "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 15 "DM user text rendered verbatim"
 live_assert_count "$LIVE_TUI_SESSION" "verbatim *stars* [brackets](http://x)" 1 "verbatim line exactly once, no Markdown rewrite"
-live_require_absence "$LIVE_TUI_SESSION" "· working…" 20 "verbatim reply finalized in place"
+live_require_absence "$LIVE_TUI_SESSION" "│ working…" 20 "verbatim reply finalized in place"
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after the verbatim send"
 
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER" 10 "composer focus for queue dance"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ COMPOSER" 10 "composer focus for queue dance"
 # Deterministic queue window: the hold fixture streams for several seconds
 # (fake-queue-hold), so the second message stays parked while the harness
 # observes the queued row and removes it. It is one-shot and never leaks into
 # later replies through session history.
 live_type "$LIVE_TUI_SESSION" "fake-queue-hold"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "· working…" 10 "DM live line while streaming"
+live_require_text "$LIVE_TUI_SESSION" "│ working…" 10 "DM live line while streaming"
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after the live DM send"
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER" 10 "composer focus for queued probe"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ COMPOSER" 10 "composer focus for queued probe"
 live_type "$LIVE_TUI_SESSION" "fake-queued-probe"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after queued probe"
@@ -798,7 +808,7 @@ live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "x"
 live_require_absence "$LIVE_TUI_SESSION" "fake-queued-probe" 15 "queued line removed by key"
 live_require_absence "$LIVE_TUI_SESSION" "[x remove]" 10 "affordance gone with the line"
-live_require_absence "$LIVE_TUI_SESSION" "· working…" 30 "queue hold reply finalized"
+live_require_absence "$LIVE_TUI_SESSION" "│ working…" 30 "queue hold reply finalized"
 live_log "verbatim user text and queued-line removal verified on the direct surface"
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "w"
@@ -831,12 +841,12 @@ done
 [[ "$t4_replied" == "1" ]] || live_fail "T4 work fixture did not reply"
 t4_id=$(t4_id_for "T4 work action probe")
 live_invoke task.retry "{\"id\":\"$t4_id\"}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "retried T4 work row mounts"
+live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "retried T4 work row mounts"
 live_key "$LIVE_TUI_SESSION" Tab
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab reaches the work list"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Work list" 10 "Tab reaches the work list"
 live_require_text "$LIVE_TUI_SESSION" "enter result" 10 "work list names its open action"
-live_assert_text "$LIVE_TUI_SESSION" "d delegate · t reassign" "work footer names delegate and reassign"
-live_assert_text "$LIVE_TUI_SESSION" "r retry · R restart · x cancel · o native" "work footer names the remaining task actions"
+live_assert_text "$LIVE_TUI_SESSION" "d delegate │ t reassign" "work footer names delegate and reassign"
+live_assert_text "$LIVE_TUI_SESSION" "r retry │ R restart │ x cancel │ o native" "work footer names the remaining task actions"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "enter/esc close" 10 "Enter opens the selected work result"
 live_key "$LIVE_TUI_SESSION" Escape
@@ -852,15 +862,15 @@ live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Reassign${NBSP}subtask" 10 "reassign picker cancels"
 # Clean this row up out of band; its terminal outcome was already announced.
 live_invoke task.cancel "{\"id\":\"$t4_id\"}" >/dev/null
-live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "T4 result probe cleaned up"
+live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "T4 result probe cleaned up"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "Esc returns to the transcript"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Group chat" 10 "Esc returns to the transcript"
 
 # Retry, restart, and cancel on a fresh row so the cancelled outcome announces.
 t4_delegate "T4 retry probe"
-live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "retry-probe work row mounts"
+live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "retry-probe work row mounts"
 live_key "$LIVE_TUI_SESSION" Tab
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab reaches the work list for retry"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Work list" 10 "Tab reaches the work list for retry"
 t4_attempts_before=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 retry probe" })[0]?.attempts')
 live_key "$LIVE_TUI_SESSION" "r"
 t4_retried=0
@@ -875,12 +885,12 @@ live_key "$LIVE_TUI_SESSION" "R"
 live_require_text "$LIVE_TUI_SESSION" "Restarting work: T4 retry probe" 10 "R restarts the selected work"
 # Let the restart RPC clear the busy gate; x is dropped while an action runs.
 sleep 1
-live_require_text "$LIVE_TUI_SESSION" "WORK ·" 5 "restarted work row stays live"
+live_require_text "$LIVE_TUI_SESSION" "WORK │" 5 "restarted work row stays live"
 live_key "$LIVE_TUI_SESSION" "x"
 live_require_text "$LIVE_TUI_SESSION" "T4 retry probe cancelled" 15 "x cancels the selected work"
-live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts after the cancel"
+live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "work block unmounts after the cancel"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "Esc returns to the transcript after cancel"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Group chat" 10 "Esc returns to the transcript after cancel"
 
 live_log "work-list actions verified: enter, d, t, r, R, x, and Esc/Tab focus"
 
@@ -897,27 +907,27 @@ live_assert_absence "$LIVE_TUI_SESSION" "enter result" "idle rail footer hides w
 # Enter focuses the composer target without entering Insert. `i` stays the
 # explicit Insert entry. Rail order is agents then workspaces, so j selects
 # #LiveSite.
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Roster" 10 "roster uses Normal grammar"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Roster" 10 "roster uses Normal grammar"
 live_key "$LIVE_TUI_SESSION" "j"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 15 "roster Enter opens the target and keeps Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Group chat" 15 "roster Enter opens the target and keeps Normal"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "chat Enter focuses the composer and keeps Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "chat Enter focuses the composer and keeps Normal"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "Esc returns to the transcript"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Group chat" 10 "Esc returns to the transcript"
 # Space opens the which-key leader; the retired tilde prefix is gone.
 live_key "$LIVE_TUI_SESSION" Space
-live_require_text "$LIVE_TUI_SESSION" "LEADER · which-key" 10 "Space opens the which-key leader"
+live_require_text "$LIVE_TUI_SESSION" "LEADER │ which-key" 10 "Space opens the which-key leader"
 live_require_text "$LIVE_TUI_SESSION" "Leave Ensemble" 10 "which-key lists leader actions"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "which-key" 10 "Esc closes the leader"
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "composer Insert hints name the ladder"
+live_require_text "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leave" 10 "composer Insert hints name the ladder"
 live_assert_absence "$LIVE_TUI_SESSION" "enter result" "composer footer hides dead work keys"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "Insert hints replaced by Normal hints"
+live_require_absence "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leave" 10 "Insert hints replaced by Normal hints"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "second Esc returns to chat Normal"
 live_log "slice E focus walkthrough shows context footers with no hidden-work hints"
@@ -945,13 +955,13 @@ live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed"
 # modal grammar: tabs, rows, action hints, and the statusline mode/context.
 live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings for tab check"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Settings" "statusline names Normal and the settings context"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Settings" "statusline names Normal and the settings context"
 live_assert_text "$LIVE_TUI_SESSION" "h/l tabs" "settings teaches h/l tabs"
 live_assert_text "$LIVE_TUI_SESSION" "j/k rows" "settings teaches j/k rows"
 live_assert_text "$LIVE_TUI_SESSION" "enter edit" "settings teaches Enter"
 live_assert_text "$LIVE_TUI_SESSION" "s save" "settings teaches save"
 live_assert_text "$LIVE_TUI_SESSION" "esc close" "settings teaches the close step"
-live_assert_absence "$LIVE_TUI_SESSION" "a add ·" "the general tab does not promise an add row"
+live_assert_absence "$LIVE_TUI_SESSION" "a add │" "the general tab does not promise an add row"
 live_assert_text "$LIVE_TUI_SESSION" "› Name" "the general tab starts on the first row"
 live_assert_text "$LIVE_TUI_SESSION" "› General" "settings tab cursor"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "settings tab keeps the live memory total"
@@ -964,7 +974,7 @@ live_key "$LIVE_TUI_SESSION" "g"
 live_require_text "$LIVE_TUI_SESSION" "› Name" 10 "gg jumps back to the first row"
 live_key "$LIVE_TUI_SESSION" "l"
 live_require_text "$LIVE_TUI_SESSION" "› Models" 10 "l switches to the next tab"
-live_require_text "$LIVE_TUI_SESSION" "a add · s save" 10 "models teaches add; no backup exists to delete"
+live_require_text "$LIVE_TUI_SESSION" "a add │ s save" 10 "models teaches add; no backup exists to delete"
 live_key "$LIVE_TUI_SESSION" "h"
 live_require_text "$LIVE_TUI_SESSION" "› General" 10 "h switches back to the previous tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
@@ -994,24 +1004,24 @@ NBSP=$'\u00a0'
 live_key "$LIVE_TUI_SESSION" "s"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · settings" 10 "agent settings"
 live_key "$LIVE_TUI_SESSION" "e"
-live_require_text "$LIVE_TUI_SESSION" "Name · NORMAL" 10 "e opens the Name field in the current Normal mode"
+live_require_text "$LIVE_TUI_SESSION" "Name │ NORMAL" 10 "e opens the Name field in the current Normal mode"
 live_key "$LIVE_TUI_SESSION" "A"
-live_require_text "$LIVE_TUI_SESSION" "Name · INSERT" 10 "A enters Insert at the line end in the settings field"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Settings" 10 "the statusline names the field mode and context"
-live_assert_text "$LIVE_TUI_SESSION" "enter done · esc field normal" "the field teaches its first Esc"
+live_require_text "$LIVE_TUI_SESSION" "Name │ INSERT" 10 "A enters Insert at the line end in the settings field"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Settings" 10 "the statusline names the field mode and context"
+live_assert_text "$LIVE_TUI_SESSION" "enter done │ esc field normal" "the field teaches its first Esc"
 live_type "$LIVE_TUI_SESSION" "X"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgentX" 10 "typing edits the field buffer"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Name · NORMAL" 10 "the first Esc returns to field Normal"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Settings" "field Normal still reports the settings context"
+live_require_text "$LIVE_TUI_SESSION" "Name │ NORMAL" 10 "the first Esc returns to field Normal"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Settings" "field Normal still reports the settings context"
 live_assert_text "$LIVE_TUI_SESSION" "esc settings" "field Normal teaches the next Esc"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "Name · NORMAL" 10 "the second Esc returns to settings Normal"
+live_require_absence "$LIVE_TUI_SESSION" "Name │ NORMAL" 10 "the second Esc returns to settings Normal"
 live_require_text "$LIVE_TUI_SESSION" "UNSAVED" 10 "draft marked unsaved"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Discard changes?" 10 "in-house confirm modal"
-live_assert_text "$LIVE_TUI_SESSION" "y/enter yes · n/esc no" "confirm footer shares y/n and Enter/Esc"
+live_assert_text "$LIVE_TUI_SESSION" "y/enter yes │ n/esc no" "confirm footer shares y/n and Enter/Esc"
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_absence "$LIVE_TUI_SESSION" "Discard changes?" 10 "n rejected the confirm"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgentX · settings" 10 "rejected discard keeps settings open"
@@ -1028,30 +1038,32 @@ live_key "$LIVE_TUI_SESSION" "Tab"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "No memories yet. a adds one." 10 "memories empty state names the add key"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "memories count renders at zero"
-live_assert_text "$LIVE_TUI_SESSION" "a add · s save" "memories teaches the add row before any row exists"
+live_assert_text "$LIVE_TUI_SESSION" "a add │ s save" "memories teaches the add row before any row exists"
 live_key "$LIVE_TUI_SESSION" "a"
-live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "a opens a new memory field in Normal"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "a opens a new memory field in Normal"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "fake-live-memory"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "New memory · INSERT" 10 "Enter saves the memory and keeps the add field in Insert"
-live_assert_text "$LIVE_TUI_SESSION" "enter save · esc field normal" "the persistent memory field teaches Enter and Esc"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ INSERT" 10 "Enter saves the memory and keeps the add field in Insert"
+live_assert_text "$LIVE_TUI_SESSION" "enter save │ esc field normal" "the persistent memory field teaches Enter and Esc"
 live_require_text "$LIVE_TUI_SESSION" "Memories (1)" 10 "memories count renders the live total while the field stays open"
 # Race probe: the created id must select its row even if the event refresh
 # lands after the mutation refresh. No sleep: the cursor resolves by id.
 live_require_text "$LIVE_TUI_SESSION" "› fake-live-memory" 10 "the newly saved memory row holds the cursor"
+sleep 0.15
 live_assert_count "$LIVE_TUI_SESSION" "fake-live-memory" 1 "the add field cleared for the next memory"
 # A second memory proves the same field stays focused and clears again.
 live_type "$LIVE_TUI_SESSION" "fake-live-memory-two"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Memories (2)" 10 "the second memory joined the list"
 live_require_text "$LIVE_TUI_SESSION" "› fake-live-memory-two" 10 "the second saved row also holds the cursor"
+sleep 0.15
 live_assert_count "$LIVE_TUI_SESSION" "fake-live-memory-two" 1 "the second entry cleared for the next one"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "Esc returns the persistent field to Normal"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "Esc returns the persistent field to Normal"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "the second Esc closes the memory field"
+live_require_absence "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "the second Esc closes the memory field"
 live_require_text "$LIVE_TUI_SESSION" "Memories (2)" 10 "both memories persisted"
 sleep 0.25
 # x deletes the selected row; the cursor stays deterministic after the add.
@@ -1062,19 +1074,24 @@ live_require_absence "$LIVE_TUI_SESSION" "fake-live-memory-two" 10 "the deleted 
 # A enters Insert at the line end, append, Enter saves persistently. One row
 # keeps its origin and history (no delete/re-add).
 live_key "$LIVE_TUI_SESSION" "e"
-live_require_text "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "e opens the selected memory field in Normal"
+live_require_text "$LIVE_TUI_SESSION" "Edit memory │ NORMAL" 10 "e opens the selected memory field in Normal"
 # p in a field is Vim paste, never the row promote action; undo any clipboard
 # content so the append below starts from the saved text.
 live_key "$LIVE_TUI_SESSION" "p"
 live_key "$LIVE_TUI_SESSION" "u"
 live_key "$LIVE_TUI_SESSION" "$"
 live_key "$LIVE_TUI_SESSION" "A"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · Settings" 10 "A returns the field to Insert at the line end"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Settings" 10 "A returns the field to Insert at the line end"
 live_type "$LIVE_TUI_SESSION" " v2"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "Edit memory · INSERT" 10 "edit Enter saves and keeps the field open"
-memory_edited=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
+memory_edited=""
+for _ in $(seq 1 25); do
+  memory_edited=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
+  [[ "$memory_edited" == '["fake-live-memory v2"]' ]] && break
+  sleep 0.2
+done
 [[ "$memory_edited" == '["fake-live-memory v2"]' ]] || live_fail "memory edit did not persist (got $memory_edited)"
+live_require_text "$LIVE_TUI_SESSION" "Edit memory │ INSERT" 10 "edit Enter saves and keeps the field open"
 sleep 0.25
 live_assert_count "$LIVE_TUI_SESSION" "fake-live-memory v2" 2 "the edit kept the field text and updated the row"
 memory_rows=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).length')
@@ -1084,21 +1101,21 @@ memory_prov=$(live_snapshot_value '(function () { var m = Object.values(output.s
 live_require_text "$LIVE_TUI_SESSION" "fake-live-memory v2" 10 "edited fact renders"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count unchanged after edit"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "edit field Normal before closing"
+live_require_text "$LIVE_TUI_SESSION" "Edit memory │ NORMAL" 10 "edit field Normal before closing"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "Edit memory · NORMAL" 10 "edit memory field closed"
+live_require_absence "$LIVE_TUI_SESSION" "Edit memory │ NORMAL" 10 "edit memory field closed"
 sleep 0.25
 # x deletes the selected memory row without a dialog. Add a scratch row so the
 # original fact survives for the later tabs.
 live_key "$LIVE_TUI_SESSION" "a"
-live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "second memory field opens in Normal"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "second memory field opens in Normal"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "scratch-memory"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "New memory · INSERT" 10 "scratch memory saved persistently"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ INSERT" 10 "scratch memory saved persistently"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "New memory · NORMAL" 10 "scratch field Normal"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "scratch field Normal"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Memories (2)" 10 "scratch memory persisted"
 live_require_text "$LIVE_TUI_SESSION" "› scratch-memory" 10 "the new memory row holds the cursor"
@@ -1124,13 +1141,13 @@ live_log "settings p promoted the selected memory through the approval flow"
 # and filters the focused settings tab live; Enter commits, Esc would restore
 # the prior filter.
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "settings search opens in the command line"
+live_require_text "$LIVE_TUI_SESSION" "enter search │ esc cancel" 10 "settings search opens in the command line"
 live_type "$LIVE_TUI_SESSION" "zzz-no-match"
 live_require_text "$LIVE_TUI_SESSION" "Filter: zzz-no-match" 10 "settings filter follows the search line"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "No matching memories" 10 "memory filter zero state"
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "settings search reopens"
+live_require_text "$LIVE_TUI_SESSION" "enter search │ esc cancel" 10 "settings search reopens"
 live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "opening a new search clears the filter preview"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "provenance line restored after clearing filter"
@@ -1152,15 +1169,15 @@ live_require_text "$LIVE_TUI_SESSION" "› Skillbox" 10 "skillbox tab active wit
 live_assert_text "$LIVE_TUI_SESSION" "space toggle" "skillbox teaches Space"
 live_assert_text "$LIVE_TUI_SESSION" "/ filter" "skillbox teaches / filter"
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "skill filter opens in the command line"
+live_require_text "$LIVE_TUI_SESSION" "enter search │ esc cancel" 10 "skill filter opens in the command line"
 live_type "$LIVE_TUI_SESSION" "zzz-no-such-skill"
 live_require_text "$LIVE_TUI_SESSION" "No matching skills" 10 "empty palette names the miss"
 live_key "$LIVE_TUI_SESSION" Enter
 live_key "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "skill filter search reopens"
+live_require_text "$LIVE_TUI_SESSION" "enter search │ esc cancel" 10 "skill filter search reopens"
 live_require_absence "$LIVE_TUI_SESSION" "No matching skills" 10 "opening a new search clears the prior filter"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_absence "$LIVE_TUI_SESSION" "enter search · esc cancel" 10 "filter search submitted"
+live_require_absence "$LIVE_TUI_SESSION" "enter search │ esc cancel" 10 "filter search submitted"
 if live_capture_contains "$LIVE_TUI_SESSION" "[ ]"; then
   live_key "$LIVE_TUI_SESSION" "Space"
   live_require_text "$LIVE_TUI_SESSION" "[x]" 10 "fill mark shows the assignment"
@@ -1268,16 +1285,16 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for Vim probe"
 live_type "$LIVE_TUI_SESSION" "vim alpha beta"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "Vim probe starts in composer Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "Vim probe starts in composer Normal"
 live_require_text "$LIVE_TUI_SESSION" "vim alpha beta" 10 "Esc keeps the typed text"
 live_key "$LIVE_TUI_SESSION" "0"
-live_require_text "$LIVE_TUI_SESSION" " · 1:1 · " 10 "0 goes to the line start"
+live_require_text "$LIVE_TUI_SESSION" " │ 1:1 │ " 10 "0 goes to the line start"
 live_key "$LIVE_TUI_SESSION" "w"
-live_require_text "$LIVE_TUI_SESSION" " · 1:5 · " 10 "w goes to the next word start"
+live_require_text "$LIVE_TUI_SESSION" " │ 1:5 │ " 10 "w goes to the next word start"
 live_key "$LIVE_TUI_SESSION" '$'
-live_require_text "$LIVE_TUI_SESSION" " · 1:14 · " 10 "$ goes to the last character"
+live_require_text "$LIVE_TUI_SESSION" " │ 1:14 │ " 10 "$ goes to the last character"
 live_key "$LIVE_TUI_SESSION" "b"
-live_require_text "$LIVE_TUI_SESSION" " · 1:11 · " 10 "b goes back to the word start"
+live_require_text "$LIVE_TUI_SESSION" " │ 1:11 │ " 10 "b goes back to the word start"
 live_key "$LIVE_TUI_SESSION" "0"
 live_key "$LIVE_TUI_SESSION" "x"
 live_require_text "$LIVE_TUI_SESSION" "im alpha beta" 10 "x cuts the character at the cursor"
@@ -1291,7 +1308,7 @@ live_key "$LIVE_TUI_SESSION" "A"
 live_type "$LIVE_TUI_SESSION" "!"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "A returns to composer Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "A returns to composer Normal"
 live_require_text "$LIVE_TUI_SESSION" "vim alpha beta!" 10 "A appends at the line end"
 live_key "$LIVE_TUI_SESSION" "y"
 sleep 0.25
@@ -1308,18 +1325,18 @@ sleep 0.25
 live_key "$LIVE_TUI_SESSION" "d"
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "dd clears the composer line"
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "INSERT · COMPOSER" 10 "Insert focus before the Enter-send probe"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ COMPOSER" 10 "Insert focus before the Enter-send probe"
 live_type "$LIVE_TUI_SESSION" "vim-enter-check"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "Normal before Enter send"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "Normal before Enter send"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "vim-enter-check" 15 "Enter sends from Normal"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" "send from Normal keeps the composer focused"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" "send from Normal keeps the composer focused"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" C-g
 live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "Ctrl+G leaves the composer from Normal"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" "Ctrl+G returns to chat Normal"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Group chat" "Ctrl+G returns to chat Normal"
 
 # v5.6 T8: Visual and Visual-Line. `v`/`V` select, motions extend, y copies,
 # d cuts, p pastes, and Esc cancels to Normal. The statusline names the kind
@@ -1328,14 +1345,14 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for the Visual probe"
 live_type "$LIVE_TUI_SESSION" "vim visual line"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "Visual probe starts in composer Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "Visual probe starts in composer Normal"
 live_key "$LIVE_TUI_SESSION" "V"
-live_require_text "$LIVE_TUI_SESSION" "V-LINE · COMPOSER" 10 "V enters Visual Line"
+live_require_text "$LIVE_TUI_SESSION" "V-LINE │ COMPOSER" 10 "V enters Visual Line"
 live_require_text "$LIVE_TUI_SESSION" "1 line" 10 "the statusline names the line selection size"
 live_key "$LIVE_TUI_SESSION" '$'
-live_assert_text "$LIVE_TUI_SESSION" "V-LINE · COMPOSER" "motions keep Visual Line active"
+live_assert_text "$LIVE_TUI_SESSION" "V-LINE │ COMPOSER" "motions keep Visual Line active"
 live_key "$LIVE_TUI_SESSION" "y"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "y copies and leaves Visual Line"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "y copies and leaves Visual Line"
 live_key "$LIVE_TUI_SESSION" "p"
 sleep 0.5
 live_assert_count "$LIVE_TUI_SESSION" "vim visual line" 2 "a V-LINE yank pastes as whole lines"
@@ -1344,15 +1361,15 @@ sleep 0.5
 live_assert_count "$LIVE_TUI_SESSION" "vim visual line" 1 "u undoes the Visual Line paste"
 # Character Visual, a motion, and the `o` end swap.
 live_key "$LIVE_TUI_SESSION" "v"
-live_require_text "$LIVE_TUI_SESSION" "VISUAL · COMPOSER" 10 "v enters Character Visual"
+live_require_text "$LIVE_TUI_SESSION" "VISUAL │ COMPOSER" 10 "v enters Character Visual"
 live_key "$LIVE_TUI_SESSION" "0"
 live_require_text "$LIVE_TUI_SESSION" "chars" 10 "motions extend the character selection"
 live_key "$LIVE_TUI_SESSION" "o"
-live_assert_text "$LIVE_TUI_SESSION" "VISUAL · COMPOSER" "o swaps the ends without leaving Visual"
+live_assert_text "$LIVE_TUI_SESSION" "VISUAL │ COMPOSER" "o swaps the ends without leaving Visual"
 live_key "$LIVE_TUI_SESSION" '$'
-live_assert_text "$LIVE_TUI_SESSION" "VISUAL · COMPOSER" "a motion after o keeps the selection active"
+live_assert_text "$LIVE_TUI_SESSION" "VISUAL │ COMPOSER" "a motion after o keeps the selection active"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "Esc cancels Visual to Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "Esc cancels Visual to Normal"
 # V then d cuts the whole line; p pastes it back as a line.
 live_key "$LIVE_TUI_SESSION" "V"
 live_key "$LIVE_TUI_SESSION" "d"
@@ -1374,7 +1391,7 @@ sleep 0.5
 live_assert_text "$LIVE_TUI_SESSION" "ENSEMBLE" "Escape never quits Ensemble"
 # Ticket #80: `:q` is the deliberate command-line quit.
 live_type "$LIVE_TUI_SESSION" ":"
-live_require_text "$LIVE_TUI_SESSION" "COMMAND · " 10 "colon opens Command mode"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND │ " 10 "colon opens Command mode"
 live_type "$LIVE_TUI_SESSION" "q"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after :q"
@@ -1405,26 +1422,26 @@ live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after F2 rou
 live_assert_absence "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "stale heading after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "stale code after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "fake-queue-beta" "stale work row after leaving Ensemble"
-live_assert_absence "$LIVE_TUI_SESSION" "WORK ·" "stale work section after leaving Ensemble"
+live_assert_absence "$LIVE_TUI_SESSION" "WORK │" "stale work section after leaving Ensemble"
 
 # v5.6 T11: `:` and `/` still open Command mode after the native F2
 # round-trip; the visible page owns the key, not a stale stacked page.
 live_key "$LIVE_TUI_SESSION" F2
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "F2 returns before the command probes"
 live_type "$LIVE_TUI_SESSION" ":"
-live_require_text "$LIVE_TUI_SESSION" "COMMAND · " 10 "colon opens Command mode after F2 round-trip"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND │ " 10 "colon opens Command mode after F2 round-trip"
 live_key "$LIVE_TUI_SESSION" Escape
 live_type "$LIVE_TUI_SESSION" "/"
-live_require_text "$LIVE_TUI_SESSION" "COMMAND · " 10 "slash opens Command search after F2 round-trip"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND │ " 10 "slash opens Command search after F2 round-trip"
 live_key "$LIVE_TUI_SESSION" Escape
 
 # v5.6 T4: `o` opens the selected work's native session.
 t4_delegate "T4 native probe"
-live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "native-probe work row mounts"
+live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "native-probe work row mounts"
 live_key "$LIVE_TUI_SESSION" "h"
 live_key "$LIVE_TUI_SESSION" Tab
 live_key "$LIVE_TUI_SESSION" Tab
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab reaches the work list for the native probe"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Work list" 10 "Tab reaches the work list for the native probe"
 live_key "$LIVE_TUI_SESSION" "o"
 # The host native TUI footer is the stable marker here; its `ctrl+p commands`
 # label is host-owned, not an Ensemble app binding.
@@ -1446,11 +1463,11 @@ live_open_ensemble
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page under reduced motion"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored under reduced motion"
 live_key "$LIVE_TUI_SESSION" "i"
-live_require_text "$LIVE_TUI_SESSION" "enter send · esc normal · ctrl+g leave" 10 "static composer hint under reduced motion"
+live_require_text "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leave" 10 "static composer hint under reduced motion"
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "◐ FakeAgent · working…" 15 "frame-0 activity line under reduced motion"
+live_require_text "$LIVE_TUI_SESSION" "◐ FakeAgent │ working…" 15 "frame-0 activity line under reduced motion"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 for _ in $(seq 1 8); do
@@ -1463,7 +1480,7 @@ done
 live_log "reduced-motion run stayed on frame-0 glyphs while live"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 30 "reduced-motion work announced once"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 1 "reduced-motion completion exactly once, no duplicate inline line"
-live_require_absence "$LIVE_TUI_SESSION" "WORK ·" 15 "work block unmounts under reduced motion"
+live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "work block unmounts under reduced motion"
 # Let the 3 s "Message sent" transient expire before sampling quiescence.
 sleep 3.2
 reduced_idle_first=$(live_capture "$LIVE_TUI_SESSION")
