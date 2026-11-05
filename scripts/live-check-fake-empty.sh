@@ -51,6 +51,7 @@ live_assert_text "$LIVE_TUI_SESSION" "○───○───○" "one-shot emp
 live_assert_absence "$LIVE_TUI_SESSION" "SUBTASKS" "right-hand task board retired"
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
+live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "FakeAgent"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
@@ -67,6 +68,7 @@ live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc cancels Visual in the wizard field"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
+live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "Renders deterministic Markdown."
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
@@ -76,9 +78,14 @@ live_require_text "$LIVE_TUI_SESSION" "0 options" 10 "empty option count"
 live_assert_text "$LIVE_TUI_SESSION" "No models available" "explained empty model state"
 
 # v5.6 T6: Esc backs one step at a time; the first step cancels the wizard.
+# The list step arrived in Insert, so the first Esc leaves Insert; the second
+# goes back one step.
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc leaves Insert on the list step"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "Esc goes back one wizard step"
-# Text steps need Insert -> field Normal -> previous step, so walk the rest.
+# Text steps keep the arrival mode; Esc leaves Insert, then field Normal
+# goes back a step. Walk the rest.
 for _ in $(seq 1 8); do
   sleep 0.25
   live_key "$LIVE_TUI_SESSION" Escape

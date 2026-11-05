@@ -26,7 +26,7 @@ export type InteractionFocus =
 
 export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "approvals" | "help"
 
-export type CommandInput = { kind: ":" | "/"; text: string }
+export type CommandInput = { kind: ":" | "/"; text: string; returnMode: InteractionMode }
 
 import type { VimVisualSelection } from "./vim.ts"
 
@@ -34,7 +34,10 @@ import type { VimVisualSelection } from "./vim.ts"
 export type InteractionSelection = VimVisualSelection
 
 /** The focused text buffer inside an overlay context, if any. */
-export type InteractionField = "settings" | null
+export type InteractionField = "settings" | "prompt" | "wizard" | null
+
+/** Every text editor that can own the caret. */
+export type InteractionEditor = "composer" | "settings" | "prompt" | "wizard"
 
 export type TransientTone = "info" | "success" | "error"
 
@@ -55,9 +58,10 @@ export type InteractionState = {
 export type DialogFieldTarget = "prompt" | "wizard"
 
 export type InteractionEvent =
-  | { type: "insert.enter" }
+  | { type: "insert.enter"; target?: InteractionEditor }
   | { type: "field.enter"; target: DialogFieldTarget }
   | { type: "field.leave" }
+  | { type: "editor.normal" }
   | { type: "escape" }
   | { type: "leave.editor" }
   | { type: "route.leave" }
@@ -78,7 +82,7 @@ export type InteractionEvent =
   | { type: "message.clear" }
 
 export type InteractionIntent =
-  | { type: "focus-editor"; target?: DialogFieldTarget }
+  | { type: "focus-editor"; target?: InteractionEditor }
   | { type: "blur-editor" }
   | { type: "close-overlay"; overlay: InteractionOverlay }
   | { type: "wizard-back" }
@@ -104,72 +108,146 @@ export function initialInteractionState(overrides: Partial<InteractionState> = {
 }
 
 /**
+ * The editor that currently owns typing. A focused settings/prompt/wizard
+ * field wins; otherwise the composer owns it only while no overlay covers it.
+ * Wizard list steps, roster, chat, and the work list expose no text target.
+ */
+export function textTargetOf(state: InteractionState): InteractionEditor | null {
+  if (state.field !== null) return state.field
+  if (state.overlay === "none" && state.focus === "composer") return "composer"
+  return null
+}
+
+/** True when Insert is honest but has nowhere to type. */
+export function insertWithoutTarget(state: InteractionState): boolean {
+  return state.mode === "insert" && textTargetOf(state) === null
+}
+
+export type CaretStyle = { style: "block" | "line"; blinking: boolean }
+
+/**
+ * Every text editor shares one caret model: a block in Normal so Vim motions
+ * act on a visible character, and a line in Insert, Visual, and Command.
+ * Carets never blink, and an unfocused editor paints none.
+ */
+export function caretStyleForMode(mode: InteractionMode): CaretStyle {
+  return mode === "normal"
+    ? { style: "block", blinking: false }
+    : { style: "line", blinking: false }
+}
+
+export function caretForEditor(mode: InteractionMode, focused: boolean): CaretStyle | null {
+  return focused ? caretStyleForMode(mode) : null
+}
+
+/**
  * The Esc ladder. Esc always goes up one level and never quits:
- * command/selection/overlay first, then Insert -> composer Normal, then
- * composer Normal -> chat Normal, otherwise a no-op.
+ * command closes to its return mode, a selection cancels, Insert/Visual
+ * returns to Normal without blurring the focused editor, a focused field
+ * returns to field Normal, then overlays close, then the composer returns to
+ * chat. Nothing here assigns Normal except the explicit Esc keys.
  *
- * Dialogs follow the same ladder with one dialog-specific step: an Insert
- * field goes to field Normal first. Wizard field Normal then goes back one
- * step; every other dialog cancels. Closing never leaves Insert behind.
+ * A field's first Esc leaves Insert but keeps the field focused; the next
+ * leaves the field. Closing a wizard step goes back through a typed intent.
  */
 function escape(state: InteractionState): InteractionResult {
-  if (state.command) {
-    return {
-      state: { ...state, command: null, mode: "normal" },
-      intents: [{ type: "blur-editor" }],
-    }
-  }
+  if (state.command) return closeCommand(state)
   if (state.selection) {
     return {
       state: { ...state, selection: null, mode: "normal" },
       intents: [],
     }
   }
-  // Settings text fields sit above the settings overlay: Insert -> field
-  // Normal -> settings Normal, and only then does the overlay close.
-  if (state.field === "settings") {
-    if (state.mode === "insert") {
-      return { state: { ...state, mode: "normal" }, intents: [{ type: "blur-editor" }] }
+  if (state.field !== null) {
+    if (state.mode !== "normal") {
+      return {
+        state: { ...state, mode: "normal", selection: null },
+        intents: [],
+      }
     }
-    return { state: { ...state, mode: "normal", field: null }, intents: [{ type: "blur-editor" }] }
-  }
-  if (state.overlay !== "none") {
-    if (state.mode === "insert") {
-      return { state: { ...state, mode: "normal" }, intents: [] }
+    // Field Normal: a settings field returns to the settings rows; a prompt
+    // cancels; a wizard text field goes back one step. Only settings keeps
+    // its overlay open.
+    if (state.field === "prompt") {
+      return {
+        state: { ...state, field: null, overlay: "none" },
+        intents: [{ type: "blur-editor" }, { type: "close-overlay", overlay: "dialog" }],
+      }
     }
-    if (state.overlay === "wizard") {
-      return { state: { ...state, mode: "normal" }, intents: [{ type: "wizard-back" }] }
+    if (state.field === "wizard") {
+      return {
+        state: { ...state, field: null },
+        intents: [{ type: "blur-editor" }, { type: "wizard-back" }],
+      }
     }
     return {
-      state: { ...state, overlay: "none", mode: "normal" },
+      state: { ...state, mode: "normal", field: null },
+      intents: [{ type: "blur-editor" }],
+    }
+  }
+  // Insert or Visual without a selection lands in Normal before any surface
+  // movement. The focused editor (if any) keeps the caret.
+  if (state.mode !== "normal") {
+    return {
+      state: { ...state, mode: "normal", selection: null },
+      intents: [],
+    }
+  }
+  if (state.overlay !== "none") {
+    if (state.overlay === "wizard") {
+      return { state, intents: [{ type: "wizard-back" }] }
+    }
+    return {
+      state: { ...state, overlay: "none" },
       intents: [{ type: "close-overlay", overlay: state.overlay }],
     }
   }
   if (state.focus === "work") {
-    return { state: { ...state, mode: "normal", focus: "chat" }, intents: [{ type: "blur-editor" }] }
+    return { state: { ...state, focus: "chat" }, intents: [{ type: "blur-editor" }] }
   }
   if (state.focus === "composer") {
-    if (state.mode === "insert") {
-      return { state: { ...state, mode: "normal" }, intents: [{ type: "blur-editor" }] }
-    }
-    return { state: { ...state, mode: "normal", focus: "chat" }, intents: [{ type: "blur-editor" }] }
+    return { state: { ...state, focus: "chat" }, intents: [{ type: "blur-editor" }] }
   }
   return { state, intents: [{ type: "noop" }] }
 }
 
+/** Close the one-line command input and restore the mode it interrupted. */
+function closeCommand(state: InteractionState): InteractionResult {
+  if (!state.command) return { state, intents: [] }
+  const next: InteractionState = { ...state, command: null, mode: state.command.returnMode }
+  const target = textTargetOf(next)
+  return {
+    state: next,
+    intents: target ? [{ type: "focus-editor", target }] : [],
+  }
+}
+
 export function interactionReducer(state: InteractionState, event: InteractionEvent): InteractionResult {
   switch (event.type) {
-    case "insert.enter":
+    case "insert.enter": {
+      const target = event.target ?? "composer"
       return {
-        state: { ...state, mode: "insert", focus: "composer", selection: null },
-        intents: [{ type: "focus-editor" }],
+        state: {
+          ...state,
+          mode: "insert",
+          focus: target === "composer" ? "composer" : target === "settings" ? "settings" : state.focus,
+          overlay: target === "settings" ? "settings" : state.overlay,
+          field: target === "composer" ? null : target,
+          selection: null,
+        },
+        intents: [{ type: "focus-editor", target }],
       }
+    }
     case "field.enter":
       return {
-        state: { ...state, mode: "insert", selection: null },
+        state: { ...state, field: event.target },
         intents: [{ type: "focus-editor", target: event.target }],
       }
     case "field.leave":
+      return { state: { ...state, field: null, selection: null }, intents: [{ type: "blur-editor" }] }
+    case "editor.normal":
+      // Esc from an Insert or Visual field keeps the field focused: the raw
+      // handler owns keys in Normal, so the caret must stay visible.
       return { state: { ...state, mode: "normal", selection: null }, intents: [] }
     case "escape":
       return escape(state)
@@ -203,79 +281,92 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
       // Wizards and prompt dialogs own the editor as their whole surface:
       // Ctrl+G leaves the field by going back a wizard step or cancelling the
       // prompt through the same typed intents Esc uses.
-      if (state.overlay === "wizard") {
+      if (state.field === "wizard" && state.overlay === "wizard") {
         return {
-          state: { ...state, mode: "normal", selection: null },
+          state: { ...state, mode: "normal", field: null, selection: null },
           intents: [{ type: "blur-editor" }, { type: "wizard-back" }],
         }
       }
-      if (state.overlay === "dialog") {
+      if (state.field === "prompt" && state.overlay === "dialog") {
         return {
-          state: { ...state, mode: "normal", overlay: "none", selection: null },
+          state: { ...state, mode: "normal", field: null, overlay: "none", selection: null },
           intents: [{ type: "blur-editor" }, { type: "close-overlay", overlay: "dialog" }],
         }
       }
+      if (state.focus === "composer") {
+        return {
+          state: { ...state, mode: "normal", focus: "chat", field: null, selection: null },
+          intents: [{ type: "blur-editor" }],
+        }
+      }
+      // Insert with no editor, or Ctrl+G outside an editor: leave Normal
+      // behind without moving focus or closing the surrounding context.
       return {
-        state: { ...state, mode: "normal", focus: "chat", selection: null },
+        state: { ...state, mode: "normal", field: null, selection: null },
         intents: [{ type: "blur-editor" }],
       }
     case "settings.field.open":
+      // Opening a field is a focus move, not an insert entry: it keeps the
+      // current mode so the user presses i/a deliberately.
       return {
         state: {
           ...state,
-          mode: "insert",
           focus: "settings",
           overlay: "settings",
           field: "settings",
           selection: null,
         },
-        intents: [{ type: "focus-editor" }],
+        intents: [{ type: "focus-editor", target: "settings" }],
       }
     case "settings.field.close":
       return {
-        state: { ...state, mode: "normal", focus: "settings", field: null, selection: null },
+        state: { ...state, focus: "settings", field: null, selection: null },
         intents: [{ type: "blur-editor" }],
       }
     case "focus.set": {
-      const composer = event.focus === "composer"
-      const mode = composer && state.mode !== "visual" ? state.mode : "normal"
-      const field = state.field !== null && event.focus !== "settings" ? null : state.field
+      // Mode is global: moving focus never assigns it. The editor focus moves
+      // with the target; leaving an editor blurs it but keeps the mode.
+      const target = event.focus === "composer" ? "composer" : null
       return {
-        state: { ...state, focus: event.focus, mode, field, selection: null },
-        intents: [{ type: composer && mode === "insert" ? "focus-editor" : "blur-editor" }],
+        state: { ...state, focus: event.focus },
+        intents: target ? [{ type: "focus-editor", target }] : [{ type: "blur-editor" }],
       }
     }
     case "overlay.set": {
-      const closing = state.overlay !== "none" && event.overlay === "none"
-      const opening = event.overlay !== "none"
-      return {
-        state: {
-          ...state,
-          overlay: event.overlay,
-          mode: opening || closing ? "normal" : state.mode,
-          field: event.overlay === "none" || event.overlay !== "settings" ? null : state.field,
-          selection: opening || closing ? null : state.selection,
-        },
-        intents: opening ? [{ type: "blur-editor" }] : [],
+      const opening = state.overlay !== event.overlay
+      // Opening or closing an overlay leaves the editor context. The mode is
+      // never assigned here; a field must be re-focused deliberately.
+      const next: InteractionState = {
+        ...state,
+        overlay: event.overlay,
+        field: opening ? null : state.field,
       }
+      const intents: InteractionIntent[] = opening ? [{ type: "blur-editor" }] : []
+      if (!opening && event.overlay === "none") {
+        const target = textTargetOf(next)
+        if (target) intents.push({ type: "focus-editor", target })
+      }
+      return { state: next, intents }
     }
-    case "command.open":
+    case "command.open": {
+      const returnMode = state.mode === "command" ? state.command?.returnMode ?? "normal" : state.mode
       return {
         state: {
           ...state,
-          command: { kind: event.kind, text: event.text ?? "" },
+          command: { kind: event.kind, text: event.text ?? "", returnMode },
           mode: "command",
           selection: null,
         },
         intents: [{ type: "blur-editor" }],
       }
+    }
     case "command.update":
       return {
         state: state.command ? { ...state, command: { ...state.command, text: event.text } } : state,
         intents: [],
       }
     case "command.close":
-      return { state: { ...state, command: null, mode: "normal" }, intents: [] }
+      return closeCommand(state)
     case "chord.set":
       return { state: { ...state, pendingChord: event.chord }, intents: [] }
     case "chord.clear":
