@@ -34,10 +34,28 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   memory list writes nothing and that `:init` still routes to the Ensemble init
   path (with a workspace-first message) while `:init <mention>` is rejected as
   solo-only without a model catalog.
+- `npm run test:live:fake:all`: runs the fake scenario, then the empty-catalog
+  scenario, in that order. Stops at the first failure and prints one compact
+  summary (`PASS`/`FAIL`/`SKIP` per scenario, counts, elapsed time). This is the
+  deterministic fake-and-empty suite.
+- `npm run test:live:all`: the same runner, adding the real host-catalog
+  scenario last. Use it for the full local matrix; the real scenario is not
+  deterministic and is not the CI guardrail.
+- `npm run test:live:latency`: a reproducible keypress-to-repaint probe on the
+  isolated fake host. It reports min/p50/p95/max/mean and raw samples for rail
+  `j`/`k` navigation; it is a measurement, not a pass/fail threshold. Set
+  `ENSEMBLE_LATENCY_SAMPLES` (default 10) to change the sample count.
 
-Both scenarios source `scripts/lib/live-harness.sh`. Each run owns a temporary
-project and HOME, plus isolated XDG config/data/state/cache. Child processes
-receive a clean environment, not inherited API keys or OpenCode overrides.
+The aggregate runner streams each scenario's output unchanged and never
+retries. A failing scenario stops the run and later scenarios are reported as
+`NOT RUN`. A scenario that prints the harness skip line is reported as `SKIP`,
+not `PASS`. Its exit stays zero locally to match the individual commands, so
+read the summary: a `SKIP` means the scenario did not run.
+
+All scenarios and the latency probe source `scripts/lib/live-harness.sh`.
+Each run owns a temporary project and HOME, plus isolated XDG
+config/data/state/cache. Child processes receive a clean environment, not
+inherited API keys or OpenCode overrides.
 Only the repository plugin is loaded. No real workspace is used. The resolved
 absolute OpenCode binary is invoked because HOME-dependent wrappers cannot run
 with an isolated HOME. The harness prefers an installed nvm binary; override
@@ -67,10 +85,26 @@ host catalog but has fewer interaction assertions.
 
 Waits poll observable conditions with bounded timeouts. Slow machines may set
 `ENSEMBLE_LIVE_START_TIMEOUT` (30s), `ENSEMBLE_LIVE_TUI_TIMEOUT` (60s), or
-`ENSEMBLE_LIVE_STEP_TIMEOUT` (20s) for helpers using those defaults. Individual
-scenario assertions also supply explicit timeouts. Set `ENSEMBLE_LIVE_DEBUG=1`
-to print resolved binaries and fixture paths. No exact full ANSI frame is
-asserted; these are content/behavior checks, not pixel-level visual tests.
+`ENSEMBLE_LIVE_STEP_TIMEOUT` (20s) for helpers using those defaults. The T4
+work fixture separately bounds its delegated-reply wait with
+`ENSEMBLE_LIVE_T4_TIMEOUT` (180s); on timeout it prints the matching subtask
+row, state counts, all row states, and workspace names before failing. It does
+not retry. Individual scenario assertions also supply explicit timeouts. Set
+`ENSEMBLE_LIVE_DEBUG=1` to print resolved binaries and fixture paths. No exact
+full ANSI frame is asserted; these are content/behavior checks, not pixel-level
+visual tests.
+
+## Latency probe
+
+`npm run test:live:latency` starts the isolated fake provider, server, and TUI,
+creates one agent and one workspace through the RPC surface, then times rail
+`j`/`k` cursor moves from `tmux send-keys` until a pane capture first shows the
+cursor on the target row. It reports raw samples plus min/p50/p95/max/mean and
+the measurement boundary. `ENSEMBLE_LATENCY_SAMPLES` controls the count.
+
+The number includes tmux send/capture overhead, so compare runs from the same
+machine and terminal host rather than treating it as pure render time. The
+probe measures and exits; it does not assert a latency threshold.
 
 The fake provider is infrastructure only and is never imported by the plugin.
 It implements `/v1/models` and `/v1/chat/completions` (also without `/v1`).

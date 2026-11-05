@@ -970,15 +970,15 @@ t4_id_for() {
 }
 
 # Result and picker actions: retry retains the prior result, so Enter opens a
-# real result while the long fixture streams again.
+# real result while the long fixture streams again. The scheduling timeout is
+# deliberately long: under load a delegated row can sit pending for a while.
+# A timeout prints the task snapshot diagnostic and fails; there is no retry
+# loop that would hide a genuine scheduling failure.
+T4_REPLY_TIMEOUT="${ENSEMBLE_LIVE_T4_TIMEOUT:-180}"
 t4_delegate "T4 work action probe"
-t4_replied=0
-for _ in $(seq 1 120); do
-  t4_state=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 work action probe" })[0]?.status')
-  [[ "$t4_state" == '"replied"' ]] && { t4_replied=1; break; }
-  sleep 0.5
-done
-[[ "$t4_replied" == "1" ]] || live_fail "T4 work fixture did not reply"
+if ! live_wait_for_subtask_status "T4 work action probe" replied "$T4_REPLY_TIMEOUT"; then
+  live_fail "T4 work fixture did not reply within ${T4_REPLY_TIMEOUT}s"
+fi
 t4_id=$(t4_id_for "T4 work action probe")
 live_invoke task.retry "{\"id\":\"$t4_id\"}" >/dev/null
 live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "retried T4 work row mounts"
