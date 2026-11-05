@@ -467,6 +467,47 @@ title_at=$(grep -nF "Engineering" <<<"$pane_leader" | head -1 | cut -d: -f1)
 [[ "$title_at" -eq "$((leader_at + 1))" ]] || live_fail "title branch must follow the leader name row (leader @$leader_at title @$title_at)"
 live_log "inline leader label visible on the name row"
 
+# v5.8 T1: every init trigger appends a visible /init audit line and starts a
+# System Agent job. The job owns a temporary native session, runs native
+# /init internally, streams progress, and finalizes the canonical block plus
+# init metadata only on success. `I`, `:init`, and composer `/init` must all
+# produce the same visible line.
+wait_for_init_successes() {
+  local expected="$1" succeeded
+  for _ in $(seq 1 120); do
+    succeeded=$(live_snapshot_value 'Object.values(output.state.initJobs).filter(function (job) { return job.state === "succeeded" }).length')
+    [[ "$succeeded" == "$expected" ]] && return 0
+    sleep 0.4
+  done
+  live_fail "expected $expected successful init job(s), found $succeeded"
+}
+live_key "$LIVE_TUI_SESSION" "I"
+live_require_text "$LIVE_TUI_SESSION" "System Agent" 20 "I starts a visible System Agent init"
+wait_for_init_successes 1
+live_key "$LIVE_TUI_SESSION" ":"
+live_type "$LIVE_TUI_SESSION" "init"
+live_key "$LIVE_TUI_SESSION" Enter
+wait_for_init_successes 2
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for /init"
+live_type "$LIVE_TUI_SESSION" "/init"
+live_key "$LIVE_TUI_SESSION" Enter
+wait_for_init_successes 3
+init_audit=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; return (output.state.messages[ws.id] || []).filter(function (m) { return m.author === "user" && m.text === "/init" }).length })()')
+[[ "$init_audit" == "3" ]] || live_fail "expected three visible /init audit lines, found $init_audit"
+init_reports=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; return (output.state.messages[ws.id] || []).filter(function (m) { return m.displayAuthor === "System Agent" && !m.streaming && /Ensemble init complete/.test(m.text) }).length })()')
+[[ "$init_reports" == "3" ]] || live_fail "expected three finalized System Agent reports, found $init_reports"
+init_sessions=$(live_snapshot_value 'Object.values(output.state.initJobs).map(function (job) { return job.sessionID }).join(",")')
+[[ "$init_sessions" == *,* ]] || live_fail "init jobs did not record their temporary native sessions (got $init_sessions)"
+live_require_text "$LIVE_TUI_SESSION" "Ensemble init complete" 20 "System Agent final report is visible"
+live_assert_text "$LIVE_TUI_SESSION" "/init" "every init trigger leaves a visible audit line"
+live_assert_text "$LIVE_TUI_SESSION" "System Agent" "the System Agent authors the init report"
+grep -qF -- "<!-- ensemble:start v2 -->" "$LIVE_PROJECT/AGENTS.md" || live_fail "canonical AGENTS.md block was not written"
+init_block_count=$(grep -oF -- "<!-- ensemble:start" "$LIVE_PROJECT/AGENTS.md" | wc -l | tr -d ' ')
+[[ "$init_block_count" == "1" ]] || live_fail "AGENTS.md carries $init_block_count Ensemble blocks"
+grep -qF -- '"version": 2' "$LIVE_PROJECT/.ensemble/init.json" || live_fail "init metadata version was not recorded"
+live_log "I, :init, and /init produced visible System Agent jobs and reports"
+
 # Inline work progress at this layer (ticket #56, slice A ticket #64): group
 # messages create leader work that starts with no further TUI action — no
 # navigation, no native session — and runs to replied. While active, the

@@ -4,6 +4,7 @@ import type {
   Agent,
   Approval,
   ChatMessage,
+  InitJob,
   Memory,
   Message,
   SessionBinding,
@@ -62,6 +63,10 @@ export class V2Store {
     for (const { value } of await this.scanAll("v2/subtask/")) {
       const subtask = value as Subtask
       if (subtask?.id) this.state.subtasks[subtask.id] = subtask
+    }
+    for (const { value } of await this.scanAll("v2/init/")) {
+      const job = value as InitJob
+      if (job?.id) this.state.initJobs[job.id] = job
     }
     for (const { value } of await this.scanAll("v2/binding/")) {
       const binding = value as SessionBinding
@@ -273,6 +278,15 @@ export class V2Store {
       }
       this.state.subtasks[subtask.id] = subtask
     }
+    for (const { value } of await this.scanAll("v2/init/")) {
+      const job = value as InitJob
+      if (!job?.id) continue
+      const current = this.state.initJobs[job.id]
+      // Local running jobs own their session; a staler storage view must not
+      // overwrite them mid-run. Finished jobs adopt the stored state.
+      if (current?.state === "running" && job.state === "running") continue
+      this.state.initJobs[job.id] = job
+    }
     for (const { value } of await this.scanAll("v2/message/")) {
       const message = value as Message
       if (!message?.workspaceID || !message?.id) continue
@@ -369,6 +383,18 @@ export class V2Store {
     await this.bump()
   }
 
+  async saveInitJob(job: InitJob): Promise<void> {
+    this.state.initJobs[job.id] = job
+    await this.ctx.storage.set(`v2/init/${job.id}`, job)
+    await this.bump()
+  }
+
+  async removeInitJob(id: string): Promise<void> {
+    delete this.state.initJobs[id]
+    await this.ctx.storage.remove(`v2/init/${id}`)
+    await this.bump()
+  }
+
   /**
    * Direct storage re-read of one subtask row, bypassing the in-memory
    * snapshot. Used for claim fencing: after persisting a claim, the runner
@@ -439,11 +465,13 @@ export class V2Store {
 
   async pruneWorkspace(workspaceID: string): Promise<void> {
     const subtaskIDs = Object.values(this.state.subtasks).filter((subtask) => subtask.workspaceID === workspaceID).map((subtask) => subtask.id)
+    const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
     const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
     const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
     const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
     delete this.state.messages[workspaceID]
     for (const id of subtaskIDs) delete this.state.subtasks[id]
+    for (const id of initJobIDs) delete this.state.initJobs[id]
     for (const [key, binding] of Object.entries(this.state.bindings)) if (binding.workspaceID === workspaceID) delete this.state.bindings[key]
     for (const id of memoryIDs) delete this.state.memories[id]
     for (const id of approvalIDs) delete this.state.approvals[id]
@@ -455,6 +483,7 @@ export class V2Store {
     await this.removePrefix(`v2/binding/${workspaceID}/`)
     await this.removePrefix(`v2/dm/${workspaceID}/`)
     for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
+    for (const id of initJobIDs) await this.ctx.storage.remove(`v2/init/${id}`)
     for (const id of memoryIDs) await this.ctx.storage.remove(`v2/memory/${id}`)
     for (const id of approvalIDs) await this.ctx.storage.remove(`v2/approval/${id}`)
     for (const id of dmQueueIDs) await this.ctx.storage.remove(`v2/dmqueue/${id}`)
@@ -474,6 +503,7 @@ export class V2Store {
     if (parts[1] === "agent" && parts[2]) delete this.state.agents[parts[2]]
     if (parts[1] === "workspace" && parts[2]) delete this.state.workspaces[parts[2]]
     if (parts[1] === "subtask" && parts[2]) delete this.state.subtasks[parts[2]]
+    if (parts[1] === "init" && parts[2]) delete this.state.initJobs[parts[2]]
     if (parts[1] === "memory" && parts[2]) delete this.state.memories[parts[2]]
     if (parts[1] === "approval" && parts[2]) delete this.state.approvals[parts[2]]
     if (parts[1] === "binding" && parts[2] && parts[3]) delete this.state.bindings[`${parts[2]}:${parts[3]}`]
@@ -491,7 +521,7 @@ export class V2Store {
   }
 
   async reset(): Promise<void> {
-    for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
+    for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/init/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
       await this.removePrefix(prefix)
     }
     await this.ctx.storage.remove("v2/meta")

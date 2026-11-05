@@ -76,6 +76,27 @@ export type Workspace = {
   lastActiveAt: number
 }
 
+export type InitJobState = "running" | "succeeded" | "failed" | "interrupted" | "cancelled"
+
+/**
+ * Durable workspace init job (ticket #100). Not a Subtask: it never enters
+ * the work queue. It owns the System Agent transcript row and the temporary
+ * native session that runs native `/init`.
+ */
+export type InitJob = {
+  id: Id
+  workspaceID: Id
+  messageID: Id
+  sessionID?: Id
+  state: InitJobState
+  /** AGENTS.md captured before the run; null means the file did not exist. */
+  previousAgentsMD: string | null
+  error?: string
+  report?: string
+  startedAt: number
+  finishedAt?: number
+}
+
 export type MessageKind = "text" | "task" | "approval" | "system"
 
 export type Message = {
@@ -84,6 +105,8 @@ export type Message = {
   seq: number
   author: "user" | "agent" | "system"
   agentID?: Id
+  /** Display-only author for non-roster identities such as the System Agent. */
+  displayAuthor?: string
   text: string
   kind: MessageKind
   taskID?: Id
@@ -332,6 +355,7 @@ export type Snapshot = {
     workspaces: Record<Id, Workspace>
     messages: Record<Id, Message[]>
     subtasks: Record<Id, Subtask>
+    initJobs: Record<Id, InitJob>
     bindings: Record<string, SessionBinding>
     memories: Record<Id, Memory>
     approvals: Record<Id, Approval>
