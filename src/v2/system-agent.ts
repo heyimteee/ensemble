@@ -7,22 +7,65 @@
  */
 
 export const SYSTEM_AGENT_NAME = "System Agent"
+export const ENSEMBLE_INIT_SKILL = "ensemble-init"
 export const INIT_COMMAND = "/init"
 export const INIT_START_TEXT = "Initializing workspace…"
 export const INIT_PROGRESS_TEXT = "Inspecting AGENTS.md and .ensemble/init.json with native /init…"
 
-const INIT_TOKEN = /(^|\s)\/(?:init|ensemble-init)(?=\s|$)/
+/** Composer/planner aliases for the built-in init job. */
+export const INIT_ALIASES = new Set(["init", ENSEMBLE_INIT_SKILL])
+
+export function isInitAlias(value: string | undefined): boolean {
+  return value !== undefined && INIT_ALIASES.has(value)
+}
+
+const INIT_SOLO_MESSAGE =
+  "Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text."
+
+function mentionEnds(text: string): number[] {
+  const ends: number[] = []
+  for (const match of text.matchAll(/(^|[\s([{])(?:[$!][A-Za-z][\w.-]*)/g)) {
+    ends.push((match.index ?? 0) + match[0].length)
+  }
+  return ends
+}
+
+function slashTokensAt(text: string): Array<{ start: number; id: string }> {
+  const tokens: Array<{ start: number; id: string }> = []
+  for (const match of text.matchAll(/(^|[\s([{])\/([A-Za-z][\w.-]*)?(?=[\s,.;:!?)\]}'\"]|$)/g)) {
+    const start = (match.index ?? 0) + match[1].length
+    tokens.push({ start, id: match[2] ?? "" })
+  }
+  return tokens
+}
 
 /**
- * The composer must never fall through to native `/init`. `/init` is a solo
- * Ensemble command: any other token (an agent anchor, a skill, or extra text)
- * is rejected before a message or task is created. `/ensemble-init` is the
- * built-in skill alias and follows the same rule.
+ * The composer must never fall through to native `/init`. A message-start
+ * `:init`/`/init` is the solo Ensemble command. An init alias attached to an
+ * agent anchor is a mixed request and is rejected before a message or task is
+ * created. A prose `/init` (no anchor or message-start position) is ordinary
+ * text and never reaches the native prompt through this path.
  */
 export function initComposerIssue(value: string): string | undefined {
   const text = value.trim()
-  if (!INIT_TOKEN.test(text) || text === INIT_COMMAND || text === "/ensemble-init") return undefined
-  return "Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text."
+  if (!text) return undefined
+  if (text.startsWith(":")) {
+    const body = text.slice(1).trim()
+    const command = body.split(/[\s:]+/, 1)[0]
+    if (!isInitAlias(command)) return undefined
+    return body === command ? undefined : INIT_SOLO_MESSAGE
+  }
+  const leading = text.length - text.trimStart().length
+  const tokens = slashTokensAt(text)
+  const anchors = mentionEnds(text)
+  for (const token of tokens) {
+    if (!isInitAlias(token.id)) continue
+    if (token.start === leading) {
+      return text === `/${token.id}` ? undefined : INIT_SOLO_MESSAGE
+    }
+    if (anchors.some((end) => end <= token.start)) return INIT_SOLO_MESSAGE
+  }
+  return undefined
 }
 
 function rollbackLine(previousExisted: boolean): string {

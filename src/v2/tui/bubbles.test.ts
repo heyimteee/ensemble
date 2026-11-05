@@ -132,7 +132,7 @@ test("one author color serves transcript rows and activity labels alike", () => 
   // Ticket #100: the System Agent is a non-roster display author and reads
   // in the information color, never as an unknown roster agent.
   assert.equal(
-    unifiedAuthorColor({ author: SYSTEM_AGENT_NAME, displayAuthor: SYSTEM_AGENT_NAME, role: "agent" }, agents, roster as any, colors, []),
+    unifiedAuthorColor({ author: SYSTEM_AGENT_NAME, role: "agent" }, agents, roster as any, colors, []),
     "#info",
   )
   // Ticket #77: a system-authored line that still carries a real agentID

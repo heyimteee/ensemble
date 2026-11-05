@@ -1,28 +1,39 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import {
-  INIT_COMMAND,
-  SYSTEM_AGENT_NAME,
   initCancelReport,
   initComposerIssue,
   initFailureReport,
   initSuccessReport,
 } from "./system-agent.ts"
 
-test("System Agent is a named transcript author, not a slash command", () => {
-  assert.equal(SYSTEM_AGENT_NAME, "System Agent")
-  assert.equal(INIT_COMMAND, "/init")
-})
-
 test("init is accepted only as the exact solo composer command", () => {
   assert.equal(initComposerIssue("/init"), undefined)
-  assert.match(initComposerIssue("$Nova /init") ?? "", /solo/i)
-  assert.match(initComposerIssue("/init /plan") ?? "", /solo/i)
-  assert.match(initComposerIssue("$Nova /plan /init") ?? "", /solo/i)
-  assert.match(initComposerIssue("hello /init") ?? "", /solo/i)
-  assert.equal(initComposerIssue("hello"), undefined)
-  assert.equal(initComposerIssue("/initialise"), undefined)
-  assert.equal(initComposerIssue("read /init/notes.md"), undefined)
+  assert.equal(initComposerIssue("/ensemble-init"), undefined)
+  assert.equal(initComposerIssue(":init"), undefined)
+  for (const text of [
+    "$Nova /init",
+    "/init /plan",
+    "$Nova /plan /init",
+    ":init $Nova",
+    ":init extra",
+    "/ensemble-init /review",
+    "$Nova /ensemble-init",
+  ]) {
+    assert.match(initComposerIssue(text) ?? "", /solo/i, text)
+  }
+})
+
+test("prose /init is ordinary text, not an init trigger", () => {
+  for (const text of [
+    "hello /init",
+    "please run /init later",
+    "hello :init",
+    "/initialise",
+    "read /init/notes.md",
+  ]) {
+    assert.equal(initComposerIssue(text), undefined, text)
+  }
 })
 
 test("success report names the native run and the files it installed", () => {
@@ -46,10 +57,4 @@ test("failure and interruption reports tell the user whether AGENTS.md was rolle
   assert.match(cancelled, /Workspace archived\./)
   assert.match(cancelled, /AGENTS\.md/)
   assert.match(cancelled, /rerun/i)
-})
-
-test("the built-in ensemble-init alias follows the same solo-only init rule", () => {
-  assert.equal(initComposerIssue("/ensemble-init"), undefined)
-  assert.match(initComposerIssue("/ensemble-init /review") ?? "", /solo/i)
-  assert.match(initComposerIssue("$Nova /ensemble-init") ?? "", /solo/i)
 })

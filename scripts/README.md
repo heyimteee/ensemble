@@ -4,9 +4,12 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
 
 - `npm run test:live`: existing real-runtime acceptance (agent/workspace wizards,
   composer agent/file completions, sending, command palette, RPC deletion, help,
-  and return to the native TUI). File completion additionally requires `fd`.
-  Models come from the host's default catalog, not your personal configuration.
-  With no models, the agent/workspace/composer portion is explicitly skipped.
+  and return to the native TUI). The v5.8 section checks the message-start
+  palette flags, proves prose `/init` stays ordinary group text, and runs `I`
+  through the visible System Agent job to a terminal report. File completion
+  additionally requires `fd`. Models come from the host's default catalog, not
+  your personal configuration. With no models, the agent/workspace/composer
+  portion is explicitly skipped.
 - `npm run test:live:fake`: no API key or external model request. A local Node
   HTTP server binds an ephemeral loopback port and streams fixed rich Markdown.
   Checks observe streaming, finalized content, single occurrences of reply
@@ -28,7 +31,9 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   memory list to the Main model step and asserts the explained empty state
   (`0 options` plus `No models available …`), `n`/`N` step navigation, and that
   Escape cancels through the dirty-draft confirm. It also proves the empty
-  memory list writes nothing.
+  memory list writes nothing and that `:init` still routes to the Ensemble init
+  path (with a workspace-first message) while `:init <mention>` is rejected as
+  solo-only without a model catalog.
 
 Both scenarios source `scripts/lib/live-harness.sh`. Each run owns a temporary
 project and HOME, plus isolated XDG config/data/state/cache. Child processes

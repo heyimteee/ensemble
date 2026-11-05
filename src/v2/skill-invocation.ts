@@ -1,27 +1,9 @@
 import type { Agent, SkillOption, Workspace } from "./types.ts"
-
-/** Composer slash commands. One catalog serves recognition, completion, and execution. */
-export const COMPOSER_COMMANDS = [
-  { name: "workspace", description: "switch workspace" },
-  { name: "agent", description: "mention an agent" },
-  { name: "settings", description: "agent settings" },
-  { name: "approvals", description: "approval inbox" },
-  { name: "pause", description: "pause workspace" },
-  { name: "resume", description: "resume workspace" },
-  { name: "init", description: "initialize workspace files" },
-  { name: "help", description: "shortcut help" },
-  { name: "native", description: "open native session" },
-  { name: "delegate", description: "delegate selected subtask" },
-  { name: "retry", description: "retry selected subtask" },
-  { name: "restart", description: "restart selected subtask" },
-  { name: "cancel", description: "cancel selected subtask" },
-  { name: "reset-ensemble", description: "delete all Ensemble data" },
-] as const
+import { COMPOSER_COMMANDS } from "./tui/composer.ts"
+import { ENSEMBLE_INIT_SKILL, isInitAlias } from "./system-agent.ts"
 
 const COMMAND_NAMES = new Set<string>(COMPOSER_COMMANDS.map((command) => command.name))
 
-/** Built-in Ensemble skill: visible as General, executed by the System Agent init job. */
-export const ENSEMBLE_INIT_SKILL = "ensemble-init"
 export const GENERAL_SKILL_FLAG = "Skill | General"
 
 type SkillOwner = Agent | undefined
@@ -167,6 +149,27 @@ function ownerMap(workspace: Workspace, agents: Record<string, Agent>): Map<stri
 
 function ownerNames(owners: Agent[]): string {
   return owners.map((owner) => `$${owner.name}`).join(", ")
+}
+
+/**
+ * One catalog lookup for every planner branch: unknown ids and assigned ids
+ * that the host catalog does not currently offer produce distinct, actionable
+ * errors instead of drifting copy in each branch.
+ */
+function catalogSkillError(
+  skillID: string,
+  bySkill: Map<string, SkillOption>,
+  owners: Map<string, Agent[]>,
+): SkillInvocationError | undefined {
+  if (bySkill.has(skillID)) return undefined
+  if (owners.has(skillID)) {
+    return {
+      code: "skill_unavailable",
+      skillID,
+      message: `Skill /${skillID} is assigned but is not available from the host skill catalog.`,
+    }
+  }
+  return { code: "unknown_skill", skillID, message: `Unknown skill: /${skillID}.` }
 }
 
 function skillLabel(skill: SkillOption): string {
@@ -332,14 +335,13 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
   const colonCommand = text.trimStart().startsWith(":")
     ? text.trimStart().slice(1).split(/[\s:]/, 1)[0]
     : undefined
-  const initToken = (id: string | undefined) => id === "init" || id === ENSEMBLE_INIT_SKILL
-  if (startToken && initToken(startToken.id)) {
+  if (startToken && isInitAlias(startToken.id)) {
     return { kind: "init", recipients: [], errors: [] }
   }
   if (startToken && COMMAND_NAMES.has(startToken.id)) {
     return { kind: "command", recipients: [], errors: [] }
   }
-  if (colonCommand && initToken(colonCommand)) {
+  if (colonCommand && isInitAlias(colonCommand)) {
     return { kind: "init", recipients: [], errors: [] }
   }
   if (colonCommand && COMMAND_NAMES.has(colonCommand)) {
@@ -357,6 +359,11 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
   const allSkillTokens = [...(startToken ? [startToken] : []), ...[...anchorTokens.values()].flat()]
   if (allSkillTokens.length === 0) {
     return { kind: "message", recipients: [], errors: [] }
+  }
+  // An init alias after an agent anchor is an init request mixed with routing;
+  // the server rejects it as init rather than treating the alias as a skill.
+  if (allSkillTokens.some((token) => isInitAlias(token.id))) {
+    return { kind: "init", recipients: [], errors: [] }
   }
 
   const errors: SkillInvocationError[] = []
@@ -384,16 +391,9 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
   }
 
   const resolveToken = (token: SlashToken, target: Agent): void => {
-    if (!bySkill.has(token.id)) {
-      if (owners.has(token.id)) {
-        errors.push({
-          code: "skill_unavailable",
-          skillID: token.id,
-          message: `Skill /${token.id} is assigned but is not available from the host skill catalog.`,
-        })
-      } else {
-        errors.push({ code: "unknown_skill", skillID: token.id, message: `Unknown skill: /${token.id}.` })
-      }
+    const catalogIssue = catalogSkillError(token.id, bySkill, owners)
+    if (catalogIssue) {
+      errors.push(catalogIssue)
       return
     }
     const assigned = owners.get(token.id) ?? []
@@ -430,19 +430,11 @@ export function planSkillInvocation(input: SkillInvocationInput): SkillInvocatio
   // violate the Skillbox.
   if (startToken) {
     const leader = agents[workspace.leaderID]
+    const catalogIssue = catalogSkillError(startToken.id, bySkill, owners)
     if (!leader) {
       errors.push({ code: "missing_leader", message: "The workspace has no leader to receive this skill." })
-    } else if (!bySkill.has(startToken.id)) {
-      const ownersForSkill = owners.get(startToken.id) ?? []
-      if (ownersForSkill.length > 0) {
-        errors.push({
-          code: "skill_unavailable",
-          skillID: startToken.id,
-          message: `Skill /${startToken.id} is assigned but is not available from the host skill catalog.`,
-        })
-      } else {
-        errors.push({ code: "unknown_skill", skillID: startToken.id, message: `Unknown skill: /${startToken.id}.` })
-      }
+    } else if (catalogIssue) {
+      errors.push(catalogIssue)
     } else {
       const assigned = owners.get(startToken.id) ?? []
       if (assigned.length === 0) {
@@ -542,26 +534,23 @@ export type DirectSkillInput = {
 export function directSkillIssue(input: DirectSkillInput): SkillInvocationError | undefined {
   const bySkill = new Map(input.skills.map((skill) => [skill.id, skill]))
   const owners = input.workspace ? ownerMap(input.workspace, input.agents) : new Map<string, Agent[]>()
+  const leading = input.text.length - input.text.trimStart().length
   for (const token of slashTokens(input.text)) {
     if (token.id.length === 0) continue
-    if (token.id === "init" || token.id === ENSEMBLE_INIT_SKILL) {
-      return {
-        code: "init_direct",
-        skillID: token.id,
-        message: "Init is workspace-only. Open the workspace group chat and rerun /init.",
-      }
-    }
-    if (COMMAND_NAMES.has(token.id)) continue
-    if (!bySkill.has(token.id)) {
-      if (owners.has(token.id)) {
+    if (isInitAlias(token.id)) {
+      if (token.start === leading) {
         return {
-          code: "skill_unavailable",
+          code: "init_direct",
           skillID: token.id,
-          message: `Skill /${token.id} is assigned but is not available from the host skill catalog.`,
+          message: "Init is workspace-only. Open the workspace group chat and rerun /init.",
         }
       }
-      return { code: "unknown_skill", skillID: token.id, message: `Unknown skill: /${token.id}.` }
+      // A prose /init is ordinary text, not a host skill or init request.
+      continue
     }
+    if (COMMAND_NAMES.has(token.id)) continue
+    const catalogIssue = catalogSkillError(token.id, bySkill, owners)
+    if (catalogIssue) return catalogIssue
     if (input.agent.skillbox.includes(token.id)) continue
     const assigned = owners.get(token.id) ?? []
     if (assigned.length === 0) {

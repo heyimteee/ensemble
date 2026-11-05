@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
-import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstruction, onboardingPrompt } from "./init-block.ts"
+import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
 import { INIT_COMMAND, INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
@@ -1146,7 +1146,6 @@ export class EnsembleV2Service {
    */
   private async reconcileInitJobs(): Promise<void> {
     const state = this.store.snapshot()
-    const runningMessages = new Set(Object.values(state.initJobs).filter((job) => job.state === "running").map((job) => job.messageID))
     for (const job of Object.values(state.initJobs)) {
       if (job.state !== "running") continue
       const workspace = state.workspaces[job.workspaceID]
@@ -1161,17 +1160,6 @@ export class EnsembleV2Service {
       job.finishedAt = now()
       await this.store.saveInitJob(job)
       if (job.sessionID) await this.ctx.session.remove({ sessionID: job.sessionID }).catch(() => undefined)
-    }
-    // An orphaned System Agent row (for example, a job that never persisted)
-    // must not keep a generic interrupted stream or look like live progress.
-    for (const list of Object.values(state.messages)) {
-      for (const message of list) {
-        if (message.displayAuthor !== SYSTEM_AGENT_NAME || runningMessages.has(message.id)) continue
-        if (message.streaming || message.text === INIT_START_TEXT || message.text.startsWith("Inspecting AGENTS.md")) {
-          settleStreamMessage(message, "Ensemble init was interrupted by a service restart. Rerun /init.", true)
-          await this.store.saveMessage(message)
-        }
-      }
     }
   }
 
@@ -1240,7 +1228,7 @@ export class EnsembleV2Service {
       }
       registration.slot.message = message
       registration.slot.buffer = `${progress}\n\n`
-      await this.ctx.session.command({ sessionID, name: "init", text: initInstruction() })
+      await this.ctx.session.command({ sessionID, name: "init", text: initInstructions() })
       await this.ctx.session.wait({ sessionID })
       if (run.cancelled) return
       const result = assistantResult(listData(await this.ctx.session.context({ sessionID })), job.startedAt)
@@ -1301,7 +1289,7 @@ export class EnsembleV2Service {
     }
   }
 
-  private async cancelInitJob(job: InitJob, reason: string, state: "cancelled" | "interrupted" = "cancelled"): Promise<void> {
+  private async cancelInitJob(job: InitJob, reason: string): Promise<void> {
     const snapshot = this.store.snapshot()
     const current = snapshot.initJobs[job.id]
     if (!current || current.state !== "running") return
@@ -1311,7 +1299,7 @@ export class EnsembleV2Service {
     const workspace = snapshot.workspaces[current.workspaceID]
     if (workspace) this.restoreAgentsFile(workspace.directory, current)
     const report = initCancelReport(reason, current.previousAgentsMD !== null)
-    current.state = state
+    current.state = "cancelled"
     current.error = reason
     current.report = report
     current.finishedAt = now()
@@ -1329,10 +1317,10 @@ export class EnsembleV2Service {
     }
   }
 
-  private async cancelActiveInitJobs(workspaceID: string | undefined, reason: string, state: "cancelled" | "interrupted" = "cancelled"): Promise<void> {
+  private async cancelActiveInitJobs(workspaceID: string | undefined, reason: string): Promise<void> {
     const jobs = Object.values(this.store.snapshot().initJobs)
       .filter((job) => job.state === "running" && (!workspaceID || job.workspaceID === workspaceID))
-    for (const job of jobs) await this.cancelInitJob(job, reason, state)
+    for (const job of jobs) await this.cancelInitJob(job, reason)
   }
 
   private async waitForInitRuns(): Promise<void> {
@@ -1552,6 +1540,22 @@ export class EnsembleV2Service {
     const skillRecipients = plan.kind === "skills" ? plan.recipients : []
     const skillRecipient = new Map(skillRecipients.map((recipient) => [recipient.agentID, recipient]))
     const explicitIDs = Array.isArray(payload.recipientIDs) ? [...new Set(payload.recipientIDs.map(String))] : []
+    const references = workspaceFileReferences(text, workspace.directory)
+    // Deliberate skill delivery keeps the exact user text as the instruction;
+    // the planner has already validated every addressed skill/owner pair.
+    // File references are context for every prompt, including skill prompts.
+    const instruction = references.length === 0 ? text : `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}`
+    if (plan.kind === "skills" && explicitIDs.length > 0) {
+      const expected = skillRecipients.map((recipient) => recipient.agentID).sort()
+      const requested = [...explicitIDs].sort()
+      if (expected.length !== requested.length || expected.some((agentID, index) => agentID !== requested[index])) {
+        const names = (ids: string[]) => ids.map((agentID) => `$${state.agents[agentID]?.name ?? agentID}`).join(", ")
+        throw Object.assign(
+          new Error(`Skill routing resolves to ${names(expected) || "no addressed agent"}. Explicit recipient ids (${names(requested)}) cannot override the addressed anchors or Skillbox owners.`),
+          { code: "skill_recipient_mismatch" },
+        )
+      }
+    }
     if (explicitIDs.length > 0) {
       const valid: string[] = []
       await this.appendMessage(workspace, { author: "user", text, kind: "text" })
@@ -1579,9 +1583,8 @@ export class EnsembleV2Service {
           assigneeID: agentID,
           creatorType: "user",
           title: recipient ? skillWorkTitle(text, recipient) : text.slice(0, 80),
-          instruction: text,
+          instruction,
           mode: payload.mode === "edit" ? "edit" : "research",
-          triage: recipient?.triage,
           skillGrants: recipient?.generalSkills,
         })
       }
@@ -1610,10 +1613,6 @@ export class EnsembleV2Service {
     const outsideRefs = outsideMentionRefs(text, state.agents, workspace.memberIDs, "")
     const outsideTokens = new Set(outsideRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]))
     const unknown = unknownMentions(text, workspace, state.agents).filter((token) => !archivedTokens.has(token.toLowerCase()) && !outsideTokens.has(token.toLowerCase()))
-    const references = workspaceFileReferences(text, workspace.directory)
-    // Deliberate skill delivery sends the exact user text as the instruction;
-    // the planner has already validated every addressed skill/owner pair.
-    const instruction = plan.kind === "skills" || references.length === 0 ? text : `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}`
     if (mentioned.length === 0 && archivedRefs.length === 0 && unknown.length === 0 && outsideRefs.length === 0 && skillRecipients.length === 0) {
       // No addressee named: the leader takes the turn, exactly as before.
       const recipients = visibleRecipients(text, workspace, state.agents)
@@ -1672,7 +1671,6 @@ export class EnsembleV2Service {
         title: recipient ? skillWorkTitle(text, recipient) : text.slice(0, 80),
         instruction,
         mode: payload.mode === "edit" ? "edit" : "research",
-        triage: recipient?.triage,
         skillGrants: recipient?.generalSkills,
       })
     }
@@ -1711,7 +1709,6 @@ export class EnsembleV2Service {
     mode?: "research" | "edit"
     stage?: "initial" | "synthesis"
     kind?: string
-    triage?: boolean
     skillGrants?: string[]
     turn?: { correlationID?: string; askerKind: "user" | "agent"; askerID?: string }
   }): Promise<{ subtask: Subtask; deduped: boolean }> {
@@ -1755,7 +1752,6 @@ export class EnsembleV2Service {
       workKind: kind,
       queueKey: key,
       deadlineAt: at + DEADLINE_MS,
-      ...(input.triage ? { triage: true } : {}),
       ...(input.skillGrants && input.skillGrants.length > 0 ? { skillGrants: [...new Set(input.skillGrants)] } : {}),
     }
     if (input.turn) {
@@ -1799,7 +1795,6 @@ export class EnsembleV2Service {
     constraints?: string
     expected?: string
     mode?: "research" | "edit"
-    triage?: boolean
     skillGrants?: string[]
   }): Promise<{ subtask: Subtask; deduped: boolean }> {
     return this.createWorkItem({
@@ -1814,7 +1809,6 @@ export class EnsembleV2Service {
       expected: input.expected,
       mode: input.mode,
       kind: "turn",
-      triage: input.triage,
       skillGrants: input.skillGrants,
       turn: { correlationID: input.correlationID, askerKind: input.askerKind, askerID: input.askerID },
     })
@@ -1832,7 +1826,6 @@ export class EnsembleV2Service {
     expected?: string
     mode?: "research" | "edit"
     stage?: "initial" | "synthesis"
-    triage?: boolean
     skillGrants?: string[]
   }): Promise<Subtask> {
     return (await this.createWorkItem(input)).subtask
@@ -1853,6 +1846,11 @@ export class EnsembleV2Service {
       createdAt: now(),
       ...(input.updatedAt !== undefined ? { updatedAt: input.updatedAt } : {}),
     })
+  }
+
+  /** Leader triage is derived from the one-run General-skill grant. */
+  private isTriageTask(subtask: Subtask): boolean {
+    return (subtask.skillGrants?.length ?? 0) > 0
   }
 
   private delegationDepth(state: SnapshotState, subtaskID: string): number {
@@ -1878,6 +1876,9 @@ export class EnsembleV2Service {
     if (!workspace.memberIDs.includes(payload.assigneeID)) throw Object.assign(new Error("That agent is not a workspace member."), { code: "not_member" })
     const parent = payload.parentID ? state.subtasks[payload.parentID] : undefined
     if (parent && parent.workspaceID !== workspace.id) throw Object.assign(new Error("The parent subtask belongs to another workspace."), { code: "invalid_parent" })
+    if (parent && this.isTriageTask(parent)) {
+      throw Object.assign(new Error("A leader triage task cannot be delegated from; the leader must use the skill or delegate its own guidance."), { code: "triage_no_delegate" })
+    }
     if (parent && this.delegationDepth(state, parent.id) >= state.settings.maxDepth) throw Object.assign(new Error(`The delegation depth limit is ${state.settings.maxDepth}.`), { code: "delegation_depth" })
     const subtask = await this.createSubtask({
       workspace,
@@ -1974,7 +1975,7 @@ export class EnsembleV2Service {
     const subtask = state.subtasks[subtaskID]
     const workspace = subtask ? state.workspaces[subtask.workspaceID] : undefined
     if (!subtask || !workspace) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
-    if (subtask.triage && assigneeID !== workspace.leaderID) {
+    if (this.isTriageTask(subtask) && assigneeID !== workspace.leaderID) {
       throw Object.assign(new Error("A leader triage task can only be reassigned to the workspace leader."), { code: "triage_leader_only" })
     }
     if (!workspace.memberIDs.includes(assigneeID)) throw Object.assign(new Error("That agent is not a workspace member."), { code: "not_member" })

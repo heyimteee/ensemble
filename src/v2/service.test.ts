@@ -8,7 +8,7 @@ import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
-import { SYSTEM_AGENT_NAME } from "./system-agent.ts"
+import { INIT_START_TEXT, SYSTEM_AGENT_NAME } from "./system-agent.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -1428,7 +1428,13 @@ test("init runs as a visible System Agent job and publishes the full report", as
     assert.equal(during.state.initJobs[init.result.jobID].state, "running")
     const command = commands.find((entry) => entry.name === "init")
     assert.ok(command, "native /init runs inside the temporary session")
-    assert.match(String(command?.text), /ensemble_init/)
+    const instruction = String(command?.text)
+    assert.match(instruction, /ensemble_init/)
+    assert.match(instruction, /Inspect the repository/i, "the native init receives the full workspace instructions")
+    assert.match(instruction, /build, test, and lint/i)
+    assert.match(instruction, /Preserve the project's own guidance/i)
+    assert.match(instruction, /replace that block in place/)
+    assert.ok(instruction.length > 400, "the command text is more than the short replace note")
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       return next.state.initJobs[init.result.jobID]?.state === "succeeded"
@@ -1722,6 +1728,10 @@ test("init rejects duplicate runs and non-solo or direct requests before appendi
     const mixed = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init /plan" } })
     assert.equal(mixed.ok, false)
     assert.equal(mixed.error?.code, "init_solo")
+    const colonMention = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: ":init $Nova" } })
+    assert.equal(colonMention.ok, false)
+    assert.equal(colonMention.error?.code, "init_solo")
+    assert.match(colonMention.error?.message ?? "", /mention/i)
     const direct = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init", direct: true } })
     assert.equal(direct.ok, false)
     assert.equal(direct.error?.code, "init_workspace_only")
@@ -1755,6 +1765,7 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
   await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
   await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
   await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: "Initializing workspace…", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveMessage({ id: "other", workspaceID: "w", seq: 2, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: INIT_START_TEXT, kind: "text", createdAt: 2 })
   await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", previousAgentsMD: previous, startedAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
@@ -1770,6 +1781,10 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
     assert.equal(message.interrupted, true)
     assert.match(message.text, /restart/i)
     assert.match(message.text, /rerun/i)
+    const unrelated = after.state.messages.w.find((item: any) => item.id === "other")
+    assert.ok(unrelated)
+    assert.equal(unrelated.interrupted, undefined, "reconciliation only settles the running init job's row")
+    assert.equal(unrelated.text, INIT_START_TEXT)
     assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
     assert.ok(removedSessions.includes("old_session"))
   } finally {
@@ -3248,6 +3263,63 @@ test("message.send also accepts a leader-owned message-start skill", async () =>
   }
 })
 
+test("explicit recipient ids cannot bypass skill ownership or routing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-explicit-"))
+  const { ctx } = fakeContext()
+  ctx.skill.list = async () => [{ id: "review", name: "Review", description: "Thorough code review" }]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", ["review"]),
+    skillAgent("sage", "Sage", []),
+  ])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
+    const text = "$Nova /review check this"
+    const bypass = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text, recipientIDs: ["sage"] } })
+    assert.equal(bypass.ok, false)
+    assert.equal(bypass.error?.code, "skill_recipient_mismatch")
+    assert.ok(bypass.error?.message.includes("$Nova"), bypass.error?.message)
+    let next = await handlers.snapshot({ directory })
+    assert.deepEqual(next.state.messages.w ?? [], [], "a mismatched explicit recipient appends nothing")
+    assert.deepEqual(Object.values(next.state.subtasks), [], "a mismatched explicit recipient creates no work")
+
+    const allowed = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text, recipientIDs: ["nova"] } })
+    assert.equal(allowed.ok, true, JSON.stringify(allowed.error))
+    next = await handlers.snapshot({ directory })
+    const task = Object.values(next.state.subtasks).find((item: any) => item.creatorType === "user") as any
+    assert.equal(task.assigneeID, "nova", "the planner owner still receives the skill turn")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("skill messages keep file-reference blocks", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-refs-"))
+  writeFileSync(join(directory, "notes.md"), "hello")
+  const { ctx } = fakeContext()
+  ctx.skill.list = async () => [{ id: "review", name: "Review", description: "Thorough code review" }]
+  await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", ["review"])])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
+    const text = "$Nova /review @notes.md please"
+    const response = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+    assert.equal(response.ok, true, JSON.stringify(response.error))
+    const next = await handlers.snapshot({ directory })
+    const task = Object.values(next.state.subtasks).find((item: any) => item.creatorType === "user") as any
+    assert.match(task.instruction, /Referenced files:\n- notes\.md/)
+    assert.ok(task.instruction.startsWith(text), "the exact user text stays first")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("invalid skill references reject atomically before any message or task", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-invalid-"))
   const { ctx } = fakeContext()
@@ -3436,8 +3508,8 @@ test("a General skill routes to the leader with a one-run native grant, then res
     const task = Object.values(next.state.subtasks).find((item: any) => item.creatorType === "user") as any
     assert.ok(task)
     assert.equal(task.assigneeID, "nova")
-    assert.equal(task.triage, true)
-    assert.deepEqual(task.skillGrants, ["public-research"])
+    assert.deepEqual(task.skillGrants, ["public-research"], "General triage is derived from the resolved skill grant")
+    assert.equal(task.triage, undefined, "there is one triage source of truth")
     assert.equal(task.instruction, text, "the exact user text stays the instruction")
     assert.equal(task.title, `/public-research — ${text}`)
     const binding = Object.values(next.state.bindings).find((item: any) => item.workspaceID === "w" && item.agentID === "nova") as any
@@ -3561,7 +3633,7 @@ test("a delegatee receives leader guidance without a host skill grant", async ()
     let leaderSession = ""
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      const task = Object.values(next.state.subtasks).find((item: any) => item.triage) as any
+      const task = Object.values(next.state.subtasks).find((item: any) => (item.skillGrants ?? []).length > 0) as any
       const binding = Object.values(next.state.bindings).find((item: any) => item.workspaceID === "w" && item.agentID === "nova") as any
       leaderSession = binding?.sessionID ?? ""
       return task?.state === "working" && Boolean(leaderSession)
@@ -3578,7 +3650,6 @@ test("a delegatee receives leader guidance without a host skill grant", async ()
     const child = Object.values(next.state.subtasks).find((item: any) => item.title === "Research follow-up") as any
     assert.ok(child)
     assert.equal(child.instruction, guidance, "the delegatee receives the leader's self-authored instruction")
-    assert.equal(child.triage, undefined)
     assert.equal(child.skillGrants, undefined, "no host skill grant is attached to the delegatee task")
     const sageBinding = Object.values(next.state.bindings).find((item: any) => item.workspaceID === "w" && item.agentID === "sage") as any
     const sageUpdates = permissionUpdates.filter((update) => update.sessionID === sageBinding.sessionID)
@@ -3641,11 +3712,45 @@ test("a leader triage task cannot be reassigned away from the leader", async () 
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
     await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text: "/public-research reassign-check" } })
     const next = await handlers.snapshot({ directory })
-    const task = Object.values(next.state.subtasks).find((item: any) => item.triage) as any
+    const task = Object.values(next.state.subtasks).find((item: any) => (item.skillGrants ?? []).length > 0) as any
     assert.ok(task)
     const refused = await handlers.invoke({ directory, action: "task.reassign", payload: { id: task.id, assigneeID: "sage" } })
     assert.equal(refused.ok, false)
     assert.equal(refused.error?.code, "triage_leader_only")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a leader triage task cannot be delegated from", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-triage-delegate-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  ctx.skill.list = async () => [{ id: "public-research", name: "Public research", description: "Find primary sources" }]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", []),
+    skillAgent("sage", "Sage", []),
+  ], { synthesis: false })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
+    await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text: "/public-research delegate-guard-check" } })
+    const next = await handlers.snapshot({ directory })
+    const task = Object.values(next.state.subtasks).find((item: any) => (item.skillGrants ?? []).length > 0) as any
+    assert.ok(task)
+    const refused = await handlers.invoke({
+      directory,
+      action: "task.delegate",
+      payload: { workspaceID: "w", parentID: task.id, assigneeID: "sage", title: "Delegated triage", instruction: "Take over triage." },
+    })
+    assert.equal(refused.ok, false)
+    assert.equal(refused.error?.code, "triage_no_delegate")
+    assert.match(refused.error?.message ?? "", /triage/i)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.values(after.state.subtasks).some((item: any) => item.parentID === task.id), false, "no child task is created from triage")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -3668,6 +3773,29 @@ test("the deliberate skill action never falls through to a native /init turn", a
     const next = await handlers.snapshot({ directory })
     assert.deepEqual(next.state.messages.w ?? [], [], "init never becomes a leader peer turn")
     assert.deepEqual(Object.values(next.state.subtasks), [], "init never becomes work")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("prose /init is delivered as ordinary group text", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-init-prose-"))
+  const { ctx, commands } = fakeContext()
+  await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", [])])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const text = "hello /init, keep going"
+    const response = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text } })
+    assert.equal(response.ok, true, JSON.stringify(response.error))
+    const next = await handlers.snapshot({ directory })
+    const task = Object.values(next.state.subtasks).find((item: any) => item.creatorType === "user") as any
+    assert.ok(task)
+    assert.equal(task.instruction, text, "prose keeps the exact text as an ordinary message")
+    assert.deepEqual(next.state.initJobs, {}, "no init job is started")
+    assert.deepEqual(commands, [], "no native command is invoked")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

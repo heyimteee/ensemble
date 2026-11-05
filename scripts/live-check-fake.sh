@@ -519,6 +519,26 @@ title_at=$(grep -nF "Engineering" <<<"$pane_leader" | head -1 | cut -d: -f1)
 [[ "$title_at" -eq "$((leader_at + 1))" ]] || live_fail "title branch must follow the leader name row (leader @$leader_at title @$title_at)"
 live_log "inline leader label visible on the name row"
 
+# Prose `/init` is ordinary group text, and a `:init` command with an extra
+# mention is rejected instead of silently discarding it.
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for prose /init"
+live_type "$LIVE_TUI_SESSION" "hello /init prose-check"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: hello /init prose-check" 20 "prose /init becomes ordinary group text"
+prose_init_jobs=$(live_snapshot_value 'Object.values(output.state.initJobs).length')
+[[ "$prose_init_jobs" == "0" ]] || live_fail "prose /init started an init job (got $prose_init_jobs)"
+live_key "$LIVE_TUI_SESSION" C-g
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "prose send leaves the composer for the command line"
+live_key "$LIVE_TUI_SESSION" ":"
+live_type "$LIVE_TUI_SESSION" "init !Helper"
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Init is solo-only." 10 "an :init mention is rejected"
+mention_init_jobs=$(live_snapshot_value 'Object.values(output.state.initJobs).length')
+[[ "$mention_init_jobs" == "0" ]] || live_fail ":init with a mention started an init job (got $mention_init_jobs)"
+live_log "v5.8 init prose and extra-mention guards verified"
+
 # v5.8 T1: every init trigger appends a visible /init audit line and starts a
 # System Agent job. The job owns a temporary native session, runs native
 # /init internally, streams progress, and finalizes the canonical block plus
@@ -817,7 +837,7 @@ while IFS= read -r done_line; do
 done <<<"$(grep -F "● FakeAgent finished:" <<<"$pane_done" | sort -u)"
 live_log "$visible_done visible completion line(s), each exactly once in the pane"
 terminal_total=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state === "replied" }).length')
-[[ "$terminal_total" == "5" ]] || live_fail "expected five terminal subtasks (got $terminal_total)"
+[[ "$terminal_total" == "6" ]] || live_fail "expected six terminal subtasks including the prose /init probe (got $terminal_total)"
 live_log "probes repeated assignment, asking, and answer exactly once each ($relay_answers)"
 
 # Ticket #67: the floating back-to-bottom control is a bare ↓ glyph — no
@@ -1909,7 +1929,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill-general" 20 "General skill triage is assigned to the leader"
 general_state=""
 for _ in $(seq 1 40); do
-  general_state=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("general-triage-check") >= 0 }).pop(); return task ? task.state + ":" + (task.triage === true) + ":" + (task.skillGrants || []).join(",") : "missing" })()')
+  general_state=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("general-triage-check") >= 0 }).pop(); return task ? task.state + ":" + ((task.skillGrants || []).length > 0) + ":" + (task.skillGrants || []).join(",") : "missing" })()')
   [[ "$general_state" == '"working:true:ensemble-live-skill-general"' ]] && break
   sleep 0.25
 done
@@ -1941,14 +1961,17 @@ done
 [[ "$restored_live" == "1" ]] || live_fail "leader grant was not restored after the turn (saw ${permissions:-no permissions})"
 live_log "ticket #103 leader triage grant issued for one run and restored"
 
+# Triage rows cannot be delegated from; the leader creates a fresh follow-up.
+triage_delegate=$(live_invoke "task.delegate" "{\"workspaceID\":\"$ws_id\",\"parentID\":\"$general_task_id\",\"assigneeID\":\"$helper_id\",\"title\":\"Delegated triage\",\"instruction\":\"Take over triage.\"}")
+[[ "$triage_delegate" == *'"code":"triage_no_delegate"'* ]] || live_fail "delegation from a triage row was not refused (got $triage_delegate)"
 # The leader's follow-up delegation carries a self-authored instruction and no
 # host skill grant; the delegatee runs it as an ordinary work row.
 guided_instruction='Apply the general-skill guidance to the release notes and return a short source list.'
-live_invoke "task.delegate" "{\"workspaceID\":\"$ws_id\",\"parentID\":\"$general_task_id\",\"assigneeID\":\"$helper_id\",\"title\":\"Guided follow-up\",\"instruction\":\"$guided_instruction\"}" >/dev/null
+live_invoke "task.delegate" "{\"workspaceID\":\"$ws_id\",\"assigneeID\":\"$helper_id\",\"title\":\"Guided follow-up\",\"instruction\":\"$guided_instruction\"}" >/dev/null
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: Guided follow-up" 20 "the leader guidance reaches the delegatee as ordinary work"
 guided_state=""
 for _ in $(seq 1 60); do
-  guided_state=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("Apply the general-skill guidance") >= 0 }).pop(); return task ? task.state + ":" + (task.triage === true) + ":" + ((task.skillGrants || []).length) : "missing" })()')
+  guided_state=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("Apply the general-skill guidance") >= 0 }).pop(); return task ? task.state + ":" + ((task.skillGrants || []).length > 0) + ":" + ((task.skillGrants || []).length) : "missing" })()')
   [[ "$guided_state" == '"replied:false:0"' ]] && break
   sleep 0.5
 done

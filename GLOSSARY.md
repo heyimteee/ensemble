@@ -12,15 +12,15 @@ _Avoid_: Bot, worker (when referring to the lasting teammate).
 **Skillbox**: The exclusive collection of optional skills assigned to an agent. A skill is reusable guidance, not a grant of tool permissions.
 _Avoid_: Toolbox (when referring to assigned skills).
 
-**Skill**: Reusable guidance that an agent loads deliberately through OpenCode's native skill tool. The host catalog supplies skills; assignment decides which agent may load one. A skill is not a tool permission.
+**Skill**: Reusable guidance that an agent loads through OpenCode's native skill tool. The host catalog supplies skills; the Skillbox decides assignment. A skill is not a tool permission.
 
-**General skill**: A catalog skill that is not assigned in the Skillbox of any workspace member. It has no owner, so the workspace leader triages it: the leader reads it under a one-run grant and either uses it or delegates with a self-authored instruction. A General skill under a non-leader mention is a validation error, not a silent retarget.
+**General skill**: A catalog skill assigned to no workspace member. It has no owner, so the workspace leader handles it through triage.
 
-**Skill invocation**: An explicit `/skill` token in composer text. The shared invocation planner resolves it to one prompt per addressed agent, groups multiple skills for the same agent, and preserves the exact user text. It never extracts per-skill bodies, creates per-skill tasks, or uses a prompt `skills` attachment.
+**Skill invocation**: An explicit `/skill` token in composer text, resolved by the shared planner to the addressed agent.
 
-**System Agent**: The visible non-roster identity that reports workspace-level jobs such as init. It has no model, Skillbox, or mention route; its streaming and finalized messages appear as ordinary left-side agent bubbles in the group chat.
+**System Agent**: A non-roster transcript identity that reports workspace-level jobs such as init.
 
-**Init job**: A durable workspace-level job that runs native `/init` inside a temporary session, streams a System Agent report, writes the Ensemble block and init metadata only on success, and restores the prior `AGENTS.md` on failure or cancellation. It is not a Subtask and does not enter the work queue.
+**Init job**: A durable workspace-level job that runs native `/init` in a temporary session and reports through the System Agent. It is not a Subtask and does not enter the work queue.
 
 **Workspace**: A directory-bound project room with a group chat, a roster, and exactly one leader. One canonical directory belongs to one workspace.
 _Avoid_: Channel, room, group (when referring to this concept).
