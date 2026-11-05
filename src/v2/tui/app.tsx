@@ -12,7 +12,22 @@ import { filterMemories } from "./memories.ts"
 import { leaderBadge, opaqueSurface, palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
-import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions } from "./wizard.ts"
+import {
+  addWizardMemory,
+  clampWizardMemoryCursor,
+  deleteWizardMemory,
+  overlayGeometry,
+  sameWizardOptions,
+  updateWizardMemory,
+  wizardDraftDirty,
+  wizardEnterAction,
+  wizardModelEmptyHint,
+  wizardModelKeyFor,
+  wizardModelOptions,
+  wizardMemorySaveList,
+  wizardStepArrival,
+  type WizardDraft,
+} from "./wizard.ts"
 import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
 import {
   chromeOwnsFocus,
@@ -144,7 +159,7 @@ type ResultState = {
 }
 
 type WizardOption = { id: string; label: string; detail?: string }
-type WizardStepKind = "pick" | "multi" | "text" | "choice"
+type WizardStepKind = "pick" | "multi" | "text" | "choice" | "memories"
 type WizardStep = {
   key: string
   title: string
@@ -153,29 +168,28 @@ type WizardStep = {
   placeholder?: string
   options?: WizardOption[]
 }
-type WizardDraft = {
-  directory: string
-  name: string
-  memberIDs: string[]
-  leaderID: string
-  synthesis: boolean
-  title: string
-  role: string
-  /** Optional new-agent memories, one per line (wizard step). */
-  memories: string
-  modelKey: string
-  variant: string
-}
+/** The memory add/edit field stays open in Insert until Esc returns to the list. */
+type WizardMemoryEditor = { mode: "add" | "edit"; index: number | null }
 type WizardState = {
   flow: "workspace" | "agent"
   title: string
   draft: WizardDraft
+  /** The draft as opened; Esc only asks to discard once it differs. */
+  initialDraft: WizardDraft
   steps: WizardStep[]
   index: number
   query: string
   /** A `/` filter owns the keyboard until Enter or Esc. */
   filtering: boolean
   cursor: number
+  /** Selected memory in the one-by-one list editor. */
+  memoryCursor: number
+  /** Open memory add/edit field; null on the list. */
+  memoryEditor: WizardMemoryEditor | null
+  /** The add field's uncommitted text, kept across an Esc back to the list. */
+  memoryDraft: string
+  /** A dirty cancel waits for y/Enter (discard) or n/Esc (keep). */
+  discardConfirm: boolean
   error?: string
   customDirectory?: boolean
   directoryOptions: WizardOption[]
@@ -223,6 +237,7 @@ function directoryOf(context: any): string {
 // v5.6 T11: the host keeps earlier plugin pages mounted, so their raw key
 // listeners outlive the navigation. Only the newest page may handle keys.
 const pageActivation = createPageActivation()
+
 
 async function callRpc<T = any>(context: any, method: string, input: any): Promise<T> {
   const response = await context.client.rpc.call({ rpcID: "ensemble.v2", method, location: { directory: directoryOf(context) }, input })
@@ -293,6 +308,10 @@ export function EnsembleV2App() {
   const [settingsField, setSettingsField] = createSignal<SettingsFieldState | null>(null)
   const [settingsFieldText, setSettingsFieldText] = createSignal("")
   const [settingsFieldCursor, setSettingsFieldCursor] = createSignal(0)
+  // The created memory id is authoritative; the snapshot that carries it can
+  // land one event-refresh later, so the cursor resolves from this id instead
+  // of guessing a row from a possibly stale filtered list.
+  const [pendingMemorySelectID, setPendingMemorySelectID] = createSignal<string | null>(null)
   const [memoryFilter, setMemoryFilter] = createSignal("")
   const [skillFilter, setSkillFilter] = createSignal("")
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
@@ -306,6 +325,9 @@ export function EnsembleV2App() {
   const [result, setResult] = createSignal<ResultState | null>(null)
   const [motionFrame, setMotionFrame] = createSignal(0)
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
+  // The persistent memory field's live buffer. The renderable's ref can trail
+  // a step switch by one frame, so the pure state owns the text Enter saves.
+  const [wizardMemoryInput, setWizardMemoryInput] = createSignal("")
   const [liveDm, setLiveDm] = createSignal<{ sessionID: string; text: string } | null>(null)
   const [atBottom, setAtBottom] = createSignal(true)
   const [transcriptScroll, setTranscriptScroll] = createSignal({ top: 0, height: 0, viewport: 0 })
@@ -319,6 +341,7 @@ export function EnsembleV2App() {
   let pendingKeys: string[] = []
   let textPromptRef: any
   let wizardRef: any
+  let wizardMemoryRef: any
   let resultScrollRef: any
   let transcriptScrollRef: any
   let helpScrollRef: any
@@ -373,6 +396,8 @@ export function EnsembleV2App() {
         try { wizardRef?.blur?.() } catch {}
       } else if (intent.type === "wizard-back") {
         wizardPrev()
+      } else if (intent.type === "wizard-cancel") {
+        wizardCancel()
       } else if (intent.type === "close-overlay") {
         closeOverlay(intent.overlay)
       }
@@ -891,6 +916,18 @@ export function EnsembleV2App() {
   // cursor. The unified settings cursor now drives it (#83).
   const skillPage = () => skillPageForCursor(clampSettingsRow(settingsCursor(), settingsCounts().skills))
   const filteredMemories = createMemo(() => filterMemories(agentMemories(), memoryFilter()))
+  // A freshly saved memory is selected by id once the snapshot carrying it
+  // arrives. This removes the stale-list guess: no sleep and no reliance on
+  // the order of an event refresh vs. the explicit mutation refresh.
+  createEffect(() => {
+    const id = pendingMemorySelectID()
+    if (!id) return
+    if (settingsTab() !== "memories" || !settingsAgentID()) { setPendingMemorySelectID(null); return }
+    const index = filteredMemories().findIndex((memory) => memory.id === id)
+    if (index < 0) return
+    setPendingMemorySelectID(null)
+    setSettingsCursor(index)
+  })
   // Ticket #83: one cursor and one row model across all four tabs. The
   // catalog owns the keys; the pure grammar owns counts, clamping, and which
   // action a row supports.
@@ -1471,9 +1508,9 @@ export function EnsembleV2App() {
         skillbox: [],
         color: "cyan",
       })
-      // Ticket #77c: optional wizard memories are saved per line after the
-      // agent exists; empty lines are skipped and never block creation.
-      const memories = wizardMemoryLines(draft.memories)
+      // Ticket #94: each listed memory is saved one by one after the agent
+      // exists; an empty list skips the step and never blocks creation.
+      const memories = wizardMemorySaveList(draft.memories)
       for (const text of memories) {
         await invoke(context, "memory.add", { agentID: agent.id, scope: "project", text, source: "wizard" }).catch(() => undefined)
       }
@@ -1954,9 +1991,10 @@ export function EnsembleV2App() {
     }
     if (name === "return" || name === "enter" || name === "kpenter") {
       // Enter submits the field, matching the old prompt and the composer's
-      // Insert behavior; Visual swallows it like any non-visual key.
+      // Insert behavior; Visual swallows it like any non-visual key. Memory
+      // fields stay open for the next entry instead of closing.
       prevent()
-      if (mode !== "visual") finishSettingsField()
+      if (mode !== "visual") finishSettingsField({ keepOpen: field.kind === "memory" })
       return true
     }
     if (mode === "insert") return true
@@ -2076,6 +2114,7 @@ export function EnsembleV2App() {
     setSettingsField(null)
     setSettingsFieldText("")
     setSettingsFieldCursor(0)
+    setPendingMemorySelectID(null)
     setSettingsAgentID(null)
     setDraft(null)
     setDirty(false)
@@ -2213,36 +2252,91 @@ export function EnsembleV2App() {
     setDirty(true)
   }
 
-  const commitSettingsField = async (field: SettingsFieldState, raw: string) => {
+  const commitSettingsField = async (field: SettingsFieldState, raw: string): Promise<boolean> => {
     if (field.kind === "agent") {
-      const agent = draft(); if (!agent) return
+      const agent = draft(); if (!agent) return false
       const value = normalizeSettingsField(field.field, raw)
-      if (String(agent[field.field] ?? "") === value) return
+      if (String(agent[field.field] ?? "") === value) return false
       setDraft({ ...agent, [field.field]: value } as Agent)
       setDirty(true)
-      return
+      return true
     }
     const text = raw.trim()
     if (field.memoryID === null) {
-      if (!text) return
-      const agent = draft(); if (!agent) return
+      if (!text) return false
+      const agent = draft(); if (!agent) return false
       let createdID: string | undefined
-      await run("Add memory", async () => {
+      const ok = await run("Add memory", async () => {
         const created = await invoke(context, "memory.add", { agentID: agent.id, workspaceID: activeWorkspace()?.id, scope: "project", text, source: "user" })
         createdID = created?.id
       })
-      const index = createdID ? filteredMemories().findIndex((memory) => memory.id === createdID) : -1
-      setSettingsCursor(index >= 0 ? index : Math.max(0, filteredMemories().length - 1))
-      return
+      if (!ok || !createdID) return false
+      // The created id is authoritative; resolve it now if the snapshot is
+      // current, otherwise let the effect above select it when it arrives.
+      setPendingMemorySelectID(null)
+      setMemoryFilter("")
+      const index = filteredMemories().findIndex((memory) => memory.id === createdID)
+      if (index >= 0) setSettingsCursor(index)
+      else setPendingMemorySelectID(createdID)
+      return true
     }
-    if (!text || text === field.value.trim()) return
-    await run("Edit memory", async () => { await invoke(context, "memory.update", { id: field.memoryID!, text }) })
+    if (!text || text === field.value.trim()) return false
+    return run("Edit memory", async () => { await invoke(context, "memory.update", { id: field.memoryID!, text }) })
   }
 
-  const finishSettingsField = (options: { leaveEditor?: boolean } = {}) => {
+  const clearSettingsMemoryField = (field: SettingsFieldState) => {
+    // Keep the add field focused and ready for the next memory.
+    setSettingsField({ ...field, value: "" })
+    setSettingsFieldText("")
+    setSettingsFieldCursor(0)
+    settingsVim?.invalidate()
+    queueMicrotask(() => {
+      if (!settingsFieldRef) return
+      try {
+        settingsFieldRef.value = ""
+        settingsFieldRef.cursorOffset = 0
+        focusWhenReady(() => settingsFieldRef)
+      } catch {}
+    })
+  }
+
+  const keepSettingsMemoryField = (field: SettingsFieldState, value: string) => {
+    setSettingsField({ ...field, value })
+    setSettingsFieldText(value)
+    setSettingsFieldCursor(value.length)
+    settingsVim?.invalidate()
+    queueMicrotask(() => {
+      if (!settingsFieldRef) return
+      try { focusWhenReady(() => settingsFieldRef) } catch {}
+    })
+  }
+
+  const finishSettingsField = (options: { leaveEditor?: boolean; keepOpen?: boolean } = {}) => {
     const field = settingsField()
     if (!field) return
     const raw = String(settingsFieldRef?.plainText ?? field.value)
+    // Settings memory add/edit is persistent: Enter saves without closing,
+    // clearing an add for the next entry and keeping an edit's text.
+    if (options.keepOpen && field.kind === "memory") {
+      syncVimChord(null)
+      if (field.memoryID === null) {
+        if (!raw.trim()) return
+        // Clear at once for the next entry; restore the draft if the save
+        // fails so an error never eats the user's text.
+        clearSettingsMemoryField(field)
+        void commitSettingsField(field, raw)
+          .then((ok) => { if (!ok) keepSettingsMemoryField(field, raw) })
+          .catch(showError)
+        return
+      }
+      if (!raw.trim() || raw.trim() === field.value.trim()) return
+      const previous = field.value
+      keepSettingsMemoryField(field, raw)
+      void commitSettingsField(field, raw)
+        .then((ok) => { if (!ok) keepSettingsMemoryField(field, previous) })
+        .catch(showError)
+      return
+    }
     settingsVim?.invalidate()
     settingsVim = null
     settingsVimRef = null
@@ -3156,7 +3250,7 @@ export function EnsembleV2App() {
       { key: "name", title: "Agent name", description: "Names are unique. Text wraps; Enter continues.", kind: "text", placeholder: "Nova" },
       { key: "title", title: "Agent title", description: "A short role label, such as Engineering.", kind: "text", placeholder: "Engineering" },
       { key: "role", title: "Agent role", description: "Describe how this agent works and what it owns.", kind: "text", placeholder: "You are a focused coding teammate." },
-      { key: "memories", title: "Agent memories (optional)", description: "One memory per line. Shift+Enter adds a line; Enter continues. Leave empty to skip.", kind: "text", placeholder: "The team uses pnpm.\nNever edit generated files." },
+      { key: "memories", title: "Agent memories (optional)", description: "Add memories one by one. a adds, e edits, x deletes; Enter continues.", kind: "memories", placeholder: "The team uses pnpm." },
       { key: "model", title: "Main model", description: "Used for this agent's native sessions.", kind: "pick", options: state.modelOptions },
     ]
     if (model && model.variants.length > 0) {
@@ -3171,6 +3265,7 @@ export function EnsembleV2App() {
     next.index = Math.max(0, Math.min(next.index, next.steps.length - 1))
     const length = next.steps[next.index]?.options?.length ?? 1
     next.cursor = Math.max(0, Math.min(next.cursor, Math.max(0, length - 1)))
+    next.memoryCursor = clampWizardMemoryCursor(next.memoryCursor, next.draft.memories.length)
     return next
   }
 
@@ -3221,6 +3316,12 @@ export function EnsembleV2App() {
     return step.options.filter((option) => option.id === "__manual__" || !query || fuzzyMatch(query, option.label))
   }
 
+  const wizardIsMemoryStep = () => wizardStep()?.key === "memories"
+
+  const wizardMemories = (): string[] => wizard()?.draft.memories ?? []
+
+  const wizardMemoryCursor = () => clampWizardMemoryCursor(wizard()?.memoryCursor ?? 0, wizardMemories().length)
+
   const wizardCursor = () => {
     const state = wizard()
     const length = wizardItems().length
@@ -3244,7 +3345,7 @@ export function EnsembleV2App() {
   const wizardTextValue = () => {
     const state = wizard()
     const step = wizardStep()
-    if (!state || !step) return ""
+    if (!state || !step || step.kind !== "text") return ""
     if (step.key === "directoryPath") return state.draft.directory
     return String((state.draft as any)[step.key] ?? "")
   }
@@ -3290,6 +3391,10 @@ export function EnsembleV2App() {
 
   const completeWizard = (state: WizardState, value: WizardDraft | undefined) => {
     setWizard(null)
+    // A later wizard must never focus the unmounted editor of this one.
+    wizardRef = null
+    wizardMemoryRef = null
+    setWizardMemoryInput("")
     setModal(false)
     clearPendingChord()
     // Closing the wizard drops its field target without changing the mode.
@@ -3300,7 +3405,18 @@ export function EnsembleV2App() {
   const submitWizard = (state: WizardState) => {
     const error = validateWizard(state)
     if (error) {
-      const next = { ...state, index: wizardInvalidIndex(state), error, query: "", filtering: false, cursor: 0 }
+      const next = {
+        ...state,
+        index: wizardInvalidIndex(state),
+        error,
+        query: "",
+        filtering: false,
+        cursor: 0,
+        memoryEditor: null,
+        discardConfirm: false,
+      }
+      wizardRef = null
+      wizardMemoryRef = null
       setWizard(next)
       syncWizardMode(next)
       return
@@ -3325,6 +3441,53 @@ export function EnsembleV2App() {
     })
   }
 
+  /** The draft including the focused field's uncommitted buffer. */
+  const wizardBufferedDraft = (state: WizardState): WizardDraft => {
+    const step = wizardStepFor(state)
+    const draft: WizardDraft = {
+      ...state.draft,
+      memberIDs: [...state.draft.memberIDs],
+      memories: [...state.draft.memories],
+    }
+    if (step?.kind === "text") {
+      const value = String(wizardRef?.plainText ?? "")
+      if (step.key === "directoryPath") draft.directory = value.trim()
+      else (draft as any)[step.key] = value
+    }
+    return draft
+  }
+
+  const wizardHasUnsavedWork = (state: WizardState): boolean => {
+    if (wizardDraftDirty(state.initialDraft, wizardBufferedDraft(state))) return true
+    const memoryText = state.memoryEditor ? String(wizardMemoryRef?.plainText ?? wizardMemoryInput()) : state.memoryDraft
+    return memoryText.trim().length > 0
+  }
+
+  const wizardCancel = () => {
+    const state = wizard()
+    if (!state || state.discardConfirm) return
+    if (wizardHasUnsavedWork(state)) {
+      setWizard({ ...state, discardConfirm: true, filtering: false, error: undefined })
+      return
+    }
+    completeWizard(state, undefined)
+  }
+
+  const wizardDiscard = () => {
+    const state = wizard()
+    if (state) completeWizard(state, undefined)
+  }
+
+  const wizardKeepEditing = () => {
+    const state = wizard()
+    if (!state) return
+    const next = { ...state, discardConfirm: false }
+    setWizard(next)
+    // The cancel Esc may have left the field; returning to the draft puts
+    // the caret back on a text step without changing the mode.
+    syncWizardMode(next)
+  }
+
   const wizardStepFor = (state: WizardState): WizardStep | undefined =>
     state.customDirectory
       ? { key: "directoryPath", title: "Workspace directory", description: "Type or paste a directory path. Enter continues.", kind: "text", placeholder: "~/dev/project" }
@@ -3337,14 +3500,25 @@ export function EnsembleV2App() {
    */
   const syncWizardMode = (state: WizardState) => {
     const step = wizardStepFor(state)
-    if (step?.kind === "text") dispatchInteraction({ type: "field.enter", target: "wizard" })
-    else dispatchInteraction({ type: "field.leave" })
+    dispatchInteraction(wizardStepArrival(step?.kind))
   }
 
   const advanceWizard = (state: WizardState | undefined) => {
     if (!state) return
     if (wizardFinal(state)) { submitWizard(state); return }
-    const next = { ...state, index: state.index + 1, query: "", filtering: false, cursor: 0, error: undefined, steps: makeWizardSteps(state) }
+    const next = {
+      ...state,
+      index: state.index + 1,
+      query: "",
+      filtering: false,
+      cursor: 0,
+      memoryEditor: null,
+      discardConfirm: false,
+      error: undefined,
+      steps: makeWizardSteps(state),
+    }
+    wizardRef = null
+    wizardMemoryRef = null
     setWizard(next)
     syncWizardMode(next)
   }
@@ -3367,6 +3541,7 @@ export function EnsembleV2App() {
   const wizardPrev = () => {
     const state = wizard()
     if (!state) return
+    if (state.discardConfirm) return
     if (state.filtering) { setWizard({ ...state, filtering: false, query: "", cursor: 0 }); return }
     if (state.customDirectory) {
       const next = { ...state, customDirectory: false, query: "", filtering: false, cursor: 0, error: undefined }
@@ -3377,8 +3552,21 @@ export function EnsembleV2App() {
     const step = wizardStep()
     const saved = step?.kind === "text" ? saveWizardText() : state
     const next = saved ?? state
-    if (next.index <= 0) { completeWizard(next, undefined); return }
-    const previous = { ...next, index: next.index - 1, query: "", filtering: false, cursor: 0, error: undefined, steps: makeWizardSteps(next) }
+    // N at the first step is a no-op; Esc owns cancel.
+    if (next.index <= 0) return
+    const previous = {
+      ...next,
+      index: next.index - 1,
+      query: "",
+      filtering: false,
+      cursor: 0,
+      memoryEditor: null,
+      discardConfirm: false,
+      error: undefined,
+      steps: makeWizardSteps(next),
+    }
+    wizardRef = null
+    wizardMemoryRef = null
     setWizard(previous)
     syncWizardMode(previous)
   }
@@ -3386,6 +3574,10 @@ export function EnsembleV2App() {
   const wizardMove = (delta: number) => {
     const state = wizard()
     if (!state) return
+    if (wizardIsMemoryStep()) {
+      setWizard({ ...state, memoryCursor: clampWizardMemoryCursor(wizardMemoryCursor() + delta, state.draft.memories.length) })
+      return
+    }
     const length = wizardItems().length
     setWizard({ ...state, cursor: Math.max(0, Math.min(Math.max(0, length - 1), wizardCursor() + delta)) })
   }
@@ -3393,6 +3585,10 @@ export function EnsembleV2App() {
   const wizardJump = (index: number) => {
     const state = wizard()
     if (!state) return
+    if (wizardIsMemoryStep()) {
+      setWizard({ ...state, memoryCursor: clampWizardMemoryCursor(index, state.draft.memories.length) })
+      return
+    }
     const length = wizardItems().length
     setWizard({ ...state, cursor: Math.max(0, Math.min(Math.max(0, length - 1), index)) })
   }
@@ -3443,6 +3639,128 @@ export function EnsembleV2App() {
       return
     }
     setPicker({ ...state, query: edit.query, cursor: 0 })
+  }
+
+  const wizardMemoryClearInput = () => {
+    setWizardMemoryInput("")
+    queueMicrotask(() => {
+      const target = wizardMemoryRef ?? wizardRef
+      if (!target) return
+      try {
+        target.value = ""
+        target.cursorOffset = 0
+        focusWhenReady(() => wizardMemoryRef ?? wizardRef)
+      } catch {}
+    })
+  }
+
+  const wizardMemoryKeepInput = (text: string) => {
+    setWizardMemoryInput(text)
+    queueMicrotask(() => {
+      const target = wizardMemoryRef ?? wizardRef
+      if (!target) return
+      try {
+        target.value = text
+        target.cursorOffset = text.length
+        focusWhenReady(() => wizardMemoryRef ?? wizardRef)
+      } catch {}
+    })
+  }
+
+  const openWizardMemoryField = (mode: "add" | "edit", index: number | null) => {
+    const state = wizard()
+    if (!state) return
+    const text = mode === "edit" && index !== null ? (state.draft.memories[index] ?? "") : state.memoryDraft
+    setWizardMemoryInput(text)
+    const next: WizardState = {
+      ...state,
+      memoryEditor: { mode, index },
+      memoryDraft: mode === "add" ? text : state.memoryDraft,
+      query: "",
+      filtering: false,
+      discardConfirm: false,
+      error: undefined,
+    }
+    // The previous step's editor is unmounted; never focus its stale ref.
+    wizardRef = null
+    wizardMemoryRef = null
+    setWizard(next)
+    dispatchInteraction({ type: "insert.enter", target: "wizard" })
+    wizardMemoryKeepInput(text)
+  }
+
+  const wizardMemoryStartAdd = () => openWizardMemoryField("add", null)
+
+  const wizardMemoryStartEdit = () => {
+    const state = wizard()
+    if (!state || state.draft.memories.length === 0) return
+    openWizardMemoryField("edit", wizardMemoryCursor())
+  }
+
+  const wizardMemoryDelete = () => {
+    const state = wizard()
+    if (!state || state.draft.memories.length === 0) return
+    const index = wizardMemoryCursor()
+    const memories = deleteWizardMemory(state.draft.memories, index)
+    setWizard({
+      ...state,
+      draft: { ...state.draft, memories },
+      memoryCursor: clampWizardMemoryCursor(index, memories.length),
+      error: undefined,
+    })
+  }
+
+  /** Enter in the persistent memory field: add clears for the next entry, edit keeps its text. */
+  const wizardMemorySubmit = () => {
+    const state = wizard()
+    const editor = state?.memoryEditor
+    const raw = String(wizardMemoryRef?.plainText ?? wizardMemoryInput())
+    if (!state || !editor) return
+    if (editor.mode === "add") {
+      const memories = addWizardMemory(state.draft.memories, raw)
+      const saved = memories.length !== state.draft.memories.length
+      setWizard({
+        ...state,
+        draft: { ...state.draft, memories },
+        memoryCursor: saved ? memories.length - 1 : wizardMemoryCursor(),
+        memoryDraft: "",
+        error: undefined,
+      })
+      wizardMemoryClearInput()
+      dispatchInteraction({ type: "insert.enter", target: "wizard" })
+      return
+    }
+    const index = editor.index
+    if (index === null) return
+    if (!raw.trim()) return
+    const memories = updateWizardMemory(state.draft.memories, index, raw)
+    setWizard({
+      ...state,
+      draft: { ...state.draft, memories },
+      memoryCursor: clampWizardMemoryCursor(index, memories.length),
+      error: undefined,
+    })
+    // An edit saves in place and keeps its text and focus in Insert.
+    wizardMemoryKeepInput(raw)
+    dispatchInteraction({ type: "insert.enter", target: "wizard" })
+  }
+
+  /** Esc leaves the persistent field for the step Normal list. */
+  const wizardMemoryClose = () => {
+    const state = wizard()
+    if (!state?.memoryEditor) return
+    const raw = String(wizardMemoryRef?.plainText ?? wizardMemoryInput())
+    dispatchInteraction({ type: "editor.normal" })
+    dispatchInteraction({ type: "field.leave" })
+    wizardRef = null
+    wizardMemoryRef = null
+    setWizard({
+      ...state,
+      memoryEditor: null,
+      memoryDraft: state.memoryEditor.mode === "add" ? raw : state.memoryDraft,
+      discardConfirm: false,
+      error: undefined,
+    })
   }
 
   const wizardToggle = () => {
@@ -3497,36 +3815,41 @@ export function EnsembleV2App() {
     const state = wizard()
     const step = wizardStep()
     if (!state || !step) return
-    if (step.kind === "text") { wizardNext(); return }
+    if (step.kind === "text" || step.kind === "memories") { wizardNext(); return }
     const action = wizardEnterAction(step.kind, wizardFinal(state))
     if (wizardItems().length === 0) return
     if (action === "continue") advanceWizard(state)
     else wizardSelect()
   }
 
-  const wizardCancel = () => {
-    const state = wizard()
-    if (state) completeWizard(state, undefined)
-  }
-
   const openWizard = (flow: "workspace" | "agent", edit?: Workspace): Promise<WizardDraft | undefined> => new Promise((resolve) => {
     clearPendingChord()
+    // Reopening a wizard must not focus the unmounted editor of the previous
+    // one; the step's field ref is resolved after this state mounts.
+    wizardRef = null
+    wizardMemoryRef = null
+    setWizardMemoryInput("")
     const first = rosterAgents()[0]
     const model = models()[0]
     const draft: WizardDraft = flow === "workspace"
       ? edit
-        ? { directory: edit.directory, name: edit.name, memberIDs: [...edit.memberIDs], leaderID: edit.leaderID, synthesis: edit.synthesis, title: "", role: "", memories: "", modelKey: "", variant: "" }
-        : { directory: directoryOf(context), name: "", memberIDs: first ? [first.id] : [], leaderID: first?.id ?? "", synthesis: true, title: "", role: "", memories: "", modelKey: "", variant: "" }
-      : { directory: "", name: "", memberIDs: [], leaderID: "", synthesis: true, title: "", role: "", memories: "", modelKey: model ? `${model.providerID}/${model.modelID}` : "", variant: model?.variants[0] ?? "none" }
+        ? { directory: edit.directory, name: edit.name, memberIDs: [...edit.memberIDs], leaderID: edit.leaderID, synthesis: edit.synthesis, title: "", role: "", memories: [], modelKey: "", variant: "" }
+        : { directory: directoryOf(context), name: "", memberIDs: first ? [first.id] : [], leaderID: first?.id ?? "", synthesis: true, title: "", role: "", memories: [], modelKey: "", variant: "" }
+      : { directory: "", name: "", memberIDs: [], leaderID: "", synthesis: true, title: "", role: "", memories: [], modelKey: model ? `${model.providerID}/${model.modelID}` : "", variant: model?.variants[0] ?? "none" }
     const state: WizardState = {
       flow,
       title: edit ? `Edit workspace · #${edit.name}` : flow === "workspace" ? "New workspace" : "New agent",
       draft,
+      initialDraft: structuredClone(draft),
       steps: [],
       index: 0,
       query: "",
       filtering: false,
       cursor: 0,
+      memoryCursor: 0,
+      memoryEditor: null,
+      memoryDraft: "",
+      discardConfirm: false,
       directoryOptions: flow === "workspace" ? directoryChoices() : [],
       modelOptions: wizardModelOptions(models()),
       resolve,
@@ -3559,6 +3882,7 @@ export function EnsembleV2App() {
 
   const dialogDescriptor = (): DialogDescriptor | null => {
     if (wizard()) {
+      if (wizard()!.memoryEditor) return { surface: "wizard", field: "insert", filtering: false }
       const step = wizardStep()
       if (step?.kind === "text") return { surface: "wizard", field: interaction().mode === "insert" ? "insert" : "normal", filtering: false }
       return { surface: "wizard", filtering: wizard()!.filtering }
@@ -3578,9 +3902,14 @@ export function EnsembleV2App() {
       case "wizard.top": return wizardJump(0)
       case "wizard.bottom": return wizardJump(Math.max(0, wizardItems().length - 1))
       case "wizard.activate": return wizardActivate()
+      case "wizard.next": return wizardNext()
+      case "wizard.prev": return wizardPrev()
+      case "wizard.memory.add": return wizardMemoryStartAdd()
+      case "wizard.memory.edit": return wizardMemoryStartEdit()
+      case "wizard.memory.delete": return wizardMemoryDelete()
       case "wizard.toggle": return wizardToggle()
-      case "wizard.filter": return wizardBeginFilter()
-      case "wizard.back": return wizardPrev()
+      case "wizard.filter": if (!wizardIsMemoryStep()) wizardBeginFilter(); return
+      case "wizard.cancel": return wizardCancel()
       case "picker.down": case "picker.down.arrow": return pickerMove(1)
       case "picker.up": case "picker.up.arrow": return pickerMove(-1)
       case "picker.top": return pickerJump(0)
@@ -3660,9 +3989,15 @@ export function EnsembleV2App() {
       }
       const action = dialogEscape({ surface })
       vim?.invalidate()
-      dispatchInteraction({ type: "field.leave" })
-      if (action === "back") wizardPrev()
-      else finishTextPrompt(undefined)
+      syncVimChord(null)
+      if (surface === "wizard") {
+        // Esc from field Normal cancels the wizard (the adapter asks to
+        // discard only when the draft is dirty); N goes back one step.
+        dispatchInteraction({ type: "escape" })
+      } else {
+        dispatchInteraction({ type: "field.leave" })
+        if (action === "cancel") finishTextPrompt(undefined)
+      }
       return true
     }
     if (entry?.id === `${context}.leave`) {
@@ -3670,6 +4005,20 @@ export function EnsembleV2App() {
       vim?.invalidate()
       syncVimChord(null)
       dispatchInteraction({ type: "leave.editor" })
+      return true
+    }
+    if (entry?.id === `${context}.next`) {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      vim?.invalidate()
+      syncVimChord(null)
+      wizardNext()
+      return true
+    }
+    if (entry?.id === `${context}.prev`) {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      vim?.invalidate()
+      syncVimChord(null)
+      wizardPrev()
       return true
     }
     if (entry?.id === `${context}.submit` || token === "shift+enter") {
@@ -3698,6 +4047,25 @@ export function EnsembleV2App() {
     return true
   }
 
+  const handleWizardMemoryKey = (event: any): boolean => {
+    const token = normalizeKeyToken(event)
+    const entry = singleKeyEntry("wizardMemory", token)
+    const prevent = () => { event?.preventDefault?.(); event?.stopPropagation?.() }
+    if (entry?.id === "wizardMemory.save") {
+      prevent()
+      wizardMemorySubmit()
+      return true
+    }
+    if (entry?.id === "wizardMemory.list" || entry?.id === "wizardMemory.leave") {
+      prevent()
+      wizardMemoryClose()
+      return true
+    }
+    // Insert is the input's own mode; printable keys, Backspace, arrows, and
+    // the clipboard stay with the field.
+    return false
+  }
+
   /**
    * One catalog-driven handler for every dialog. Text fields follow the
    * Insert -> field Normal -> back/cancel ladder and route motions through
@@ -3707,6 +4075,14 @@ export function EnsembleV2App() {
   const handleDialogKey = (event: any): boolean => {
     const dialog = dialogDescriptor()
     if (!dialog) return false
+    const token = normalizeKeyToken(event)
+    if (wizard()?.discardConfirm) {
+      event?.preventDefault?.(); event?.stopPropagation?.()
+      if (token === "y" || token === "enter") wizardDiscard()
+      else if (token === "n" || token === "shift+n" || token === "escape") wizardKeepEditing()
+      return true
+    }
+    if (dialog.surface === "wizard" && wizard()?.memoryEditor) return handleWizardMemoryKey(event)
     if (dialog.surface === "wizard" && dialog.field === "insert") return handleFieldInsertKey("wizard", event)
     if (dialog.surface === "prompt" && dialog.field === "insert") return handleFieldInsertKey("prompt", event)
     if (dialog.surface === "wizard" && dialog.field === "normal") return handleFieldNormalKey("wizard", event)
@@ -3719,7 +4095,6 @@ export function EnsembleV2App() {
     }
 
     event?.preventDefault?.(); event?.stopPropagation?.()
-    const token = normalizeKeyToken(event)
     if (token === "escape") {
       dispatchInteraction({ type: "escape" })
       return true
@@ -3767,7 +4142,9 @@ export function EnsembleV2App() {
     if (settingsAgentID()) return listPosition(settingsCursorClamped(), settingsRowTotal())
     const activeWizard = wizard()
     if (activeWizard) {
+      if (activeWizard.memoryEditor) return composerPosition(wizardMemoryInput(), wizardMemoryInput().length)
       if (wizardStep()?.kind === "text") return composerPosition(String(wizardRef?.plainText ?? ""), Number(wizardRef?.cursorOffset ?? 0))
+      if (wizardIsMemoryStep()) return listPosition(wizardMemoryCursor(), wizardMemories().length)
       return listPosition(wizardCursor(), wizardItems().length)
     }
     if (picker()) return listPosition(picker()!.cursor, pickerItems().length)
@@ -3781,6 +4158,7 @@ export function EnsembleV2App() {
   const statusTextValue = (): string => {
     if (settingsField()) return settingsFieldText()
     const activeWizard = wizard()
+    if (activeWizard?.memoryEditor) return wizardMemoryInput()
     if (activeWizard && wizardStep()?.kind === "text") return String(wizardRef?.plainText ?? "")
     const prompt = textPrompt()
     if (prompt) return String(textPromptRef?.plainText ?? prompt.value)
@@ -3797,12 +4175,18 @@ export function EnsembleV2App() {
     if (interaction().mode === "visual") return visualHint
     const state = wizard()
     if (!state) return ""
+    if (state.discardConfirm) return chromeJoin(["discard draft?", "y/enter discard", "n/esc keep editing"])
+    if (state.memoryEditor) return statuslineHints("wizardMemory")
     const step = wizardStep()
     if (state.filtering) return statuslineHints("filter")
     if (step?.kind === "text") {
       return statuslineHints(dialogKeyContext({ surface: "wizard", field: interaction().mode === "insert" ? "insert" : "normal" }))
     }
-    return statuslineHints("wizard", { multiple: step?.kind === "multi" })
+    return statuslineHints("wizard", {
+      multiple: step?.kind === "multi",
+      memory: step?.kind === "memories",
+      filter: (entry) => !wizardIsMemoryStep() || entry.id !== "wizard.filter",
+    })
   }
   const dialogHint = () => {
     if (interaction().mode === "visual") return visualHint
@@ -3846,9 +4230,10 @@ export function EnsembleV2App() {
       return footerLine2({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })
     }
     if (settingsField()) {
+      const memory = settingsField()!.kind === "memory"
       return interaction().mode === "insert"
-        ? statuslineHints("settingsField")
-        : statuslineHints("settingsText")
+        ? statuslineHints(memory ? "settingsMemoryField" : "settingsField")
+        : statuslineHints(memory ? "settingsMemoryText" : "settingsText")
     }
     if (settingsAgentID()) return statuslineHints("settings", { filter: settingsEntryEnabled })
     if (interaction().overlay === "help") {
@@ -4118,7 +4503,7 @@ export function EnsembleV2App() {
                 />
               </Show>
             }>
-              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value) }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value); if (value) settingsFieldVimBuffer() }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
             </Show>
           </box>
         </box>
@@ -4174,35 +4559,61 @@ export function EnsembleV2App() {
           <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{chromeJoin([wizard()!.title, `step ${wizard()!.index + 1} / ${wizard()!.steps.length}`])}</text>
           <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
           <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
-          <Show when={wizardStep()?.kind === "text"} fallback={
-            <box flexDirection="column" height={9}>
-              <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])}</text>
-              <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
-                <Show when={wizardItems().length === 0} fallback={
-                <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
+          <Show when={wizardIsMemoryStep()} fallback={
+            <Show when={wizardStep()?.kind === "text"} fallback={
+              <box flexDirection="column" height={9}>
+                <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])}</text>
+                <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
+                  <Show when={wizardItems().length === 0} fallback={
+                  <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
+                    <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
+                      const state = wizard()
+                      const step = wizardStep()
+                      const items = wizardItems()
+                      if (!state || !step) return ""
+                      const offset = pickerWindow(wizardCursor(), items.length, 8).start
+                      const item = items[offset + slot]
+                      if (!item) return ""
+                      const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
+                      return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.label}${item.detail ? ` · ${item.detail}` : ""}`
+                    })()}</text>
+                  )}</For>
+                  }>
+                    <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{pickerEmptyLine()}</text>
+                  </Show>
+                }>
+                  <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
+                </Show>
+              </box>
+            }>
+              <Show when={wizardStepKey()} keyed>
+                <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
+                  <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                </box>
+              </Show>
+            </Show>
+          }>
+            <box flexDirection="column" height={6} flexShrink={0}>
+              <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{chromeJoin([`memories: ${wizardMemories().length}`, ...(wizardMemories().length > 0 ? [`${wizardMemoryCursor() + 1}/${wizardMemories().length}`] : [])])}</text>
+              <Show when={wizardMemories().length === 0} fallback={
+                <For each={[0, 1, 2, 3]}>{(slot) => (
                   <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
-                    const state = wizard()
-                    const step = wizardStep()
-                    const items = wizardItems()
-                    if (!state || !step) return ""
-                    const offset = pickerWindow(wizardCursor(), items.length, 8).start
-                    const item = items[offset + slot]
-                    if (!item) return ""
-                    const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
-                    return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.label}${item.detail ? ` · ${item.detail}` : ""}`
+                    const memories = wizardMemories()
+                    if (memories.length === 0) return ""
+                    const offset = pickerWindow(wizardMemoryCursor(), memories.length, 4).start
+                    const index = offset + slot
+                    const text = memories[index]
+                    if (text === undefined) return ""
+                    return `${index === wizardMemoryCursor() ? "›" : " "} ${index + 1}. ${text}`
                   })()}</text>
                 )}</For>
-                }>
-                  <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{pickerEmptyLine()}</text>
-                </Show>
               }>
-                <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
+                <text fg={colors.muted} bg={colors.panel} width="100%" truncate>No memories yet. a adds one.</text>
               </Show>
             </box>
-          }>
-            <Show when={wizardStepKey()} keyed>
-              <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+            <Show when={wizard()!.memoryEditor}>
+              <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
+                <input ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
               </box>
             </Show>
           </Show>

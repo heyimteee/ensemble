@@ -1,6 +1,21 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions } from "./wizard.ts"
+import { initialInteractionState, insertWithoutTarget, interactionReducer } from "./interaction.ts"
+import {
+  addWizardMemory,
+  clampWizardMemoryCursor,
+  deleteWizardMemory,
+  overlayGeometry,
+  sameWizardOptions,
+  updateWizardMemory,
+  wizardDraftDirty,
+  wizardEnterAction,
+  wizardModelEmptyHint,
+  wizardModelKeyFor,
+  wizardModelOptions,
+  wizardMemorySaveList,
+  wizardStepArrival,
+} from "./wizard.ts"
 
 test("overlay geometry centers a bounded box and recomputes on resize", () => {
   const wide = overlayGeometry(200, 60, 20)
@@ -57,8 +72,69 @@ test("text steps keep enter for continue handled by the field", () => {
   assert.equal(wizardEnterAction("text", true), "text")
 })
 
-test("wizard memory lines split one-per-line and skip blanks", () => {
-  assert.deepEqual(wizardMemoryLines("pnpm only\n\n  never edit dist  \n"), ["pnpm only", "never edit dist"])
-  assert.deepEqual(wizardMemoryLines(""), [])
-  assert.deepEqual(wizardMemoryLines("one\r\ntwo"), ["one", "two"])
+test("wizard memory list adds, edits, deletes, and clamps one-by-one entries", () => {
+  const first = addWizardMemory([], "  pnpm only  ")
+  assert.deepEqual(first, ["pnpm only"])
+  const second = addWizardMemory(first, "never edit dist")
+  assert.deepEqual(second, ["pnpm only", "never edit dist"])
+  assert.deepEqual(addWizardMemory(second, "   "), second, "blank entries never enter the list")
+
+  assert.deepEqual(updateWizardMemory(second, 0, " pnpm only v2 "), ["pnpm only v2", "never edit dist"])
+  assert.deepEqual(updateWizardMemory(second, 9, "ignored"), second, "an invalid edit leaves the list alone")
+  assert.deepEqual(updateWizardMemory(second, 1, ""), second, "an empty edit never erases the entry")
+
+  assert.deepEqual(deleteWizardMemory(second, 0), ["never edit dist"])
+  assert.deepEqual(deleteWizardMemory(second, 7), second, "an invalid delete leaves the list alone")
+
+  assert.equal(clampWizardMemoryCursor(4, 3), 2)
+  assert.equal(clampWizardMemoryCursor(-1, 3), 0)
+  assert.equal(clampWizardMemoryCursor(2, 0), 0)
+})
+
+test("wizard step arrival keeps the mode and only focuses a text target", () => {
+  const textArrival = wizardStepArrival("text")
+  const insert = interactionReducer(initialInteractionState({ mode: "insert", overlay: "wizard" }), textArrival)
+  assert.equal(insert.state.mode, "insert", "arriving at a text step never assigns the mode")
+  assert.equal(insert.state.field, "wizard")
+  assert.deepEqual(insert.intents, [{ type: "focus-editor", target: "wizard" }])
+
+  const normal = interactionReducer(initialInteractionState({ mode: "normal", overlay: "wizard" }), textArrival)
+  assert.equal(normal.state.mode, "normal", "Normal arrival stays Normal")
+  assert.equal(normal.state.field, "wizard", "the text field keeps the caret in Normal")
+
+  const listArrival = wizardStepArrival("memories")
+  const list = interactionReducer(initialInteractionState({ mode: "insert", overlay: "wizard" }), listArrival)
+  assert.equal(list.state.mode, "insert", "a list step never changes the arrival mode")
+  assert.equal(list.state.field, null)
+  assert.equal(insertWithoutTarget(list.state), true, "Insert on a list step is honest about no target")
+  assert.deepEqual(list.intents, [{ type: "blur-editor" }])
+})
+
+const draft = (overrides: Record<string, unknown> = {}) => ({
+  directory: "/tmp/project",
+  name: "",
+  title: "",
+  role: "",
+  memberIDs: [] as string[],
+  leaderID: "",
+  synthesis: true,
+  memories: [] as string[],
+  modelKey: "fake/m1",
+  variant: "none",
+  ...overrides,
+})
+
+test("wizard memories save one by one and an empty list skips", () => {
+  assert.deepEqual(wizardMemorySaveList([]), [])
+  assert.deepEqual(wizardMemorySaveList(["  ", ""]), [], "blank entries never save")
+  assert.deepEqual(wizardMemorySaveList([" pnpm only ", "never edit dist", "  "]), ["pnpm only", "never edit dist"])
+})
+
+test("wizard dirty compares the draft with the draft opened", () => {
+  const initial = draft()
+  assert.equal(wizardDraftDirty(initial, draft()), false)
+  assert.equal(wizardDraftDirty(initial, draft({ name: "Nova" })), true)
+  assert.equal(wizardDraftDirty(initial, draft({ memories: ["pnpm only"] })), true)
+  assert.equal(wizardDraftDirty(initial, draft({ memberIDs: ["a"], leaderID: "a" })), true)
+  assert.equal(wizardDraftDirty(draft({ name: "Nova" }), draft({ name: "Nova" })), false, "an edit wizard that is unchanged is clean")
 })

@@ -84,14 +84,23 @@ sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "first Esc goes to field Normal"
 live_assert_text "$LIVE_TUI_SESSION" "i/a insert" "field Normal teaches the Vim entries"
-live_assert_text "$LIVE_TUI_SESSION" "esc back" "field Normal teaches the back step"
-# The first step cancels on the second Esc; no surface underneath inherits Insert.
+live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "field Normal Esc cancels the wizard"
+# T4: a dirty cancel asks first; n keeps the draft, the second Esc confirms.
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "second Esc cancelled the wizard"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Roster" "cancel returns to roster Normal"
-# Reopen and walk the fields: back from Agent title restores Agent name in
-# field Normal, and the title draft survives the round trip.
+live_require_text "$LIVE_TUI_SESSION" "discard draft?" 10 "dirty Esc asks before discarding"
+live_assert_text "$LIVE_TUI_SESSION" "y/enter discard" "discard confirm teaches y/Enter"
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_absence "$LIVE_TUI_SESSION" "discard draft?" 10 "n keeps the wizard draft"
+live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "the draft stays on the step"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "keeping the draft keeps the mode"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "discard draft?" 10 "cancel confirm reopened"
+live_key "$LIVE_TUI_SESSION" "y"
+live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "y discarded the wizard"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Roster" 10 "cancel returns to roster Normal"
+# Reopen and walk the fields: N goes back to Agent name and n returns; the
+# title draft survives the round trip.
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard reopened"
 live_key "$LIVE_TUI_SESSION" "i"
@@ -101,12 +110,12 @@ live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
 live_type "$LIVE_TUI_SESSION" "Engineering"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-sleep 0.25
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "second Esc goes back one step"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "title Esc goes to field Normal"
+live_key "$LIVE_TUI_SESSION" "N"
+live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "N goes back one step"
 live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "the previous text step keeps Normal"
-live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "Enter continues from the restored text field"
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "n returns to the next step"
 live_require_text "$LIVE_TUI_SESSION" "Engineering" 10 "title draft survived the back step"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
@@ -114,18 +123,71 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "Renders deterministic Markdown."
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
+# T4: the memories step is an ordered one-by-one list. Insert arrival stays
+# Insert with no text target; Esc returns to Normal before list keys act.
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ no text target │ Esc normal" "the memories step has no text target"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc leaves Insert on the memory list"
+live_assert_text "$LIVE_TUI_SESSION" "j/k select" "the memory list uses j/k"
+live_assert_text "$LIVE_TUI_SESSION" "a add" "the memory list teaches add"
+live_assert_text "$LIVE_TUI_SESSION" "e edit" "the memory list teaches edit"
+live_assert_text "$LIVE_TUI_SESSION" "x delete" "the memory list teaches delete"
+live_assert_text "$LIVE_TUI_SESSION" "n next" "the memory list teaches n next"
+live_assert_text "$LIVE_TUI_SESSION" "N previous" "the memory list teaches N previous"
+live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "the memory list teaches cancel"
+live_require_text "$LIVE_TUI_SESSION" "No memories yet. a adds one." 10 "the empty memory list names add"
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "a opens the memory field in Insert"
+live_assert_text "$LIVE_TUI_SESSION" "enter save │ esc list" "the memory field teaches its persistent ladder"
+live_require_text "$LIVE_TUI_SESSION" "The team uses pnpm." 10 "the memory input is mounted"
+sleep 0.2
 live_type "$LIVE_TUI_SESSION" "Likes deterministic fixtures"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "agent model step"
-# Entering a list step keeps Insert but there is no text target; Esc returns
-# to Normal before the list grammar applies.
-live_assert_text "$LIVE_TUI_SESSION" "INSERT │ no text target │ Esc normal" "a list step has no text target"
+live_require_text "$LIVE_TUI_SESSION" "memories: 1" 10 "the first memory joined the list"
+live_require_text "$LIVE_TUI_SESSION" "The team uses pnpm." 10 "the add field cleared after Enter"
+live_assert_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" "the add field stayed in Insert"
+sleep 0.2
+live_type "$LIVE_TUI_SESSION" "Never edit generated files"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "memories: 2" 10 "the second memory joined the list"
+live_require_text "$LIVE_TUI_SESSION" "The team uses pnpm." 10 "the second entry cleared for the next one"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc leaves Insert on the list step"
-# `/` owns filtering; `:` and Space never open the command line or the leader.
-live_assert_text "$LIVE_TUI_SESSION" "j/k move" "wizard list uses the shared navigation"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc returns the memory field to the list"
+sleep 0.25
+# e opens the selected memory in Insert; Enter saves in place and keeps it.
+live_key "$LIVE_TUI_SESSION" "k"
+live_key "$LIVE_TUI_SESSION" "e"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "e opens the memory in Insert"
+sleep 0.2
+live_type "$LIVE_TUI_SESSION" " v2"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "edit Enter saves and keeps the field"
+live_assert_count "$LIVE_TUI_SESSION" "Likes deterministic fixtures v2" 2 "edited text is in the field and the list"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "memories: 2" 10 "the edit field returned to the list"
+sleep 0.25
+# x deletes the selected memory; the remaining list stays intact.
+live_key "$LIVE_TUI_SESSION" "j"
+live_key "$LIVE_TUI_SESSION" "x"
+live_require_text "$LIVE_TUI_SESSION" "memories: 1" 10 "x deletes the selected memory"
+live_require_absence "$LIVE_TUI_SESSION" "Never edit generated files" 10 "the deleted memory leaves the list"
+# Add another entry so creation saves a multi-item list one by one.
+live_key "$LIVE_TUI_SESSION" "a"
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ Wizard" 10 "the add field reopens in Insert"
+sleep 0.2
+live_type "$LIVE_TUI_SESSION" "Uses pnpm"
+live_key "$LIVE_TUI_SESSION" Enter
+live_key "$LIVE_TUI_SESSION" Escape
+sleep 0.25
+live_require_text "$LIVE_TUI_SESSION" "memories: 2" 10 "the final memory list has two entries"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "Enter advances from the memory list"
+# A list step arrives in Normal; `/` owns filtering on option steps. `:` and
+# Space never open the command line or the leader.
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "the model step keeps the arrival mode"
+live_assert_text "$LIVE_TUI_SESSION" "j/k select" "wizard list uses the shared navigation"
 live_assert_text "$LIVE_TUI_SESSION" "/ filter" "wizard list names the filter key"
-live_assert_text "$LIVE_TUI_SESSION" "esc back" "wizard list names the back key"
+live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "wizard list names the cancel key"
 live_key "$LIVE_TUI_SESSION" ":"
 sleep 0.25
 live_assert_absence "$LIVE_TUI_SESSION" "COMMAND │" "colon is disabled in a wizard"
@@ -149,10 +211,13 @@ if live_capture_contains "$LIVE_TUI_SESSION" "Reasoning effort"; then
 fi
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent · direct" 20 "direct chat opened"
 agent_memories=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
-[[ "$agent_memories" == '["Likes deterministic fixtures"]' ]] || live_fail "wizard memories did not persist (got $agent_memories)"
-# Clear it so later memory-count probes stay meaningful.
-wizard_memory_id=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt })[0].id')
-live_invoke memory.delete "{\"id\":$wizard_memory_id}" >/dev/null
+[[ "$agent_memories" == '["Likes deterministic fixtures v2","Uses pnpm"]' ]] || live_fail "wizard memories did not persist one by one (got $agent_memories)"
+# Clear them so later memory-count probes stay meaningful.
+for _ in $(seq 1 2); do
+  wizard_memory_id=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt })[0]?.id' | tr -d '"')
+  [[ -n "$wizard_memory_id" ]] || break
+  live_invoke memory.delete "{\"id\":\"$wizard_memory_id\"}" >/dev/null
+done
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent" 10 "agent roster entry"
 live_require_text "$LIVE_TUI_SESSION" "Onboarding complete. I am ready." 20 "fake onboarding reply"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 15 "onboarding finalization"
@@ -302,9 +367,9 @@ live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "New workspace" 10 "workspace wizard"
 live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "directory step"
 live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "wizard list step is Normal"
-live_assert_text "$LIVE_TUI_SESSION" "j/k move" "directory step names j/k"
+live_assert_text "$LIVE_TUI_SESSION" "j/k select" "directory step names j/k"
 live_assert_text "$LIVE_TUI_SESSION" "/ filter" "directory step names the filter key"
-live_assert_text "$LIVE_TUI_SESSION" "esc back" "directory step names the back key"
+live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "directory step names the cancel key"
 live_key "$LIVE_TUI_SESSION" ":"
 sleep 0.25
 live_assert_absence "$LIVE_TUI_SESSION" "COMMAND │" "colon never opens Command inside a wizard"
@@ -976,19 +1041,38 @@ live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "memories count renders at z
 live_assert_text "$LIVE_TUI_SESSION" "a add │ s save" "memories teaches the add row before any row exists"
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "a opens a new memory field in Normal"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "fake-live-memory"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "New memory │ INSERT" 10 "Enter saves the memory and keeps the add field in Insert"
+live_assert_text "$LIVE_TUI_SESSION" "enter save │ esc field normal" "the persistent memory field teaches Enter and Esc"
+live_require_text "$LIVE_TUI_SESSION" "Memories (1)" 10 "memories count renders the live total while the field stays open"
+# Race probe: the created id must select its row even if the event refresh
+# lands after the mutation refresh. No sleep: the cursor resolves by id.
+live_require_text "$LIVE_TUI_SESSION" "› fake-live-memory" 10 "the newly saved memory row holds the cursor"
+sleep 0.15
+live_assert_count "$LIVE_TUI_SESSION" "fake-live-memory" 1 "the add field cleared for the next memory"
+# A second memory proves the same field stays focused and clears again.
+live_type "$LIVE_TUI_SESSION" "fake-live-memory-two"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Memories (2)" 10 "the second memory joined the list"
+live_require_text "$LIVE_TUI_SESSION" "› fake-live-memory-two" 10 "the second saved row also holds the cursor"
+sleep 0.15
+live_assert_count "$LIVE_TUI_SESSION" "fake-live-memory-two" 1 "the second entry cleared for the next one"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "new-memory field Normal"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "Esc returns the persistent field to Normal"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "the second Esc commits and returns to settings Normal"
-live_require_text "$LIVE_TUI_SESSION" "Memories (1)" 10 "memories count renders the live total"
-memory_text=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
-[[ "$memory_text" == '["fake-live-memory"]' ]] || live_fail "memory field did not persist (got $memory_text)"
-live_require_text "$LIVE_TUI_SESSION" "manual · project · reviewed" 10 "memory provenance line"
+live_require_absence "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "the second Esc closes the memory field"
+live_require_text "$LIVE_TUI_SESSION" "Memories (2)" 10 "both memories persisted"
+sleep 0.25
+# x deletes the selected row; the cursor stays deterministic after the add.
+live_key "$LIVE_TUI_SESSION" "x"
+live_require_text "$LIVE_TUI_SESSION" "Memories (1)" 10 "x deletes the selected memory"
+live_require_absence "$LIVE_TUI_SESSION" "fake-live-memory-two" 10 "the deleted memory leaves the list"
 # Slice D edit-in-place through the shared Vim adapter: e opens the fact,
-# Esc -> field Normal, $ -> end, i -> Insert, append. One row keeps its origin
-# and history (no delete/re-add).
+# A enters Insert at the line end, append, Enter saves persistently. One row
+# keeps its origin and history (no delete/re-add).
 live_key "$LIVE_TUI_SESSION" "e"
 live_require_text "$LIVE_TUI_SESSION" "Edit memory │ NORMAL" 10 "e opens the selected memory field in Normal"
 # p in a field is Vim paste, never the row promote action; undo any clipboard
@@ -999,29 +1083,43 @@ live_key "$LIVE_TUI_SESSION" "$"
 live_key "$LIVE_TUI_SESSION" "A"
 live_require_text "$LIVE_TUI_SESSION" "INSERT │ Settings" 10 "A returns the field to Insert at the line end"
 live_type "$LIVE_TUI_SESSION" " v2"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Edit memory │ NORMAL" 10 "edit field Normal before commit"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "Edit memory │ NORMAL" 10 "edit memory committed"
-memory_edited=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
+live_key "$LIVE_TUI_SESSION" Enter
+memory_edited=""
+for _ in $(seq 1 25); do
+  memory_edited=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).map(function (m) { return m.text })')
+  [[ "$memory_edited" == '["fake-live-memory v2"]' ]] && break
+  sleep 0.2
+done
 [[ "$memory_edited" == '["fake-live-memory v2"]' ]] || live_fail "memory edit did not persist (got $memory_edited)"
+live_require_text "$LIVE_TUI_SESSION" "Edit memory │ INSERT" 10 "edit Enter saves and keeps the field open"
+sleep 0.25
+live_assert_count "$LIVE_TUI_SESSION" "fake-live-memory v2" 2 "the edit kept the field text and updated the row"
 memory_rows=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).length')
 [[ "$memory_rows" == '1' ]] || live_fail "edit re-added instead of updating in place (got $memory_rows rows)"
 memory_prov=$(live_snapshot_value '(function () { var m = Object.values(output.state.memories).filter(function (x) { return !x.deletedAt })[0]; return m.origin + "|" + m.scope + "|" + m.history.map(function (h) { return h.action }).join(",") })()')
 [[ "$memory_prov" == '"manual|project|created,edited"' ]] || live_fail "edit lost provenance history (got $memory_prov)"
 live_require_text "$LIVE_TUI_SESSION" "fake-live-memory v2" 10 "edited fact renders"
 live_assert_text "$LIVE_TUI_SESSION" "Memories (1)" "count unchanged after edit"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "Edit memory │ NORMAL" 10 "edit field Normal before closing"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Edit memory │ NORMAL" 10 "edit memory field closed"
+sleep 0.25
 # x deletes the selected memory row without a dialog. Add a scratch row so the
 # original fact survives for the later tabs.
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "second memory field opens in Normal"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "scratch-memory"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "New memory │ INSERT" 10 "scratch memory saved persistently"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "second memory field Normal"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "scratch field Normal"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Memories (2)" 10 "second memory persisted"
+live_require_text "$LIVE_TUI_SESSION" "Memories (2)" 10 "scratch memory persisted"
 live_require_text "$LIVE_TUI_SESSION" "› scratch-memory" 10 "the new memory row holds the cursor"
+sleep 0.25
 live_key "$LIVE_TUI_SESSION" "x"
 live_require_text "$LIVE_TUI_SESSION" "Memories (1)" 10 "x deletes the selected memory"
 live_require_absence "$LIVE_TUI_SESSION" "scratch-memory" 10 "deleted memory leaves the list"

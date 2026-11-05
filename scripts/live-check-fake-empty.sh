@@ -72,25 +72,36 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "Renders deterministic Markdown."
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "agent memories step"
+# T4: the empty list skips without creating a blob. Arrival keeps Insert with
+# no text target; Enter advances to the empty model step.
+live_require_text "$LIVE_TUI_SESSION" "INSERT │ no text target │ Esc normal" 10 "the empty memory list has no text target"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "main model step"
+live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "main model step after an empty memory list"
 live_require_text "$LIVE_TUI_SESSION" "0 options" 10 "empty option count"
 live_assert_text "$LIVE_TUI_SESSION" "No models available" "explained empty model state"
 
-# v5.6 T6: Esc backs one step at a time; the first step cancels the wizard.
-# The list step arrived in Insert, so the first Esc leaves Insert; the second
-# goes back one step.
+# T4 navigation: Esc leaves Insert, N goes back to the memory step, n returns
+# to the model step, and both keep Normal. Esc then asks before discarding the
+# dirty draft; n keeps it and y confirms the discard.
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc leaves Insert on the list step"
+live_key "$LIVE_TUI_SESSION" "N"
+live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "N goes back one wizard step"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "the previous list step keeps Normal"
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "n returns to the next step"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" "the next list step keeps Normal"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "Esc goes back one wizard step"
-# Text steps keep the arrival mode; Esc leaves Insert, then field Normal
-# goes back a step. Walk the rest.
-for _ in $(seq 1 8); do
-  sleep 0.25
-  live_key "$LIVE_TUI_SESSION" Escape
-done
-live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "wizard cancelled from its first step"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Roster" "cancel restored Normal mode"
+live_require_text "$LIVE_TUI_SESSION" "discard draft?" 10 "dirty Esc asks before discarding"
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_absence "$LIVE_TUI_SESSION" "discard draft?" 10 "n kept the wizard draft"
+live_assert_text "$LIVE_TUI_SESSION" "Main model" "the wizard stayed on its step"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "discard draft?" 10 "cancel confirm reopened"
+live_key "$LIVE_TUI_SESSION" "y"
+live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "y cancelled the wizard"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Roster" 10 "cancel restored Normal mode"
+empty_memory_count=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).length')
+[[ "$empty_memory_count" == "0" ]] || live_fail "empty memory list wrote memories (got $empty_memory_count)"
 
 live_log "fake empty-catalog live-check passed ($LIVE_SERVER_URL)"
