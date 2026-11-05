@@ -22,6 +22,10 @@ Every non-leader agent turn must end with a handoff to another workspace member 
 
 ## Agent skills
 
+### Native skills
+
+Native skill execution is authoritative. Ensemble routes exact user text, validates Skillbox ownership, and sends General skills to leader triage; it does not reimplement skill loading, create per-skill tasks, or use prompt attachments or experimental activation. Before changing skill routing or init, read [ADR 0001: Native-skill boundary](docs/adr/0001-native-skill-boundary.md).
+
 ### Issue tracker
 
 Track specifications and tickets in GitHub Issues for heyimteee/ensemble. Before reading, publishing, claiming, or completing work, read `docs/agents/issue-tracker.md`.

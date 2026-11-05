@@ -14,6 +14,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Working agreements
 
+- [ADR 0001: Native-skill boundary](adr/0001-native-skill-boundary.md): why Ensemble routes native skills instead of executing them
 - [Agent instructions](../AGENTS.md)
 - [Handoff contract](agents/handoff.md): the detailed mandatory completion-handoff, batch-review, loop-guard, and mention rules
 - [OpenCode/OpenTUI runtime guide](agents/opencode-tui-runtime.md): host contracts, source navigation, and verification
