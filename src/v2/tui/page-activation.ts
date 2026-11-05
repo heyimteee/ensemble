@@ -13,6 +13,12 @@ export type PageActivation = {
   mount(token: PageToken): void
   unmount(token: PageToken): void
   isActive(token: PageToken): boolean
+  /**
+   * Raw keys belong to a page only while it is the newest mount AND the
+   * Ensemble route is visible. A page left mounted behind a native route must
+   * never consume the native prompt's keys.
+   */
+  ownsRawKeys(token: PageToken, routeActive: boolean): boolean
 }
 
 export function createPageActivation(): PageActivation {
@@ -27,6 +33,9 @@ export function createPageActivation(): PageActivation {
     },
     isActive(token) {
       return stack.length > 0 && stack[stack.length - 1] === token
+    },
+    ownsRawKeys(token, routeActive) {
+      return routeActive && stack.length > 0 && stack[stack.length - 1] === token
     },
   }
 }

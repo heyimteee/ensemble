@@ -13,6 +13,24 @@ test("the newest mounted page owns raw keys", () => {
   assert.equal(pages.isActive(second), true)
 })
 
+test("an inactive route never consumes a raw key", () => {
+  const pages = createPageActivation()
+  const page = {}
+  pages.mount(page)
+  assert.equal(pages.ownsRawKeys(page, true), true, "the active route on the newest page owns keys")
+  assert.equal(pages.ownsRawKeys(page, false), false, "a hidden Ensemble page never consumes a native key")
+})
+
+test("only the newest page on the active route owns raw keys", () => {
+  const pages = createPageActivation()
+  const first = {}
+  const second = {}
+  pages.mount(first)
+  pages.mount(second)
+  assert.equal(pages.ownsRawKeys(first, true), false, "a stale stacked page never consumes a key")
+  assert.equal(pages.ownsRawKeys(second, true), true)
+})
+
 test("unmounting the top page reactivates the page beneath", () => {
   const pages = createPageActivation()
   const first = {}

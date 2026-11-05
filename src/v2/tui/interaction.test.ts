@@ -77,6 +77,30 @@ test("focus changes outside the composer return to Normal mode", () => {
   assert.deepEqual(rail.intents, [{ type: "blur-editor" }])
 })
 
+test("leaving the Ensemble route resets Normal and clears every transient field", () => {
+  const before = initialInteractionState({
+    mode: "insert",
+    focus: "settings",
+    overlay: "settings",
+    field: "settings",
+    command: { kind: ":", text: "q" },
+    pendingChord: "space",
+    selection: { kind: "char", anchor: 0, cursor: 2 },
+    message: { text: "pending", tone: "info", at: 1 },
+  })
+
+  const left = reduce(before, { type: "route.leave" })
+  assert.equal(left.state.mode, "normal", "leaving always lands in Normal")
+  assert.equal(left.state.focus, "rail", "an overlay context never survives the leave")
+  assert.equal(left.state.overlay, "none")
+  assert.equal(left.state.field, null)
+  assert.equal(left.state.command, null)
+  assert.equal(left.state.pendingChord, null)
+  assert.equal(left.state.selection, null)
+  assert.equal(left.state.message, null)
+  assert.deepEqual(left.intents, [{ type: "blur-editor" }], "the adapter blurs every editor")
+})
+
 test("Esc returns from the work-list zone to the transcript", () => {
   const work = reduce(initialInteractionState(), { type: "focus.set", focus: "work" })
   assert.equal(work.state.focus, "work")
