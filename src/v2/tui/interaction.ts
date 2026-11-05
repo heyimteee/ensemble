@@ -86,6 +86,7 @@ export type InteractionIntent =
   | { type: "blur-editor" }
   | { type: "close-overlay"; overlay: InteractionOverlay }
   | { type: "wizard-back" }
+  | { type: "wizard-cancel" }
   | { type: "noop" }
 
 export type InteractionResult = { state: InteractionState; intents: InteractionIntent[] }
@@ -177,7 +178,7 @@ function escape(state: InteractionState): InteractionResult {
     if (state.field === "wizard") {
       return {
         state: { ...state, field: null },
-        intents: [{ type: "blur-editor" }, { type: "wizard-back" }],
+        intents: [{ type: "blur-editor" }, { type: "wizard-cancel" }],
       }
     }
     return {
@@ -195,7 +196,7 @@ function escape(state: InteractionState): InteractionResult {
   }
   if (state.overlay !== "none") {
     if (state.overlay === "wizard") {
-      return { state, intents: [{ type: "wizard-back" }] }
+      return { state, intents: [{ type: "wizard-cancel" }] }
     }
     return {
       state: { ...state, overlay: "none" },

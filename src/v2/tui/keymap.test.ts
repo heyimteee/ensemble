@@ -201,21 +201,34 @@ test("keys resolve through the chord machine, including gg, G, and Ctrl+d", () =
   assert.equal(resolveNormalKey("roster", [], "escape").type, "action")
 })
 
-test("wizard steps carry list navigation, multi-select, filter, and the Esc ladder", () => {
+test("wizard steps carry list navigation, multi-select, filter, memory actions, and the cancel ladder", () => {
   const keys = keysFor("wizard")
-  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "space", "/", "escape"]) {
+  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "space", "/", "escape", "n", "shift+n", "a", "e", "x"]) {
     assert.ok(keys.includes(sequence), `wizard keeps ${sequence}`)
   }
   assert.equal(entryId("wizard", "j"), "wizard.down")
   assert.equal(entryId("wizard", "enter"), "wizard.activate")
   assert.equal(entryId("wizard", "space"), "wizard.toggle")
   assert.equal(entryId("wizard", "/"), "wizard.filter")
-  assert.equal(entryId("wizard", "escape"), "wizard.back")
+  assert.equal(entryId("wizard", "escape"), "wizard.cancel")
+  assert.equal(entryId("wizard", "n"), "wizard.next")
+  assert.equal(entryId("wizard", "shift+n"), "wizard.prev")
+  assert.equal(entryId("wizard", "a"), "wizard.memory.add")
+  assert.equal(entryId("wizard", "e"), "wizard.memory.edit")
+  assert.equal(entryId("wizard", "x"), "wizard.memory.delete")
   assert.equal(actionId(resolveNormalKey("wizard", ["g"], "g")), "wizard.top")
   // `:` and the leader never claim keys inside a wizard.
   assert.equal(resolveNormalKey("wizard", [], ":").type, "none")
   assert.equal(entryId("wizard", ":"), undefined)
   assert.ok(!keys.includes(":"), "wizard never opens the command line")
+})
+
+test("wizard text Normal reuses n/N for step navigation and Esc for cancel", () => {
+  assert.equal(entryId("wizardText", "n"), "wizardText.next")
+  assert.equal(entryId("wizardText", "shift+n"), "wizardText.prev")
+  assert.equal(entryId("wizardText", "escape"), "wizardText.escape")
+  assert.match(normalEntries("wizardText").find((entry) => entry.id === "wizardText.escape")?.hint ?? "", /esc cancel/)
+  assert.match(statuslineHints("wizardText"), /esc cancel/)
 })
 
 test("pickers, results, and approvals share the list grammar", () => {
@@ -245,14 +258,21 @@ test("confirm accepts with y/Enter and cancels with n/Esc", () => {
 })
 
 test("dialog hints come from the catalog and stay truthful about variants", () => {
-  const wizard = statuslineHints("wizard", { multiple: true })
-  assert.ok(wizard.includes("j/k move"), wizard)
+  const wizard = statuslineHints("wizard", { multiple: true, memory: true })
+  assert.ok(wizard.includes("j/k select"), wizard)
   assert.ok(wizard.includes("enter next"), wizard)
+  assert.ok(wizard.includes("n next"), wizard)
+  assert.ok(wizard.includes("N previous"), wizard)
   assert.ok(wizard.includes("space toggle"), wizard)
+  assert.ok(wizard.includes("a add"), wizard)
+  assert.ok(wizard.includes("e edit"), wizard)
+  assert.ok(wizard.includes("x delete"), wizard)
   assert.ok(wizard.includes("/ filter"), wizard)
-  assert.ok(wizard.includes("esc back"), wizard)
+  assert.ok(wizard.includes("esc cancel"), wizard)
   const single = statuslineHints("wizard", { multiple: false })
   assert.ok(!single.includes("space toggle"), "a single-choice step never promises Space")
+  assert.ok(!single.includes("a add"), "a non-memory step never promises add")
+  assert.ok(!single.includes("x delete"), "a non-memory step never promises delete")
 
   const picker = statuslineHints("picker", { multiple: true })
   for (const hint of ["j/k move", "enter select", "space toggle", "/ filter", "esc cancel"]) {
@@ -269,7 +289,11 @@ test("dialog hints come from the catalog and stay truthful about variants", () =
 
 test("text-field hints share the dialog ladder vocabulary", () => {
   assert.ok(statuslineHints("wizardField").includes("esc normal"))
-  assert.ok(statuslineHints("wizardText").includes("esc back"))
+  assert.ok(statuslineHints("wizardText").includes("esc cancel"))
+  assert.ok(statuslineHints("wizardMemory").includes("enter save"), statuslineHints("wizardMemory"))
+  assert.ok(statuslineHints("wizardMemory").includes("esc list"))
+  assert.ok(statuslineHints("settingsMemoryField").includes("enter save"))
+  assert.ok(statuslineHints("settingsMemoryText").includes("esc settings"))
   assert.ok(statuslineHints("promptField").includes("shift+enter newline"))
   assert.ok(statuslineHints("promptText").includes("esc cancel"))
   const filter = statuslineHints("filter")
@@ -426,6 +450,8 @@ test("the catalog covers every app-level key the handlers consume", () => {
     ["wizardText", "enter", "wizardText.submit"],
     ["wizardText", "escape", "wizardText.escape"],
     ["wizardText", "ctrl+g", "wizardText.leave"],
+    ["wizardText", "n", "wizardText.next"],
+    ["wizardText", "shift+n", "wizardText.prev"],
     ["wizardText", "h", "wizardText.motion.h"],
     ["wizardText", "d", "wizardText.delete"],
     ["wizardText", "y", "wizardText.yank"],
@@ -439,6 +465,14 @@ test("the catalog covers every app-level key the handlers consume", () => {
     ["settingsField", "enter", "settingsField.submit"],
     ["settingsField", "escape", "settingsField.escape"],
     ["settingsField", "ctrl+g", "settingsField.leave"],
+    ["settingsMemoryField", "enter", "settingsMemoryField.submit"],
+    ["settingsMemoryField", "escape", "settingsMemoryField.escape"],
+    ["settingsMemoryField", "ctrl+g", "settingsMemoryField.leave"],
+    ["settingsMemoryText", "enter", "settingsMemoryText.submit"],
+    ["settingsMemoryText", "escape", "settingsMemoryText.escape"],
+    ["wizardMemory", "enter", "wizardMemory.save"],
+    ["wizardMemory", "escape", "wizardMemory.list"],
+    ["wizardMemory", "ctrl+g", "wizardMemory.leave"],
     ["settingsText", "enter", "settingsText.submit"],
     ["settingsText", "escape", "settingsText.escape"],
     ["settingsText", "ctrl+g", "settingsText.leave"],
@@ -473,7 +507,8 @@ test("statusline hints for special text buffers are catalog-generated", () => {
   assert.ok(insert.includes("enter send · esc normal · ctrl+g leave"), insert)
   const wizard = statuslineHints("wizardText")
   assert.ok(wizard.includes("i/a insert · h/j/k/l"), wizard)
-  assert.ok(wizard.includes("esc back"), wizard)
+  assert.ok(wizard.includes("esc cancel"), wizard)
+  assert.ok(wizard.includes("n next · N previous"), wizard)
   const prompt = statuslineHints("promptText")
   assert.ok(prompt.includes("esc cancel"), prompt)
   const settings = statuslineHints("settingsText")

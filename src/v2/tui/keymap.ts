@@ -21,12 +21,18 @@ export type KeyContext =
   | "settingsField"
   /** Settings text field in Normal or Visual mode. */
   | "settingsText"
-  /** Wizard list step: j/k, gg/G, Enter, Space multi-select, /, Esc back. */
+  /** Settings memory add/edit field in Insert mode. */
+  | "settingsMemoryField"
+  /** Settings memory add/edit field in Normal mode. */
+  | "settingsMemoryText"
+  /** Wizard list step: j/k, gg/G, Enter, Space multi-select, /, n/N, Esc cancel. */
   | "wizard"
   /** Wizard text field in Insert mode: Enter continues, Esc goes to field Normal. */
   | "wizardField"
   /** Wizard text field in Normal mode: the Vim subset plus continue/back. */
   | "wizardText"
+  /** Wizard memory add/edit field: Enter saves and stays, Esc returns to the list. */
+  | "wizardMemory"
   /** Single or multi-choice picker overlay. */
   | "picker"
   /** Text prompt in Insert mode. */
@@ -69,7 +75,7 @@ export type KeyEntry = {
   /** Hint used when the work zone has no rows. */
   emptyHint?: string
   /** The binding only applies while the inline work list has rows. */
-  requires?: "work" | "multi"
+  requires?: "work" | "multi" | "memory"
   /** The binding is unavailable while one of these transient modes is active. */
   availability?: "no-transcript-search"
   /** Hide from which-key and compact statusline hints; help still lists it. */
@@ -215,16 +221,21 @@ const NORMAL: readonly KeyEntry[] = [
  * wizard can never open the command line or the which-key menu.
  */
 const WIZARD: readonly KeyEntry[] = [
-  { id: "wizard.down", scope: "normal", contexts: ["wizard"], keys: ["j"], title: "Next option", group: "Navigation", hint: "j/k move" },
+  { id: "wizard.down", scope: "normal", contexts: ["wizard"], keys: ["j"], title: "Next option", group: "Navigation", hint: "j/k select" },
   { id: "wizard.up", scope: "normal", contexts: ["wizard"], keys: ["k"], title: "Previous option", group: "Navigation" },
   { id: "wizard.down.arrow", scope: "normal", contexts: ["wizard"], keys: ["down"], title: "Next option", group: "Navigation", listed: false },
   { id: "wizard.up.arrow", scope: "normal", contexts: ["wizard"], keys: ["up"], title: "Previous option", group: "Navigation", listed: false },
   { id: "wizard.top", scope: "normal", contexts: ["wizard"], keys: ["g", "g"], title: "First option", group: "Navigation", listed: false },
   { id: "wizard.bottom", scope: "normal", contexts: ["wizard"], keys: ["shift+g"], title: "Last option", group: "Navigation", listed: false },
-  { id: "wizard.activate", scope: "normal", contexts: ["wizard"], keys: ["enter"], title: "Select or continue", group: "Open", hint: "enter next" },
+  { id: "wizard.activate", scope: "normal", contexts: ["wizard"], keys: ["enter"], title: "Select, continue, or submit", group: "Open", hint: "enter next" },
+  { id: "wizard.next", scope: "normal", contexts: ["wizard"], keys: ["n"], title: "Next step", group: "Navigation", hint: "n next" },
+  { id: "wizard.prev", scope: "normal", contexts: ["wizard"], keys: ["shift+n"], title: "Previous step", group: "Navigation", hint: "N previous" },
+  { id: "wizard.memory.add", scope: "normal", contexts: ["wizard"], keys: ["a"], title: "Add memory", group: "Memories", hint: "a add", requires: "memory" },
+  { id: "wizard.memory.edit", scope: "normal", contexts: ["wizard"], keys: ["e"], title: "Edit memory", group: "Memories", hint: "e edit", requires: "memory" },
+  { id: "wizard.memory.delete", scope: "normal", contexts: ["wizard"], keys: ["x"], title: "Delete memory", group: "Memories", hint: "x delete", requires: "memory" },
   { id: "wizard.toggle", scope: "normal", contexts: ["wizard"], keys: ["space"], title: "Toggle option", group: "Select", hint: "space toggle", requires: "multi" },
   { id: "wizard.filter", scope: "normal", contexts: ["wizard"], keys: ["/"], title: "Filter options", group: "Search", hint: "/ filter" },
-  { id: "wizard.back", scope: "normal", contexts: ["wizard"], keys: ["escape"], title: "Back one step or cancel", group: "Navigation", hint: "esc back" },
+  { id: "wizard.cancel", scope: "normal", contexts: ["wizard"], keys: ["escape"], title: "Cancel wizard", group: "Navigation", hint: "esc cancel" },
 ]
 
 /**
@@ -483,8 +494,15 @@ const TEXT_FIELDS: readonly KeyEntry[] = [
     return entry
   }),
   textAction("wizardText", WIZARD_NORMAL, "submit", ["enter"], "Continue", "Text", "enter next"),
-  textAction("wizardText", WIZARD_NORMAL, "escape", ["escape"], "Back one step", "Text", "esc back"),
+  textAction("wizardText", WIZARD_NORMAL, "next", ["n"], "Next step", "Text", "n next"),
+  textAction("wizardText", WIZARD_NORMAL, "prev", ["shift+n"], "Previous step", "Text", "N previous"),
+  textAction("wizardText", WIZARD_NORMAL, "escape", ["escape"], "Cancel wizard", "Text", "esc cancel"),
   textAction("wizardText", WIZARD_NORMAL, "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Wizard memory add/edit ------------------------------------------------
+  textAction("wizardMemory", "wizardMemory", "save", ["enter"], "Save memory", "Text", "enter save"),
+  textAction("wizardMemory", "wizardMemory", "list", ["escape"], "Back to the memory list", "Text", "esc list"),
+  textAction("wizardMemory", "wizardMemory", "leave", ["ctrl+g"], "Back to the memory list", "Text", "ctrl+g list"),
 
   // Prompt Insert ---------------------------------------------------------
   textAction("promptField", PROMPT_INSERT, "submit", ["enter"], "Submit", "Text", "enter submit"),
@@ -516,6 +534,21 @@ const TEXT_FIELDS: readonly KeyEntry[] = [
   textAction("settingsText", SETTINGS_NORMAL, "submit", ["enter"], "Finish editing", "Text", "enter done"),
   textAction("settingsText", SETTINGS_NORMAL, "escape", ["escape"], "Return to settings", "Text", "esc settings"),
   textAction("settingsText", SETTINGS_NORMAL, "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Settings memory Insert ------------------------------------------------
+  textAction("settingsMemoryField", "settingsMemoryField", "submit", ["enter"], "Save memory", "Text", "enter save"),
+  textAction("settingsMemoryField", "settingsMemoryField", "escape", ["escape"], "Field Normal", "Text", "esc field normal"),
+  textAction("settingsMemoryField", "settingsMemoryField", "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
+
+  // Settings memory Normal ------------------------------------------------
+  ...textEntries("settingsMemoryText", "settingsMemoryText", VIM_NORMAL_SPECS, FONT_HINTS).map((entry) => {
+    if (entry.id === "settingsMemoryText.x") return { ...entry, hint: "x/d edit" }
+    if (entry.id === "settingsMemoryText.yy") return { ...entry, hint: "yy/p yank" }
+    return entry
+  }),
+  textAction("settingsMemoryText", "settingsMemoryText", "submit", ["enter"], "Save memory", "Text", "enter save"),
+  textAction("settingsMemoryText", "settingsMemoryText", "escape", ["escape"], "Return to settings", "Text", "esc settings"),
+  textAction("settingsMemoryText", "settingsMemoryText", "leave", ["ctrl+g"], "Leave the field", "Text", "ctrl+g leave"),
 
   // Inline `/` filter -----------------------------------------------------
   { id: "filter.edit", scope: "normal", contexts: ["filter"], keys: ["backspace"], title: "Type to filter", group: "Search", hint: "type to filter" },
@@ -688,16 +721,19 @@ export function statuslineHints(
   options: {
     hasWork?: boolean
     multiple?: boolean
+    memory?: boolean
     filter?: (entry: KeyEntry) => boolean
   } = {},
 ): string {
   const hasWork = options.hasWork ?? true
   const multiple = options.multiple ?? false
+  const memory = options.memory ?? false
   return normalEntries(context)
     .filter((entry) => options.filter?.(entry) ?? true)
     .flatMap((entry) => {
       if (entry.listed === false) return []
       if (entry.requires === "multi" && !multiple) return []
+      if (entry.requires === "memory" && !memory) return []
       const hint = entry.requires === "work" && !hasWork ? entry.emptyHint : entry.hint
       return hint ? [hint] : []
     })

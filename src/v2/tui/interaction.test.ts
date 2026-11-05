@@ -123,12 +123,20 @@ test("an open dialog owns Esc first and closes via a typed intent", () => {
   assert.deepEqual(closed.intents, [{ type: "close-overlay", overlay: "dialog" }])
 })
 
-test("a wizard Esc in step Normal asks the adapter to go back one step", () => {
+test("a wizard Esc in step Normal asks the adapter to cancel the wizard", () => {
   const overlay = reduce(initialInteractionState(), { type: "overlay.set", overlay: "wizard" })
-  const back = reduce(overlay.state, { type: "escape" })
-  assert.equal(back.state.overlay, "wizard", "going back never closes the wizard itself")
-  assert.equal(back.state.mode, "normal")
-  assert.deepEqual(back.intents, [{ type: "wizard-back" }])
+  const cancel = reduce(overlay.state, { type: "escape" })
+  assert.equal(cancel.state.overlay, "wizard", "the adapter confirms the discard before closing")
+  assert.equal(cancel.state.mode, "normal")
+  assert.deepEqual(cancel.intents, [{ type: "wizard-cancel" }])
+})
+
+test("a wizard field Normal Esc cancels the wizard instead of stepping back", () => {
+  const wizard = reduce(initialInteractionState({ overlay: "wizard" }), { type: "field.enter", target: "wizard" }).state
+  const cancel = reduce(wizard, { type: "escape" })
+  assert.equal(cancel.state.field, null)
+  assert.equal(cancel.state.overlay, "wizard")
+  assert.deepEqual(cancel.intents, [{ type: "blur-editor" }, { type: "wizard-cancel" }])
 })
 
 test("a dialog text field goes Insert -> field Normal -> cancel on the Esc ladder", () => {

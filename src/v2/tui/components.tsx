@@ -235,7 +235,7 @@ export function SettingsView(props: {
   skillFilter: string
   skillCatalog: SkillOption[]
   skillPage?: number
-  field?: { label: string; value: string } | null
+  field?: { kind: "agent" | "memory"; label: string; value: string } | null
   fieldMode?: InteractionMode
   fieldRef?: (value: any) => void
   onFieldContentChange?: () => void
@@ -251,6 +251,12 @@ export function SettingsView(props: {
     catalog: props.skillCatalog.length,
   })
   const fieldMode = () => props.fieldMode ?? "normal"
+  const fieldHints = () => {
+    const memory = props.field?.kind === "memory"
+    if (fieldMode() === "insert") return statuslineHints(memory ? "settingsMemoryField" : "settingsField")
+    if (fieldMode() === "visual") return statuslineHints("composerVisual")
+    return statuslineHints(memory ? "settingsMemoryText" : "settingsText")
+  }
   return (
     <Show when={props.agent} fallback={<text fg={props.colors.muted}>{settingsNoAgentLine()}</text>}>
       <box flexDirection="column">
@@ -298,7 +304,7 @@ export function SettingsView(props: {
         <Show when={props.field}>
           <box flexDirection="column" marginTop={1}>
             <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>
-              {props.field!.label} · {fieldMode() === "insert" ? "INSERT · " : fieldMode() === "visual" ? "VISUAL · " : "NORMAL · "}{fieldMode() === "insert" ? statuslineHints("settingsField") : fieldMode() === "visual" ? statuslineHints("composerVisual") : statuslineHints("settingsText")}
+              {props.field!.label} · {fieldMode() === "insert" ? "INSERT · " : fieldMode() === "visual" ? "VISUAL · " : "NORMAL · "}{fieldHints()}
             </text>
             <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={props.colors.focus} backgroundColor={props.colors.bg} paddingLeft={1} paddingRight={1}>
               <input ref={props.fieldRef} value={props.field!.value} width="100%" backgroundColor={props.colors.bg} textColor={props.colors.text} onContentChange={() => props.onFieldContentChange?.()} onCursorChange={() => props.onFieldCursorChange?.()} />
