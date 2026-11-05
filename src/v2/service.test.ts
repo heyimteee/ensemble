@@ -2838,7 +2838,7 @@ test("ticket68: restart recovery requeues dead work without a phantom approval",
 
 test("ticket68: a native permission request gates work and resolves through the host", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-68-"))
-  const { ctx, tools, emitEvent } = fakeContext()
+  const { ctx, emitEvent } = fakeContext()
   const replies: any[] = []
   ;(ctx as any).permission = { reply: async (input: any) => { replies.push(input) } }
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 400)) }

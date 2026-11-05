@@ -4,7 +4,7 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
+import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
@@ -548,7 +548,7 @@ export function EnsembleV2App() {
   const [restored, setRestored] = createSignal(false)
   let lastSavedHistory = ""
   let lastConfigError = ""
-  const [uiState, setUiState] = context.storage.store("ensemble.v2.ui", { initial: { workspaceID: null as string | null, taskID: null as string | null, transcriptOffset: 0 } })
+  const [uiState] = context.storage.store("ensemble.v2.ui", { initial: { workspaceID: null as string | null, taskID: null as string | null, transcriptOffset: 0 } })
 
   const state = createMemo<SnapshotState | null>(() => snapshot()?.state ?? null)
   const models = createMemo<ModelOption[]>(() => snapshot()?.models ?? [])
@@ -890,9 +890,6 @@ export function EnsembleV2App() {
     if (line.interrupted) header += " · interrupted"
     return decorate(header)
   }
-  const emptyChat = () => surface()?.kind === "agent"
-    ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}\n\nSend a direct message. It goes to this agent's native OpenCode session.`
-    : "Group chat\n\nSay something to your team. $Name mentions an agent; @path references a file. i to compose."
   const syncTranscriptScroll = () => {
     const box = transcriptScrollRef
     if (!box) { setAtBottom(true); return }
