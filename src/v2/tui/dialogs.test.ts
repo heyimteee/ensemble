@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { dialogEscape, dialogFilterEdit, dialogKeyContext, type DialogSurface } from "./dialogs.ts"
+import { dialogEscape, dialogKeyContext, type DialogSurface } from "./dialogs.ts"
+import { filterEdit } from "./overlays.ts"
 
 test("dialog Esc goes up exactly one level", () => {
   assert.equal(dialogEscape({ surface: "wizard", filtering: true }), "filter-clear")
@@ -15,16 +16,16 @@ test("dialog Esc goes up exactly one level", () => {
 })
 
 test("a wizard filter owns the first Esc and clears its query", () => {
-  let state = dialogFilterEdit("", { name: "", sequence: "d" })
+  let state = filterEdit("", { name: "", sequence: "d" })
   assert.deepEqual(state, { query: "d", done: false, cancelled: false })
-  state = dialogFilterEdit(state.query, { name: "", sequence: "e" })
-  state = dialogFilterEdit(state.query, { name: "backspace", sequence: "" })
+  state = filterEdit(state.query, { name: "", sequence: "e" })
+  state = filterEdit(state.query, { name: "backspace", sequence: "" })
   assert.equal(state.query, "d")
-  const done = dialogFilterEdit("dev", { name: "return", sequence: "\r" })
+  const done = filterEdit("dev", { name: "return", sequence: "\r" })
   assert.deepEqual(done, { query: "dev", done: true, cancelled: false })
-  const cancelled = dialogFilterEdit("dev", { name: "escape" })
+  const cancelled = filterEdit("dev", { name: "escape" })
   assert.deepEqual(cancelled, { query: "dev", done: true, cancelled: true })
-  assert.equal(dialogFilterEdit("dev", { name: "", sequence: "Z?", ctrl: true }).query, "dev", "chords never leak into a filter")
+  assert.equal(filterEdit("dev", { name: "", sequence: "Z?", ctrl: true }).query, "dev", "chords never leak into a filter")
 })
 
 test("each dialog surface maps to the catalog context that teaches it", () => {

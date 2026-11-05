@@ -28,7 +28,10 @@ export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "ap
 
 export type CommandInput = { kind: ":" | "/"; text: string }
 
-export type InteractionSelection = { kind: "char" | "line"; anchor: number; cursor: number }
+import type { VimVisualSelection } from "./vim.ts"
+
+/** The interaction selection is the Vim Visual range type (one shape). */
+export type InteractionSelection = VimVisualSelection
 
 /** The focused text buffer inside an overlay context, if any. */
 export type InteractionField = "settings" | null
@@ -174,6 +177,21 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
         return {
           state: { ...state, mode: "normal", focus: "settings", field: null, selection: null },
           intents: [{ type: "blur-editor" }],
+        }
+      }
+      // Wizards and prompt dialogs own the editor as their whole surface:
+      // Ctrl+G leaves the field by going back a wizard step or cancelling the
+      // prompt through the same typed intents Esc uses.
+      if (state.overlay === "wizard") {
+        return {
+          state: { ...state, mode: "normal", selection: null },
+          intents: [{ type: "blur-editor" }, { type: "wizard-back" }],
+        }
+      }
+      if (state.overlay === "dialog") {
+        return {
+          state: { ...state, mode: "normal", overlay: "none", selection: null },
+          intents: [{ type: "blur-editor" }, { type: "close-overlay", overlay: "dialog" }],
         }
       }
       return {

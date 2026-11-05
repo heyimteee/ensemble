@@ -280,3 +280,21 @@ test("leaving Visual, changing focus, or entering Insert clears the selection", 
   assert.equal(command.state.mode, "command")
   assert.equal(command.state.selection, null)
 })
+
+test("Ctrl+G leaves a wizard field by going back one step", () => {
+  const wizard = reduce(initialInteractionState(), { type: "overlay.set", overlay: "wizard" }).state
+  const editing = reduce(wizard, { type: "field.enter", target: "wizard" })
+  const left = reduce(editing.state, { type: "leave.editor" })
+  assert.equal(left.state.mode, "normal")
+  assert.equal(left.state.overlay, "wizard", "the wizard stays open")
+  assert.deepEqual(left.intents, [{ type: "blur-editor" }, { type: "wizard-back" }])
+})
+
+test("Ctrl+G leaves a prompt field by cancelling the prompt", () => {
+  const dialog = reduce(initialInteractionState(), { type: "overlay.set", overlay: "dialog" }).state
+  const editing = reduce(dialog, { type: "field.enter", target: "prompt" })
+  const left = reduce(editing.state, { type: "leave.editor" })
+  assert.equal(left.state.mode, "normal")
+  assert.equal(left.state.overlay, "none")
+  assert.deepEqual(left.intents, [{ type: "blur-editor" }, { type: "close-overlay", overlay: "dialog" }])
+})

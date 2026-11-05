@@ -27,10 +27,10 @@ test("the command set is navigation and state only, never destructive or selecta
 })
 
 test("command parsing accepts the leading colon and surrounding whitespace", () => {
-  assert.deepEqual(parseCommandLine(":settings"), { name: "settings", args: [] })
-  assert.deepEqual(parseCommandLine("  :pause  "), { name: "pause", args: [] })
-  assert.deepEqual(parseCommandLine("settings"), { name: "settings", args: [] })
-  assert.deepEqual(parseCommandLine(":agent Nova"), { name: "agent", args: ["Nova"] })
+  assert.deepEqual(parseCommandLine(":settings"), { name: "settings" })
+  assert.deepEqual(parseCommandLine("  :pause  "), { name: "pause" })
+  assert.deepEqual(parseCommandLine("settings"), { name: "settings" })
+  assert.deepEqual(parseCommandLine(":agent Nova"), { name: "agent" }, "extra words are ignored; commands take no arguments")
 })
 
 test("command parsing rejects empty and unknown commands", () => {

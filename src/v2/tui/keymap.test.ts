@@ -3,9 +3,11 @@ import assert from "node:assert/strict"
 import {
   KEYMAP_CATALOG,
   duplicateBindings,
+  commandStatusHints,
   keyChordLabel,
-  keyLabel,
   layerEntries,
+  leaderHints,
+  singleKeyEntry,
   leaderEntries,
   leaderLayerEntries,
   normalEntries,
@@ -88,7 +90,8 @@ test("settings promote and reorder teach their keys from the catalog", () => {
 test("settings lists expose no Visual, yank, or paste and no per-tab filter chords", () => {
   for (const entry of normalEntries("settings")) {
     assert.ok(!/visual|yank|paste/i.test(`${entry.id} ${entry.title}`), `settings:${entry.id} is a list-surface action`)
-    assert.ok(!entry.keys.some((key) => key.startsWith("ctrl+")), `settings:${entry.id} must not use a Ctrl chord`)
+    const paging = entry.id === "settings.half.down" || entry.id === "settings.half.up"
+    assert.ok(paging || !entry.keys.some((key) => key.startsWith("ctrl+")), `settings:${entry.id} must not use an app Ctrl chord`)
   }
   assert.deepEqual(duplicateBindings(), [], "settings keys never collide in their context")
 })
@@ -359,13 +362,14 @@ test("which-key renders two columns and every leader entry remains discoverable"
 })
 
 test("key labels read like Vim/terminal keys", () => {
-  assert.equal(keyLabel(["g", "g"]), "gg")
-  assert.equal(keyLabel(["shift+g"]), "G")
-  assert.equal(keyLabel(["ctrl+d"]), "Ctrl+D")
-  assert.equal(keyLabel(["enter"]), "Enter")
-  assert.equal(keyLabel(["space"]), "Space")
-  assert.equal(keyLabel(["escape"]), "Esc")
-  assert.equal(keyLabel(["p"]), "p", "plain Vim keys keep their case")
+  assert.equal(keyChordLabel(["g", "g"]), "gg")
+  assert.equal(keyChordLabel(["shift+g"]), "G")
+  assert.equal(keyChordLabel(["ctrl+d"]), "Ctrl+D")
+  assert.equal(keyChordLabel(["enter"]), "Enter")
+  assert.equal(keyChordLabel(["space"]), "Space")
+  assert.equal(keyChordLabel(["escape"]), "Esc")
+  assert.equal(keyChordLabel(["p"]), "p", "plain Vim keys keep their case")
+  assert.equal(keyChordLabel(["d", "$"]), "d$", "chord labels join single characters without a space")
   assert.equal(keyChordLabel(["d", "shift+g"]), "dG")
   assert.equal(keyChordLabel(["g", "g"]), "gg")
 })
@@ -391,4 +395,100 @@ test("colon normalizes from every terminal shape after a keyboard-protocol reset
   assert.equal(normalizeKeyToken({ name: "colon", sequence: ":" }), ":")
   assert.equal(normalizeKeyToken({ name: ";", sequence: ";" }), ";", "a literal semicolon is not a command")
   assert.equal(normalizeKeyToken({ name: "/", sequence: "/" }), "/", "slash search still opens")
+})
+
+test("the catalog covers every app-level key the handlers consume", () => {
+  const required: Array<[KeyContext, string, string]> = [
+    ["roster", "shift+tab", "focus.shift.tab"],
+    ["roster", "ctrl+d", "nav.half.down"],
+    ["roster", "ctrl+u", "nav.half.up"],
+    ["chat", "shift+tab", "focus.shift.tab"],
+    ["chat", "ctrl+d", "chat.half.down"],
+    ["work", "shift+tab", "focus.shift.tab"],
+    ["work", "ctrl+d", "work.half.down"],
+    ["work", "ctrl+u", "work.half.up"],
+    ["settings", "shift+tab", "settings.tab.cycle.prev"],
+    ["settings", "ctrl+d", "settings.half.down"],
+    ["settings", "ctrl+u", "settings.half.up"],
+    ["composerInsert", "enter", "composerInsert.enter"],
+    ["composerInsert", "escape", "composerInsert.escape"],
+    ["composerInsert", "ctrl+g", "composerInsert.leave"],
+    ["composerNormal", "enter", "composerNormal.enter"],
+    ["composerNormal", "escape", "composerNormal.escape"],
+    ["composerNormal", "ctrl+g", "composerNormal.leave"],
+    ["composerNormal", ":", "composerNormal.command"],
+    ["composerNormal", "/", "composerNormal.search"],
+    ["composerVisual", "escape", "composerVisual.escape"],
+    ["composerVisual", "ctrl+g", "composerVisual.leave"],
+    ["wizardField", "enter", "wizardField.submit"],
+    ["wizardField", "escape", "wizardField.escape"],
+    ["wizardField", "ctrl+g", "wizardField.leave"],
+    ["wizardText", "enter", "wizardText.submit"],
+    ["wizardText", "escape", "wizardText.escape"],
+    ["wizardText", "ctrl+g", "wizardText.leave"],
+    ["wizardText", "h", "wizardText.motion.h"],
+    ["wizardText", "d", "wizardText.delete"],
+    ["wizardText", "y", "wizardText.yank"],
+    ["promptField", "enter", "promptField.submit"],
+    ["promptField", "escape", "promptField.escape"],
+    ["promptField", "ctrl+g", "promptField.leave"],
+    ["promptText", "enter", "promptText.submit"],
+    ["promptText", "escape", "promptText.escape"],
+    ["promptText", "ctrl+g", "promptText.leave"],
+    ["promptText", "p", "promptText.paste"],
+    ["settingsField", "enter", "settingsField.submit"],
+    ["settingsField", "escape", "settingsField.escape"],
+    ["settingsField", "ctrl+g", "settingsField.leave"],
+    ["settingsText", "enter", "settingsText.submit"],
+    ["settingsText", "escape", "settingsText.escape"],
+    ["settingsText", "ctrl+g", "settingsText.leave"],
+    ["settingsText", "x", "settingsText.x"],
+    ["help", "j", "help.down"],
+    ["help", "ctrl+d", "help.half.down"],
+    ["help", "pagedown", "help.page.down"],
+    ["help", "escape", "help.close"],
+    ["command", "enter", "command.run"],
+    ["command", "escape", "command.cancel"],
+    ["command", "up", "command.history.up"],
+    ["command", "tab", "command.complete"],
+    ["command", "backspace", "command.backspace"],
+  ]
+  for (const [context, token, id] of required) {
+    assert.equal(singleKeyEntry(context, token)?.id, id, `${context} resolves ${token} to ${id}`)
+  }
+  // Multi-key chords resolve through the same pending machine.
+  assert.equal(actionId(resolveNormalKey("wizardText", ["g"], "g")), "wizardText.motion.gg")
+  assert.equal(actionId(resolveNormalKey("wizardText", ["y"], "y")), "wizardText.yy")
+  const dg = resolveNormalKey("promptText", ["d"], "g")
+  assert.equal(dg.type, "pending")
+  assert.deepEqual(dg.type === "pending" ? dg.prefix : [], ["d", "g"])
+  assert.equal(actionId(resolveNormalKey("promptText", ["d", "g"], "g")), "promptText.dgg")
+})
+
+test("statusline hints for special text buffers are catalog-generated", () => {
+  const composer = statuslineHints("composerNormal")
+  assert.ok(composer.includes("i insert · h/j/k/l"), composer)
+  assert.ok(composer.includes("enter send · esc chat"), composer)
+  const insert = statuslineHints("composerInsert")
+  assert.ok(insert.includes("enter send · esc normal · ctrl+g leave"), insert)
+  const wizard = statuslineHints("wizardText")
+  assert.ok(wizard.includes("i/a insert · h/j/k/l"), wizard)
+  assert.ok(wizard.includes("esc back"), wizard)
+  const prompt = statuslineHints("promptText")
+  assert.ok(prompt.includes("esc cancel"), prompt)
+  const settings = statuslineHints("settingsText")
+  assert.ok(settings.includes("esc settings"), settings)
+  const field = statuslineHints("settingsField")
+  assert.ok(field.includes("enter done · esc field normal"), field)
+})
+
+test("leader and command hints are generated from their catalogs", () => {
+  const leader = leaderHints()
+  for (const hint of ["? help", "q leave", "esc cancel"]) assert.ok(leader.includes(hint), leader)
+  const command = commandStatusHints(":")
+  assert.ok(command.includes("enter run"), command)
+  assert.ok(command.includes("tab complete"), command)
+  const search = commandStatusHints("/")
+  assert.ok(search.includes("enter search"), search)
+  assert.ok(!search.includes("tab complete"), "search has no command-name completion")
 })

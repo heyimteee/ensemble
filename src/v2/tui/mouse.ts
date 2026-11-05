@@ -126,10 +126,15 @@ export function normalizeRendererSelection(
   // drag. Word and line clicks are real selections even when ends coincide.
   if (kind === "drag" && anchor.x === focus.x && anchor.y === focus.y) return null
 
+  // Without a known start pane there is no honest boundary: a renderer
+  // selection may span the rail, chat, and statusline, and copying it would
+  // violate the pane-bounded rule. Refuse rather than guess.
+  if (startPane === null) return null
+
   const selected = selection.selectedRenderables ?? []
   let text = ""
   if (selected.length > 0) {
-    const bounded = startPane === null ? selected : selected.filter((renderable) => paneName(renderable) === startPane)
+    const bounded = selected.filter((renderable) => paneName(renderable) === startPane)
     if (bounded.length === 0) return null
     text = joinSelectedText(bounded)
   } else {

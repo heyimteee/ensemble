@@ -11,7 +11,6 @@
  * goes and which catalog context teaches the current dialog level.
  */
 
-import { filterEdit, type FilterEdit, type FilterKey } from "./overlays.ts"
 import type { KeyContext } from "./keymap.ts"
 
 export type DialogSurface = "wizard" | "picker" | "prompt" | "confirm" | "result"
@@ -29,11 +28,6 @@ export function dialogEscape(input: {
   if (input.field) return "field-normal"
   if (input.surface === "wizard") return "back"
   return "cancel"
-}
-
-/** Inline `/` filtering shared by wizards and pickers. */
-export function dialogFilterEdit(query: string, key: FilterKey | undefined): FilterEdit {
-  return filterEdit(query, key)
 }
 
 export type DialogFieldMode = "insert" | "normal"

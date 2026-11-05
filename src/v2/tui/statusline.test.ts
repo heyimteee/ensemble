@@ -8,6 +8,7 @@ import {
   modeLabel,
   statuslineRow1,
   statuslineRow2,
+  transcriptPosition,
 } from "./statusline.ts"
 
 test("mode chip names Normal, Insert, Command, and both Visual kinds in text", () => {
@@ -94,4 +95,14 @@ test("row two renders command input, else a transient message, else a reserved b
   assert.equal(statuslineRow2({ message: "Message sent" }), "Message sent")
   assert.equal(statuslineRow2({}), " ")
   assert.equal(statuslineRow2({ command: null, message: "" }), " ", "an empty message keeps the reserved row")
+})
+
+test("transcript position is a real scroll percentage, not a boolean label", () => {
+  assert.equal(transcriptPosition(0, 500, 100), "0%")
+  assert.equal(transcriptPosition(200, 500, 100), "50%")
+  assert.equal(transcriptPosition(400, 500, 100), "100%")
+  assert.equal(transcriptPosition(999, 500, 100), "100%", "over-scroll clamps to the bottom")
+  assert.equal(transcriptPosition(-10, 500, 100), "0%", "negative scroll clamps to the top")
+  assert.equal(transcriptPosition(0, 80, 100), "100%", "content shorter than the viewport is fully visible")
+  assert.equal(transcriptPosition(0, 0, 0), "100%")
 })

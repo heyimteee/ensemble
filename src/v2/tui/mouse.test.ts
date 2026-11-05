@@ -69,15 +69,23 @@ test("a drag keeps only the text from the pane where it started", () => {
   assert.deepEqual(normalized?.bounds, { x: 10, y: 10, width: 21, height: 3 })
 })
 
-test("a drag started without a known pane falls back to the renderer text", () => {
+test("a drag without a known start pane never copies cross-pane text", () => {
   const selected = selection({
+    anchor: { x: 1, y: 2 },
+    focus: { x: 30, y: 2 },
+    renderables: [
+      renderable({ parent: railPane(), x: 1, y: 2, text: "roster" }),
+      renderable({ parent: chatPane(), x: 12, y: 2, text: "chat" }),
+    ],
+  })
+  assert.equal(normalizeRendererSelection(selected, null), null)
+
+  const unpainted = selection({
     anchor: { x: 1, y: 2 },
     focus: { x: 3, y: 2 },
     renderables: [renderable({ x: 1, y: 2, text: "status" })],
   })
-  const normalized = normalizeRendererSelection(selected, null)
-  assert.equal(normalized?.text, "status")
-  assert.equal(normalized?.pane, null)
+  assert.equal(normalizeRendererSelection(unpainted, null), null, "an unmarked renderable is not a pane")
 })
 
 test("a renderer payload without per-renderable text still copies its selected text", () => {
