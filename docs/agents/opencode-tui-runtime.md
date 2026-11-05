@@ -5,7 +5,7 @@ Read before changing the TUI or host integration, or diagnosing location diverge
 ## Evidence and versions
 
 - **Declared API/source:** the lockfile installs `@opencode/plugin` **2.2.1** and OpenTUI **0.7.0** for checking. Inspect their declarations and shipped implementation using the paths below.
-- **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. These are not the same as the pinned type-package version. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
+- **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. These are not the same as the pinned type-package version. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
 - **Repository behavior:** links below describe the current implementation. A passing typecheck establishes agreement with installed types, not compatibility with every installed host. Record `node --version` and `opencode --version` with live results; recheck assumptions when upgrading.
 
 Research proposals are not implemented guarantees. In particular, one local service descriptor does not discover every service process, and a snapshot request is not guaranteed to be free of server-side writes.

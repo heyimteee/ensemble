@@ -2,7 +2,7 @@
 
 > **v3 UI and streaming pass.** The v3 work adds real delta streaming, inline composer completions, a searchable member checklist, semantic theme tokens, focus borders, git metadata, and the visible `I` init shortcut. The v2 runtime model and authority boundaries are unchanged.
 
-Status: **developer preview**, tested against OpenCode 2.2.2. The v2 runtime is the default. The v1 preview was removed.
+Status: **developer preview**, compatibility recorded against OpenCode 2.2.1. The v2 runtime is the default. The v1 preview was removed. The v5.8 live matrix ran on OpenCode 2.2.5.
 
 ## Architecture
 
@@ -98,6 +98,8 @@ Message {
 
 - `$Name` is primary; `!Name` is an alias. `@` is reserved for file references.
 - Multiple known mentions create one task per recipient.
+- One composer message creates at most one prompt per unique addressed agent. A normal anchor is an ordinary peer turn; skill anchors use the same recipient rule and group their resolved skills. Separate messages stay separate queued items.
+- The System Agent is a display identity, not a roster member: it cannot be mentioned, has no model or Skillbox, and authors ordinary left-side transcript bubbles through `Message.displayAuthor`. Workspace-level jobs such as init use its messages and the existing live/streaming row conventions.
 - No mention routes only to the leader.
 - Unknown `$Name`/`!Name` values fail with a clear `unknown_member` error instead of silently falling back.
 - Archived mentions are refused loudly instead of routing to the leader; one refused peer never aborts the remaining recipients.
@@ -117,7 +119,9 @@ Message {
 - The leader receives a one-run native `skill` permission allow for exactly the requested General skills and a prompt directive to read them with the native skill tool, then use or delegate them. The Skillbox permission baseline is restored after the turn. A delegatee receives the leader's self-authored instruction and no host skill grant.
 - Direct conversations reject General skills with a pointer to the workspace group chat. The DM agent's own assigned skills pass through.
 - The built-in `/init` palette entry is displayed as General but executes the System Agent init job. It is not assignable in the Skillbox and remains solo-only.
-- Exact user text is the prompt body. No prompt `skills` attachment or experimental skill activation is used.
+- Exact user text is the prompt body, preserved for skill delivery; the service adds routing directives outside that text. No prompt `skills` attachment or experimental skill activation is used.
+- One planner message creates at most one prompt per unique addressed agent. Multiple `/skill` tokens for the same agent are grouped into that one prompt; the planner never extracts per-skill bodies or creates per-skill child tasks. Separate composer messages remain separate queued items and therefore run sequentially through the conversation queue.
+- Validation is atomic and server-authoritative: an unknown skill, wrong owner, archived or non-member agent, missing workspace, cap overflow, or General skill on a non-leader mention rejects the whole message before a transcript line, task, or prompt exists. The error names the exact skill, owner, agent, or workspace problem, and the TUI keeps the draft for correction.
 
 ## v3 composer, transcript, and visual system
 
@@ -155,7 +159,7 @@ handoffs/            typed Markdown handoffs
 init.json            AGENTS.md block version
 ```
 
-`I` or `/init` appends a visible `/init` audit line and starts a System Agent init job. The job runs native `/init` with Ensemble's full instructions in a temporary workspace session, streams progress into a System Agent message, and finalizes a report. On success it places the versioned `<!-- ensemble:start v2 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; the Ensemble composer never falls through to native `/init`.
+`I`, `:init`, or `/init` appends a visible `/init` audit line and starts a System Agent init job. The job creates a temporary native session in the workspace, calls native `/init` with Ensemble's full instructions (`session.command` with the `init` command), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the versioned `<!-- ensemble:start v2 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
 
 Reset is available through the `/reset-ensemble` composer command, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
@@ -301,6 +305,16 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 - **Wizard navigation and memories.** `n` next, `N` previous, `Enter` next/confirm, and `Esc` cancel. Text steps open in the mode the user arrived with, never auto-Insert. The memories step replaces the old multi-line blob with an ordered list; `a`/`e`/`x` add, edit, and delete, and `Enter` saves one entry while keeping the field focused. Settings memory add/edit uses the same persistent-field flow.
 - **Changed from v5.6.** Enter no longer forces Insert, text fields no longer auto-enter Insert, and step arrival no longer resets mode. Tests and live probes that expected the old coupling were updated rather than weakened.
 
+## v5.8 System Agent init and deliberate skill invocation
+
+- **System Agent identity.** A non-roster display identity for workspace-level jobs. It has no model, Skillbox, or mention route; its messages use the normal left-side agent bubble and streaming lifecycle.
+- **Visible init job.** `I`, `:init`, and `/init` append the same visible `/init` line, then start a durable init job. The System Agent row starts as `Initializing workspace…`, receives progress, and finalizes into the full report. The job survives navigation; reset/archive/delete cancel it, and restart marks it interrupted with a rerun instruction.
+- **Deliberate internal native init.** The job owns a temporary native session in the workspace and calls the native `init` command with Ensemble's instruction text. Only the success path writes the canonical block and `init.json`; every failure path restores the prior `AGENTS.md`. The composer never falls through to native `/init`, and native `/init` outside Ensemble is unchanged.
+- **Exact-text routing.** The shared planner resolves `$Agent` anchors and `/skill` tokens but never rewrites the request. Each unique addressed agent receives one prompt containing the exact user text; multiple skills for that agent are grouped, separate messages stay sequential, and there are no per-skill bodies or per-skill tasks.
+- **General-skill leader triage.** Assigned skills stay with their owner. General skills route to the leader, who reads them under a one-run native permission grant and either uses them or delegates with a self-authored instruction. The grant is restored after the turn; a delegatee receives guidance, not a host grant.
+- **No attachment bypass.** General skills are never delivered through prompt `skills` attachments or the experimental skill-activation endpoint. Native per-agent skill permissions remain authoritative, and the identity contract tells agents to load deliberate `/skill` tokens with the native skill tool.
+- **Atomic validation.** A bad skill, owner, agent, workspace, or cap rejects the whole message before any transcript line or work row, names the specific problem, and leaves the draft in place.
+
 ## Known limitations
 
 - The composer completes agents on `$`, files on `@`, and Ensemble commands on `/`; arbitrary native OpenCode slash commands are not proxied into the group chat.
@@ -308,8 +322,8 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 - Multiple OpenCode locations synchronize roster, workspace membership, and bindings through the shared service/store plus config reconciliation. Messages and active runs remain owned by the instance handling them.
 - Direct chats read the native OpenCode session context and render it in the Ensemble transcript; `o` opens the native session route. There is no separate Ensemble DM store, search, or export.
 - Some host dialog closes leave stale cells until the next full repaint; the page remains usable.
-- macOS/Herdr behavior is unverified in v5.7: the environment is Linux/tmux. The collision-free shortcut intent, inline leader label on that host, and `Esc`/`Ctrl+G` under a live native run remain a manual check.
+- macOS/Herdr behavior remains unverified in v5.8: the environment is Linux/tmux. The collision-free shortcut intent, inline leader label on that host, `Esc`/`Ctrl+G` under a live native run, System Agent live progress, the `/` and `$Agent /` palettes, and `/init` under Herdr remain a manual check.
 - Real mouse-drag copy remains manual because tmux does not reliably inject drag gestures; the pane-bound selection/copy policy is unit-covered.
 - The host keeps old plugin pages mounted; the route gate prevents stale key ownership but cannot force the host to dispose them.
-- The large TUI application component remains a follow-up; v5.7 did not split it.
+- The large TUI application component remains a follow-up; v5.8 did not split it.
 - No npm package, versioning policy, or license has been selected.

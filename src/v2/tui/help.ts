@@ -158,6 +158,11 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   ],
   "composer-insert": [
     info("composer-insert", "typing", "text", "Type at the cursor. Enter sends and keeps Insert focus; Shift+Enter adds a line."),
+    info("composer-insert", "composer.skill-palette", "/", "At message start / lists commands plus every skill with Command, Skill | General, or Skill | <Owner> flags; after $Agent / it lists only that agent's assigned skills."),
+    info("composer-insert", "composer.general-triage", "General", "A General skill has no Skillbox owner; it routes to the leader for triage. A General skill under a non-leader mention is rejected with the leader's name so the Skillbox stays authoritative."),
+    info("composer-insert", "composer.init-solo", "/init", "Init is solo-only and workspace-only: send /init by itself. It appends a visible System Agent job, streams progress and a report, and never falls through to native /init."),
+    info("composer-insert", "composer.skill-delivery", "exact text", "Each addressed agent receives the exact text once per message; multiple skills for one agent group into one prompt, no per-skill bodies or tasks are created, and separate messages keep their order."),
+    info("composer-insert", "composer.skill-validation", "validation", "Invalid skill or agent references reject the whole message before work starts, name the exact skill and owner, and keep the draft."),
   ],
   "composer-normal": [
     info("composer-normal", "subset", "Vim subset", "No counts, text objects, macros, marks, or extra registers."),

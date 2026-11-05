@@ -178,6 +178,31 @@ test("v5.7 help states the persistent-mode, caret, native, separator, badge, and
   assert.ok(entry("modes:escape.ctrl-g"), "Ctrl+G stays documented")
 })
 
+test("v5.8 help teaches palette scoping, General triage, solo init, exact-text grouping, and validation recovery", () => {
+  const entries = helpSections().flatMap((section) => section.entries.map((entry) => ({ section: section.id, ...entry })))
+  const title = (key: string) => entries.find((candidate) => `${candidate.section}:${candidate.id}` === key)?.title ?? ""
+
+  assert.match(title("composer-insert:composer.skill-palette"), /message start/i)
+  assert.match(title("composer-insert:composer.skill-palette"), /\$Agent \//)
+  assert.match(title("composer-insert:composer.skill-palette"), /assigned/i)
+  assert.match(title("composer-insert:composer.skill-palette"), /Command/)
+  assert.match(title("composer-insert:composer.skill-palette"), /Skill \| General/)
+  assert.match(title("composer-insert:composer.general-triage"), /General/i)
+  assert.match(title("composer-insert:composer.general-triage"), /leader/i)
+  assert.match(title("composer-insert:composer.general-triage"), /triage/i)
+  assert.match(title("composer-insert:composer.init-solo"), /solo-only/i)
+  assert.match(title("composer-insert:composer.init-solo"), /workspace/i)
+  assert.match(title("composer-insert:composer.init-solo"), /System Agent/i)
+  assert.match(title("composer-insert:composer.skill-delivery"), /exact/i)
+  assert.match(title("composer-insert:composer.skill-delivery"), /one prompt/i)
+  assert.match(title("composer-insert:composer.skill-delivery"), /separate messages/i)
+  assert.match(title("composer-insert:composer.skill-delivery"), /sequential|order/i)
+  assert.match(title("composer-insert:composer.skill-delivery"), /per-skill|body|task/i)
+  assert.match(title("composer-insert:composer.skill-validation"), /reject/i)
+  assert.match(title("composer-insert:composer.skill-validation"), /draft/i)
+  assert.match(title("composer-insert:composer.skill-validation"), /name/i)
+})
+
 test("help filtering is fuzzy and n/N wrap through matches", () => {
   const sections = helpSections()
   assert.deepEqual(filterHelpSections(sections, ""), sections)
