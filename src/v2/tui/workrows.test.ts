@@ -65,15 +65,15 @@ test("work status labels name the visible lifecycle", () => {
 test("work rows show the assigned agent and derived state", () => {
   assert.equal(
     workRowText(task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }), "Nova", 1000),
-    "◐ Check the build · Nova · working",
+    "◐ Check the build │ Nova │ working",
   )
   assert.equal(
     workRowText(task({ state: "replied", outcome: "succeeded" }), "Nova", 1000),
-    "● Check the build · Nova · replied",
+    "● Check the build │ Nova │ replied",
   )
   assert.equal(
     workRowText(task({ state: "replied", outcome: "failed", error: "boom" }), "Sage", 1000),
-    "✕ Check the build · Sage · failed",
+    "✕ Check the build │ Sage │ failed",
   )
 })
 
@@ -155,7 +155,7 @@ test("terminal announcements order oldest-first with one line per task", () => {
 })
 
 test("activity lines name the agent with the default verb", () => {
-  assert.equal(activityLine("Clark", ACTIVITY_DEFAULT_VERB, "◐"), "◐ Clark · checking the details…")
+  assert.equal(activityLine("Clark", ACTIVITY_DEFAULT_VERB, "◐"), "◐ Clark │ checking the details…")
   assert.equal(ACTIVITY_DEFAULT_VERB, "checking the details…")
   assert.equal(activityVerb("running", "tests"), "running tests…")
   assert.equal(activityVerb("reading", "notes.md"), "reading notes.md…")
@@ -294,26 +294,26 @@ test("review fix: pending work rows show the interim label until terminal", () =
   const running = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
   assert.equal(
     workRowText(running, "Nova", 1000, { pending: "cancel" }),
-    "◐ Check the build · Nova · Cancelling…",
+    "◐ Check the build │ Nova │ Cancelling…",
   )
   assert.equal(
     workRowText(running, "Nova", 1000, { pending: "stop" }),
-    "◐ Check the build · Nova · Stopping…",
+    "◐ Check the build │ Nova │ Stopping…",
   )
   assert.equal(
     workRowText(task({ state: "pending" }), "Nova", 1000, { pending: "retry" }),
-    "○ Check the build · Nova · Retrying…",
+    "○ Check the build │ Nova │ Retrying…",
   )
   // No pending action: the derived status renders as before.
-  assert.equal(workRowText(running, "Nova", 1000), "◐ Check the build · Nova · working")
-  assert.equal(workRowText(running, "Nova", 1000, { pending: null }), "◐ Check the build · Nova · working")
+  assert.equal(workRowText(running, "Nova", 1000), "◐ Check the build │ Nova │ working")
+  assert.equal(workRowText(running, "Nova", 1000, { pending: null }), "◐ Check the build │ Nova │ working")
 })
 
 test("review fix: needs-you rows carry a distinct marker, never plain waiting", () => {
   const running = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
   assert.equal(
     workRowText(running, "Nova", 1000, { needsYou: true }),
-    `◆ ◐ Check the build · Nova · working${needsYouSuffix()}`,
+    `◆ ◐ Check the build │ Nova │ working${needsYouSuffix()}`,
   )
   assert.ok(workRowText(running, "Nova", 1000, { needsYou: true }).includes("needs you"))
   assert.ok(workRowText(running, "Nova", 1000, { needsYou: true }).includes("v to resolve"))
@@ -332,7 +332,7 @@ test("review fix: needs-you derives from existing interruption/approval state", 
 })
 
 test("work summary counts active work only and names the empty state", () => {
-  assert.equal(workSummary([], 1000), "WORK · none yet")
+  assert.equal(workSummary([], 1000), "WORK │ none yet")
   const summary = workSummary(
     [
       task({ id: "a", state: "working", claimedBy: "r", leaseUntil: 9999, attempts: 1 }),

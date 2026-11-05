@@ -11,6 +11,8 @@
  * serves raw keypresses and the host keymap alike.
  */
 
+import { chromeJoin } from "./separators.ts"
+
 export type KeyContext =
   | "roster"
   | "chat"
@@ -416,8 +418,8 @@ const PROMPT_NORMAL = "promptText"
 const SETTINGS_INSERT = "settingsField"
 const SETTINGS_NORMAL = "settingsText"
 
-const FONT_HINTS = { "motion.h": "i/a insert · h/j/k/l" }
-const COMPOSER_HINTS = { "motion.h": "i insert · h/j/k/l" }
+const FONT_HINTS = { "motion.h": chromeJoin(["i/a insert", "h/j/k/l"]) }
+const COMPOSER_HINTS = { "motion.h": chromeJoin(["i insert", "h/j/k/l"]) }
 
 /**
  * The shared text-buffer grammar (#85/#86) is catalogued alongside every
@@ -693,7 +695,7 @@ export function statuslineHints(
 ): string {
   const hasWork = options.hasWork ?? true
   const multiple = options.multiple ?? false
-  return normalEntries(context)
+  const hints = normalEntries(context)
     .filter((entry) => options.filter?.(entry) ?? true)
     .flatMap((entry) => {
       if (entry.listed === false) return []
@@ -702,7 +704,7 @@ export function statuslineHints(
       return hint ? [hint] : []
     })
     .filter((hint, index, all) => all.indexOf(hint) === index)
-    .join(" · ")
+  return chromeJoin(hints)
 }
 
 /**
@@ -710,10 +712,10 @@ export function statuslineHints(
  * which-key popup and layer. Only teaching entries carry a hint.
  */
 export function leaderHints(): string {
-  return leaderEntries()
+  const hints = leaderEntries()
     .flatMap((entry) => entry.hint && entry.listed !== false ? [entry.hint] : [])
     .filter((hint, index, all) => all.indexOf(hint) === index)
-    .join(" · ")
+  return chromeJoin(hints)
 }
 
 /**
@@ -730,7 +732,7 @@ export function commandStatusHints(kind: ":" | "/"): string {
     .filter((entry) => entry.id !== "command.run" && entry.listed !== false)
     .filter((entry) => kind === ":" || entry.id !== "command.complete")
     .flatMap((entry) => entry.hint ? [entry.hint] : [])
-  return [runLabel, ...rest].filter((hint, index, all) => all.indexOf(hint) === index).join(" · ")
+  return chromeJoin([runLabel, ...rest].filter((hint, index, all) => all.indexOf(hint) === index))
 }
 
 const NAMED_KEY_LABELS: Record<string, string> = {

@@ -189,7 +189,7 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
     info("statusline", "git", "git:(branch*)", "Branch, dirty mark, ahead ↑, and behind ↓ counts."),
     info("statusline", "position", "position", "line:col in a text buffer, row/total in a list, or percent in the transcript."),
     info("statusline", "chord", "chord", "Pending multi-key prefix, e.g. g."),
-    info("statusline", "hints", "hints", "Context keys generated from the binding catalog, e.g. enter open · / filter · space leader."),
+    info("statusline", "hints", "hints", "Context keys generated from the binding catalog, e.g. enter open │ / filter │ space leader."),
     info("statusline", "row2", "row 2", ": or / input while active; otherwise the latest transient message; otherwise blank."),
   ],
   native: [

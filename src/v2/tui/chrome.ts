@@ -9,6 +9,7 @@
  */
 
 import { statuslineHints } from "./keymap.ts"
+import { chromeJoin, chromeSeparator } from "./separators.ts"
 
 /** Columns that can own the chat-surface focus. The composer is a distinct focus state (brief §2.10). */
 export type ChromeFocusArea = "rail" | "chat"
@@ -51,7 +52,7 @@ export function footerLine1(context: { focus: ChromeFocus; hasWork: boolean }): 
         filter: (entry) => entry.id !== "composerInsert.stop",
       })
     case "overlay":
-      return "esc cancel · dialog open — close to return"
+      return chromeJoin(["esc cancel", "dialog open — close to return"])
     case "rail":
       return statuslineHints("roster")
     case "chat":
@@ -68,13 +69,13 @@ export function footerLine1(context: { focus: ChromeFocus; hasWork: boolean }): 
 export function footerLine2(context: FooterContext): string {
   if (context.missingSkills.length > 0) return `! missing skills: ${context.missingSkills.join(", ")}`
   const workLive = context.hasWork && context.focus !== "composer" && context.focus !== "overlay"
-  if (workLive) return "tab work · space leader · / search · p pause · s settings"
-  return "space leader · / search · p pause · s settings"
+  if (workLive) return chromeJoin(["tab work", "space leader", "/ search", "p pause", "s settings"])
+  return chromeJoin(["space leader", "/ search", "p pause", "s settings"])
 }
 
 /** Rail empty state: names both fixes with their keys (brief §2.1). */
 export function railEmptyLine(): string {
-  return "No agents or workspaces yet. n new workspace · a new agent"
+  return chromeJoin(["No agents or workspaces yet. n new workspace", "a new agent"])
 }
 
 /** Skill palette zero state: names the miss and the fix (filter without a dialog). */
@@ -104,7 +105,7 @@ export function dmEmptyDetail(): string {
 
 /** Approval row suffix: `Resolving…` while that approval's resolve RPC is in flight, else empty. */
 export function approvalResolvingSuffix(resolving: boolean): string {
-  return resolving ? " · Resolving…" : ""
+  return resolving ? ` ${chromeSeparator()} Resolving…` : ""
 }
 
 /** Inbox origin tag: native host blocks read differently from product decisions. Pure. */

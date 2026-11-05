@@ -68,7 +68,7 @@ test("slice E footer line 2 gates work keys and keeps missing-skills precedence"
 })
 
 test("slice E empty states name the fix action and key", () => {
-  assert.equal(railEmptyLine(), "No agents or workspaces yet. n new workspace · a new agent")
+  assert.equal(railEmptyLine(), "No agents or workspaces yet. n new workspace │ a new agent")
   assert.ok(skillsEmptyLine().includes("No matching skills"), "skills names the miss")
   assert.ok(skillsEmptyLine().includes("refine filter"), "skills names the fix")
   assert.ok(helpEmptyLine().includes("No matching shortcuts"), "help names the miss")
@@ -77,9 +77,24 @@ test("slice E empty states name the fix action and key", () => {
   assert.ok(dmEmptyDetail().includes("i to compose"), "direct empty names its key")
 })
 
+test("ticket93: chrome footers use the shared faint bar instead of a dot", () => {
+  const lines = [
+    footerLine1({ focus: "rail", hasWork: false }),
+    footerLine1({ focus: "chat", hasWork: true }),
+    footerLine2({ focus: "chat", hasWork: true, missingSkills: [] }),
+    footerLine2({ focus: "chat", hasWork: false, missingSkills: [] }),
+    railEmptyLine(),
+    approvalResolvingSuffix(true),
+  ]
+  for (const line of lines) {
+    assert.ok(!line.includes(" · "), `dot separator remains: ${line}`)
+    assert.ok(line.includes(" │ ") || line.startsWith("No "), `missing bar separator: ${line}`)
+  }
+})
+
 test("slice E approval rows show Resolving… only while acted on", () => {
   assert.equal(approvalResolvingSuffix(false), "")
-  assert.equal(approvalResolvingSuffix(true), " · Resolving…")
+  assert.equal(approvalResolvingSuffix(true), " │ Resolving…")
 })
 
 test("ticket68: approval inbox tags distinguish native blocks from product decisions", async () => {
