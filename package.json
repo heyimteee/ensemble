@@ -23,7 +23,8 @@
     "test:live:fake:empty": "bash scripts/live-check-fake-empty.sh",
     "test:live:fake:all": "bash scripts/live-matrix.sh fake",
     "test:live:all": "bash scripts/live-matrix.sh all",
-    "test:live:latency": "bash scripts/live-latency-probe.sh"
+    "test:live:latency": "bash scripts/live-latency-probe.sh",
+    "issue:hygiene": "node scripts/issue-hygiene.mjs"
   },
   "engines": {
     "node": ">=26.4.0"

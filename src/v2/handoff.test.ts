@@ -80,18 +80,16 @@ function stateWithAgents() {
 
 test("recipient resolution prefers id, then unique name, and refuses archived", () => {
   const state = stateWithAgents()
-  const workspace = state.workspaces.w
-  assert.equal(resolveHandoffRecipient(state, workspace, "sage").status, "ok")
-  assert.equal(resolveHandoffRecipient(state, workspace, "SAGE").status, "ok")
-  assert.equal(resolveHandoffRecipient(state, workspace, "Nope").status, "unknown")
-  assert.equal(resolveHandoffRecipient(state, workspace, "Retired").status, "archived")
-  assert.equal(resolveHandoffRecipient(state, workspace, "").status, "unknown")
+  assert.equal(resolveHandoffRecipient(state, "sage").status, "ok")
+  assert.equal(resolveHandoffRecipient(state, "SAGE").status, "ok")
+  assert.equal(resolveHandoffRecipient(state, "Nope").status, "unknown")
+  assert.equal(resolveHandoffRecipient(state, "Retired").status, "archived")
+  assert.equal(resolveHandoffRecipient(state, "").status, "unknown")
 })
 
 test("bare prose never resolves to a recipient", () => {
   const state = stateWithAgents()
-  const workspace = state.workspaces.w
-  const result = resolveHandoffRecipient(state, workspace, "please ask sage to help")
+  const result = resolveHandoffRecipient(state, "please ask sage to help")
   assert.equal(result.status, "unknown")
 })
 

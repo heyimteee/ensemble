@@ -81,7 +81,7 @@ const handoffFile = (directory: string, name: string, body: string): string => {
   return `.ensemble/handoffs/${name}`
 }
 
-async function setupPair(directory: string, ctx: any, handlers: Handlers) {
+async function setupPair(directory: string, handlers: Handlers) {
   const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
   const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
   const workspace = await handlers.invoke({
@@ -111,7 +111,7 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Summarize the deploy\n---\n# Handoff\n")
@@ -185,7 +185,7 @@ test("handoff carries a tailored instruction distinct from the user text", async
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Please rewrite the deploy summary from scratch for the exec team" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Deploy summary\n---\n# Handoff\n")
@@ -232,7 +232,7 @@ test("malformed, unknown, and missing-recipient handoffs are refused visibly", a
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const bad = handoffFile(directory, "bad.md", "Just prose mentioning ensemble: handoff without structure.\n")
@@ -341,7 +341,7 @@ test("handoff depth and per-run caps are refused visibly", async () => {
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, sage, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
     // The store binding lands before the run registers its session: wait for
@@ -399,7 +399,7 @@ test("cancelling a handoff hop records a terminal cancelled state with correlati
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const path = handoffFile(directory, "stop.md", "---\nensemble: handoff\ntask: Long work\n---\n# Handoff\n")
@@ -433,7 +433,7 @@ test("direct messages carry an envelope and cross-boundary contact needs approva
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, workspace } = await setupPair(directory, handlers)
     const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
@@ -479,7 +479,7 @@ test("approved cross-boundary handoffs create a typed hop through the queue", as
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, ctx, handlers)
+    const { nova, workspace } = await setupPair(directory, handlers)
     const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)

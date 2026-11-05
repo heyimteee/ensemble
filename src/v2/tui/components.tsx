@@ -4,7 +4,7 @@ import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../typ
 import { approvalSource } from "../types.ts"
 import type { InteractionMode } from "./interaction.ts"
 import { contrastText, type Palette, type ThemeColor } from "./theme.ts"
-import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
+import { busyCount, missingSkills, short, unreadCount } from "./format.ts"
 import { settingsTabLine, skillAssigned, skillPageItems, skillPaginationText, skillToggleMark } from "./skills.ts"
 import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
 import {
@@ -14,7 +14,6 @@ import {
   memoriesNoMatchLine,
   modelSummary,
   modelsEmptyLine,
-  railAgentLabel,
   railGroupLine,
   settingsCursorMark,
   settingsDivider,
@@ -264,7 +263,6 @@ export function Rail(props: {
         const selected = () => props.cursor === index()
         // Slice E single-cursor rule: the `›` position marker renders only on
         // the surface that owns the focus border, never on two surfaces at once.
-        const agent = item.kind === "agent" ? props.state?.agents[item.id] : undefined
         const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
         const unread = workspace ? unreadCount(props.state, workspace) : 0
         const busy = workspace ? busyCount(props.state, workspace.id) : 0

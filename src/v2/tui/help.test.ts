@@ -8,7 +8,7 @@ import {
   helpMatchAfter,
   helpSections,
 } from "./help.ts"
-import { KEYMAP_CATALOG, normalEntries, statuslineHints } from "./keymap.ts"
+import { normalEntries, statuslineHints } from "./keymap.ts"
 import { COMMANDS } from "./commands.ts"
 import { MOUSE_GESTURES } from "./mouse.ts"
 import { resolveVimKey, resolveVisualKey } from "./vim.ts"

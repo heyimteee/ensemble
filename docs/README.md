@@ -14,13 +14,23 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Working agreements
 
+- [ADR 0001: Native-skill boundary](adr/0001-native-skill-boundary.md): why Ensemble routes native skills instead of executing them
 - [Agent instructions](../AGENTS.md)
+- [Handoff contract](agents/handoff.md): the detailed mandatory completion-handoff, batch-review, loop-guard, and mention rules
 - [OpenCode/OpenTUI runtime guide](agents/opencode-tui-runtime.md): host contracts, source navigation, and verification
 - [Issue tracker](agents/issue-tracker.md)
 - [Labels](agents/triage-labels.md)
+- [Review workflow](agents/review-workflow.md)
+- [Reviewer standards](agents/review-standards.md): judgement calls only; mechanical rules stay in automated checks
 - [Domain document conventions](agents/domain.md)
 - [Contributing](../CONTRIBUTING.md)
 - [Security](../SECURITY.md)
+
+## Verification
+
+- [macOS/Herdr manual checklist](verification/macos-herdr-checklist.md): repeatable, manual, and unexecuted until a run is recorded
+- [v5.8 verification](verification/2026-11-05-v58.md): System Agent init and deliberate skill invocation
+- [v5.7 verification](verification/2026-11-05-v57.md): persistent modes, native key ownership, and interaction polish
 
 ## Architecture status
 

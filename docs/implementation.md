@@ -112,6 +112,8 @@ Message {
 
 ## Skill invocation and leader triage
 
+The authoritative boundary and its trade-offs are recorded in [ADR 0001: Native-skill boundary](adr/0001-native-skill-boundary.md). This section describes the implementation of that decision.
+
 `/` at message start shows commands, the built-in Ensemble init skill, assigned skills as `Skill | <Owner>`, and unassigned catalog skills as `Skill | General`. `$Agent /` shows only that agent's Skillbox. The TUI and server run the same pure planner; the server re-validates against authoritative state before appending a message or creating work.
 
 - Assigned skills route only to their owner. A message-start skill owned by the leader runs on the leader; one owned elsewhere opens an owner picker. With no mention, the leader is tried first, then the picker.

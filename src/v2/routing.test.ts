@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { normalizeAgentMentions, unknownMentions, visibleRecipients } from "./routing.ts"
-import type { Agent, Workspace } from "./types.ts"
+import type { Agent } from "./types.ts"
 
 const agent = { id: "a", name: "Jessy" } as Agent
 

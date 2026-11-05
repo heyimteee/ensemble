@@ -12,6 +12,19 @@ Specifications and tickets live in GitHub Issues for **heyimteee/ensemble**. Use
 - Completing a child ticket must not close or modify its parent specification.
 - Keep code paths and speculative architecture out of issue acceptance criteria; describe observable behavior.
 
+## Closing a completed version specification
+
+A version specification is a parent issue that describes one delivered release, such as `Spec: Ensemble v5.9 — Agent guardrails and feedback loop`. Close it only when both conditions hold:
+
+1. Every sub-issue is closed.
+2. Its verification record is committed under `docs/verification/` and linked from the closing comment.
+
+Close the version specification as completed with a comment that names the verification record and the closed children. Do not close a parent merely because its last child closed: the verification record is the delivery evidence.
+
+Keep the enduring product or reference specification open. A version specification is a delivery milestone, not a replacement for the product specification. Closing a version specification must not reopen, close, or rewrite an older specification or its records.
+
+A child ticket closing still does not close its parent by itself; the closure above is a separate, deliberate step.
+
 ## Operations
 
 - Read: `gh issue view <number> --repo heyimteee/ensemble --json number,title,body,labels,comments`
@@ -20,6 +33,7 @@ Specifications and tickets live in GitHub Issues for **heyimteee/ensemble**. Use
 - Label: `gh issue edit <number> --repo heyimteee/ensemble --add-label "..."`
 - Comment: `gh issue comment <number> --repo heyimteee/ensemble --body-file <file>`
 - Close a completed ticket: `gh issue close <number> --repo heyimteee/ensemble --comment "Verification evidence..."`
+- Hygiene audit: `npm run issue:hygiene` lists open parent issues whose sub-issues are all closed; `npm run issue:hygiene -- --all` also audits already-closed parents against `docs/verification/`. See [the scripts guide](../../scripts/README.md#issue-hygiene).
 
 Use GitHub's REST sub-issue endpoint to attach children when the installed CLI lacks native flags: `POST repos/heyimteee/ensemble/issues/<parent>/sub_issues` with `sub_issue_id` set to the child's numeric database ID.
 
