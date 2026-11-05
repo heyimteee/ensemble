@@ -3801,3 +3801,343 @@ test("prose /init is delivered as ordinary group text", async () => {
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+// --- v5.9 ticket #109: service routing regression matrix ---------------------
+
+type RoutedWork = { assigneeID: string; title: string }
+
+type RoutingCase = {
+  name: string
+  action: "message.send" | "skill.send" | "chat.send"
+  text: string
+  agentID?: string
+  recipientIDs?: string[]
+  ownerSelections?: Record<string, string>
+  files?: string[]
+  expects:
+    | { ok: true; recipients?: string[]; work: RoutedWork[] }
+    | { ok: false; code: string; includes: string[] }
+}
+
+// Roster: Nova leads and owns review/notes; Sage owns deploy; Echo is a
+// normal-only member; public-research belongs to no member (General).
+// Every text below stays under the 80-character request snippet so a title
+// mismatch points at routing rather than truncation.
+const routingMatrix: RoutingCase[] = [
+  {
+    name: "explicit recipient IDs may repeat an assigned skill route",
+    action: "message.send",
+    text: "$Nova /review @notes.md check",
+    recipientIDs: ["nova"],
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["nova"],
+      work: [{ assigneeID: "nova", title: "/review — $Nova /review @notes.md check" }],
+    },
+  },
+  {
+    name: "a multi-agent skill route accepts the exact routed set in any order",
+    action: "skill.send",
+    text: "$Nova /review @notes.md and $Sage /deploy",
+    recipientIDs: ["sage", "nova"],
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["sage", "nova"],
+      work: [
+        { assigneeID: "nova", title: "/review — $Nova /review @notes.md and $Sage /deploy" },
+        { assigneeID: "sage", title: "/deploy — $Nova /review @notes.md and $Sage /deploy" },
+      ],
+    },
+  },
+  {
+    name: "explicit recipient IDs cannot retarget a skill to another owner",
+    action: "skill.send",
+    text: "$Nova /review @notes.md check",
+    recipientIDs: ["sage"],
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_recipient_mismatch", includes: ["$Nova"] },
+  },
+  {
+    name: "explicit recipient IDs cannot add a non-owner to a skill route",
+    action: "message.send",
+    text: "$Nova /review @notes.md check",
+    recipientIDs: ["nova", "echo"],
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_recipient_mismatch", includes: ["$Nova", "$Echo"] },
+  },
+  {
+    name: "explicit recipient IDs cannot narrow a multi-agent skill route",
+    action: "skill.send",
+    text: "$Nova /review @notes.md and $Sage /deploy",
+    recipientIDs: ["nova"],
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_recipient_mismatch", includes: ["$Nova", "$Sage"] },
+  },
+  {
+    name: "a message-start skill rejects an explicit recipient that is not its owner",
+    action: "skill.send",
+    text: "/review @notes.md leader",
+    recipientIDs: ["sage"],
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_recipient_mismatch", includes: ["$Nova"] },
+  },
+  {
+    name: "a message-start skill accepts the leader owner as the explicit recipient",
+    action: "skill.send",
+    text: "/review @notes.md leader",
+    recipientIDs: ["nova"],
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["nova"],
+      work: [{ assigneeID: "nova", title: "/review — /review @notes.md leader" }],
+    },
+  },
+  {
+    name: "the owner picker routes a message-start skill owned outside the leader",
+    action: "skill.send",
+    text: "/deploy @notes.md pick",
+    recipientIDs: ["sage"],
+    ownerSelections: { deploy: "sage" },
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["sage"],
+      work: [{ assigneeID: "sage", title: "/deploy — /deploy @notes.md pick" }],
+    },
+  },
+  {
+    name: "an owner-picker selection cannot be overridden by an explicit recipient",
+    action: "skill.send",
+    text: "/deploy @notes.md pick",
+    recipientIDs: ["nova"],
+    ownerSelections: { deploy: "sage" },
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_recipient_mismatch", includes: ["$Sage"] },
+  },
+  {
+    name: "the owner picker is required when the leader does not own a start skill",
+    action: "message.send",
+    text: "/deploy @notes.md pick",
+    files: ["notes.md"],
+    expects: { ok: false, code: "owner_choice_required", includes: ["/deploy", "$Sage"] },
+  },
+  {
+    name: "mixed skill and normal anchors route one turn per unique agent",
+    action: "skill.send",
+    text: "$Nova /review @notes.md and $Echo inspect",
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["nova", "echo"],
+      work: [
+        { assigneeID: "nova", title: "/review — $Nova /review @notes.md and $Echo inspect" },
+        { assigneeID: "echo", title: "$Nova /review @notes.md and $Echo inspect" },
+      ],
+    },
+  },
+  {
+    name: "mixed anchors accept the exact explicit routed set",
+    action: "message.send",
+    text: "$Nova /review @notes.md and $Echo inspect",
+    recipientIDs: ["nova", "echo"],
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["nova", "echo"],
+      work: [
+        { assigneeID: "nova", title: "/review — $Nova /review @notes.md and $Echo inspect" },
+        { assigneeID: "echo", title: "$Nova /review @notes.md and $Echo inspect" },
+      ],
+    },
+  },
+  {
+    name: "mixed anchors reject an explicit set that drops the normal anchor",
+    action: "skill.send",
+    text: "$Nova /review @notes.md and $Echo inspect",
+    recipientIDs: ["nova"],
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_recipient_mismatch", includes: ["$Nova", "$Echo"] },
+  },
+  {
+    name: "bang aliases route the same as dollar anchors",
+    action: "skill.send",
+    text: "!Nova /review @notes.md and $Echo inspect",
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["nova", "echo"],
+      work: [
+        { assigneeID: "nova", title: "/review — !Nova /review @notes.md and $Echo inspect" },
+        { assigneeID: "echo", title: "!Nova /review @notes.md and $Echo inspect" },
+      ],
+    },
+  },
+  {
+    name: "General skills route to the leader and cannot be retargeted by explicit IDs",
+    action: "skill.send",
+    text: "/public-research @notes.md general",
+    recipientIDs: ["sage"],
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_recipient_mismatch", includes: ["$Nova"] },
+  },
+  {
+    name: "General skills route to the leader with file references intact",
+    action: "skill.send",
+    text: "/public-research @notes.md general",
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["nova"],
+      work: [{ assigneeID: "nova", title: "/public-research — /public-research @notes.md general" }],
+    },
+  },
+  {
+    name: "a General skill under a non-leader anchor stays atomic",
+    action: "skill.send",
+    text: "$Sage /public-research @notes.md",
+    files: ["notes.md"],
+    expects: { ok: false, code: "general_skill_non_leader", includes: ["$Nova"] },
+  },
+  {
+    name: "multiple file references survive a skill route in order",
+    action: "skill.send",
+    text: "$Nova /review @notes.md @docs/guide.md review",
+    files: ["notes.md", "docs/guide.md"],
+    expects: {
+      ok: true,
+      recipients: ["nova"],
+      work: [{ assigneeID: "nova", title: "/review — $Nova /review @notes.md @docs/guide.md review" }],
+    },
+  },
+  {
+    name: "invalid skill/owner pairs stay atomic with explicit recipient IDs",
+    action: "skill.send",
+    text: "$Nova /deploy @notes.md check",
+    recipientIDs: ["sage"],
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_not_assigned", includes: ["$Sage"] },
+  },
+  {
+    name: "ordinary group messages keep file references for explicit recipients",
+    action: "message.send",
+    text: "@notes.md please inspect",
+    recipientIDs: ["sage"],
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["sage"],
+      work: [{ assigneeID: "sage", title: "@notes.md please inspect" }],
+    },
+  },
+  {
+    name: "ordinary group messages keep file references for the default leader",
+    action: "message.send",
+    text: "@notes.md please inspect",
+    files: ["notes.md"],
+    expects: {
+      ok: true,
+      recipients: ["nova"],
+      work: [{ assigneeID: "nova", title: "@notes.md please inspect" }],
+    },
+  },
+  {
+    name: "direct conversations deliver a skill message with its file reference as written",
+    action: "chat.send",
+    agentID: "nova",
+    text: "/review @notes.md direct",
+    files: ["notes.md"],
+    expects: { ok: true, work: [] },
+  },
+  {
+    name: "direct conversations cannot route another owner's skill via explicit IDs",
+    action: "chat.send",
+    agentID: "sage",
+    text: "/review @notes.md direct",
+    recipientIDs: ["nova"],
+    files: ["notes.md"],
+    expects: { ok: false, code: "skill_not_assigned_direct", includes: ["$Nova"] },
+  },
+  {
+    name: "direct conversations reject a General skill atomically",
+    action: "chat.send",
+    agentID: "nova",
+    text: "/public-research @notes.md direct",
+    files: ["notes.md"],
+    expects: { ok: false, code: "general_skill_direct", includes: ["workspace group chat"] },
+  },
+]
+
+test("service routing matrix: skills, explicit recipients, files, and direct conversations", async (t) => {
+  for (const item of routingMatrix) {
+    await t.test(item.name, async () => {
+      const directory = mkdtempSync(join(tmpdir(), "ensemble-routing-"))
+      writeFileSync(join(directory, "notes.md"), "notes")
+      mkdirSync(join(directory, "docs"), { recursive: true })
+      writeFileSync(join(directory, "docs", "guide.md"), "guide")
+      const { ctx, prompts } = fakeContext()
+      ctx.skill.list = async () => [
+        { id: "review", name: "Review", description: "Thorough code review" },
+        { id: "notes", name: "Notes", description: "Write the notes" },
+        { id: "deploy", name: "Deploy", description: "Ship the release" },
+        { id: "public-research", name: "Public research", description: "Find primary sources" },
+      ]
+      await seedSkillWorkspace(directory, ctx, [
+        skillAgent("nova", "Nova", ["review", "notes"]),
+        skillAgent("sage", "Sage", ["deploy"]),
+        skillAgent("echo", "Echo", []),
+      ], { memberIDs: ["nova", "sage", "echo"] })
+      const service = new EnsembleV2Service(ctx)
+      const stop = await service.start()
+      const handlers = service.handlers()
+      try {
+        await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 4)
+        const payload: Record<string, unknown> = { workspaceID: "w", text: item.text }
+        if (item.agentID) payload.agentID = item.agentID
+        if (item.recipientIDs) payload.recipientIDs = item.recipientIDs
+        if (item.ownerSelections) payload.ownerSelections = item.ownerSelections
+        const response = await handlers.invoke({ directory, action: item.action, payload })
+        const next = await handlers.snapshot({ directory })
+        if (!item.expects.ok) {
+          assert.equal(response.ok, false, item.name)
+          assert.equal(response.error?.code, item.expects.code, item.name)
+          for (const part of item.expects.includes) {
+            assert.ok(response.error?.message.includes(part), `${item.name}: ${response.error?.message}`)
+          }
+          assert.deepEqual(next.state.messages.w ?? [], [], `${item.name} appends no group message`)
+          assert.deepEqual(Object.values(next.state.subtasks), [], `${item.name} creates no work`)
+          assert.deepEqual(Object.values(next.state.dmTranscripts), [], `${item.name} appends no direct line`)
+          return
+        }
+        assert.equal(response.ok, true, `${item.name}: ${JSON.stringify(response.error)}`)
+        if (item.expects.recipients) assert.deepEqual(response.result.recipients, item.expects.recipients, item.name)
+        const referenceBlock = item.files?.length
+          ? `\n\nReferenced files:\n${item.files.map((file) => `- ${file}`).join("\n")}`
+          : ""
+        if (item.action === "chat.send") {
+          const lines = Object.values(next.state.dmTranscripts).flat() as any[]
+          assert.deepEqual(lines.map((line) => line.text), [item.text], `${item.name} persists the exact line`)
+          assert.ok(prompts.some((prompt) => prompt.text === item.text), `${item.name} prompts the exact text`)
+          assert.deepEqual(Object.values(next.state.subtasks), [], `${item.name} creates no group work`)
+          return
+        }
+        const tasks = Object.values(next.state.subtasks).filter((task: any) => task.creatorType === "user") as any[]
+        assert.deepEqual(
+          tasks.map((task) => ({ assigneeID: task.assigneeID, title: task.title })).sort((a, b) => a.assigneeID.localeCompare(b.assigneeID)),
+          [...item.expects.work].sort((a, b) => a.assigneeID.localeCompare(b.assigneeID)),
+          `${item.name} creates one work row per routed agent`,
+        )
+        for (const task of tasks) {
+          assert.equal(task.instruction, `${item.text}${referenceBlock}`, `${item.name}: ${task.assigneeID} keeps the exact text and file references`)
+        }
+        const userMessages = (next.state.messages.w ?? []).filter((message: any) => message.author === "user")
+        assert.deepEqual(userMessages.map((message: any) => message.text), [item.text], `${item.name} appends the exact user text once`)
+      } finally {
+        await stop()
+        rmSync(directory, { recursive: true, force: true })
+      }
+    })
+  }
+})
