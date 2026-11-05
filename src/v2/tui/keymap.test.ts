@@ -131,10 +131,14 @@ test("Esc and Tab return from the work list to the transcript", () => {
   assert.equal(actionId(resolveNormalKey("work", [], "x")), "work.cancel")
 })
 
-test("the catalog retires the tilde leader and list surfaces expose no Visual, yank, or paste", () => {
+test("the catalog retires the tilde leader and legacy Ctrl app actions", () => {
   for (const entry of KEYMAP_CATALOG) {
     assert.ok(!entry.keys.includes("~"), `${entry.id} must not bind ~`)
     assert.ok(!entry.keys.some((key) => key.includes("~")), `${entry.id} must not carry a ~ chord`)
+    for (const key of entry.keys) {
+      assert.ok(!["ctrl+s", "ctrl+up", "ctrl+down", "ctrl+n", "ctrl+p", "ctrl+w", "ctrl+a", "ctrl+shift+w", "ctrl+shift+a", "ctrl+shift+delete"].includes(key), `${entry.id} must not bind retired ${key}`)
+      assert.ok(!key.startsWith("ctrl+shift"), `${entry.id} must not bind a Ctrl+Shift app shortcut`)
+    }
   }
   const listContexts: KeyContext[] = ["roster", "chat", "work"]
   for (const context of listContexts) {
@@ -358,8 +362,6 @@ test("key labels read like Vim/terminal keys", () => {
   assert.equal(keyLabel(["g", "g"]), "gg")
   assert.equal(keyLabel(["shift+g"]), "G")
   assert.equal(keyLabel(["ctrl+d"]), "Ctrl+D")
-  assert.equal(keyLabel(["ctrl+shift+w"]), "Ctrl+Shift+W")
-  assert.equal(keyLabel(["ctrl+shift+delete"]), "Ctrl+Shift+Delete")
   assert.equal(keyLabel(["enter"]), "Enter")
   assert.equal(keyLabel(["space"]), "Space")
   assert.equal(keyLabel(["escape"]), "Esc")
@@ -380,4 +382,13 @@ test("raw keypresses normalize to catalog tokens", () => {
   assert.equal(normalizeKeyToken({ name: "ctrl+d" }), "ctrl+d")
   assert.equal(normalizeKeyToken({ name: "?", sequence: "?" }), "?")
   assert.equal(normalizeKeyToken({ name: "/", sequence: "/" }), "/")
+})
+
+test("colon normalizes from every terminal shape after a keyboard-protocol reset", () => {
+  assert.equal(normalizeKeyToken({ name: ":", sequence: ":" }), ":")
+  assert.equal(normalizeKeyToken({ name: ";", shift: true, sequence: ":" }), ":")
+  assert.equal(normalizeKeyToken({ name: ";", shift: true, sequence: ";" }), ":")
+  assert.equal(normalizeKeyToken({ name: "colon", sequence: ":" }), ":")
+  assert.equal(normalizeKeyToken({ name: ";", sequence: ";" }), ";", "a literal semicolon is not a command")
+  assert.equal(normalizeKeyToken({ name: "/", sequence: "/" }), "/", "slash search still opens")
 })

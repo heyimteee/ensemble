@@ -70,8 +70,6 @@ export type KeyEntry = {
   availability?: "no-transcript-search"
   /** Hide from which-key and compact statusline hints; help still lists it. */
   listed?: boolean
-  /** Legacy Ctrl binding that keeps the existing macOS Ctrl->Cmd transform. */
-  platform?: boolean
 }
 
 const SURFACES: readonly KeyContext[] = ["roster", "chat", "work"]
@@ -196,14 +194,6 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "settings.save", scope: "normal", contexts: ["settings"], keys: ["s"], title: "Save settings", group: "State", hint: "s save" },
   { id: "settings.filter", scope: "normal", contexts: ["settings"], keys: ["/"], title: "Filter tab", group: "Search", hint: "/ filter" },
   { id: "settings.escape", scope: "normal", contexts: ["settings"], keys: ["escape"], title: "Close settings", group: "Navigation", hint: "esc close" },
-
-  // Legacy Ctrl/agent/workspace actions remain available on the list
-  // surfaces until later phase tickets move them to their own contexts.
-  { id: "legacy.workspace.archive", scope: "normal", contexts: ["roster", "chat"], keys: ["ctrl+w"], title: "Archive workspace", group: "Legacy", listed: false, platform: true },
-  { id: "legacy.workspace.delete", scope: "normal", contexts: ["roster", "chat"], keys: ["ctrl+shift+w"], title: "Delete workspace", group: "Legacy", listed: false, platform: true },
-  { id: "legacy.agent.archive", scope: "normal", contexts: ["roster", "chat"], keys: ["ctrl+a"], title: "Archive agent", group: "Legacy", listed: false, platform: true },
-  { id: "legacy.agent.delete", scope: "normal", contexts: ["roster", "chat"], keys: ["ctrl+shift+a"], title: "Delete agent", group: "Legacy", listed: false, platform: true },
-  { id: "legacy.reset", scope: "normal", contexts: ["roster", "chat"], keys: ["ctrl+shift+delete"], title: "Reset Ensemble", group: "Legacy", listed: false, platform: true },
 ]
 
 /**
@@ -611,7 +601,7 @@ function labelForKey(key: string): string {
   return key
 }
 
-/** Modifier children read as terminal keys: `Ctrl+D`, `Ctrl+Shift+W`. */
+/** Modifier children read as terminal keys: `Ctrl+D`, `Shift+G`. */
 function modifierLabel(key: string): string {
   if (key.startsWith("shift+")) return `Shift+${modifierLabel(key.slice("shift+".length))}`
   const label = labelForKey(key)
@@ -662,6 +652,11 @@ export function normalizeKeyToken(event: {
   if (name === "return" || name === "enter" || name === "kpenter" || sequence === "\r" || sequence === "\n") return event?.shift ? "shift+enter" : "enter"
   if (name === "escape") return "escape"
   if (name === "tab") return event?.shift ? "shift+tab" : "tab"
+  // The terminal's keyboard protocol can reset after a native session: some
+  // hosts then report Shift+; as `;` with a colon sequence, or as `;` with
+  // only the Shift modifier. Normalize every shape to the command key.
+  if (name === ":" || name === "colon" || sequence === ":") return ":"
+  if ((name === ";" || name === "semicolon") && event?.shift) return ":"
   if (name === "backspace" || name === "pageup" || name === "pagedown" || name === "end" || name === "home") return name
   if (name === "?" || sequence === "?") return "?"
   if (name.startsWith("ctrl+") || name.startsWith("super+") || name.startsWith("alt+")) return name.toLowerCase()

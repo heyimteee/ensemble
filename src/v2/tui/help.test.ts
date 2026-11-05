@@ -73,7 +73,7 @@ test("the completeness checker catches omissions, duplicates, and invented entri
       ...section,
       entries: [
         ...section.entries,
-        { id: "invented", keys: "~", title: "Tilde leader", source: { kind: "keymap" as const, id: "invented", context: "roster" as const } },
+        { id: "invented", keys: "F9", title: "Invented shortcut", source: { kind: "keymap" as const, id: "invented", context: "roster" as const } },
       ],
     }
   })

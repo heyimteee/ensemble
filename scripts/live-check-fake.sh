@@ -824,10 +824,7 @@ live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "composer Normal after one Esc"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL · Group chat" 10 "second Esc returns to the transcript"
-# The retired ~ leader leaves no popup; Space opens which-key.
-live_key "$LIVE_TUI_SESSION" '~'
-sleep 0.3
-live_assert_absence "$LIVE_TUI_SESSION" "which-key" "tilde no longer opens the leader"
+# Space opens the which-key leader; the retired tilde prefix is gone.
 live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER · which-key" 10 "Space opens the which-key leader"
 live_require_text "$LIVE_TUI_SESSION" "Leave Ensemble" 10 "which-key lists leader actions"
@@ -1285,11 +1282,18 @@ live_assert_absence "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "stale code after lea
 live_assert_absence "$LIVE_TUI_SESSION" "fake-queue-beta" "stale work row after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "WORK ·" "stale work section after leaving Ensemble"
 
-# v5.6 T4: `o` opens the selected work's native session. It runs after the
-# `:q` probe so no literal `:` follows a native round-trip; in this harness a
-# later `:` did not open Command mode, which is recorded as a follow-up risk.
+# v5.6 T11: `:` and `/` still open Command mode after the native F2
+# round-trip; the visible page owns the key, not a stale stacked page.
 live_key "$LIVE_TUI_SESSION" F2
-live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "F2 returns before the work-list native probe"
+live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "F2 returns before the command probes"
+live_type "$LIVE_TUI_SESSION" ":"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND · " 10 "colon opens Command mode after F2 round-trip"
+live_key "$LIVE_TUI_SESSION" Escape
+live_type "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "COMMAND · " 10 "slash opens Command search after F2 round-trip"
+live_key "$LIVE_TUI_SESSION" Escape
+
+# v5.6 T4: `o` opens the selected work's native session.
 t4_delegate "T4 native probe"
 live_require_text "$LIVE_TUI_SESSION" "WORK ·" 15 "native-probe work row mounts"
 live_key "$LIVE_TUI_SESSION" "h"
@@ -1297,6 +1301,8 @@ live_key "$LIVE_TUI_SESSION" Tab
 live_key "$LIVE_TUI_SESSION" Tab
 live_require_text "$LIVE_TUI_SESSION" "NORMAL · Work list" 10 "Tab reaches the work list for the native probe"
 live_key "$LIVE_TUI_SESSION" "o"
+# The host native TUI footer is the stable marker here; its `ctrl+p commands`
+# label is host-owned, not an Ensemble app binding.
 live_require_text "$LIVE_TUI_SESSION" "ctrl+p commands" 15 "o opens the selected work's native session"
 t4_native_id=$(t4_id_for "T4 native probe")
 live_invoke task.cancel "{\"id\":\"$t4_native_id\"}" >/dev/null

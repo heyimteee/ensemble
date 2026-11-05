@@ -24,7 +24,7 @@ test("a wizard filter owns the first Esc and clears its query", () => {
   assert.deepEqual(done, { query: "dev", done: true, cancelled: false })
   const cancelled = dialogFilterEdit("dev", { name: "escape" })
   assert.deepEqual(cancelled, { query: "dev", done: true, cancelled: true })
-  assert.equal(dialogFilterEdit("dev", { name: "", sequence: "~?", ctrl: true }).query, "dev", "chords never leak into a filter")
+  assert.equal(dialogFilterEdit("dev", { name: "", sequence: "Z?", ctrl: true }).query, "dev", "chords never leak into a filter")
 })
 
 test("each dialog surface maps to the catalog context that teaches it", () => {

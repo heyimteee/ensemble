@@ -12,7 +12,6 @@ import { COMMANDS, type CommandSpec } from "./commands.ts"
 import { fuzzyMatch } from "./format.ts"
 import { KEYMAP_CATALOG, keyChordLabel, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { MOUSE_GESTURES, type MouseGestureSpec } from "./mouse.ts"
-import { isMacPlatform, platformLabel } from "./platform.ts"
 
 export type HelpSectionID =
   | "modes"
@@ -195,13 +194,12 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   ],
 }
 
-function keymapLabel(entry: KeyEntry, mac: boolean): string {
-  const label = keyChordLabel(entry.keys)
-  return entry.platform && mac ? platformLabel(label, true) : label
+function keymapLabel(entry: KeyEntry): string {
+  return keyChordLabel(entry.keys)
 }
 
-function keymapHelpEntry(entry: KeyEntry, context: KeyContext | "leader", mac: boolean): HelpEntry {
-  const base = keymapLabel(entry, mac)
+function keymapHelpEntry(entry: KeyEntry, context: KeyContext | "leader"): HelpEntry {
+  const base = keymapLabel(entry)
   const keys = context === "leader"
     ? entry.id === "leader.cancel"
       ? base
@@ -237,7 +235,6 @@ export function helpSections(input: HelpCatalogInput = {}): HelpSection[] {
   const keymap = input.keymap ?? KEYMAP_CATALOG
   const commands = input.commands ?? COMMANDS
   const mouse = input.mouse ?? MOUSE_GESTURES
-  const mac = isMacPlatform()
   const sections = new Map<HelpSectionID, HelpSection>(
     HELP_SECTION_ORDER.map((section) => [section.id, { ...section, entries: [] }]),
   )
@@ -247,11 +244,11 @@ export function helpSections(input: HelpCatalogInput = {}): HelpSection[] {
 
   for (const entry of keymap) {
     if (entry.scope === "leader") {
-      add("leader", keymapHelpEntry(entry, "leader", mac))
+      add("leader", keymapHelpEntry(entry, "leader"))
       continue
     }
     for (const context of entry.contexts) {
-      add(helpSectionForContext(context), keymapHelpEntry(entry, context, mac))
+      add(helpSectionForContext(context), keymapHelpEntry(entry, context))
     }
   }
   for (const command of commands) add("command", commandHelpEntry(command))
