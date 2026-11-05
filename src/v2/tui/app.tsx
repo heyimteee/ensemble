@@ -7,6 +7,7 @@ import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
+import { planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue } from "../system-agent.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
@@ -205,8 +206,11 @@ type Completion = {
   kind: "agent" | "file" | "command"
   query: string
   start: number
+  end: number
   cursor: number
-  items: Array<{ title: string; value: string }>
+  scope?: "start" | "agent"
+  ownerName?: string
+  items: Array<{ title: string; value: string; action?: "command" | "skill"; insert?: string }>
 }
 
 /** Where a `/` search applies: the rail, the settings tab, or the transcript. */
@@ -1554,32 +1558,54 @@ export function EnsembleV2App() {
     })
   }
 
+  const composerPlan = (text: string) => {
+    const current = surface()
+    if (!current || current.kind !== "workspace") return undefined
+    const workspace = state()?.workspaces[current.workspaceID]
+    if (!workspace) return undefined
+    return planSkillInvocation({
+      text,
+      workspace,
+      agents: state()?.agents ?? {},
+      skills: skills(),
+      maxSkills: Math.min(state()?.settings.maxDelegations ?? 8, 8),
+    })
+  }
+
   const send = async (text: string, recipientIDs?: string[]): Promise<boolean> => {
     const value = text.trim()
     if (!value) return false
     const current = surface()
     if (!current) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return false }
+    const plan = current.kind === "workspace" ? composerPlan(value) : undefined
+    const error = plan?.errors[0]
+    if (error) {
+      notify(error.message, "error")
+      context.ui.toast.show({ title: "Ensemble", message: error.message, variant: "error" })
+      return false
+    }
     return run("Send message", async () => {
       if (current.kind === "agent") {
         await invoke(context, "chat.send", { agentID: current.agentID, workspaceID: current.workspaceID, text: value })
         await refreshChat()
       } else {
-        await invoke(context, "message.send", { workspaceID: current.workspaceID, text: value, recipientIDs })
+        const action = plan?.kind === "skills" ? "skill.send" : "message.send"
+        await invoke(context, action, { workspaceID: current.workspaceID, text: value, recipientIDs })
       }
     })
   }
 
   const focusComposer = () => focusWhenReady(() => composerRef)
   const composerHeight = () => computeComposerHeight(composerDraft(), Math.max(12, messageWidth() - 6))
-  const setComposerValue = (value: string) => {
+  const setComposerValue = (value: string, cursor = value.length) => {
     composerCache.buffer?.invalidate()
     if (composerRef) {
       composerRef.setText?.(value)
-      composerRef.cursorOffset = value.length
+      composerRef.cursorOffset = cursor
       composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6))
     }
     setComposerDraft(value)
-    setComposerCursor(value.length)
+    setComposerCursor(cursor)
     setDrafts((store) => updateDraft(store, currentDraftKey(), value))
   }
   // Per-surface draft restoration: switching a Workspace or Direct
@@ -1740,13 +1766,52 @@ export function EnsembleV2App() {
     }
   }
 
-  const openCompletion = (kind: Completion["kind"], value: string, start: number) => {
-    const source = kind === "agent" ? agentItems() : kind === "file" ? fileItems() : slashCommands.map(([command, description]) => ({ title: chromeJoin([`/${command}`, description]), value: command }))
-    setCompletion({ kind, query: value.slice(start + 1).toLowerCase(), start, cursor: 0, items: source })
+  const skillPalette = (value: string, cursor: number) => {
+    const workspace = activeWorkspace()
+    if (!workspace) return undefined
+    return skillPaletteAt({
+      text: value,
+      cursor,
+      workspace,
+      agents: state()?.agents ?? {},
+      skills: skills(),
+    })
+  }
+
+  const commandPaletteCompletion = (value: string, cursor: number): boolean => {
+    const palette = skillPalette(value, cursor)
+    if (!palette) {
+      if (completion()?.kind === "command") setCompletion(null)
+      return false
+    }
+    const previous = completion()
+    const sameToken = previous?.kind === "command" && previous.start === palette.tokenStart && previous.scope === palette.scope
+    const items = palette.rows.map((row) => ({
+      title: chromeJoin([row.label, row.flag]),
+      value: row.kind === "command" ? row.command! : row.skillID!,
+      action: row.kind,
+      insert: row.insert,
+    }))
+    setCompletion({
+      kind: "command",
+      query: palette.query,
+      start: palette.tokenStart,
+      end: palette.tokenEnd,
+      cursor: sameToken ? Math.min(previous.cursor, Math.max(0, items.length - 1)) : 0,
+      scope: palette.scope,
+      ownerName: palette.ownerID ? state()?.agents[palette.ownerID]?.name : undefined,
+      items,
+    })
+    return true
+  }
+
+  const openCompletion = (kind: "agent" | "file", value: string, start: number) => {
+    const source = kind === "agent" ? agentItems() : fileItems()
+    setCompletion({ kind, query: value.slice(start + 1).toLowerCase(), start, end: value.length, cursor: 0, items: source })
   }
 
   const filterCompletion = (state: Completion, query: string) => {
-    const source = state.kind === "agent" ? agentItems() : state.kind === "file" ? fileItems() : slashCommands.map(([command, description]) => ({ title: chromeJoin([`/${command}`, description]), value: command }))
+    const source = state.kind === "agent" ? agentItems() : fileItems()
     const items = source.filter((item) => fuzzyMatch(query, item.title))
     return { ...state, query, cursor: Math.min(state.cursor, Math.max(0, items.length - 1)), items }
   }
@@ -1759,8 +1824,19 @@ export function EnsembleV2App() {
     const item = state.items[state.cursor]
     if (!item) return
     if (state.kind === "command") {
-      closeCompletion()
-      await runSlashCommand(`/${item.value}`)
+      if (item.action === "command") {
+        closeCompletion()
+        await runSlashCommand(`/${item.value}`)
+        return
+      }
+      if (item.action === "skill" && item.insert) {
+        const value = String(composerRef?.plainText ?? "")
+        const next = replaceSkillToken(value, state.start, state.end, item.insert)
+        closeCompletion()
+        setComposerValue(next.text, next.cursor)
+        setComposerActive(true)
+        focusComposer()
+      }
       return
     }
     const value = String(composerRef?.plainText ?? "")
@@ -1779,13 +1855,6 @@ export function EnsembleV2App() {
     focusComposer()
     openCompletion("agent", `${base}$`, base.length)
   }
-
-  const slashCommands = [
-    ["workspace", "switch workspace"], ["agent", "mention an agent"], ["settings", "agent settings"], ["approvals", "approval inbox"],
-    ["pause", "pause workspace"], ["resume", "resume workspace"], ["init", "initialize workspace files (initialisation, not routing)"], ["help", "shortcut help"],
-    ["native", "open native session"], ["delegate", "delegate selected subtask"], ["retry", "retry selected subtask"], ["restart", "restart selected subtask"],
-    ["cancel", "cancel selected subtask"], ["reset-ensemble", "delete all Ensemble data"],
-  ] as const
 
   const pickWorkspace = async () => {
     const selected = await openPicker("workspace", { selected: workspaceID() ? [workspaceID()!] : [] })
@@ -1855,18 +1924,19 @@ export function EnsembleV2App() {
     }
   }
 
-  const handleComposerInput = (value: string) => {
+  const handleComposerInput = (value: string, cursor: number) => {
     const current = completion()
     if (current) {
-      const trigger = current.kind === "agent" ? "$" : current.kind === "file" ? "@" : "/"
+      if (current.kind === "command") { commandPaletteCompletion(value, cursor); return }
+      const trigger = current.kind === "agent" ? "$" : "@"
       if (value[current.start] !== trigger) { closeCompletion(); return }
       setCompletion(filterCompletion(current, value.slice(current.start + 1).toLowerCase()))
       return
     }
+    if (commandPaletteCompletion(value, cursor)) return
     const trigger = composerTrigger(value)
-    if (!trigger) return
-    const start = trigger === "command" ? 0 : value.length - 1
-    openCompletion(trigger, value, start)
+    if (!trigger || trigger === "command") return
+    openCompletion(trigger, value, value.length - 1)
   }
 
   const moveCompletion = (delta: number) => {
@@ -1877,10 +1947,12 @@ export function EnsembleV2App() {
     const text = value.trim()
     if (!text) return
     if (completion()) { await selectCompletion(); return }
-    if (text === "/") { openCompletion("command", "/", 0); return }
+    if (text === "/") { commandPaletteCompletion("/", 1); return }
     const initIssue = initComposerIssue(text)
     if (initIssue) { notify(initIssue, "error"); return }
-    if (parseSlashCommand(text)) { await runSlashCommand(text); return }
+    const plan = composerPlan(text)
+    if (plan?.kind === "command" || plan?.kind === "init") { await runSlashCommand(text); return }
+    if (!plan && parseSlashCommand(text)) { await runSlashCommand(text); return }
     // v5.6 T1: Enter sends and keeps Insert focus. The draft is owned by the
     // surface, cleared only after a successful send; busy/failed sends keep
     // it. A send can outlive the composer session, and a newer draft typed
@@ -4512,7 +4584,7 @@ export function EnsembleV2App() {
                           <text fg={colors.leader} bg={colors.bg} width="100%" truncate>{(() => {
                             const state = completion()
                             if (!state) return ""
-                            const title = state.kind === "agent" ? "$ agents" : state.kind === "file" ? "@ files" : "/ commands"
+                            const title = state.kind === "agent" ? "$ agents" : state.kind === "file" ? "@ files" : state.scope === "agent" ? chromeJoin([`$${state.ownerName ?? "agent"} /`, "skills"]) : chromeJoin(["/ commands", "skills"])
                             return state.query ? chromeJoin([title, state.query]) : title
                           })()}</text>
                           <For each={[0, 1, 2, 3, 4, 5]}>{(slot) => (
@@ -4528,7 +4600,7 @@ export function EnsembleV2App() {
                         </box>
                       </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); if (completion()?.kind === "command") commandPaletteCompletion(value, cursor) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
                     </>

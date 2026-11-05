@@ -13,6 +13,22 @@ live_require_runtime
 live_require_node
 live_setup "fake"
 
+# v5.8 T2: a deterministic project skill gives the composer palette a real
+# host catalog row to assign and invoke. OpenCode discovers project skills
+# from .opencode/skills/<name>/SKILL.md before the server starts.
+mkdir -p "$LIVE_PROJECT/.opencode/skills/ensemble-live-skill"
+cat >"$LIVE_PROJECT/.opencode/skills/ensemble-live-skill/SKILL.md" <<'EOF'
+---
+name: ensemble-live-skill
+description: Deterministic Ensemble live skill for composer invocation.
+---
+
+# Ensemble live skill
+
+Use this fixture only to verify deliberate skill routing in the fake live
+harness. It contains no project instructions.
+EOF
+
 # Ticket #77: keep fake streams long enough that the parked-queue probe is
 # deterministic — the queued line must still be parked when the removal key
 # is pressed. This only slows the fake harness; the real provider is untouched.
@@ -1612,5 +1628,79 @@ live_assert_absence "$LIVE_TUI_SESSION" "@FakeAgent" "completion addressing stay
 live_log "ticket #71 completion handoff and batch review verified live"
 # Ticket #74: after both handoffs/completions, no generic checking ghost may remain.
 live_require_absence "$LIVE_TUI_SESSION" "checking the details…" 15 "no ghost checking line after completions"
+
+# v5.8 T2 (ticket #101): the composer `/` palette lists commands and the
+# owner's assigned skills with `Command` / `Skill | Owner` flags, agent-scoped
+# `/` lists only that agent's skills, selection inserts the template, exact
+# text reaches the owner as one peer turn, and an invalid owner rejects before
+# sending while the draft stays.
+skill_found=0
+for _ in $(seq 1 40); do
+  skill_found=$(live_snapshot_value 'output.skills.filter(function (s) { return s.id === "ensemble-live-skill" }).length')
+  [[ "$skill_found" == "1" ]] && break
+  sleep 0.25
+done
+[[ "$skill_found" == "1" ]] || live_fail "project skill fixture missing from the host catalog"
+fake_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "FakeAgent" }).id' | tr -d '"')
+live_invoke "agent.update" "{\"id\":\"$fake_id\",\"skillbox\":[\"ensemble-live-skill\"]}" >/dev/null
+sleep 0.5
+assigned=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "FakeAgent" }).skillbox.join(",")' | tr -d '"')
+[[ "$assigned" == "ensemble-live-skill" ]] || live_fail "skill assignment did not persist (got $assigned)"
+
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for skill palette"
+live_type "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "/ commands │ skills" 10 "message-start palette title"
+live_require_text "$LIVE_TUI_SESSION" "Command" 10 "command rows carry the Command flag"
+live_type "$LIVE_TUI_SESSION" "ensemble-live"
+live_require_text "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "assigned skill row carries the owner flag"
+live_assert_absence "$LIVE_TUI_SESSION" "Skill ·" "skill flags never use a middle dot"
+live_assert_absence "$LIVE_TUI_SESSION" "Command ·" "command flags never use a middle dot"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "skill selection closes the palette"
+live_assert_text "$LIVE_TUI_SESSION" "/ensemble-live-skill" "leader-owned skill inserts the bare template"
+live_type "$LIVE_TUI_SESSION" "palette-check"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill palette-check" 20 "skill turn assigned to its owner"
+skill_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.creatorType === "user" && t.instruction === "/ensemble-live-skill palette-check" }).pop(); return task ? task.instruction : "missing" })()')
+[[ "$skill_exact" == '"/ensemble-live-skill palette-check"' ]] || live_fail "skill turn did not keep the exact user text (got $skill_exact)"
+
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for agent-scoped skill palette"
+live_type "$LIVE_TUI_SESSION" "$"
+live_require_text "$LIVE_TUI_SESSION" "\$ agents" 10 "agent completion opens for the skill anchor"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "\$ agents" 10 "agent anchor accepted"
+live_type "$LIVE_TUI_SESSION" "/ens"
+live_require_text "$LIVE_TUI_SESSION" "\$FakeAgent / │ skills" 10 "agent-scoped palette title"
+live_require_text "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "agent-scoped palette lists its assigned skill"
+live_assert_absence "$LIVE_TUI_SESSION" "/ commands" "agent-scoped palette hides commands"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_absence "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "agent-scoped selection closes the palette"
+live_assert_text "$LIVE_TUI_SESSION" "\$FakeAgent /ensemble-live-skill" "anchored selection keeps the agent anchor"
+sleep 0.4
+live_type "$LIVE_TUI_SESSION" "anchored-check"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent /ensemble-live-skill anchored-check" 20 "anchored skill turn assigned to the owner"
+anchored_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.creatorType === "user" && t.instruction === "$FakeAgent /ensemble-live-skill anchored-check" }).pop(); return task ? task.instruction : "missing" })()')
+[[ "$anchored_exact" == '"$FakeAgent /ensemble-live-skill anchored-check"' ]] || live_fail "anchored skill turn did not keep the exact user text (got $anchored_exact)"
+
+# Validation is atomic and preserves the draft. Helper is a workspace member
+# with no assigned skills, so the planner names both the skill and its owner.
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for skill validation"
+live_type "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill wrong-owner"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "\$Helper / │ skills" 10 "validation palette closed"
+sleep 0.3
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Skill /ensemble-live-skill is assigned to \$FakeAgent, not \$Helper." 10 "skill validation names the owner and the wrong agent"
+live_assert_text "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill wrong-owner" "validation failure keeps the draft"
+invalid_skill_tasks=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("wrong-owner") >= 0 }).length')
+[[ "$invalid_skill_tasks" == "0" ]] || live_fail "invalid skill reference created work (got $invalid_skill_tasks rows)"
+live_log "ticket #101 composer skill palette, insertion, routing, and validation verified"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"
