@@ -7,6 +7,7 @@ import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
+import { initComposerIssue } from "../system-agent.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import { palette } from "./theme.ts"
@@ -627,6 +628,7 @@ export function EnsembleV2App() {
       const previous = lineCache.get(line.id)
       if (previous
         && previous.author === line.author
+        && previous.displayAuthor === line.displayAuthor
         && previous.role === line.role
         && previous.text === line.text
         && previous.kind === line.kind
@@ -685,7 +687,8 @@ export function EnsembleV2App() {
     }
     return stableLines(groupMessages().map((message) => ({
       id: message.id,
-      author: message.author === "user" ? "You" : message.author === "system" ? "Ensemble" : state()?.agents[message.agentID ?? ""]?.name ?? "Unknown agent",
+      author: message.displayAuthor ?? (message.author === "user" ? "You" : message.author === "system" ? "Ensemble" : state()?.agents[message.agentID ?? ""]?.name ?? "Unknown agent"),
+      displayAuthor: message.displayAuthor,
       role: message.author === "user" ? "user" as const : message.author === "system" ? "system" as const : "agent" as const,
       agentID: message.agentID,
       text: message.author === "agent" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
@@ -845,7 +848,7 @@ export function EnsembleV2App() {
   // Ticket #67 one author-color source: the transcript, activity lines, and
   // relays all resolve through unifiedAuthorColor (ID first, roster-name
   // fallback), so each agent reads as the same color everywhere.
-  const authorColor = (input: { agentID?: string; author: string; role: "user" | "agent" | "system" }) =>
+  const authorColor = (input: { agentID?: string; author: string; displayAuthor?: string; role: "user" | "agent" | "system" }) =>
     unifiedAuthorColor(input, state()?.agents ?? {}, rosterAgents(), colors, colors.categorical)
   const hasChatContent = createMemo(
     () =>
@@ -1797,11 +1800,15 @@ export function EnsembleV2App() {
   }
 
   const initEnsemble = async () => {
+    if (surface()?.kind === "agent") {
+      context.ui.toast.show({ title: "Ensemble", message: "Init is workspace-only. Open the workspace group chat and rerun /init.", variant: "warning" })
+      return
+    }
     const workspace = activeWorkspace()
     if (!workspace) { context.ui.toast.show({ title: "Ensemble", message: "Open a workspace first.", variant: "warning" }); return }
     await run("Initialize Ensemble", async () => {
-      await invoke(context, "workspace.init", { id: workspace.id })
-      context.ui.toast.show({ title: "Ensemble", message: `AGENTS.md initialized in ${workspaceLabel(workspace.directory)}.`, variant: "success" })
+      await invoke(context, "workspace.init", { id: workspace.id, text: "/init" })
+      notify("Init started — the System Agent is inspecting the workspace.", "info")
     })
   }
 
@@ -1830,7 +1837,13 @@ export function EnsembleV2App() {
       case "approvals": openApprovals(); return
       case "pause": await togglePause(true); return
       case "resume": await togglePause(false); return
-      case "init": await initEnsemble(); return
+      case "init":
+        if ((parsed?.args.length ?? 0) > 0) {
+          notify("Init is solo-only. Send /init by itself.", "error")
+          return
+        }
+        await initEnsemble()
+        return
       case "help": openHelp(); return
       case "native": openNative(); return
       case "delegate": await delegateSelected(); return
@@ -1865,6 +1878,8 @@ export function EnsembleV2App() {
     if (!text) return
     if (completion()) { await selectCompletion(); return }
     if (text === "/") { openCompletion("command", "/", 0); return }
+    const initIssue = initComposerIssue(text)
+    if (initIssue) { notify(initIssue, "error"); return }
     if (parseSlashCommand(text)) { await runSlashCommand(text); return }
     // v5.6 T1: Enter sends and keeps Insert focus. The draft is owned by the
     // surface, cleared only after a successful send; busy/failed sends keep
@@ -4387,7 +4402,7 @@ export function EnsembleV2App() {
                                     const hit = searchLineState(message.id)
                                     return (
                                     <box id={chatRowID(message.id)} flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                      <text fg={hit ? (hit.current ? colors.warn : colors.focus) : message.queued ? colors.warn : authorColor({ agentID: message.agentID, author: message.author, role: message.role })} bg={hit ? colors.panel : colors.bg} width="100%" truncate>{headerForLine(message)}</text>
+                                      <text fg={hit ? (hit.current ? colors.warn : colors.focus) : message.queued ? colors.warn : authorColor({ agentID: message.agentID, author: message.author, displayAuthor: message.displayAuthor, role: message.role })} bg={hit ? colors.panel : colors.bg} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "agent" && syntaxStyle} fallback={
                                         <text fg={message.role === "system" || message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                       }>
@@ -4411,7 +4426,7 @@ export function EnsembleV2App() {
                                   // (= bounded width − BUBBLE_CHROME), so the
                                   // height is consistent when paths swap.
                                   const hit = searchLineState(message.id)
-                                  const accent = hit ? (hit.current ? colors.warn : colors.focus) : authorColor({ agentID: message.agentID, author: message.author, role: message.role })
+                                  const accent = hit ? (hit.current ? colors.warn : colors.focus) : authorColor({ agentID: message.agentID, author: message.author, displayAuthor: message.displayAuthor, role: message.role })
                                   const wrapWidth = bubbleContentWidth(messageWidth(), BUBBLE_CHROME)
                                   return (
                                   <box id={chatRowID(message.id)} flexDirection="column" width="100%" marginTop={1}>

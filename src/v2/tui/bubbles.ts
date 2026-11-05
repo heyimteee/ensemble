@@ -17,6 +17,7 @@
  */
 
 import type { Agent, Subtask } from "../types.ts"
+import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 import { agentColor } from "./format.ts"
 import { terminalAnnouncement, TRANSCRIPT_WINDOW } from "./workrows.ts"
 
@@ -118,13 +119,14 @@ export function bubbleHead(author: string, relay?: RelayParties): string {
  * never grey.
  */
 export function unifiedAuthorColor(
-  line: { agentID?: string; author: string; role: "user" | "agent" | "system" },
+  line: { agentID?: string; author: string; displayAuthor?: string; role: "user" | "agent" | "system" },
   agents: Record<string, Agent | undefined>,
   roster: Agent[],
-  colors: { accent: any; muted: any; good: any },
+  colors: { accent: any; muted: any; good: any; info?: any },
   categorical: readonly any[],
 ): any {
   if (line.role === "user") return colors.good
+  if (line.displayAuthor === SYSTEM_AGENT_NAME) return colors.info ?? colors.accent
   const byID = line.agentID ? agents[line.agentID] : undefined
   const index = line.agentID
     ? roster.findIndex((item) => item.id === line.agentID)

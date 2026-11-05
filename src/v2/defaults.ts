@@ -15,6 +15,7 @@ export function createInitialState(): SnapshotState {
     workspaces: {},
     messages: {},
     subtasks: {},
+    initJobs: {},
     bindings: {},
     memories: {},
     approvals: {},

@@ -59,6 +59,8 @@ export type RailItem = {
 export type ChatLine = {
   id: string
   author: string
+  /** Non-roster display identity such as the System Agent. */
+  displayAuthor?: string
   role: "user" | "agent" | "system"
   agentID?: string
   text: string

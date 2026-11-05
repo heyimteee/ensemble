@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
+import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 import { agentColor } from "./format.ts"
 import {
   accumulateCompletions,
@@ -119,7 +120,7 @@ test("relay parties resolve answerer and asker for turns and handoffs", () => {
 })
 
 test("one author color serves transcript rows and activity labels alike", () => {
-  const colors = { accent: "#accent", muted: "#muted", good: "#good" }
+  const colors = { accent: "#accent", muted: "#muted", good: "#good", info: "#info" }
   const agents = { a: agent() } as Record<string, ReturnType<typeof agent> | undefined>
   const roster = [agent()]
   const byID = unifiedAuthorColor({ agentID: "a", author: "Nova", role: "agent" }, agents, roster as any, colors, [])
@@ -128,6 +129,12 @@ test("one author color serves transcript rows and activity labels alike", () => 
   assert.equal(byID, agentColor(agent() as any, "#accent", 0, []))
   assert.equal(unifiedAuthorColor({ author: "You", role: "user" }, agents, roster as any, colors, []), "#good")
   assert.equal(unifiedAuthorColor({ author: "Ensemble", role: "system" }, agents, roster as any, colors, []), "#muted")
+  // Ticket #100: the System Agent is a non-roster display author and reads
+  // in the information color, never as an unknown roster agent.
+  assert.equal(
+    unifiedAuthorColor({ author: SYSTEM_AGENT_NAME, displayAuthor: SYSTEM_AGENT_NAME, role: "agent" }, agents, roster as any, colors, []),
+    "#info",
+  )
   // Ticket #77: a system-authored line that still carries a real agentID
   // resolves the agent color — "Handed to $Nova" names are never grey.
   assert.equal(
