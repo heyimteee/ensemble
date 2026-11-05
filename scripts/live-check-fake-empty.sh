@@ -58,14 +58,14 @@ live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
 live_type "$LIVE_TUI_SESSION" "Engineering"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "wizard text field Normal"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "wizard text field Normal"
 # v5.6 T8: Visual works in wizard text fields too.
 live_key "$LIVE_TUI_SESSION" "v"
-live_require_text "$LIVE_TUI_SESSION" "VISUAL · Wizard" 10 "v enters Visual in a wizard field"
+live_require_text "$LIVE_TUI_SESSION" "VISUAL │ Wizard" 10 "v enters Visual in a wizard field"
 live_key "$LIVE_TUI_SESSION" "0"
 live_require_text "$LIVE_TUI_SESSION" "chars" 10 "a motion extends the wizard selection"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc cancels Visual in the wizard field"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc cancels Visual in the wizard field"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent role" 10 "agent role step"
 live_key "$LIVE_TUI_SESSION" "i"
@@ -81,7 +81,7 @@ live_assert_text "$LIVE_TUI_SESSION" "No models available" "explained empty mode
 # The list step arrived in Insert, so the first Esc leaves Insert; the second
 # goes back one step.
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL · Wizard" 10 "Esc leaves Insert on the list step"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL │ Wizard" 10 "Esc leaves Insert on the list step"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "Agent memories (optional)" 10 "Esc goes back one wizard step"
 # Text steps keep the arrival mode; Esc leaves Insert, then field Normal
@@ -91,6 +91,6 @@ for _ in $(seq 1 8); do
   live_key "$LIVE_TUI_SESSION" Escape
 done
 live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "wizard cancelled from its first step"
-live_assert_text "$LIVE_TUI_SESSION" "NORMAL · Roster" "cancel restored Normal mode"
+live_assert_text "$LIVE_TUI_SESSION" "NORMAL │ Roster" "cancel restored Normal mode"
 
 live_log "fake empty-catalog live-check passed ($LIVE_SERVER_URL)"

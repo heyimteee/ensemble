@@ -5,11 +5,11 @@ import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, Workspace } from "../types.ts"
-import { ApprovalList, HelpView, PickerOverlay, Rail, SettingsView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
-import { palette } from "./theme.ts"
+import { leaderBadge, opaqueSurface, palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import { overlayGeometry, sameWizardOptions, wizardEnterAction, wizardMemoryLines, wizardModelEmptyHint, wizardModelKeyFor, wizardModelOptions } from "./wizard.ts"
@@ -62,11 +62,12 @@ import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-op
 import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
 import { createVimRegisterStore, normalizeVimKey, visualSelectionSize, type VimBuffer, type VimOutcome } from "./vim.ts"
 import { dialogEscape, dialogKeyContext } from "./dialogs.ts"
-import { composerPosition, contextLabel, listPosition, statuslineRow1, statuslineRow2, transcriptPosition, type StatuslineSurface } from "./statusline.ts"
+import { buildStatuslineSegments, composerPosition, contextLabel, listPosition, statuslineRow2Parts, transcriptPosition, type StatuslineSurface } from "./statusline.ts"
 import { commandStatusHints, layerEntries, globalEntries, leaderEntries, leaderHints, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, singleKeyEntry, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
 import { createPageActivation } from "./page-activation.ts"
+import { chromeJoin, chromeSeparator } from "./separators.ts"
 import { focusWhenReady, halfPageCursor, nextFocusZone, type FocusZone } from "./focus.ts"
 import { LEADER_POPUP_DELAY_MS } from "./leader.ts"
 import { createCommandHistory, recallHistory, rememberHistory, startHistory, type CommandHistory } from "./history.ts"
@@ -701,7 +702,7 @@ export function EnsembleV2App() {
     const cursor = matchIndexAfter(matches.length, search.cursor, direction)
     setTranscriptSearch({ ...search, cursor })
     const match = matches[cursor]
-    notify(`Match ${cursor + 1}/${matches.length} · ${match.excerpt}`, "info")
+    notify(chromeJoin([`Match ${cursor + 1}/${matches.length}`, match.excerpt]), "info")
     scrollMatchIntoView(match.lineID)
   }
   const clearSearchAndFilter = (): boolean => {
@@ -934,11 +935,26 @@ export function EnsembleV2App() {
     return agent ? missingSkills(agent, skills()) : []
   })
   const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
+  const [terminalBackground, setTerminalBackground] = createSignal<string | null>(null)
   onMount(() => {
     const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
     context.renderer.on("resize", update)
-    onCleanup(() => context.renderer.off("resize", update))
+    let live = true
+    // v5.7 T3: use the terminal's reported default background for the rail
+    // surface so the leader badge text is a true cutout. Detection is async
+    // and optional; the opaque panel color is the fallback until it lands.
+    Promise.resolve()
+      .then(() => (context.renderer as any).getPalette?.())
+      .then((found: any) => { if (live) setTerminalBackground(found?.defaultBackground ?? null) })
+      .catch(() => {})
+    onCleanup(() => {
+      live = false
+      context.renderer.off("resize", update)
+    })
   })
+  const statuslineWidth = () => Math.max(10, renderSize().width - 2)
+  const railSurface = () => opaqueSurface(terminalBackground(), colors.panel)
+  const railBadge = () => leaderBadge(colors.leader, railSurface())
   const viewWidth = () => Math.max(60, renderSize().width - 2)
   const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
   // Two-column layout (ticket #56): the task board is gone and the chat
@@ -1080,18 +1096,18 @@ export function EnsembleV2App() {
       const matches = transcriptMatches(chatLines(), query)
       if (matches.length === 0) { notify(`No matches: ${query}`, "info"); return }
       setTranscriptSearch({ query, cursor: 0 })
-      notify(`Match 1/${matches.length} · ${matches[0].excerpt}`, "info")
+      notify(chromeJoin([`Match 1/${matches.length}`, matches[0].excerpt]), "info")
       scrollMatchIntoView(matches[0].lineID)
       return
     }
     if (session.target === "roster") {
       setWorkspaceFilter(text)
       const count = railItems().length
-      notify(`${count} roster ${count === 1 ? "match" : "matches"} · /${query}`, "info")
+      notify(chromeJoin([`${count} roster ${count === 1 ? "match" : "matches"}`, `/${query}`]), "info")
       return
     }
     const count = settingsTab() === "memories" ? filteredMemories().length : settingsTab() === "skillbox" ? filteredSkills().length : 0
-    notify(`${count} settings ${count === 1 ? "match" : "matches"} · /${query}`, "info")
+    notify(chromeJoin([`${count} settings ${count === 1 ? "match" : "matches"}`, `/${query}`]), "info")
   }
 
   const handleCommandKey = (event: any): boolean => {
@@ -1271,7 +1287,7 @@ export function EnsembleV2App() {
       const current = surface()
       if (current?.kind === "workspace" && !next.state.workspaces[current.workspaceID]) setSurface(null)
       if (current?.kind === "agent" && !next.state.agents[current.agentID]) setSurface(null)
-      setStatus(`${workspaces().length} workspaces · ${rosterAgents().length} agents · ${activeCount()} working`)
+      setStatus(chromeJoin([`${workspaces().length} workspaces`, `${rosterAgents().length} agents`, `${activeCount()} working`]))
     } catch (error: any) {
       setStatus(`Ensemble unavailable: ${error?.message ?? error}`)
     }
@@ -3808,7 +3824,7 @@ export function EnsembleV2App() {
       const hints = commandStatusHints(command.kind)
       if (command.kind === ":") {
         const suggestions = commandCompletions(command.text).slice(0, 3).map((item) => item.name)
-        return `${hints}${suggestions.length > 0 ? ` · ${suggestions.join(" · ")}` : ""}`
+        return suggestions.length > 0 ? chromeJoin([hints, ...suggestions]) : hints
       }
       return hints
     }
@@ -3822,9 +3838,9 @@ export function EnsembleV2App() {
       if (search) {
         const total = transcriptSearchMatches().length
         const position = total > 0 ? Math.min(total, search.cursor + 1) : 0
-        return `match ${position}/${total} · ${statuslineHints("search")}`
+        return chromeJoin([`match ${position}/${total}`, statuslineHints("search")])
       }
-      if (workspaceFilter()) return `filter “${workspaceFilter()}” · esc clear`
+      if (workspaceFilter()) return chromeJoin([`filter “${workspaceFilter()}”`, "esc clear"])
     }
     if (selectedMissingSkills().length > 0) {
       return footerLine2({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false, missingSkills: selectedMissingSkills() })
@@ -3838,7 +3854,7 @@ export function EnsembleV2App() {
     if (interaction().overlay === "help") {
       if (helpFiltering()) return statuslineHints("filter")
       const matches = helpMatchEntries().length
-      if (helpQuery()) return `match ${matches > 0 ? Math.min(matches, helpMatch() + 1) : 0}/${matches} · ${statuslineHints("help")}`
+      if (helpQuery()) return chromeJoin([`match ${matches > 0 ? Math.min(matches, helpMatch() + 1) : 0}/${matches}`, statuslineHints("help")])
       return statuslineHints("help")
     }
     if (composerActive()) {
@@ -3854,6 +3870,22 @@ export function EnsembleV2App() {
     return footerLine1({ focus: chromeFocus(), hasWork: showWorkBlock() ?? false })
   }
   const statusMessage = () => visibleMessage(interaction(), Date.now())?.text ?? null
+  const statusSegments = () => buildStatuslineSegments({
+    mode: interactionMode(),
+    visualKind: interaction().selection?.kind,
+    leader: leaderMode(),
+    context: statusContext(),
+    git: insertWithoutTarget(interaction()) ? undefined : gitState(),
+    position: insertWithoutTarget(interaction()) ? undefined : statusPosition(),
+    selectionSize: insertWithoutTarget(interaction()) ? undefined : statusSelectionSize(),
+    pendingChord: insertWithoutTarget(interaction()) ? undefined : interaction().pendingChord,
+    hints: statusHints(),
+  })
+  const statusRow2 = () => statuslineRow2Parts({
+    command: helpFiltering() ? { kind: "/", text: helpQuery(), returnMode: "normal" } : interaction().command,
+    message: statusMessage(),
+    tone: interaction().message?.tone,
+  })
   /** The in-chat line under the composer, from the same catalog as the bar. */
   const composerInlineHint = () => {
     if (completion()) return statuslineHints("completion")
@@ -3862,7 +3894,7 @@ export function EnsembleV2App() {
       const insert = statuslineHints("composerInsert", {
         filter: (entry) => ["composerInsert.mention", "composerInsert.file", "composerInsert.slash"].includes(entry.id),
       })
-      return [compose, insert].filter(Boolean).join(" · ")
+      return chromeJoin([compose, insert].filter(Boolean))
     }
     if (interaction().mode === "visual") return visualHint
     if (interaction().mode === "normal") return statuslineHints("composerNormal")
@@ -3890,12 +3922,12 @@ export function EnsembleV2App() {
     >
       <box id={MOUSE_PANE_IDS.header} height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={overlayOpen() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
-          <text fg={colors.accent} bg={colors.bg} width="100%" truncate>ENSEMBLE{activeWorkspace() ? ` · #${activeWorkspace()!.name}${activeWorkspace()!.paused ? " · paused" : ""} · ${workspaceLabel(activeWorkspace()!.directory)}` : " · no workspace"}</text>
-          <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? "LEADER · which-key · esc cancel" : `${isBusy() ? "BUSY · " : ""}${status()}`}</text>
+          <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{chromeJoin(["ENSEMBLE", ...(activeWorkspace() ? [`#${activeWorkspace()!.name}`, ...(activeWorkspace()!.paused ? ["paused"] : []), workspaceLabel(activeWorkspace()!.directory)] : ["no workspace"])])}</text>
+          <text fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{leaderMode() ? chromeJoin(["LEADER", "which-key", "esc cancel"]) : `${isBusy() ? `${chromeJoin(["BUSY", status()])}` : status()}`}</text>
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
+          <Rail colors={colors} surface={railSurface()} badge={railBadge()} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <text fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" flexShrink={0} truncate>{surfaceTitle()}</text>
             <Show when={settingsAgentID()} fallback={
@@ -3994,7 +4026,8 @@ export function EnsembleV2App() {
                                   <Show when={entry.kind === "asking"} fallback={
                                     <>
                                       <text fg={authorColor({ agentID: entry.agentID, author: entry.label, role: "agent" })} bg={colors.bg}>{entry.label}</text>
-                                      <text fg={colors.muted} bg={colors.bg}>{` · ${entry.verb}`}</text>
+                                      <text fg={colors.faint} bg={colors.bg}>{` ${chromeSeparator()} `}</text>
+                                      <text fg={colors.muted} bg={colors.bg}>{entry.verb}</text>
                                     </>
                                   }>
                                     <text fg={authorColor({ agentID: entry.agentID, author: entry.label, role: "agent" })} bg={colors.bg}>{entry.verb}</text>
@@ -4005,7 +4038,8 @@ export function EnsembleV2App() {
                                 <box flexDirection="row" width="100%">
                                   <text fg={colors.muted} bg={colors.bg}>{`${queuedActivityFrame()} `}</text>
                                   <text fg={authorColor({ author: label, role: "agent" })} bg={colors.bg}>{label}</text>
-                                  <text fg={colors.muted} bg={colors.bg}> · queued</text>
+                                  <text fg={colors.faint} bg={colors.bg}>{` ${chromeSeparator()} `}</text>
+                                  <text fg={colors.muted} bg={colors.bg}>queued</text>
                                 </box>
                               )}</For>
                               <Show when={liveActivity().overflow > 0}>
@@ -4015,7 +4049,7 @@ export function EnsembleV2App() {
                           </Show>
                           <Show when={showWorkBlock()}>
                             <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
-                              <text fg={colors.muted} bg={colors.bg} width="100%" truncate>{workSummary(activeTasks(), Date.now())}</text>
+                              <ChromeText colors={colors} fg={colors.muted} bg={colors.bg} width="100%" truncate text={workSummary(activeTasks(), Date.now())} />
                               <For each={orderedTasks()}>{(task, index) => {
                                 // Review fixes (findings 2–3): the row with an
                                 // in-flight action shows its interim label, and
@@ -4025,12 +4059,16 @@ export function EnsembleV2App() {
                                 const pending = pendingWork()?.id === task.id ? pendingWork()!.action : null
                                 const rowStatus = deriveWorkStatus(task, Date.now())
                                 return (
-                                <text fg={taskCursor() === index() && interaction().focus === "work" ? colors.good : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text} bg={colors.bg} width="100%" truncate>
-                                  {taskCursor() === index() && interaction().focus === "work" ? "› " : "  "}{workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })}{` ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
-                                </text>
+                                <ChromeText colors={colors}
+                                  fg={taskCursor() === index() && interaction().focus === "work" ? colors.good : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text}
+                                  bg={colors.bg}
+                                  width="100%"
+                                  truncate
+                                  text={`${taskCursor() === index() && interaction().focus === "work" ? "› " : "  "}${workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })} ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
+                                />
                                 )
                               }}</For>
-                              <text fg={colors.faint} bg={colors.bg} width="100%" truncate>d delegate · t reassign · ↵ result · r retry · R restart · x cancel · o native</text>
+                              <text fg={colors.faint} bg={colors.bg} width="100%" truncate>d delegate │ t reassign │ ↵ result │ r retry │ R restart │ x cancel │ o native</text>
                             </box>
                           </Show>
                           <Show when={!atBottom()}>
@@ -4063,7 +4101,7 @@ export function EnsembleV2App() {
                       <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent · @file · /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); setComposerDraft(value); setComposerCursor(Number(composerRef?.cursorOffset ?? value.length)); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
-                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{composerActive() && interaction().mode === "visual" ? `COMPOSER · ${interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL"} · ${composerInlineHint()}` : composerActive() ? `COMPOSER · ${interaction().mode === "normal" ? "NORMAL · " : ""}${composerInlineHint()}` : composerInlineHint()}</text>
+                      <text fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate>{composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()}</text>
                     </>
                   </Show>
                 }>
@@ -4133,12 +4171,12 @@ export function EnsembleV2App() {
       </Show>
       <Show when={wizard()}>
         <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
-          <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{wizard()!.title} · step {wizard()!.index + 1} / {wizard()!.steps.length}</text>
+          <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{chromeJoin([wizard()!.title, `step ${wizard()!.index + 1} / ${wizard()!.steps.length}`])}</text>
           <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
           <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
           <Show when={wizardStep()?.kind === "text"} fallback={
             <box flexDirection="column" height={9}>
-              <text fg={colors.faint} bg={colors.panel} width="100%" truncate>filter: {wizard()!.query || "(none)"} · {wizardItems().length} options{wizard()!.filtering ? " · typing" : ""}</text>
+              <text fg={colors.faint} bg={colors.panel} width="100%" truncate>{chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])}</text>
               <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
                 <Show when={wizardItems().length === 0} fallback={
                 <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
@@ -4191,26 +4229,13 @@ export function EnsembleV2App() {
           paddingRight={1}
           flexDirection="column"
         >
-          <text fg={colors.leader} bg={colors.panel} width="100%" truncate>LEADER · Space</text>
+          <text fg={colors.leader} bg={colors.panel} width="100%" truncate>{chromeJoin(["LEADER", "Space"])}</text>
           <For each={whichKeyLines(leaderEntries())}>{(line) => <text fg={colors.text} bg={colors.panel} width="100%" truncate>{line}</text>}</For>
         </box>
       </Show>
       <box id={MOUSE_PANE_IDS.statusline} height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>
-        <text fg={leaderMode() ? colors.warn : interactionMode() === "insert" ? colors.good : interactionMode() === "visual" ? colors.warn : interactionMode() === "command" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate>
-          {statuslineRow1({
-            mode: interactionMode(),
-            visualKind: interaction().selection?.kind,
-            context: statusContext(),
-            git: insertWithoutTarget(interaction()) ? undefined : gitState(),
-            position: insertWithoutTarget(interaction()) ? undefined : statusPosition(),
-            selectionSize: insertWithoutTarget(interaction()) ? undefined : statusSelectionSize(),
-            pendingChord: insertWithoutTarget(interaction()) ? undefined : interaction().pendingChord,
-            hints: statusHints(),
-          })}
-        </text>
-        <text fg={interaction().message?.tone === "error" ? colors.bad : interaction().message?.tone === "success" ? colors.good : colors.faint} bg={colors.bg} width="100%" truncate>
-          {statuslineRow2({ command: helpFiltering() ? { kind: "/", text: helpQuery(), returnMode: "normal" } : interaction().command, message: statusMessage() })}
-        </text>
+        <StatuslineRow colors={colors} segments={statusSegments()} width={statuslineWidth()} bg={colors.bg} />
+        <StatuslineMessage colors={colors} parts={statusRow2()} bg={colors.bg} />
       </box>
     </box>
   )

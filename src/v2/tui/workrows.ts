@@ -2,6 +2,7 @@ import { deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "
 import type { Subtask } from "../types.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
+import { chromeJoin, chromeSeparator } from "./separators.ts"
 
 /**
  * Inline work-row mapping for the group chat surface (ticket #56, slice A
@@ -37,7 +38,7 @@ export function workStatusLabel(status: DerivedWorkStatus): string {
   return status
 }
 
-/** One inline row: `{glyph} {title} · {agent} · {status}`. Pure. */
+/** One inline row: `{glyph} {title} │ {agent} │ {status}`. Pure. */
 export function workRowText(
   task: Subtask,
   agentLabel: string,
@@ -46,7 +47,7 @@ export function workRowText(
 ): string {
   const status = deriveWorkStatus(task, now)
   const segment = opts.pending ? pendingWorkLabel(opts.pending) : status
-  const row = `${workGlyph(status)} ${short(task.title || "(untitled)", 60)} · ${agentLabel} · ${segment}`
+  const row = chromeJoin([`${workGlyph(status)} ${short(task.title || "(untitled)", 60)}`, agentLabel, segment])
   if (!opts.needsYou) return row
   return `${NEEDS_YOU_MARK} ${row}${needsYouSuffix()}`
 }
@@ -76,14 +77,14 @@ export function pendingWorkLabel(action: PendingWorkAction): string {
 /**
  * Distinct attention marker for work blocked on the user (brief §2.2/`needs
  * you` amber override): interrupted runs and approval-gated work (ask_person
- * and friends) render `◆` + `· needs you · v to resolve`, visually distinct
+ * and friends) render `◆` + `│ needs you │ v to resolve`, visually distinct
  * from plain pending `○`. Derived from existing interruption/approval state
  * only — no new coordination semantics. Pure.
  */
 export const NEEDS_YOU_MARK = "◆"
 
 export function needsYouSuffix(): string {
-  return " · needs you · v to resolve"
+  return ` ${chromeSeparator()} needs you ${chromeSeparator()} v to resolve`
 }
 
 /** True while the task waits on the user: interrupted, gated on a still-pending approval, or blocked by a native permission mirror. */
@@ -267,9 +268,9 @@ export function activityVerb(kind: ActivityVerbKind, detail?: string): string {
   }
 }
 
-/** One live activity line: `{frame} {agent} · {verb}`. The frame animates via the shared working frames. Pure. */
+/** One live activity line: `{frame} {agent} │ {verb}`. The frame animates via the shared working frames. Pure. */
 export function activityLine(agentLabel: string, verb: string, frame: string): string {
-  return `${frame} ${agentLabel} · ${verb}`
+  return chromeJoin([`${frame} ${agentLabel}`, verb])
 }
 
 /** Max visible activity lines; the rest collapse into a `+N more` overflow line. */
@@ -452,7 +453,7 @@ export function splitActivityGroups(
 /** Counts line for the active-work section; omits zero buckets and terminal states. */
 export function workSummary(tasks: Subtask[], now: number): string {
   const active = tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
-  if (active.length === 0) return "WORK · none yet"
+  if (active.length === 0) return chromeJoin(["WORK", "none yet"])
   const counts = new Map<DerivedWorkStatus, number>()
   for (const task of active) {
     const status = deriveWorkStatus(task, now)
@@ -462,7 +463,7 @@ export function workSummary(tasks: Subtask[], now: number): string {
   const parts = order
     .filter((status) => (counts.get(status) ?? 0) > 0)
     .map((status) => `${counts.get(status)} ${status}`)
-  return `WORK · ${parts.join(" · ")}`
+  return chromeJoin(["WORK", ...parts])
 }
 
 /**

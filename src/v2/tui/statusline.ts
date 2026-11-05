@@ -1,10 +1,16 @@
 /**
- * Two-row statusline strings (ticket #79).
+ * Two-row statusline (ticket #79; typed segments in v5.7 T3, ticket #93).
  *
- * Pure text builders for the always-reserved bottom bar. Row one carries the
- * mode chip, context, git state, focused position, pending chord, and context
- * hints. Row two carries command input when active, otherwise the latest
- * transient message, otherwise a single blank cell so the layout never jumps.
+ * Row one is built from typed segments: a filled mode chip, context, git,
+ * position/selection, pending chord, and hints. Each part carries a palette
+ * tone so the renderer can paint hint keys, descriptions, git, and position
+ * differently. Row two is the command input or the latest message with a
+ * success/error tone. Plain-text formatters stay available for tests and the
+ * live harness.
+ *
+ * Fitting keeps the mode chip in every width and drops hint segments from
+ * the right before any core segment. Row two is dedicated to the command
+ * input, so no hint can truncate it.
  */
 
 import type { GitState } from "./git.ts"
@@ -15,6 +21,7 @@ import type {
   InteractionOverlay,
   InteractionSelection,
 } from "./interaction.ts"
+import { CHROME_SEPARATOR, chromeJoin, chromeSeparator, chromeSplit } from "./separators.ts"
 
 export type StatuslineSurface = "none" | "agent" | "workspace"
 
@@ -52,8 +59,8 @@ export function contextLabel(input: {
   const focused = FOCUS_LABELS[input.focus]
   if (focused) return focused
   if (input.focus === "composer") {
-    if (input.surface === "agent") return "COMPOSER · Direct conversation"
-    if (input.surface === "workspace") return "COMPOSER · Group chat"
+    if (input.surface === "agent") return chromeJoin(["COMPOSER", "Direct conversation"])
+    if (input.surface === "workspace") return chromeJoin(["COMPOSER", "Group chat"])
     return "COMPOSER"
   }
   if (input.focus === "rail") return "Roster"
@@ -98,9 +105,86 @@ export function listPosition(cursor: number, total: number): string {
   return `${Math.max(1, Math.min(total, Math.trunc(cursor) + 1))}/${total}`
 }
 
-export function statuslineRow1(input: {
+export type StatuslineTone = "text" | "muted" | "faint" | "accent" | "good" | "warn" | "bad" | "leader" | "chip"
+export type StatuslineChipRole = "muted" | "accent" | "good" | "warn" | "leader"
+export type StatuslinePart = {
+  text: string
+  tone: StatuslineTone
+  /** A filled chip background role; the renderer pairs it with contrast text. */
+  chip?: StatuslineChipRole
+}
+export type StatuslineSegmentKind = "mode" | "context" | "selection" | "git" | "position" | "chord" | "hint"
+export type StatuslineSegment = { kind: StatuslineSegmentKind; parts: StatuslinePart[] }
+
+/** Theme chip role for the current mode. */
+export function modeChipRole(mode: InteractionMode, leader = false): StatuslineChipRole {
+  if (leader) return "leader"
+  if (mode === "insert") return "good"
+  if (mode === "visual") return "warn"
+  if (mode === "command") return "accent"
+  return "muted"
+}
+
+export function modeSegment(mode: InteractionMode, visualKind?: InteractionSelection["kind"], leader = false): StatuslineSegment {
+  return {
+    kind: "mode",
+    parts: [{ text: modeLabel(mode, visualKind), tone: "chip", chip: modeChipRole(mode, leader) }],
+  }
+}
+
+export function contextSegment(context: string): StatuslineSegment {
+  return { kind: "context", parts: [{ text: context, tone: "muted" }] }
+}
+
+export function gitSegments(git: GitState | null): StatuslineSegment {
+  if (!git) return { kind: "git", parts: [{ text: gitLabel(null), tone: "muted" }] }
+  const parts: StatuslinePart[] = [
+    { text: "git:(", tone: "accent" },
+    { text: git.branch, tone: "accent" },
+  ]
+  if (git.dirty) parts.push({ text: "*", tone: "warn" })
+  parts.push({ text: ")", tone: "accent" })
+  if (git.ahead > 0) parts.push({ text: ` ↑${git.ahead}`, tone: "good" })
+  if (git.behind > 0) parts.push({ text: ` ↓${git.behind}`, tone: "warn" })
+  return { kind: "git", parts }
+}
+
+export function selectionSegment(size: string): StatuslineSegment {
+  return { kind: "selection", parts: [{ text: size, tone: "warn" }] }
+}
+
+export function positionSegment(position: string): StatuslineSegment {
+  return { kind: "position", parts: [{ text: position, tone: "accent" }] }
+}
+
+export function chordSegment(chord: string): StatuslineSegment {
+  return { kind: "chord", parts: [{ text: `chord ${chord}`, tone: "warn" }] }
+}
+
+/**
+ * Split a catalog hint list into accent key + muted description segments.
+ * Hints are the only droppable segments when the bar is narrow.
+ */
+export function hintSegments(hints: string | null | undefined, separator: string = chromeSeparator()): StatuslineSegment[] {
+  if (!hints) return []
+  return chromeSplit(hints, separator)
+    .map((hint) => hint.trim())
+    .filter((hint) => hint.length > 0)
+    .map((hint) => {
+      const space = hint.indexOf(" ")
+      const key = space === -1 ? hint : hint.slice(0, space)
+      const description = space === -1 ? "" : hint.slice(space + 1)
+      const parts: StatuslinePart[] = [{ text: key, tone: "accent" }]
+      if (description) parts.push({ text: ` ${description}`, tone: "muted" })
+      return { kind: "hint", parts } satisfies StatuslineSegment
+    })
+}
+
+export type StatuslineRow1Input = {
   mode: InteractionMode
   visualKind?: InteractionSelection["kind"]
+  /** The leader menu is open; the chip uses the leader accent. */
+  leader?: boolean
   context: string
   git?: GitState | null
   position?: string
@@ -108,21 +192,123 @@ export function statuslineRow1(input: {
   selectionSize?: string
   pendingChord?: string | null
   hints?: string
-}): string {
-  const parts = [modeLabel(input.mode, input.visualKind), input.context]
-  if (input.selectionSize) parts.push(input.selectionSize)
-  if (input.git !== undefined) parts.push(gitLabel(input.git))
-  if (input.position) parts.push(input.position)
-  if (input.pendingChord) parts.push(`chord ${input.pendingChord}`)
-  if (input.hints) parts.push(input.hints)
-  return parts.join(" · ")
+}
+
+export function buildStatuslineSegments(input: StatuslineRow1Input, separator: string = chromeSeparator()): StatuslineSegment[] {
+  const segments: StatuslineSegment[] = [modeSegment(input.mode, input.visualKind, input.leader), contextSegment(input.context)]
+  if (input.selectionSize) segments.push(selectionSegment(input.selectionSize))
+  if (input.git !== undefined) segments.push(gitSegments(input.git))
+  if (input.position) segments.push(positionSegment(input.position))
+  if (input.pendingChord) segments.push(chordSegment(input.pendingChord))
+  segments.push(...hintSegments(input.hints, separator))
+  return segments
+}
+
+export function segmentText(segment: StatuslineSegment): string {
+  return segment.parts.map((part) => part.text).join("")
+}
+
+export function formatStatuslineSegments(segments: readonly StatuslineSegment[], separator: string = chromeSeparator()): string {
+  return chromeJoin(segments.map(segmentText), separator)
+}
+
+export function statuslineRow1(input: StatuslineRow1Input, separator: string = chromeSeparator()): string {
+  return formatStatuslineSegments(buildStatuslineSegments(input, separator), separator)
+}
+
+/**
+ * Fit row one to the terminal width. Hints disappear from the right first;
+ * only after every hint is gone do optional core segments drop. The mode chip
+ * is never dropped, so the current interaction state always stays visible.
+ */
+export function fitStatuslineSegments(
+  segments: readonly StatuslineSegment[],
+  maxWidth: number,
+  separator: string = chromeSeparator(),
+): StatuslineSegment[] {
+  if (!Number.isFinite(maxWidth) || maxWidth <= 0) return [...segments]
+  const kept = [...segments]
+  while (kept.length > 1 && statuslineWidth(kept, separator) > maxWidth) {
+    const hintIndex = lastIndexWhere(kept, (segment) => segment.kind === "hint")
+    if (hintIndex >= 0) {
+      kept.splice(hintIndex, 1)
+      continue
+    }
+    const modeIndex = kept.findIndex((segment) => segment.kind === "mode")
+    const dropIndex = kept.length - 1
+    if (dropIndex === modeIndex) break
+    kept.splice(dropIndex, 1)
+  }
+  return kept
+}
+
+function statuslineWidth(segments: readonly StatuslineSegment[], separator: string): number {
+  if (segments.length === 0) return 0
+  const content = segments.reduce((total, segment) => total + displayWidth(segmentText(segment)), 0)
+  return content + displayWidth(` ${separator} `) * (segments.length - 1)
+}
+
+function lastIndexWhere<T>(items: readonly T[], predicate: (item: T) => boolean): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (predicate(items[index])) return index
+  }
+  return -1
+}
+
+/** Terminal cell width for the printable strings the statusline builds. */
+export function displayWidth(text: string): number {
+  let width = 0
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0
+    if (code === 0x200d || (code >= 0x0300 && code <= 0x036f)) continue
+    width += isWideCodePoint(code) ? 2 : 1
+  }
+  return width
+}
+
+function isWideCodePoint(code: number): boolean {
+  return (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe4f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f300 && code <= 0x1faff) ||
+    (code >= 0x20000 && code <= 0x3fffd)
+  )
+}
+
+export type StatuslineMessageTone = "info" | "success" | "error"
+
+export function statuslineRow2Parts(input: {
+  command?: CommandInput | null
+  message?: string | null
+  tone?: StatuslineMessageTone
+}): StatuslinePart[] {
+  if (input.command) {
+    return [
+      { text: input.command.kind, tone: "accent" },
+      { text: input.command.text, tone: "text" },
+    ]
+  }
+  if (input.message) {
+    const tone: StatuslineTone = input.tone === "error" ? "bad" : input.tone === "success" ? "good" : "faint"
+    return [{ text: input.message, tone }]
+  }
+  return [{ text: " ", tone: "faint" }]
 }
 
 export function statuslineRow2(input: {
   command?: CommandInput | null
   message?: string | null
+  tone?: StatuslineMessageTone
 }): string {
-  if (input.command) return `${input.command.kind}${input.command.text}`
-  if (input.message) return input.message
-  return " "
+  return statuslineRow2Parts(input)
+    .map((part) => part.text)
+    .join("")
 }
+
+/** Exposed for tests that pin the shared chrome glyph. */
+export const STATUSLINE_SEPARATOR = CHROME_SEPARATOR

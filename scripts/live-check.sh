@@ -119,7 +119,7 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_absence "$LIVE_TUI_SESSION" "/ commands" 10 "slash command palette closed"
   live_key "$LIVE_TUI_SESSION" Escape
-  live_require_text "$LIVE_TUI_SESSION" "NORMAL · COMPOSER" 10 "composer Normal after the palette"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL │ COMPOSER" 10 "composer Normal after the palette"
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer closed"
 
