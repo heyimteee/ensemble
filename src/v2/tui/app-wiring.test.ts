@@ -61,4 +61,20 @@ test("the rail stays transparent and renders the leader as inline colored text",
   assert.ok(!rail.includes("const selected = props.cursor === index()"), "the cursor is not captured as a one-time boolean")
 })
 
+test("ticket101: the composer palette is cursor-scoped and submits through the skill planner", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const planner = readFileSync(new URL("../skill-invocation.ts", import.meta.url), "utf8")
+  assert.ok(app.includes('from "../skill-invocation.ts"'), "the TUI imports the shared planner")
+  assert.ok(app.includes("onCursorChange"), "cursor movement recomputes the completion context")
+  assert.ok(app.includes("commandPaletteCompletion(value, cursor)"), "the palette follows the caret")
+  assert.ok(app.includes('const action = plan?.kind === "skills" ? "skill.send" : "message.send"'), "skill messages use the deliberate delivery action")
+  assert.ok(app.includes('plan?.kind === "command" || plan?.kind === "init"'), "known commands still execute before send")
+  assert.ok(!app.includes("slashCommands"), "one shared command catalog replaces the private palette list")
+  assert.ok(planner.includes("Skill | "), "assigned skill flags carry the owner")
+  assert.ok(planner.includes("Command"), "command rows carry the Command flag")
+  assert.ok(!planner.includes("Skill ·"), "skill flags never use a middle dot")
+  assert.ok(!planner.includes("Command ·"), "command flags never use a middle dot")
+  assert.ok(planner.includes("generalSkills: []"), "the planner keeps the general-skill extension point")
+})
+
 

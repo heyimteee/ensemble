@@ -7,6 +7,7 @@ import { EnsembleV2Service } from "./service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
+import type { Agent, Workspace } from "./types.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -19,6 +20,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   const interruptedSessions: string[] = []
   const movedSessions: Array<{ sessionID: string; directory: string }> = []
   const commands: Array<{ sessionID: string; name: string }> = []
+  const prompts: any[] = []
   const createdSessionIDs: string[] = []
   let sessions = 0
   const handlers: Partial<Handlers> = {}
@@ -66,7 +68,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
       create: async ({ title }: any) => { const id = `session_${++sessions}`; createdSessionIDs.push(id); return { data: { id, title } } },
       instructions: { entry: { put: async () => undefined } },
       switchModel: async () => undefined,
-      prompt: async () => undefined,
+      prompt: async (input: any) => { prompts.push({ ...input }) },
       wait: async () => { await new Promise((resolve) => setTimeout(resolve, 5)) },
       context: async () => ({
         data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "OK" }] }],
@@ -87,10 +89,10 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     model: {
       list: async () => [{ providerID: "probe", id: "probe-model", name: "Probe", variants: [] }],
     },
-    skill: { list: async () => [] },
+    skill: { list: async (): Promise<any[]> => [] },
     event,
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, createdSessionIDs, tools, emitEvent }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, createdSessionIDs, tools, emitEvent }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -2845,6 +2847,157 @@ test("ticket76: a delegated child and a later user task both settle in order", a
     assert.deepEqual(tasks.filter((task) => task.workKind !== "handoff").map((task) => task.title).sort(), ["child", "coordinate", "later"])
     assert.equal(tasks.some((task) => task.state === "working"), false)
     assert.equal(tasks.some((task) => task.awaitingChildren), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+// --- v5.8 ticket #101: deliberate assigned-skill invocation -----------------
+
+const skillAgent = (id: string, name: string, skillbox: string[], archived = false): Agent => ({
+  id,
+  name,
+  title: "",
+  role: "",
+  mainModel: { providerID: "probe", modelID: "probe-model" },
+  backupModels: [],
+  skillbox,
+  color: "cyan",
+  archived,
+  pendingSettings: false,
+  version: 1,
+  createdAt: 1,
+  updatedAt: 1,
+})
+
+const skillWorkspace: Workspace = {
+  id: "w",
+  name: "site",
+  directory: "",
+  leaderID: "nova",
+  memberIDs: ["nova", "sage"],
+  synthesis: true,
+  archived: false,
+  paused: false,
+  nextSeq: 1,
+  createdAt: 1,
+  lastActiveAt: 1,
+}
+
+async function seedSkillWorkspace(directory: string, ctx: any, agents: Agent[]): Promise<void> {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  for (const agent of agents) await seed.saveAgent(agent)
+  await seed.saveWorkspace({ ...skillWorkspace, directory })
+}
+
+test("skill.send delivers the exact text to the assigned owner as one peer turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-send-"))
+  const { ctx, prompts } = fakeContext()
+  ctx.skill.list = async () => [
+    { id: "review", name: "Review", description: "Thorough code review" },
+    { id: "deploy", name: "Deploy", description: "Ship the release" },
+  ]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", ["review"]),
+    skillAgent("sage", "Sage", ["deploy"]),
+  ])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
+    const text = "$Nova /review check this carefully"
+    const response = await handlers.invoke({ directory, action: "skill.send", payload: { workspaceID: "w", text } })
+    assert.equal(response.ok, true, JSON.stringify(response.error))
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.creatorType === "user" && task.state === "replied")
+    })
+    const next = await handlers.snapshot({ directory })
+    const userTasks = Object.values(next.state.subtasks).filter((task: any) => task.creatorType === "user") as any[]
+    assert.equal(userTasks.length, 1, "one work row for the addressed agent")
+    assert.equal(userTasks[0].workKind, "turn")
+    assert.equal(userTasks[0].assigneeID, "nova")
+    assert.equal(userTasks[0].instruction, text, "the exact user text is the instruction")
+    const messages = next.state.messages.w ?? []
+    assert.equal(messages.find((message: any) => message.author === "user")?.text, text)
+    const replies = messages.filter((message: any) => message.agentID === "nova" && message.taskID === userTasks[0].id)
+    assert.equal(replies.length, 1, "one reply, attributed to the owner")
+    assert.equal(replies[0].text, "OK")
+    const prompt = prompts.find((item) => item.text.includes(text))
+    assert.ok(prompt, "the owner receives the exact text in its turn prompt")
+    assert.equal("skills" in prompt, false, "no prompt skill attachment bypass is used")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("message.send also accepts a leader-owned message-start skill", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-leader-"))
+  const { ctx } = fakeContext()
+  ctx.skill.list = async () => [{ id: "review", name: "Review", description: "Thorough code review" }]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", ["review"]),
+    skillAgent("sage", "Sage", []),
+  ])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
+    const text = "/review check the release"
+    const response = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text } })
+    assert.equal(response.ok, true, JSON.stringify(response.error))
+    const next = await handlers.snapshot({ directory })
+    const userTasks = Object.values(next.state.subtasks).filter((task: any) => task.creatorType === "user") as any[]
+    assert.equal(userTasks.length, 1)
+    assert.equal(userTasks[0].assigneeID, "nova")
+    assert.equal(userTasks[0].instruction, text)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("invalid skill references reject atomically before any message or task", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-skill-invalid-"))
+  const { ctx } = fakeContext()
+  ctx.skill.list = async () => [
+    { id: "review", name: "Review", description: "Thorough code review" },
+    { id: "deploy", name: "Deploy", description: "Ship the release" },
+  ]
+  await seedSkillWorkspace(directory, ctx, [
+    skillAgent("nova", "Nova", ["review", "missing"]),
+    skillAgent("sage", "Sage", ["deploy"]),
+    skillAgent("echo", "Echo", ["review"]),
+    skillAgent("retired", "Retired", ["review"], true),
+  ])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
+    const cases = [
+      { text: "$Nova /deploy check this", code: "skill_not_assigned", includes: ["/deploy", "$Sage"] },
+      { text: "$Nova /ghost check this", code: "unknown_skill", includes: ["/ghost"] },
+      { text: "$Ghost /review check this", code: "unknown_agent", includes: ["$Ghost"] },
+      { text: "$Echo /review check this", code: "not_member", includes: ["$Echo", "member"] },
+      { text: "$Retired /review check this", code: "agent_archived", includes: ["$Retired", "archived"] },
+      { text: "$Nova /missing check this", code: "skill_unavailable", includes: ["/missing", "catalog"] },
+    ]
+    for (const item of cases) {
+      const action = item.code === "unknown_skill" ? "message.send" : "skill.send"
+      const response = await handlers.invoke({ directory, action, payload: { workspaceID: "w", text: item.text } })
+      assert.equal(response.ok, false, item.text)
+      assert.equal(response.error?.code, item.code, item.text)
+      for (const part of item.includes) assert.ok(response.error?.message.includes(part), `${item.text}: ${response.error?.message}`)
+      const next = await handlers.snapshot({ directory })
+      assert.deepEqual(next.state.messages.w ?? [], [], `${item.text} must not append a message`)
+      assert.deepEqual(Object.values(next.state.subtasks), [], `${item.text} must not create work`)
+    }
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

@@ -13,6 +13,7 @@ import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalT
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
+import { planSkillInvocation } from "./skill-invocation.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type {
   Agent,
@@ -523,6 +524,7 @@ export class EnsembleV2Service {
       case "workspace.archive": return this.archiveWorkspace(payload.id)
       case "workspace.delete": return this.deleteWorkspace(payload.id, Boolean(payload.deleteNativeSessions))
       case "message.send": return this.sendMessage(directory, payload)
+      case "skill.send": return this.sendMessage(directory, payload)
       case "task.delegate": return this.delegateFromUser(payload)
       case "task.retry": return this.retryTask(payload.id)
       case "task.restart": return this.restartTask(payload.id)
@@ -547,6 +549,7 @@ export class EnsembleV2Service {
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
       "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
       "Answer first: write your own answer in the group chat before handing off. A handoff forwards a completed result or clearly scoped work; it is never a substitute for answering your assignment.",
+      "A `/skill` token in a user message is a deliberate skill request. When it applies to your part, load that skill with the native skill tool rather than treating it as prose.",
       "End-of-turn handoff (mandatory): every non-leader turn must end with a handoff to another member — hand off explicitly with ensemble_handoff, or the server hands your finished turn to the workspace leader automatically and the group shows `Handed to $Name`. The leader may end turns normally or hand off voluntarily. A batch review turn lists every pending completion: decide each item with ensemble_review (delegate, start, end, or dismiss) — the batch closes only when every item is decided; non-leaders hand it onward to the leader.",
       "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
       "",
@@ -1274,6 +1277,18 @@ export class EnsembleV2Service {
     if (workspace.paused) throw Object.assign(new Error("This workspace is paused. Resume it before sending work."), { code: "workspace_paused" })
     const text = String(payload.text ?? "").trim()
     if (!text) throw Object.assign(new Error("Message is empty."), { code: "empty" })
+    // Ticket #101: the server re-runs the shared planner against authoritative
+    // workspace state before touching the transcript or the queue. Any invalid
+    // skill/owner pair rejects the whole message atomically.
+    const plan = planSkillInvocation({
+      text,
+      workspace,
+      agents: state.agents,
+      skills: this.catalog.skillOptions,
+      maxSkills: Math.min(state.settings.maxDelegations, 8),
+    })
+    const planError = plan.errors[0]
+    if (planError) throw Object.assign(new Error(planError.message), { code: planError.code })
     const explicitIDs = Array.isArray(payload.recipientIDs) ? [...new Set(payload.recipientIDs.map(String))] : []
     if (explicitIDs.length > 0) {
       const valid: string[] = []
@@ -1331,7 +1346,9 @@ export class EnsembleV2Service {
     const outsideTokens = new Set(outsideRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]))
     const unknown = unknownMentions(text, workspace, state.agents).filter((token) => !archivedTokens.has(token.toLowerCase()) && !outsideTokens.has(token.toLowerCase()))
     const references = workspaceFileReferences(text, workspace.directory)
-    const instruction = references.length > 0 ? `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}` : text
+    // Deliberate skill delivery sends the exact user text as the instruction;
+    // the planner has already validated every addressed skill/owner pair.
+    const instruction = plan.kind === "skills" || references.length === 0 ? text : `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}`
     if (mentioned.length === 0 && archivedRefs.length === 0 && unknown.length === 0 && outsideRefs.length === 0) {
       // No addressee named: the leader takes the turn, exactly as before.
       const recipients = visibleRecipients(text, workspace, state.agents)
