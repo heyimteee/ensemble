@@ -455,17 +455,17 @@ synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synth
 [[ "$synthesis" == "true" ]] || live_fail "synthesis choice did not persist as Yes (got $synthesis)"
 leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')
 [[ "$leader_name" == '"FakeAgent"' ]] || live_fail "unexpected roster leader (got $leader_name)"
-# v5.7 T3: the LEADER badge is a true cutout on an opaque rail surface (the
-# text capture cannot see color), and the extra connector stem is gone: the
-# badge row is followed immediately by the title branch; terminal cells cannot
-# render a half-row gap.
-live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader badge visible in the rail"
+# v5.7 T3 follow-up: LEADER is inline colored text after a chrome separator,
+# not a boxed cutout. The name row carries `FakeAgent │ LEADER`; the title
+# branch stays on the next row.
+live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader label visible in the rail"
+live_assert_text "$LIVE_TUI_SESSION" "FakeAgent │ LEADER" "leader label shares the name row after a separator"
 pane_leader=$(live_capture "$LIVE_TUI_SESSION")
 leader_at=$(grep -nF "LEADER" <<<"$pane_leader" | head -1 | cut -d: -f1)
 title_at=$(grep -nF "Engineering" <<<"$pane_leader" | head -1 | cut -d: -f1)
-[[ -n "$leader_at" && -n "$title_at" ]] || live_fail "leader badge or title branch missing (badge @$leader_at title @$title_at)"
-[[ "$title_at" -eq "$((leader_at + 1))" ]] || live_fail "leader badge must be immediately before the title branch (badge @$leader_at title @$title_at)"
-live_log "leader badge visible immediately before the title branch"
+[[ -n "$leader_at" && -n "$title_at" ]] || live_fail "leader label or title branch missing (leader @$leader_at title @$title_at)"
+[[ "$title_at" -eq "$((leader_at + 1))" ]] || live_fail "title branch must follow the leader name row (leader @$leader_at title @$title_at)"
+live_log "inline leader label visible on the name row"
 
 # Inline work progress at this layer (ticket #56, slice A ticket #64): group
 # messages create leader work that starts with no further TUI action — no

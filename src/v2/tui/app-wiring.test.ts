@@ -47,12 +47,18 @@ test("statusline and chrome render StyledText through the native content setter"
   assert.ok(source.includes("value.content = content()"), "StyledText is assigned through the ref, not the JSX content prop")
 })
 
-test("the rail pane stays transparent and only the badge uses the opaque cutout", () => {
+test("the rail stays transparent and renders the leader as inline colored text", () => {
   const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   const rail = components.slice(components.indexOf("export function Rail"), components.indexOf("export function ApprovalList"))
   assert.ok(!rail.includes("backgroundColor={props.surface}"), "the rail no longer paints the opaque cutout surface")
   assert.ok(rail.includes("backgroundColor={props.colors.bg}"), "the rail uses the transparent theme background")
-  assert.ok(app.includes("leaderBadge(colors.leader, terminalBackground())"), "the badge uses the detected terminal background only")
-  assert.ok(!app.includes("railSurface()"), "the rail surface is not computed or painted")
+  assert.ok(!rail.includes("props.badge"), "the leader badge is not a boxed cutout")
+  assert.ok(rail.includes("{chromeSeparator()}"), "the name and LEADER label share the chrome separator")
+  assert.ok(rail.includes("fg={props.colors.leader}"), "the LEADER label uses the leader color")
+  assert.ok(!app.includes("leaderBadge"), "the app no longer computes badge background/foreground pairs")
+  assert.ok(rail.includes("const selected = () => props.cursor === index()"), "the rail cursor stays reactive between snapshot polls")
+  assert.ok(!rail.includes("const selected = props.cursor === index()"), "the cursor is not captured as a one-time boolean")
 })
+
+

@@ -3,7 +3,7 @@ import { StyledText, TextAttributes, bg as bgStyle, fg as fgStyle } from "@opent
 import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import { approvalSource } from "../types.ts"
 import type { InteractionMode } from "./interaction.ts"
-import { contrastText, type LeaderBadge, type Palette, type ThemeColor } from "./theme.ts"
+import { contrastText, type Palette, type ThemeColor } from "./theme.ts"
 import { busyCount, fuzzyMatch, missingSkills, short, unreadCount } from "./format.ts"
 import { settingsTabLine, skillAssigned, skillPageItems, skillPaginationText, skillToggleMark } from "./skills.ts"
 import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
@@ -234,7 +234,6 @@ export function StatuslineMessage(props: { colors: Palette; prompt: StatuslinePa
 
 export function Rail(props: {
   colors: Palette
-  badge: LeaderBadge
   items: RailItem[]
   cursor: number
   focus: boolean
@@ -258,7 +257,10 @@ export function Rail(props: {
         const agentCount = props.items.filter((entry) => entry.kind === "agent").length
         const workspaceCount = props.items.length - agentCount
         const groupHeader = item.group && item.group !== previous?.group ? item.group : ""
-        const selected = props.cursor === index()
+        // Read the cursor inside the rendered expression. A plain const here
+        // captures the value once per item and only refreshes when the poll
+        // rebuilds the list, which made j/k feel up to a tick late.
+        const selected = () => props.cursor === index()
         // Slice E single-cursor rule: the `›` position marker renders only on
         // the surface that owns the focus border, never on two surfaces at once.
         const agent = item.kind === "agent" ? props.state?.agents[item.id] : undefined
@@ -278,13 +280,12 @@ export function Rail(props: {
             </Show>
             <box flexDirection="column">
               <box flexDirection="row" width="100%">
-                <text fg={selected ? props.colors.good : props.colors.text} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
-                  {settingsCursorMark(selected && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
+                <text fg={selected() ? props.colors.good : props.colors.text} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
+                  {settingsCursorMark(selected() && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
                 </text>
                 <Show when={item.kind === "agent" && item.leader}>
-                  <box marginLeft={1} flexShrink={0} backgroundColor={props.badge.background} paddingLeft={1} paddingRight={1}>
-                    <text fg={props.badge.foreground} attributes={TextAttributes.BOLD}>LEADER</text>
-                  </box>
+                  <text fg={props.colors.faint} bg={props.colors.bg} flexShrink={0}> {chromeSeparator()} </text>
+                  <text fg={props.colors.leader} bg={props.colors.bg} flexShrink={0} attributes={TextAttributes.BOLD}>LEADER</text>
                 </Show>
                 <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
                 <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ◐{busy}</text></Show>

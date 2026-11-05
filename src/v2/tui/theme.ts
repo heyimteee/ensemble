@@ -63,21 +63,6 @@ function toRgba(color: ThemeColor | null | undefined): RGBA | null {
   }
 }
 
-/** True only for a resolved, fully opaque color (not the terminal default). */
-export function isOpaqueColor(color: ThemeColor | null | undefined): boolean {
-  const rgba = toRgba(color)
-  if (!rgba) return false
-  if (rgba.intent === "default") return false
-  return rgba.a >= 1
-}
-
-function colorToHex(color: ThemeColor): string | null {
-  const rgba = toRgba(color)
-  if (!rgba) return null
-  const [r, g, b] = rgba.toInts()
-  return `#${[r, g, b].map((value) => value.toString(16).padStart(2, "0")).join("")}`
-}
-
 function relativeLuminance(color: ThemeColor): number | null {
   const rgba = toRgba(color)
   if (!rgba) return null
@@ -91,16 +76,4 @@ export function contrastText(color: ThemeColor): "#000000" | "#ffffff" {
   if (luminance === null) return "#ffffff"
   // WCAG crossover: black wins above L=0.179, white below it.
   return luminance > 0.179 ? "#000000" : "#ffffff"
-}
-
-export type LeaderBadge = { background: ThemeColor; foreground: string }
-
-/**
- * Leader badge colors. A guaranteed opaque surface makes the text a true
- * cutout (the glyphs paint the same color as the rail). Without a guarantee,
- * the text falls back to automatic black/white contrast from the accent.
- */
-export function leaderBadge(accent: ThemeColor, surface: ThemeColor | null | undefined): LeaderBadge {
-  const cutout = isOpaqueColor(surface) ? colorToHex(surface!) : null
-  return { background: accent, foreground: cutout ?? contrastText(accent) }
 }

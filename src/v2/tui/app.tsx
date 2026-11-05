@@ -9,7 +9,7 @@ import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, 
 import { composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
-import { leaderBadge, palette } from "./theme.ts"
+import { palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import {
@@ -976,28 +976,14 @@ export function EnsembleV2App() {
     return agent ? missingSkills(agent, skills()) : []
   })
   const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
-  const [terminalBackground, setTerminalBackground] = createSignal<string | null>(null)
   onMount(() => {
     const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
     context.renderer.on("resize", update)
-    let live = true
-    // v5.7 T3: use the terminal's reported default background for the rail
-    // surface so the leader badge text is a true cutout. Detection is async
-    // and optional; the opaque panel color is the fallback until it lands.
-    Promise.resolve()
-      .then(() => (context.renderer as any).getPalette?.())
-      .then((found: any) => { if (live) setTerminalBackground(found?.defaultBackground ?? null) })
-      .catch(() => {})
-    onCleanup(() => {
-      live = false
-      context.renderer.off("resize", update)
-    })
+    onCleanup(() => context.renderer.off("resize", update))
   })
   const statuslineWidth = () => Math.max(10, renderSize().width - 2)
-  // The rail stays transparent. The badge text uses the terminal's reported
-  // default background for a true cutout; without it, leaderBadge falls back
-  // to automatic contrast instead of painting the pane opaque.
-  const railBadge = () => leaderBadge(colors.leader, terminalBackground())
+  // The rail stays transparent; the inline LEADER label uses the leader
+  // color, so there is no badge box or opaque cutout to paint.
   const viewWidth = () => Math.max(60, renderSize().width - 2)
   const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
   // Two-column layout (ticket #56): the task board is gone and the chat
@@ -4355,7 +4341,7 @@ export function EnsembleV2App() {
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} badge={railBadge()} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
+          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={settingsAgentID()} fallback={
