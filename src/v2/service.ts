@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
 import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstruction, onboardingPrompt } from "./init-block.ts"
+import { INIT_COMMAND, INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
@@ -19,6 +20,7 @@ import type {
   Agent,
   Approval,
   DmQueueEntry,
+  InitJob,
   Memory,
   MemoryScope,
   Message,
@@ -156,6 +158,7 @@ export class EnsembleV2Service {
     this.lastDmAt = Math.max(this.lastDmAt, this.store.dmMaxCreatedAt())
   }
   private readonly liveBySession = new Map<string, LiveSlot>()
+  private readonly initRuns = new Map<string, { jobID: string; sessionID?: string; cancelled: boolean; promise: Promise<void> }>()
   private globalEpoch = 0
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
@@ -174,6 +177,7 @@ export class EnsembleV2Service {
     })
     await this.store.load()
     this.refreshDmClock()
+    await this.reconcileInitJobs()
     // Restart recovery lives in the store load path: rows left `working`
     // across a restart return to `pending` with their attempt budget intact
     // and no approval minted. A pending decision (ask_person and friends)
@@ -518,7 +522,7 @@ export class EnsembleV2Service {
       case "workspace.update": return this.updateWorkspace(payload)
       case "workspace.activate": return this.activateWorkspace(payload.id)
       case "ui.save": return this.saveUiState(payload)
-      case "workspace.init": return this.initWorkspace(payload.id)
+      case "workspace.init": return this.initWorkspace(payload)
       case "workspace.pause": return this.pauseWorkspace(payload.id, true)
       case "workspace.resume": return this.pauseWorkspace(payload.id, false)
       case "workspace.archive": return this.archiveWorkspace(payload.id)
@@ -1075,11 +1079,118 @@ export class EnsembleV2Service {
     return { ok: true }
   }
 
-  private async initWorkspace(workspaceID: string): Promise<any> {
+  private async initWorkspace(payload: Json): Promise<any> {
     const state = this.store.snapshot()
-    const workspace = state.workspaces[workspaceID]
+    const workspace = state.workspaces[payload.id]
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
-    ensureEnsembleDirectory(workspace.directory)
+    if (workspace.archived) throw Object.assign(new Error("This workspace is archived."), { code: "workspace_archived" })
+    if (payload.direct === true) throw Object.assign(new Error("Init is workspace-only. Open a workspace and rerun /init."), { code: "init_workspace_only" })
+    if (payload.text !== undefined) {
+      const issue = initComposerIssue(String(payload.text))
+      if (issue) throw Object.assign(new Error(issue), { code: "init_solo" })
+    }
+    const leader = state.agents[workspace.leaderID]
+    if (!leader || leader.archived || !workspace.memberIDs.includes(leader.id)) {
+      throw Object.assign(new Error("The workspace leader is missing or archived."), { code: "invalid_leader" })
+    }
+    const active = Object.values(state.initJobs).find((job) => job.workspaceID === workspace.id && job.state === "running")
+    if (active) throw Object.assign(new Error("An init is already running for this workspace. Wait for it to finish."), { code: "init_running" })
+    const agentsPath = join(workspace.directory, "AGENTS.md")
+    const previousAgentsMD = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : null
+    await this.appendMessage(workspace, { author: "user", text: INIT_COMMAND, kind: "text" })
+    const message = await this.appendMessage(workspace, {
+      author: "agent",
+      displayAuthor: SYSTEM_AGENT_NAME,
+      text: INIT_START_TEXT,
+      kind: "text",
+      streaming: true,
+      updatedAt: now(),
+    })
+    const job: InitJob = {
+      id: id("init"),
+      workspaceID: workspace.id,
+      messageID: message.id,
+      state: "running",
+      previousAgentsMD,
+      startedAt: now(),
+    }
+    await this.store.saveInitJob(job)
+    const run = { jobID: job.id, cancelled: false, promise: Promise.resolve() }
+    this.initRuns.set(job.id, run)
+    run.promise = this.runInit(job.id).finally(() => {
+      this.initRuns.delete(job.id)
+    })
+    void run.promise
+    return { ok: true, jobID: job.id, messageID: message.id, directory: workspace.directory }
+  }
+
+  /**
+   * Restart reconciliation: a running job cannot keep its native session
+   * across a service restart. Restore the captured AGENTS.md, settle the
+   * System Agent row with an explicit rerun instruction, and remove the dead
+   * temporary session if the host still knows it.
+   */
+  private async reconcileInitJobs(): Promise<void> {
+    const state = this.store.snapshot()
+    const runningMessages = new Set(Object.values(state.initJobs).filter((job) => job.state === "running").map((job) => job.messageID))
+    for (const job of Object.values(state.initJobs)) {
+      if (job.state !== "running") continue
+      const workspace = state.workspaces[job.workspaceID]
+      if (workspace) this.restoreAgentsFile(workspace.directory, job)
+      const message = this.initMessage(state, job)
+      if (message) {
+        settleStreamMessage(message, "Ensemble init was interrupted by a service restart. Rerun /init.", true)
+        await this.store.saveMessage(message)
+      }
+      job.state = "interrupted"
+      job.error = "Ensemble restarted while init was running."
+      job.finishedAt = now()
+      await this.store.saveInitJob(job)
+      if (job.sessionID) await this.ctx.session.remove({ sessionID: job.sessionID }).catch(() => undefined)
+    }
+    // An orphaned System Agent row (for example, a job that never persisted)
+    // must not keep a generic interrupted stream or look like live progress.
+    for (const list of Object.values(state.messages)) {
+      for (const message of list) {
+        if (message.displayAuthor !== SYSTEM_AGENT_NAME || runningMessages.has(message.id)) continue
+        if (message.streaming || message.text === INIT_START_TEXT || message.text.startsWith("Inspecting AGENTS.md")) {
+          settleStreamMessage(message, "Ensemble init was interrupted by a service restart. Rerun /init.", true)
+          await this.store.saveMessage(message)
+        }
+      }
+    }
+  }
+
+  private initMessage(state: SnapshotState, job: InitJob): Message | undefined {
+    return (state.messages[job.workspaceID] ?? []).find((message) => message.id === job.messageID)
+  }
+
+  private restoreAgentsFile(directory: string, job: InitJob): void {
+    const path = join(directory, "AGENTS.md")
+    try {
+      if (job.previousAgentsMD === null) {
+        if (existsSync(path)) unlinkSync(path)
+      } else {
+        writeFileSync(path, job.previousAgentsMD)
+      }
+    } catch {
+      // Best-effort rollback: the failure report still names the intended
+      // state. A read-only checkout cannot be repaired by the service.
+    }
+  }
+
+  private async runInit(jobID: string): Promise<void> {
+    const run = this.initRuns.get(jobID)
+    const state = this.store.snapshot()
+    const job = state.initJobs[jobID]
+    if (!run || !job || job.state !== "running") return
+    const workspace = state.workspaces[job.workspaceID]
+    if (!workspace) {
+      await this.failInit(jobID, "Workspace not found.")
+      return
+    }
+    const globalEpoch = this.globalEpoch
+    const workspaceEpoch = this.workspaceEpoch.get(job.workspaceID) ?? 0
     let sessionID = ""
     try {
       const created = unwrap<any>(await this.ctx.session.create({
@@ -1089,16 +1200,131 @@ export class EnsembleV2Service {
       }))
       sessionID = created?.id
       if (!sessionID) throw new Error("Could not create an init session.")
+      run.sessionID = sessionID
+      if (run.cancelled) {
+        await this.ctx.session.remove({ sessionID }).catch(() => undefined)
+        return
+      }
+      const claimed = this.store.snapshot().initJobs[jobID]
+      if (!claimed || claimed.state !== "running") {
+        await this.ctx.session.remove({ sessionID }).catch(() => undefined)
+        return
+      }
+      claimed.sessionID = sessionID
+      await this.store.saveInitJob(claimed)
+      const message = this.initMessage(this.store.snapshot(), claimed)
+      const registration = registerLiveSlot(this.liveBySession, sessionID, now())
+      if (registration.orphaned) {
+        await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || "Reply interrupted.", true, globalEpoch, workspaceEpoch, workspace.id)
+      }
+      const progress = INIT_PROGRESS_TEXT
+      if (message) {
+        message.text = progress
+        message.streaming = true
+        message.updatedAt = now()
+        await this.store.saveMessage(message)
+      }
+      registration.slot.message = message
+      registration.slot.buffer = `${progress}\n\n`
       await this.ctx.session.command({ sessionID, name: "init", text: initInstruction() })
       await this.ctx.session.wait({ sessionID })
-      writeAgentsBlock(workspace.directory, ensembleBlock())
-      writeInitMetadata(workspace.directory, ENSEMBLE_BLOCK_VERSION)
-      return { ok: true, directory: workspace.directory }
+      if (run.cancelled) return
+      const result = assistantResult(listData(await this.ctx.session.context({ sessionID })), job.startedAt)
+      if (result.failure) throw new Error(result.failure.message ?? "Native init failed.")
+      if (run.cancelled) return
+      const current = this.store.snapshot()
+      const currentJob = current.initJobs[jobID]
+      const currentWorkspace = current.workspaces[claimed.workspaceID]
+      if (!currentJob || currentJob.state !== "running" || !currentWorkspace) return
+      if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(claimed.workspaceID) ?? 0) !== workspaceEpoch) return
+      writeAgentsBlock(currentWorkspace.directory, ensembleBlock())
+      writeInitMetadata(currentWorkspace.directory, ENSEMBLE_BLOCK_VERSION)
+      if (run.cancelled) {
+        this.restoreAgentsFile(currentWorkspace.directory, currentJob)
+        return
+      }
+      const report = initSuccessReport(currentWorkspace.directory, result.text)
+      currentJob.state = "succeeded"
+      currentJob.report = report
+      currentJob.finishedAt = now()
+      currentJob.error = undefined
+      // Mark the job terminal before awaiting storage so a concurrent delete
+      // or archive sees a finished job and cannot half-cancel the write.
+      await this.store.saveInitJob(currentJob)
+      const latest = this.store.snapshot()
+      const messageNow = this.initMessage(latest, currentJob)
+      if (messageNow) {
+        settleStreamMessage(messageNow, report, false)
+        await this.store.saveMessage(messageNow)
+      }
     } catch (error: any) {
-      throw Object.assign(new Error(`Ensemble init failed: ${error?.message ?? error}`), { code: "init_failed" })
+      if (!run.cancelled) await this.failInit(jobID, error?.message ?? String(error))
     } finally {
+      this.liveBySession.delete(sessionID)
       if (sessionID) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
     }
+  }
+
+  private async failInit(jobID: string, message: string): Promise<void> {
+    const state = this.store.snapshot()
+    const job = state.initJobs[jobID]
+    if (!job || job.state !== "running") return
+    const workspace = state.workspaces[job.workspaceID]
+    if (workspace) this.restoreAgentsFile(workspace.directory, job)
+    const report = initFailureReport(message, job.previousAgentsMD !== null)
+    job.state = "failed"
+    job.error = message
+    job.report = report
+    job.finishedAt = now()
+    // Terminal first: a cancellation that arrives while the message save
+    // yields must observe the finished job rather than restoring twice.
+    await this.store.saveInitJob(job)
+    const latest = this.store.snapshot()
+    const row = this.initMessage(latest, job)
+    if (row) {
+      settleStreamMessage(row, report, true)
+      await this.store.saveMessage(row)
+    }
+  }
+
+  private async cancelInitJob(job: InitJob, reason: string, state: "cancelled" | "interrupted" = "cancelled"): Promise<void> {
+    const snapshot = this.store.snapshot()
+    const current = snapshot.initJobs[job.id]
+    if (!current || current.state !== "running") return
+    const run = this.initRuns.get(job.id)
+    if (run) run.cancelled = true
+    const sessionID = current.sessionID ?? run?.sessionID
+    const workspace = snapshot.workspaces[current.workspaceID]
+    if (workspace) this.restoreAgentsFile(workspace.directory, current)
+    const report = initCancelReport(reason, current.previousAgentsMD !== null)
+    current.state = state
+    current.error = reason
+    current.report = report
+    current.finishedAt = now()
+    await this.store.saveInitJob(current)
+    const latest = this.store.snapshot()
+    const row = this.initMessage(latest, current)
+    if (row) {
+      settleStreamMessage(row, report, true)
+      await this.store.saveMessage(row)
+    }
+    if (sessionID) {
+      await this.ctx.session.interrupt({ sessionID, resume: false }).catch(() => undefined)
+      this.liveBySession.delete(sessionID)
+      await this.ctx.session.remove({ sessionID }).catch(() => undefined)
+    }
+  }
+
+  private async cancelActiveInitJobs(workspaceID: string | undefined, reason: string, state: "cancelled" | "interrupted" = "cancelled"): Promise<void> {
+    const jobs = Object.values(this.store.snapshot().initJobs)
+      .filter((job) => job.state === "running" && (!workspaceID || job.workspaceID === workspaceID))
+    for (const job of jobs) await this.cancelInitJob(job, reason, state)
+  }
+
+  private async waitForInitRuns(): Promise<void> {
+    const promises = [...this.initRuns.values()].map((run) => run.promise)
+    if (promises.length === 0) return
+    await Promise.race([Promise.allSettled(promises), new Promise<void>((resolve) => setTimeout(resolve, 2000))])
   }
 
   private async scanStorage(prefix: string): Promise<Array<{ key: string; value: any }>> {
@@ -1121,6 +1347,8 @@ export class EnsembleV2Service {
     if (confirmation !== "RESET") throw Object.assign(new Error('Type RESET to confirm.'), { code: "confirmation_required" })
     this.globalEpoch++
     this.workspaceEpoch.clear()
+    await this.cancelActiveInitJobs(undefined, "Ensemble was reset.")
+    await this.waitForInitRuns()
     for (const run of this.activeRuns.values()) await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
     await this.waitForRuns()
     const bindings = await this.scanStorage("v2/binding/")
@@ -1163,6 +1391,7 @@ export class EnsembleV2Service {
     workspace.archived = true
     workspace.lastActiveAt = now()
     this.workspaceEpoch.set(workspaceID, (this.workspaceEpoch.get(workspaceID) ?? 0) + 1)
+    await this.cancelActiveInitJobs(workspaceID, "Workspace archived.")
     await this.store.saveWorkspace(workspace)
     try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
     if (state.ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...state.ui, activeWorkspaceID: undefined })
@@ -1178,6 +1407,7 @@ export class EnsembleV2Service {
     const workspace = state.workspaces[workspaceID]
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     this.workspaceEpoch.set(workspaceID, (this.workspaceEpoch.get(workspaceID) ?? 0) + 1)
+    await this.cancelActiveInitJobs(workspaceID, "Workspace deleted.")
     await this.cancelWorkspaceSubtasks(workspaceID, "Workspace deleted.")
     for (const run of this.activeRuns.values()) {
       if (run.workspaceID === workspaceID) await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
@@ -1556,11 +1786,12 @@ export class EnsembleV2Service {
     return (await this.createWorkItem(input)).subtask
   }
 
-  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; correlationID?: string; updatedAt?: number }): Promise<Message> {
+  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; correlationID?: string; updatedAt?: number }): Promise<Message> {
     return this.store.appendMessage(workspace.id, {
       id: id("msg"),
       author: input.author,
       agentID: input.agentID,
+      displayAuthor: input.displayAuthor,
       text: input.text,
       kind: input.kind,
       taskID: input.taskID,

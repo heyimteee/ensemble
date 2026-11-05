@@ -77,4 +77,21 @@ test("ticket101: the composer palette is cursor-scoped and submits through the s
   assert.ok(planner.includes("generalSkills: []"), "the planner keeps the general-skill extension point")
 })
 
+test("System Agent display authors render as left bubbles and never fall through to native /init", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  assert.ok(components.includes("displayAuthor?: string"), "ChatLine carries a non-roster display author")
+  assert.ok(app.includes("message.displayAuthor ?? "), "the transcript prefers the display author over roster lookup")
+  assert.ok(app.includes("displayAuthor: message.displayAuthor"), "the display author survives into the rendered line")
+  assert.ok(
+    app.includes("authorColor({ agentID: message.agentID, author: message.author, displayAuthor: message.displayAuthor, role: message.role })"),
+    "the System Agent keeps its information author color",
+  )
+  const guard = app.indexOf("const initIssue = initComposerIssue(text)")
+  const command = app.indexOf("parseSlashCommand(text)")
+  assert.ok(guard >= 0 && command > guard, "the composer rejects mixed init text before slash-command fallthrough")
+  assert.ok(app.includes('invoke(context, "workspace.init", { id: workspace.id, text: "/init" })'), "every trigger sends the normalized /init audit text")
+  assert.ok(!app.includes('"AGENTS.md initialized in '), "init no longer claims completion before the System Agent job finishes")
+})
+
 

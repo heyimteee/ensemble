@@ -8,6 +8,7 @@ import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
+import { SYSTEM_AGENT_NAME } from "./system-agent.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -19,7 +20,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   const removedSessions: string[] = []
   const interruptedSessions: string[] = []
   const movedSessions: Array<{ sessionID: string; directory: string }> = []
-  const commands: Array<{ sessionID: string; name: string }> = []
+  const commands: Array<{ sessionID: string; name: string; text?: string }> = []
   const prompts: any[] = []
   const createdSessionIDs: string[] = []
   let sessions = 0
@@ -76,7 +77,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
       interrupt: async ({ sessionID }: any) => { interruptedSessions.push(sessionID) },
       remove: async ({ sessionID }: any) => { removedSessions.push(sessionID) },
       move: async ({ sessionID, directory }: any) => { movedSessions.push({ sessionID, directory }); return { data: { id: sessionID, directory } } },
-      command: async ({ sessionID, name }: any) => { commands.push({ sessionID, name }); return { data: {} } },
+      command: async ({ sessionID, name, text }: any) => { commands.push({ sessionID, name, text }); return { data: {} } },
     },
     tool: { transform: async (factory: any) => factory({ namespace() {}, add(tool: any) { tools.set(tool.name, tool) } }) },
     rpc: {
@@ -1390,28 +1391,106 @@ test("group replies stream as one growing message and finalize", async () => {
   }
 })
 
-test("init runs native /init then places the versioned block at the top", async () => {
+test("init runs as a visible System Agent job and publishes the full report", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx, commands } = fakeContext()
-  ;(ctx.session as any).command = async ({ sessionID, name }: any) => {
-    commands.push({ sessionID, name })
+  ;(ctx.session as any).command = async ({ sessionID, name, text }: any) => {
+    commands.push({ sessionID, name, text })
     writeFileSync(join(directory, "AGENTS.md"), "# Repo\n\nExisting.\n")
     return { data: {} }
   }
+  ;(ctx.session as any).context = async () => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Native init inspected the repo." }] }],
+  })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
     const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
-    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id } })
+    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
     assert.equal(init.ok, true)
-    assert.ok(commands.some((entry) => entry.name === "init"))
+    assert.ok(init.result.jobID)
+    assert.ok(init.result.messageID)
+    const during = await handlers.snapshot({ directory })
+    const messages = during.state.messages[workspace.result.id]
+    const audit = messages.find((message: any) => message.author === "user" && message.text === "/init")
+    const streaming = messages.find((message: any) => message.id === init.result.messageID)
+    assert.ok(audit, "the trigger leaves a visible /init user line")
+    assert.ok(streaming)
+    assert.equal(streaming.displayAuthor, SYSTEM_AGENT_NAME)
+    assert.equal(streaming.author, "agent")
+    assert.equal(streaming.streaming, true)
+    assert.equal(Object.values(during.state.agents).some((agent: any) => agent.name === SYSTEM_AGENT_NAME), false)
+    assert.equal(during.state.initJobs[init.result.jobID].state, "running")
+    const command = commands.find((entry) => entry.name === "init")
+    assert.ok(command, "native /init runs inside the temporary session")
+    assert.match(String(command?.text), /ensemble_init/)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.initJobs[init.result.jobID]?.state === "succeeded"
+    }, 3000)
+    const final = await handlers.snapshot({ directory })
+    const report = final.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
+    assert.ok(report)
+    assert.equal(report.streaming, false)
+    assert.equal(report.interrupted, false)
+    assert.equal(report.displayAuthor, SYSTEM_AGENT_NAME)
+    assert.match(report.text, /Ensemble init complete/)
+    assert.match(report.text, /Native init inspected the repo\./)
+    const job = final.state.initJobs[init.result.jobID]
+    assert.ok(job.sessionID)
+    assert.equal(job.sessionID.startsWith("session_"), true)
+    assert.equal(commands.filter((entry) => entry.name === "init").length, 1)
     const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
     assert.ok(content.startsWith("<!-- ensemble:start v2 -->"))
     assert.ok(content.includes("# Repo"))
     assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1)
+    const metadata = JSON.parse(readFileSync(join(directory, ".ensemble", "init.json"), "utf8"))
+    assert.equal(metadata.version, 2)
   } finally {
+    await stop()
+  }
+})
+
+test("init streams native worker text into the System Agent message before finalizing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, emitEvent } = fakeContext()
+  let release: (() => void) | undefined
+  const parked = new Promise<void>((resolve) => { release = resolve })
+  ;(ctx.session as any).wait = async () => { await parked }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
+    assert.equal(init.ok, true)
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      sessionID = next.state.initJobs[init.result.jobID]?.sessionID ?? ""
+      return Boolean(sessionID)
+    })
+    emitEvent({ type: "session.text.delta", data: { sessionID, delta: "Streamed init progress" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const message = next.state.messages[workspace.result.id].find((item: any) => item.id === init.result.messageID)
+      return message?.streaming === true && String(message.text).includes("Streamed init progress")
+    })
+    release?.()
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.initJobs[init.result.jobID]?.state === "succeeded"
+    }, 3000)
+    const final = await handlers.snapshot({ directory })
+    const message = final.state.messages[workspace.result.id].find((item: any) => item.id === init.result.messageID)
+    assert.ok(message)
+    assert.equal(message.streaming, false)
+    assert.match(message.text, /Ensemble init complete/)
+  } finally {
+    release?.()
     await stop()
   }
 })
@@ -1589,7 +1668,7 @@ test("editing an agent cannot resurrect an archived workspace config", async () 
   }
 })
 
-test("failed init leaves no AGENTS.md block", async () => {
+test("failed init removes AGENTS.md that did not exist and reports the failure", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   ;(ctx.session as any).wait = async () => { throw new Error("agent failed") }
@@ -1599,10 +1678,214 @@ test("failed init leaves no AGENTS.md block", async () => {
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
     const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
-    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id } })
-    assert.equal(init.ok, false)
-    assert.equal(init.error?.code, "init_failed")
+    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
+    assert.equal(init.ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.initJobs[init.result.jobID]?.state === "failed"
+    }, 3000)
+    const final = await handlers.snapshot({ directory })
+    const failedJob = final.state.initJobs[init.result.jobID]
+    assert.ok(failedJob.error)
+    assert.match(failedJob.error, /agent failed/)
     assert.equal(existsSync(join(directory, "AGENTS.md")), false)
+    const report = final.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
+    assert.ok(report)
+    assert.equal(report.streaming, false)
+    assert.equal(report.interrupted, true)
+    assert.match(report.text, /Ensemble init failed/)
+    assert.match(report.text, /removed/)
+  } finally {
+    await stop()
+  }
+})
+
+test("init rejects duplicate runs and non-solo or direct requests before appending anything", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, interruptedSessions } = fakeContext()
+  let release: (() => void) | undefined
+  const parked = new Promise<void>((resolve) => { release = resolve })
+  ;(ctx.session as any).wait = async () => { await parked }
+  ;(ctx.session as any).interrupt = async ({ sessionID }: any) => { interruptedSessions.push(sessionID); release?.() }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const solo = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "$Nova /init" } })
+    assert.equal(solo.ok, false)
+    assert.equal(solo.error?.code, "init_solo")
+    const mixed = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init /plan" } })
+    assert.equal(mixed.ok, false)
+    assert.equal(mixed.error?.code, "init_solo")
+    const direct = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init", direct: true } })
+    assert.equal(direct.ok, false)
+    assert.equal(direct.error?.code, "init_workspace_only")
+    const before = await handlers.snapshot({ directory })
+    assert.equal(Object.keys(before.state.initJobs).length, 0)
+    assert.equal((before.state.messages[workspace.result.id] ?? []).length, 0)
+    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
+    assert.equal(init.ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Boolean(next.state.initJobs[init.result.jobID]?.sessionID)
+    })
+    const duplicate = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
+    assert.equal(duplicate.ok, false)
+    assert.equal(duplicate.error?.code, "init_running")
+    const during = await handlers.snapshot({ directory })
+    assert.equal((during.state.messages[workspace.result.id] ?? []).filter((message: any) => message.author === "user" && message.text === "/init").length, 1)
+  } finally {
+    release?.()
+    await stop()
+  }
+})
+
+test("service restart marks a running init interrupted, restores AGENTS.md, and tells the user to rerun", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const previous = "# Before restart\n"
+  writeFileSync(join(directory, "AGENTS.md"), previous)
+  const { ctx, removedSessions } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: "Initializing workspace…", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", previousAgentsMD: previous, startedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.initJobs.init_1.state, "interrupted")
+    assert.ok(after.state.initJobs.init_1.error)
+    assert.match(after.state.initJobs.init_1.error, /restart/i)
+    const message = after.state.messages.w.find((item: any) => item.id === "m")
+    assert.ok(message)
+    assert.equal(message.streaming, false)
+    assert.equal(message.interrupted, true)
+    assert.match(message.text, /restart/i)
+    assert.match(message.text, /rerun/i)
+    assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
+    assert.ok(removedSessions.includes("old_session"))
+  } finally {
+    await stop()
+  }
+})
+
+test("workspace archive cancels an active init, restores AGENTS.md, and removes its temporary session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const previous = "# Archive rollback\n"
+  writeFileSync(join(directory, "AGENTS.md"), previous)
+  const { ctx, removedSessions, interruptedSessions } = fakeContext()
+  let release: (() => void) | undefined
+  const parked = new Promise<void>((resolve) => { release = resolve })
+  ;(ctx.session as any).wait = async () => { await parked }
+  ;(ctx.session as any).interrupt = async ({ sessionID }: any) => { interruptedSessions.push(sessionID); release?.() }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      sessionID = next.state.initJobs[init.result.jobID]?.sessionID ?? ""
+      return Boolean(sessionID)
+    })
+    const archived = await handlers.invoke({ directory, action: "workspace.archive", payload: { id: workspace.result.id } })
+    assert.equal(archived.ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.initJobs[init.result.jobID]?.state === "cancelled"
+    }, 3000)
+    const after = await handlers.snapshot({ directory })
+    const job = after.state.initJobs[init.result.jobID]
+    assert.equal(job.state, "cancelled")
+    assert.ok(job.error)
+    assert.match(job.error, /archiv/i)
+    const message = after.state.messages[workspace.result.id].find((item: any) => item.id === init.result.messageID)
+    assert.ok(message)
+    assert.equal(message.streaming, false)
+    assert.equal(message.interrupted, true)
+    assert.match(message.text, /cancelled/i)
+    assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
+    assert.ok(interruptedSessions.includes(sessionID))
+    assert.ok(removedSessions.includes(sessionID))
+  } finally {
+    release?.()
+    await stop()
+  }
+})
+
+test("workspace delete and reset cancel active init jobs and remove their temporary sessions", async () => {
+  for (const action of ["workspace.delete", "ensemble.reset"] as const) {
+    const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+    const previous = `# ${action} rollback\n`
+    writeFileSync(join(directory, "AGENTS.md"), previous)
+    const { ctx, removedSessions, interruptedSessions } = fakeContext()
+    let release: (() => void) | undefined
+    const parked = new Promise<void>((resolve) => { release = resolve })
+    ;(ctx.session as any).wait = async () => { await parked }
+    ;(ctx.session as any).interrupt = async ({ sessionID }: any) => { interruptedSessions.push(sessionID); release?.() }
+    const service = new EnsembleV2Service(ctx)
+    const stop = await service.start()
+    const handlers = service.handlers()
+    try {
+      const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+      const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+      const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
+      let sessionID = ""
+      await waitFor(async () => {
+        const next = await handlers.snapshot({ directory })
+        sessionID = next.state.initJobs[init.result.jobID]?.sessionID ?? ""
+        return Boolean(sessionID)
+      })
+      const result = action === "workspace.delete"
+        ? await handlers.invoke({ directory, action, payload: { id: workspace.result.id } })
+        : await handlers.invoke({ directory, action, payload: { confirmation: "RESET" } })
+      assert.equal(result.ok, true)
+      await waitFor(() => Promise.resolve(removedSessions.includes(sessionID)), 3000)
+      assert.ok(interruptedSessions.includes(sessionID))
+      assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
+      const after = await handlers.snapshot({ directory })
+      assert.equal(after.state.initJobs[init.result.jobID], undefined)
+    } finally {
+      release?.()
+      await stop()
+    }
+  }
+})
+
+test("failed init restores the previous AGENTS.md content", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const previous = "# Project rules\n\nKeep this line.\n"
+  writeFileSync(join(directory, "AGENTS.md"), previous)
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).command = async () => {
+    writeFileSync(join(directory, "AGENTS.md"), "<!-- ensemble:start v2 -->\npartial\n<!-- ensemble:end -->\n")
+    return { data: {} }
+  }
+  ;(ctx.session as any).wait = async () => { throw new Error("native init failed") }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.initJobs[init.result.jobID]?.state === "failed"
+    }, 3000)
+    assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
+    const final = await handlers.snapshot({ directory })
+    const report = final.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
+    assert.ok(report)
+    assert.match(report.text, /restored/)
   } finally {
     await stop()
   }
