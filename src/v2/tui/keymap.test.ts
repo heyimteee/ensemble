@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import {
   KEYMAP_CATALOG,
   duplicateBindings,
+  keyChordLabel,
   keyLabel,
   layerEntries,
   leaderEntries,
@@ -357,9 +358,14 @@ test("key labels read like Vim/terminal keys", () => {
   assert.equal(keyLabel(["g", "g"]), "gg")
   assert.equal(keyLabel(["shift+g"]), "G")
   assert.equal(keyLabel(["ctrl+d"]), "Ctrl+D")
+  assert.equal(keyLabel(["ctrl+shift+w"]), "Ctrl+Shift+W")
+  assert.equal(keyLabel(["ctrl+shift+delete"]), "Ctrl+Shift+Delete")
   assert.equal(keyLabel(["enter"]), "Enter")
   assert.equal(keyLabel(["space"]), "Space")
   assert.equal(keyLabel(["escape"]), "Esc")
+  assert.equal(keyLabel(["p"]), "p", "plain Vim keys keep their case")
+  assert.equal(keyChordLabel(["d", "shift+g"]), "dG")
+  assert.equal(keyChordLabel(["g", "g"]), "gg")
 })
 
 test("raw keypresses normalize to catalog tokens", () => {

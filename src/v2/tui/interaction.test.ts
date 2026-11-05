@@ -120,6 +120,19 @@ test("a dialog text field goes Insert -> field Normal -> cancel on the Esc ladde
   assert.deepEqual(cancelled.intents, [{ type: "close-overlay", overlay: "dialog" }])
 })
 
+test("help opens and closes without changing the underlying mode or focus", () => {
+  for (const focus of ["rail", "chat", "work", "composer"] as const) {
+    const opened = reduce(initialInteractionState({ focus }), { type: "overlay.set", overlay: "help" })
+    assert.equal(opened.state.overlay, "help")
+    assert.equal(opened.state.mode, "normal", "help is a Normal-mode context")
+    assert.equal(opened.state.focus, focus, "opening help keeps the underlying focus")
+    const closed = reduce(opened.state, { type: "overlay.set", overlay: "none" })
+    assert.equal(closed.state.overlay, "none")
+    assert.equal(closed.state.mode, "normal")
+    assert.equal(closed.state.focus, focus, "closing help returns to the same focus")
+  }
+})
+
 test("closing a dialog never leaks Insert into the surface underneath", () => {
   const editing = reduce(
     reduce(initialInteractionState(), { type: "overlay.set", overlay: "dialog" }).state,

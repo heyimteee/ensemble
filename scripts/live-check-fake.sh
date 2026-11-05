@@ -844,16 +844,18 @@ live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "second Esc returns to ch
 live_log "slice E focus walkthrough shows context footers with no hidden-work hints"
 
 # Slice E help: tone-down keeps every shortcut searchable; the zero state
-# names the fix.
+# names the fix. v5.6 T10 filters through the shared `/` grammar.
 live_key "$LIVE_TUI_SESSION" Space
 live_require_text "$LIVE_TUI_SESSION" "LEADER" 10 "leader mode before help"
 live_key "$LIVE_TUI_SESSION" '?'
 live_require_text "$LIVE_TUI_SESSION" "Keyboard shortcuts" 15 "searchable shortcut help"
+live_key "$LIVE_TUI_SESSION" "/"
 live_type "$LIVE_TUI_SESSION" "zzz-no-shortcut"
 live_require_text "$LIVE_TUI_SESSION" "No matching shortcuts" 10 "help zero state names the miss"
 live_assert_absence "$LIVE_TUI_SESSION" "Delete workspace" "help filter hid unrelated shortcuts"
 live_key_repeat "$LIVE_TUI_SESSION" "BSpace" 20
-live_require_text "$LIVE_TUI_SESSION" "Leader key" 10 "help filter cleared"
+live_require_text "$LIVE_TUI_SESSION" "Modes and Esc ladder" 10 "help filter cleared"
+live_key "$LIVE_TUI_SESSION" Enter
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Keyboard shortcuts" 10 "help closed"
