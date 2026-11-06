@@ -161,13 +161,6 @@ export function wizardStepRail(count: number, index: number): string {
   return cells.join(" ")
 }
 
-/** Transient announcement shown when a step moves forward or back. */
-export function wizardStepAnnouncement(title: string | undefined, index: number, count: number): string {
-  const total = Math.max(0, Math.trunc(count))
-  const position = total === 0 ? 0 : Math.max(0, Math.min(total - 1, Math.trunc(index))) + 1
-  return title ? `Step ${position}/${total} · ${title}` : `Step ${position}/${total}`
-}
-
 /**
  * The step transition is a short one-shot opacity settle, never geometry.
  * Reduced motion (or No Color) pins the content at its final state, so the
