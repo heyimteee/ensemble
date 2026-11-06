@@ -36,7 +36,7 @@ test("the selection marker is one consistent grammar across settings surfaces", 
   assert.equal(settingsCursorMark(false), "  ")
 })
 
-test("the settings header names the agent, dirty, and pending states", () => {
+test("the settings header names the agent, dirty, saved, and pending states", () => {
   assert.equal(settingsHeader("FakeAgent", false, false), "FakeAgent │ settings")
   assert.ok(settingsHeader("FakeAgent", true, false).includes("UNSAVED"), "dirty names UNSAVED")
   assert.ok(
@@ -44,6 +44,12 @@ test("the settings header names the agent, dirty, and pending states", () => {
     "pending names the next-task deferral",
   )
   assert.equal(settingsHeader("FakeAgent", true, true), "FakeAgent │ settings │ UNSAVED │ pending next task")
+  assert.equal(settingsHeader("FakeAgent", false, false, true), "FakeAgent │ settings │ Saved")
+  assert.equal(
+    settingsHeader("FakeAgent", true, false, true),
+    "FakeAgent │ settings │ UNSAVED",
+    "a new edit supersedes the previous saved state",
+  )
 })
 
 test("every tab renders a section header carrying its counts", () => {
