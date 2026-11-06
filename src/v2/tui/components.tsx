@@ -35,6 +35,7 @@ import {
 } from "./chrome.ts"
 import { helpEntryKey, type HelpEntry, type HelpSection } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
+import { railRowKey, type RailEmphasis } from "./rail.ts"
 import { MOUSE_PANE_IDS } from "./mouse.ts"
 import { statuslineHints } from "./keymap.ts"
 import { displayWidth, fitStatuslineSegments, type StatuslinePart, type StatuslineSegment, type StatuslineTone } from "./statusline.ts"
@@ -245,7 +246,21 @@ export function Rail(props: {
   width: number
   filter: string
   motionTick?: number
+  /** One-shot unread/approval pulses and quiet row arrivals from ticket #121. */
+  emphasis?: RailEmphasis
 }) {
+  const approvalCountParts = (): StyledLinePart[] => {
+    const parts: StyledLinePart[] = [{ text: "APPROVALS", fg: props.colors.accent }]
+    if (props.pendingApprovals > 0) {
+      const pulse = Boolean(props.emphasis?.approval)
+      parts.push({
+        text: ` (${props.pendingApprovals})`,
+        fg: pulse ? props.colors.warn : props.colors.accent,
+        attributes: pulse ? TextAttributes.BOLD : undefined,
+      })
+    }
+    return parts
+  }
   return (
     <box id={MOUSE_PANE_IDS.rail} width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
       <Show when={props.filter}>
@@ -268,6 +283,12 @@ export function Rail(props: {
         const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
         const unread = workspace ? unreadCount(props.state, workspace) : 0
         const busy = workspace ? busyCount(props.state, workspace.id) : 0
+        // Ticket #121: unread growth pulses the count once; a newly arrived row
+        // settles from muted to its normal tone without movement. Selection
+        // always wins the tone, so arrival emphasis never hides the cursor.
+        const unreadPulse = () => Boolean(props.emphasis?.unread.has(item.id))
+        const arriving = () => Boolean(props.emphasis?.arrivals.has(railRowKey(item.kind, item.id)))
+        const rowTone = () => selected() ? props.colors.good : arriving() ? props.colors.muted : props.colors.text
         return (
           <>
             <Show when={kindHeader === railGroupLine("workspace", workspaceCount)}>
@@ -281,7 +302,7 @@ export function Rail(props: {
             </Show>
             <box flexDirection="column">
               <box flexDirection="row" width="100%">
-                <text fg={selected() ? props.colors.good : props.colors.text} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
+                <text fg={rowTone()} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
                   {settingsCursorMark(selected() && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
                 </text>
                 <Show when={item.kind === "agent" && item.leader}>
@@ -290,7 +311,7 @@ export function Rail(props: {
                 </Show>
                 <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
                 <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> {railBusyMark(busy, props.motionTick ?? 0, process.env)}</text></Show>
-                <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ●{unread}</text></Show>
+                <Show when={unread > 0}><text fg={unreadPulse() ? props.colors.info : props.colors.muted} bg={props.colors.bg} flexShrink={0} attributes={unreadPulse() ? TextAttributes.BOLD : undefined}> ●{unread}</text></Show>
               </box>
               <Show when={item.kind === "agent"}>
                 <Show when={(item.description ?? "").trim()}>
@@ -306,7 +327,7 @@ export function Rail(props: {
       }}</For>
       <Show when={props.items.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{railEmptyLine()}</text></Show>
       <text> </text>
-      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>APPROVALS {props.pendingApprovals > 0 ? `(${props.pendingApprovals})` : ""}</text>
+      <StyledLineText parts={approvalCountParts} fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate />
       <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>v opens inbox</text>
     </box>
   )
