@@ -41,8 +41,15 @@ import {
   wizardModelKeyFor,
   wizardModelOptions,
   wizardMemorySaveList,
+  wizardStepAnnouncement,
   wizardStepArrival,
+  wizardStepRail,
+  wizardStepSettleMs,
+  wizardStepSettleOpacity,
+  wizardSuccessToast,
+  wizardValidation,
   type WizardDraft,
+  type WizardToast,
 } from "./wizard.ts"
 import { EMPTY_MARK, isReducedMotion, shouldRunMotion } from "./motion.ts"
 import {
@@ -359,6 +366,9 @@ export function EnsembleV2App() {
   // this at the empty set and starts no timer.
   const [railEmphasis, setRailEmphasis] = createSignal<RailEmphasis>(emptyRailEmphasis())
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
+  // One-shot step settle: the content dims once on arrival and returns to
+  // full color, never moving geometry. Reduced motion leaves it settled.
+  const [wizardSettling, setWizardSettling] = createSignal(false)
   // The persistent memory field's live buffer. The renderable's ref can trail
   // a step switch by one frame, so the pure state owns the text Enter saves.
   const [wizardMemoryInput, setWizardMemoryInput] = createSignal("")
@@ -386,6 +396,8 @@ export function EnsembleV2App() {
   // Remember where settings was opened so closing returns to the same column.
   let settingsReturnFocus: InteractionFocus = "chat"
   let messageTimer: ReturnType<typeof setTimeout> | undefined
+  let wizardSettleTimer: ReturnType<typeof setTimeout> | undefined
+  let wizardSettledKey = ""
 
   // v5.7 T2: every text editor paints the same mode-driven caret. A block in
   // Normal shows the character Vim acts on; a line in Insert/Visual/Command
@@ -457,6 +469,13 @@ export function EnsembleV2App() {
     }, 3_000)
   }
   onCleanup(() => { if (messageTimer !== undefined) clearTimeout(messageTimer) })
+
+  // Wizard success feedback goes through the app toast surface. The app-owned
+  // toast scene lands separately; this is the single call site the wizard uses
+  // so that transport can change without touching the success paths.
+  const showWizardToast = (toast: WizardToast) => {
+    try { context.ui.toast.show(toast) } catch {}
+  }
 
   // v5.6 T7: Normal-mode Vim editing for every text buffer. One internal
   // register is shared by the composer, prompts, and wizard fields; the
@@ -1629,6 +1648,7 @@ export function EnsembleV2App() {
       await invoke(context, "workspace.activate", { id: workspace.id })
     })
     if (created) {
+      showWizardToast(wizardSuccessToast("workspace-created", created.name))
       await offerMoveHome(created, draft.memberIDs)
       await refresh()
     }
@@ -1655,7 +1675,7 @@ export function EnsembleV2App() {
       for (const text of memories) {
         await invoke(context, "memory.add", { agentID: agent.id, scope: "project", text, source: "wizard" }).catch(() => undefined)
       }
-      context.ui.toast.show({ title: "Ensemble", message: `${agent.name} created. Opening a direct chat.${memories.length > 0 ? ` Saved ${memories.length} ${memories.length === 1 ? "memory" : "memories"}.` : ""}`, variant: "success" })
+      showWizardToast(wizardSuccessToast("agent-created", agent.name, memories.length))
       openAgent(agent)
     })
   }
@@ -1674,10 +1694,11 @@ export function EnsembleV2App() {
     if (!workspace) return
     const draft = await openWizard("workspace", workspace)
     if (!draft) return
-    await run("Update workspace", async () => {
+    const updated = await run("Update workspace", async () => {
       await invoke(context, "workspace.update", { id: workspace.id, memberIDs: draft.memberIDs, leaderID: draft.leaderID, synthesis: draft.synthesis })
       await offerMoveHome(workspace, draft.memberIDs.filter((id) => !workspace.memberIDs.includes(id)))
     })
+    if (updated) showWizardToast(wizardSuccessToast("workspace-updated", workspace.name))
   }
 
   const composerPlan = (text: string, ownerSelections?: Record<string, string>) => {
@@ -3577,6 +3598,43 @@ export function EnsembleV2App() {
     return state && step ? `${state.index}:${step.key}:${state.customDirectory ? "custom" : "list"}` : ""
   }
 
+  // Forward and back share one one-shot settle keyed by the step identity.
+  // A changed key starts the short dim interval; reduced motion starts and
+  // ends it immediately so the next step is simply there.
+  const clearWizardSettle = () => {
+    if (wizardSettleTimer !== undefined) {
+      clearTimeout(wizardSettleTimer)
+      wizardSettleTimer = undefined
+    }
+  }
+  createEffect(() => {
+    const active = wizard()
+    const key = active ? wizardStepKey() : ""
+    if (!active) {
+      wizardSettledKey = ""
+      clearWizardSettle()
+      setWizardSettling(false)
+      return
+    }
+    if (key === wizardSettledKey) return
+    wizardSettledKey = key
+    clearWizardSettle()
+    const duration = wizardStepSettleMs()
+    if (duration <= 0) {
+      setWizardSettling(false)
+      return
+    }
+    setWizardSettling(true)
+    wizardSettleTimer = setTimeout(() => {
+      wizardSettleTimer = undefined
+      setWizardSettling(false)
+    }, duration)
+  })
+  onCleanup(() => {
+    clearWizardSettle()
+    wizardSettledKey = ""
+  })
+
   const wizardItems = (): WizardOption[] => {
     const state = wizard()
     const step = wizardStep()
@@ -3621,44 +3679,18 @@ export function EnsembleV2App() {
 
   const wizardFinal = (state: WizardState) => !state.customDirectory && state.index >= state.steps.length - 1
 
-  const validateWizard = (state: WizardState): string | undefined => {
-    const draft = state.draft
-    if (state.flow === "workspace") {
-      if (!draft.directory.trim()) return "Choose a workspace directory."
-      if (!draft.name.trim()) return "Workspace name is required."
-      if (draft.memberIDs.length === 0) return "Choose at least one member."
-      if (!draft.leaderID || !draft.memberIDs.includes(draft.leaderID)) return "Choose a leader from the selected members."
-      return undefined
-    }
-    if (!draft.name.trim()) return "Agent name is required."
-    if (!draft.role.trim()) return "Agent role is required."
-    if (!draft.modelKey) return "Choose a main model."
-    if (rosterAgents().some((agent) => agent.name.toLowerCase() === draft.name.trim().toLowerCase())) return "An agent with that name already exists."
-    const model = models().find((item) => `${item.providerID}/${item.modelID}` === draft.modelKey)
-    if (model && model.variants.length > 0 && !model.variants.includes(draft.variant)) return "Choose a reasoning effort."
-    return undefined
-  }
-
-  const wizardInvalidIndex = (state: WizardState): number => {
-    const draft = state.draft
-    let key = ""
-    if (state.flow === "workspace") {
-      if (!draft.directory.trim()) key = "directory"
-      else if (!draft.name.trim()) key = "name"
-      else if (draft.memberIDs.length === 0) key = "members"
-      else if (!draft.leaderID || !draft.memberIDs.includes(draft.leaderID)) key = "leader"
-    } else {
-      const model = models().find((item) => `${item.providerID}/${item.modelID}` === draft.modelKey)
-      if (!draft.name.trim()) key = "name"
-      else if (!draft.role.trim()) key = "role"
-      else if (!draft.modelKey) key = "model"
-      else if (model && model.variants.length > 0 && !model.variants.includes(draft.variant)) key = "variant"
-    }
-    const index = state.steps.findIndex((step) => step.key === key)
-    return index >= 0 ? index : 0
-  }
+  const validateWizard = (state: WizardState) =>
+    wizardValidation({
+      flow: state.flow,
+      draft: state.draft,
+      agentNames: rosterAgents().map((agent) => agent.name),
+      models: models().map((model) => ({ key: `${model.providerID}/${model.modelID}`, variants: model.variants })),
+    })
 
   const completeWizard = (state: WizardState, value: WizardDraft | undefined) => {
+    // A queued submit or a stale closure must never close a different (or
+    // already closed) wizard a second time.
+    if (wizard() !== state) return
     setWizard(null)
     // A later wizard must never focus the unmounted editor of this one.
     wizardRef = null
@@ -3672,12 +3704,13 @@ export function EnsembleV2App() {
   }
 
   const submitWizard = (state: WizardState) => {
-    const error = validateWizard(state)
-    if (error) {
+    const validation = validateWizard(state)
+    if (validation.error) {
+      const invalid = state.steps.findIndex((step) => step.key === validation.stepKey)
       const next = {
         ...state,
-        index: wizardInvalidIndex(state),
-        error,
+        index: invalid >= 0 ? invalid : 0,
+        error: validation.error,
         query: "",
         filtering: false,
         cursor: 0,
@@ -3688,6 +3721,7 @@ export function EnsembleV2App() {
       wizardMemoryRef = null
       setWizard(next)
       syncWizardMode(next)
+      notify(`Wizard: ${validation.error}`, "error")
       return
     }
     completeWizard(state, state.draft)
@@ -3790,6 +3824,7 @@ export function EnsembleV2App() {
     wizardMemoryRef = null
     setWizard(next)
     syncWizardMode(next)
+    notify(wizardStepAnnouncement(next.steps[next.index]?.title, next.index, next.steps.length), "info")
   }
 
   const wizardNext = () => {
@@ -3816,6 +3851,7 @@ export function EnsembleV2App() {
       const next = { ...state, customDirectory: false, query: "", filtering: false, cursor: 0, error: undefined }
       setWizard(next)
       syncWizardMode(next)
+      notify(wizardStepAnnouncement(next.steps[next.index]?.title, next.index, next.steps.length), "info")
       return
     }
     const step = wizardStep()
@@ -3838,6 +3874,7 @@ export function EnsembleV2App() {
     wizardMemoryRef = null
     setWizard(previous)
     syncWizardMode(previous)
+    notify(wizardStepAnnouncement(previous.steps[previous.index]?.title, previous.index, previous.steps.length), "info")
   }
 
   const wizardMove = (delta: number) => {
@@ -4840,68 +4877,70 @@ export function EnsembleV2App() {
       </Show>
       <Show when={wizard()}>
         <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column" opacity={overlayOpacity()}>
-          <ChromeText colors={colors} fg={colors.focus} bg={colors.panel} width="100%" truncate text={chromeJoin([wizard()!.title, `step ${wizard()!.index + 1} / ${wizard()!.steps.length}`])} />
-          <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
-          <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
-          <Show when={wizardIsMemoryStep()} fallback={
-            <Show when={wizardStep()?.kind === "text"} fallback={
-              <box flexDirection="column" height={9}>
-                <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])} />
-                <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
-                  <Show when={wizardItems().length === 0} fallback={
-                  <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
+          <box width="100%" flexGrow={1} minHeight={0} flexDirection="column" opacity={wizardStepSettleOpacity(wizardSettling())}>
+            <ChromeText colors={colors} fg={colors.focus} bg={colors.panel} width="100%" truncate text={chromeJoin([wizard()!.title, wizardStepRail(wizard()!.steps.length, wizard()!.index), `${wizard()!.index + 1} / ${wizard()!.steps.length}`])} />
+            <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
+            <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
+            <Show when={wizardIsMemoryStep()} fallback={
+              <Show when={wizardStep()?.kind === "text"} fallback={
+                <box flexDirection="column" height={9}>
+                  <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])} />
+                  <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
+                    <Show when={wizardItems().length === 0} fallback={
+                    <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
+                      <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
+                        const state = wizard()
+                        const step = wizardStep()
+                        const items = wizardItems()
+                        if (!state || !step) return ""
+                        const offset = pickerWindow(wizardCursor(), items.length, 8).start
+                        const item = items[offset + slot]
+                        if (!item) return ""
+                        const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
+                        return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.detail ? chromeJoin([item.label, item.detail]) : item.label}`
+                      })()}</text>
+                    )}</For>
+                    }>
+                      <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{pickerEmptyLine()}</text>
+                    </Show>
+                  }>
+                    <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
+                  </Show>
+                </box>
+              }>
+                <Show when={wizardStepKey()} keyed>
+                  <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
+                    <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                  </box>
+                </Show>
+              </Show>
+            }>
+              <box flexDirection="column" height={6} flexShrink={0}>
+                <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`memories: ${wizardMemories().length}`, ...(wizardMemories().length > 0 ? [`${wizardMemoryCursor() + 1}/${wizardMemories().length}`] : [])])} />
+                <Show when={wizardMemories().length === 0} fallback={
+                  <For each={[0, 1, 2, 3]}>{(slot) => (
                     <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
-                      const state = wizard()
-                      const step = wizardStep()
-                      const items = wizardItems()
-                      if (!state || !step) return ""
-                      const offset = pickerWindow(wizardCursor(), items.length, 8).start
-                      const item = items[offset + slot]
-                      if (!item) return ""
-                      const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
-                      return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.detail ? chromeJoin([item.label, item.detail]) : item.label}`
+                      const memories = wizardMemories()
+                      if (memories.length === 0) return ""
+                      const offset = pickerWindow(wizardMemoryCursor(), memories.length, 4).start
+                      const index = offset + slot
+                      const text = memories[index]
+                      if (text === undefined) return ""
+                      return `${index === wizardMemoryCursor() ? "›" : " "} ${index + 1}. ${text}`
                     })()}</text>
                   )}</For>
-                  }>
-                    <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{pickerEmptyLine()}</text>
-                  </Show>
                 }>
-                  <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
+                  <text fg={colors.muted} bg={colors.panel} width="100%" truncate>No memories yet. a adds one.</text>
                 </Show>
               </box>
-            }>
-              <Show when={wizardStepKey()} keyed>
-                <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                  <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+              <Show when={wizard()!.memoryEditor}>
+                <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
+                  <input ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
                 </box>
               </Show>
             </Show>
-          }>
-            <box flexDirection="column" height={6} flexShrink={0}>
-              <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`memories: ${wizardMemories().length}`, ...(wizardMemories().length > 0 ? [`${wizardMemoryCursor() + 1}/${wizardMemories().length}`] : [])])} />
-              <Show when={wizardMemories().length === 0} fallback={
-                <For each={[0, 1, 2, 3]}>{(slot) => (
-                  <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
-                    const memories = wizardMemories()
-                    if (memories.length === 0) return ""
-                    const offset = pickerWindow(wizardMemoryCursor(), memories.length, 4).start
-                    const index = offset + slot
-                    const text = memories[index]
-                    if (text === undefined) return ""
-                    return `${index === wizardMemoryCursor() ? "›" : " "} ${index + 1}. ${text}`
-                  })()}</text>
-                )}</For>
-              }>
-                <text fg={colors.muted} bg={colors.panel} width="100%" truncate>No memories yet. a adds one.</text>
-              </Show>
-            </box>
-            <Show when={wizard()!.memoryEditor}>
-              <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                <input ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
-              </box>
-            </Show>
-          </Show>
-          <Show when={wizard()?.error}><text fg={colors.bad} bg={colors.panel} width="100%" truncate>{wizard()!.error}</text></Show>
+            <Show when={wizard()?.error}><text fg={colors.bad} bg={colors.panel} width="100%" wrapMode="word">{`! ${wizard()!.error}`}</text></Show>
+          </box>
           <box width="100%" flexDirection="row" justifyContent="center" flexShrink={0}>
             <text fg={colors.faint} bg={colors.panel} truncate>{wizardHint()}</text>
           </box>
