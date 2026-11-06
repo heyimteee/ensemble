@@ -1530,8 +1530,12 @@ live_require_text "$LIVE_TUI_SESSION" "Clipboard" 5 "copy feedback uses the app 
 toast_cell=$(live_capture "$LIVE_TUI_SESSION" | awk 'index($0, "Clipboard") { print NR " " index($0, "Clipboard"); exit }')
 [[ -n "$toast_cell" ]] || live_fail "copy toast disappeared before its placement could be read"
 read -r toast_row toast_col <<<"$toast_cell"
+# Ticket #127: the fake scenario is size-parameterized, so "right-aligned"
+# must be relative to the configured width instead of the 160-column default.
+toast_width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
 [[ "$toast_row" -le 8 ]] || live_fail "copy toast is not near the top (row $toast_row)"
-[[ "$toast_col" -ge 90 ]] || live_fail "copy toast is not right-aligned at 160 columns (column $toast_col)"
+[[ "$toast_col" -gt $((toast_width / 2)) ]] \
+  || live_fail "copy toast is not in the right half at ${toast_width} columns (column $toast_col)"
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ COMPOSER" 10 "copy toast does not steal composer focus"
 live_log "ticket #119 copy toast is top-right and leaves keys with the composer"
 live_key "$LIVE_TUI_SESSION" "p"

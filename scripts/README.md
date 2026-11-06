@@ -152,6 +152,29 @@ It implements `/v1/models` and `/v1/chat/completions` (also without `/v1`).
 `fake-rich-fixture` selects the Markdown reply; other prompts get a short
 onboarding reply. SSE ends with `finish_reason: "stop"` and `[DONE]`.
 
+## Size matrix
+
+`npm run test:live:sizes` (ticket #127) is the targeted Work-card geometry
+check. It starts the isolated fake host once, creates three agents and one
+workspace through the RPC surface, then restarts the TUI at 80×24, 100×30,
+120×40, and 160×50. At each size it delegates one long-running fake task per
+agent and checks the Work header, the visible card count, the overflow line,
+compact fallback, focus ownership, and the composer. Override the set with
+`ENSEMBLE_V6_SIZES="120x40 160x50"`.
+
+The same run records the TUI process CPU and tmux pane updates for one, two,
+and three working cards at 160×50. These numbers are observations, not
+thresholds. It also restarts once with `NO_COLOR=1` and checks frame-0
+motion plus the state word. It is Linux/tmux only, like the rest of the live
+harness, and is not a substitute for the full `test:live:fake` scenario or the
+macOS/Herdr checklist.
+
+The full `test:live:fake` scenario keeps its 160×80 default and contains
+viewport-sensitive transcript assertions. Use the size matrix for other
+geometries; running the full scenario at a smaller height can fail because a
+finalized rich reply is not visible in the shorter pane, not because the Work
+layout is wrong.
+
 ## Issue hygiene
 
 `npm run issue:hygiene` is a read-only GitHub listing for tracker cleanup. It

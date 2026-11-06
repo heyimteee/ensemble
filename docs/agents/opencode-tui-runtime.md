@@ -112,6 +112,7 @@ Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` insta
 | `npm run test:live:fake:all` | Fake then empty-catalog scenarios in order; fails fast and prints a compact `PASS`/`FAIL`/`SKIP` summary. Deterministic fake-and-empty suite. |
 | `npm run test:live:all` | The full local matrix: fake, empty catalog, then real host catalog. Same fail-fast summary; the real scenario is not deterministic and stays local. |
 | `npm run test:live:latency` | Reproducible keypress-to-repaint probe on the isolated fake host: rail `j`/`k` from `tmux send-keys` to the first capture showing the moved cursor. Reports samples and percentiles; no threshold gate. |
+| `npm run test:live:sizes` | Targeted Work-card size matrix at 80×24, 100×30, 120×40, and 160×50 on the isolated fake host. Checks card/compact layout, overflow, focus, and composer; records TUI CPU for one to three working cards and runs a `NO_COLOR=1` still-motion check. Linux/tmux only. |
 | `npm run test:live:preflight` | Resolve and print the live Node/OpenCode/tmux versions; pass `all` to include the real scenario's `fd`. Missing tools follow the [skip-versus-fail contract](../../scripts/README.md#skip-versus-fail). |
 | `ENSEMBLE_LIVE_KEEP=1 npm run test:live:fake` | Preserve this run's processes/files **on failure** for inspection; also works with `test:live`. Success still cleans up. |
 
