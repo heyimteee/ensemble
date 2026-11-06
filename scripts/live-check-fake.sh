@@ -13,6 +13,21 @@ live_require_runtime
 live_require_node
 live_setup "fake"
 
+# Ticket #117: the Work header distinguishes active and recent work, so a
+# "work is active" wait must assert a non-zero active count instead of the
+# header's mere presence — recent cards keep the header mounted for eight
+# seconds after the last active card finishes.
+live_capture_active_work() {
+  local session="$1"
+  live_capture "$session" | grep -Eq 'WORK [1-9][0-9]* active'
+}
+
+live_require_active_work() {
+  local session="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}" description="${3:-active work}"
+  live_wait_for "$seconds" "$description" live_capture_active_work "$session" \
+    || live_fail "TUI did not show: $description"
+}
+
 # v5.8 T2/T3: deterministic project skills give the composer palette real
 # host catalog rows to assign and invoke. OpenCode discovers project skills
 # from .opencode/skills/<name>/SKILL.md before the server starts.
@@ -597,7 +612,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message posted"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "active · " 15 "ephemeral work block mounts while active"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "ephemeral work block mounts while active"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ working" 15 "work card loading state with assignee"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 # Slice B: live activity lines animate across the approved ten-frame Braille
@@ -697,7 +712,7 @@ live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
 # flight the live row reads `Asking $Name…` instead of the generic verb.
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 15 "assignment line for the peer turn"
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "peer assignment emitted exactly once"
-live_require_text "$LIVE_TUI_SESSION" "active · " 15 "work block mounts fresh for the new burst"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "work block mounts fresh for the new burst"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
 live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 2 "asking verb once on the activity line and once on the work card"
 live_assert_count "$LIVE_TUI_SESSION" "FakeAgent │ working" 1 "fresh burst lists only its own active card"
@@ -982,7 +997,7 @@ if ! live_wait_for_subtask_status "T4 work action probe" replied "$T4_REPLY_TIME
 fi
 t4_id=$(t4_id_for "T4 work action probe")
 live_invoke task.retry "{\"id\":\"$t4_id\"}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "active · " 15 "retried T4 work row mounts"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "retried T4 work row mounts"
 live_key "$LIVE_TUI_SESSION" Tab
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Tab reaches the work list"
 live_require_text "$LIVE_TUI_SESSION" "enter result" 10 "work list names its open action"
@@ -1009,7 +1024,7 @@ live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns t
 
 # Retry, restart, and cancel on a fresh row so the cancelled outcome announces.
 t4_delegate "T4 retry probe"
-live_require_text "$LIVE_TUI_SESSION" "active · " 15 "retry-probe work row mounts"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "retry-probe work row mounts"
 live_key "$LIVE_TUI_SESSION" Tab
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Tab reaches the work list for retry"
 t4_attempts_before=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 retry probe" })[0]?.attempts')
@@ -1026,7 +1041,7 @@ live_key "$LIVE_TUI_SESSION" "R"
 live_require_text "$LIVE_TUI_SESSION" "Restarting work: T4 retry probe" 10 "R restarts the selected work"
 # Let the restart RPC clear the busy gate; x is dropped while an action runs.
 sleep 1
-live_require_text "$LIVE_TUI_SESSION" "active · " 5 "restarted work row stays live"
+live_require_active_work "$LIVE_TUI_SESSION" 5 "restarted work row stays live"
 live_key "$LIVE_TUI_SESSION" "x"
 live_require_text "$LIVE_TUI_SESSION" "T4 retry probe cancelled" 15 "x cancels the selected work"
 live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the cancel"
@@ -1591,7 +1606,7 @@ live_key "$LIVE_TUI_SESSION" Escape
 
 # v5.6 T4: `o` opens the selected work's native session.
 t4_delegate "T4 native probe"
-live_require_text "$LIVE_TUI_SESSION" "active · " 15 "native-probe work row mounts"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "native-probe work row mounts"
 live_key "$LIVE_TUI_SESSION" "h"
 live_key "$LIVE_TUI_SESSION" Tab
 live_key "$LIVE_TUI_SESSION" Tab
