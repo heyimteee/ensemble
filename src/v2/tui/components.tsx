@@ -24,7 +24,9 @@ import {
   skillboxEmptyLine,
   skillsUnavailableLine,
 } from "./settings.ts"
+import type { SettingsAcknowledgement } from "./settings-feedback.ts"
 import {
+  approvalResolvedLine,
   approvalResolvingSuffix,
   approvalSourceTag,
   approvalsEmptyLine,
@@ -35,10 +37,14 @@ import {
 } from "./chrome.ts"
 import { helpEntryKey, type HelpEntry, type HelpSection } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
+import { railRowKey, type RailEmphasis } from "./rail.ts"
 import { MOUSE_PANE_IDS } from "./mouse.ts"
 import { statuslineHints } from "./keymap.ts"
 import { displayWidth, fitStatuslineSegments, type StatuslinePart, type StatuslineSegment, type StatuslineTone } from "./statusline.ts"
 import { chromeJoin, chromeSeparator, chromeSeparatorParts } from "./separators.ts"
+import { approvalResolvedTone, type ApprovalResolvedSettle } from "./approvals.ts"
+import { TIDE_GLYPHS, tideTone } from "./tide.ts"
+import type { WorkCard } from "./workrows.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
@@ -245,7 +251,21 @@ export function Rail(props: {
   width: number
   filter: string
   motionTick?: number
+  /** One-shot unread/approval pulses and quiet row arrivals from ticket #121. */
+  emphasis?: RailEmphasis
 }) {
+  const approvalCountParts = (): StyledLinePart[] => {
+    const parts: StyledLinePart[] = [{ text: "APPROVALS", fg: props.colors.accent }]
+    if (props.pendingApprovals > 0) {
+      const pulse = Boolean(props.emphasis?.approval)
+      parts.push({
+        text: ` (${props.pendingApprovals})`,
+        fg: pulse ? props.colors.warn : props.colors.accent,
+        attributes: pulse ? TextAttributes.BOLD : undefined,
+      })
+    }
+    return parts
+  }
   return (
     <box id={MOUSE_PANE_IDS.rail} width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
       <Show when={props.filter}>
@@ -268,6 +288,12 @@ export function Rail(props: {
         const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
         const unread = workspace ? unreadCount(props.state, workspace) : 0
         const busy = workspace ? busyCount(props.state, workspace.id) : 0
+        // Ticket #121: unread growth pulses the count once; a newly arrived row
+        // settles from muted to its normal tone without movement. Selection
+        // always wins the tone, so arrival emphasis never hides the cursor.
+        const unreadPulse = () => Boolean(props.emphasis?.unread.has(item.id))
+        const arriving = () => Boolean(props.emphasis?.arrivals.has(railRowKey(item.kind, item.id)))
+        const rowTone = () => selected() ? props.colors.good : arriving() ? props.colors.muted : props.colors.text
         return (
           <>
             <Show when={kindHeader === railGroupLine("workspace", workspaceCount)}>
@@ -281,7 +307,7 @@ export function Rail(props: {
             </Show>
             <box flexDirection="column">
               <box flexDirection="row" width="100%">
-                <text fg={selected() ? props.colors.good : props.colors.text} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
+                <text fg={rowTone()} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
                   {settingsCursorMark(selected() && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
                 </text>
                 <Show when={item.kind === "agent" && item.leader}>
@@ -290,7 +316,7 @@ export function Rail(props: {
                 </Show>
                 <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
                 <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> {railBusyMark(busy, props.motionTick ?? 0, process.env)}</text></Show>
-                <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ●{unread}</text></Show>
+                <Show when={unread > 0}><text fg={unreadPulse() ? props.colors.info : props.colors.muted} bg={props.colors.bg} flexShrink={0} attributes={unreadPulse() ? TextAttributes.BOLD : undefined}> ●{unread}</text></Show>
               </box>
               <Show when={item.kind === "agent"}>
                 <Show when={(item.description ?? "").trim()}>
@@ -306,22 +332,70 @@ export function Rail(props: {
       }}</For>
       <Show when={props.items.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{railEmptyLine()}</text></Show>
       <text> </text>
-      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>APPROVALS {props.pendingApprovals > 0 ? `(${props.pendingApprovals})` : ""}</text>
+      <StyledLineText parts={approvalCountParts} fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate />
       <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>v opens inbox</text>
     </box>
   )
 }
 
 
-export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cursor: number; resolvingID: string | null; state: SnapshotState | null; onResolve: (approval: Approval) => Promise<void>; motionTick?: number }) {
+export function WorkCardView(props: { colors: Palette; card: WorkCard; selected: boolean; index: number }) {
+  const stateTone = () =>
+    props.card.needsYou || props.card.status === "working" || props.card.status === "retrying"
+      ? props.colors.warn
+      : props.colors.muted
+  const header = (): StyledLinePart[] => [
+    { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.good : props.colors.faint },
+    { text: `${props.card.glyph} `, fg: stateTone() },
+    { text: props.card.agent, fg: props.colors.text },
+    { text: ` ${chromeSeparator()} `, fg: props.colors.faint },
+    { text: props.card.state, fg: stateTone() },
+  ]
+  // One styled line with one chunk per tide sample. The sample is two cells
+  // wide, so the strip spans the card content width; no nested colored spans.
+  const tide = (): StyledLinePart[] => props.card.tideLevels.map((level) => ({
+    text: TIDE_GLYPHS[level].repeat(2),
+    fg: props.card.needsYou ? props.colors.warn : props.colors[tideTone(level)],
+  }))
+  return (
+    <box flexDirection="column" width="100%" marginTop={props.index === 0 ? 0 : 1} flexShrink={0} backgroundColor={props.colors.panel}>
+      <StyledLineText parts={header} fg={props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
+      <text fg={props.selected ? props.colors.good : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate attributes={TextAttributes.BOLD}>{`  ${props.card.title}`}</text>
+      <text fg={props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{`  ${props.card.detail}`}</text>
+      <StyledLineText parts={tide} fg={props.colors.faint} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
+    </box>
+  )
+}
+
+export function ApprovalList(props: {
+  colors: Palette
+  approvals: Approval[]
+  cursor: number
+  resolvingID: string | null
+  state: SnapshotState | null
+  onResolve: (approval: Approval) => Promise<void>
+  motionTick?: number
+  emphasized: ReadonlySet<string>
+  resolved: readonly ApprovalResolvedSettle[]
+}) {
   return (
     <box flexDirection="column">
       <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>Approvals inbox</text>
-      <Show when={props.approvals.length === 0}><text fg={props.colors.muted}>{approvalsEmptyLine()}</text></Show>
-      <For each={props.approvals}>{(approval, index) => (
+      <Show when={props.approvals.length === 0 && props.resolved.length === 0}><text fg={props.colors.muted}>{approvalsEmptyLine()}</text></Show>
+      <For each={props.approvals}>{(approval, index) => {
+        const selected = () => props.cursor === index()
+        const emphasized = () => props.emphasized.has(approval.id)
+        return (
+          <box flexDirection="column">
+            <text fg={selected() ? props.colors.good : emphasized() ? props.colors.accent : props.colors.warn} bg={props.colors.bg} width="100%" truncate attributes={emphasized() ? TextAttributes.BOLD : undefined}>{selected() ? "› " : "  "}[{approvalSourceTag(approvalSource(approval))}] {approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)}</text>
+            <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
+          </box>
+        )
+      }}</For>
+      <For each={props.resolved}>{(entry) => (
         <box flexDirection="column">
-          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}[{approvalSourceTag(approvalSource(approval))}] {approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)}</text>
-          <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
+          <text fg={approvalResolvedTone(entry.ageMs, process.env) === "good" ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" truncate>{approvalResolvedLine(entry.approval)}</text>
+          <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{short(entry.approval.detail, 80)}</text>
         </box>
       )}</For>
     </box>
@@ -402,6 +476,8 @@ export function SettingsView(props: {
   skillFilter: string
   skillCatalog: SkillOption[]
   skillPage?: number
+  /** Ticket #124 one-shot feedback view; absent means no acknowledgement. */
+  acknowledgement?: SettingsAcknowledgement
   field?: { kind: "agent" | "memory"; label: string; value: string } | null
   fieldMode?: InteractionMode
   fieldRef?: (value: any) => void
@@ -417,6 +493,28 @@ export function SettingsView(props: {
     assigned: props.agent?.skillbox.length ?? 0,
     catalog: props.skillCatalog.length,
   })
+  // Ticket #124: the header keeps the saved state word and flashes its color
+  // once; a dirty draft always supersedes it.
+  const saved = () => props.acknowledgement?.saved ?? false
+  const headerColor = () =>
+    props.acknowledgement?.savedFlash ? props.colors.text : saved() ? props.colors.good : props.colors.accent
+  // A new memory or changed skill row acknowledges once. Bold is the flash:
+  // the selected row is already green, so color alone would not read.
+  const memoryRowFlash = (memoryID: string) =>
+    Boolean(props.acknowledgement?.memoryFlash && props.acknowledgement.memoryID === memoryID)
+  const skillRowFlash = (skillID: string) =>
+    Boolean(props.acknowledgement?.skillFlash && props.acknowledgement.skillID === skillID)
+  const memoryRowColor = (memoryID: string, selected: boolean) => {
+    if (selected) return props.colors.good
+    if (memoryRowFlash(memoryID)) return props.colors.good
+    return props.colors.text
+  }
+  // The toggle mark remains the final state after the skill flash.
+  const skillRowColor = (skillID: string, selected: boolean) => {
+    if (selected) return props.colors.good
+    if (skillRowFlash(skillID)) return props.colors.good
+    return props.colors.text
+  }
   const fieldMode = () => props.fieldMode ?? "normal"
   const fieldHints = () => {
     const memory = props.field?.kind === "memory"
@@ -427,7 +525,7 @@ export function SettingsView(props: {
   return (
     <Show when={props.agent} fallback={<text fg={props.colors.muted}>{settingsNoAgentLine()}</text>}>
       <box flexDirection="column">
-        <ChromeText colors={props.colors} fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate text={settingsHeader(props.agent!.name, props.dirty, props.agent!.pendingSettings)} />
+        <ChromeText colors={props.colors} fg={headerColor()} bg={props.colors.bg} width="100%" truncate attributes={props.acknowledgement?.savedFlash ? TextAttributes.BOLD : undefined} text={settingsHeader(props.agent!.name, props.dirty, props.agent!.pendingSettings, saved())} />
         <ChromeText colors={props.colors} fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate text={settingsTabLine(props.tab, props.memoryTotal, props.agent!.skillbox.length, props.skillCatalog.length)} />
         <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{settingsDivider()}</text>
         <ChromeText colors={props.colors} fg={props.colors.text} bg={props.colors.bg} width="100%" truncate text={settingsSectionHeader(props.tab, sectionCounts())} />
@@ -446,7 +544,7 @@ export function SettingsView(props: {
           <ChromeText colors={props.colors} fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate text={chromeJoin([`Filter: ${props.memoryFilter || "(none)"}`, "/ filter"])} />
           <For each={props.memories}>{(memory, index) => (
             <box flexDirection="column">
-              <text fg={props.cursor === index() ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" wrapMode="word">{settingsCursorMark(props.cursor === index())}{memory.text}</text>
+              <text fg={memoryRowColor(memory.id, props.cursor === index())} bg={props.colors.bg} width="100%" wrapMode="word" attributes={memoryRowFlash(memory.id) ? TextAttributes.BOLD : undefined}>{settingsCursorMark(props.cursor === index())}{memory.text}</text>
               <ChromeText colors={props.colors} fg={memoryNeedsReview(memory) ? props.colors.warn : props.colors.muted} bg={props.colors.bg} width="100%" truncate text={`    ${memoryProvenanceLine(memory)}${memoryNeedsReview(memory) ? " ◆" : ""}`} />
             </box>
           )}</For>
@@ -454,13 +552,13 @@ export function SettingsView(props: {
           <Show when={props.memoryTotal > 0 && props.memories.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{memoriesNoMatchLine()}</text></Show>
         </Show>
         <Show when={props.tab === "skillbox"}>
-          <Show when={missing().length > 0}><text fg={props.colors.bad}>Missing assigned skills: {missing().join(", ")}</text></Show>
+          <Show when={missing().length > 0}><text fg={props.acknowledgement?.missingFlash ? props.colors.bad : props.colors.warn} attributes={props.acknowledgement?.missingFlash ? TextAttributes.BOLD : undefined}>Missing assigned skills: {missing().join(", ")}</text></Show>
           <ChromeText colors={props.colors} fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate text={chromeJoin([`Filter: ${props.skillFilter || "(none)"}`, "/ filter", ...(skillPaginationText(props.skills.length, props.skillPage ?? 1) ? [skillPaginationText(props.skills.length, props.skillPage ?? 1)] : [])])} />
           <Show when={props.skillCatalog.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillsUnavailableLine()}</text></Show>
 <Show when={props.skillCatalog.length > 0 && props.skills.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillboxEmptyLine()}</text></Show>
           <For each={skillPageItems(props.skills, props.skillPage ?? 1)}>{(entry) => (
             <box flexDirection="column">
-              <text fg={props.cursor === entry.index ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>{settingsCursorMark(props.cursor === entry.index)}{skillToggleMark(skillAssigned(props.agent!.skillbox, entry.skill.id))} {entry.skill.name}{entry.skill.name !== entry.skill.id ? ` (${entry.skill.id})` : ""}</text>
+              <text fg={skillRowColor(entry.skill.id, props.cursor === entry.index)} bg={props.colors.bg} width="100%" truncate attributes={skillRowFlash(entry.skill.id) ? TextAttributes.BOLD : undefined}>{settingsCursorMark(props.cursor === entry.index)}{skillToggleMark(skillAssigned(props.agent!.skillbox, entry.skill.id))} {entry.skill.name}{entry.skill.name !== entry.skill.id ? ` (${entry.skill.id})` : ""}</text>
               <Show when={(entry.skill.description ?? "").trim()}>
                 <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>    {short(entry.skill.description!.replace(/\s+/g, " ").trim(), 120)}</text>
               </Show>

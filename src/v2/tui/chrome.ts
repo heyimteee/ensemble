@@ -8,6 +8,7 @@
  * renders at all times and every hint matches the actions actually available.
  */
 
+import { approvalSource, type Approval } from "../types.ts"
 import { statuslineHints } from "./keymap.ts"
 import { effectiveTick, workingFrame } from "./motion.ts"
 import { chromeJoin, chromeSeparator } from "./separators.ts"
@@ -114,6 +115,11 @@ export function dmEmptyDetail(): string {
 export function approvalResolvingSuffix(resolving: boolean, tick = 0, env: NodeJS.ProcessEnv = process.env): string {
   if (!resolving) return ""
   return ` ${chromeSeparator()} ${workingFrame(effectiveTick(tick, env))} Resolving…`
+}
+
+/** Resolved settle row: display-only confirmation that leaves after its window. */
+export function approvalResolvedLine(approval: Approval): string {
+  return `✓ Resolved ${chromeSeparator()} [${approvalSourceTag(approvalSource(approval))}] ${approval.title}`
 }
 
 /** Inbox origin tag: native host blocks read differently from product decisions. Pure. */

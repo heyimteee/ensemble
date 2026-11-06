@@ -151,8 +151,25 @@ test("completion entries carry finish time and stable done: IDs", () => {
     "Nova",
     100,
   )
-  assert.deepEqual(done, { id: "done:t1", text: "● Nova finished: Check the build", at: 10 })
+  assert.deepEqual(done, { id: "done:t1", text: "● Nova finished: Check the build", at: 10, tone: "success" as const })
   assert.equal(completionEntry(task({ state: "working", claimedBy: "r", leaseUntil: 9999, attempts: 1 }), "Nova", 100), undefined)
+})
+
+test("failed and cancelled completion entries carry the error emphasis tone", () => {
+  const failed = completionEntry(
+    task({ id: "t1", state: "replied", outcome: "failed", error: "boom", createdAt: 5, finishedAt: 10 }),
+    "Nova",
+    100,
+  )
+  assert.equal(failed?.tone, "error")
+  assert.equal(failed?.text, "✕ Nova failed: boom")
+  const cancelled = completionEntry(
+    task({ id: "t2", state: "replied", outcome: "failed", stoppedAt: 9, createdAt: 5, finishedAt: 10 }),
+    "Nova",
+    100,
+  )
+  assert.equal(cancelled?.tone, "error")
+  assert.match(cancelled?.text ?? "", /⊘ .* cancelled/)
 })
 
 test("completion accumulator persists one line per outcome and never regenerates", () => {
@@ -181,7 +198,7 @@ test("merged transcript orders completions at their finish position in one windo
     { id: "m2", createdAt: 15 },
     { id: "m3", createdAt: 25 },
   ]
-  const completions = [{ id: "done:t1", text: "● Nova finished: alpha", at: 10 }]
+  const completions = [{ id: "done:t1", text: "● Nova finished: alpha", at: 10, tone: "success" as const }]
   const merged = mergeTranscriptRows(messages, completions, 40)
   assert.deepEqual(merged.map((row) => row.id), ["m1", "done:t1", "m2", "m3"])
   assert.equal(merged[1].completion?.text, "● Nova finished: alpha")
@@ -189,7 +206,7 @@ test("merged transcript orders completions at their finish position in one windo
   // Exactly one row per ID even when a completion collides with a message timestamp.
   const clash = mergeTranscriptRows(
     [{ id: "m1", createdAt: 10 }],
-    [{ id: "done:t1", text: "x", at: 10 }],
+    [{ id: "done:t1", text: "x", at: 10, tone: "success" as const }],
     40,
   )
   assert.equal(clash.length, 2)
@@ -197,7 +214,7 @@ test("merged transcript orders completions at their finish position in one windo
   // completion row, so an answer is never displaced by its own handoff ack.
   assert.deepEqual(mergeTranscriptRows(
     [{ id: "z-message", createdAt: 10 }],
-    [{ id: "done:a-task", text: "x", at: 10 }],
+    [{ id: "done:a-task", text: "x", at: 10, tone: "success" as const }],
     40,
   ).map((row) => row.id), ["z-message", "done:a-task"])
   // The shared window drops the oldest rows first.
@@ -211,7 +228,7 @@ test("stabilized merged rows keep identity across idle polls", () => {
   // nothing when nothing changed.
   const m1 = { id: "m1", createdAt: 5 }
   const m2 = { id: "m2", createdAt: 15 }
-  const completions = [{ id: "done:t1", text: "● Nova finished: alpha", at: 10 }]
+  const completions = [{ id: "done:t1", text: "● Nova finished: alpha", at: 10, tone: "success" as const }]
   const first = stabilizeMergedRows([], mergeTranscriptRows([m1, m2], completions, 40))
   // A second poll over the same message refs yields identical wrappers.
   const second = stabilizeMergedRows(first, mergeTranscriptRows([m1, m2], completions, 40))
@@ -234,10 +251,14 @@ test("stabilized merged rows keep identity across idle polls", () => {
   assert.equal(fourth[2], third[2])
   assert.equal(fourth[3], third[3])
   // A changed completion payload remounts only the completion row.
-  const changed = [{ id: "done:t1", text: "● Nova finished: beta", at: 10 }]
+  const changed = [{ id: "done:t1", text: "● Nova finished: beta", at: 10, tone: "success" as const }]
   const fifth = stabilizeMergedRows(fourth, mergeTranscriptRows([m1Edited, m2, m3], changed, 40))
   assert.equal(fifth[0], fourth[0])
   assert.notEqual(fifth[1], fourth[1])
   assert.equal(fifth[2], fourth[2])
   assert.equal(fifth[3], fourth[3])
+  // Ticket #122: an emphasis-tone change is part of the completion payload.
+  const retoned = [{ id: "done:t1", text: "● Nova finished: beta", at: 10, tone: "error" as const }]
+  const sixth = stabilizeMergedRows(fifth, mergeTranscriptRows([m1Edited, m2, m3], retoned, 40))
+  assert.notEqual(sixth[1], fifth[1])
 })

@@ -3,17 +3,18 @@ import type { Subtask } from "../types.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
 import { chromeJoin, chromeSeparator } from "./separators.ts"
+import { currentTideLevels, currentTideStrip, tideColumns } from "./tide.ts"
 
 /**
- * Inline work-row mapping for the group chat surface (ticket #56, slice A
- * ticket #64, slice C ticket #59). The right-hand task board is gone; the
- * WORK block carries only active subtasks for the workspace with their
- * assigned agent and derived lifecycle state. Terminal outcomes never render
- * here — they are announced once as transcript system lines (see
- * terminalAnnouncement). Attribution lines (`→ Assigned to $AgentName: <title>`
- * events, `Asking $AgentName…` live variants, `Answer from $AgentName` relay
- * headers) are defined in format.ts and wired through activityDetailForTask
- * below and the transcript render in app.tsx.
+ * Inline work-row and Work-card mapping for the group chat surface (ticket
+ * #56, slice A ticket #64, slice C ticket #59, card layout ticket #115). The
+ * right-hand task board is gone; the WORK block carries only active subtasks
+ * for the workspace with their assigned agent and derived lifecycle state.
+ * Terminal outcomes never render here — they are announced once as transcript
+ * system lines (see terminalAnnouncement). Attribution lines (`→ Assigned to
+ * $AgentName: <title>` events, `Asking $AgentName…` live variants, `Answer from
+ * $AgentName` relay headers) are defined in format.ts and wired through
+ * activityDetailForTask below and the transcript render in app.tsx.
  */
 
 /** Shared transcript window: both the DM and group surfaces keep the most
@@ -464,6 +465,157 @@ export function workSummary(tasks: Subtask[], now: number): string {
     .filter((status) => (counts.get(status) ?? 0) > 0)
     .map((status) => `${counts.get(status)} ${status}`)
   return chromeJoin(["WORK", ...parts])
+}
+
+/**
+ * Ticket #115: the Work pane's card model. One card carries the agent, the
+ * animated Braille state glyph, the state word, a truncated title, an honest
+ * detail line, and the full-width one-row tide strip. This is a pure mapping
+ * over one active subtask; ordering and active-only filtering stay in
+ * `workCardsForTasks`.
+ */
+export type WorkCard = {
+  id: string
+  agent: string
+  glyph: string
+  state: string
+  title: string
+  detail: string
+  status: DerivedWorkStatus
+  needsYou: boolean
+  /** Rendered one-row strip: two cells per tide column, `width` cells total. */
+  tide: string
+  /** One sampled level per tide column, used for per-cell theme colors. */
+  tideLevels: readonly number[]
+}
+
+export type WorkCardOptions = {
+  now: number
+  tick: number
+  /** Card content width in terminal cells. */
+  width: number
+  env?: NodeJS.ProcessEnv
+  pendingApprovalIDs?: ReadonlySet<string>
+  nativeBlockedSubtaskIDs?: ReadonlySet<string>
+  pendingFor?: (task: Subtask) => PendingWorkAction | null | undefined
+  detailFor?: (task: Subtask) => string | undefined
+}
+
+/**
+ * The card detail line stays honest: in-flight actions win, user-blocked work
+ * says so, parked work is queued (never a fake live verb), and working work
+ * uses the caller's activity verb when one exists. Pure.
+ */
+export function workCardDetail(
+  status: DerivedWorkStatus,
+  opts: { pending?: PendingWorkAction | null; needsYou?: boolean; activity?: string } = {},
+): string {
+  if (opts.pending) return pendingWorkLabel(opts.pending)
+  if (opts.needsYou) return waitingForYouLine()
+  switch (status) {
+    case "pending":
+      return "queued"
+    case "retrying":
+      return retryingLine()
+    case "working":
+      return opts.activity?.trim() || workingLine()
+    default:
+      return workStatusLabel(status)
+  }
+}
+
+const NO_TASK_IDS: ReadonlySet<string> = new Set<string>()
+
+export function workCardForTask(task: Subtask, agentLabel: string, options: WorkCardOptions): WorkCard {
+  const status = deriveWorkStatus(task, options.now)
+  const needsYou = isNeedsYouTask(
+    task,
+    options.pendingApprovalIDs ?? NO_TASK_IDS,
+    options.nativeBlockedSubtaskIDs ?? NO_TASK_IDS,
+  )
+  const pending = options.pendingFor?.(task) ?? null
+  const width = Math.max(16, Math.floor(options.width))
+  const textWidth = Math.max(8, width - 2)
+  return {
+    id: task.id,
+    agent: short(agentLabel, Math.max(8, width - 16)),
+    glyph: needsYou ? NEEDS_YOU_MARK : workRowFrame(status, options.tick, options.env),
+    state: needsYou ? "needs you" : workStatusLabel(status),
+    title: short(task.title || "(untitled)", textWidth),
+    detail: short(workCardDetail(status, { pending, needsYou, activity: options.detailFor?.(task) }), textWidth),
+    status,
+    needsYou,
+    tide: currentTideStrip(width, options.tick, options.env),
+    tideLevels: currentTideLevels(tideColumns(width), options.tick, options.env),
+  }
+}
+
+/** Active cards in the existing work-row order (working first, oldest first). */
+export function workCardsForTasks(
+  tasks: Subtask[],
+  agentLabelFor: (task: Subtask) => string,
+  options: WorkCardOptions,
+): WorkCard[] {
+  return orderedWorkItems(tasks, options.now).map((task) => workCardForTask(task, agentLabelFor(task), options))
+}
+
+/** One card row: header, title, detail, tide. Gap rows sit between cards. */
+export const WORK_CARD_ROWS = 4
+export const WORK_CARD_GAP_ROWS = 1
+/** Section header plus the key-hint row in card mode. */
+export const WORK_BLOCK_CHROME_ROWS = 2
+/**
+ * Rows outside the Work block in the default 120×40 composition: outer
+ * padding, header, gaps, statusline, chat border/padding, surface title,
+ * composer, and composer hint. Used to reserve transcript space when choosing
+ * the card count.
+ */
+export const WORK_BASE_ROWS = 19
+/** Minimum transcript rows kept above the Work block. */
+export const WORK_TRANSCRIPT_RESERVE = 4
+
+export type WorkCardLayout = {
+  mode: "cards" | "compact"
+  /** Visible card/row count. */
+  limit: number
+  overflow: number
+  /** Rows the Work block consumes, including header, gaps, and overflow. */
+  rows: number
+}
+
+function cardBlockRows(cards: number, overflow: number): number {
+  return (
+    cards * WORK_CARD_ROWS +
+    Math.max(0, cards - 1) * WORK_CARD_GAP_ROWS +
+    WORK_BLOCK_CHROME_ROWS +
+    (overflow > 0 ? 1 : 0)
+  )
+}
+
+function compactLimit(terminalHeight: number): number {
+  return terminalHeight >= 27 ? 2 : 1
+}
+
+/**
+ * Pick the card count that fits the terminal height while reserving transcript
+ * rows. Tall terminals show three cards, medium two, short one, and below the
+ * minimum card height the Work pane falls back to compact one-line rows (with
+ * no inline hint row). Pure.
+ */
+export function workCardLayout(terminalHeight: number, activeCount: number): WorkCardLayout {
+  const active = Math.max(0, Math.floor(activeCount))
+  if (active === 0) return { mode: "compact", limit: 0, overflow: 0, rows: 0 }
+  const available = Math.max(0, terminalHeight - WORK_BASE_ROWS)
+  for (const count of [3, 2, 1] as const) {
+    if (active < count) continue
+    const overflow = active - count
+    const rows = cardBlockRows(count, overflow)
+    if (rows + WORK_TRANSCRIPT_RESERVE <= available) {
+      return { mode: "cards", limit: count, overflow, rows }
+    }
+  }
+  const limit = Math.min(active, compactLimit(terminalHeight))
+  return { mode: "compact", limit, overflow: active - limit, rows: 1 + limit }
 }
 
 /**
