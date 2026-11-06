@@ -502,3 +502,59 @@ test("ticket115: card detail defaults stay honest", () => {
   assert.equal(workCardDetail("working", { pending: "stop" }), "Stopping…")
   assert.equal(workCardDetail("pending", { needsYou: true }), "waiting for you…")
 })
+
+test("ticket116: a working card keeps its assigned variant and advances the strip", () => {
+  const working = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  const first = workCardForTask(working, "Nova", { now: 1000, tick: 3, width: 40, variant: "ripple" })
+  const later = workCardForTask(working, "Nova", { now: 1000, tick: 9, width: 40, variant: "ripple" })
+  assert.equal(first.tideVariant, "ripple")
+  assert.equal(later.tideVariant, "ripple")
+  assert.equal(first.tide.length, 40)
+  assert.notEqual(first.tide, later.tide, "working cards animate at the work tick")
+})
+
+test("ticket116: needs-you freezes the card's current variant", () => {
+  const blocked = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1, interrupted: true })
+  const first = workCardForTask(blocked, "Nova", { now: 1000, tick: 3, width: 40, variant: "echo" })
+  const later = workCardForTask(blocked, "Nova", { now: 1000, tick: 9, width: 40, variant: "echo" })
+  assert.equal(first.tideVariant, "echo")
+  assert.equal(first.needsYou, true)
+  assert.equal(first.tide, later.tide, "the strip does not advance while waiting for the user")
+})
+
+test("ticket116: card mapping keeps one stable variant per subtask across polls", () => {
+  const items = [
+    task({ id: "one", state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
+    task({ id: "two", state: "pending" }),
+  ]
+  const assigned = new Map([
+    ["one", "echo" as const],
+    ["two", "travel" as const],
+  ])
+  const render = (tick: number) =>
+    workCardsForTasks(items, () => "Nova", {
+      now: 1000,
+      tick,
+      tideTick: tick,
+      width: 40,
+      variantFor: (item) => assigned.get(item.id) ?? "current",
+    })
+  assert.deepEqual(render(1).map((card) => card.tideVariant), ["echo", "travel"])
+  assert.deepEqual(render(9).map((card) => card.tideVariant), ["echo", "travel"])
+})
+
+test("ticket116: queued cards stay still and terminal cards settle flat", () => {
+  const queued = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 3, width: 40, variant: "travel" })
+  const queuedLater = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 9, width: 40, variant: "travel" })
+  assert.equal(queued.tide, queuedLater.tide, "parked work never animates")
+
+  for (const patch of [
+    { state: "replied" as const, outcome: "succeeded" as const, repliedAt: 10, finishedAt: 10 },
+    { state: "replied" as const, outcome: "failed" as const, repliedAt: 10, finishedAt: 10 },
+    { state: "replied" as const, outcome: "succeeded" as const, repliedAt: 10, finishedAt: 10, stoppedAt: 10 },
+  ]) {
+    const card = workCardForTask(task(patch), "Nova", { now: 2000, tick: 5, width: 40, variant: "inbound" })
+    assert.ok(card.tideLevels.every((level) => level === 0), `${card.status} settles flat`)
+    assert.equal(card.tide, "▁".repeat(40))
+  }
+})

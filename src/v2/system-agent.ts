@@ -6,11 +6,51 @@
  * `Message.displayAuthor` and reports the internal native init job.
  */
 
+import type { InitPhase } from "./types.ts"
+
 export const SYSTEM_AGENT_NAME = "System Agent"
 export const ENSEMBLE_INIT_SKILL = "ensemble-init"
 export const INIT_COMMAND = "/init"
 export const INIT_START_TEXT = "Initializing workspace…"
 export const INIT_PROGRESS_TEXT = "Inspecting AGENTS.md and .ensemble/init.json with native /init…"
+export const INIT_WRITING_TEXT = "Writing AGENTS.md and .ensemble/init.json…"
+export const INIT_REPORTING_TEXT = "Preparing the init report…"
+
+/** Ordered stages for the System Agent init row (ticket #118). */
+export const INIT_PHASES: readonly InitPhase[] = ["starting", "running", "writing", "reporting"]
+
+/** Short stage word for the row. The native run is explicitly indeterminate. */
+export function initPhaseLabel(phase: InitPhase): string {
+  return phase === "running" ? "running · indeterminate" : phase
+}
+
+/** One honest detail line per stage; never a percentage or within-stage claim. */
+export function initPhaseDetail(phase: InitPhase): string {
+  switch (phase) {
+    case "starting":
+      return "preparing a temporary native session"
+    case "running":
+      return "native /init is opaque; progress is indeterminate"
+    case "writing":
+      return "writing AGENTS.md and .ensemble/init.json"
+    case "reporting":
+      return "settling the report"
+  }
+}
+
+/** Streaming row text for a stage. */
+export function initPhaseText(phase: InitPhase): string {
+  switch (phase) {
+    case "starting":
+      return INIT_START_TEXT
+    case "running":
+      return INIT_PROGRESS_TEXT
+    case "writing":
+      return INIT_WRITING_TEXT
+    case "reporting":
+      return INIT_REPORTING_TEXT
+  }
+}
 
 /** Composer/planner aliases for the built-in init job. */
 export const INIT_ALIASES = new Set(["init", ENSEMBLE_INIT_SKILL])
@@ -99,5 +139,14 @@ export function initCancelReport(reason: string, previousExisted = true): string
     `Ensemble init cancelled: ${reason}`,
     rollbackLine(previousExisted),
     "Rerun /init when the workspace is ready.",
+  ].join("\n")
+}
+
+/** Restart recovery report: a running job cannot keep its native session. */
+export function initInterruptedReport(previousExisted: boolean): string {
+  return [
+    "Ensemble init was interrupted by a service restart.",
+    rollbackLine(previousExisted),
+    "Rerun /init to try again.",
   ].join("\n")
 }

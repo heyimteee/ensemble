@@ -5,10 +5,11 @@ import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, InitJobState, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
-import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
+import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import {
@@ -50,7 +51,8 @@ import {
   type WizardDraft,
   type WizardToast,
 } from "./wizard.ts"
-import { EMPTY_MARK, isReducedMotion, shouldRunMotion } from "./motion.ts"
+import { EMPTY_MARK, WORK_CLOCK_INTERVAL_MS, isReducedMotion, shouldRunMotion, shouldRunWorkClock } from "./motion.ts"
+import { createTideAssignments, pruneTideAssignments, tideVariantFor } from "./tide.ts"
 import {
   TRANSCRIPT_EMPHASIS_MS,
   createTranscriptMotionState,
@@ -418,6 +420,10 @@ export function EnsembleV2App() {
   const [confirm, setConfirm] = createSignal<ConfirmState | null>(null)
   const [result, setResult] = createSignal<ResultState | null>(null)
   const [motionFrame, setMotionFrame] = createSignal(0)
+  // Ticket #116: the Work-card tide runs on its own 10 fps clock, independent
+  // of the 4 fps chrome clock. It stops (and resets) when no unblocked
+  // working card remains, so idle cards cost nothing.
+  const [workFrame, setWorkFrame] = createSignal(0)
   // Ticket #119: one visible app toast and a bounded queue. The effect below
   // schedules exactly one timeout for the visible toast's deadline.
   const [toasts, setToasts] = createSignal(createToastState())
@@ -722,6 +728,18 @@ export function EnsembleV2App() {
   })
   const selectedTask = createMemo(() => orderedTasks()[taskCursor()])
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
+  // Ticket #118: the System Agent init row is a live, staged row. It belongs
+  // to the workspace surface, survives navigation through snapshot state, and
+  // shows only honest stages. The ids keep the generic streaming-activity
+  // line from duplicating the same System Agent job.
+  const liveInitJobs = createMemo(() => {
+    if (surface()?.kind !== "workspace") return []
+    const workspace = activeWorkspace()
+    if (!workspace) return []
+    return activeInitJobs(state()?.initJobs ?? {}, workspace.id)
+  })
+  const initRows = createMemo(() => liveInitJobs().map((job) => initRowForJob(job, motionFrame(), process.env)))
+  const initRowMessageIDs = createMemo(() => initJobMessageIDs(state()?.initJobs ?? {}, surface()?.kind === "workspace" ? activeWorkspace()?.id : undefined))
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
   // Ticket #126: one-shot inbox transitions. The first snapshot is the
   // baseline; later arrivals emphasize once and resolved rows settle once.
@@ -929,6 +947,9 @@ export function EnsembleV2App() {
   // items fold into the transcript in place with no duplicates or stale
   // lines. The transcript scrollbox keeps a stable identity throughout.
   const liveMessages = createMemo(() => splitTranscript().live.filter((line) => {
+    // The dedicated init row owns this System Agent stream; the generic
+    // activity line would be a duplicate and could not show phases.
+    if (initRowMessageIDs().has(line.id)) return false
     if (!line.taskID) return true
     const task = state()?.subtasks[line.taskID]
     return Boolean(task && !isTerminalWorkStatus(deriveWorkStatus(task, Date.now())))
@@ -1126,6 +1147,7 @@ export function EnsembleV2App() {
   const hasChatContent = createMemo(
     () =>
       finalizedLines().length > 0 ||
+      liveInitJobs().length > 0 ||
       liveMessages().length > 0 ||
       completionMap().size > 0 ||
       (showWorkBlock() ?? false) ||
@@ -1271,6 +1293,10 @@ export function EnsembleV2App() {
   // the section padding; `workCardLayout` decides whether the terminal can
   // afford cards or must fall back to compact one-line rows.
   const workCardWidth = () => Math.max(20, messageWidth() - 2)
+  // Ticket #116: one shuffled-deck assignment state for the session. Variants
+  // are resolved by subtask id and survive every snapshot refresh; entries
+  // leave the map after the recent-card retention window.
+  const tideAssignments = createTideAssignments()
   const workCards = createMemo(() => {
     const now = Date.now()
     const active = activeTasks()
@@ -1279,11 +1305,13 @@ export function EnsembleV2App() {
     const cards = workCardsForTasks(active, (item) => agentName(state(), item.assigneeID), {
       now,
       tick: motionFrame(),
+      tideTick: workFrame(),
       width: workCardWidth(),
       env: process.env,
       pendingApprovalIDs: pendingApprovalSet,
       nativeBlockedSubtaskIDs: nativeBlockedSet,
       pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
+      variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
       detailFor: (item) => activityStateForTask(item, {
         now,
         pendingApprovalIDs: pendingApprovalSet,
@@ -1292,6 +1320,7 @@ export function EnsembleV2App() {
         agentNameFor: (agentID) => agentName(state(), agentID),
       }).verb,
     })
+    pruneTideAssignments(tideAssignments, now)
     return { cards, layout: workCardLayout(viewHeight(), cards.length) }
   })
   const pickerGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 16)
@@ -3135,7 +3164,7 @@ export function EnsembleV2App() {
     shouldRunMotion(
       {
         busy: isBusy() || resolvingApprovalID() !== null,
-        live: liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
+        live: liveInitJobs().length > 0 || liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
         composerActive: composerActive() || composerValidation() !== null,
       },
       process.env,
@@ -3174,6 +3203,46 @@ export function EnsembleV2App() {
   })
   createEffect(() => {
     syncClock()
+  })
+
+  // Ticket #116: dedicated 10 fps Work-card clock. It runs only while at
+  // least one working card is not waiting on the user, the Ensemble route is
+  // visible, no modal owns attention, and reduced motion is off. Needs-you
+  // cards freeze on their assigned variant; pending, retrying, and terminal
+  // cards hold the still frame. Stopping resets the tick so a later run starts
+  // clean instead of resuming an old phase.
+  let workClockTimer: ReturnType<typeof setInterval> | undefined;
+  let workClockRunning = false;
+  const workClockOn = () =>
+    shouldRunWorkClock(
+      {
+        // Cards only render on the workspace surface; a DM/settings surface
+        // must not keep the tide clock alive in the background.
+        workingCards: surface()?.kind === "workspace"
+          ? workCards().cards.filter((card) => card.status === "working" && !card.needsYou).length
+          : 0,
+        routeActive: isOurRoute(),
+        modalOpen: isModal(),
+      },
+      process.env,
+    )
+  const syncWorkClock = () => {
+    const want = workClockOn()
+    if (want === workClockRunning) return
+    workClockRunning = want
+    if (workClockTimer !== undefined) { clearInterval(workClockTimer); workClockTimer = undefined }
+    if (want) {
+      workClockTimer = setInterval(() => setWorkFrame((frame) => frame + 1), WORK_CLOCK_INTERVAL_MS)
+    } else {
+      setWorkFrame(0)
+    }
+  };
+  onCleanup(() => {
+    if (workClockTimer !== undefined) { clearInterval(workClockTimer); workClockTimer = undefined }
+    workClockRunning = false
+  })
+  createEffect(() => {
+    syncWorkClock()
   })
 
   createEffect(() => {
@@ -5137,6 +5206,13 @@ export function EnsembleV2App() {
                               <Show when={liveActivity().overflow > 0}>
                                 <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{liveActivity().overflow} more</text>
                               </Show>
+                            </box>
+                          </Show>
+                          <Show when={initRows().length > 0}>
+                            <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1}>
+                              <For each={initRows()}>{(row) => (
+                                <InitRowView colors={colors} row={row} />
+                              )}</For>
                             </box>
                           </Show>
                           <Show when={showWorkBlock()}>

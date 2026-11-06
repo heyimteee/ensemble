@@ -117,6 +117,42 @@ test("ticket115 follow-up: carded tasks suppress duplicate activity lines withou
   assert.ok(workrows.includes("entry.taskID === undefined || !cardTaskIDs.has(entry.taskID)"), "streaming-only entries survive suppression")
 })
 
+test("ticket118: the System Agent init row stays live, staged, and percentage-free", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  const rows = readFileSync(new URL("./initrow.ts", import.meta.url), "utf8")
+  assert.ok(app.includes("activeInitJobs(state()?.initJobs"), "the row reads durable init jobs")
+  assert.ok(app.includes("initRowForJob(job, motionFrame(), process.env)"), "the row advances on the shared motion tick")
+  assert.ok(app.includes("<InitRowView"), "the app renders the shared init row view")
+  assert.ok(app.includes("initRows().length > 0"), "the live row mounts only while a job runs")
+  assert.ok(app.includes("initRowMessageIDs().has(line.id)"), "the generic activity line does not duplicate the init row")
+  assert.ok(app.includes("liveInitJobs().length > 0 || liveMessages().length > 0"), "an active init keeps the motion clock running")
+  assert.ok(components.includes("export function InitRowView"), "the init row lives in the shared component seam")
+  assert.ok(components.includes("props.row.label"), "the row shows the phase label")
+  assert.ok(components.includes("props.row.stage"), "the row shows the staged indicator")
+  assert.ok(rows.includes("running · indeterminate") || rows.includes("initPhaseLabel"), "running is explicitly indeterminate")
+  assert.ok(!rows.includes("%"), "no init row source fabricates a percentage")
+  const rowBlock = app.slice(app.indexOf("<Show when={initRows().length > 0}>"), app.indexOf("<Show when={showWorkBlock()}>"))
+  assert.ok(rowBlock.length > 0, "the init row block is present")
+  assert.ok(!rowBlock.includes("%"), "the rendered init row never carries a percentage")
+})
+
+test("ticket116: Work cards use stable tide assignments and a gated 10 fps work clock", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const tide = readFileSync(new URL("./tide.ts", import.meta.url), "utf8")
+  assert.ok(app.includes("createTideAssignments()"), "one UI-local assignment state lives with the app")
+  assert.ok(
+    app.includes("variantFor: (item) => tideVariantFor(tideAssignments, item.id, now)"),
+    "cards draw a stable variant from the assignment state",
+  )
+  assert.ok(app.includes("pruneTideAssignments(tideAssignments, now)"), "assignments are pruned after the retention window")
+  assert.ok(app.includes("tideTick: workFrame()"), "the tide runs on the dedicated work clock")
+  assert.ok(app.includes("shouldRunWorkClock("), "the work clock is gated by working cards and motion policy")
+  assert.ok(app.includes("WORK_CLOCK_INTERVAL_MS"), "the work clock uses the approved 10 fps cadence")
+  assert.ok(app.includes("setWorkFrame"), "the work clock owns its own tick signal")
+  assert.ok(tide.includes("shuffleTideDeck"), "assignment uses a shuffled deck")
+})
+
 test("ticket120: every shell overlay fades in once without owning focus", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   const overlays = readFileSync(new URL("./overlays.ts", import.meta.url), "utf8")
