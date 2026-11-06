@@ -1413,7 +1413,10 @@ live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 2" 10 "second backup selec
 live_key "$LIVE_TUI_SESSION" "K"
 live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 1" 10 "K moves the selected backup up"
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings saved after backup reorder"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings │ Saved" 10 "save acknowledges with the saved state"
+live_require_absence "$LIVE_TUI_SESSION" "UNSAVED" 10 "save clears the dirty mark"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed after saving"
 backup_order=$(live_snapshot_value '(function () { var a = Object.values(output.state.agents).filter(function (x) { return x.name === "FakeAgent" })[0]; return a.backupModels.map(function (m) { return m.variant }) })()')
 [[ "$backup_order" == '["medium","low"]' ]] || live_fail "K did not reorder the backups before save (got $backup_order)"
 live_log "settings J/K reordered backups and saved the persisted order"
