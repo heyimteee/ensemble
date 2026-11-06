@@ -214,6 +214,28 @@ test("ticket103: General triage, owner choice, and direct rejection stay on the 
   assert.ok(app.includes('row.executor === "init" ? "init"'), "the built-in init row runs the System Agent init job")
 })
 
+test("ticket119: app feedback paints the app toast and host toast is fallback-only", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  assert.equal((app.match(/context\.ui\.toast\.show/g) ?? []).length, 1, "one host-toast call site remains")
+  const fallback = app.indexOf("const showHostToast")
+  assert.ok(fallback >= 0 && app.indexOf("context.ui.toast.show") > fallback, "the host toast lives in the fallback helper")
+  assert.ok(app.includes('if (!isOurRoute()) { showHostToast(input); return }'), "the host fallback only runs when the app surface is not visible")
+  assert.ok(app.includes('feedbackChannel(isToastModal()) === "statusline"'), "modal feedback goes to the statusline")
+  assert.ok(app.includes("pushToast(state, input, Date.now())"), "app feedback enters the bounded queue")
+  assert.ok(app.includes("expireToasts(state, Date.now())"), "the one visible toast expires through the pure model")
+  assert.ok(app.includes("toastPlacement(viewWidth())"), "the app anchors the toast with the bounded geometry helper")
+  assert.ok(app.includes("initToast(job.state, job.error)"), "terminal init jobs report through the app toast")
+  assert.ok(app.includes("describeGitChange(gitState(), next)"), "git changes report through the app toast")
+  assert.ok(components.includes("export function ToastOverlay"), "the app-owned toast component exists")
+  assert.ok(components.includes("borderColor={accent()}"), "the toast tone owns its border color")
+  assert.ok(components.includes("zIndex={80}"), "the toast stays below dialogs and the leader popup")
+  assert.ok(components.includes("createSignal(isReducedMotion())"), "reduced motion mounts the toast at its final state")
+  assert.ok(components.includes("opacity={settled() ? 1 : 0.72}"), "the presence settle is a single opacity change")
+  const toastView = components.slice(components.indexOf("export function ToastOverlay"), components.indexOf("export function Rail"))
+  assert.ok(!toastView.includes("textarea") && !toastView.includes("onKey"), "the toast mounts no editor and owns no keys")
+})
+
 test("ticket123: composer validation is non-destructive and clears on input or success", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
 
