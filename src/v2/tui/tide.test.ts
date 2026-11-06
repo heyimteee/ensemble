@@ -65,6 +65,12 @@ test("ticket115: tide levels map onto faint, muted, and text theme roles", () =>
   assert.equal(tideTone(7), "text")
 })
 
+test("ticket117: the settled tide stays flat at the shared card width", () => {
+  assert.equal(flatTideStrip(40), TIDE_GLYPHS[0].repeat(40))
+  assert.equal(flatTideStrip(12), TIDE_GLYPHS[0].repeat(16), "the strip honours the minimum column clamp")
+  assert.deepEqual(flatTideLevels(20), new Array(20).fill(0))
+})
+
 test("ticket116: each approved motion has a fixed formula over column, width, and tick", () => {
   const expectedAtTickZero: Record<(typeof TIDE_VARIANTS)[number], number[]> = {
     current: [0, 1, 1, 2, 2, 3, 4, 4, 5, 5, 6, 6],

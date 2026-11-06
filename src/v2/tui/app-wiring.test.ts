@@ -86,12 +86,12 @@ test("ticket115: Work renders active subtasks as cards with a full-width tide ro
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
   assert.ok(app.includes("workCardsForTasks(active, (item) => agentName(state(), item.assigneeID)"), "cards map the active subtask list")
-  assert.ok(app.includes("workCardLayout(viewHeight(), cards.length)"), "card count follows the terminal height")
+  assert.ok(app.includes("workCardLayout(viewHeight(), cards.length, recentCards.length)"), "card count follows the terminal height")
   assert.ok(app.includes("<WorkCardView"), "the app renders the shared card view")
   assert.ok(app.includes('workCards().layout.mode === "cards"'), "card mode is explicit")
-  assert.ok(app.includes("orderedTasks().slice(0, workCards().layout.limit)"), "compact rows stay active-only and height-capped")
-  assert.ok(app.includes("workCards().cards.slice(0, workCards().layout.limit)"), "cards stay active-only and height-capped")
-  assert.ok(app.includes('selected={taskCursor() === index() && interaction().focus === "work"}'), "the existing work cursor selects card index")
+  assert.ok(app.includes("compactWorkRows().slice(0, workCards().layout.limit)"), "compact rows stay active-first and height-capped")
+  assert.ok(app.includes("workCards().cards.slice(0, workCards().layout.limit)"), "cards stay active-first and height-capped")
+  assert.ok(app.includes('selected={!card.recent && taskCursor() === index() && interaction().focus === "work"}'), "the existing work cursor selects active card index")
   assert.ok(app.includes("motionFrame()"), "cards receive the shared motion tick")
   const workBlock = app.slice(app.indexOf("<Show when={showWorkBlock()}>"), app.indexOf("<Show when={!atBottom()}>"))
   assert.ok(workBlock.length > 0, "the Work block is present")
@@ -100,6 +100,34 @@ test("ticket115: Work renders active subtasks as cards with a full-width tide ro
   assert.ok(components.includes("props.card.tideLevels.map"), "the tide strip colors one sample at a time")
   assert.ok(components.includes("TIDE_GLYPHS[level].repeat(2)"), "each tide sample covers two cells")
   assert.ok(!components.includes("<span"), "the tide strip is one styled line, not nested spans")
+})
+
+test("ticket117: recent Work cards stay mounted, counted, and display-only", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+
+  const showStart = app.indexOf("const showWorkBlock = createMemo")
+  const showEnd = app.indexOf("const stoppable", showStart)
+  assert.ok(showStart >= 0 && showEnd > showStart, "the Work mount condition is present")
+  const show = app.slice(showStart, showEnd)
+  assert.ok(show.includes("hasRecentWork("), "the block stays mounted while recent cards exist")
+  assert.ok(show.includes("motionFrame()"), "the recent window closing repaints on the work clock")
+
+  assert.ok(app.includes("recentWorkCardsForTasks("), "recent cards come from the shared card model")
+  assert.ok(app.includes("workSummaryCounts("), "the header names active and recent counts")
+  assert.ok(app.includes("workCardLayout(viewHeight(), cards.length, recentCards.length)"), "recent cards share the height budget")
+  assert.ok(app.includes("!card.recent && taskCursor() === index()"), "recent cards never take the work cursor")
+  assert.ok(app.includes("const hasWorkZone = () => hasActiveWorkNow()"), "only active work owns the work focus zone")
+  assert.ok(app.includes("const stoppable = () => surface()?.kind === \"workspace\" && hasActiveWorkNow()"), "recent cards are not stoppable")
+
+  const workBlock = app.slice(app.indexOf("<Show when={showWorkBlock()}>"), app.indexOf("<Show when={!atBottom()}>"))
+  assert.ok(workBlock.includes("compactWorkRows().slice(0, workCards().layout.limit)"), "compact fallback renders active and recent rows")
+  assert.ok(workBlock.includes("+{workCards().layout.overflow} more"), "card overflow counts active and recent")
+  const compactRows = app.slice(app.indexOf("const compactWorkRows = ()"), app.indexOf("const pickerGeometry"))
+  assert.ok(compactRows.includes("orderedTasks().map((task) => ({ task, recent: false }))"), "compact rows start with active work")
+  assert.ok(compactRows.includes("workCards().recentTasks.map((task) => ({ task, recent: true }))"), "compact rows append the recent window")
+
+  assert.ok(components.includes("props.card.recent"), "the card view renders the settled display-only treatment")
 })
 
 test("ticket118: the System Agent init row stays live, staged, and percentage-free", () => {
