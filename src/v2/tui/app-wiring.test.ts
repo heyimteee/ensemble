@@ -82,8 +82,27 @@ test("ticket101: the composer submits through the shared skill planner", () => {
   assert.ok(!app.includes("slashCommands"), "one shared command catalog replaces the private palette list")
 })
 
-test("ticket120: every shell overlay fades in once without owning focus", () => {
+test("ticket115: Work renders active subtasks as cards with a full-width tide row", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  assert.ok(app.includes("workCardsForTasks(active, (item) => agentName(state(), item.assigneeID)"), "cards map the active subtask list")
+  assert.ok(app.includes("workCardLayout(viewHeight(), cards.length)"), "card count follows the terminal height")
+  assert.ok(app.includes("<WorkCardView"), "the app renders the shared card view")
+  assert.ok(app.includes('workCards().layout.mode === "cards"'), "card mode is explicit")
+  assert.ok(app.includes("orderedTasks().slice(0, workCards().layout.limit)"), "compact rows stay active-only and height-capped")
+  assert.ok(app.includes("workCards().cards.slice(0, workCards().layout.limit)"), "cards stay active-only and height-capped")
+  assert.ok(app.includes('selected={taskCursor() === index() && interaction().focus === "work"}'), "the existing work cursor selects card index")
+  assert.ok(app.includes("motionFrame()"), "cards receive the shared motion tick")
+  const workBlock = app.slice(app.indexOf("<Show when={showWorkBlock()}>"), app.indexOf("<Show when={!atBottom()}>"))
+  assert.ok(workBlock.length > 0, "the Work block is present")
+  assert.ok(!workBlock.includes("% complete") && !workBlock.includes("% done"), "cards never display a percentage")
+  assert.ok(components.includes("export function WorkCardView"), "the card view lives in the shared component seam")
+  assert.ok(components.includes("props.card.tideLevels.map"), "the tide strip colors one sample at a time")
+  assert.ok(components.includes("TIDE_GLYPHS[level].repeat(2)"), "each tide sample covers two cells")
+  assert.ok(!components.includes("<span"), "the tide strip is one styled line, not nested spans")
+})
+
+test("ticket120: every shell overlay fades in once without owning focus", () => {  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   const overlays = readFileSync(new URL("./overlays.ts", import.meta.url), "utf8")
   assert.ok(overlays.includes("export function overlayPresenceOpacity"), "the one-shot presence curve lives in the overlay helper seam")
 
