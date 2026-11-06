@@ -3,7 +3,15 @@ import type { Subtask } from "../types.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
 import { chromeJoin, chromeSeparator } from "./separators.ts"
-import { currentTideLevels, currentTideStrip, settledTideLevels, settledTideStrip, tideColumns } from "./tide.ts"
+import {
+  flatTideLevels,
+  flatTideStrip,
+  tideColumns,
+  tideLevels,
+  tideStrip,
+  tideTickForCard,
+  type TideVariant,
+} from "./tide.ts"
 
 /**
  * Inline work-row and Work-card mapping for the group chat surface (ticket
@@ -522,6 +530,8 @@ export type WorkCard = {
   needsYou: boolean
   /** Ticket #117: a recently finished card that is display-only, never a cursor target. */
   recent: boolean
+  /** Stable tide motion for this subtask's active lifetime. */
+  tideVariant: TideVariant
   /** Rendered one-row strip: two cells per tide column, `width` cells total. */
   tide: string
   /** One sampled level per tide column, used for per-cell theme colors. */
@@ -530,7 +540,10 @@ export type WorkCard = {
 
 export type WorkCardOptions = {
   now: number
+  /** Braille chrome clock tick (4 fps). */
   tick: number
+  /** Work-card tide clock tick (10 fps); defaults to `tick`. */
+  tideTick?: number
   /** Card content width in terminal cells. */
   width: number
   env?: NodeJS.ProcessEnv
@@ -538,6 +551,10 @@ export type WorkCardOptions = {
   nativeBlockedSubtaskIDs?: ReadonlySet<string>
   pendingFor?: (task: Subtask) => PendingWorkAction | null | undefined
   detailFor?: (task: Subtask) => string | undefined
+  /** Fixed variant override; assignment callers should use `variantFor`. */
+  variant?: TideVariant
+  /** Stable per-subtask assignment, resolved once on first sight. */
+  variantFor?: (task: Subtask) => TideVariant
 }
 
 /**
@@ -575,6 +592,9 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
   const pending = options.pendingFor?.(task) ?? null
   const width = Math.max(16, Math.floor(options.width))
   const textWidth = Math.max(8, width - 2)
+  const variant = options.variantFor?.(task) ?? options.variant ?? "current"
+  const tideTick = tideTickForCard(status, needsYou, options.tideTick ?? options.tick, options.env)
+  const settled = isTerminalWorkStatus(status)
   return {
     id: task.id,
     agent: short(agentLabel, Math.max(8, width - 16)),
@@ -585,8 +605,9 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     status,
     needsYou,
     recent: false,
-    tide: currentTideStrip(width, options.tick, options.env),
-    tideLevels: currentTideLevels(tideColumns(width), options.tick, options.env),
+    tideVariant: variant,
+    tide: settled ? flatTideStrip(width) : tideStrip(variant, width, tideTick, options.env),
+    tideLevels: settled ? flatTideLevels(tideColumns(width)) : tideLevels(variant, tideColumns(width), tideTick, options.env),
   }
 }
 
@@ -624,8 +645,9 @@ export function recentWorkCardsForTasks(
       status,
       needsYou: false,
       recent: true,
-      tide: settledTideStrip(width),
-      tideLevels: settledTideLevels(tideColumns(width)),
+      tideVariant: options.variantFor?.(task) ?? options.variant ?? "current",
+      tide: flatTideStrip(width),
+      tideLevels: flatTideLevels(tideColumns(width)),
     }
   })
 }
