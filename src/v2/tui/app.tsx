@@ -6,7 +6,7 @@ import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
-import { COMPOSER_COMMANDS, composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
+import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
@@ -28,8 +28,15 @@ import {
   wizardModelKeyFor,
   wizardModelOptions,
   wizardMemorySaveList,
+  wizardStepAnnouncement,
   wizardStepArrival,
+  wizardStepRail,
+  wizardStepSettleMs,
+  wizardStepSettleOpacity,
+  wizardSuccessToast,
+  wizardValidation,
   type WizardDraft,
+  type WizardToast,
 } from "./wizard.ts"
 import { EMPTY_MARK, isReducedMotion, shouldRunMotion } from "./motion.ts"
 import {
@@ -60,6 +67,14 @@ import {
   reorderBackupList,
   type SettingsFieldID,
 } from "./settings-grammar.ts"
+import {
+  SETTINGS_FLASH_MS,
+  createMissingSkillsTracker,
+  settingsAcknowledgement,
+  settingsFeedbackSignal,
+  trackMissingSkills,
+  type SettingsFeedback as SettingsFeedbackSignal,
+} from "./settings-feedback.ts"
 import {
   OVERLAY_PRESENCE_MS,
   OVERLAY_PRESENCE_STEP_MS,
@@ -328,12 +343,35 @@ export function EnsembleV2App() {
   // land one event-refresh later, so the cursor resolves from this id instead
   // of guessing a row from a possibly stale filtered list.
   const [pendingMemorySelectID, setPendingMemorySelectID] = createSignal<string | null>(null)
+  // Ticket #124: one-shot settings acknowledgements. A signal lights its
+  // target for one window, then settles; the timer ends that window once and
+  // never restarts it. Reduced motion renders the settled state immediately.
+  const [settingsFeedback, setSettingsFeedback] = createSignal<SettingsFeedbackSignal | null>(null)
+  const [settingsFeedbackNow, setSettingsFeedbackNow] = createSignal(0)
+  let settingsFeedbackTimer: ReturnType<typeof setTimeout> | undefined
+  const clearSettingsFeedback = () => {
+    if (settingsFeedbackTimer !== undefined) { clearTimeout(settingsFeedbackTimer); settingsFeedbackTimer = undefined }
+    setSettingsFeedback(null)
+    setSettingsFeedbackNow(0)
+  }
+  const signalSettingsFeedback = (feedback: SettingsFeedbackSignal) => {
+    if (settingsFeedbackTimer !== undefined) { clearTimeout(settingsFeedbackTimer); settingsFeedbackTimer = undefined }
+    setSettingsFeedback(feedback)
+    setSettingsFeedbackNow(feedback.at)
+    settingsFeedbackTimer = setTimeout(() => {
+      setSettingsFeedbackNow(feedback.at + SETTINGS_FLASH_MS)
+      settingsFeedbackTimer = undefined
+    }, SETTINGS_FLASH_MS)
+  }
+  const settingsAck = createMemo(() => settingsAcknowledgement(settingsFeedback(), settingsFeedbackNow()))
+  onCleanup(() => { if (settingsFeedbackTimer !== undefined) clearTimeout(settingsFeedbackTimer) })
   const [memoryFilter, setMemoryFilter] = createSignal("")
   const [skillFilter, setSkillFilter] = createSignal("")
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
   const [composerDraft, setComposerDraft] = createSignal("")
   const [composerCursor, setComposerCursor] = createSignal(0)
   const [drafts, setDrafts] = createSignal<DraftStore>({})
+  const [composerValidation, setComposerValidation] = createSignal<ComposerValidationState | null>(null)
   const [completion, setCompletion] = createSignal<Completion | null>(null)
   const [picker, setPicker] = createSignal<PickerState | null>(null)
   const [textPrompt, setTextPrompt] = createSignal<TextPromptState | null>(null)
@@ -345,6 +383,9 @@ export function EnsembleV2App() {
   const [overlayPresence, setOverlayPresence] = createSignal(overlayPresenceOpacity(0))
   const [overlayPresenceKey, setOverlayPresenceKey] = createSignal("none")
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
+  // One-shot step settle: the content dims once on arrival and returns to
+  // full color, never moving geometry. Reduced motion leaves it settled.
+  const [wizardSettling, setWizardSettling] = createSignal(false)
   // The persistent memory field's live buffer. The renderable's ref can trail
   // a step switch by one frame, so the pure state owns the text Enter saves.
   const [wizardMemoryInput, setWizardMemoryInput] = createSignal("")
@@ -372,6 +413,9 @@ export function EnsembleV2App() {
   // Remember where settings was opened so closing returns to the same column.
   let settingsReturnFocus: InteractionFocus = "chat"
   let messageTimer: ReturnType<typeof setTimeout> | undefined
+  let wizardSettleTimer: ReturnType<typeof setTimeout> | undefined
+  let wizardSettledKey = ""
+  let composerValidationTimer: ReturnType<typeof setTimeout> | undefined
 
   // v5.7 T2: every text editor paints the same mode-driven caret. A block in
   // Normal shows the character Vim acts on; a line in Insert/Visual/Command
@@ -443,6 +487,33 @@ export function EnsembleV2App() {
     }, 3_000)
   }
   onCleanup(() => { if (messageTimer !== undefined) clearTimeout(messageTimer) })
+
+  // Wizard success feedback goes through the app toast surface. The app-owned
+  // toast scene lands separately; this is the single call site the wizard uses
+  // so that transport can change without touching the success paths.
+  const showWizardToast = (toast: WizardToast) => {
+    try { context.ui.toast.show(toast) } catch {}
+  }
+
+  // Ticket #123: invalid commands and failed validation flash the composer
+  // border once while the draft stays intact. Typing or a successful send
+  // clears the signal; the short timer is the one-shot lifetime.
+  const clearComposerValidation = (reason: "input" | "send-success" = "input") => {
+    if (composerValidationTimer !== undefined) {
+      clearTimeout(composerValidationTimer)
+      composerValidationTimer = undefined
+    }
+    setComposerValidation((state) => composerValidationReducer(state, { type: reason }))
+  }
+  const markComposerInvalid = (message: string) => {
+    setComposerValidation((state) => composerValidationReducer(state, { type: "invalid", message, at: Date.now() }))
+    if (composerValidationTimer !== undefined) clearTimeout(composerValidationTimer)
+    composerValidationTimer = setTimeout(() => {
+      composerValidationTimer = undefined
+      setComposerValidation((state) => composerValidationReducer(state, { type: "tick", at: Date.now() }))
+    }, COMPOSER_VALIDATION_MS)
+  }
+  onCleanup(() => { if (composerValidationTimer !== undefined) clearTimeout(composerValidationTimer) })
 
   // v5.6 T7: Normal-mode Vim editing for every text buffer. One internal
   // register is shared by the composer, prompts, and wizard fields; the
@@ -989,6 +1060,15 @@ export function EnsembleV2App() {
   const selectedMissingSkills = createMemo(() => {
     const agent = draft() ?? selectedAgent()
     return agent ? missingSkills(agent, skills()) : []
+  })
+  // Ticket #124: a missing-skill warning emphasizes once when its set first
+  // appears on the Skillbox tab. Snapshot paints and same-set refreshes do not
+  // re-signal, so the warning never loops back into motion.
+  const missingSkillsTracker = createMissingSkillsTracker()
+  createEffect(() => {
+    if (!settingsAgentID() || settingsTab() !== "skillbox") return
+    const feedback = trackMissingSkills(missingSkillsTracker, selectedMissingSkills())
+    if (feedback) signalSettingsFeedback(feedback)
   })
   const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
   onMount(() => {
@@ -1580,6 +1660,7 @@ export function EnsembleV2App() {
       await invoke(context, "workspace.activate", { id: workspace.id })
     })
     if (created) {
+      showWizardToast(wizardSuccessToast("workspace-created", created.name))
       await offerMoveHome(created, draft.memberIDs)
       await refresh()
     }
@@ -1606,7 +1687,7 @@ export function EnsembleV2App() {
       for (const text of memories) {
         await invoke(context, "memory.add", { agentID: agent.id, scope: "project", text, source: "wizard" }).catch(() => undefined)
       }
-      context.ui.toast.show({ title: "Ensemble", message: `${agent.name} created. Opening a direct chat.${memories.length > 0 ? ` Saved ${memories.length} ${memories.length === 1 ? "memory" : "memories"}.` : ""}`, variant: "success" })
+      showWizardToast(wizardSuccessToast("agent-created", agent.name, memories.length))
       openAgent(agent)
     })
   }
@@ -1625,10 +1706,11 @@ export function EnsembleV2App() {
     if (!workspace) return
     const draft = await openWizard("workspace", workspace)
     if (!draft) return
-    await run("Update workspace", async () => {
+    const updated = await run("Update workspace", async () => {
       await invoke(context, "workspace.update", { id: workspace.id, memberIDs: draft.memberIDs, leaderID: draft.leaderID, synthesis: draft.synthesis })
       await offerMoveHome(workspace, draft.memberIDs.filter((id) => !workspace.memberIDs.includes(id)))
     })
+    if (updated) showWizardToast(wizardSuccessToast("workspace-updated", workspace.name))
   }
 
   const composerPlan = (text: string, ownerSelections?: Record<string, string>) => {
@@ -1646,12 +1728,17 @@ export function EnsembleV2App() {
     })
   }
 
-  const send = async (text: string, recipientIDs?: string[]): Promise<boolean> => {
+  const send = async (text: string, recipientIDs?: string[], onInvalid?: (message: string) => void): Promise<boolean> => {
     const value = text.trim()
     if (!value) return false
     const current = surface()
-    if (!current) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return false }
+    if (!current) {
+      onInvalid?.("Open an agent or workspace first.")
+      context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" })
+      return false
+    }
     const failure = (message: string) => {
+      onInvalid?.(message)
       notify(message, "error")
       context.ui.toast.show({ title: "Ensemble", message, variant: "error" })
       return false
@@ -1704,7 +1791,15 @@ export function EnsembleV2App() {
 
   const focusComposer = () => focusWhenReady(() => composerRef)
   const composerHeight = () => computeComposerHeight(composerDraft(), Math.max(12, messageWidth() - 6))
+  const composerBorderColor = () => {
+    // Read the motion tick so the bounded bad-border pulse repaints itself.
+    motionFrame()
+    const role = composerValidationBorder(composerValidation(), Date.now(), isReducedMotion(process.env))
+    if (role === "bad") return colors.bad
+    return chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border
+  }
   const setComposerValue = (value: string, cursor = value.length) => {
+    clearComposerValidation()
     composerCache.buffer?.invalidate()
     if (composerRef) {
       composerRef.setText?.(value)
@@ -1724,6 +1819,7 @@ export function EnsembleV2App() {
     const key = currentDraftKey()
     if (key === lastDraftKey) return
     lastDraftKey = key
+    clearComposerValidation()
     composerCache.buffer?.invalidate()
     const value = draftFor(drafts(), key)
     setComposerDraft(value)
@@ -1805,6 +1901,7 @@ export function EnsembleV2App() {
     setApprovalsOpen(false)
     setModal(false)
     setCompletion(null)
+    clearComposerValidation()
     closeLeader()
     if (commandActive()) closeCommandLine(true)
     clearPendingChord()
@@ -1843,6 +1940,7 @@ export function EnsembleV2App() {
   }
   /** Slash commands consume their text, so only this path clears a draft. */
   const resetComposer = () => {
+    clearComposerValidation()
     composerEpoch++
     composerCache.buffer?.invalidate()
     syncVimChord(null)
@@ -2008,15 +2106,28 @@ export function EnsembleV2App() {
     // command line has its own parser, so normalize here before dispatching.
     const parsed = parseSlashCommand(raw.startsWith(":") ? `/${raw.slice(1)}` : raw)
     const command = parsed?.command ?? ""
-    resetComposer()
+    const known = COMPOSER_COMMANDS.some((entry) => entry.name === command) || isInitAlias(command)
+    if (!known) {
+      // An invalid command is non-destructive: keep the draft and show the
+      // one-shot bad border until the user types or submits successfully.
+      const message = `Unknown command: /${command}`
+      notify(message, "error")
+      context.ui.toast.show({ title: "Ensemble", message, variant: "warning" })
+      markComposerInvalid(message)
+      return
+    }
     if (isInitAlias(command)) {
       if ((parsed?.args.length ?? 0) > 0) {
-        notify("Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text.", "error")
+        const message = "Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text."
+        notify(message, "error")
+        markComposerInvalid(message)
         return
       }
+      resetComposer()
       await initEnsemble()
       return
     }
+    resetComposer()
     switch (command) {
       case "workspace": await pickWorkspace(); return
       case "agent": mention(); return
@@ -2031,11 +2142,17 @@ export function EnsembleV2App() {
       case "restart": await restartSelected(); return
       case "cancel": await cancelSelected(); return
       case "reset-ensemble": await resetEnsemble(); return
-      default: context.ui.toast.show({ title: "Ensemble", message: `Unknown command: /${command}`, variant: "warning" })
+      default: {
+        const message = `Unknown command: /${command}`
+        notify(message, "error")
+        context.ui.toast.show({ title: "Ensemble", message, variant: "warning" })
+        markComposerInvalid(message)
+      }
     }
   }
 
   const handleComposerInput = (value: string, cursor: number) => {
+    clearComposerValidation()
     const current = completion()
     if (current) {
       if (current.kind === "command") { commandPaletteCompletion(value, cursor); return }
@@ -2060,7 +2177,7 @@ export function EnsembleV2App() {
     if (completion()) { await selectCompletion(); return }
     if (text === "/") { commandPaletteCompletion("/", 1); return }
     const initIssue = initComposerIssue(text)
-    if (initIssue) { notify(initIssue, "error"); return }
+    if (initIssue) { notify(initIssue, "error"); markComposerInvalid(initIssue); return }
     const plan = composerPlan(text)
     if (plan?.kind === "command" || plan?.kind === "init") { await runSlashCommand(text); return }
     const parsed = parseSlashCommand(text)
@@ -2078,11 +2195,12 @@ export function EnsembleV2App() {
     const key = currentDraftKey()
     const epoch = composerEpoch
     const wasBusy = busy()
-    const sent = await send(text)
+    const sent = await send(text, undefined, markComposerInvalid)
     if (!sent) {
       if (wasBusy) notify("Busy — draft kept", "info")
       return
     }
+    clearComposerValidation("send-success")
     notify("Message sent", "success")
     const sameKey = currentDraftKey() === key
     const unchanged = sameKey && composerDraft() === value
@@ -2332,6 +2450,8 @@ export function EnsembleV2App() {
     setSettingsFieldText("")
     setSettingsFieldCursor(0)
     setPendingMemorySelectID(null)
+    clearSettingsFeedback()
+    missingSkillsTracker.key = ""
     setSettingsAgentID(null)
     setDraft(null)
     setDirty(false)
@@ -2347,7 +2467,16 @@ export function EnsembleV2App() {
     // that exists in the current tab.
     setSkillFilter(""); setMemoryFilter(""); setSettingsCursor(0)
     setSettingsField(null); setSettingsFieldText(""); setSettingsFieldCursor(0)
+    clearSettingsFeedback()
+    missingSkillsTracker.key = ""
     dispatchInteraction({ type: "focus.set", focus: "settings" })
+  }
+
+  // An edit always wins over the previous save acknowledgement, so the header
+  // can never show Saved while the draft is dirty.
+  const markSettingsDirty = () => {
+    setDirty(true)
+    if (settingsFeedback()?.kind === "saved") clearSettingsFeedback()
   }
 
   const closeSettings = async () => {
@@ -2361,9 +2490,14 @@ export function EnsembleV2App() {
   const saveSettings = async () => {
     const agent = draft(); if (!agent) return
     if (!agent.name.trim()) throw new Error("Agent name is required.")
+    clearSettingsFeedback()
     await run("Save settings", async () => {
       await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color })
-      finishSettingsClose()
+      // Ticket #124: stay in Settings so the saved state is visible. The
+      // header flashes once, then keeps the final Saved word until the next
+      // edit; the dirty mark is cleared at the same time.
+      setDirty(false)
+      signalSettingsFeedback(settingsFeedbackSignal("saved"))
     })
   }
 
@@ -2374,7 +2508,7 @@ export function EnsembleV2App() {
     setDraft({ ...agent, backupModels: [...agent.backupModels, { providerID: model.providerID, modelID: model.modelID, variant }] })
     // Row 0 is the main model, so the appended backup lands at row N+1.
     setSettingsCursor(agent.backupModels.length + 1)
-    setDirty(true)
+    markSettingsDirty()
   }
 
   const editModelRow = async (row: number) => {
@@ -2382,7 +2516,7 @@ export function EnsembleV2App() {
     if (row <= 0) {
       const model = await chooseModel(agent.mainModel); if (!model) return
       const variant = await chooseVariant(model)
-      setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); setDirty(true)
+      setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); markSettingsDirty()
       return
     }
     const index = row - 1
@@ -2391,7 +2525,7 @@ export function EnsembleV2App() {
     const variant = await chooseVariant(model)
     const backupModels = [...agent.backupModels]
     backupModels[index] = { providerID: model.providerID, modelID: model.modelID, variant }
-    setDraft({ ...agent, backupModels }); setDirty(true)
+    setDraft({ ...agent, backupModels }); markSettingsDirty()
   }
 
   const removeBackup = () => {
@@ -2401,14 +2535,17 @@ export function EnsembleV2App() {
     const index = row - 1
     setDraft({ ...agent, backupModels: agent.backupModels.filter((_, i) => i !== index) })
     setSettingsCursor(Math.max(0, row - 1))
-    setDirty(true)
+    markSettingsDirty()
   }
 
   const toggleSkill = () => {
     const agent = draft(); const skill = filteredSkills()[settingsCursorClamped()]
     if (!agent || !skill) return
     const has = agent.skillbox.includes(skill.id)
-    setDraft({ ...agent, skillbox: has ? agent.skillbox.filter((id) => id !== skill.id) : [...agent.skillbox, skill.id] }); setDirty(true)
+    setDraft({ ...agent, skillbox: has ? agent.skillbox.filter((id) => id !== skill.id) : [...agent.skillbox, skill.id] })
+    markSettingsDirty()
+    // Ticket #124: acknowledge the row that actually changed, once.
+    signalSettingsFeedback(settingsFeedbackSignal("skill-changed", skill.id))
   }
 
   const deleteMemory = async () => {
@@ -2433,7 +2570,7 @@ export function EnsembleV2App() {
     if (!moved) return
     setDraft({ ...agent, backupModels: moved.backups })
     setSettingsCursor(moved.index + 1)
-    setDirty(true)
+    markSettingsDirty()
   }
 
   // Settings text fields reuse the composer Vim adapter (#85): Insert type,
@@ -2466,7 +2603,7 @@ export function EnsembleV2App() {
     const agent = draft()
     if (!agent || String(agent[field.field] ?? "") === value) return
     setDraft({ ...agent, [field.field]: value } as Agent)
-    setDirty(true)
+    markSettingsDirty()
   }
 
   const commitSettingsField = async (field: SettingsFieldState, raw: string): Promise<boolean> => {
@@ -2475,7 +2612,7 @@ export function EnsembleV2App() {
       const value = normalizeSettingsField(field.field, raw)
       if (String(agent[field.field] ?? "") === value) return false
       setDraft({ ...agent, [field.field]: value } as Agent)
-      setDirty(true)
+      markSettingsDirty()
       return true
     }
     const text = raw.trim()
@@ -2488,6 +2625,9 @@ export function EnsembleV2App() {
         createdID = created?.id
       })
       if (!ok || !createdID) return false
+      // Ticket #124: acknowledge the new row once; the id survives until the
+      // snapshot carrying the memory paints.
+      signalSettingsFeedback(settingsFeedbackSignal("memory-added", createdID))
       // The created id is authoritative; resolve it now if the snapshot is
       // current, otherwise let the effect above select it when it arrives.
       setPendingMemorySelectID(null)
@@ -2683,7 +2823,7 @@ export function EnsembleV2App() {
       {
         busy: isBusy() || resolvingApprovalID() !== null,
         live: liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
-        composerActive: composerActive(),
+        composerActive: composerActive() || composerValidation() !== null,
       },
       process.env,
     )
@@ -3528,6 +3668,43 @@ export function EnsembleV2App() {
     return state && step ? `${state.index}:${step.key}:${state.customDirectory ? "custom" : "list"}` : ""
   }
 
+  // Forward and back share one one-shot settle keyed by the step identity.
+  // A changed key starts the short dim interval; reduced motion starts and
+  // ends it immediately so the next step is simply there.
+  const clearWizardSettle = () => {
+    if (wizardSettleTimer !== undefined) {
+      clearTimeout(wizardSettleTimer)
+      wizardSettleTimer = undefined
+    }
+  }
+  createEffect(() => {
+    const active = wizard()
+    const key = active ? wizardStepKey() : ""
+    if (!active) {
+      wizardSettledKey = ""
+      clearWizardSettle()
+      setWizardSettling(false)
+      return
+    }
+    if (key === wizardSettledKey) return
+    wizardSettledKey = key
+    clearWizardSettle()
+    const duration = wizardStepSettleMs()
+    if (duration <= 0) {
+      setWizardSettling(false)
+      return
+    }
+    setWizardSettling(true)
+    wizardSettleTimer = setTimeout(() => {
+      wizardSettleTimer = undefined
+      setWizardSettling(false)
+    }, duration)
+  })
+  onCleanup(() => {
+    clearWizardSettle()
+    wizardSettledKey = ""
+  })
+
   const wizardItems = (): WizardOption[] => {
     const state = wizard()
     const step = wizardStep()
@@ -3572,44 +3749,18 @@ export function EnsembleV2App() {
 
   const wizardFinal = (state: WizardState) => !state.customDirectory && state.index >= state.steps.length - 1
 
-  const validateWizard = (state: WizardState): string | undefined => {
-    const draft = state.draft
-    if (state.flow === "workspace") {
-      if (!draft.directory.trim()) return "Choose a workspace directory."
-      if (!draft.name.trim()) return "Workspace name is required."
-      if (draft.memberIDs.length === 0) return "Choose at least one member."
-      if (!draft.leaderID || !draft.memberIDs.includes(draft.leaderID)) return "Choose a leader from the selected members."
-      return undefined
-    }
-    if (!draft.name.trim()) return "Agent name is required."
-    if (!draft.role.trim()) return "Agent role is required."
-    if (!draft.modelKey) return "Choose a main model."
-    if (rosterAgents().some((agent) => agent.name.toLowerCase() === draft.name.trim().toLowerCase())) return "An agent with that name already exists."
-    const model = models().find((item) => `${item.providerID}/${item.modelID}` === draft.modelKey)
-    if (model && model.variants.length > 0 && !model.variants.includes(draft.variant)) return "Choose a reasoning effort."
-    return undefined
-  }
-
-  const wizardInvalidIndex = (state: WizardState): number => {
-    const draft = state.draft
-    let key = ""
-    if (state.flow === "workspace") {
-      if (!draft.directory.trim()) key = "directory"
-      else if (!draft.name.trim()) key = "name"
-      else if (draft.memberIDs.length === 0) key = "members"
-      else if (!draft.leaderID || !draft.memberIDs.includes(draft.leaderID)) key = "leader"
-    } else {
-      const model = models().find((item) => `${item.providerID}/${item.modelID}` === draft.modelKey)
-      if (!draft.name.trim()) key = "name"
-      else if (!draft.role.trim()) key = "role"
-      else if (!draft.modelKey) key = "model"
-      else if (model && model.variants.length > 0 && !model.variants.includes(draft.variant)) key = "variant"
-    }
-    const index = state.steps.findIndex((step) => step.key === key)
-    return index >= 0 ? index : 0
-  }
+  const validateWizard = (state: WizardState) =>
+    wizardValidation({
+      flow: state.flow,
+      draft: state.draft,
+      agentNames: rosterAgents().map((agent) => agent.name),
+      models: models().map((model) => ({ key: `${model.providerID}/${model.modelID}`, variants: model.variants })),
+    })
 
   const completeWizard = (state: WizardState, value: WizardDraft | undefined) => {
+    // A queued submit or a stale closure must never close a different (or
+    // already closed) wizard a second time.
+    if (wizard() !== state) return
     setWizard(null)
     // A later wizard must never focus the unmounted editor of this one.
     wizardRef = null
@@ -3623,12 +3774,13 @@ export function EnsembleV2App() {
   }
 
   const submitWizard = (state: WizardState) => {
-    const error = validateWizard(state)
-    if (error) {
+    const validation = validateWizard(state)
+    if (validation.error) {
+      const invalid = state.steps.findIndex((step) => step.key === validation.stepKey)
       const next = {
         ...state,
-        index: wizardInvalidIndex(state),
-        error,
+        index: invalid >= 0 ? invalid : 0,
+        error: validation.error,
         query: "",
         filtering: false,
         cursor: 0,
@@ -3639,6 +3791,7 @@ export function EnsembleV2App() {
       wizardMemoryRef = null
       setWizard(next)
       syncWizardMode(next)
+      notify(`Wizard: ${validation.error}`, "error")
       return
     }
     completeWizard(state, state.draft)
@@ -3741,6 +3894,7 @@ export function EnsembleV2App() {
     wizardMemoryRef = null
     setWizard(next)
     syncWizardMode(next)
+    notify(wizardStepAnnouncement(next.steps[next.index]?.title, next.index, next.steps.length), "info")
   }
 
   const wizardNext = () => {
@@ -3767,6 +3921,7 @@ export function EnsembleV2App() {
       const next = { ...state, customDirectory: false, query: "", filtering: false, cursor: 0, error: undefined }
       setWizard(next)
       syncWizardMode(next)
+      notify(wizardStepAnnouncement(next.steps[next.index]?.title, next.index, next.steps.length), "info")
       return
     }
     const step = wizardStep()
@@ -3789,6 +3944,7 @@ export function EnsembleV2App() {
     wizardMemoryRef = null
     setWizard(previous)
     syncWizardMode(previous)
+    notify(wizardStepAnnouncement(previous.steps[previous.index]?.title, previous.index, previous.steps.length), "info")
   }
 
   const wizardMove = (delta: number) => {
@@ -4735,7 +4891,7 @@ export function EnsembleV2App() {
                           )}</For>
                         </box>
                       </Show>
-                      <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
+                      <box flexShrink={0} border borderStyle="single" borderColor={composerBorderColor()} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); if (completion()?.kind === "command") commandPaletteCompletion(value, cursor) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
@@ -4755,7 +4911,7 @@ export function EnsembleV2App() {
                 />
               </Show>
             }>
-              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value); if (value) settingsFieldVimBuffer() }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} acknowledgement={settingsAck()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value); if (value) settingsFieldVimBuffer() }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
             </Show>
           </box>
         </box>
@@ -4808,68 +4964,70 @@ export function EnsembleV2App() {
       </Show>
       <Show when={wizard()}>
         <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column" opacity={overlayOpacity()}>
-          <ChromeText colors={colors} fg={colors.focus} bg={colors.panel} width="100%" truncate text={chromeJoin([wizard()!.title, `step ${wizard()!.index + 1} / ${wizard()!.steps.length}`])} />
-          <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
-          <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
-          <Show when={wizardIsMemoryStep()} fallback={
-            <Show when={wizardStep()?.kind === "text"} fallback={
-              <box flexDirection="column" height={9}>
-                <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])} />
-                <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
-                  <Show when={wizardItems().length === 0} fallback={
-                  <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
+          <box width="100%" flexGrow={1} minHeight={0} flexDirection="column" opacity={wizardStepSettleOpacity(wizardSettling())}>
+            <ChromeText colors={colors} fg={colors.focus} bg={colors.panel} width="100%" truncate text={chromeJoin([wizard()!.title, wizardStepRail(wizard()!.steps.length, wizard()!.index), `${wizard()!.index + 1} / ${wizard()!.steps.length}`])} />
+            <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
+            <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>
+            <Show when={wizardIsMemoryStep()} fallback={
+              <Show when={wizardStep()?.kind === "text"} fallback={
+                <box flexDirection="column" height={9}>
+                  <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`filter: ${wizard()!.query || "(none)"}`, `${wizardItems().length} options`, ...(wizard()!.filtering ? ["typing"] : [])])} />
+                  <Show when={(wizardStep()?.options?.length ?? 0) === 0 && wizardStep()?.key === "model"} fallback={
+                    <Show when={wizardItems().length === 0} fallback={
+                    <For each={[0, 1, 2, 3, 4, 5, 6, 7]}>{(slot) => (
+                      <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
+                        const state = wizard()
+                        const step = wizardStep()
+                        const items = wizardItems()
+                        if (!state || !step) return ""
+                        const offset = pickerWindow(wizardCursor(), items.length, 8).start
+                        const item = items[offset + slot]
+                        if (!item) return ""
+                        const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
+                        return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.detail ? chromeJoin([item.label, item.detail]) : item.label}`
+                      })()}</text>
+                    )}</For>
+                    }>
+                      <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{pickerEmptyLine()}</text>
+                    </Show>
+                  }>
+                    <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
+                  </Show>
+                </box>
+              }>
+                <Show when={wizardStepKey()} keyed>
+                  <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
+                    <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                  </box>
+                </Show>
+              </Show>
+            }>
+              <box flexDirection="column" height={6} flexShrink={0}>
+                <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`memories: ${wizardMemories().length}`, ...(wizardMemories().length > 0 ? [`${wizardMemoryCursor() + 1}/${wizardMemories().length}`] : [])])} />
+                <Show when={wizardMemories().length === 0} fallback={
+                  <For each={[0, 1, 2, 3]}>{(slot) => (
                     <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
-                      const state = wizard()
-                      const step = wizardStep()
-                      const items = wizardItems()
-                      if (!state || !step) return ""
-                      const offset = pickerWindow(wizardCursor(), items.length, 8).start
-                      const item = items[offset + slot]
-                      if (!item) return ""
-                      const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
-                      return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.detail ? chromeJoin([item.label, item.detail]) : item.label}`
+                      const memories = wizardMemories()
+                      if (memories.length === 0) return ""
+                      const offset = pickerWindow(wizardMemoryCursor(), memories.length, 4).start
+                      const index = offset + slot
+                      const text = memories[index]
+                      if (text === undefined) return ""
+                      return `${index === wizardMemoryCursor() ? "›" : " "} ${index + 1}. ${text}`
                     })()}</text>
                   )}</For>
-                  }>
-                    <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{pickerEmptyLine()}</text>
-                  </Show>
                 }>
-                  <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
+                  <text fg={colors.muted} bg={colors.panel} width="100%" truncate>No memories yet. a adds one.</text>
                 </Show>
               </box>
-            }>
-              <Show when={wizardStepKey()} keyed>
-                <box height={7} minHeight={7} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                  <textarea ref={(value: any) => { wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} initialValue={wizardTextValue()} placeholder={wizardStep()?.placeholder ?? ""} width="100%" height={5} backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardNext()} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+              <Show when={wizard()!.memoryEditor}>
+                <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
+                  <input ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
                 </box>
               </Show>
             </Show>
-          }>
-            <box flexDirection="column" height={6} flexShrink={0}>
-              <ChromeText colors={colors} fg={colors.faint} bg={colors.panel} width="100%" truncate text={chromeJoin([`memories: ${wizardMemories().length}`, ...(wizardMemories().length > 0 ? [`${wizardMemoryCursor() + 1}/${wizardMemories().length}`] : [])])} />
-              <Show when={wizardMemories().length === 0} fallback={
-                <For each={[0, 1, 2, 3]}>{(slot) => (
-                  <text fg={colors.text} bg={colors.panel} width="100%" truncate>{(() => {
-                    const memories = wizardMemories()
-                    if (memories.length === 0) return ""
-                    const offset = pickerWindow(wizardMemoryCursor(), memories.length, 4).start
-                    const index = offset + slot
-                    const text = memories[index]
-                    if (text === undefined) return ""
-                    return `${index === wizardMemoryCursor() ? "›" : " "} ${index + 1}. ${text}`
-                  })()}</text>
-                )}</For>
-              }>
-                <text fg={colors.muted} bg={colors.panel} width="100%" truncate>No memories yet. a adds one.</text>
-              </Show>
-            </box>
-            <Show when={wizard()!.memoryEditor}>
-              <box height={3} minHeight={3} flexShrink={0} border borderStyle="single" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1}>
-                <input ref={(value: any) => { wizardMemoryRef = value; wizardRef = value; applyEditorCaret(value); if (value) focusWhenReady(() => value) }} value={wizardMemoryInput()} onInput={(value: string) => setWizardMemoryInput(String(value ?? ""))} placeholder={wizardStep()?.placeholder ?? ""} width="100%" backgroundColor={colors.panel} textColor={colors.text} onSubmit={() => wizardMemorySubmit()} />
-              </box>
-            </Show>
-          </Show>
-          <Show when={wizard()?.error}><text fg={colors.bad} bg={colors.panel} width="100%" truncate>{wizard()!.error}</text></Show>
+            <Show when={wizard()?.error}><text fg={colors.bad} bg={colors.panel} width="100%" wrapMode="word">{`! ${wizard()!.error}`}</text></Show>
+          </box>
           <box width="100%" flexDirection="row" justifyContent="center" flexShrink={0}>
             <text fg={colors.faint} bg={colors.panel} truncate>{wizardHint()}</text>
           </box>

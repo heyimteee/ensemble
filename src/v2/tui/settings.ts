@@ -26,9 +26,20 @@ export function settingsCursorMark(selected: boolean): string {
   return selected ? "› " : "  "
 }
 
-/** Header grammar: `Name │ settings` plus dirty and pending-deferral flags. */
-export function settingsHeader(agentName: string, dirty: boolean, pending: boolean): string {
-  return chromeJoin([agentName, "settings", ...(dirty ? ["UNSAVED"] : []), ...(pending ? ["pending next task"] : [])])
+/** Header grammar: `Name │ settings` plus dirty/saved and pending-deferral
+ *  flags. A new edit always wins over the previous saved state. */
+export function settingsHeader(
+  agentName: string,
+  dirty: boolean,
+  pending: boolean,
+  saved: boolean = false,
+): string {
+  return chromeJoin([
+    agentName,
+    "settings",
+    ...(dirty ? ["UNSAVED"] : saved ? ["Saved"] : []),
+    ...(pending ? ["pending next task"] : []),
+  ])
 }
 
 /** Per-tab section header naming the section plus its live counts. */
