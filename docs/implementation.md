@@ -77,7 +77,7 @@ Agent {
 - New agents start with no workspace. Their native DM session lives under `~/.ensemble/agents/<id>/`.
 - Adding an agent to a workspace can move its no-workspace session with `session.move`; `g` edits members and the leader without recreating the workspace.
 - Agent names are unique and case-insensitive.
-- General, Models, Memories, and Skillbox settings.
+- General, Models, Memories, and Skillbox settings. `s` saves and closes the surface; one app toast confirms the save.
 - Main model and supported reasoning; ordered backups can be added, moved, and removed.
 - Exclusive Skillbox enforced with per-session `skill` permissions.
 - Automatic leader synthesis is chosen when a workspace is created.

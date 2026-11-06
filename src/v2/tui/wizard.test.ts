@@ -155,19 +155,15 @@ test("memory actions only exist on the memories step", () => {
   }
 })
 
-test("the app guards every memory action and the Enter path behind the memories step", () => {
+test("the app gates wizard memory actions behind the memories step", () => {
+  // Narrow wiring guard: the predicate itself is behavior-tested above and in
+  // the live wizard walkthrough.
   const source = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
-  for (const fn of ["openWizardMemoryField", "wizardMemoryStartEdit", "wizardMemoryDelete", "wizardMemorySubmit", "wizardMemoryClose"]) {
-    const declaration = source.indexOf(`const ${fn} =`)
-    assert.ok(declaration >= 0, `${fn} exists`)
-    const body = source.slice(declaration, declaration + 400)
-    assert.ok(body.includes("wizardIsMemoryStep()"), `${fn} checks wizardIsMemoryStep() before acting`)
-  }
-  const add = source.indexOf("const wizardMemoryStartAdd")
-  assert.ok(source.slice(add, add + 200).includes("openWizardMemoryField"), "add delegates to the guarded field opener")
-  for (const id of ["add", "edit", "delete"]) {
-    assert.ok(source.includes(`case "wizard.memory.${id}": if (wizardIsMemoryStep())`), `${id} action is guarded in runDialogAction`)
-  }
+  assert.equal(
+    (source.match(/case "wizard\.memory\.[a-z]+": if \(wizardIsMemoryStep\(\)\)/g) ?? []).length,
+    3,
+    "add, edit, and delete share the one guard",
+  )
   assert.ok(source.includes("wizardIsMemoryStep() && wizard()!.memoryEditor"), "a stale memory editor cannot swallow Enter on another step")
 })
 
@@ -213,10 +209,10 @@ test("agent validation checks required text, unique names, and the live model va
 })
 
 test("submitted wizards use one success toast per outcome", () => {
-  assert.deepEqual(wizardSuccessToast("workspace-created", "Site"), { title: "Ensemble", message: "#Site created.", variant: "success" })
-  assert.deepEqual(wizardSuccessToast("workspace-updated", "Site"), { title: "Ensemble", message: "#Site updated.", variant: "success" })
-  assert.deepEqual(wizardSuccessToast("agent-created", "Nova"), { title: "Ensemble", message: "Nova created. Opening a direct chat.", variant: "success" })
-  assert.deepEqual(wizardSuccessToast("agent-created", "Nova", 2), { title: "Ensemble", message: "Nova created. Opening a direct chat. Saved 2 memories.", variant: "success" })
+  assert.deepEqual(wizardSuccessToast("workspace-created", "Site"), { title: "Ensemble", message: "#Site created.", tone: "success" })
+  assert.deepEqual(wizardSuccessToast("workspace-updated", "Site"), { title: "Ensemble", message: "#Site updated.", tone: "success" })
+  assert.deepEqual(wizardSuccessToast("agent-created", "Nova"), { title: "Ensemble", message: "Nova created. Opening a direct chat.", tone: "success" })
+  assert.deepEqual(wizardSuccessToast("agent-created", "Nova", 2), { title: "Ensemble", message: "Nova created. Opening a direct chat. Saved 2 memories.", tone: "success" })
 })
 
 test("closing a wizard overlay in Insert restores the composer focus", () => {
@@ -230,16 +226,10 @@ test("closing a wizard overlay in Insert restores the composer focus", () => {
   assert.deepEqual(closed.intents.at(-1), { type: "focus-editor", target: "composer" })
 })
 
-test("the wizard wires the rail, the one-shot settle, validation, and submit feedback", () => {
+test("the wizard renders its step rail and sends success through the app toast", () => {
+  // Narrow wiring guards only: the rail and submit feedback behavior are
+  // covered by the pure wizard tests and the fake live scenario.
   const source = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   assert.ok(source.includes("wizardStepRail(wizard()!.steps.length, wizard()!.index)"), "the header renders the current step rail")
-  assert.ok(source.includes("wizardStepSettleMs()"), "the settle duration follows reduced motion")
-  assert.ok(source.includes("opacity={wizardStepSettleOpacity(wizardSettling())}"), "only the content settles")
-  assert.ok(source.includes("wizardValidation({"), "submit uses the pure validation seam")
-  assert.ok(source.includes('notify(`Wizard: ${validation.error}`, "error")'), "validation failure announces once without a toast")
-  assert.ok(source.includes("if (wizard() !== state) return"), "a stale submit cannot close the wizard twice")
-  assert.ok(source.includes('! ${wizard()!.error}') && source.includes('wrapMode="word"'), "validation feedback wraps instead of truncating")
-  for (const outcome of ["workspace-created", "workspace-updated", "agent-created"]) {
-    assert.ok(source.includes(`showWizardToast(wizardSuccessToast("${outcome}"`), `${outcome} uses the app toast`)
-  }
+  assert.ok(source.includes("showToast(wizardSuccessToast("), "submitted wizards use the app toast")
 })

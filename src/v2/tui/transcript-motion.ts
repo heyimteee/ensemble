@@ -75,15 +75,11 @@ export function observeTranscriptMotion(
       state.streaming.add(row.id)
       continue
     }
+    // A row settles once whether we watched it stream or observed it enter
+    // finalized directly (direct conversations carry no streaming flag).
     const wasStreaming = state.streaming.delete(row.id)
-    if (wasStreaming && !state.settled.has(row.id)) {
+    if ((wasStreaming || row.entering) && !state.settled.has(row.id)) {
       // Exactly one beat per completed row, even when the outcome is an error.
-      state.settled.add(row.id)
-      state.emphasized.add(row.id)
-      if (enabled) events.push({ id: row.id, kind: row.error ? "error" : "finalized" })
-      continue
-    }
-    if (row.entering && !state.settled.has(row.id)) {
       state.settled.add(row.id)
       state.emphasized.add(row.id)
       if (enabled) events.push({ id: row.id, kind: row.error ? "error" : "finalized" })

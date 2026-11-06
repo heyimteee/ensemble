@@ -8,7 +8,7 @@
  * decides when the row is visible and threads the shared motion tick.
  */
 import type { InitJob, InitPhase } from "../types.ts"
-import { INIT_PHASES, SYSTEM_AGENT_NAME, initPhaseDetail, initPhaseLabel } from "../system-agent.ts"
+import { INIT_PHASES, SYSTEM_AGENT_NAME, initJobPhase, initPhaseDetail, initPhaseLabel } from "../system-agent.ts"
 import { effectiveTick, workingFrame } from "./motion.ts"
 import { chromeJoin } from "./separators.ts"
 
@@ -31,11 +31,6 @@ export type InitRow = {
   /** Animated Braille liveness mark; reduced motion pins it to frame 0. */
   glyph: string
   startedAt: number
-}
-
-/** Legacy running jobs (pre-#118) have no phase; they are honestly running. */
-export function initJobPhase(job: InitJob): InitPhase {
-  return job.phase && INIT_PHASES.includes(job.phase) ? job.phase : "running"
 }
 
 export function initRowForJob(job: InitJob, tick: number, env: NodeJS.ProcessEnv = process.env): InitRow {

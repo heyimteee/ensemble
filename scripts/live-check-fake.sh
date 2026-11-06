@@ -142,6 +142,9 @@ live_check_help
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
 live_assert_text "$LIVE_TUI_SESSION" "NORMAL  │ Wizard" "wizard text keeps the arrival mode"
+# Ticket #125/#127: the wizard header carries a one-cell step rail; the
+# current step is `▣`, completed steps are `▪`, and upcoming steps are `▫`.
+live_assert_text "$LIVE_TUI_SESSION" "▣ ▫ ▫" "wizard rail marks the current and upcoming steps"
 live_assert_text "$LIVE_TUI_SESSION" "i/a insert" "field Normal teaches the Vim entries"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "i enters Insert in the wizard field"
@@ -174,6 +177,7 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_type "$LIVE_TUI_SESSION" "FakeAgent"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Agent title" 10 "agent title step"
+live_assert_text "$LIVE_TUI_SESSION" "▪ ▣" "wizard rail marks the completed first step"
 live_type "$LIVE_TUI_SESSION" "Engineering"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
@@ -632,20 +636,33 @@ live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump remov
 # tick. Collect at 0.15 s from the moment live work is known (the WORK row)
 # across both delegation bursts instead: the loop subsumes the "activity line
 # while live" wait, and zero frames means the line never rendered.
-live_log "observing working-frame animation across ticks"
+live_log "observing working-frame animation and tide motion across ticks"
 seen_frames=0
 seen_which=""
+seen_tides=0
+seen_tide_rows=""
+seen_work_sample=""
 collect_work_frames() {
-  local rounds="${1:-16}" _ pane frame
+  local rounds="${1:-16}" _ pane frame tide_row work_sample
   for _ in $(seq 1 "$rounds"); do
     pane=$(live_capture "$LIVE_TUI_SESSION")
+    work_sample=$(grep -n -A 4 'FakeAgent │ working' <<<"$pane" | head -n 12 || true)
+    [[ -n "$work_sample" ]] && seen_work_sample="$work_sample"
     for frame in "⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"; do
       if grep -qF -- "${frame} FakeAgent │ working" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
         seen_which="${seen_which}${frame}"
         seen_frames=$((seen_frames + 1))
       fi
     done
-    [[ "$seen_frames" -ge 2 ]] && return 0
+    # Ticket #116/#127: the Work card tide row is a full-width one-row strip
+    # of block glyphs inside the chat border. Distinct captures prove the
+    # 10 fps tide advances.
+    tide_row=$(grep -oE '[▁▂▃▄▅▆▇█]{16,}' <<<"$pane" | tr '\n' '|' || true)
+    if [[ -n "$tide_row" && "$seen_tide_rows" != *"$tide_row"* ]]; then
+      seen_tide_rows="${seen_tide_rows}${tide_row}"$'\n'
+      seen_tides=$((seen_tides + 1))
+    fi
+    [[ "$seen_frames" -ge 2 && "$seen_tides" -ge 2 ]] && return 0
     sleep 0.15
   done
   return 1
@@ -665,7 +682,11 @@ live_require_text "$LIVE_TUI_SESSION" "fake-queue-beta" 15 "second group message
 # the clock ticking; a single static frame in both fails below.
 collect_work_frames 16 || true
 [[ "$seen_frames" -ge 2 ]] || live_fail "activity line did not animate across working frames (saw: $seen_which)"
-live_log "activity line animated across working frames ($seen_which)"
+if [[ "$seen_tides" -lt 2 ]]; then
+  printf 'live: tide diagnostics (work sample: %q)\n' "$seen_work_sample" >&2
+  live_fail "Work card tide strip did not advance across working frames"
+fi
+live_log "activity line and tide strip animated across working frames ($seen_which; $seen_tides tide frames)"
 # Count only the two named group work items; init jobs are separate subtasks.
 queue_replied=0
 for _ in $(seq 1 120); do
@@ -1299,15 +1320,34 @@ live_key "$LIVE_TUI_SESSION" "p"
 sleep 0.5
 promotion=$(live_snapshot_value '(function () { var a = Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" }); return a.length + ":" + (a[0] ? a[0].detail : "") })()')
 [[ "$promotion" == '"1:fake-live-memory v2"' ]] || live_fail "p did not request a memory promotion (got $promotion)"
-promotion_id=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" })[0].id')
-live_invoke approval.resolve "{\"id\":$promotion_id,\"approve\":false}" >/dev/null
-sleep 0.3
+# Ticket #126/#127: resolve through the inbox itself. The row leaves the
+# pending list and settles once as `✓ Resolved`; the short resolving frame is
+# covered by approvals.test.ts because the fake RPC returns too fast to
+# capture reliably.
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed for the approvals inbox"
+live_key "$LIVE_TUI_SESSION" "v"
+live_require_text "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals inbox opens for the promotion"
+live_require_text "$LIVE_TUI_SESSION" "Promote memory for FakeAgent" 10 "the promotion row is visible"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Approve" 10 "the resolution choice opens"
+live_key "$LIVE_TUI_SESSION" Down
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "✓ Resolved" 10 "the resolved row settles once"
 promotions_left=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" }).length')
 [[ "$promotions_left" == '0' ]] || live_fail "promotion approval was not cleaned up (got $promotions_left)"
-live_log "settings p promoted the selected memory through the approval flow"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals inbox closed after resolving"
+live_log "settings p promoted the selected memory through the TUI approvals inbox"
 # Slice D inline filter (ticket #80): / opens the shared command-line search
 # and filters the focused settings tab live; Enter commits, Esc would restore
-# the prior filter.
+# the prior filter. Resolving through the inbox closed Settings, so reopen it
+# on the memories tab first.
+live_key "$LIVE_TUI_SESSION" "s"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings reopened for the memory filter"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_key "$LIVE_TUI_SESSION" "Tab"
+live_require_text "$LIVE_TUI_SESSION" "Saved knowledge — Memories (1)" 10 "memories tab reopened for the filter"
 live_key "$LIVE_TUI_SESSION" "/"
 live_require_text "$LIVE_TUI_SESSION" "enter search │ esc cancel" 10 "settings search opens in the command line"
 live_type "$LIVE_TUI_SESSION" "zzz-no-match"
@@ -1440,11 +1480,18 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 2" 10 "second backup selected after add"
 live_key "$LIVE_TUI_SESSION" "K"
 live_require_text "$LIVE_TUI_SESSION" "› ( ) Backup 1" 10 "K moves the selected backup up"
+# Ticket #124/#127: save closes the surface and confirms through one app
+# toast. No header Saved state and no statusline duplicate compete with it.
 live_key "$LIVE_TUI_SESSION" "s"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ settings │ Saved" 10 "save acknowledges with the saved state"
-live_require_absence "$LIVE_TUI_SESSION" "UNSAVED" 10 "save clears the dirty mark"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed after saving"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "save closes the settings surface"
+live_require_text "$LIVE_TUI_SESSION" "Saved FakeAgent." 5 "save confirms once in the app toast"
+save_toast_cell=$(live_capture "$LIVE_TUI_SESSION" | awk 'index($0, "Saved FakeAgent.") { print NR " " index($0, "Saved FakeAgent."); exit }')
+[[ -n "$save_toast_cell" ]] || live_fail "save toast disappeared before its placement could be read"
+read -r save_toast_row save_toast_col <<<"$save_toast_cell"
+save_toast_width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
+[[ "$save_toast_row" -le 8 ]] || live_fail "save toast is not near the top (row $save_toast_row)"
+[[ "$save_toast_col" -gt $((save_toast_width / 2)) ]] || live_fail "save toast is not in the right half at ${save_toast_width} columns (column $save_toast_col)"
+live_assert_absence "$LIVE_TUI_SESSION" "UNSAVED" "a closed save leaves no dirty mark"
 backup_order=$(live_snapshot_value '(function () { var a = Object.values(output.state.agents).filter(function (x) { return x.name === "FakeAgent" })[0]; return a.backupModels.map(function (m) { return m.variant }) })()')
 [[ "$backup_order" == '["medium","low"]' ]] || live_fail "K did not reorder the backups before save (got $backup_order)"
 live_log "settings J/K reordered backups and saved the persisted order"
@@ -1768,6 +1815,7 @@ clear_composer_text() {
   live_key_repeat "$LIVE_TUI_SESSION" BSpace 160
   sleep 0.5
 }
+
 fake_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "FakeAgent" }).id' | tr -d '"')
 live_invoke "agent.update" "{\"id\":\"$fake_id\",\"skillbox\":[\"ensemble-live-skill\",\"ensemble-live-skill-two\"]}" >/dev/null
 live_invoke "agent.update" "{\"id\":\"$helper_id\",\"skillbox\":[\"ensemble-live-skill-two\",\"ensemble-live-skill-helper\"]}" >/dev/null
@@ -2077,7 +2125,12 @@ live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Init is solo-only." 10 "init rejects a mixed composer line"
+# Ticket #123/#127: a rejected composer line keeps its draft and uses one
+# feedback channel — the statusline message plus the one-shot border. No app
+# toast repeats the same error.
+live_assert_count "$LIVE_TUI_SESSION" "Init is solo-only." 1 "composer rejection feedback appears once"
+live_assert_text "$LIVE_TUI_SESSION" "/init extra" "composer rejection keeps the draft"
 clear_composer_text
-live_log "ticket #103 init General row remains solo-only"
+live_log "ticket #103 init General row remains solo-only with single-channel validation"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

@@ -19,37 +19,59 @@ export const INIT_REPORTING_TEXT = "Preparing the init report…"
 /** Ordered stages for the System Agent init row (ticket #118). */
 export const INIT_PHASES: readonly InitPhase[] = ["starting", "running", "writing", "reporting"]
 
+type InitPhaseCopy = { label: string; detail: string; text: string }
+
+/** One copy table is the single source for every stage word and row text. */
+export const INIT_PHASE_COPY: Record<InitPhase, InitPhaseCopy> = {
+  starting: {
+    label: "starting",
+    detail: "preparing a temporary native session",
+    text: INIT_START_TEXT,
+  },
+  running: {
+    label: "running · indeterminate",
+    detail: "native /init is opaque; progress is indeterminate",
+    text: INIT_PROGRESS_TEXT,
+  },
+  writing: {
+    label: "writing",
+    detail: "writing AGENTS.md and .ensemble/init.json",
+    text: INIT_WRITING_TEXT,
+  },
+  reporting: {
+    label: "reporting",
+    detail: "settling the report",
+    text: INIT_REPORTING_TEXT,
+  },
+}
+
 /** Short stage word for the row. The native run is explicitly indeterminate. */
 export function initPhaseLabel(phase: InitPhase): string {
-  return phase === "running" ? "running · indeterminate" : phase
+  return INIT_PHASE_COPY[phase].label
 }
 
 /** One honest detail line per stage; never a percentage or within-stage claim. */
 export function initPhaseDetail(phase: InitPhase): string {
-  switch (phase) {
-    case "starting":
-      return "preparing a temporary native session"
-    case "running":
-      return "native /init is opaque; progress is indeterminate"
-    case "writing":
-      return "writing AGENTS.md and .ensemble/init.json"
-    case "reporting":
-      return "settling the report"
-  }
+  return INIT_PHASE_COPY[phase].detail
 }
 
 /** Streaming row text for a stage. */
 export function initPhaseText(phase: InitPhase): string {
-  switch (phase) {
-    case "starting":
-      return INIT_START_TEXT
-    case "running":
-      return INIT_PROGRESS_TEXT
-    case "writing":
-      return INIT_WRITING_TEXT
-    case "reporting":
-      return INIT_REPORTING_TEXT
-  }
+  return INIT_PHASE_COPY[phase].text
+}
+
+/**
+ * Current stage of an init job. The durable `phases` history is the only
+ * stored source; its last entry is the current stage. Jobs persisted before
+ * ticket #118 carry only a single `phase` field, read here as a migration
+ * fallback and never written again.
+ */
+export function initJobPhase(job: { phases?: readonly InitPhase[]; phase?: InitPhase }): InitPhase {
+  const phases = job.phases
+  const current = phases && phases.length > 0 ? phases[phases.length - 1] : undefined
+  if (current && INIT_PHASES.includes(current)) return current
+  if (job.phase && INIT_PHASES.includes(job.phase)) return job.phase
+  return "running"
 }
 
 /** Composer/planner aliases for the built-in init job. */

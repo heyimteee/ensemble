@@ -20,7 +20,7 @@ _Avoid_: Toolbox (when referring to assigned skills).
 
 **System Agent**: A non-roster transcript identity that reports workspace-level jobs such as init.
 
-**Init job**: A durable workspace-level job that runs native `/init` in a temporary session, moves through `starting`, `running`, `writing`, and `reporting` stages, and reports through the System Agent. It is not a Subtask and does not enter the work queue.
+**Init job**: A durable workspace-level job that runs native `/init` in a temporary session and reports through the System Agent. It is not a Subtask and does not enter the work queue.
 
 **Workspace**: A directory-bound project room with a group chat, a roster, and exactly one leader. One canonical directory belongs to one workspace.
 _Avoid_: Channel, room, group (when referring to this concept).

@@ -86,10 +86,11 @@ collision-free intent as unverified there.
 
 Settings use `h`/`l` for tabs, `j`/`k` for rows, `Enter` to edit or toggle,
 `a`/`e`/`x` to add or remove, `Space` to toggle a skill, `p` to promote a
-memory, `J`/`K` to reorder backups, `s` to save, `/` to filter, and `Esc` to
-close. Memory add/edit uses the same persistent field as the wizard: `Enter`
-saves and keeps the field focused, an add clears for the next entry, and `Esc`
-returns to the rows. Press `i` to focus the bottom composer; the leader only
+memory, `J`/`K` to reorder backups, `s` to save and close Settings, `/` to
+filter, and `Esc` to close. A successful save confirms once in the app toast
+after the surface closes. Memory add/edit uses the same persistent field as
+the wizard: `Enter` saves and keeps the field focused, an add clears for the
+next entry, and `Esc` returns to the rows. Press `i` to focus the bottom composer; the leader only
 acts when the composer and dialogs are inactive. In the composer, `$Name`
 addresses an agent, `@path` references a workspace file, and `/` opens Ensemble
 commands or the skill palette. At message start `/` shows commands and every

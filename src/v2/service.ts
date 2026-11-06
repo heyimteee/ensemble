@@ -98,11 +98,17 @@ function sameModels(a: ModelRef[], b: ModelRef[]): boolean {
   return a.length === b.length && a.every((model, index) => sameModel(model, b[index]))
 }
 
-/** Record one init stage without duplicating consecutive entries or dropping history. */
+/**
+ * Record one init stage without duplicating consecutive entries or dropping
+ * history. `phases` is the single stored source: the current stage is read
+ * from its last entry, never written as a mirror field. A pre-#118 job that
+ * only carries `phase` is migrated into the history on its first advance.
+ */
 function recordInitPhase(job: InitJob, phase: InitPhase): void {
-  const phases = job.phases ? [...job.phases] : job.phase ? [job.phase] : []
+  const existing = job.phases ?? []
+  const legacy = (job as { phase?: InitPhase }).phase
+  const phases = existing.length > 0 ? [...existing] : legacy ? [legacy] : []
   if (phases[phases.length - 1] !== phase) phases.push(phase)
-  job.phase = phase
   job.phases = phases
 }
 
@@ -1134,7 +1140,6 @@ export class EnsembleV2Service {
       workspaceID: workspace.id,
       messageID: message.id,
       state: "running",
-      phase: "starting",
       phases: ["starting"],
       previousAgentsMD,
       startedAt: now(),

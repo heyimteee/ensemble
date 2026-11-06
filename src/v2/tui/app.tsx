@@ -49,10 +49,9 @@ import {
   wizardSuccessToast,
   wizardValidation,
   type WizardDraft,
-  type WizardToast,
 } from "./wizard.ts"
 import { EMPTY_MARK, WORK_CLOCK_INTERVAL_MS, isReducedMotion, shouldRunMotion, shouldRunWorkClock } from "./motion.ts"
-import { createTideAssignments, pruneTideAssignments, tideVariantFor } from "./tide.ts"
+import { createTideAssignments, createTideFreezeState, pruneTideAssignments, pruneTideFreezes, tideVariantFor } from "./tide.ts"
 import {
   TRANSCRIPT_EMPHASIS_MS,
   createTranscriptMotionState,
@@ -163,6 +162,7 @@ import {
   splitActivityGroups,
   splitLiveFinalized,
   suppressCardedActivity,
+  visibleWorkTasks,
   workCardLayout,
   workCardsForTasks,
   workRowFrame,
@@ -546,12 +546,6 @@ export function EnsembleV2App() {
   }
   onCleanup(() => { if (messageTimer !== undefined) clearTimeout(messageTimer) })
 
-  // Wizard success feedback goes through the app-owned toast surface. The
-  // wizard keeps one call site per outcome, so transport stays replaceable.
-  const showWizardToast = (toast: WizardToast) => {
-    showToast({ title: toast.title, message: toast.message, tone: toast.variant })
-  }
-
   // Ticket #123: invalid commands and failed validation flash the composer
   // border once while the draft stays intact. Typing or a successful send
   // clears the signal; the short timer is the one-shot lifetime.
@@ -571,6 +565,12 @@ export function EnsembleV2App() {
     }, COMPOSER_VALIDATION_MS)
   }
   onCleanup(() => { if (composerValidationTimer !== undefined) clearTimeout(composerValidationTimer) })
+  // One composer rejection path: the statusline names the problem and the
+  // border flashes once. No second (toast) channel competes with it.
+  const rejectComposerInput = (message: string) => {
+    notify(message, "error")
+    markComposerInvalid(message)
+  }
 
   // v5.6 T7: Normal-mode Vim editing for every text buffer. One internal
   // register is shared by the composer, prompts, and wizard fields; the
@@ -730,9 +730,8 @@ export function EnsembleV2App() {
     const recentCount = recentWorkItems(active, Date.now()).length
     const layout = workCardLayout(renderSize().height, ordered.length, recentCount)
     if (layout.mode !== "cards") return new Set<string>()
-    return new Set(ordered.slice(0, layout.limit).map((task) => task.id))
+    return new Set(visibleWorkTasks(ordered, layout).map((task) => task.id))
   })
-  const selectedTask = createMemo(() => orderedTasks()[taskCursor()])
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
   // Ticket #118: the System Agent init row is a live, staged row. It belongs
   // to the workspace surface, survives navigation through snapshot state, and
@@ -1310,8 +1309,10 @@ export function EnsembleV2App() {
   const workCardWidth = () => Math.max(20, messageWidth() - 2)
   // Ticket #116: one shuffled-deck assignment state for the session. Variants
   // are resolved by subtask id and survive every snapshot refresh; entries
-  // leave the map after the recent-card retention window.
+  // leave the map after the recent-card retention window. A blocked card also
+  // keeps the tide frame it had when it started waiting for the user.
   const tideAssignments = createTideAssignments()
+  const tideFreezes = createTideFreezeState()
   const workCards = createMemo(() => {
     const now = Date.now()
     const active = activeTasks()
@@ -1327,6 +1328,7 @@ export function EnsembleV2App() {
       nativeBlockedSubtaskIDs: nativeBlockedSet,
       pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
       variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
+      freezeState: tideFreezes,
       detailFor: (item) => activityStateForTask(item, {
         now,
         pendingApprovalIDs: pendingApprovalSet,
@@ -1338,6 +1340,7 @@ export function EnsembleV2App() {
     const cards = workCardsForTasks(active, (item) => agentName(state(), item.assigneeID), options)
     const recentCards = recentWorkCardsForTasks(active, (item) => agentName(state(), item.assigneeID), options)
     pruneTideAssignments(tideAssignments, now)
+    pruneTideFreezes(tideFreezes, now)
     return {
       activeCards: cards,
       recentCards,
@@ -1346,6 +1349,24 @@ export function EnsembleV2App() {
       recentTasks: recentWorkItems(active, now),
       layout: workCardLayout(viewHeight(), cards.length, recentCards.length),
     }
+  })
+  // Ticket #115/#117: the cursor and every work action target only cards that
+  // are actually rendered. Overflow active cards and recent cards are
+  // display-only, so a key can never act on hidden work.
+  const visibleTasks = createMemo(() => visibleWorkTasks(orderedTasks(), workCards().layout))
+  const taskCursorClamped = () => {
+    const length = visibleTasks().length
+    if (length <= 0) return 0
+    return Math.max(0, Math.min(length - 1, taskCursor()))
+  }
+  const selectedTask = createMemo(() => visibleTasks()[taskCursorClamped()])
+  createEffect(() => {
+    const length = visibleTasks().length
+    if (length <= 0) {
+      if (taskCursor() !== 0) setTaskCursor(0)
+      return
+    }
+    if (taskCursor() >= length) setTaskCursor(length - 1)
   })
   const workHeader = () => {
     const pane = workCards()
@@ -1853,7 +1874,7 @@ export function EnsembleV2App() {
           if (history?.column) setFocusArea(history.column === ("tasks" as string) ? "chat" : history.column)
           const taskID = history?.taskID ?? uiState.taskID
           if (taskID) {
-            const index = orderedTasks().findIndex((task) => task.id === taskID)
+            const index = visibleTasks().findIndex((task) => task.id === taskID)
             if (index >= 0) setTaskCursor(index)
           }
         }
@@ -1935,12 +1956,12 @@ export function EnsembleV2App() {
     setRailCursor((cursor) => halfPageCursor(cursor, railItems().length, direction, listPage()))
   }
   const moveTask = (delta: number) => {
-    const length = orderedTasks().length
+    const length = visibleTasks().length
     if (length === 0) return
     setTaskCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
   }
   const moveTaskHalf = (direction: 1 | -1) => {
-    setTaskCursor((cursor) => halfPageCursor(cursor, orderedTasks().length, direction, listPage()))
+    setTaskCursor((cursor) => halfPageCursor(cursor, visibleTasks().length, direction, listPage()))
   }
   /**
    * Tab/Shift+Tab move focus zones. Forward: roster -> chat -> work list ->
@@ -2030,7 +2051,7 @@ export function EnsembleV2App() {
       await invoke(context, "workspace.activate", { id: workspace.id })
     })
     if (created) {
-      showWizardToast(wizardSuccessToast("workspace-created", created.name))
+      showToast(wizardSuccessToast("workspace-created", created.name))
       await offerMoveHome(created, draft.memberIDs)
       await refresh()
     }
@@ -2057,7 +2078,7 @@ export function EnsembleV2App() {
       for (const text of memories) {
         await invoke(context, "memory.add", { agentID: agent.id, scope: "project", text, source: "wizard" }).catch(() => undefined)
       }
-      showWizardToast(wizardSuccessToast("agent-created", agent.name, memories.length))
+      showToast(wizardSuccessToast("agent-created", agent.name, memories.length))
       openAgent(agent)
     })
   }
@@ -2080,7 +2101,7 @@ export function EnsembleV2App() {
       await invoke(context, "workspace.update", { id: workspace.id, memberIDs: draft.memberIDs, leaderID: draft.leaderID, synthesis: draft.synthesis })
       await offerMoveHome(workspace, draft.memberIDs.filter((id) => !workspace.memberIDs.includes(id)))
     })
-    if (updated) showWizardToast(wizardSuccessToast("workspace-updated", workspace.name))
+    if (updated) showToast(wizardSuccessToast("workspace-updated", workspace.name))
   }
 
   const composerPlan = (text: string, ownerSelections?: Record<string, string>) => {
@@ -2485,17 +2506,12 @@ export function EnsembleV2App() {
     if (!known) {
       // An invalid command is non-destructive: keep the draft and show the
       // one-shot bad border until the user types or submits successfully.
-      const message = `Unknown command: /${command}`
-      notify(message, "error")
-      showToast({ title: "Ensemble", message, tone: "warning" })
-      markComposerInvalid(message)
+      rejectComposerInput(`Unknown command: /${command}`)
       return
     }
     if (isInitAlias(command)) {
       if ((parsed?.args.length ?? 0) > 0) {
-        const message = "Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text."
-        notify(message, "error")
-        markComposerInvalid(message)
+        rejectComposerInput("Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text.")
         return
       }
       resetComposer()
@@ -2517,12 +2533,8 @@ export function EnsembleV2App() {
       case "restart": await restartSelected(); return
       case "cancel": await cancelSelected(); return
       case "reset-ensemble": await resetEnsemble(); return
-      default: {
-        const message = `Unknown command: /${command}`
-        notify(message, "error")
-        showToast({ title: "Ensemble", message, tone: "warning" })
-        markComposerInvalid(message)
-      }
+      default:
+        rejectComposerInput(`Unknown command: /${command}`)
     }
   }
 
@@ -2552,7 +2564,7 @@ export function EnsembleV2App() {
     if (completion()) { await selectCompletion(); return }
     if (text === "/") { commandPaletteCompletion("/", 1); return }
     const initIssue = initComposerIssue(text)
-    if (initIssue) { notify(initIssue, "error"); markComposerInvalid(initIssue); return }
+    if (initIssue) { rejectComposerInput(initIssue); return }
     const plan = composerPlan(text)
     if (plan?.kind === "command" || plan?.kind === "init") { await runSlashCommand(text); return }
     const parsed = parseSlashCommand(text)
@@ -2869,11 +2881,11 @@ export function EnsembleV2App() {
     clearSettingsFeedback()
     const ok = await run("Save settings", async () => {
       await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color })
-      // Ticket #124: stay in Settings so the saved state is visible. The
-      // header flashes once, then keeps the final Saved word until the next
-      // edit; the dirty mark is cleared at the same time.
+      // Restore the pre-#124 save-then-close flow. The confirmation is one
+      // one-shot toast after the surface closes; the statusline remains the
+      // modal fallback, so save never has two competing feedback channels.
       setDirty(false)
-      signalSettingsFeedback(settingsFeedbackSignal("saved"))
+      finishSettingsClose()
     })
     if (ok) showToast({ title: "Settings", message: `Saved ${agent.name}.`, tone: "success" })
   }
@@ -3355,7 +3367,7 @@ export function EnsembleV2App() {
     "work.down": () => moveTask(1),
     "work.up": () => moveTask(-1),
     "work.top": () => setTaskCursor(0),
-    "work.bottom": () => setTaskCursor(Math.max(0, orderedTasks().length - 1)),
+    "work.bottom": () => setTaskCursor(Math.max(0, visibleTasks().length - 1)),
     "work.half.down": () => moveTaskHalf(1),
     "work.half.up": () => moveTaskHalf(-1),
     "work.open": () => openResult(),
@@ -4945,7 +4957,7 @@ export function EnsembleV2App() {
     const prompt = textPrompt()
     if (prompt) return composerPosition(String(textPromptRef?.plainText ?? prompt.value), Number(textPromptRef?.cursorOffset ?? 0))
     if (interaction().focus === "rail") return listPosition(railCursor(), railItems().length)
-    if (interaction().focus === "work") return listPosition(taskCursor(), orderedTasks().length)
+    if (interaction().focus === "work") return listPosition(taskCursorClamped(), visibleTasks().length)
     const metrics = transcriptScroll()
     return transcriptPosition(metrics.top, metrics.height, metrics.viewport)
   }
