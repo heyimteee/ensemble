@@ -11,27 +11,28 @@
  * Named sets (all constant-width within their set; modular wrap incl.
  * negatives; tick 120 is a still frame for every set):
  *
- * - working `◐ ◑ ◒ ◓` (4f, 250 ms/step) — WORK rows for running work, live
- *   activity lines. This is the app's signature spinner (kept).
- * - waiting `○ ◌` (2f alternating, 500 ms/step) — pending WORK rows. Calm,
- *   distinct from working.
+ * - working `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏` (10f Braille) — WORK rows for running
+ *   work, rail busy counts, live activity lines, and resolving approvals.
+ *   This is the app's signature liveness mark.
+ * - waiting `▫ ▪` (2f alternating, 500 ms/step) — pending WORK rows and
+ *   queued/backoff activity. Calm, distinct from working and never a circle.
  * - tool `▸ ▹` (2f chevron nudge) — tool-kind activity verbs
  *   (reading/searching/running/writing); folds to `▸` when done.
  * - thinking `·   / ˙   /  ⋮  / ·  ` (4f textual shimmer on the activity
  *   verb) — the terminal reduction of OpenBot's shimmer sweep.
- * - queued `○` (static — NEVER animated; queued is parked, not live).
+ * - queued `▫` (static — NEVER animated; queued is parked, not live).
  * - done `● / ✕ / ⊘` (static final frames, announced once, no animation).
  *
  * Reduced motion: `ENSEMBLE_REDUCED_MOTION=1` (or `true`) or `NO_COLOR`
  * present pins every animated cell to its frame-0 glyph via `effectiveTick`
- * and stops the clock via `shouldRunMotion`. Stagger is off (lines appear
- * full), functional state words (`working`, `queued`, `● finished`, …)
- * remain — only decorative movement is removed.
+ * (so the working frame is `⠋`) and stops the clock via `shouldRunMotion`.
+ * Stagger is off (lines appear full), functional state words (`working`,
+ * `queued`, `● finished`, …) remain — only decorative movement is removed.
  */
 
-export const WORKING_FRAMES = ["◐", "◑", "◒", "◓"] as const
+export const WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
 
-export const WAITING_FRAMES = ["○", "◌"] as const
+export const WAITING_FRAMES = ["▫", "▪"] as const
 
 export const TOOL_FRAMES = ["▸", "▹"] as const
 
@@ -39,14 +40,14 @@ export const TOOL_FRAMES = ["▸", "▹"] as const
 export const THINKING_FRAMES = ["·  ", "˙  ", " ⋮ ", "·  "] as const
 
 /** Queued agents are parked, never animated. */
-export const QUEUED_FRAME = "○"
+export const QUEUED_FRAME = "▫"
 
 function cycle<const F extends readonly string[]>(frames: F, tick: number): F[number] {
   const index = ((tick % frames.length) + frames.length) % frames.length
   return frames[index]
 }
 
-/** Working/live spinner frame for a tick. Pure, modular, constant-width. */
+/** Working/live Braille frame for a tick. Pure, modular, constant-width. */
 export function workingFrame(tick: number): string {
   return cycle(WORKING_FRAMES, tick)
 }

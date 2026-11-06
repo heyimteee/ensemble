@@ -9,6 +9,7 @@ import {
   footerLine2,
   helpEmptyLine,
   pickerEmptyLine,
+  railBusyMark,
   railEmptyLine,
   resolveChromeFocus,
   skillsEmptyLine,
@@ -94,7 +95,24 @@ test("ticket93: chrome footers use the shared faint bar instead of a dot", () =>
 
 test("slice E approval rows show Resolving… only while acted on", () => {
   assert.equal(approvalResolvingSuffix(false), "")
-  assert.equal(approvalResolvingSuffix(true), " │ Resolving…")
+  assert.equal(approvalResolvingSuffix(true), " │ ⠋ Resolving…")
+  assert.equal(approvalResolvingSuffix(true, 1), " │ ⠙ Resolving…")
+  assert.equal(approvalResolvingSuffix(true, 9), " │ ⠏ Resolving…")
+  assert.equal(approvalResolvingSuffix(true, 10), " │ ⠋ Resolving…")
+  assert.equal(approvalResolvingSuffix(true, 3, { ENSEMBLE_REDUCED_MOTION: "1" }), " │ ⠋ Resolving…")
+})
+
+test("ticket114: rail busy counts use the one-cell Braille working frame", () => {
+  assert.equal(railBusyMark(0, 0), "")
+  assert.equal(railBusyMark(2, 0), "⠋2")
+  assert.equal(railBusyMark(2, 1), "⠙2")
+  assert.equal(railBusyMark(2, 9), "⠏2")
+  assert.equal(railBusyMark(2, 10), "⠋2")
+  assert.equal(railBusyMark(12, 4), "⠼12")
+  assert.equal(railBusyMark(2, 3, { ENSEMBLE_REDUCED_MOTION: "1" }), "⠋2")
+  for (let tick = 0; tick < 10; tick++) {
+    assert.equal([...railBusyMark(3, tick)].length, 2, "one marker cell plus the count")
+  }
 })
 
 test("ticket68: approval inbox tags distinguish native blocks from product decisions", async () => {
