@@ -24,7 +24,7 @@ import {
   skillboxEmptyLine,
   skillsUnavailableLine,
 } from "./settings.ts"
-import type { SettingsAcknowledgement } from "./settings-feedback.ts"
+import { settingsRowFlash, type SettingsAcknowledgement } from "./settings-feedback.ts"
 import {
   approvalResolvedLine,
   approvalResolvingSuffix,
@@ -577,22 +577,11 @@ export function SettingsView(props: {
   const headerColor = () =>
     props.acknowledgement?.savedFlash ? props.colors.text : saved() ? props.colors.good : props.colors.accent
   // A new memory or changed skill row acknowledges once. Bold is the flash:
-  // the selected row is already green, so color alone would not read.
-  const memoryRowFlash = (memoryID: string) =>
-    Boolean(props.acknowledgement?.memoryFlash && props.acknowledgement.memoryID === memoryID)
-  const skillRowFlash = (skillID: string) =>
-    Boolean(props.acknowledgement?.skillFlash && props.acknowledgement.skillID === skillID)
-  const memoryRowColor = (memoryID: string, selected: boolean) => {
-    if (selected) return props.colors.good
-    if (memoryRowFlash(memoryID)) return props.colors.good
-    return props.colors.text
-  }
-  // The toggle mark remains the final state after the skill flash.
-  const skillRowColor = (skillID: string, selected: boolean) => {
-    if (selected) return props.colors.good
-    if (skillRowFlash(skillID)) return props.colors.good
-    return props.colors.text
-  }
+  // the selected row is already green, so color alone would not read. One
+  // predicate and one color rule serve both row families.
+  const rowFlash = (kind: "memory" | "skill", id: string) => settingsRowFlash(props.acknowledgement, kind, id)
+  const rowColor = (selected: boolean, flash: boolean) =>
+    selected || flash ? props.colors.good : props.colors.text
   const fieldMode = () => props.fieldMode ?? "normal"
   const fieldHints = () => {
     const memory = props.field?.kind === "memory"
@@ -622,7 +611,7 @@ export function SettingsView(props: {
           <ChromeText colors={props.colors} fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate text={chromeJoin([`Filter: ${props.memoryFilter || "(none)"}`, "/ filter"])} />
           <For each={props.memories}>{(memory, index) => (
             <box flexDirection="column">
-              <text fg={memoryRowColor(memory.id, props.cursor === index())} bg={props.colors.bg} width="100%" wrapMode="word" attributes={memoryRowFlash(memory.id) ? TextAttributes.BOLD : undefined}>{settingsCursorMark(props.cursor === index())}{memory.text}</text>
+              <text fg={rowColor(props.cursor === index(), rowFlash("memory", memory.id))} bg={props.colors.bg} width="100%" wrapMode="word" attributes={rowFlash("memory", memory.id) ? TextAttributes.BOLD : undefined}>{settingsCursorMark(props.cursor === index())}{memory.text}</text>
               <ChromeText colors={props.colors} fg={memoryNeedsReview(memory) ? props.colors.warn : props.colors.muted} bg={props.colors.bg} width="100%" truncate text={`    ${memoryProvenanceLine(memory)}${memoryNeedsReview(memory) ? " ◆" : ""}`} />
             </box>
           )}</For>
@@ -636,7 +625,7 @@ export function SettingsView(props: {
 <Show when={props.skillCatalog.length > 0 && props.skills.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{skillboxEmptyLine()}</text></Show>
           <For each={skillPageItems(props.skills, props.skillPage ?? 1)}>{(entry) => (
             <box flexDirection="column">
-              <text fg={skillRowColor(entry.skill.id, props.cursor === entry.index)} bg={props.colors.bg} width="100%" truncate attributes={skillRowFlash(entry.skill.id) ? TextAttributes.BOLD : undefined}>{settingsCursorMark(props.cursor === entry.index)}{skillToggleMark(skillAssigned(props.agent!.skillbox, entry.skill.id))} {entry.skill.name}{entry.skill.name !== entry.skill.id ? ` (${entry.skill.id})` : ""}</text>
+              <text fg={rowColor(props.cursor === entry.index, rowFlash("skill", entry.skill.id))} bg={props.colors.bg} width="100%" truncate attributes={rowFlash("skill", entry.skill.id) ? TextAttributes.BOLD : undefined}>{settingsCursorMark(props.cursor === entry.index)}{skillToggleMark(skillAssigned(props.agent!.skillbox, entry.skill.id))} {entry.skill.name}{entry.skill.name !== entry.skill.id ? ` (${entry.skill.id})` : ""}</text>
               <Show when={(entry.skill.description ?? "").trim()}>
                 <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>    {short(entry.skill.description!.replace(/\s+/g, " ").trim(), 120)}</text>
               </Show>

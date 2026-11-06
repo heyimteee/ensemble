@@ -7,6 +7,7 @@ import {
   settingsAcknowledgement,
   settingsFeedbackSignal,
   settingsFlashActive,
+  settingsRowFlash,
   trackMissingSkills,
 } from "./settings-feedback.ts"
 
@@ -66,6 +67,19 @@ test("a row acknowledgement names exactly one memory or skill and expires once",
     skillFlash: false,
     missingFlash: false,
   })
+})
+
+test("one row predicate serves both memory and skill acknowledgements", () => {
+  const memory = settingsAcknowledgement(settingsFeedbackSignal("memory-added", "mem-1", 1000), 1000)
+  assert.equal(settingsRowFlash(memory, "memory", "mem-1"), true)
+  assert.equal(settingsRowFlash(memory, "memory", "mem-2"), false, "only the named memory row flashes")
+  assert.equal(settingsRowFlash(memory, "skill", "mem-1"), false, "a memory signal never lights a skill row")
+  const skill = settingsAcknowledgement(settingsFeedbackSignal("skill-changed", "skill-1", 1000), 1000)
+  assert.equal(settingsRowFlash(skill, "skill", "skill-1"), true)
+  assert.equal(settingsRowFlash(skill, "memory", "skill-1"), false)
+  const settled = settingsAcknowledgement(settingsFeedbackSignal("skill-changed", "skill-1", 1000), 1000 + SETTINGS_FLASH_MS)
+  assert.equal(settingsRowFlash(settled, "skill", "skill-1"), false, "the settled row keeps its final color without a flash")
+  assert.equal(settingsRowFlash(undefined, "memory", "mem-1"), false)
 })
 
 test("missing-skill emphasis fires once per set and does not loop on refreshes", () => {

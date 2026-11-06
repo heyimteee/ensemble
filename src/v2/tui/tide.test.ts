@@ -1,5 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import { RECENT_WORK_TTL_MS } from "./work-constants.ts"
 import {
   TIDE_ASSIGNMENT_RETENTION_MS,
   TIDE_GLYPHS,
@@ -7,11 +8,11 @@ import {
   TIDE_MIN_COLUMNS,
   TIDE_VARIANTS,
   createTideAssignments,
-  currentTideLevels,
-  currentTideStrip,
+  createTideFreezeState,
   flatTideLevels,
   flatTideStrip,
   pruneTideAssignments,
+  pruneTideFreezes,
   tideAssignmentFor,
   tideColumns,
   tideLevel,
@@ -32,7 +33,7 @@ test("ticket115: tide columns follow content width and clamp to the approved ran
 })
 
 test("ticket115: one tide glyph covers two cells and the strip spans the card width", () => {
-  const strip = currentTideStrip(40, 0)
+  const strip = tideStrip("current", 40, 0)
   assert.equal(strip.length, 40)
   for (let index = 0; index < strip.length; index += 2) {
     assert.equal(strip[index], strip[index + 1], "each tide column renders the same glyph twice")
@@ -43,17 +44,17 @@ test("ticket115: one tide glyph covers two cells and the strip spans the card wi
 
 test("ticket115: the current tide ramps through eight block levels", () => {
   assert.deepEqual([...TIDE_GLYPHS], ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"])
-  const levels = currentTideLevels(24, 0)
+  const levels = tideLevels("current", 24, 0)
   assert.equal(levels.length, 24)
   assert.ok(levels.every((level) => level >= 0 && level < TIDE_GLYPHS.length))
   assert.ok(new Set(levels).size >= 4, "the strip is a ramp, not one flat level")
 })
 
 test("ticket115: the current tide advances with the tick and pins under reduced motion", () => {
-  assert.notEqual(currentTideStrip(40, 0), currentTideStrip(40, 1))
-  assert.notEqual(currentTideStrip(40, 1), currentTideStrip(40, 2))
-  assert.equal(currentTideStrip(40, 5, { ENSEMBLE_REDUCED_MOTION: "1" }), currentTideStrip(40, 0))
-  assert.equal(currentTideStrip(40, 7, { NO_COLOR: "1" }), currentTideStrip(40, 0))
+  assert.notEqual(tideStrip("current", 40, 0), tideStrip("current", 40, 1))
+  assert.notEqual(tideStrip("current", 40, 1), tideStrip("current", 40, 2))
+  assert.equal(tideStrip("current", 40, 5, { ENSEMBLE_REDUCED_MOTION: "1" }), tideStrip("current", 40, 0))
+  assert.equal(tideStrip("current", 40, 7, { NO_COLOR: "1" }), tideStrip("current", 40, 0))
 })
 
 test("ticket115: tide levels map onto faint, muted, and text theme roles", () => {
@@ -144,7 +145,7 @@ test("ticket116: terminal cards settle to a flat strip", () => {
 
 test("ticket116: only working, unblocked cards advance the tide", () => {
   assert.equal(tideTickForCard("working", false, 7, {}), 7)
-  assert.equal(tideTickForCard("working", true, 7, {}), 0, "needs-you freezes")
+  assert.equal(tideTickForCard("working", true, 7, {}), 0, "a needs-you still frame is deterministic without assignment state")
   assert.equal(tideTickForCard("working", false, 7, { ENSEMBLE_REDUCED_MOTION: "1" }), 0)
   assert.equal(tideTickForCard("working", false, 7, { NO_COLOR: "1" }), 0)
   assert.equal(tideTickForCard("pending", false, 7, {}), 0)
@@ -152,6 +153,27 @@ test("ticket116: only working, unblocked cards advance the tide", () => {
   assert.equal(tideTickForCard("replied", false, 7, {}), 0)
   assert.equal(tideTickForCard("failed", false, 7, {}), 0)
   assert.equal(tideTickForCard("cancelled", false, 7, {}), 0)
+})
+
+test("ticket116: needs-you freezes at the tick it became blocked and releases when unblocked", () => {
+  const freeze = createTideFreezeState()
+  const at = (status: "working", needsYou: boolean, tick: number, now: number) =>
+    tideTickForCard(status, needsYou, tick, {}, { state: freeze, id: "task", now })
+  assert.equal(at("working", false, 7, 0), 7, "the card animates before it blocks")
+  assert.equal(at("working", true, 12, 100), 12, "the first blocked observation is the freeze frame")
+  assert.equal(at("working", true, 40, 200), 12, "later ticks keep the frozen frame")
+  assert.equal(at("working", false, 41, 300), 41, "resolving the block lets the tide advance again")
+  assert.equal(freeze.frozen.size, 0, "an unblocked card leaves no freeze entry")
+})
+
+test("ticket116: idle freeze assignments prune after the recent-card window", () => {
+  const freeze = createTideFreezeState()
+  tideTickForCard("working", true, 12, {}, { state: freeze, id: "gone", now: 1_000 })
+  tideTickForCard("working", true, 12, {}, { state: freeze, id: "live", now: 5_000 })
+  assert.deepEqual(pruneTideFreezes(freeze, 1_000 + TIDE_ASSIGNMENT_RETENTION_MS), [], "the boundary still belongs to the window")
+  assert.deepEqual(pruneTideFreezes(freeze, 1_000 + TIDE_ASSIGNMENT_RETENTION_MS + 1), ["gone"])
+  assert.equal(freeze.frozen.has("live"), true, "a still-observed freeze survives")
+  assert.equal(TIDE_ASSIGNMENT_RETENTION_MS, RECENT_WORK_TTL_MS, "assignment retention uses the recent-card window")
 })
 
 function seeded(seed: number): () => number {

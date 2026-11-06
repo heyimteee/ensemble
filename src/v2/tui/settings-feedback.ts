@@ -77,6 +77,20 @@ export function settingsAcknowledgement(
   }
 }
 
+/**
+ * One row predicate for both memory and skill acknowledgements: true only for
+ * the exact row the one-shot signal named. Selection and final colors stay
+ * separate, so the two row families cannot drift.
+ */
+export function settingsRowFlash(
+  acknowledgement: SettingsAcknowledgement | undefined,
+  kind: "memory" | "skill",
+  id: string,
+): boolean {
+  if (kind === "memory") return Boolean(acknowledgement?.memoryFlash && acknowledgement.memoryID === id)
+  return Boolean(acknowledgement?.skillFlash && acknowledgement.skillID === id)
+}
+
 /** Stable identity for a missing set: order and duplicates do not matter. */
 export function missingSkillsKey(missing: readonly string[]): string {
   return [...new Set(missing)].sort().join("\u0000")

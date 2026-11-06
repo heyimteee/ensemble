@@ -97,9 +97,12 @@ export type InitJob = {
   messageID: Id
   sessionID?: Id
   state: InitJobState
-  /** Current lifecycle stage; absent on jobs persisted before ticket #118. */
-  phase?: InitPhase
-  /** Stages entered in order, including the current one. */
+  /**
+   * Stages entered in order, including the current one. This is the single
+   * stored source; the current stage is always `phases.at(-1)`. Jobs persisted
+   * before ticket #118 stored one `phase` field instead, read only through
+   * `initJobPhase` as a migration fallback.
+   */
   phases?: InitPhase[]
   /** AGENTS.md captured before the run; null means the file did not exist. */
   previousAgentsMD: string | null

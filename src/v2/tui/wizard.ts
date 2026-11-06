@@ -7,6 +7,7 @@
 import type { InteractionEvent } from "./interaction.ts"
 import { isReducedMotion } from "./motion.ts"
 import { chromeJoin } from "./separators.ts"
+import type { ToastInput } from "./toast.ts"
 
 export type WizardEnterAction = "select" | "continue" | "submit" | "text"
 
@@ -213,19 +214,19 @@ export function wizardMemorySaveList(memories: readonly string[]): string[] {
   return memories.map((text) => text.trim()).filter((text) => text.length > 0)
 }
 
-export type WizardToast = { title: string; message: string; variant: "success" }
 export type WizardSuccessOutcome = "workspace-created" | "workspace-updated" | "agent-created"
 
 /**
  * One success toast per submitted wizard outcome. The caller shows it only
  * after the workspace or agent operation actually succeeds, so a failed
- * create never claims success. The transport is the app's toast surface.
+ * create never claims success. The payload is the app's shared ToastInput, so
+ * the transport needs no field renaming or wrapper.
  */
-export function wizardSuccessToast(outcome: WizardSuccessOutcome, name: string, memories = 0): WizardToast {
+export function wizardSuccessToast(outcome: WizardSuccessOutcome, name: string, memories = 0): ToastInput {
   const message = outcome === "workspace-created"
     ? `#${name} created.`
     : outcome === "workspace-updated"
       ? `#${name} updated.`
       : `${name} created. Opening a direct chat.${memories > 0 ? ` Saved ${memories} ${memories === 1 ? "memory" : "memories"}.` : ""}`
-  return { title: "Ensemble", message, variant: "success" }
+  return { title: "Ensemble", message, tone: "success" }
 }

@@ -15,6 +15,7 @@
  */
 import type { DerivedWorkStatus } from "../queue.ts"
 import { effectiveTick } from "./motion.ts"
+import { RECENT_WORK_TTL_MS } from "./work-constants.ts"
 
 /** Eight block levels, low to high. */
 export const TIDE_GLYPHS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const
@@ -30,23 +31,23 @@ export const TIDE_VARIANTS = ["current", "ripple", "travel", "interference", "in
 
 export type TideVariant = (typeof TIDE_VARIANTS)[number]
 
-/** Assignment retention matches the recent-card window (#117). */
-export const TIDE_ASSIGNMENT_RETENTION_MS = 8_000
+/** Assignment retention is the shared recent-card window (#117). */
+export const TIDE_ASSIGNMENT_RETENTION_MS = RECENT_WORK_TTL_MS
+
+/** One source of truth for the approved 8–64 sampled-column range. */
+function clampedColumns(columns: number): number {
+  if (!Number.isFinite(columns)) return TIDE_MIN_COLUMNS
+  return Math.max(TIDE_MIN_COLUMNS, Math.min(TIDE_MAX_COLUMNS, Math.floor(columns)))
+}
 
 /** Card content width → sampled tide columns, clamped to the approved range. */
 export function tideColumns(contentWidth: number): number {
   if (!Number.isFinite(contentWidth)) return TIDE_MIN_COLUMNS
-  const columns = Math.floor(Math.max(0, contentWidth) / TIDE_CELLS_PER_GLYPH)
-  return Math.max(TIDE_MIN_COLUMNS, Math.min(TIDE_MAX_COLUMNS, columns))
+  return clampedColumns(Math.max(0, contentWidth) / TIDE_CELLS_PER_GLYPH)
 }
 
 function modulo(value: number, divisor: number): number {
   return ((value % divisor) + divisor) % divisor
-}
-
-function clampedColumns(columns: number): number {
-  if (!Number.isFinite(columns)) return TIDE_MIN_COLUMNS
-  return Math.max(TIDE_MIN_COLUMNS, Math.min(TIDE_MAX_COLUMNS, Math.floor(columns)))
 }
 
 /** Triangle wave in 0…1 over one period; phase wraps modularly. */
@@ -110,6 +111,11 @@ export function tideLevel(variant: TideVariant, column: number, totalColumns: nu
   }
 }
 
+/** Levels for an already-clamped width; the single sampling primitive. */
+function levelsForWidth(variant: TideVariant, width: number, frame: number): number[] {
+  return Array.from({ length: width }, (_, column) => tideLevel(variant, column, width, frame))
+}
+
 /** One level per sampled column, clamped to the approved 8–64 column range. */
 export function tideLevels(
   variant: TideVariant,
@@ -117,9 +123,7 @@ export function tideLevels(
   tick: number,
   env: NodeJS.ProcessEnv = process.env,
 ): number[] {
-  const width = clampedColumns(columns)
-  const frame = effectiveTick(tick, env)
-  return Array.from({ length: width }, (_, column) => tideLevel(variant, column, width, frame))
+  return levelsForWidth(variant, clampedColumns(columns), effectiveTick(tick, env))
 }
 
 /** The rendered one-row strip: each sampled level becomes two identical cells. */
@@ -129,18 +133,9 @@ export function tideStrip(
   tick: number,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return tideLevels(variant, tideColumns(contentWidth), tick, env)
+  return levelsForWidth(variant, tideColumns(contentWidth), effectiveTick(tick, env))
     .map((level) => TIDE_GLYPHS[level].repeat(TIDE_CELLS_PER_GLYPH))
     .join("")
-}
-
-/** The pre-#116 `current` motion, kept as the default variant. */
-export function currentTideLevels(columns: number, tick: number, env: NodeJS.ProcessEnv = process.env): number[] {
-  return tideLevels("current", columns, tick, env)
-}
-
-export function currentTideStrip(contentWidth: number, tick: number, env: NodeJS.ProcessEnv = process.env): string {
-  return tideStrip("current", contentWidth, tick, env)
 }
 
 /** Terminal cards settle to the lowest block, one glyph per two cells. */
@@ -153,18 +148,64 @@ export function flatTideStrip(contentWidth: number): string {
 }
 
 /**
+ * UI-local freeze frames for cards that started waiting on the user. A card
+ * that blocks while working keeps the tide frame it had at that moment; the
+ * entry is released as soon as the card stops needing the user.
+ */
+export type TideFreezeState = {
+  frozen: Map<string, { tick: number; seenAt: number }>
+}
+
+export function createTideFreezeState(): TideFreezeState {
+  return { frozen: new Map() }
+}
+
+/**
  * Tide frame for one card: only a working card that is not waiting on the
- * user advances. Needs-you, pending, retrying, and terminal cards hold the
- * deterministic still frame; reduced motion pins every card to tick 0.
+ * user advances. A needs-you working card freezes on the tick where it first
+ * blocked, then holds that frame until the block clears; pending, retrying,
+ * and terminal cards hold the deterministic still frame. Reduced motion pins
+ * every card to tick 0.
  */
 export function tideTickForCard(
   status: DerivedWorkStatus,
   needsYou: boolean,
   tick: number,
   env: NodeJS.ProcessEnv = process.env,
+  freeze?: { state: TideFreezeState; id: string; now: number },
 ): number {
-  if (needsYou || status !== "working") return 0
+  if (needsYou) {
+    // Without a freeze record (or for a card that never animated) the tick-0
+    // frame remains the honest deterministic still.
+    if (!freeze || status !== "working") return 0
+    const existing = freeze.state.frozen.get(freeze.id)
+    if (existing) {
+      existing.seenAt = freeze.now
+      return existing.tick
+    }
+    const frozen = effectiveTick(tick, env)
+    freeze.state.frozen.set(freeze.id, { tick: frozen, seenAt: freeze.now })
+    return frozen
+  }
+  freeze?.state.frozen.delete(freeze.id)
+  if (status !== "working") return 0
   return effectiveTick(tick, env)
+}
+
+/** Drop freeze frames for cards that left the recent-card window. */
+export function pruneTideFreezes(
+  state: TideFreezeState,
+  now: number = Date.now(),
+  retentionMs: number = TIDE_ASSIGNMENT_RETENTION_MS,
+): string[] {
+  const removed: string[] = []
+  for (const [id, entry] of state.frozen) {
+    if (now - entry.seenAt > retentionMs) {
+      state.frozen.delete(id)
+      removed.push(id)
+    }
+  }
+  return removed
 }
 
 export type TideAssignmentState = {

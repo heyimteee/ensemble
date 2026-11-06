@@ -2,6 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { deriveWorkStatus } from "../queue.ts"
 import type { Subtask } from "../types.ts"
+import { createTideFreezeState } from "./tide.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -35,7 +36,8 @@ import {
   workRowFrame,
   workRowText,
   workStatusLabel,
-  workSummary,
+  workSummaryCounts,
+  visibleWorkTasks,
   WORK_BASE_ROWS,
   WORK_CARD_ROWS,
 } from "./workrows.ts"
@@ -381,17 +383,9 @@ test("review fix: needs-you derives from existing interruption/approval state", 
 })
 
 test("work summary counts active and recent work and names the empty state", () => {
-  assert.equal(workSummary([], 1000), "WORK │ none yet")
-  const summary = workSummary(
-    [
-      task({ id: "a", state: "working", claimedBy: "r", leaseUntil: 9999, attempts: 1 }),
-      task({ id: "b", state: "pending" }),
-      task({ id: "c", state: "replied", outcome: "succeeded" }),
-      task({ id: "d", state: "replied", outcome: "failed", error: "boom" }),
-    ],
-    1000,
-  )
-  assert.equal(summary, "WORK 2 active · 0 recent", "legacy terminal rows without a finish time add no recent count")
+  assert.equal(workSummaryCounts(0, 0), "WORK │ none yet")
+  assert.equal(workSummaryCounts(2, 0), "WORK 2 active · 0 recent", "legacy terminal rows without a finish time add no recent count")
+  assert.equal(workSummaryCounts(0, 1), "WORK 0 active · 1 recent")
 })
 
 test("ticket68: native-blocked tasks read as needs-you without an approvalID", async () => {
@@ -605,10 +599,10 @@ test("ticket117: the Work header distinguishes active and recent counts", () => 
   const now = 20_000
   const recent = task({ id: "recent", state: "replied", outcome: "succeeded", repliedAt: 15_000, finishedAt: 15_000 })
   const active = task({ id: "active", state: "working", claimedBy: "run", leaseUntil: 99_000, attempts: 1 })
-  assert.equal(workSummary([active, recent], now), "WORK 1 active · 1 recent")
-  assert.equal(workSummary([active], now), "WORK 1 active · 0 recent")
-  assert.equal(workSummary([recent], now), "WORK 0 active · 1 recent")
-  assert.equal(workSummary([recent], 15_000 + RECENT_WORK_TTL_MS), "WORK │ none yet")
+  assert.equal(workSummaryCounts(1, recentWorkItems([active, recent], now).length), "WORK 1 active · 1 recent")
+  assert.equal(workSummaryCounts(1, recentWorkItems([active], now).length), "WORK 1 active · 0 recent")
+  assert.equal(workSummaryCounts(0, recentWorkItems([recent], now).length), "WORK 0 active · 1 recent")
+  assert.equal(workSummaryCounts(0, recentWorkItems([recent], 15_000 + RECENT_WORK_TTL_MS).length), "WORK │ none yet")
 })
 
 test("ticket117: recent cards share the height budget after active cards", () => {
@@ -624,6 +618,37 @@ test("ticket117: compact fallback keeps transcript and composer at 80x24", () =>
   const layout = workCardLayout(24, 0, 3)
   assert.equal(layout.mode, "compact")
   assert.ok(24 - WORK_BASE_ROWS - layout.rows >= 3, "80x24 keeps at least three transcript rows")
+})
+
+test("ticket115: the work cursor set is the visible active prefix, never overflow", () => {
+  const ordered = ["a", "b", "c", "d"].map((id) => task({ id }))
+  const cardLayout = workCardLayout(40, ordered.length, 0)
+  assert.equal(cardLayout.limit, 3, "the tall layout fits three cards")
+  assert.deepEqual(visibleWorkTasks(ordered, cardLayout), ordered.slice(0, 3), "overflow task d is not a cursor target")
+  const compact = workCardLayout(24, ordered.length, 0)
+  assert.equal(compact.limit, 1)
+  assert.deepEqual(visibleWorkTasks(ordered, compact), ordered.slice(0, 1), "compact mode exposes the same visible prefix")
+  assert.deepEqual(visibleWorkTasks(ordered, workCardLayout(40, 0, 0)), [], "an empty layout has no selectable task")
+})
+
+test("ticket117: recent cards reuse the card mapping but stay display-only", () => {
+  const finished = task({ id: "done", state: "replied", outcome: "succeeded", repliedAt: 10, finishedAt: 10, interrupted: true })
+  const card = recentWorkCardsForTasks([finished], () => "Nova", {
+    now: 20,
+    tick: 7,
+    tideTick: 7,
+    width: 40,
+    variant: "travel",
+    pendingFor: () => "stop",
+    detailFor: () => "should not appear",
+    pendingApprovalIDs: new Set(["ap"]),
+  })[0]
+  assert.equal(card.recent, true)
+  assert.equal(card.needsYou, false, "recent cards never light needs-you")
+  assert.equal(card.detail, "replied", "recent details ignore pending/activity callbacks")
+  assert.equal(card.glyph, "●")
+  assert.equal(card.tideVariant, "travel", "the active assignment carries into the recent card")
+  assert.ok(card.tideLevels.every((level) => level === 0), "recent cards stay settled flat")
 })
 
 test("ticket116: a working card keeps its assigned variant and advances the strip", () => {
@@ -643,6 +668,15 @@ test("ticket116: needs-you freezes the card's current variant", () => {
   assert.equal(first.tideVariant, "echo")
   assert.equal(first.needsYou, true)
   assert.equal(first.tide, later.tide, "the strip does not advance while waiting for the user")
+})
+
+test("ticket116: needs-you keeps the tide frame from when the card blocked, not tick 0", () => {
+  const blocked = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1, interrupted: true })
+  const freezeState = createTideFreezeState()
+  const atBlock = workCardForTask(blocked, "Nova", { now: 1000, tick: 12, width: 40, variant: "echo", freezeState })
+  const later = workCardForTask(blocked, "Nova", { now: 2000, tick: 30, width: 40, variant: "echo", freezeState })
+  assert.equal(atBlock.tide, later.tide, "the blocked card holds one frame")
+  assert.notEqual(atBlock.tide, workCardForTask(blocked, "Nova", { now: 1000, tick: 0, width: 40, variant: "echo" }).tide, "the freeze is not the deterministic tick-0 still")
 })
 
 test("ticket116: card mapping keeps one stable variant per subtask across polls", () => {

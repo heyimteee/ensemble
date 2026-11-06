@@ -8,7 +8,7 @@ import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
-import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME } from "./system-agent.ts"
+import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -1489,7 +1489,7 @@ test("init carries the starting, running, writing, reporting phases in order", a
     const starting = await handlers.snapshot({ directory })
     const startJob = starting.state.initJobs[init.result.jobID]
     assert.equal(startJob.state, "running")
-    assert.equal(startJob.phase, "starting")
+    assert.equal(initJobPhase(startJob), "starting")
     assert.deepEqual(startJob.phases, ["starting"])
     const startMessage = starting.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
     assert.ok(startMessage)
@@ -1500,7 +1500,7 @@ test("init carries the starting, running, writing, reporting phases in order", a
     releaseCreate?.()
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      return next.state.initJobs[init.result.jobID]?.phase === "running"
+      return next.state.initJobs[init.result.jobID] ? initJobPhase(next.state.initJobs[init.result.jobID]) === "running" : false
     })
     const running = await handlers.snapshot({ directory })
     const runningJob = running.state.initJobs[init.result.jobID]
@@ -1518,7 +1518,7 @@ test("init carries the starting, running, writing, reporting phases in order", a
     }, 3000)
     const final = await handlers.snapshot({ directory })
     const job = final.state.initJobs[init.result.jobID]
-    assert.equal(job.phase, "reporting")
+    assert.equal(initJobPhase(job), "reporting")
     assert.deepEqual(job.phases, ["starting", "running", "writing", "reporting"])
     const report = final.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
     assert.ok(report)
@@ -1766,7 +1766,7 @@ test("failed init removes AGENTS.md that did not exist and reports the failure",
     const failedJob = final.state.initJobs[init.result.jobID]
     assert.ok(failedJob.error)
     assert.match(failedJob.error, /agent failed/)
-    assert.equal(failedJob.phase, "reporting")
+    assert.equal(initJobPhase(failedJob), "reporting")
     assert.deepEqual(failedJob.phases, ["starting", "running", "reporting"])
     assert.equal(existsSync(join(directory, "AGENTS.md")), false)
     const report = final.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
@@ -1837,7 +1837,7 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
   await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
   await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: "Initializing workspace…", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
   await seed.saveMessage({ id: "other", workspaceID: "w", seq: 2, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: INIT_START_TEXT, kind: "text", createdAt: 2 })
-  await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", phase: "running", phases: ["starting", "running"], previousAgentsMD: previous, startedAt: 1 })
+  await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", phases: ["starting", "running"], previousAgentsMD: previous, startedAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -1846,7 +1846,7 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
     assert.equal(after.state.initJobs.init_1.state, "interrupted")
     assert.ok(after.state.initJobs.init_1.error)
     assert.match(after.state.initJobs.init_1.error, /restart/i)
-    assert.equal(after.state.initJobs.init_1.phase, "reporting")
+    assert.equal(initJobPhase(after.state.initJobs.init_1), "reporting")
     assert.deepEqual(after.state.initJobs.init_1.phases, ["starting", "running", "reporting"])
     const message = after.state.messages.w.find((item: any) => item.id === "m")
     assert.ok(message)
@@ -1899,7 +1899,7 @@ test("workspace archive cancels an active init, restores AGENTS.md, and removes 
     assert.equal(job.state, "cancelled")
     assert.ok(job.error)
     assert.match(job.error, /archiv/i)
-    assert.equal(job.phase, "reporting")
+    assert.equal(initJobPhase(job), "reporting")
     assert.deepEqual(job.phases, ["starting", "running", "reporting"])
     const message = after.state.messages[workspace.result.id].find((item: any) => item.id === init.result.messageID)
     assert.ok(message)

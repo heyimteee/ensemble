@@ -10,8 +10,12 @@ import {
   tideLevels,
   tideStrip,
   tideTickForCard,
+  type TideFreezeState,
   type TideVariant,
 } from "./tide.ts"
+import { RECENT_WORK_TTL_MS } from "./work-constants.ts"
+
+export { RECENT_WORK_TTL_MS }
 
 /**
  * Inline work-row and Work-card mapping for the group chat surface (ticket
@@ -181,12 +185,13 @@ export function hasActiveWork(tasks: Subtask[], now: number): boolean {
 }
 
 /**
- * Ticket #117: finished cards settle in the Work pane for eight seconds, then
- * disappear. The transcript announcement remains the durable record, so the
- * card copy is allowed to be ephemeral. Only a real terminal timestamp counts:
- * legacy rows without one invent no recency.
+ * Ticket #117: finished cards settle in the Work pane for the shared
+ * eight-second recent window, then disappear. The transcript announcement
+ * remains the durable record, so the card copy is allowed to be ephemeral.
+ * Only a real terminal timestamp counts: legacy rows without one invent no
+ * recency. `RECENT_WORK_TTL_MS` lives in work-constants.ts because the tide
+ * assignment retention uses the same canonical window.
  */
-export const RECENT_WORK_TTL_MS = 8_000
 
 /** The honest finish time for a terminal task, or undefined when none was recorded. */
 export function workFinishedAt(task: Subtask): number | undefined {
@@ -523,12 +528,6 @@ export function workSummaryCounts(activeCount: number, recentCount: number): str
   return `WORK ${active} active · ${recent} recent`
 }
 
-/** Counts line for the Work section: active work plus the eight-second recent window. */
-export function workSummary(tasks: Subtask[], now: number): string {
-  const active = tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now))).length
-  return workSummaryCounts(active, recentWorkItems(tasks, now).length)
-}
-
 /**
  * Ticket #115: the Work pane's card model. One card carries the agent, the
  * animated Braille state glyph, the state word, a truncated title, an honest
@@ -572,6 +571,10 @@ export type WorkCardOptions = {
   variant?: TideVariant
   /** Stable per-subtask assignment, resolved once on first sight. */
   variantFor?: (task: Subtask) => TideVariant
+  /** Freeze frames for cards that started waiting on the user. */
+  freezeState?: TideFreezeState
+  /** Recent cards share this mapping but are display-only and never needs-you. */
+  recent?: boolean
 }
 
 /**
@@ -601,16 +604,27 @@ const NO_TASK_IDS: ReadonlySet<string> = new Set<string>()
 
 export function workCardForTask(task: Subtask, agentLabel: string, options: WorkCardOptions): WorkCard {
   const status = deriveWorkStatus(task, options.now)
-  const needsYou = isNeedsYouTask(
-    task,
-    options.pendingApprovalIDs ?? NO_TASK_IDS,
-    options.nativeBlockedSubtaskIDs ?? NO_TASK_IDS,
-  )
-  const pending = options.pendingFor?.(task) ?? null
+  const recent = options.recent ?? false
+  // A recent card is display-only: the terminal state owns the glyph and
+  // detail, and an old interruption/approval must not revive needs-you.
+  const needsYou = recent
+    ? false
+    : isNeedsYouTask(
+        task,
+        options.pendingApprovalIDs ?? NO_TASK_IDS,
+        options.nativeBlockedSubtaskIDs ?? NO_TASK_IDS,
+      )
+  const pending = recent ? null : options.pendingFor?.(task) ?? null
   const width = Math.max(16, Math.floor(options.width))
   const textWidth = Math.max(8, width - 2)
   const variant = options.variantFor?.(task) ?? options.variant ?? "current"
-  const tideTick = tideTickForCard(status, needsYou, options.tideTick ?? options.tick, options.env)
+  const tideTick = tideTickForCard(
+    status,
+    needsYou,
+    options.tideTick ?? options.tick,
+    options.env,
+    options.freezeState ? { state: options.freezeState, id: task.id, now: options.now } : undefined,
+  )
   const settled = isTerminalWorkStatus(status)
   return {
     id: task.id,
@@ -621,7 +635,7 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     detail: short(workCardDetail(status, { pending, needsYou, activity: options.detailFor?.(task) }), textWidth),
     status,
     needsYou,
-    recent: false,
+    recent,
     tideVariant: variant,
     tide: settled ? flatTideStrip(width) : tideStrip(variant, width, tideTick, options.env),
     tideLevels: settled ? flatTideLevels(tideColumns(width)) : tideLevels(variant, tideColumns(width), tideTick, options.env),
@@ -648,25 +662,9 @@ export function recentWorkCardsForTasks(
   agentLabelFor: (task: Subtask) => string,
   options: WorkCardOptions,
 ): WorkCard[] {
-  return recentWorkItems(tasks, options.now).map((task) => {
-    const status = deriveWorkStatus(task, options.now)
-    const width = Math.max(16, Math.floor(options.width))
-    const textWidth = Math.max(8, width - 2)
-    return {
-      id: task.id,
-      agent: short(agentLabelFor(task), Math.max(8, width - 16)),
-      glyph: workGlyph(status),
-      state: workStatusLabel(status),
-      title: short(task.title || "(untitled)", textWidth),
-      detail: short(workCardDetail(status), textWidth),
-      status,
-      needsYou: false,
-      recent: true,
-      tideVariant: options.variantFor?.(task) ?? options.variant ?? "current",
-      tide: flatTideStrip(width),
-      tideLevels: flatTideLevels(tideColumns(width)),
-    }
-  })
+  return recentWorkItems(tasks, options.now).map((task) =>
+    workCardForTask(task, agentLabelFor(task), { ...options, recent: true }),
+  )
 }
 
 /** One card row: header, title, detail, tide. Gap rows sit between cards. */
@@ -728,6 +726,16 @@ export function workCardLayout(terminalHeight: number, activeCount: number, rece
   }
   const limit = Math.min(total, compactLimit(terminalHeight))
   return { mode: "compact", limit, overflow: total - limit, rows: 1 + limit }
+}
+
+/**
+ * Ticket #115/#117: the work cursor and every work action target only the
+ * visible prefix. Active work is ordered before recent cards, so the first
+ * `limit` rows are the visible active cards; overflow and recent cards stay
+ * display-only. No action can reach an off-screen task.
+ */
+export function visibleWorkTasks<T>(ordered: readonly T[], layout: WorkCardLayout): T[] {
+  return ordered.slice(0, Math.max(0, Math.floor(layout.limit)))
 }
 
 /**
