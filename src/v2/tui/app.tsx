@@ -3642,6 +3642,7 @@ export function EnsembleV2App() {
       wizardMemoryRef = null
       setWizard(next)
       syncWizardMode(next)
+      notify(`Wizard: ${validation.error}`, "error")
       return
     }
     completeWizard(state, state.draft)

@@ -244,6 +244,7 @@ test("the wizard wires the rail, the one-shot settle, validation, and submit fee
   assert.ok(source.includes("opacity={wizardStepSettleOpacity(wizardSettling())}"), "only the content settles")
   assert.ok(source.includes("notify(wizardStepAnnouncement("), "moving a step announces its title and position")
   assert.ok(source.includes("wizardValidation({"), "submit uses the pure validation seam")
+  assert.ok(source.includes('notify(`Wizard: ${validation.error}`, "error")'), "validation failure announces once without a toast")
   assert.ok(source.includes("if (wizard() !== state) return"), "a stale submit cannot close the wizard twice")
   assert.ok(source.includes('! ${wizard()!.error}') && source.includes('wrapMode="word"'), "validation feedback wraps instead of truncating")
   for (const outcome of ["workspace-created", "workspace-updated", "agent-created"]) {
