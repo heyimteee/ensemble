@@ -9,8 +9,21 @@ import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, 
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
-import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
+import {
+  RAIL_PULSE_STEP_MS,
+  emptyRailEmphasis,
+  observeRailAttention,
+  railArrivalActive,
+  railEmphasisAt,
+  railPulseActive,
+  railRowKey,
+  type RailAttentionSnapshot,
+  type RailAttentionState,
+  type RailEmphasis,
+  type RailPulseStart,
+} from "./rail.ts"
 import { palette } from "./theme.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
@@ -379,6 +392,10 @@ export function EnsembleV2App() {
   // panel owns the current settle so a replaced panel starts clean.
   const [overlayPresence, setOverlayPresence] = createSignal(overlayPresenceOpacity(0))
   const [overlayPresenceKey, setOverlayPresenceKey] = createSignal("none")
+  // Ticket #121: rail attention is one-shot. Pulses and row-arrival emphasis
+  // are derived transitions, never a permanent beacon; reduced motion leaves
+  // this at the empty set and starts no timer.
+  const [railEmphasis, setRailEmphasis] = createSignal<RailEmphasis>(emptyRailEmphasis())
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
   // One-shot step settle: the content dims once on arrival and returns to
   // full color, never moving geometry. Reduced motion leaves it settled.
@@ -1135,6 +1152,68 @@ export function EnsembleV2App() {
     if (key === "none") return 1
     return overlayPresenceKey() === key ? overlayPresence() : overlayPresenceOpacity(0)
   }
+
+  // Ticket #121: the rail observes one snapshot baseline and emits a pulse only
+  // when unread work, the pending-approval count, or the row set actually
+  // changes. The first populated snapshot is the baseline, so opening Ensemble
+  // does not flash the whole rail. Pulses and arrivals share one short timer;
+  // it stops as soon as the last one-shot window closes. Reduced motion still
+  // advances the baseline but suppresses every pulse and timer.
+  const railAttentionInput = createMemo<RailAttentionSnapshot | null>(() => {
+    const snapshot = state()
+    if (!snapshot) return null
+    const unread: Record<string, number> = {}
+    for (const workspace of workspaces()) unread[workspace.id] = unreadCount(snapshot, workspace)
+    return {
+      unread,
+      approvals: pendingApprovals().length,
+      rows: [
+        ...rosterAgents().map((agent) => railRowKey("agent", agent.id)),
+        ...workspaces().map((workspace) => railRowKey("workspace", workspace.id)),
+      ],
+    }
+  })
+  let railAttentionState: RailAttentionState | null = null
+  let railPulseStarts: RailPulseStart[] = []
+  let railPulseTimer: ReturnType<typeof setInterval> | undefined
+  let railEmphasisKey = ""
+  const stopRailPulseTimer = () => {
+    if (railPulseTimer === undefined) return
+    clearInterval(railPulseTimer)
+    railPulseTimer = undefined
+  }
+  const railStartActive = (start: RailPulseStart, now: number) => {
+    const elapsed = now - start.startedAt
+    return start.pulse.kind === "arrival" ? railArrivalActive(elapsed, process.env) : railPulseActive(elapsed, process.env)
+  }
+  const publishRailEmphasis = () => {
+    const now = Date.now()
+    const active = railPulseStarts.filter((start) => railStartActive(start, now))
+    if (active.length !== railPulseStarts.length) {
+      railPulseStarts = active
+      if (active.length === 0) stopRailPulseTimer()
+    }
+    const key = active.map((start) => `${start.pulse.kind}:${start.pulse.id}`).sort().join("\u0000")
+    if (key === railEmphasisKey) return
+    railEmphasisKey = key
+    setRailEmphasis(railEmphasisAt(active, now, process.env))
+  }
+  const syncRailAttention = () => {
+    const input = railAttentionInput()
+    if (!input) return
+    const observed = observeRailAttention(railAttentionState, input)
+    railAttentionState = observed.state
+    if (observed.pulses.length === 0 || isReducedMotion()) return
+    const now = Date.now()
+    for (const pulse of observed.pulses) {
+      railPulseStarts = railPulseStarts.filter((start) => !(start.pulse.kind === pulse.kind && start.pulse.id === pulse.id))
+      railPulseStarts.push({ pulse, startedAt: now })
+    }
+    publishRailEmphasis()
+    if (railPulseTimer === undefined) railPulseTimer = setInterval(publishRailEmphasis, RAIL_PULSE_STEP_MS)
+  }
+  createEffect(syncRailAttention)
+  onCleanup(stopRailPulseTimer)
 
   // v5.6 T2 command and search. `:`/`/` open a one-line input in the bottom
   // bar; the pure commands/history/search modules own parsing, recall, and
@@ -4673,7 +4752,7 @@ export function EnsembleV2App() {
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} />
+          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={settingsAgentID()} fallback={

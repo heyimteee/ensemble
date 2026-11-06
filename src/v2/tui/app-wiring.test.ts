@@ -109,6 +109,32 @@ test("ticket120: every shell overlay fades in once without owning focus", () => 
   )
 })
 
+test("ticket121: rail attention pulses once and settles without owning focus", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  const rail = components.slice(components.indexOf("export function Rail"), components.indexOf("export function ApprovalList"))
+
+  const effectStart = app.indexOf("const railAttentionInput")
+  const effectEnd = app.indexOf("const commandTarget", effectStart)
+  assert.ok(effectStart >= 0 && effectEnd > effectStart, "the rail attention effect is present")
+  const effect = app.slice(effectStart, effectEnd)
+  assert.ok(effect.includes("observeRailAttention"), "transitions come from the pure rail seam")
+  assert.ok(effect.includes("railEmphasisAt"), "active emphasis is resolved from one-shot starts")
+  assert.ok(effect.includes("setInterval"), "pulses advance on a timer")
+  assert.ok(effect.includes("clearInterval"), "the pulse timer stops when the window closes")
+  assert.ok(effect.includes("isReducedMotion"), "reduced motion never starts a pulse")
+  assert.ok(!effect.includes("dispatchInteraction"), "rail attention never changes focus, mode, or key routing")
+  assert.ok(app.includes("emphasis={railEmphasis()}"), "the app threads one-shot emphasis into the rail")
+
+  assert.ok(rail.includes("props.emphasis?.unread.has(item.id)"), "unread growth pulses the count")
+  assert.ok(rail.includes("props.emphasis?.approval"), "the approval count pulses")
+  assert.ok(rail.includes("props.emphasis?.arrivals.has(railRowKey(item.kind, item.id))"), "new rows use the quiet arrival set")
+  assert.ok(rail.includes("const rowTone = () => selected() ? props.colors.good"), "selection wins over arrival emphasis")
+  assert.ok(rail.includes("const selected = () => props.cursor === index()"), "the rail cursor stays reactive between polls")
+  assert.equal((rail.match(/borderColor=/g) ?? []).length, 1, "the rail keeps one focus border")
+  assert.ok(rail.includes("railBusyMark(busy, props.motionTick ?? 0, process.env)"), "the Braille busy count is unchanged")
+})
+
 test("System Agent rows use one attribution source and never fall through to native /init", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   assert.ok(app.includes("author: message.displayAuthor ?? "), "the transcript maps the display author into the one rendered author")
