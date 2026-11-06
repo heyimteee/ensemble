@@ -17,6 +17,7 @@
  */
 
 import type { Agent, Subtask } from "../types.ts"
+import { deriveWorkStatus } from "../queue.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 import { agentColor } from "./format.ts"
 import { terminalAnnouncement, TRANSCRIPT_WINDOW } from "./workrows.ts"
@@ -144,7 +145,8 @@ export function unifiedAuthorColor(
   // after messages with the same timestamp via a sequence tie-breaker.
   // The service ensures hop.createdAt < recipient answer.createdAt, so
   // ordering by createdAt emerges naturally once finishedAt is not used.
-export type InlineCompletion = { id: string; text: string; at: number }
+export type InlineCompletionTone = "success" | "error"
+export type InlineCompletion = { id: string; text: string; at: number; tone: InlineCompletionTone }
 
 export function completionEntry(
   task: Subtask,
@@ -153,6 +155,10 @@ export function completionEntry(
 ): InlineCompletion | undefined {
   const text = terminalAnnouncement(task, agentLabel, now)
   if (text === undefined) return undefined
+  // Ticket #122: the completion row carries its emphasis tone so the
+  // transcript can acknowledge a failed/cancelled outcome once without
+  // re-parsing the announcement glyph in the render path.
+  const status = deriveWorkStatus(task, now)
   // Ticket #77 handoff ordering: completions sort by causal position,
   // not finishedAt lexical ties. A completion's `at` is the finishing
   // task's finish time; the transcript sorts by (at, message-then-completion)
@@ -164,6 +170,7 @@ export function completionEntry(
     id: `done:${task.id}`,
     text,
     at: task.finishedAt ?? task.repliedAt ?? task.createdAt,
+    tone: status === "replied" ? "success" : "error",
   }
 }
 
@@ -233,7 +240,7 @@ export function mergeTranscriptRows<T extends { id: string; createdAt: number }>
  * even when idle — tearing down native `<markdown>` renderables mid-layout
  * (the glitch). This folds a fresh merge onto the previous array, reusing
  * the previous wrapper when the inner `message` ref is identical and the
- * completion payload (`text`/`at`) plus sort key (`at`) are unchanged.
+ * completion payload (`text`/`at`/`tone`) plus sort key (`at`) are unchanged.
  * New/changed rows get fresh wrappers and mount normally; completion
  * ordering and the live/finalized partition are untouched (sort/dedupe
  * still happen upstream in `mergeTranscriptRows`). Pure.
@@ -252,7 +259,7 @@ export function stabilizeMergedRows<T extends { id: string; createdAt: number }>
     const b = row.completion
     if (a === b) return prev
     if (!a || !b) return row
-    if (a.text !== b.text || a.at !== b.at) return row
+    if (a.text !== b.text || a.at !== b.at || a.tone !== b.tone) return row
     return prev
   })
 }
