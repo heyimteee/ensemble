@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
-import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
@@ -148,6 +148,7 @@ import {
   MAX_VISIBLE_ACTIVITY,
   TRANSCRIPT_WINDOW,
   activityFrameForKind,
+  activityStateForTask,
   hasActiveWork,
   isNeedsYouTask,
   mergeStreamingActivity,
@@ -156,6 +157,8 @@ import {
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
+  workCardLayout,
+  workCardsForTasks,
   workRowFrame,
   workRowText,
   workSummary,
@@ -1236,6 +1239,33 @@ export function EnsembleV2App() {
   const messageWidth = () => Math.max(20, viewWidth() - railWidth() - 10)
   const viewHeight = () => renderSize().height
   const messageHeight = () => Math.max(6, viewHeight() - 14)
+  // Ticket #115: Work cards. The card owns the full chat content width minus
+  // the section padding; `workCardLayout` decides whether the terminal can
+  // afford cards or must fall back to compact one-line rows.
+  const workCardWidth = () => Math.max(20, messageWidth() - 2)
+  const workCards = createMemo(() => {
+    const now = Date.now()
+    const active = activeTasks()
+    const pendingApprovalSet = pendingApprovalIDs()
+    const nativeBlockedSet = nativeBlockedSubtaskIDs()
+    const cards = workCardsForTasks(active, (item) => agentName(state(), item.assigneeID), {
+      now,
+      tick: motionFrame(),
+      width: workCardWidth(),
+      env: process.env,
+      pendingApprovalIDs: pendingApprovalSet,
+      nativeBlockedSubtaskIDs: nativeBlockedSet,
+      pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
+      detailFor: (item) => activityStateForTask(item, {
+        now,
+        pendingApprovalIDs: pendingApprovalSet,
+        nativeBlockedIDs: nativeBlockedSet,
+        children: active.filter((child) => child.parentID === item.id),
+        agentNameFor: (agentID) => agentName(state(), agentID),
+      }).verb,
+    })
+    return { cards, layout: workCardLayout(viewHeight(), cards.length) }
+  })
   const pickerGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 16)
   const promptGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 14)
   const confirmGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 10)
@@ -5026,27 +5056,44 @@ export function EnsembleV2App() {
                             </box>
                           </Show>
                           <Show when={showWorkBlock()}>
-                            <box flexShrink={0} border borderStyle="single" borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
-                              <ChromeText colors={colors} fg={colors.muted} bg={colors.bg} width="100%" truncate text={workSummary(activeTasks(), Date.now())} />
-                              <For each={orderedTasks()}>{(task, index) => {
-                                // Review fixes (findings 2–3): the row with an
-                                // in-flight action shows its interim label, and
-                                // user-blocked rows carry the needs-you marker —
-                                // both derived per row from existing state.
-                                const needsYou = isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
-                                const pending = pendingWork()?.id === task.id ? pendingWork()!.action : null
-                                const rowStatus = deriveWorkStatus(task, Date.now())
-                                return (
-                                <ChromeText colors={colors}
-                                  fg={taskCursor() === index() && interaction().focus === "work" ? colors.good : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text}
-                                  bg={colors.bg}
-                                  width="100%"
-                                  truncate
-                                  text={`${taskCursor() === index() && interaction().focus === "work" ? "› " : "  "}${workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })} ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
-                                />
-                                )
-                              }}</For>
-                              <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{chromeJoin(["d delegate", "t reassign", "↵ result", "r retry", "R restart", "x cancel", "o native"])}</text>
+                            <box flexShrink={0} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
+                              <ChromeText colors={colors} fg={colors.muted} bg={colors.bg} width="100%" truncate text={workCards().layout.mode === "compact" && workCards().layout.overflow > 0 ? `${workSummary(activeTasks(), Date.now())} ${chromeSeparator()} +${workCards().layout.overflow} more` : workSummary(activeTasks(), Date.now())} />
+                              <Show when={workCards().layout.mode === "cards"} fallback={
+                                <For each={orderedTasks().slice(0, workCards().layout.limit)}>{(task, index) => {
+                                  // Compact fallback below the minimum card
+                                  // height: the pre-card one-line rows stay
+                                  // keyboard-first and active-only.
+                                  const needsYou = isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
+                                  const pending = pendingWork()?.id === task.id ? pendingWork()!.action : null
+                                  const rowStatus = deriveWorkStatus(task, Date.now())
+                                  return (
+                                  <ChromeText colors={colors}
+                                    fg={taskCursor() === index() && interaction().focus === "work" ? colors.good : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text}
+                                    bg={colors.bg}
+                                    width="100%"
+                                    truncate
+                                    text={`${taskCursor() === index() && interaction().focus === "work" ? "› " : "  "}${workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })} ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
+                                  />
+                                  )
+                                }}</For>
+                              }>
+                                <For each={workCards().cards.slice(0, workCards().layout.limit)}>{(card, index) => (
+                                  // Ticket #115: active subtasks render as
+                                  // cards. The cursor set is the same active
+                                  // list, so every existing work action still
+                                  // targets the selected card.
+                                  <WorkCardView
+                                    colors={colors}
+                                    card={card}
+                                    selected={taskCursor() === index() && interaction().focus === "work"}
+                                    index={index()}
+                                  />
+                                )}</For>
+                                <Show when={workCards().layout.overflow > 0}>
+                                  <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{workCards().layout.overflow} more</text>
+                                </Show>
+                                <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{chromeJoin(["d delegate", "t reassign", "↵ result", "r retry", "R restart", "x cancel", "o native"])}</text>
+                              </Show>
                             </box>
                           </Show>
                           <Show when={!atBottom()}>
