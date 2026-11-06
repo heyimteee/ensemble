@@ -51,7 +51,8 @@ import {
   type WizardDraft,
   type WizardToast,
 } from "./wizard.ts"
-import { EMPTY_MARK, isReducedMotion, shouldRunMotion } from "./motion.ts"
+import { EMPTY_MARK, WORK_CLOCK_INTERVAL_MS, isReducedMotion, shouldRunMotion, shouldRunWorkClock } from "./motion.ts"
+import { createTideAssignments, pruneTideAssignments, tideVariantFor } from "./tide.ts"
 import {
   TRANSCRIPT_EMPHASIS_MS,
   createTranscriptMotionState,
@@ -410,6 +411,10 @@ export function EnsembleV2App() {
   const [confirm, setConfirm] = createSignal<ConfirmState | null>(null)
   const [result, setResult] = createSignal<ResultState | null>(null)
   const [motionFrame, setMotionFrame] = createSignal(0)
+  // Ticket #116: the Work-card tide runs on its own 10 fps clock, independent
+  // of the 4 fps chrome clock. It stops (and resets) when no unblocked
+  // working card remains, so idle cards cost nothing.
+  const [workFrame, setWorkFrame] = createSignal(0)
   // Ticket #120: shell overlay presence is one-shot; the key tracks which
   // panel owns the current settle so a replaced panel starts clean.
   const [overlayPresence, setOverlayPresence] = createSignal(overlayPresenceOpacity(0))
@@ -1243,6 +1248,10 @@ export function EnsembleV2App() {
   // the section padding; `workCardLayout` decides whether the terminal can
   // afford cards or must fall back to compact one-line rows.
   const workCardWidth = () => Math.max(20, messageWidth() - 2)
+  // Ticket #116: one shuffled-deck assignment state for the session. Variants
+  // are resolved by subtask id and survive every snapshot refresh; entries
+  // leave the map after the recent-card retention window.
+  const tideAssignments = createTideAssignments()
   const workCards = createMemo(() => {
     const now = Date.now()
     const active = activeTasks()
@@ -1251,11 +1260,13 @@ export function EnsembleV2App() {
     const cards = workCardsForTasks(active, (item) => agentName(state(), item.assigneeID), {
       now,
       tick: motionFrame(),
+      tideTick: workFrame(),
       width: workCardWidth(),
       env: process.env,
       pendingApprovalIDs: pendingApprovalSet,
       nativeBlockedSubtaskIDs: nativeBlockedSet,
       pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
+      variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
       detailFor: (item) => activityStateForTask(item, {
         now,
         pendingApprovalIDs: pendingApprovalSet,
@@ -1264,6 +1275,7 @@ export function EnsembleV2App() {
         agentNameFor: (agentID) => agentName(state(), agentID),
       }).verb,
     })
+    pruneTideAssignments(tideAssignments, now)
     return { cards, layout: workCardLayout(viewHeight(), cards.length) }
   })
   const pickerGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 16)
@@ -3084,6 +3096,42 @@ export function EnsembleV2App() {
   })
   createEffect(() => {
     syncClock()
+  })
+
+  // Ticket #116: dedicated 10 fps Work-card clock. It runs only while at
+  // least one working card is not waiting on the user, the Ensemble route is
+  // visible, no modal owns attention, and reduced motion is off. Needs-you
+  // cards freeze on their assigned variant; pending, retrying, and terminal
+  // cards hold the still frame. Stopping resets the tick so a later run starts
+  // clean instead of resuming an old phase.
+  let workClockTimer: ReturnType<typeof setInterval> | undefined;
+  let workClockRunning = false;
+  const workClockOn = () =>
+    shouldRunWorkClock(
+      {
+        workingCards: workCards().cards.filter((card) => card.status === "working" && !card.needsYou).length,
+        routeActive: isOurRoute(),
+        modalOpen: isModal(),
+      },
+      process.env,
+    )
+  const syncWorkClock = () => {
+    const want = workClockOn()
+    if (want === workClockRunning) return
+    workClockRunning = want
+    if (workClockTimer !== undefined) { clearInterval(workClockTimer); workClockTimer = undefined }
+    if (want) {
+      workClockTimer = setInterval(() => setWorkFrame((frame) => frame + 1), WORK_CLOCK_INTERVAL_MS)
+    } else {
+      setWorkFrame(0)
+    }
+  };
+  onCleanup(() => {
+    if (workClockTimer !== undefined) { clearInterval(workClockTimer); workClockTimer = undefined }
+    workClockRunning = false
+  })
+  createEffect(() => {
+    syncWorkClock()
   })
 
   createEffect(() => {

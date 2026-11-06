@@ -102,6 +102,22 @@ test("ticket115: Work renders active subtasks as cards with a full-width tide ro
   assert.ok(!components.includes("<span"), "the tide strip is one styled line, not nested spans")
 })
 
+test("ticket116: Work cards use stable tide assignments and a gated 10 fps work clock", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const tide = readFileSync(new URL("./tide.ts", import.meta.url), "utf8")
+  assert.ok(app.includes("createTideAssignments()"), "one UI-local assignment state lives with the app")
+  assert.ok(
+    app.includes("variantFor: (item) => tideVariantFor(tideAssignments, item.id, now)"),
+    "cards draw a stable variant from the assignment state",
+  )
+  assert.ok(app.includes("pruneTideAssignments(tideAssignments, now)"), "assignments are pruned after the retention window")
+  assert.ok(app.includes("tideTick: workFrame()"), "the tide runs on the dedicated work clock")
+  assert.ok(app.includes("shouldRunWorkClock("), "the work clock is gated by working cards and motion policy")
+  assert.ok(app.includes("WORK_CLOCK_INTERVAL_MS"), "the work clock uses the approved 10 fps cadence")
+  assert.ok(app.includes("setWorkFrame"), "the work clock owns its own tick signal")
+  assert.ok(tide.includes("shuffleTideDeck"), "assignment uses a shuffled deck")
+})
+
 test("ticket120: every shell overlay fades in once without owning focus", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   const overlays = readFileSync(new URL("./overlays.ts", import.meta.url), "utf8")
