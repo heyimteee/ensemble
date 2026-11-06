@@ -3178,7 +3178,11 @@ export function EnsembleV2App() {
   const workClockOn = () =>
     shouldRunWorkClock(
       {
-        workingCards: workCards().cards.filter((card) => card.status === "working" && !card.needsYou).length,
+        // Cards only render on the workspace surface; a DM/settings surface
+        // must not keep the tide clock alive in the background.
+        workingCards: surface()?.kind === "workspace"
+          ? workCards().cards.filter((card) => card.status === "working" && !card.needsYou).length
+          : 0,
         routeActive: isOurRoute(),
         modalOpen: isModal(),
       },
