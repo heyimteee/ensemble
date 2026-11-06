@@ -61,6 +61,18 @@ test("the rail stays transparent and renders the leader as inline colored text",
   assert.ok(!rail.includes("const selected = props.cursor === index()"), "the cursor is not captured as a one-time boolean")
 })
 
+test("ticket114: rail busy and resolving approvals render the shared Braille motion frame", () => {
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const rail = components.slice(components.indexOf("export function Rail"), components.indexOf("export function ApprovalList"))
+  const approvals = components.slice(components.indexOf("export function ApprovalList"))
+  assert.ok(rail.includes("railBusyMark(busy, props.motionTick ?? 0, process.env)"), "rail busy uses the shared Braille marker")
+  assert.ok(!rail.includes("◐"), "rail busy no longer draws a circle-family glyph")
+  assert.ok(approvals.includes("approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)"), "resolving approvals pass the motion tick")
+  assert.ok(app.includes("motionTick={motionFrame()}"), "the app threads the shared motion tick into chrome")
+  assert.ok(app.includes("resolvingApprovalID() !== null"), "an in-flight approval keeps the motion clock running")
+})
+
 test("ticket101: the composer submits through the shared skill planner", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   assert.ok(app.includes('from "../skill-invocation.ts"'), "the TUI imports the shared planner")

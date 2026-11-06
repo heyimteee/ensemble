@@ -2600,14 +2600,15 @@ export function EnsembleV2App() {
   }
 
   // Slice B motion gate: the 4 fps clock runs only while something is in
-  // flight (busy, live streaming text, task-backed activity lines, or the
-  // ephemeral WORK block) or composing — and never under reduced motion
-  // (`ENSEMBLE_REDUCED_MOTION`/`NO_COLOR`), where every animated cell pins
-  // to its frame-0 glyph. Idle screens hold tick 0 with no interval.
+  // flight (busy, live streaming text, task-backed activity lines, the
+  // ephemeral WORK block, or an approval resolve RPC) or composing — and
+  // never under reduced motion (`ENSEMBLE_REDUCED_MOTION`/`NO_COLOR`), where
+  // every animated cell pins to its frame-0 glyph. Idle screens hold tick 0
+  // with no interval.
   const motionOn = () =>
     shouldRunMotion(
       {
-        busy: isBusy(),
+        busy: isBusy() || resolvingApprovalID() !== null,
         live: liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
         composerActive: composerActive(),
       },
@@ -4473,7 +4474,7 @@ export function EnsembleV2App() {
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} />
+          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={settingsAgentID()} fallback={
@@ -4651,7 +4652,7 @@ export function EnsembleV2App() {
                     </>
                   </Show>
                 }>
-                  <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} resolvingID={resolvingApprovalID()} state={state()} onResolve={resolveApproval} />
+                  <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} resolvingID={resolvingApprovalID()} state={state()} onResolve={resolveApproval} motionTick={motionFrame()} />
                 </Show>
               }>
                 <HelpView

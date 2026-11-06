@@ -46,7 +46,9 @@ const task = (patch: Partial<Subtask> = {}): Subtask => ({
 })
 
 test("work glyphs are distinct per terminal state", () => {
-  assert.equal(workGlyph("pending"), "○")
+  assert.equal(workGlyph("pending"), "▫")
+  assert.equal(workGlyph("working"), "⠋")
+  assert.equal(workGlyph("retrying"), "⠋")
   assert.equal(workGlyph("replied"), "●")
   assert.notEqual(workGlyph("failed"), workGlyph("replied"))
   assert.notEqual(workGlyph("cancelled"), workGlyph("replied"))
@@ -65,7 +67,7 @@ test("work status labels name the visible lifecycle", () => {
 test("work rows show the assigned agent and derived state", () => {
   assert.equal(
     workRowText(task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }), "Nova", 1000),
-    "◐ Check the build │ Nova │ working",
+    "⠋ Check the build │ Nova │ working",
   )
   assert.equal(
     workRowText(task({ state: "replied", outcome: "succeeded" }), "Nova", 1000),
@@ -154,7 +156,7 @@ test("terminal announcements order oldest-first with one line per task", () => {
 })
 
 test("activity lines name the agent with the default verb", () => {
-  assert.equal(activityLine("Clark", ACTIVITY_DEFAULT_VERB, "◐"), "◐ Clark │ checking the details…")
+  assert.equal(activityLine("Clark", ACTIVITY_DEFAULT_VERB, "⠋"), "⠋ Clark │ checking the details…")
   assert.equal(ACTIVITY_DEFAULT_VERB, "checking the details…")
   assert.equal(activityVerb("running", "tests"), "running tests…")
   assert.equal(activityVerb("reading", "notes.md"), "reading notes.md…")
@@ -224,16 +226,16 @@ test("live/finalized split keeps concurrent live rows distinct and folds finaliz
 
 test("work row frames use the named sets per status, not one generic frame", () => {
   assert.deepEqual(
-    [0, 1, 2, 3, 4, 5, 6, 7].map((tick) => workRowFrame("working", tick)),
-    ["◐", "◑", "◒", "◓", "◐", "◑", "◒", "◓"],
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((tick) => workRowFrame("working", tick)),
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
   )
   assert.deepEqual(
-    [0, 1, 2, 3, 4, 5, 6, 7].map((tick) => workRowFrame("retrying", tick)),
-    ["◐", "◑", "◒", "◓", "◐", "◑", "◒", "◓"],
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((tick) => workRowFrame("retrying", tick)),
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
   )
   assert.deepEqual(
     [0, 1, 2, 3, 4, 5, 6, 7].map((tick) => workRowFrame("pending", tick)),
-    ["○", "◌", "○", "◌", "○", "◌", "○", "◌"],
+    ["▫", "▪", "▫", "▪", "▫", "▪", "▫", "▪"],
   )
   // Terminal rows are static final glyphs, never animation frames.
   assert.equal(workRowFrame("replied", 3), "●")
@@ -242,32 +244,32 @@ test("work row frames use the named sets per status, not one generic frame", () 
 })
 
 test("work row frames are constant-width and pin to frame 0 under reduced motion", () => {
-  for (let tick = 0; tick < 8; tick++) {
+  for (let tick = 0; tick < 10; tick++) {
     assert.equal([...workRowFrame("working", tick)].length, 1)
     assert.equal([...workRowFrame("pending", tick)].length, 1)
   }
-  assert.equal(workRowFrame("working", 3, { ENSEMBLE_REDUCED_MOTION: "1" }), "◐")
-  assert.equal(workRowFrame("pending", 1, { NO_COLOR: "1" }), "○")
+  assert.equal(workRowFrame("working", 3, { ENSEMBLE_REDUCED_MOTION: "1" }), "⠋")
+  assert.equal(workRowFrame("pending", 1, { NO_COLOR: "1" }), "▫")
 })
 
 test("activity frames route verb kinds to the named sets", () => {
-  assert.equal(activityFrameForKind("checking", 0), "◐")
-  assert.equal(activityFrameForKind("checking", 1), "◑")
-  assert.equal(activityFrameForKind("wrapping", 2), "◒")
-  assert.equal(activityFrameForKind("waiting", 0), "○")
-  assert.equal(activityFrameForKind("waiting", 1), "◌")
+  assert.equal(activityFrameForKind("checking", 0), "⠋")
+  assert.equal(activityFrameForKind("checking", 1), "⠙")
+  assert.equal(activityFrameForKind("wrapping", 2), "⠹")
+  assert.equal(activityFrameForKind("waiting", 0), "▫")
+  assert.equal(activityFrameForKind("waiting", 1), "▪")
   assert.equal(activityFrameForKind("reading", 0), "▸")
   assert.equal(activityFrameForKind("searching", 1), "▹")
   assert.equal(activityFrameForKind("running", 0), "▸")
   assert.equal(activityFrameForKind("writing", 1), "▹")
   assert.equal(activityFrameForKind("running", 3, { ENSEMBLE_REDUCED_MOTION: "1" }), "▸")
-  assert.equal(activityFrameForKind("waiting", 1, { NO_COLOR: "1" }), "○")
+  assert.equal(activityFrameForKind("waiting", 1, { NO_COLOR: "1" }), "▫")
 })
 
 test("slice C asking and thinking verbs use their named frames", () => {
-  assert.equal(activityFrameForKind("asking", 0), "◐")
-  assert.equal(activityFrameForKind("asking", 1), "◑")
-  assert.equal(activityFrameForKind("asking", 2, { ENSEMBLE_REDUCED_MOTION: "1" }), "◐")
+  assert.equal(activityFrameForKind("asking", 0), "⠋")
+  assert.equal(activityFrameForKind("asking", 1), "⠙")
+  assert.equal(activityFrameForKind("asking", 2, { ENSEMBLE_REDUCED_MOTION: "1" }), "⠋")
   assert.equal(activityFrameForKind("thinking", 0), "·  ")
   assert.equal(activityFrameForKind("thinking", 1), "˙  ")
   assert.equal(activityFrameForKind("thinking", 0, { ENSEMBLE_REDUCED_MOTION: "1" }), "·  ")
@@ -279,7 +281,7 @@ test("slice C asking and thinking verbs use their named frames", () => {
 })
 
 test("queued activity lines stay static across ticks", () => {
-  for (let tick = 0; tick < 8; tick++) assert.equal(queuedActivityFrame(), "○")
+  for (let tick = 0; tick < 8; tick++) assert.equal(queuedActivityFrame(), "▫")
 })
 
 test("review fix: interim work labels name the in-flight action", () => {
@@ -293,26 +295,26 @@ test("review fix: pending work rows show the interim label until terminal", () =
   const running = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
   assert.equal(
     workRowText(running, "Nova", 1000, { pending: "cancel" }),
-    "◐ Check the build │ Nova │ Cancelling…",
+    "⠋ Check the build │ Nova │ Cancelling…",
   )
   assert.equal(
     workRowText(running, "Nova", 1000, { pending: "stop" }),
-    "◐ Check the build │ Nova │ Stopping…",
+    "⠋ Check the build │ Nova │ Stopping…",
   )
   assert.equal(
     workRowText(task({ state: "pending" }), "Nova", 1000, { pending: "retry" }),
-    "○ Check the build │ Nova │ Retrying…",
+    "▫ Check the build │ Nova │ Retrying…",
   )
   // No pending action: the derived status renders as before.
-  assert.equal(workRowText(running, "Nova", 1000), "◐ Check the build │ Nova │ working")
-  assert.equal(workRowText(running, "Nova", 1000, { pending: null }), "◐ Check the build │ Nova │ working")
+  assert.equal(workRowText(running, "Nova", 1000), "⠋ Check the build │ Nova │ working")
+  assert.equal(workRowText(running, "Nova", 1000, { pending: null }), "⠋ Check the build │ Nova │ working")
 })
 
 test("review fix: needs-you rows carry a distinct marker, never plain waiting", () => {
   const running = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
   assert.equal(
     workRowText(running, "Nova", 1000, { needsYou: true }),
-    `◆ ◐ Check the build │ Nova │ working${needsYouSuffix()}`,
+    `◆ ⠋ Check the build │ Nova │ working${needsYouSuffix()}`,
   )
   assert.ok(workRowText(running, "Nova", 1000, { needsYou: true }).includes("needs you"))
   assert.ok(workRowText(running, "Nova", 1000, { needsYou: true }).includes("v to resolve"))
