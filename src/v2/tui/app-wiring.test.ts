@@ -122,6 +122,22 @@ test("ticket118: the System Agent init row stays live, staged, and percentage-fr
   assert.ok(!rowBlock.includes("%"), "the rendered init row never carries a percentage")
 })
 
+test("ticket116: Work cards use stable tide assignments and a gated 10 fps work clock", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const tide = readFileSync(new URL("./tide.ts", import.meta.url), "utf8")
+  assert.ok(app.includes("createTideAssignments()"), "one UI-local assignment state lives with the app")
+  assert.ok(
+    app.includes("variantFor: (item) => tideVariantFor(tideAssignments, item.id, now)"),
+    "cards draw a stable variant from the assignment state",
+  )
+  assert.ok(app.includes("pruneTideAssignments(tideAssignments, now)"), "assignments are pruned after the retention window")
+  assert.ok(app.includes("tideTick: workFrame()"), "the tide runs on the dedicated work clock")
+  assert.ok(app.includes("shouldRunWorkClock("), "the work clock is gated by working cards and motion policy")
+  assert.ok(app.includes("WORK_CLOCK_INTERVAL_MS"), "the work clock uses the approved 10 fps cadence")
+  assert.ok(app.includes("setWorkFrame"), "the work clock owns its own tick signal")
+  assert.ok(tide.includes("shuffleTideDeck"), "assignment uses a shuffled deck")
+})
+
 test("ticket120: every shell overlay fades in once without owning focus", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   const overlays = readFileSync(new URL("./overlays.ts", import.meta.url), "utf8")
@@ -136,13 +152,18 @@ test("ticket120: every shell overlay fades in once without owning focus", () => 
   assert.ok(effect.includes("isReducedMotion"), "reduced motion skips the ramp")
   assert.ok(!effect.includes("dispatchInteraction"), "presence never changes focus, mode, overlay ownership, or keys")
 
-  const panelKeyStart = app.indexOf("const overlayPanelKey = ()")
+  const panelKeyStart = app.indexOf("const overlayPanelKey = createMemo(")
   const panelKeyEnd = app.indexOf("let overlayPresenceTimer", panelKeyStart)
-  assert.ok(panelKeyStart >= 0 && panelKeyEnd > panelKeyStart, "the presence panel key is present")
+  assert.ok(panelKeyStart >= 0 && panelKeyEnd > panelKeyStart, "the presence panel key is memoized")
   const panelKey = app.slice(panelKeyStart, panelKeyEnd)
   for (const panel of ["helpOpen()", "approvalsOpen()", "leaderPopup()"]) {
     assert.ok(panelKey.includes(panel), `the presence key includes ${panel}`)
   }
+  assert.ok(panelKey.includes("wizard: wizard() !== null"), "wizard ownership is part of the presence key")
+  assert.ok(
+    !app.includes("const overlayPanelKey = ()"),
+    "the key is a memo, so unrelated wizard state updates cannot restart the one-shot presence settle",
+  )
   assert.equal(
     (app.match(/opacity=\{overlayOpacity\(\)\}/g) ?? []).length,
     8,
@@ -216,6 +237,28 @@ test("ticket103: General triage, owner choice, and direct rejection stay on the 
   assert.ok(app.includes('await openChoice(\n          `Owner for /${choice.skillID}`'), "the TUI offers the owner picker before sending")
   assert.ok(app.includes("ownerSelections"), "the chosen owner is sent to the server authoritative re-plan")
   assert.ok(app.includes('row.executor === "init" ? "init"'), "the built-in init row runs the System Agent init job")
+})
+
+test("ticket119: app feedback paints the app toast and host toast is fallback-only", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  assert.equal((app.match(/context\.ui\.toast\.show/g) ?? []).length, 1, "one host-toast call site remains")
+  const fallback = app.indexOf("const showHostToast")
+  assert.ok(fallback >= 0 && app.indexOf("context.ui.toast.show") > fallback, "the host toast lives in the fallback helper")
+  assert.ok(app.includes('if (!isOurRoute()) { showHostToast(input); return }'), "the host fallback only runs when the app surface is not visible")
+  assert.ok(app.includes('feedbackChannel(isToastModal()) === "statusline"'), "modal feedback goes to the statusline")
+  assert.ok(app.includes("pushToast(state, input, Date.now())"), "app feedback enters the bounded queue")
+  assert.ok(app.includes("expireToasts(state, Date.now())"), "the one visible toast expires through the pure model")
+  assert.ok(app.includes("toastPlacement(viewWidth())"), "the app anchors the toast with the bounded geometry helper")
+  assert.ok(app.includes("initToast(job.state, job.error)"), "terminal init jobs report through the app toast")
+  assert.ok(app.includes("describeGitChange(gitState(), next)"), "git changes report through the app toast")
+  assert.ok(components.includes("export function ToastOverlay"), "the app-owned toast component exists")
+  assert.ok(components.includes("borderColor={accent()}"), "the toast tone owns its border color")
+  assert.ok(components.includes("zIndex={80}"), "the toast stays below dialogs and the leader popup")
+  assert.ok(components.includes("createSignal(isReducedMotion())"), "reduced motion mounts the toast at its final state")
+  assert.ok(components.includes("opacity={settled() ? 1 : 0.72}"), "the presence settle is a single opacity change")
+  const toastView = components.slice(components.indexOf("export function ToastOverlay"), components.indexOf("export function Rail"))
+  assert.ok(!toastView.includes("textarea") && !toastView.includes("onKey"), "the toast mounts no editor and owns no keys")
 })
 
 test("ticket123: composer validation is non-destructive and clears on input or success", () => {
