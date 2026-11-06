@@ -277,7 +277,7 @@ export function activityLine(agentLabel: string, verb: string, frame: string): s
 /** Max visible activity lines; the rest collapse into a `+N more` overflow line. */
 export const MAX_VISIBLE_ACTIVITY = 3
 
-export type ActivityEntry = { key: string; label: string; agentID?: string; createdAt: number; verb: string; kind: ActivityVerbKind }
+export type ActivityEntry = { key: string; label: string; agentID?: string; taskID?: string; createdAt: number; verb: string; kind: ActivityVerbKind }
 
 /**
  * Per-agent live display for one active task (slice C + ticket #70):
@@ -438,7 +438,7 @@ export function splitActivityGroups(
       children,
       agentNameFor,
     })
-    const entry: ActivityEntry = { key: keyFor(task), label, agentID: task.assigneeID, createdAt: task.createdAt, verb: detail.verb, kind: detail.kind }
+    const entry: ActivityEntry = { key: keyFor(task), label, agentID: task.assigneeID, taskID: task.id, createdAt: task.createdAt, verb: detail.verb, kind: detail.kind }
     // User-blocked work is waiting, not parked: approval-gated,
     // interrupted, and native-blocked tasks read the waiting-for-you verb
     // in live even while their derived queue status is still pending.
@@ -451,6 +451,23 @@ export function splitActivityGroups(
   const byAge = (a: ActivityEntry, b: ActivityEntry) => a.createdAt - b.createdAt
   return { live: [...liveByKey.values()].sort(byAge), queued: [...queuedByKey.values()].sort(byAge) }
 }
+
+/**
+ * Ticket #115 follow-up: a visible Work card already carries the task's
+ * honest detail, so the matching task-backed activity line must not render a
+ * second time. Streaming-only rows are added later and have no taskID, so
+ * they are never suppressed here; queued tasks without a card keep their
+ * queued line. Pure.
+ */
+export function suppressCardedActivity(
+  groups: { live: ActivityEntry[]; queued: ActivityEntry[] },
+  cardTaskIDs: ReadonlySet<string>,
+): { live: ActivityEntry[]; queued: ActivityEntry[] } {
+  if (cardTaskIDs.size === 0) return groups
+  const keep = (entry: ActivityEntry) => entry.taskID === undefined || !cardTaskIDs.has(entry.taskID)
+  return { live: groups.live.filter(keep), queued: groups.queued.filter(keep) }
+}
+
 /** Counts line for the active-work section; omits zero buckets and terminal states. */
 export function workSummary(tasks: Subtask[], now: number): string {
   const active = tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))

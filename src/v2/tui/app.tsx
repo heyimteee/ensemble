@@ -157,6 +157,7 @@ import {
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
+  suppressCardedActivity,
   workCardLayout,
   workCardsForTasks,
   workRowFrame,
@@ -702,6 +703,23 @@ export function EnsembleV2App() {
   // failed/cancelled terminal rows. Active work sorts first (oldest first);
   // terminal rows are capped to the most recent so history never crowds chat.
   const orderedTasks = createMemo(() => orderedWorkItems(activeTasks(), Date.now()))
+  const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
+  onMount(() => {
+    const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
+    context.renderer.on("resize", update)
+    onCleanup(() => context.renderer.off("resize", update))
+  })
+  // Ticket #115 follow-up: a visible Work card already carries its task's
+  // detail, so the same task-backed activity line is suppressed. This set uses
+  // the same height-based card limit as the render; compact fallback rows and
+  // overflow tasks keep their activity lines, and streaming-only rows never
+  // enter this set.
+  const cardedTaskIDs = createMemo(() => {
+    const ordered = orderedTasks()
+    const layout = workCardLayout(renderSize().height, ordered.length)
+    if (layout.mode !== "cards") return new Set<string>()
+    return new Set(ordered.slice(0, layout.limit).map((task) => task.id))
+  })
   const selectedTask = createMemo(() => orderedTasks()[taskCursor()])
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
@@ -1050,7 +1068,7 @@ export function EnsembleV2App() {
   })
   const liveActivity = createMemo(() => {
     const taskLive: ActivityEntry[] = []
-    let queued: string[] = []
+    let queuedEntries: ActivityEntry[] = []
     if (surface()?.kind === "workspace") {
       const groups = splitActivityGroups(
         activeTasks(),
@@ -1064,13 +1082,19 @@ export function EnsembleV2App() {
         },
       )
       taskLive.push(...groups.live)
-      queued = groups.queued.map((entry) => entry.label)
+      queuedEntries = groups.queued
     }
     // Ticket #74: task-less streaming rows never synthesize the generic
     // checking verb. A fresh live row reads honest `working…` while a run
     // or recent delta exists; stale orphans and task-backed agents add
     // nothing, so finished turns leave no ghost line behind.
-    const live = mergeStreamingActivity(taskLive, liveMessages(), Date.now())
+    const merged = mergeStreamingActivity(taskLive, liveMessages(), Date.now())
+    // Ticket #115 follow-up: suppress the task-backed line only after the
+    // merge. Keeping it in `taskLive` during the merge prevents the same
+    // agent's streaming row from replacing the suppressed card detail.
+    const visible = suppressCardedActivity({ live: merged, queued: queuedEntries }, cardedTaskIDs())
+    const live = visible.live
+    const queued = visible.queued.map((entry) => entry.label)
     const selected = selectActivityAgents(live, MAX_VISIBLE_ACTIVITY)
     const byLabel = new Map<string, ActivityEntry>()
     for (const entry of live) if (!byLabel.has(entry.label)) byLabel.set(entry.label, entry)
@@ -1232,12 +1256,6 @@ export function EnsembleV2App() {
     if (!settingsAgentID() || settingsTab() !== "skillbox") return
     const feedback = trackMissingSkills(missingSkillsTracker, selectedMissingSkills())
     if (feedback) signalSettingsFeedback(feedback)
-  })
-  const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
-  onMount(() => {
-    const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
-    context.renderer.on("resize", update)
-    onCleanup(() => context.renderer.off("resize", update))
   })
   const statuslineWidth = () => Math.max(10, renderSize().width - 2)
   // The rail stays transparent; the inline LEADER label uses the leader
