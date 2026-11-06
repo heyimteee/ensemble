@@ -76,6 +76,14 @@ import {
   type SettingsFieldID,
 } from "./settings-grammar.ts"
 import {
+  SETTINGS_FLASH_MS,
+  createMissingSkillsTracker,
+  settingsAcknowledgement,
+  settingsFeedbackSignal,
+  trackMissingSkills,
+  type SettingsFeedback as SettingsFeedbackSignal,
+} from "./settings-feedback.ts"
+import {
   OVERLAY_PRESENCE_MS,
   OVERLAY_PRESENCE_STEP_MS,
   filterEdit,
@@ -340,6 +348,28 @@ export function EnsembleV2App() {
   // land one event-refresh later, so the cursor resolves from this id instead
   // of guessing a row from a possibly stale filtered list.
   const [pendingMemorySelectID, setPendingMemorySelectID] = createSignal<string | null>(null)
+  // Ticket #124: one-shot settings acknowledgements. A signal lights its
+  // target for one window, then settles; the timer ends that window once and
+  // never restarts it. Reduced motion renders the settled state immediately.
+  const [settingsFeedback, setSettingsFeedback] = createSignal<SettingsFeedbackSignal | null>(null)
+  const [settingsFeedbackNow, setSettingsFeedbackNow] = createSignal(0)
+  let settingsFeedbackTimer: ReturnType<typeof setTimeout> | undefined
+  const clearSettingsFeedback = () => {
+    if (settingsFeedbackTimer !== undefined) { clearTimeout(settingsFeedbackTimer); settingsFeedbackTimer = undefined }
+    setSettingsFeedback(null)
+    setSettingsFeedbackNow(0)
+  }
+  const signalSettingsFeedback = (feedback: SettingsFeedbackSignal) => {
+    if (settingsFeedbackTimer !== undefined) { clearTimeout(settingsFeedbackTimer); settingsFeedbackTimer = undefined }
+    setSettingsFeedback(feedback)
+    setSettingsFeedbackNow(feedback.at)
+    settingsFeedbackTimer = setTimeout(() => {
+      setSettingsFeedbackNow(feedback.at + SETTINGS_FLASH_MS)
+      settingsFeedbackTimer = undefined
+    }, SETTINGS_FLASH_MS)
+  }
+  const settingsAck = createMemo(() => settingsAcknowledgement(settingsFeedback(), settingsFeedbackNow()))
+  onCleanup(() => { if (settingsFeedbackTimer !== undefined) clearTimeout(settingsFeedbackTimer) })
   const [memoryFilter, setMemoryFilter] = createSignal("")
   const [skillFilter, setSkillFilter] = createSignal("")
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
@@ -1123,6 +1153,15 @@ export function EnsembleV2App() {
   const selectedMissingSkills = createMemo(() => {
     const agent = draft() ?? selectedAgent()
     return agent ? missingSkills(agent, skills()) : []
+  })
+  // Ticket #124: a missing-skill warning emphasizes once when its set first
+  // appears on the Skillbox tab. Snapshot paints and same-set refreshes do not
+  // re-signal, so the warning never loops back into motion.
+  const missingSkillsTracker = createMissingSkillsTracker()
+  createEffect(() => {
+    if (!settingsAgentID() || settingsTab() !== "skillbox") return
+    const feedback = trackMissingSkills(missingSkillsTracker, selectedMissingSkills())
+    if (feedback) signalSettingsFeedback(feedback)
   })
   const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
   onMount(() => {
@@ -2477,6 +2516,8 @@ export function EnsembleV2App() {
     setSettingsFieldText("")
     setSettingsFieldCursor(0)
     setPendingMemorySelectID(null)
+    clearSettingsFeedback()
+    missingSkillsTracker.key = ""
     setSettingsAgentID(null)
     setDraft(null)
     setDirty(false)
@@ -2492,7 +2533,16 @@ export function EnsembleV2App() {
     // that exists in the current tab.
     setSkillFilter(""); setMemoryFilter(""); setSettingsCursor(0)
     setSettingsField(null); setSettingsFieldText(""); setSettingsFieldCursor(0)
+    clearSettingsFeedback()
+    missingSkillsTracker.key = ""
     dispatchInteraction({ type: "focus.set", focus: "settings" })
+  }
+
+  // An edit always wins over the previous save acknowledgement, so the header
+  // can never show Saved while the draft is dirty.
+  const markSettingsDirty = () => {
+    setDirty(true)
+    if (settingsFeedback()?.kind === "saved") clearSettingsFeedback()
   }
 
   const closeSettings = async () => {
@@ -2506,9 +2556,14 @@ export function EnsembleV2App() {
   const saveSettings = async () => {
     const agent = draft(); if (!agent) return
     if (!agent.name.trim()) throw new Error("Agent name is required.")
+    clearSettingsFeedback()
     await run("Save settings", async () => {
       await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color })
-      finishSettingsClose()
+      // Ticket #124: stay in Settings so the saved state is visible. The
+      // header flashes once, then keeps the final Saved word until the next
+      // edit; the dirty mark is cleared at the same time.
+      setDirty(false)
+      signalSettingsFeedback(settingsFeedbackSignal("saved"))
     })
   }
 
@@ -2519,7 +2574,7 @@ export function EnsembleV2App() {
     setDraft({ ...agent, backupModels: [...agent.backupModels, { providerID: model.providerID, modelID: model.modelID, variant }] })
     // Row 0 is the main model, so the appended backup lands at row N+1.
     setSettingsCursor(agent.backupModels.length + 1)
-    setDirty(true)
+    markSettingsDirty()
   }
 
   const editModelRow = async (row: number) => {
@@ -2527,7 +2582,7 @@ export function EnsembleV2App() {
     if (row <= 0) {
       const model = await chooseModel(agent.mainModel); if (!model) return
       const variant = await chooseVariant(model)
-      setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); setDirty(true)
+      setDraft({ ...agent, mainModel: { providerID: model.providerID, modelID: model.modelID, variant } }); markSettingsDirty()
       return
     }
     const index = row - 1
@@ -2536,7 +2591,7 @@ export function EnsembleV2App() {
     const variant = await chooseVariant(model)
     const backupModels = [...agent.backupModels]
     backupModels[index] = { providerID: model.providerID, modelID: model.modelID, variant }
-    setDraft({ ...agent, backupModels }); setDirty(true)
+    setDraft({ ...agent, backupModels }); markSettingsDirty()
   }
 
   const removeBackup = () => {
@@ -2546,14 +2601,17 @@ export function EnsembleV2App() {
     const index = row - 1
     setDraft({ ...agent, backupModels: agent.backupModels.filter((_, i) => i !== index) })
     setSettingsCursor(Math.max(0, row - 1))
-    setDirty(true)
+    markSettingsDirty()
   }
 
   const toggleSkill = () => {
     const agent = draft(); const skill = filteredSkills()[settingsCursorClamped()]
     if (!agent || !skill) return
     const has = agent.skillbox.includes(skill.id)
-    setDraft({ ...agent, skillbox: has ? agent.skillbox.filter((id) => id !== skill.id) : [...agent.skillbox, skill.id] }); setDirty(true)
+    setDraft({ ...agent, skillbox: has ? agent.skillbox.filter((id) => id !== skill.id) : [...agent.skillbox, skill.id] })
+    markSettingsDirty()
+    // Ticket #124: acknowledge the row that actually changed, once.
+    signalSettingsFeedback(settingsFeedbackSignal("skill-changed", skill.id))
   }
 
   const deleteMemory = async () => {
@@ -2578,7 +2636,7 @@ export function EnsembleV2App() {
     if (!moved) return
     setDraft({ ...agent, backupModels: moved.backups })
     setSettingsCursor(moved.index + 1)
-    setDirty(true)
+    markSettingsDirty()
   }
 
   // Settings text fields reuse the composer Vim adapter (#85): Insert type,
@@ -2611,7 +2669,7 @@ export function EnsembleV2App() {
     const agent = draft()
     if (!agent || String(agent[field.field] ?? "") === value) return
     setDraft({ ...agent, [field.field]: value } as Agent)
-    setDirty(true)
+    markSettingsDirty()
   }
 
   const commitSettingsField = async (field: SettingsFieldState, raw: string): Promise<boolean> => {
@@ -2620,7 +2678,7 @@ export function EnsembleV2App() {
       const value = normalizeSettingsField(field.field, raw)
       if (String(agent[field.field] ?? "") === value) return false
       setDraft({ ...agent, [field.field]: value } as Agent)
-      setDirty(true)
+      markSettingsDirty()
       return true
     }
     const text = raw.trim()
@@ -2633,6 +2691,9 @@ export function EnsembleV2App() {
         createdID = created?.id
       })
       if (!ok || !createdID) return false
+      // Ticket #124: acknowledge the new row once; the id survives until the
+      // snapshot carrying the memory paints.
+      signalSettingsFeedback(settingsFeedbackSignal("memory-added", createdID))
       // The created id is authoritative; resolve it now if the snapshot is
       // current, otherwise let the effect above select it when it arrives.
       setPendingMemorySelectID(null)
@@ -4908,7 +4969,7 @@ export function EnsembleV2App() {
                 />
               </Show>
             }>
-              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value); if (value) settingsFieldVimBuffer() }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
+              <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} acknowledgement={settingsAck()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value); if (value) settingsFieldVimBuffer() }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
             </Show>
           </box>
         </box>
