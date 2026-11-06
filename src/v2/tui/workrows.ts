@@ -15,14 +15,16 @@ import {
 
 /**
  * Inline work-row and Work-card mapping for the group chat surface (ticket
- * #56, slice A ticket #64, slice C ticket #59, card layout ticket #115). The
- * right-hand task board is gone; the WORK block carries only active subtasks
- * for the workspace with their assigned agent and derived lifecycle state.
- * Terminal outcomes never render here — they are announced once as transcript
- * system lines (see terminalAnnouncement). Attribution lines (`→ Assigned to
- * $AgentName: <title>` events, `Asking $AgentName…` live variants, `Answer from
- * $AgentName` relay headers) are defined in format.ts and wired through
- * activityDetailForTask below and the transcript render in app.tsx.
+ * #56, slice A ticket #64, slice C ticket #59, card layout ticket #115,
+ * recent cards ticket #117). The right-hand task board is gone; the WORK block
+ * carries active subtasks plus recently finished cards for the workspace with
+ * their assigned agent and derived lifecycle state. Terminal outcomes remain
+ * the durable transcript record (see terminalAnnouncement); the card copy is
+ * display-only and disappears after the recent window. Attribution lines
+ * (`→ Assigned to $AgentName: <title>` events, `Asking $AgentName…` live
+ * variants, `Answer from $AgentName` relay headers) are defined in format.ts
+ * and wired through activityDetailForTask below and the transcript render in
+ * app.tsx.
  */
 
 /** Shared transcript window: both the DM and group surfaces keep the most
@@ -173,9 +175,42 @@ export function orderedWorkItems(tasks: Subtask[], now: number): Subtask[] {
     })
 }
 
-/** True while the surface has active (non-terminal) work — the WORK block mounts exactly then. */
+/** True while the surface has active (non-terminal) work — the work cursor and its actions mount exactly then. */
 export function hasActiveWork(tasks: Subtask[], now: number): boolean {
   return tasks.some((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
+}
+
+/**
+ * Ticket #117: finished cards settle in the Work pane for eight seconds, then
+ * disappear. The transcript announcement remains the durable record, so the
+ * card copy is allowed to be ephemeral. Only a real terminal timestamp counts:
+ * legacy rows without one invent no recency.
+ */
+export const RECENT_WORK_TTL_MS = 8_000
+
+/** The honest finish time for a terminal task, or undefined when none was recorded. */
+export function workFinishedAt(task: Subtask): number | undefined {
+  return task.finishedAt ?? task.repliedAt ?? task.stoppedAt
+}
+
+/** True while a terminal task is inside the eight-second recent-card window. */
+export function isRecentWork(task: Subtask, now: number): boolean {
+  if (!isTerminalWorkStatus(deriveWorkStatus(task, now))) return false
+  const finished = workFinishedAt(task)
+  if (finished === undefined) return false
+  return now < finished + RECENT_WORK_TTL_MS
+}
+
+/** Recently finished tasks, oldest terminal first, so cards settle in finish order. */
+export function recentWorkItems(tasks: Subtask[], now: number): Subtask[] {
+  return tasks
+    .filter((task) => isRecentWork(task, now))
+    .sort((a, b) => (workFinishedAt(a) ?? 0) - (workFinishedAt(b) ?? 0) || a.createdAt - b.createdAt)
+}
+
+/** True while the Work pane still has a recent card to show after active work ends. */
+export function hasRecentWork(tasks: Subtask[], now: number): boolean {
+  return tasks.some((task) => isRecentWork(task, now))
 }
 
 /** One terminal outcome announced once as a transcript system line. Non-terminal work announces nothing. */
@@ -476,20 +511,22 @@ export function suppressCardedActivity(
   return { live: groups.live.filter(keep), queued: groups.queued.filter(keep) }
 }
 
-/** Counts line for the active-work section; omits zero buckets and terminal states. */
+/**
+ * Ticket #117: the Work header names both live and recently finished work.
+ * The block stays mounted while either count is non-zero, so a pane holding
+ * only recent cards still tells the user nothing is running.
+ */
+export function workSummaryCounts(activeCount: number, recentCount: number): string {
+  const active = Math.max(0, Math.floor(activeCount))
+  const recent = Math.max(0, Math.floor(recentCount))
+  if (active === 0 && recent === 0) return chromeJoin(["WORK", "none yet"])
+  return `WORK ${active} active · ${recent} recent`
+}
+
+/** Counts line for the Work section: active work plus the eight-second recent window. */
 export function workSummary(tasks: Subtask[], now: number): string {
-  const active = tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
-  if (active.length === 0) return chromeJoin(["WORK", "none yet"])
-  const counts = new Map<DerivedWorkStatus, number>()
-  for (const task of active) {
-    const status = deriveWorkStatus(task, now)
-    counts.set(status, (counts.get(status) ?? 0) + 1)
-  }
-  const order: DerivedWorkStatus[] = ["working", "retrying", "pending"]
-  const parts = order
-    .filter((status) => (counts.get(status) ?? 0) > 0)
-    .map((status) => `${counts.get(status)} ${status}`)
-  return chromeJoin(["WORK", ...parts])
+  const active = tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now))).length
+  return workSummaryCounts(active, recentWorkItems(tasks, now).length)
 }
 
 /**
@@ -508,6 +545,8 @@ export type WorkCard = {
   detail: string
   status: DerivedWorkStatus
   needsYou: boolean
+  /** Ticket #117: a recently finished card that is display-only, never a cursor target. */
+  recent: boolean
   /** Stable tide motion for this subtask's active lifetime. */
   tideVariant: TideVariant
   /** Rendered one-row strip: two cells per tide column, `width` cells total. */
@@ -582,6 +621,7 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     detail: short(workCardDetail(status, { pending, needsYou, activity: options.detailFor?.(task) }), textWidth),
     status,
     needsYou,
+    recent: false,
     tideVariant: variant,
     tide: settled ? flatTideStrip(width) : tideStrip(variant, width, tideTick, options.env),
     tideLevels: settled ? flatTideLevels(tideColumns(width)) : tideLevels(variant, tideColumns(width), tideTick, options.env),
@@ -595,6 +635,38 @@ export function workCardsForTasks(
   options: WorkCardOptions,
 ): WorkCard[] {
   return orderedWorkItems(tasks, options.now).map((task) => workCardForTask(task, agentLabelFor(task), options))
+}
+
+/**
+ * Ticket #117: recently finished cards. They keep the fixed terminal glyph and
+ * state word, carry a flat settled strip, and are display-only — the work
+ * cursor and every work action are built from `workCardsForTasks`, never from
+ * this set. Oldest finish first, matching the transcript announcement order.
+ */
+export function recentWorkCardsForTasks(
+  tasks: Subtask[],
+  agentLabelFor: (task: Subtask) => string,
+  options: WorkCardOptions,
+): WorkCard[] {
+  return recentWorkItems(tasks, options.now).map((task) => {
+    const status = deriveWorkStatus(task, options.now)
+    const width = Math.max(16, Math.floor(options.width))
+    const textWidth = Math.max(8, width - 2)
+    return {
+      id: task.id,
+      agent: short(agentLabelFor(task), Math.max(8, width - 16)),
+      glyph: workGlyph(status),
+      state: workStatusLabel(status),
+      title: short(task.title || "(untitled)", textWidth),
+      detail: short(workCardDetail(status), textWidth),
+      status,
+      needsYou: false,
+      recent: true,
+      tideVariant: options.variantFor?.(task) ?? options.variant ?? "current",
+      tide: flatTideStrip(width),
+      tideLevels: flatTideLevels(tideColumns(width)),
+    }
+  })
 }
 
 /** One card row: header, title, detail, tide. Gap rows sit between cards. */
@@ -638,22 +710,24 @@ function compactLimit(terminalHeight: number): number {
  * Pick the card count that fits the terminal height while reserving transcript
  * rows. Tall terminals show three cards, medium two, short one, and below the
  * minimum card height the Work pane falls back to compact one-line rows (with
- * no inline hint row). Pure.
+ * no inline hint row). Ticket #117: active and recent cards share the same
+ * height budget; callers render active cards first, so overflow never pushes
+ * live work out of the visible slots first. Pure.
  */
-export function workCardLayout(terminalHeight: number, activeCount: number): WorkCardLayout {
-  const active = Math.max(0, Math.floor(activeCount))
-  if (active === 0) return { mode: "compact", limit: 0, overflow: 0, rows: 0 }
+export function workCardLayout(terminalHeight: number, activeCount: number, recentCount = 0): WorkCardLayout {
+  const total = Math.max(0, Math.floor(activeCount)) + Math.max(0, Math.floor(recentCount))
+  if (total === 0) return { mode: "compact", limit: 0, overflow: 0, rows: 0 }
   const available = Math.max(0, terminalHeight - WORK_BASE_ROWS)
   for (const count of [3, 2, 1] as const) {
-    if (active < count) continue
-    const overflow = active - count
+    if (total < count) continue
+    const overflow = total - count
     const rows = cardBlockRows(count, overflow)
     if (rows + WORK_TRANSCRIPT_RESERVE <= available) {
       return { mode: "cards", limit: count, overflow, rows }
     }
   }
-  const limit = Math.min(active, compactLimit(terminalHeight))
-  return { mode: "compact", limit, overflow: active - limit, rows: 1 + limit }
+  const limit = Math.min(total, compactLimit(terminalHeight))
+  return { mode: "compact", limit, overflow: total - limit, rows: 1 + limit }
 }
 
 /**

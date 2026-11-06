@@ -1,5 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import { deriveWorkStatus } from "../queue.ts"
 import type { Subtask } from "../types.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
@@ -16,6 +17,10 @@ import {
   orderedWorkItems,
   pendingWorkLabel,
   queuedActivityFrame,
+  recentWorkCardsForTasks,
+  recentWorkItems,
+  hasRecentWork,
+  RECENT_WORK_TTL_MS,
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
@@ -375,7 +380,7 @@ test("review fix: needs-you derives from existing interruption/approval state", 
   assert.equal(isNeedsYouTask(task({ approvalID: "ap" }), new Set()), false)
 })
 
-test("work summary counts active work only and names the empty state", () => {
+test("work summary counts active and recent work and names the empty state", () => {
   assert.equal(workSummary([], 1000), "WORK │ none yet")
   const summary = workSummary(
     [
@@ -386,10 +391,7 @@ test("work summary counts active work only and names the empty state", () => {
     ],
     1000,
   )
-  assert.ok(summary.includes("1 working"))
-  assert.ok(summary.includes("1 pending"))
-  assert.ok(!summary.includes("replied"))
-  assert.ok(!summary.includes("failed"))
+  assert.equal(summary, "WORK 2 active · 0 recent", "legacy terminal rows without a finish time add no recent count")
 })
 
 test("ticket68: native-blocked tasks read as needs-you without an approvalID", async () => {
@@ -501,6 +503,127 @@ test("ticket115: card detail defaults stay honest", () => {
   assert.equal(workCardDetail("working", { activity: "running tests…" }), "running tests…")
   assert.equal(workCardDetail("working", { pending: "stop" }), "Stopping…")
   assert.equal(workCardDetail("pending", { needsYou: true }), "waiting for you…")
+})
+
+test("ticket117: terminal work stays recent for eight seconds after it finishes", () => {
+  const finished = task({
+    id: "done",
+    state: "replied",
+    outcome: "succeeded",
+    repliedAt: 10_000,
+    finishedAt: 10_000,
+  })
+  assert.equal(RECENT_WORK_TTL_MS, 8_000)
+  assert.deepEqual(recentWorkItems([finished], 10_001).map((item) => item.id), ["done"])
+  assert.deepEqual(recentWorkItems([finished], 17_999).map((item) => item.id), ["done"], "visible just before the window closes")
+  assert.deepEqual(recentWorkItems([finished], 18_000), [], "gone at the eight-second boundary")
+  assert.equal(hasRecentWork([finished], 17_999), true)
+  assert.equal(hasRecentWork([finished], 18_000), false)
+})
+
+test("ticket117: all three terminal outcomes are recent and active work never is", () => {
+  const now = 40_000
+  const items = [
+    task({ id: "working", state: "working", claimedBy: "run", leaseUntil: 99_000, attempts: 1, createdAt: 1 }),
+    task({ id: "failed", state: "replied", outcome: "failed", error: "boom", repliedAt: 35_000, finishedAt: 35_000 }),
+    task({ id: "stopped", state: "replied", outcome: "succeeded", stoppedAt: 36_000, repliedAt: 36_000, finishedAt: 36_000 }),
+    task({ id: "replied", state: "replied", outcome: "succeeded", repliedAt: 37_000, finishedAt: 37_000 }),
+    task({ id: "old", state: "replied", outcome: "succeeded", repliedAt: 20_000, finishedAt: 20_000 }),
+  ]
+  assert.deepEqual(recentWorkItems(items, now).map((item) => item.id), ["failed", "stopped", "replied"])
+  assert.deepEqual(recentWorkItems(items, now).map((item) => deriveWorkStatus(item, now)), ["failed", "cancelled", "replied"])
+})
+
+test("ticket117: recent ordering follows finish time, not creation or snapshot order", () => {
+  const items = [
+    task({ id: "newer-finished", state: "replied", outcome: "succeeded", createdAt: 1, repliedAt: 30, finishedAt: 30 }),
+    task({ id: "older-finished", state: "replied", outcome: "succeeded", createdAt: 20, repliedAt: 10, finishedAt: 10 }),
+  ]
+  assert.deepEqual(recentWorkItems(items, 40).map((item) => item.id), ["older-finished", "newer-finished"])
+})
+
+test("ticket117: terminal rows without a finish timestamp invent no recency", () => {
+  const legacy = task({ state: "replied", outcome: "succeeded", createdAt: 100 })
+  assert.deepEqual(recentWorkItems([legacy], 200), [], "there is no honest finish time to measure from")
+  assert.equal(hasRecentWork([legacy], 200), false)
+})
+
+test("ticket117: recent cards settle flat and keep the terminal state word", () => {
+  const items = [
+    task({ id: "failed", state: "replied", outcome: "failed", error: "boom", repliedAt: 1_000, finishedAt: 1_000, title: "Old fail" }),
+    task({ id: "stopped", state: "replied", outcome: "succeeded", stoppedAt: 1_100, repliedAt: 1_100, finishedAt: 1_100, title: "Old stop" }),
+    task({ id: "working", state: "working", claimedBy: "run", leaseUntil: 9_000, attempts: 1, createdAt: 1 }),
+  ]
+  const cards = recentWorkCardsForTasks(items, () => "Nova", { now: 1_500, tick: 7, width: 40 })
+  assert.deepEqual(cards.map((card) => card.id), ["failed", "stopped"])
+  const failed = cards[0]
+  const stopped = cards[1]
+  assert.equal(failed.recent, true)
+  assert.equal(failed.status, "failed")
+  assert.equal(failed.glyph, "✕")
+  assert.equal(failed.state, "failed")
+  assert.equal(failed.detail, "failed")
+  assert.equal(stopped.glyph, "⊘")
+  assert.equal(stopped.state, "cancelled")
+  for (const card of cards) {
+    assert.equal(new Set([...card.tide]).size, 1, "the settled strip is flat")
+    assert.ok(card.tideLevels.every((level) => level === 0), "every settled sample sits at the same level")
+    assert.equal(card.tide.length, 40)
+    assert.equal(card.tideLevels.length, 20)
+    assert.ok(!JSON.stringify(card).includes("%"), "recent cards never invent a percentage")
+  }
+})
+
+test("ticket117: recent cards are display-only and never carry needs-you", () => {
+  const interrupted = task({
+    id: "interrupted",
+    state: "replied",
+    outcome: "succeeded",
+    interrupted: true,
+    repliedAt: 1_000,
+    finishedAt: 1_000,
+  })
+  const card = recentWorkCardsForTasks([interrupted], () => "Nova", { now: 1_500, tick: 2, width: 40 })[0]
+  assert.equal(card.recent, true)
+  assert.equal(card.needsYou, false)
+  assert.equal(card.glyph, "●")
+  assert.equal(card.state, "replied")
+  assert.equal(workCardForTask(task({ state: "pending" }), "Nova", { now: 1_000, tick: 0, width: 40 }).recent, false)
+})
+
+test("ticket117: active and recent card sets stay separate", () => {
+  const items = [
+    task({ id: "active", state: "pending", createdAt: 1 }),
+    task({ id: "recent", state: "replied", outcome: "succeeded", repliedAt: 10, finishedAt: 10, createdAt: 2 }),
+  ]
+  const options = { now: 20, tick: 0, width: 40 }
+  assert.deepEqual(workCardsForTasks(items, () => "Nova", options).map((card) => card.id), ["active"])
+  assert.deepEqual(recentWorkCardsForTasks(items, () => "Nova", options).map((card) => card.id), ["recent"])
+})
+
+test("ticket117: the Work header distinguishes active and recent counts", () => {
+  const now = 20_000
+  const recent = task({ id: "recent", state: "replied", outcome: "succeeded", repliedAt: 15_000, finishedAt: 15_000 })
+  const active = task({ id: "active", state: "working", claimedBy: "run", leaseUntil: 99_000, attempts: 1 })
+  assert.equal(workSummary([active, recent], now), "WORK 1 active · 1 recent")
+  assert.equal(workSummary([active], now), "WORK 1 active · 0 recent")
+  assert.equal(workSummary([recent], now), "WORK 0 active · 1 recent")
+  assert.equal(workSummary([recent], 15_000 + RECENT_WORK_TTL_MS), "WORK │ none yet")
+})
+
+test("ticket117: recent cards share the height budget after active cards", () => {
+  assert.deepEqual(workCardLayout(40, 1, 1), { mode: "cards", limit: 2, overflow: 0, rows: 11 })
+  assert.deepEqual(workCardLayout(40, 1, 3), { mode: "cards", limit: 3, overflow: 1, rows: 17 })
+  assert.deepEqual(workCardLayout(40, 0, 2), { mode: "cards", limit: 2, overflow: 0, rows: 11 })
+  assert.deepEqual(workCardLayout(24, 0, 2), { mode: "compact", limit: 1, overflow: 1, rows: 2 })
+  assert.deepEqual(workCardLayout(24, 1, 1), { mode: "compact", limit: 1, overflow: 1, rows: 2 })
+  assert.deepEqual(workCardLayout(24, 0, 0), { mode: "compact", limit: 0, overflow: 0, rows: 0 })
+})
+
+test("ticket117: compact fallback keeps transcript and composer at 80x24", () => {
+  const layout = workCardLayout(24, 0, 3)
+  assert.equal(layout.mode, "compact")
+  assert.ok(24 - WORK_BASE_ROWS - layout.rows >= 3, "80x24 keeps at least three transcript rows")
 })
 
 test("ticket116: a working card keeps its assigned variant and advances the strip", () => {

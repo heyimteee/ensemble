@@ -3,7 +3,8 @@
  * (`current`, `ripple`, `travel`, `interference`, `inbound`, `echo`) are pure
  * functions over column, total columns, and tick. Each subtask keeps one
  * variant for its active lifetime via a shuffled deck, so concurrent cards
- * vary without re-rolling on every snapshot poll.
+ * vary without re-rolling on every snapshot poll. Ticket #117 keeps recently
+ * finished cards on the same flat settled frame after they leave active work.
  *
  * The strip is one row of block glyphs, one glyph per two terminal cells.
  * `tideColumns` derives the sampled column count from the card content width

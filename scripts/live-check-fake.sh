@@ -13,6 +13,21 @@ live_require_runtime
 live_require_node
 live_setup "fake"
 
+# Ticket #117: the Work header distinguishes active and recent work, so a
+# "work is active" wait must assert a non-zero active count instead of the
+# header's mere presence — recent cards keep the header mounted for eight
+# seconds after the last active card finishes.
+live_capture_active_work() {
+  local session="$1"
+  live_capture "$session" | grep -Eq 'WORK [1-9][0-9]* active'
+}
+
+live_require_active_work() {
+  local session="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}" description="${3:-active work}"
+  live_wait_for "$seconds" "$description" live_capture_active_work "$session" \
+    || live_fail "TUI did not show: $description"
+}
+
 # v5.8 T2/T3: deterministic project skills give the composer palette real
 # host catalog rows to assign and invoke. OpenCode discovers project skills
 # from .opencode/skills/<name>/SKILL.md before the server starts.
@@ -597,9 +612,10 @@ live_log "I, :init, and /init produced visible System Agent jobs and reports"
 # ephemeral WORK block lists exactly the active rows with the assigned agent,
 # and a per-agent activity line shows what each agent is doing; no raw
 # streamed body text appears anywhere. Each terminal outcome is announced
-# once as a transcript system line, finished rows never remain in the block,
-# and the block unmounts when all work is terminal. A second message proves
-# multiple live items each finalize without duplicates or stale lines.
+# once as a transcript system line, finished rows settle as display-only
+# recent cards for eight seconds, and the block unmounts after that window.
+# A second message proves multiple live items each finalize without
+# duplicates or stale lines.
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on group surface"
 live_type "$LIVE_TUI_SESSION" "fake-queue-alpha"
@@ -607,7 +623,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message posted"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "ephemeral work block mounts while active"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "ephemeral work block mounts while active"
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ working" 15 "work card loading state with assignee"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 # Slice B: live activity lines animate across the approved ten-frame Braille
@@ -661,9 +677,9 @@ done
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-alpha" 15 "terminal announcement for first work"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-beta" 15 "terminal announcement for second work"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal outcome announced exactly once"
-live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "work block unmounts when all work is terminal"
+live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the eight-second recent window"
 live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent │ working" "no active cards remain in the block"
-live_assert_absence "$LIVE_TUI_SESSION" "│ FakeAgent │ replied" "no finished rows remain in the block"
+live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent │ replied" "no finished cards remain after the recent window"
 live_assert_absence "$LIVE_TUI_SESSION" "│ working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
 # and no needs-you marker appears without user-blocked work in this flow.
@@ -691,9 +707,9 @@ live_log "group work ran to replied with derived status ($queue_status)"
 # mention creates a durable peer turn through the same queue — queued,
 # working, then replied — with the asking mention and the answering agent
 # both visible in order. The new burst mounts a fresh WORK block with only
-# its own row; the terminal outcome is announced once and the block
-# unmounts. The recipient's reply is the relay: exactly one answer row, no
-# second leg.
+# its own row; the terminal outcome is announced once and the block settles
+# through the eight-second recent window. The recipient's reply is the relay:
+# exactly one answer row, no second leg.
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for peer turn"
@@ -708,9 +724,9 @@ live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
 # flight the live row reads `Asking $Name…` instead of the generic verb.
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 15 "assignment line for the peer turn"
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "peer assignment emitted exactly once"
-live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "work block mounts fresh for the new burst"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "work block mounts fresh for the new burst"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
-live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking row exactly once, no duplicate turn row"
+live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking verb renders once, on the Work card only"
 live_assert_count "$LIVE_TUI_SESSION" "FakeAgent │ working" 1 "fresh burst lists only its own active card"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
 # Review fix (finding 1): queued rows are DM-only by construction, so the
@@ -725,7 +741,7 @@ done
 [[ "$peer_replied" == "1" ]] || live_fail "peer turn did not run to replied with no further action (got $peer_replied replied)"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished:" 15 "peer turn announced once"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 3 "two delegation rows plus one peer row, no duplicates"
-live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "work block unmounts after the peer burst"
+live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the peer burst"
 live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent │ working" "no active cards remain after the peer burst"
 live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
 # Slice C: the relayed answer lands headed `Answer from $Name` (correlation
@@ -788,7 +804,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 15 "assignment line for the attribution probe"
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 1 "probe assignment emitted exactly once"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the probe turn is in flight"
-live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "probe asking row exactly once"
+live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "probe asking verb renders once, on the Work card only"
 # v5.6 T3: the long fixture keeps the work zone live while Tab focuses it.
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" Tab
@@ -993,7 +1009,7 @@ if ! live_wait_for_subtask_status "T4 work action probe" replied "$T4_REPLY_TIME
 fi
 t4_id=$(t4_id_for "T4 work action probe")
 live_invoke task.retry "{\"id\":\"$t4_id\"}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "retried T4 work row mounts"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "retried T4 work row mounts"
 live_key "$LIVE_TUI_SESSION" Tab
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Tab reaches the work list"
 live_require_text "$LIVE_TUI_SESSION" "enter result" 10 "work list names its open action"
@@ -1014,13 +1030,13 @@ live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Reassign${NBSP}subtask" 10 "reassign picker cancels"
 # Clean this row up out of band; its terminal outcome was already announced.
 live_invoke task.cancel "{\"id\":\"$t4_id\"}" >/dev/null
-live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "T4 result probe cleaned up"
+live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "T4 result probe cleaned up"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to the transcript"
 
 # Retry, restart, and cancel on a fresh row so the cancelled outcome announces.
 t4_delegate "T4 retry probe"
-live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "retry-probe work row mounts"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "retry-probe work row mounts"
 live_key "$LIVE_TUI_SESSION" Tab
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Tab reaches the work list for retry"
 t4_attempts_before=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 retry probe" })[0]?.attempts')
@@ -1037,10 +1053,10 @@ live_key "$LIVE_TUI_SESSION" "R"
 live_require_text "$LIVE_TUI_SESSION" "Restarting work: T4 retry probe" 10 "R restarts the selected work"
 # Let the restart RPC clear the busy gate; x is dropped while an action runs.
 sleep 1
-live_require_text "$LIVE_TUI_SESSION" "WORK │" 5 "restarted work row stays live"
+live_require_active_work "$LIVE_TUI_SESSION" 5 "restarted work row stays live"
 live_key "$LIVE_TUI_SESSION" "x"
 live_require_text "$LIVE_TUI_SESSION" "T4 retry probe cancelled" 15 "x cancels the selected work"
-live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "work block unmounts after the cancel"
+live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the cancel"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to the transcript after cancel"
 
@@ -1587,7 +1603,7 @@ live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after F2 rou
 live_assert_absence "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "stale heading after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "stale code after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "fake-queue-beta" "stale work row after leaving Ensemble"
-live_assert_absence "$LIVE_TUI_SESSION" "WORK │" "stale work section after leaving Ensemble"
+live_assert_absence "$LIVE_TUI_SESSION" "active · " "stale work section after leaving Ensemble"
 
 # v5.6 T11: `:` and `/` still open Command mode after the native F2
 # round-trip; the visible page owns the key, not a stale stacked page.
@@ -1602,7 +1618,7 @@ live_key "$LIVE_TUI_SESSION" Escape
 
 # v5.6 T4: `o` opens the selected work's native session.
 t4_delegate "T4 native probe"
-live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "native-probe work row mounts"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "native-probe work row mounts"
 live_key "$LIVE_TUI_SESSION" "h"
 live_key "$LIVE_TUI_SESSION" Tab
 live_key "$LIVE_TUI_SESSION" Tab
@@ -1645,7 +1661,7 @@ done
 live_log "reduced-motion run stayed on frame-0 glyphs while live"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 30 "reduced-motion work announced once"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 1 "reduced-motion completion exactly once, no duplicate inline line"
-live_require_absence "$LIVE_TUI_SESSION" "WORK │" 15 "work block unmounts under reduced motion"
+live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts under reduced motion"
 # Let the 3 s "Message sent" transient expire before sampling quiescence.
 sleep 3.2
 reduced_idle_first=$(live_capture "$LIVE_TUI_SESSION")
