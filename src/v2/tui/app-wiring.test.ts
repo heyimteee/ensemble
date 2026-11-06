@@ -151,3 +151,26 @@ test("ticket103: General triage, owner choice, and direct rejection stay on the 
   assert.ok(app.includes("ownerSelections"), "the chosen owner is sent to the server authoritative re-plan")
   assert.ok(app.includes('row.executor === "init" ? "init"'), "the built-in init row runs the System Agent init job")
 })
+
+test("ticket123: composer validation is non-destructive and clears on input or success", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+
+  const command = app.slice(app.indexOf("const runSlashCommand"), app.indexOf("const handleComposerInput"))
+  const unknownGuard = command.indexOf("if (!known)")
+  assert.ok(unknownGuard >= 0, "the command dispatcher validates the command name first")
+  assert.ok(unknownGuard < command.indexOf("resetComposer()"), "an invalid command returns before the consuming reset, preserving the draft")
+  assert.ok(command.includes("markComposerInvalid(message)"), "an invalid command starts the one-shot bad-border state")
+
+  const input = app.slice(app.indexOf("const handleComposerInput"), app.indexOf("const moveCompletion"))
+  assert.ok(input.includes("clearComposerValidation()"), "typing clears the validation state")
+
+  const submit = app.slice(app.indexOf("const submitComposer"), app.indexOf("const handleComposerKey"))
+  assert.ok(submit.includes("markComposerInvalid(initIssue)"), "rejected init text keeps the draft and shows the bad border")
+  assert.ok(submit.includes("send(text, undefined, markComposerInvalid)"), "send validation failures show the bad border")
+  assert.ok(submit.includes('clearComposerValidation("send-success")'), "a successful send clears the validation state")
+
+  assert.ok(app.includes("borderColor={composerBorderColor()}"), "the composer border consumes the validation role")
+  assert.ok(app.includes('if (role === "bad") return colors.bad'), "the bad role uses the theme error color")
+  assert.ok(app.includes("height={composerHeight()}"), "the composer height path is unchanged")
+  assert.ok(app.includes('{ name: "return", action: "submit" }'), "Enter still submits through the textarea binding")
+})
