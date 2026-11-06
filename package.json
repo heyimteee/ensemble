@@ -25,6 +25,7 @@
     "test:live:fake:all": "bash scripts/live-matrix.sh fake",
     "test:live:all": "bash scripts/live-matrix.sh all",
     "test:live:latency": "bash scripts/live-latency-probe.sh",
+    "test:live:sizes": "bash scripts/live-size-matrix.sh",
     "issue:hygiene": "node scripts/issue-hygiene.mjs"
   },
   "engines": {

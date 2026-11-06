@@ -29,6 +29,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 ## Verification
 
 - [macOS/Herdr manual checklist](verification/macos-herdr-checklist.md): repeatable, manual, and unexecuted until a run is recorded
+- [v6 verification](verification/2026-11-07-v6.md): nine-scene motion parity, Work-card size matrix, load probe, reduced motion, and `NO_COLOR`
 - [v5.9 verification](verification/2026-11-06-v59.md): live-matrix guardrails, CI, reviewer standards, unused checks, and tracker hygiene
 - [v5.8 verification](verification/2026-11-05-v58.md): System Agent init and deliberate skill invocation
 - [v5.7 verification](verification/2026-11-05-v57.md): persistent modes, native key ownership, and interaction polish

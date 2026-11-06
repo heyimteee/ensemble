@@ -3,7 +3,8 @@
 Status: **Manual and unexecuted.** No macOS/Herdr host has run this checklist.
 It is a repeatable procedure, not evidence. Until a run is recorded below or in
 a dated verification record, treat macOS/Herdr behavior as unverified and do
-not cite this document as a pass.
+not cite this document as a pass. Sections 5–8 add the v6 motion checks and are
+also **NOT RUN**.
 
 This checklist covers the areas that Linux/tmux cannot prove:
 
@@ -11,8 +12,18 @@ This checklist covers the areas that Linux/tmux cannot prove:
 - System Agent init streaming and report rendering
 - composer palette behavior
 - init lifecycle, writes, and restoration
+- v6 Braille font coverage and Sub-Cell Tide rendering
+- v6 Work cards, recent cards, and compact fallback
+- v6 app-owned toast placement and focus behavior
+- v6 reduced-motion and `NO_COLOR` appearance
 
-Related records: [v5.8 verification](2026-11-05-v58.md),
+Linux/tmux evidence is not macOS/Herdr evidence. The
+[2026-11-07 v6 record](2026-11-07-v6.md) records Linux/tmux evidence only.
+
+Related records: [v6 verification](2026-11-07-v6.md),
+[v5.8 verification](2026-11-05-v58.md),
+[spec #113](https://github.com/heyimteee/ensemble/issues/113),
+[tickets #114–#127](https://github.com/heyimteee/ensemble/issues/127),
 [issue #105](https://github.com/heyimteee/ensemble/issues/105),
 [ticket #112](https://github.com/heyimteee/ensemble/issues/112), and the
 [known limitations](../../README.md#keyboard).
@@ -98,6 +109,14 @@ the native prompt immediately.
   Expected: `LEADER` is inline after a faint `│` on the agent's name row, with
   no badge box or opaque cutout. The statusline and chrome use `│` (ASCII `|`
   fallback), and the rail stays transparent.
+- [ ] **1.10 v6 Work focus and toast key ownership.** With active work, press
+      `Tab` until the statusline reads `NORMAL  │ Work list`, then `Esc`. Repeat
+      with a recent completed card visible.
+  Expected: the Work list owns the cursor only while focused; `d`, `t`, `r`,
+  `R`, `x`, and `o` act only on active cards; a recent card never takes the
+  cursor and cannot be acted on. A visible app toast does not change the
+  statusline mode, steal focus, or swallow the next key. `F2` still hands the
+  keyboard to a native session and back.
 
 ## 2. System Agent streaming
 
@@ -201,10 +220,117 @@ The goal is to prove the durable effects, not just the visible stream.
   Expected: cancellation restores the prior `AGENTS.md`; restart marks the job
   interrupted with a rerun instruction rather than leaving a stuck working row.
 
+## 5. v6 Braille and Sub-Cell Tide
+
+The goal is to prove that the Braille working glyph and the six tide motions
+render as motion on the recorded macOS/Herdr font and terminal, not as missing
+glyphs, tofu, or a static row.
+
+- [ ] **5.1 Braille coverage.** While work runs, inspect the rail busy count,
+      the Work card header, the activity line, and the approvals resolving
+      suffix.
+  Expected: every working marker uses the ten-frame Braille set
+  `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`; no square tofu or blank cell appears in any of
+  those locations.
+- [ ] **5.2 Braille animation.** Watch one working card for at least two
+      seconds.
+  Expected: the glyph advances through the ten frames without reflowing the
+  row. The glyph cell keeps a constant width.
+- [ ] **5.3 Tide coverage and width.** With one working card, inspect the
+      Sub-Cell Tide strip under the card.
+  Expected: a one-row strip spans the full card content width, uses one glyph
+  per two cells, and ramps through the eight block levels. It does not wrap,
+  overlap the detail row, or leave a gap at the right edge.
+- [ ] **5.4 Six variants.** Run three or more working cards at once and watch
+      their strips.
+  Expected: distinct tide patterns appear (`current`, `ripple`, `travel`,
+  `interference`, `inbound`, `echo`) and the six are used before repeats. A
+  card keeps its pattern across snapshot refreshes rather than re-rolling.
+- [ ] **5.5 Needs-you freeze.** Block one card on an approval or interruption.
+  Expected: its tide freezes, the card uses the amber attention treatment, and
+  the `◆` needs-you marker and state word remain readable.
+- [ ] **5.6 Terminal settle.** Let a working card finish.
+  Expected: its strip settles flat to one still row, never keeps animating,
+  and the terminal state word (`replied`, `failed`, or `cancelled`) stays
+  visible.
+- [ ] **5.7 Theme and contrast.** Repeat in the light and dark host themes.
+  Expected: tide shades come from the theme text/muted/faint roles, remain
+  distinguishable without relying on subtle color alone, and reduce to a
+  readable fallback on a limited-color terminal.
+
+## 6. v6 Work cards and recent cards
+
+The goal is to prove the Work card layout and focus behavior on the recorded
+host, including short terminals.
+
+- [ ] **6.1 Card anatomy.** With active work, inspect one card.
+  Expected: agent, Braille glyph, state word, title, honest detail, and one
+  full-width tide row render in that order. No fabricated percentage appears.
+- [ ] **6.2 Active ordering.** Run two and then three active cards.
+  Expected: working cards appear before pending/queued cards and oldest-first
+  among equals. The header reads `WORK <n> active · <m> recent` and reflects
+  the visible counts.
+- [ ] **6.3 Card budget.** Resize through 160×50, 120×40, 100×30, and 80×24
+      while three cards are live.
+  Expected: tall terminals show three cards, medium terminals show fewer with
+  `+N more`, 80×24 uses one-line compact rows, and the transcript and composer
+  remain usable. Record the exact card/compact count seen at each size.
+- [ ] **6.4 Recent window.** Let a card finish.
+  Expected: the card stays as a display-only recent card for about eight
+  seconds, then unmounts. The transcript completion line remains afterward.
+- [ ] **6.5 Recent is display-only.** While only a recent card is visible,
+      try `d`, `t`, `r`, `R`, `x`, and `o`.
+  Expected: the recent card never takes the cursor and no action fires. The
+  header still distinguishes active from recent work.
+- [ ] **6.6 Work actions.** With an active card selected, exercise `d`, `t`,
+  `r`, `R`, `x`, and `o` one at a time.
+  Expected: delegate, reassign, retry, restart, cancel, and native-session
+  open target that active card; interim labels are singular and terminal
+  outcomes settle once.
+
+## 7. v6 app-owned toast
+
+The goal is to prove the toast is app-owned, readable, and non-focusable on
+the recorded host.
+
+- [ ] **7.1 Copy toast.** Yank text in the composer.
+  Expected: the `Clipboard` toast appears in the bounded top-right position,
+  stays within the pane, and auto-dismisses. The statusline mode and focus do
+  not change.
+- [ ] **7.2 Queue and auto-dismiss.** Trigger several feedback events in a row
+  (copy, settings save, init completion, and a validation warning).
+  Expected: one toast is visible at a time, up to three queue in arrival
+  order, the oldest queued entry drops on overflow, and each visible toast
+  gets its full display window.
+- [ ] **7.3 Modal fallback.** Trigger feedback while a picker, confirm, wizard,
+  help, or approvals panel is open.
+  Expected: feedback appears in the statusline instead of painting over the
+  dialog; the host toast is not used for app-level feedback.
+- [ ] **7.4 Key isolation.** While a toast is visible, type in the composer and
+  press `Esc`, `Tab`, and the next Work action key.
+  Expected: keys keep their normal owner; the toast never takes focus or
+  intercepts a key.
+
+## 8. v6 reduced motion and `NO_COLOR`
+
+- [ ] **8.1 Reduced motion.** Restart with `ENSEMBLE_REDUCED_MOTION=1` and run
+      one working card.
+  Expected: all decorative motion mounts at its final state (frame-0 Braille
+  `⠋`, still tide), while state words, glyphs, completion lines, and the
+  composer remain readable. No timer-driven pane churn appears while idle.
+- [ ] **8.2 `NO_COLOR`.** Restart with `NO_COLOR=1` and run one working card.
+  Expected: motion freezes and color decoration is suppressed, but state text,
+  separators, card titles, and the composer remain readable.
+- [ ] **8.3 Contrast.** Inspect the theme under reduced motion and `NO_COLOR`.
+  Expected: no state relies on color alone; needs-you, failed, and resolved
+  states keep their text or glyph distinction.
+
 ## Recording the run
 
 Copy this table into a dated verification record or append it below as a run
 log. Add evidence paths for pane captures, `init.json`, and `AGENTS.md` diffs.
+The v6 record must say exactly which host and terminal versions ran it; Linux
+(or tmux) evidence does not satisfy these rows.
 
 | Section | Result | Evidence / notes |
 |---|---|---|
@@ -212,6 +338,10 @@ log. Add evidence paths for pane captures, `init.json`, and `AGENTS.md` diffs.
 | 2. System Agent streaming | NOT RUN | |
 | 3. Palette behavior | NOT RUN | |
 | 4. Init lifecycle and writes | NOT RUN | |
+| 5. v6 Braille and Sub-Cell Tide | NOT RUN | |
+| 6. v6 Work cards and recent cards | NOT RUN | |
+| 7. v6 app-owned toast | NOT RUN | |
+| 8. v6 reduced motion and `NO_COLOR` | NOT RUN | |
 
 Only change `NOT RUN` to `PASS` after observing the expected outcome on the
 recorded host. Record a `FAIL` as a ticket or a follow-up; do not quietly relax
