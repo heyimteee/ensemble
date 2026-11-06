@@ -2,6 +2,7 @@
  * Ticket #115: the Work-card liveness strip. The six-motion family lands in
  * #116; this module carries the fixed `current` tide so cards can animate
  * deterministically now without committing to the later assignment model.
+ * Ticket #117 adds the flat settled frame for recently finished cards.
  *
  * The strip is one row of block glyphs, one glyph per two terminal cells.
  * `tideColumns` derives the sampled column count from the card content width
@@ -53,6 +54,22 @@ export function currentTideLevels(columns: number, tick: number, env: NodeJS.Pro
 export function currentTideStrip(contentWidth: number, tick: number, env: NodeJS.ProcessEnv = process.env): string {
   const columns = tideColumns(contentWidth)
   return currentTideLevels(columns, tick, env)
+    .map((level) => TIDE_GLYPHS[level].repeat(TIDE_CELLS_PER_GLYPH))
+    .join("")
+}
+
+/**
+ * Ticket #117: the flat settled frame for terminal/recent cards. Every sample
+ * sits on the lowest level, so a finished card stops moving without changing
+ * its width or introducing a second motion language.
+ */
+export function settledTideLevels(columns: number): number[] {
+  return new Array(Math.max(1, Math.floor(columns))).fill(0)
+}
+
+/** Rendered flat settled strip at the same full card width as the live tide. */
+export function settledTideStrip(contentWidth: number): string {
+  return settledTideLevels(tideColumns(contentWidth))
     .map((level) => TIDE_GLYPHS[level].repeat(TIDE_CELLS_PER_GLYPH))
     .join("")
 }

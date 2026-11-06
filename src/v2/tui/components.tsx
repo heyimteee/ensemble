@@ -340,28 +340,32 @@ export function Rail(props: {
 
 
 export function WorkCardView(props: { colors: Palette; card: WorkCard; selected: boolean; index: number }) {
+  const recent = () => props.card.recent
   const stateTone = () =>
-    props.card.needsYou || props.card.status === "working" || props.card.status === "retrying"
-      ? props.colors.warn
-      : props.colors.muted
+    recent()
+      ? props.colors.faint
+      : props.card.needsYou || props.card.status === "working" || props.card.status === "retrying"
+        ? props.colors.warn
+        : props.colors.muted
   const header = (): StyledLinePart[] => [
     { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.good : props.colors.faint },
     { text: `${props.card.glyph} `, fg: stateTone() },
-    { text: props.card.agent, fg: props.colors.text },
+    { text: props.card.agent, fg: recent() ? props.colors.muted : props.colors.text },
     { text: ` ${chromeSeparator()} `, fg: props.colors.faint },
     { text: props.card.state, fg: stateTone() },
   ]
   // One styled line with one chunk per tide sample. The sample is two cells
   // wide, so the strip spans the card content width; no nested colored spans.
+  // Recent cards arrive with a flat settled strip, so this row stops moving.
   const tide = (): StyledLinePart[] => props.card.tideLevels.map((level) => ({
     text: TIDE_GLYPHS[level].repeat(2),
-    fg: props.card.needsYou ? props.colors.warn : props.colors[tideTone(level)],
+    fg: recent() ? props.colors.faint : props.card.needsYou ? props.colors.warn : props.colors[tideTone(level)],
   }))
   return (
     <box flexDirection="column" width="100%" marginTop={props.index === 0 ? 0 : 1} flexShrink={0} backgroundColor={props.colors.panel}>
       <StyledLineText parts={header} fg={props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
-      <text fg={props.selected ? props.colors.good : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate attributes={TextAttributes.BOLD}>{`  ${props.card.title}`}</text>
-      <text fg={props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{`  ${props.card.detail}`}</text>
+      <text fg={props.selected ? props.colors.good : recent() ? props.colors.muted : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate attributes={TextAttributes.BOLD}>{`  ${props.card.title}`}</text>
+      <text fg={recent() ? props.colors.faint : props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{`  ${props.card.detail}`}</text>
       <StyledLineText parts={tide} fg={props.colors.faint} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
     </box>
   )

@@ -6,6 +6,8 @@ import {
   TIDE_MIN_COLUMNS,
   currentTideLevels,
   currentTideStrip,
+  settledTideLevels,
+  settledTideStrip,
   tideColumns,
   tideTone,
 } from "./tide.ts"
@@ -51,4 +53,11 @@ test("ticket115: tide levels map onto faint, muted, and text theme roles", () =>
   assert.equal(tideTone(5), "muted")
   assert.equal(tideTone(6), "text")
   assert.equal(tideTone(7), "text")
+})
+
+test("ticket117: the settled tide is flat, width-stable, and needs no tick", () => {
+  assert.equal(settledTideStrip(40), TIDE_GLYPHS[0].repeat(40))
+  assert.equal(settledTideStrip(12), TIDE_GLYPHS[0].repeat(16), "the strip honours the minimum column clamp")
+  assert.deepEqual(settledTideLevels(20), new Array(20).fill(0))
+  assert.deepEqual(settledTideLevels(20), settledTideLevels(20), "the settled frame is deterministic")
 })
