@@ -4,6 +4,7 @@ import {
   initCancelReport,
   initComposerIssue,
   initFailureReport,
+  initInterruptedReport,
   initSuccessReport,
 } from "./system-agent.ts"
 
@@ -57,4 +58,13 @@ test("failure and interruption reports tell the user whether AGENTS.md was rolle
   assert.match(cancelled, /Workspace archived\./)
   assert.match(cancelled, /AGENTS\.md/)
   assert.match(cancelled, /rerun/i)
+})
+
+test("restart recovery settles to an explicit report with the rollback outcome", () => {
+  const restored = initInterruptedReport(true)
+  assert.match(restored, /interrupted by a service restart/i)
+  assert.match(restored, /restored/)
+  assert.match(restored, /Rerun \/init/)
+  const removed = initInterruptedReport(false)
+  assert.match(removed, /removed/)
 })

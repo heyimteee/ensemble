@@ -555,7 +555,14 @@ wait_for_init_successes() {
 }
 live_key "$LIVE_TUI_SESSION" "I"
 live_require_text "$LIVE_TUI_SESSION" "System Agent" 20 "I starts a visible System Agent init"
+# Ticket #118: the live row names the current stage and shows four discrete
+# stage marks. Running is explicitly indeterminate because native /init is
+# opaque; there is no fabricated percentage.
+live_require_text "$LIVE_TUI_SESSION" "System Agent │ running · indeterminate" 20 "init row labels the opaque native run"
+live_require_text "$LIVE_TUI_SESSION" "● ● ○ ○" 20 "init row shows the staged indicator"
 wait_for_init_successes 1
+init_first_phases=$(live_snapshot_value 'Object.values(output.state.initJobs)[0].phases.join(">")')
+[[ "$init_first_phases" == '"starting>running>writing>reporting"' ]] || live_fail "I init did not carry the four phases in order (got $init_first_phases)"
 live_key "$LIVE_TUI_SESSION" ":"
 live_type "$LIVE_TUI_SESSION" "init"
 live_key "$LIVE_TUI_SESSION" Enter
@@ -565,6 +572,9 @@ live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for /init"
 live_type "$LIVE_TUI_SESSION" "/init"
 live_key "$LIVE_TUI_SESSION" Enter
 wait_for_init_successes 3
+init_phase_order=$(live_snapshot_value 'Object.values(output.state.initJobs).map(function (job) { return (job.phases || []).join(">") }).join(",")')
+expected_init_phases="starting>running>writing>reporting"
+[[ "$init_phase_order" == "$expected_init_phases,$expected_init_phases,$expected_init_phases" ]] || live_fail "all init triggers did not carry the four phases in order (got $init_phase_order)"
 init_audit=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; return (output.state.messages[ws.id] || []).filter(function (m) { return m.author === "user" && m.text === "/init" }).length })()')
 [[ "$init_audit" == "3" ]] || live_fail "expected three visible /init audit lines, found $init_audit"
 init_reports=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; return (output.state.messages[ws.id] || []).filter(function (m) { return m.displayAuthor === "System Agent" && !m.streaming && /Ensemble init complete/.test(m.text) }).length })()')

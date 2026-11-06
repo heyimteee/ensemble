@@ -45,6 +45,8 @@ import { chromeJoin, chromeSeparator, chromeSeparatorParts } from "./separators.
 import { approvalResolvedTone, type ApprovalResolvedSettle } from "./approvals.ts"
 import { TIDE_GLYPHS, tideTone } from "./tide.ts"
 import type { WorkCard } from "./workrows.ts"
+import type { InitRow } from "./initrow.ts"
+import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
@@ -364,6 +366,27 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
       <text fg={props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{`  ${props.card.detail}`}</text>
       <StyledLineText parts={tide} fg={props.colors.faint} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
     </box>
+  )
+}
+
+/**
+ * Ticket #118: one live System Agent init row. The phase word, four discrete
+ * stage marks, and the opaque-native detail are all explicit; there is no
+ * progress percentage and no fake within-stage precision.
+ */
+export function InitRowView(props: { colors: Palette; row: InitRow }) {
+  const parts = (): StyledLinePart[] => [
+    { text: `${props.row.glyph} `, fg: props.colors.info ?? props.colors.accent },
+    { text: SYSTEM_AGENT_NAME, fg: props.colors.info ?? props.colors.accent },
+    { text: ` ${chromeSeparator()} `, fg: props.colors.faint },
+    { text: props.row.label, fg: props.row.phase === "running" ? props.colors.accent : props.colors.muted },
+    { text: ` ${chromeSeparator()} `, fg: props.colors.faint },
+    { text: props.row.stage, fg: props.colors.muted },
+    { text: ` ${chromeSeparator()} `, fg: props.colors.faint },
+    { text: props.row.detail, fg: props.colors.muted },
+  ]
+  return (
+    <StyledLineText parts={parts} fg={props.colors.text} bg={props.colors.bg} width="100%" wrapMode="none" truncate flexShrink={0} />
   )
 }
 
