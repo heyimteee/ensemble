@@ -403,6 +403,24 @@ test("closing an overlay in Normal keeps Normal focus semantics", () => {
   assert.ok(!closed.intents.some((intent) => intent.type === "focus-editor"), "Normal close does not steal focus")
 })
 
+test("ticket120: repeated overlay open/close always restores the editor and leaves no overlay focus behind", () => {
+  let state = reduce(initialInteractionState(), { type: "insert.enter" }).state
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const opened = reduce(state, { type: "overlay.set", overlay: "dialog" })
+    assert.equal(opened.state.overlay, "dialog", `open ${cycle + 1} owns the overlay`)
+    assert.equal(opened.state.focus, "composer", `open ${cycle + 1} preserves the underlying focus`)
+    const closed = reduce(opened.state, { type: "overlay.set", overlay: "none" })
+    assert.equal(closed.state.overlay, "none", `close ${cycle + 1} releases the overlay`)
+    assert.equal(closed.state.focus, "composer", `close ${cycle + 1} restores the editor focus`)
+    assert.deepEqual(closed.intents.at(-1), { type: "focus-editor", target: "composer" }, `close ${cycle + 1} re-focuses the editor`)
+    state = closed.state
+  }
+  const editorNormal = reduce(state, { type: "escape" }).state
+  assert.equal(editorNormal.focus, "composer", "the editor stays focused in Normal")
+  const column = reduce(editorNormal, { type: "escape" }).state
+  assert.equal(column.focus, "chat", "the editor returns to the column afterwards")
+})
+
 test("field focus and wizard step changes keep the mode", () => {
   const insert = initialInteractionState({ mode: "insert" })
   const entered = reduce(insert, { type: "field.enter", target: "wizard" })

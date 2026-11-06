@@ -57,7 +57,7 @@ Workspace {
 - Valid config files discovered in a directory register a workspace automatically; invalid config is rejected and the last good state is kept.
 - `.ensemble/` is created when a workspace is created, is added to `.gitignore`, and contains only config, handoffs, and init metadata. Conversation history stays in OpenCode storage.
 
-The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent workspace directories come first, `~/` expands, and manual paths are supported. The workspace rail groups workspaces by canonical project directory, supports `/` search, and shows unread (`●`), busy (`◐`), and paused (`⏸`) markers. The selected workspace and subtask are persisted and restored when the page reopens.
+The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent workspace directories come first, `~/` expands, and manual paths are supported. The workspace rail groups workspaces by canonical project directory, supports `/` search, and shows unread (`●`), busy (Braille `⠋`), and paused (`⏸`) markers. The selected workspace and subtask are persisted and restored when the page reopens.
 
 A workspace can be paused with `p`; paused workspaces reject new work until resumed. Automatic leader synthesis is chosen when the workspace is created.
 

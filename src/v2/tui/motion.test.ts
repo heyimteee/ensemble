@@ -25,11 +25,20 @@ import {
 const idle = { busy: false, live: false, composerActive: false }
 
 test("named frame sets match the brief's normative glyphs", () => {
-  assert.deepEqual([...WORKING_FRAMES], ["◐", "◑", "◒", "◓"])
-  assert.deepEqual([...WAITING_FRAMES], ["○", "◌"])
+  assert.deepEqual([...WORKING_FRAMES], ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+  assert.deepEqual([...WAITING_FRAMES], ["▫", "▪"])
   assert.deepEqual([...TOOL_FRAMES], ["▸", "▹"])
   assert.deepEqual([...THINKING_FRAMES], ["·  ", "˙  ", " ⋮ ", "·  "])
-  assert.equal(queuedFrame(), "○")
+  assert.equal(queuedFrame(), "▫")
+})
+
+test("working frames are ten distinct one-cell Braille glyphs", () => {
+  assert.equal(WORKING_FRAMES.length, 10)
+  assert.equal(new Set(WORKING_FRAMES).size, 10)
+  for (const frame of WORKING_FRAMES) {
+    assert.equal([...frame].length, 1, `${frame} is one cell wide`)
+    assert.match(frame, /^[\u2800-\u28ff]$/)
+  }
 })
 
 test("each frame set is constant-width (no reflow)", () => {
@@ -40,17 +49,23 @@ test("each frame set is constant-width (no reflow)", () => {
 })
 
 test("frames cycle deterministically with modular wrap", () => {
-  assert.equal(workingFrame(0), "◐")
-  assert.equal(workingFrame(1), "◑")
-  assert.equal(workingFrame(2), "◒")
-  assert.equal(workingFrame(3), "◓")
-  assert.equal(workingFrame(4), "◐")
-  assert.equal(workingFrame(7), "◓")
-  assert.equal(workingFrame(-1), "◓")
-  assert.equal(waitingFrame(0), "○")
-  assert.equal(waitingFrame(1), "◌")
-  assert.equal(waitingFrame(2), "○")
-  assert.equal(waitingFrame(-1), "◌")
+  assert.equal(workingFrame(0), "⠋")
+  assert.equal(workingFrame(1), "⠙")
+  assert.equal(workingFrame(2), "⠹")
+  assert.equal(workingFrame(3), "⠸")
+  assert.equal(workingFrame(4), "⠼")
+  assert.equal(workingFrame(5), "⠴")
+  assert.equal(workingFrame(6), "⠦")
+  assert.equal(workingFrame(7), "⠧")
+  assert.equal(workingFrame(8), "⠇")
+  assert.equal(workingFrame(9), "⠏")
+  assert.equal(workingFrame(10), "⠋")
+  assert.equal(workingFrame(17), "⠧")
+  assert.equal(workingFrame(-1), "⠏")
+  assert.equal(waitingFrame(0), "▫")
+  assert.equal(waitingFrame(1), "▪")
+  assert.equal(waitingFrame(2), "▫")
+  assert.equal(waitingFrame(-1), "▪")
   assert.equal(toolFrame(0), "▸")
   assert.equal(toolFrame(1), "▹")
   assert.equal(toolFrame(2), "▸")
@@ -68,7 +83,7 @@ test("tick 120 is a still frame for every animated set", () => {
 })
 
 test("queued frame is static across ticks", () => {
-  for (let tick = 0; tick < 8; tick++) assert.equal(queuedFrame(), "○")
+  for (let tick = 0; tick < 8; tick++) assert.equal(queuedFrame(), "▫")
 })
 
 test("motion is active only while busy, live, or composing", () => {
@@ -92,8 +107,8 @@ test("effective tick pins to frame 0 under reduced motion", () => {
   assert.equal(effectiveTick(5, {}), 5)
   assert.equal(effectiveTick(5, { ENSEMBLE_REDUCED_MOTION: "1" }), 0)
   assert.equal(effectiveTick(5, { NO_COLOR: "1" }), 0)
-  assert.equal(workingFrame(effectiveTick(3, { ENSEMBLE_REDUCED_MOTION: "1" })), "◐")
-  assert.equal(waitingFrame(effectiveTick(1, { NO_COLOR: "1" })), "○")
+  assert.equal(workingFrame(effectiveTick(3, { ENSEMBLE_REDUCED_MOTION: "1" })), "⠋")
+  assert.equal(waitingFrame(effectiveTick(1, { NO_COLOR: "1" })), "▫")
   assert.equal(toolFrame(effectiveTick(1, { ENSEMBLE_REDUCED_MOTION: "1" })), "▸")
 })
 
