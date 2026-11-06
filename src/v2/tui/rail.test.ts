@@ -88,6 +88,16 @@ test("reduced motion suppresses rail pulses and mounts arrivals settled", () => 
   assert.equal(railPulseActive(0, noColor), false)
   assert.equal(railArrivalActive(0, noColor), false)
   assert.equal(railPulseActive(0, { ENSEMBLE_REDUCED_MOTION: "0" }), true)
+
+  const starts: RailPulseStart[] = [
+    { pulse: { kind: "unread", id: "w1" }, startedAt: 1_000 },
+    { pulse: { kind: "approval", id: RAIL_APPROVAL_ID }, startedAt: 1_000 },
+    { pulse: { kind: "arrival", id: railRowKey("agent", "a1") }, startedAt: 1_000 },
+  ]
+  const emphasis = railEmphasisAt(starts, 1_100, reduced)
+  assert.deepEqual([...emphasis.unread], [])
+  assert.equal(emphasis.approval, false)
+  assert.deepEqual([...emphasis.arrivals], [], "arrivals mount at their final tone, never in a dim state")
 })
 
 test("rail emphasis maps active starts to unread, approval, and arrival sets", () => {
