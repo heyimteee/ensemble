@@ -22,9 +22,9 @@ import { chromeJoin, chromeSeparator } from "./separators.ts"
 export const TRANSCRIPT_WINDOW = 40
 
 const GLYPHS: Record<DerivedWorkStatus, string> = {
-  pending: "○",
-  working: "◐",
-  retrying: "◐",
+  pending: "▫",
+  working: "⠋",
+  retrying: "⠋",
   replied: "●",
   failed: "✕",
   cancelled: "⊘",
@@ -78,7 +78,7 @@ export function pendingWorkLabel(action: PendingWorkAction): string {
  * Distinct attention marker for work blocked on the user (brief §2.2/`needs
  * you` amber override): interrupted runs and approval-gated work (ask_person
  * and friends) render `◆` + `│ needs you │ v to resolve`, visually distinct
- * from plain pending `○`. Derived from existing interruption/approval state
+ * from plain pending `▫`. Derived from existing interruption/approval state
  * only — no new coordination semantics. Pure.
  */
 export const NEEDS_YOU_MARK = "◆"
@@ -97,11 +97,11 @@ export function isNeedsYouTask(task: Subtask, pendingApprovalIDs: ReadonlySet<st
 
 /**
  * Animated liveness suffix for a WORK row at a tick (brief §4). Working and
- * retrying rows cycle the working spinner; pending rows alternate the calmer
- * waiting frames; terminal rows are static (they never render in the block —
- * see `orderedWorkItems` — but the helper stays total). Under reduced motion
- * the tick collapses to frame 0, so pending still reads `○` and working
- * still reads `◐`. Pure.
+ * retrying rows cycle the ten-frame Braille set; pending rows alternate the
+ * calmer `▫`/`▪` waiting frames; terminal rows are static (they never render
+ * in the block — see `orderedWorkItems` — but the helper stays total). Under
+ * reduced motion the tick collapses to frame 0, so pending still reads `▫`
+ * and working still reads `⠋`. Pure.
  */
 export function workRowFrame(status: DerivedWorkStatus, tick: number, env: NodeJS.ProcessEnv = process.env): string {
   const frame = effectiveTick(tick, env)
@@ -120,7 +120,7 @@ export function workRowFrame(status: DerivedWorkStatus, tick: number, env: NodeJ
  * Frame for an activity verb kind at a tick (brief §4). Tool-kind verbs
  * (reading/searching/running/writing) nudge the tool chevron; `waiting`
  * alternates the calm waiting frames; `checking`/`wrapping` and the peer-turn
- * `asking` variant use the working spinner; `thinking` (streaming text
+ * `asking` variant use the Braille working set; `thinking` (streaming text
  * arriving, OpenBot's gap-filler) uses the textual shimmer cells.
  * Queued-behind-live lines never call this — they render the static
  * `queuedFrame()`. Under reduced motion every kind pins to its frame 0.
