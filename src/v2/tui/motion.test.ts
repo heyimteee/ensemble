@@ -8,12 +8,14 @@ import {
   TOOL_FRAMES,
   WAITING_FRAMES,
   WORKING_FRAMES,
+  WORK_CLOCK_INTERVAL_MS,
   createStaggerState,
   effectiveTick,
   isReducedMotion,
   motionActive,
   queuedFrame,
   shouldRunMotion,
+  shouldRunWorkClock,
   staggerDelayMs,
   thinkingFrame,
   toolFrame,
@@ -121,6 +123,17 @@ test("motion clock runs only while active and never under reduced motion", () =>
   assert.equal(shouldRunMotion({ busy: true, live: false, composerActive: false }, { NO_COLOR: "1" }), false)
   // Idle-quiescence: no active/live/composing means no interval, even animated.
   assert.equal(shouldRunMotion(idle, { ENSEMBLE_REDUCED_MOTION: "1" }), false)
+})
+
+test("ticket116: the 10 fps work clock runs only while a working card exists", () => {
+  assert.equal(WORK_CLOCK_INTERVAL_MS, 100)
+  const working = { workingCards: 1, routeActive: true, modalOpen: false }
+  assert.equal(shouldRunWorkClock(working, {}), true)
+  assert.equal(shouldRunWorkClock({ ...working, workingCards: 0 }, {}), false)
+  assert.equal(shouldRunWorkClock({ ...working, routeActive: false }, {}), false)
+  assert.equal(shouldRunWorkClock({ ...working, modalOpen: true }, {}), false)
+  assert.equal(shouldRunWorkClock(working, { ENSEMBLE_REDUCED_MOTION: "1" }), false)
+  assert.equal(shouldRunWorkClock(working, { NO_COLOR: "1" }), false)
 })
 
 test("empty states show a one-shot static mark", () => {

@@ -28,6 +28,11 @@
  * (so the working frame is `⠋`) and stops the clock via `shouldRunMotion`.
  * Stagger is off (lines appear full), functional state words (`working`,
  * `queued`, `● finished`, …) remain — only decorative movement is removed.
+ *
+ * Independent of this 4 fps chrome cycle, Work cards run a 10 fps tide clock
+ * gated by `shouldRunWorkClock`: it runs only while an unblocked working card
+ * exists on the visible route with no modal open, and never under reduced
+ * motion.
  */
 
 export const WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
@@ -108,6 +113,28 @@ export function effectiveTick(tick: number, env: NodeJS.ProcessEnv = process.env
  */
 export function shouldRunMotion(state: MotionState, env: NodeJS.ProcessEnv = process.env): boolean {
   return motionActive(state) && !isReducedMotion(env)
+}
+
+/** Dedicated Work-card cadence: 10 fps, independent of the 4 fps chrome clock. */
+export const WORK_CLOCK_INTERVAL_MS = 100
+
+export type WorkClockState = {
+  /** Count of working cards that are not waiting on the user. */
+  workingCards: number
+  routeActive: boolean
+  modalOpen: boolean
+}
+
+/**
+ * The work clock runs only while a working card exists, the Ensemble route is
+ * visible, no modal owns attention, and reduced motion is off. Needs-you,
+ * pending, retrying, and terminal cards do not keep the clock alive.
+ */
+export function shouldRunWorkClock(state: WorkClockState, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (state.workingCards <= 0) return false
+  if (!state.routeActive) return false
+  if (state.modalOpen) return false
+  return !isReducedMotion(env)
 }
 
 /** One-shot static mark for empty states; rendered once, never animated. */
