@@ -194,6 +194,10 @@ test("ticket119: app feedback paints the app toast and host toast is fallback-on
   assert.ok(components.includes("export function ToastOverlay"), "the app-owned toast component exists")
   assert.ok(components.includes("borderColor={accent()}"), "the toast tone owns its border color")
   assert.ok(components.includes("zIndex={80}"), "the toast stays below dialogs and the leader popup")
+  assert.ok(components.includes("createSignal(isReducedMotion())"), "reduced motion mounts the toast at its final state")
+  assert.ok(components.includes("opacity={settled() ? 1 : 0.72}"), "the presence settle is a single opacity change")
+  const toastView = components.slice(components.indexOf("export function ToastOverlay"), components.indexOf("export function Rail"))
+  assert.ok(!toastView.includes("textarea") && !toastView.includes("onKey"), "the toast mounts no editor and owns no keys")
 })
 
 test("ticket123: composer validation is non-destructive and clears on input or success", () => {
