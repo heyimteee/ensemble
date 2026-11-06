@@ -98,14 +98,6 @@ function sameModels(a: ModelRef[], b: ModelRef[]): boolean {
   return a.length === b.length && a.every((model, index) => sameModel(model, b[index]))
 }
 
-/**
- * Settle a streaming transcript row: clear the live flag, record the final
- * text, and stamp the last write so staleness runs on heartbeat time.
- * Ticket #74: finalization races must settle through this helper even when
- * the epoch guard rejects the content update — otherwise the stored row
- * keeps `streaming: true` and wedges the activity line until the age
- * filter. Pure over the caller's message object.
- */
 /** Record one init stage without duplicating consecutive entries or dropping history. */
 function recordInitPhase(job: InitJob, phase: InitPhase): void {
   const phases = job.phases ? [...job.phases] : job.phase ? [job.phase] : []
@@ -114,6 +106,14 @@ function recordInitPhase(job: InitJob, phase: InitPhase): void {
   job.phases = phases
 }
 
+/**
+ * Settle a streaming transcript row: clear the live flag, record the final
+ * text, and stamp the last write so staleness runs on heartbeat time.
+ * Ticket #74: finalization races must settle through this helper even when
+ * the epoch guard rejects the content update — otherwise the stored row
+ * keeps `streaming: true` and wedges the activity line until the age
+ * filter. Pure over the caller's message object.
+ */
 export function settleStreamMessage(message: Message, text: string, interrupted: boolean): Message {
   message.text = text
   message.streaming = false
