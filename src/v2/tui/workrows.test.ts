@@ -20,11 +20,17 @@ import {
   splitLiveFinalized,
   terminalAnnouncement,
   terminalAnnouncements,
+  workCardDetail,
+  workCardForTask,
+  workCardLayout,
+  workCardsForTasks,
   workGlyph,
   workRowFrame,
   workRowText,
   workStatusLabel,
   workSummary,
+  WORK_BASE_ROWS,
+  WORK_CARD_ROWS,
 } from "./workrows.ts"
 
 const task = (patch: Partial<Subtask> = {}): Subtask => ({
@@ -355,4 +361,107 @@ test("ticket68: native-blocked tasks read as needs-you without an approvalID", a
   assert.equal(isNeedsYouTask(plain, new Set(), new Set(["t"])), true)
   assert.equal(isNeedsYouTask(plain, new Set(), new Set(["other"])), false)
   assert.equal(isNeedsYouTask(plain, new Set(["ap"]), new Set(["t"])), true)
+})
+
+test("ticket115: work cards map agent, glyph, state, title, detail, and a full-width tide", () => {
+  const card = workCardForTask(
+    task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
+    "Nova",
+    {
+      now: 1000,
+      tick: 2,
+      width: 40,
+      detailFor: () => "reading src/auth.ts",
+    },
+  )
+  assert.equal(card.agent, "Nova")
+  assert.equal(card.glyph, "⠹")
+  assert.equal(card.state, "working")
+  assert.equal(card.status, "working")
+  assert.equal(card.title, "Check the build")
+  assert.equal(card.detail, "reading src/auth.ts")
+  assert.equal(card.tide.length, 40)
+  assert.equal(card.tideLevels.length, 20)
+  assert.ok(!JSON.stringify(card).includes("%"), "cards never invent a percentage")
+})
+
+test("ticket115: contract details are honest for queued, retrying, and stopped work", () => {
+  const pend = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 0, width: 40 })
+  assert.equal(pend.state, "pending")
+  assert.equal(pend.glyph, "▫")
+  assert.equal(pend.detail, "queued")
+
+  const retrying = workCardForTask(
+    task({ state: "working", attempts: 1, retryAfter: 1500 }),
+    "Nova",
+    { now: 1000, tick: 0, width: 40, detailFor: () => "retrying…" },
+  )
+  assert.equal(retrying.state, "retrying")
+  assert.equal(retrying.detail, "retrying…")
+
+  const stopping = workCardForTask(
+    task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
+    "Nova",
+    { now: 1000, tick: 0, width: 40, pendingFor: (item) => (item.id === "t" ? "cancel" : null) },
+  )
+  assert.equal(stopping.state, "working")
+  assert.equal(stopping.detail, "Cancelling…")
+})
+
+test("ticket115: needs-you cards carry the static marker and waiting detail", () => {
+  const card = workCardForTask(task({ interrupted: true }), "Nova", { now: 1000, tick: 3, width: 40 })
+  assert.equal(card.glyph, NEEDS_YOU_MARK)
+  assert.equal(card.state, "needs you")
+  assert.equal(card.detail, "waiting for you…")
+  assert.equal(card.needsYou, true)
+})
+
+test("ticket115: card titles truncate to the content width instead of wrapping", () => {
+  const longTitle = `t${"i".repeat(100)}`
+  const card = workCardForTask(task({ title: longTitle }), "Nova", { now: 1000, tick: 0, width: 20 })
+  assert.ok(card.title.length <= 18)
+  assert.ok(card.title.endsWith("…"))
+  assert.ok(card.detail.length <= 18)
+})
+
+test("ticket115: card ordering keeps active work only, working first and oldest-first", () => {
+  const items = [
+    task({ id: "terminal", state: "replied", outcome: "succeeded", repliedAt: 10, finishedAt: 10, createdAt: 0 }),
+    task({ id: "pending-old", state: "pending", createdAt: 1 }),
+    task({ id: "working-new", state: "working", claimedBy: "r", leaseUntil: 9000, attempts: 1, createdAt: 5 }),
+    task({ id: "working-old", state: "working", claimedBy: "r", leaseUntil: 9000, attempts: 1, createdAt: 2 }),
+    task({ id: "pending-new", state: "pending", createdAt: 6 }),
+  ]
+  const cards = workCardsForTasks(items, () => "Nova", { now: 1000, tick: 0, width: 40 })
+  assert.deepEqual(cards.map((card) => card.id), ["working-old", "working-new", "pending-old", "pending-new"])
+})
+
+test("ticket115: card height fits three, two, or one and falls back to compact rows", () => {
+  const wide = workCardLayout(40, 5)
+  assert.deepEqual(wide, { mode: "cards", limit: 3, overflow: 2, rows: 17 })
+  assert.deepEqual(workCardLayout(40, 2), { mode: "cards", limit: 2, overflow: 0, rows: 11 })
+  assert.deepEqual(workCardLayout(34, 2), { mode: "cards", limit: 2, overflow: 0, rows: 11 })
+  assert.deepEqual(workCardLayout(33, 2), { mode: "cards", limit: 1, overflow: 1, rows: 7 })
+  assert.deepEqual(workCardLayout(30, 2), { mode: "cards", limit: 1, overflow: 1, rows: 7 })
+  assert.deepEqual(workCardLayout(29, 1), { mode: "cards", limit: 1, overflow: 0, rows: 6 })
+  assert.deepEqual(workCardLayout(24, 3), { mode: "compact", limit: 1, overflow: 2, rows: 2 })
+  assert.deepEqual(workCardLayout(27, 3), { mode: "compact", limit: 2, overflow: 1, rows: 3 })
+  assert.deepEqual(workCardLayout(50, 1), { mode: "cards", limit: 1, overflow: 0, rows: 6 })
+})
+
+test("ticket115: card layouts leave transcript rows at the reference and compact sizes", () => {
+  const tall = workCardLayout(40, 5)
+  assert.ok(40 - WORK_BASE_ROWS - tall.rows >= 4, "120x40 keeps at least four transcript rows")
+  const short = workCardLayout(24, 3)
+  assert.ok(24 - WORK_BASE_ROWS - short.rows >= 3, "80x24 keeps at least three transcript rows")
+  assert.ok(WORK_CARD_ROWS >= 4, "a card is tall enough for header, title, detail, and tide")
+})
+
+test("ticket115: card detail defaults stay honest", () => {
+  assert.equal(workCardDetail("working"), "working…")
+  assert.equal(workCardDetail("pending"), "queued")
+  assert.equal(workCardDetail("retrying"), "retrying…")
+  assert.equal(workCardDetail("working", { activity: "running tests…" }), "running tests…")
+  assert.equal(workCardDetail("working", { pending: "stop" }), "Stopping…")
+  assert.equal(workCardDetail("pending", { needsYou: true }), "waiting for you…")
 })
