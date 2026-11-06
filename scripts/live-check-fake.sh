@@ -574,7 +574,8 @@ live_key "$LIVE_TUI_SESSION" Enter
 wait_for_init_successes 3
 init_phase_order=$(live_snapshot_value 'Object.values(output.state.initJobs).map(function (job) { return (job.phases || []).join(">") }).join(",")')
 expected_init_phases="starting>running>writing>reporting"
-[[ "$init_phase_order" == "$expected_init_phases,$expected_init_phases,$expected_init_phases" ]] || live_fail "all init triggers did not carry the four phases in order (got $init_phase_order)"
+expected_init_order="\"$expected_init_phases,$expected_init_phases,$expected_init_phases\""
+[[ "$init_phase_order" == "$expected_init_order" ]] || live_fail "all init triggers did not carry the four phases in order (got $init_phase_order)"
 init_audit=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; return (output.state.messages[ws.id] || []).filter(function (m) { return m.author === "user" && m.text === "/init" }).length })()')
 [[ "$init_audit" == "3" ]] || live_fail "expected three visible /init audit lines, found $init_audit"
 init_reports=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces)[0]; return (output.state.messages[ws.id] || []).filter(function (m) { return m.displayAuthor === "System Agent" && !m.streaming && /Ensemble init complete/.test(m.text) }).length })()')
