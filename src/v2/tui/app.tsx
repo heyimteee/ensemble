@@ -6,7 +6,7 @@ import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
-import { COMPOSER_COMMANDS, composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
+import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, workspaceGroupLabel, workspaceLabel } from "./format.ts"
@@ -338,6 +338,7 @@ export function EnsembleV2App() {
   const [composerDraft, setComposerDraft] = createSignal("")
   const [composerCursor, setComposerCursor] = createSignal(0)
   const [drafts, setDrafts] = createSignal<DraftStore>({})
+  const [composerValidation, setComposerValidation] = createSignal<ComposerValidationState | null>(null)
   const [completion, setCompletion] = createSignal<Completion | null>(null)
   const [picker, setPicker] = createSignal<PickerState | null>(null)
   const [textPrompt, setTextPrompt] = createSignal<TextPromptState | null>(null)
@@ -381,6 +382,7 @@ export function EnsembleV2App() {
   let messageTimer: ReturnType<typeof setTimeout> | undefined
   let wizardSettleTimer: ReturnType<typeof setTimeout> | undefined
   let wizardSettledKey = ""
+  let composerValidationTimer: ReturnType<typeof setTimeout> | undefined
 
   // v5.7 T2: every text editor paints the same mode-driven caret. A block in
   // Normal shows the character Vim acts on; a line in Insert/Visual/Command
@@ -459,6 +461,26 @@ export function EnsembleV2App() {
   const showWizardToast = (toast: WizardToast) => {
     try { context.ui.toast.show(toast) } catch {}
   }
+
+  // Ticket #123: invalid commands and failed validation flash the composer
+  // border once while the draft stays intact. Typing or a successful send
+  // clears the signal; the short timer is the one-shot lifetime.
+  const clearComposerValidation = (reason: "input" | "send-success" = "input") => {
+    if (composerValidationTimer !== undefined) {
+      clearTimeout(composerValidationTimer)
+      composerValidationTimer = undefined
+    }
+    setComposerValidation((state) => composerValidationReducer(state, { type: reason }))
+  }
+  const markComposerInvalid = (message: string) => {
+    setComposerValidation((state) => composerValidationReducer(state, { type: "invalid", message, at: Date.now() }))
+    if (composerValidationTimer !== undefined) clearTimeout(composerValidationTimer)
+    composerValidationTimer = setTimeout(() => {
+      composerValidationTimer = undefined
+      setComposerValidation((state) => composerValidationReducer(state, { type: "tick", at: Date.now() }))
+    }, COMPOSER_VALIDATION_MS)
+  }
+  onCleanup(() => { if (composerValidationTimer !== undefined) clearTimeout(composerValidationTimer) })
 
   // v5.6 T7: Normal-mode Vim editing for every text buffer. One internal
   // register is shared by the composer, prompts, and wizard fields; the
@@ -1637,12 +1659,17 @@ export function EnsembleV2App() {
     })
   }
 
-  const send = async (text: string, recipientIDs?: string[]): Promise<boolean> => {
+  const send = async (text: string, recipientIDs?: string[], onInvalid?: (message: string) => void): Promise<boolean> => {
     const value = text.trim()
     if (!value) return false
     const current = surface()
-    if (!current) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return false }
+    if (!current) {
+      onInvalid?.("Open an agent or workspace first.")
+      context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" })
+      return false
+    }
     const failure = (message: string) => {
+      onInvalid?.(message)
       notify(message, "error")
       context.ui.toast.show({ title: "Ensemble", message, variant: "error" })
       return false
@@ -1695,7 +1722,15 @@ export function EnsembleV2App() {
 
   const focusComposer = () => focusWhenReady(() => composerRef)
   const composerHeight = () => computeComposerHeight(composerDraft(), Math.max(12, messageWidth() - 6))
+  const composerBorderColor = () => {
+    // Read the motion tick so the bounded bad-border pulse repaints itself.
+    motionFrame()
+    const role = composerValidationBorder(composerValidation(), Date.now(), isReducedMotion(process.env))
+    if (role === "bad") return colors.bad
+    return chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border
+  }
   const setComposerValue = (value: string, cursor = value.length) => {
+    clearComposerValidation()
     composerCache.buffer?.invalidate()
     if (composerRef) {
       composerRef.setText?.(value)
@@ -1715,6 +1750,7 @@ export function EnsembleV2App() {
     const key = currentDraftKey()
     if (key === lastDraftKey) return
     lastDraftKey = key
+    clearComposerValidation()
     composerCache.buffer?.invalidate()
     const value = draftFor(drafts(), key)
     setComposerDraft(value)
@@ -1796,6 +1832,7 @@ export function EnsembleV2App() {
     setApprovalsOpen(false)
     setModal(false)
     setCompletion(null)
+    clearComposerValidation()
     closeLeader()
     if (commandActive()) closeCommandLine(true)
     clearPendingChord()
@@ -1834,6 +1871,7 @@ export function EnsembleV2App() {
   }
   /** Slash commands consume their text, so only this path clears a draft. */
   const resetComposer = () => {
+    clearComposerValidation()
     composerEpoch++
     composerCache.buffer?.invalidate()
     syncVimChord(null)
@@ -1999,15 +2037,28 @@ export function EnsembleV2App() {
     // command line has its own parser, so normalize here before dispatching.
     const parsed = parseSlashCommand(raw.startsWith(":") ? `/${raw.slice(1)}` : raw)
     const command = parsed?.command ?? ""
-    resetComposer()
+    const known = COMPOSER_COMMANDS.some((entry) => entry.name === command) || isInitAlias(command)
+    if (!known) {
+      // An invalid command is non-destructive: keep the draft and show the
+      // one-shot bad border until the user types or submits successfully.
+      const message = `Unknown command: /${command}`
+      notify(message, "error")
+      context.ui.toast.show({ title: "Ensemble", message, variant: "warning" })
+      markComposerInvalid(message)
+      return
+    }
     if (isInitAlias(command)) {
       if ((parsed?.args.length ?? 0) > 0) {
-        notify("Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text.", "error")
+        const message = "Init is solo-only. Send /init by itself; remove agent mentions, skills, and extra text."
+        notify(message, "error")
+        markComposerInvalid(message)
         return
       }
+      resetComposer()
       await initEnsemble()
       return
     }
+    resetComposer()
     switch (command) {
       case "workspace": await pickWorkspace(); return
       case "agent": mention(); return
@@ -2022,11 +2073,17 @@ export function EnsembleV2App() {
       case "restart": await restartSelected(); return
       case "cancel": await cancelSelected(); return
       case "reset-ensemble": await resetEnsemble(); return
-      default: context.ui.toast.show({ title: "Ensemble", message: `Unknown command: /${command}`, variant: "warning" })
+      default: {
+        const message = `Unknown command: /${command}`
+        notify(message, "error")
+        context.ui.toast.show({ title: "Ensemble", message, variant: "warning" })
+        markComposerInvalid(message)
+      }
     }
   }
 
   const handleComposerInput = (value: string, cursor: number) => {
+    clearComposerValidation()
     const current = completion()
     if (current) {
       if (current.kind === "command") { commandPaletteCompletion(value, cursor); return }
@@ -2051,7 +2108,7 @@ export function EnsembleV2App() {
     if (completion()) { await selectCompletion(); return }
     if (text === "/") { commandPaletteCompletion("/", 1); return }
     const initIssue = initComposerIssue(text)
-    if (initIssue) { notify(initIssue, "error"); return }
+    if (initIssue) { notify(initIssue, "error"); markComposerInvalid(initIssue); return }
     const plan = composerPlan(text)
     if (plan?.kind === "command" || plan?.kind === "init") { await runSlashCommand(text); return }
     const parsed = parseSlashCommand(text)
@@ -2069,11 +2126,12 @@ export function EnsembleV2App() {
     const key = currentDraftKey()
     const epoch = composerEpoch
     const wasBusy = busy()
-    const sent = await send(text)
+    const sent = await send(text, undefined, markComposerInvalid)
     if (!sent) {
       if (wasBusy) notify("Busy — draft kept", "info")
       return
     }
+    clearComposerValidation("send-success")
     notify("Message sent", "success")
     const sameKey = currentDraftKey() === key
     const unchanged = sameKey && composerDraft() === value
@@ -2674,7 +2732,7 @@ export function EnsembleV2App() {
       {
         busy: isBusy() || resolvingApprovalID() !== null,
         live: liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
-        composerActive: composerActive(),
+        composerActive: composerActive() || composerValidation() !== null,
       },
       process.env,
     )
@@ -4725,7 +4783,7 @@ export function EnsembleV2App() {
                           )}</For>
                         </box>
                       </Show>
-                      <box flexShrink={0} border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "composer") ? colors.focus : colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
+                      <box flexShrink={0} border borderStyle="single" borderColor={composerBorderColor()} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
                         <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); if (completion()?.kind === "command") commandPaletteCompletion(value, cursor) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
