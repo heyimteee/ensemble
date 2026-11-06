@@ -25,6 +25,7 @@ import {
   skillsUnavailableLine,
 } from "./settings.ts"
 import {
+  approvalResolvedLine,
   approvalResolvingSuffix,
   approvalSourceTag,
   approvalsEmptyLine,
@@ -39,6 +40,7 @@ import { MOUSE_PANE_IDS } from "./mouse.ts"
 import { statuslineHints } from "./keymap.ts"
 import { displayWidth, fitStatuslineSegments, type StatuslinePart, type StatuslineSegment, type StatuslineTone } from "./statusline.ts"
 import { chromeJoin, chromeSeparator, chromeSeparatorParts } from "./separators.ts"
+import { approvalResolvedTone, type ApprovalResolvedSettle } from "./approvals.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
@@ -313,15 +315,35 @@ export function Rail(props: {
 }
 
 
-export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cursor: number; resolvingID: string | null; state: SnapshotState | null; onResolve: (approval: Approval) => Promise<void>; motionTick?: number }) {
+export function ApprovalList(props: {
+  colors: Palette
+  approvals: Approval[]
+  cursor: number
+  resolvingID: string | null
+  state: SnapshotState | null
+  onResolve: (approval: Approval) => Promise<void>
+  motionTick?: number
+  emphasized: ReadonlySet<string>
+  resolved: readonly ApprovalResolvedSettle[]
+}) {
   return (
     <box flexDirection="column">
       <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>Approvals inbox</text>
-      <Show when={props.approvals.length === 0}><text fg={props.colors.muted}>{approvalsEmptyLine()}</text></Show>
-      <For each={props.approvals}>{(approval, index) => (
+      <Show when={props.approvals.length === 0 && props.resolved.length === 0}><text fg={props.colors.muted}>{approvalsEmptyLine()}</text></Show>
+      <For each={props.approvals}>{(approval, index) => {
+        const selected = () => props.cursor === index()
+        const emphasized = () => props.emphasized.has(approval.id)
+        return (
+          <box flexDirection="column">
+            <text fg={selected() ? props.colors.good : emphasized() ? props.colors.accent : props.colors.warn} bg={props.colors.bg} width="100%" truncate attributes={emphasized() ? TextAttributes.BOLD : undefined}>{selected() ? "› " : "  "}[{approvalSourceTag(approvalSource(approval))}] {approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)}</text>
+            <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
+          </box>
+        )
+      }}</For>
+      <For each={props.resolved}>{(entry) => (
         <box flexDirection="column">
-          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}[{approvalSourceTag(approvalSource(approval))}] {approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)}</text>
-          <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
+          <text fg={approvalResolvedTone(entry.ageMs, process.env) === "good" ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" truncate>{approvalResolvedLine(entry.approval)}</text>
+          <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{short(entry.approval.detail, 80)}</text>
         </box>
       )}</For>
     </box>

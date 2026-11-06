@@ -64,9 +64,16 @@ import {
   OVERLAY_PRESENCE_MS,
   OVERLAY_PRESENCE_STEP_MS,
   filterEdit,
+  overlayPresenceKey as presencePanelKey,
   overlayPresenceOpacity,
   singleChoiceValue,
 } from "./overlays.ts"
+import {
+  APPROVAL_MOTION_STEP_MS,
+  createApprovalInboxTrack,
+  updateApprovalInboxMotion,
+  type ApprovalInboxMotion,
+} from "./approvals.ts"
 import { readGitState, type GitState } from "./git.ts"
 import {
   caretStyleForMode,
@@ -313,6 +320,10 @@ export function EnsembleV2App() {
   const [modal, setModal] = createSignal(false)
   const [approvalCursor, setApprovalCursor] = createSignal(0)
   const [resolvingApprovalID, setResolvingApprovalID] = createSignal<string | null>(null)
+  // Ticket #126: the approval inbox owns one-shot transitions derived from the
+  // durable rows. The track is UI-local and prunes itself after each window.
+  const [approvalMotion, setApprovalMotion] = createSignal<ApprovalInboxMotion>({ emphasized: new Set(), resolved: [], active: false })
+  const approvalTrack = createApprovalInboxTrack()
   // Review fix (finding 2): the work row with an in-flight Stop/Cancel (or
   // retry/restart) action shows its interim label until the terminal state
   // arrives; cleared in a finally so it can never stick.
@@ -585,6 +596,35 @@ export function EnsembleV2App() {
   const selectedTask = createMemo(() => orderedTasks()[taskCursor()])
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
+  // Ticket #126: one-shot inbox transitions. The first snapshot is the
+  // baseline; later arrivals emphasize once and resolved rows settle once.
+  // A short app-owned cadence repaints only while one of those windows is
+  // live, so idle approvals never run a decorative clock. It never dispatches
+  // interaction: keys, focus, and cursor ownership stay untouched.
+  let approvalMotionTimer: ReturnType<typeof setInterval> | undefined
+  const stopApprovalMotion = () => {
+    if (approvalMotionTimer === undefined) return
+    clearInterval(approvalMotionTimer)
+    approvalMotionTimer = undefined
+  }
+  const refreshApprovalMotion = () => {
+    const current = state()
+    if (!current) {
+      stopApprovalMotion()
+      return
+    }
+    const view = updateApprovalInboxMotion(approvalTrack, Object.values(current.approvals), Date.now(), process.env)
+    setApprovalMotion(view)
+    if (!view.active) {
+      stopApprovalMotion()
+      return
+    }
+    if (approvalMotionTimer === undefined) {
+      approvalMotionTimer = setInterval(refreshApprovalMotion, APPROVAL_MOTION_STEP_MS)
+    }
+  }
+  createEffect(refreshApprovalMotion)
+  onCleanup(stopApprovalMotion)
   // Review fix (finding 3): needs-you derives from existing state only —
   // the set of still-pending approval ids, matched against each task's
   // approvalID (or its interrupted flag inside isNeedsYouTask).
@@ -1028,8 +1068,16 @@ export function EnsembleV2App() {
   // geometry, layout, focus, mode, overlay ownership, or key routing moves.
   // Close clears the timer and resets the baseline so repeated open/close
   // cannot leave stale translucency; reduced motion mounts at full opacity.
-  const overlayPanelKey = () =>
-    picker() ? "picker" : textPrompt() ? "prompt" : confirm() ? "confirm" : result() ? "result" : wizard() ? "wizard" : "none"
+  const overlayPanelKey = () => presencePanelKey({
+    picker: picker() !== null,
+    prompt: textPrompt() !== null,
+    confirm: confirm() !== null,
+    result: result() !== null,
+    wizard: wizard() !== null,
+    help: helpOpen(),
+    approvals: approvalsOpen(),
+    leader: leaderPopup(),
+  })
   let overlayPresenceTimer: ReturnType<typeof setInterval> | undefined
   const stopOverlayPresence = () => {
     if (overlayPresenceTimer === undefined) return
@@ -4695,17 +4743,21 @@ export function EnsembleV2App() {
                     </>
                   </Show>
                 }>
-                  <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} resolvingID={resolvingApprovalID()} state={state()} onResolve={resolveApproval} motionTick={motionFrame()} />
+                  <box flexDirection="column" opacity={overlayOpacity()}>
+                    <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} resolvingID={resolvingApprovalID()} state={state()} onResolve={resolveApproval} motionTick={motionFrame()} emphasized={approvalMotion().emphasized} resolved={approvalMotion().resolved} />
+                  </box>
                 </Show>
               }>
-                <HelpView
-                  colors={colors}
-                  sections={helpVisibleSections()}
-                  query={helpQuery()}
-                  filtering={helpFiltering()}
-                  matchKey={helpMatchKey()}
-                  scrollRef={(value: any) => { helpScrollRef = value }}
-                />
+                <box flexGrow={1} minHeight={0} flexDirection="column" opacity={overlayOpacity()}>
+                  <HelpView
+                    colors={colors}
+                    sections={helpVisibleSections()}
+                    query={helpQuery()}
+                    filtering={helpFiltering()}
+                    matchKey={helpMatchKey()}
+                    scrollRef={(value: any) => { helpScrollRef = value }}
+                  />
+                </box>
               </Show>
             }>
               <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value); if (value) settingsFieldVimBuffer() }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
@@ -4844,6 +4896,7 @@ export function EnsembleV2App() {
           paddingLeft={1}
           paddingRight={1}
           flexDirection="column"
+          opacity={overlayOpacity()}
         >
           <ChromeText colors={colors} fg={colors.leader} bg={colors.panel} width="100%" truncate text={chromeJoin(["LEADER", "Space"])} />
           <For each={whichKeyLines(leaderEntries())}>{(line) => <text fg={colors.text} bg={colors.panel} width="100%" truncate>{line}</text>}</For>

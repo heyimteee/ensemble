@@ -7,6 +7,36 @@
 
 import { isReducedMotion } from "./motion.ts"
 
+export type OverlayPresenceKey = "picker" | "prompt" | "confirm" | "result" | "wizard" | "help" | "approvals" | "leader" | "none"
+
+export type OverlayPresencePanels = {
+  picker: boolean
+  prompt: boolean
+  confirm: boolean
+  result: boolean
+  wizard: boolean
+  help: boolean
+  approvals: boolean
+  leader: boolean
+}
+
+/**
+ * Which open surface owns the current presence settle. The order mirrors the
+ * render precedence so a replaced panel starts a fresh one-shot settle and a
+ * surface that is merely mounted behind another never steals it.
+ */
+export function overlayPresenceKey(panels: OverlayPresencePanels): OverlayPresenceKey {
+  if (panels.picker) return "picker"
+  if (panels.prompt) return "prompt"
+  if (panels.confirm) return "confirm"
+  if (panels.result) return "result"
+  if (panels.wizard) return "wizard"
+  if (panels.help) return "help"
+  if (panels.approvals) return "approvals"
+  if (panels.leader) return "leader"
+  return "none"
+}
+
 /** One-shot overlay presence settle: short, terminal-friendly, never loops. */
 export const OVERLAY_PRESENCE_MS = 120
 
