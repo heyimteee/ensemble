@@ -53,6 +53,14 @@ import {
 } from "./wizard.ts"
 import { EMPTY_MARK, isReducedMotion, shouldRunMotion } from "./motion.ts"
 import {
+  TRANSCRIPT_EMPHASIS_MS,
+  createTranscriptMotionState,
+  observeTranscriptMotion,
+  type TranscriptEmphasisEvent,
+  type TranscriptEmphasisKind,
+  type TranscriptRowSignal,
+} from "./transcript-motion.ts"
+import {
   chromeOwnsFocus,
   dmEmptyDetail,
   footerLine1,
@@ -924,6 +932,94 @@ export function EnsembleV2App() {
     const previous = completionMap()
     const next = accumulateCompletions(previous, tasks, (task) => agentName(snapshot, task.assigneeID), now)
     if (next !== previous) setCompletionMap(next)
+  })
+  // Ticket #122 one-shot transcript feedback: a group message that was
+  // observed streaming and then finalizes gets one brief brighter
+  // border/background beat; failed/cancelled completions and interrupted
+  // agent messages get one error beat. `observeTranscriptMotion` owns the
+  // exactly-once guard, so 250 ms snapshot polls never restart a beat.
+  // Reduced motion records the final state and emits nothing. The beat is a
+  // short-lived signal only: row keys, the scrollbox, sticky scroll, and the
+  // scroll cue are untouched.
+  const [transcriptEmphasis, setTranscriptEmphasis] = createSignal(new Map<string, TranscriptEmphasisKind>())
+  const transcriptMotion = createTranscriptMotionState()
+  const transcriptEmphasisTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const clearTranscriptEmphasis = (id: string) => {
+    const timer = transcriptEmphasisTimers.get(id)
+    if (timer !== undefined) { clearTimeout(timer); transcriptEmphasisTimers.delete(id) }
+    setTranscriptEmphasis((current) => {
+      if (!current.has(id)) return current
+      const next = new Map(current)
+      next.delete(id)
+      return next
+    })
+  }
+  const flashTranscriptRows = (events: readonly TranscriptEmphasisEvent[]) => {
+    for (const event of events) {
+      setTranscriptEmphasis((current) => {
+        const next = new Map(current)
+        next.set(event.id, event.kind)
+        return next
+      })
+      const previous = transcriptEmphasisTimers.get(event.id)
+      if (previous !== undefined) clearTimeout(previous)
+      const timer = setTimeout(() => clearTranscriptEmphasis(event.id), TRANSCRIPT_EMPHASIS_MS)
+      timer.unref?.()
+      transcriptEmphasisTimers.set(event.id, timer)
+    }
+  }
+  onCleanup(() => {
+    for (const timer of transcriptEmphasisTimers.values()) clearTimeout(timer)
+    transcriptEmphasisTimers.clear()
+  })
+  // Fresh completions only: the completion map accumulates every terminal task
+  // in the workspace, so a surface switch can replay history. Old outcomes are
+  // already settled state, not new feedback to flash.
+  const TRANSCRIPT_ERROR_FRESH_MS = 10_000
+  // Direct conversations persist no streaming flag on the chat line: the live
+  // row is synthetic. Remember the ids present when a live DM starts, then
+  // mark the first new agent line after it ends as the finalizing row.
+  const [dmFinalizeID, setDmFinalizeID] = createSignal<string | null>(null)
+  let dmKnownIDs: Set<string> | null = null
+  createEffect(() => {
+    const live = liveDm()
+    if (live) {
+      if (dmKnownIDs === null) dmKnownIDs = new Set(chatLines().map((line) => line.id))
+      if (dmFinalizeID() !== null) setDmFinalizeID(null)
+      return
+    }
+    const known = dmKnownIDs
+    if (!known) return
+    if (surface()?.kind !== "agent") { dmKnownIDs = null; return }
+    const candidate = chatLines()
+      .filter((line) => !known.has(line.id) && line.role === "agent" && line.id !== "live")
+      .at(-1)
+    if (!candidate) return
+    dmKnownIDs = null
+    setDmFinalizeID(candidate.id)
+  })
+  const transcriptMotionRows = createMemo<TranscriptRowSignal[]>(() => {
+    const now = Date.now()
+    const dmFinalize = dmFinalizeID()
+    const rows: TranscriptRowSignal[] = chatLines().map((line) => ({
+      id: line.id,
+      streaming: line.streaming,
+      entering: line.id === dmFinalize,
+      error: line.role === "agent" && Boolean(line.interrupted),
+    }))
+    for (const completion of completionMap().values()) {
+      rows.push({
+        id: completion.id,
+        error: completion.tone === "error" && now - completion.at <= TRANSCRIPT_ERROR_FRESH_MS,
+      })
+    }
+    return rows
+  })
+  createEffect(() => {
+    const events = observeTranscriptMotion(transcriptMotion, transcriptMotionRows(), {
+      enabled: !isReducedMotion(process.env),
+    })
+    if (events.length > 0) flashTranscriptRows(events)
   })
   // One time-ordered transcript window: conversation lines interleaved with
   // inline completions by (finish/created) time. The scrollbox keeps a stable
@@ -4830,9 +4926,13 @@ export function EnsembleV2App() {
                                   // outcome at its finish position — no
                                   // border, no trailing feed, no regeneration.
                                   if (row.completion) {
+                                    // Ticket #122: a failed/cancelled
+                                    // outcome emphasizes once, then settles
+                                    // back to the muted inline line.
+                                    const emphasized = () => transcriptEmphasis().get(row.id) === "error"
                                     return (
                                     <box flexDirection="column" marginTop={1} paddingLeft={1} paddingRight={1}>
-                                      <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{row.completion.text}</text>
+                                      <text fg={emphasized() ? colors.bad : colors.muted} bg={emphasized() ? colors.panel : colors.bg} width="100%" wrapMode="word">{row.completion.text}</text>
                                     </box>
                                     )
                                   }
@@ -4871,11 +4971,16 @@ export function EnsembleV2App() {
                                   // height is consistent when paths swap.
                                   const hit = searchLineState(message.id)
                                   const accent = hit ? (hit.current ? colors.warn : colors.focus) : authorColor({ agentID: message.agentID, author: message.author, role: message.role })
+                                  // Ticket #122: one-shot completion/error beat.
+                                  // The accessor stays reactive inside the stable
+                                  // <For> row, so only colors change — never row
+                                  // identity, geometry, or scroll state.
+                                  const emphasis = () => transcriptEmphasis().get(message.id)
                                   const wrapWidth = bubbleContentWidth(messageWidth(), BUBBLE_CHROME)
                                   return (
                                   <box id={chatRowID(message.id)} flexDirection="column" width="100%" marginTop={1}>
-                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={side === "left" ? accent : message.queued ? colors.warn : colors.good} backgroundColor={colors.panel} padding={1} flexDirection="column">
-                                      <text fg={message.queued && !hit ? colors.warn : accent} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
+                                    <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={emphasis() === "error" ? colors.bad : emphasis() === "finalized" ? colors.focus : side === "left" ? accent : message.queued ? colors.warn : colors.good} backgroundColor={colors.panel} padding={1} flexDirection="column">
+                                      <text fg={emphasis() === "error" ? colors.bad : message.queued && !hit ? colors.warn : accent} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "user"} fallback={
                                         <Show when={syntaxStyle} fallback={
                                           <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
