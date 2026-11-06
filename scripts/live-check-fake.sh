@@ -666,9 +666,10 @@ live_require_text "$LIVE_TUI_SESSION" "fake-queue-beta" 15 "second group message
 collect_work_frames 16 || true
 [[ "$seen_frames" -ge 2 ]] || live_fail "activity line did not animate across working frames (saw: $seen_which)"
 live_log "activity line animated across working frames ($seen_which)"
+# Count only the two named group work items; init jobs are separate subtasks.
 queue_replied=0
 for _ in $(seq 1 120); do
-  queue_replied=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state === "replied" }).length')
+  queue_replied=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state === "replied" && (t.title === "fake-queue-alpha" || t.title === "fake-queue-beta") }).length')
   [[ "$queue_replied" == "2" ]] && break
   sleep 0.5
 done
@@ -725,7 +726,7 @@ live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent 
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "peer assignment emitted exactly once"
 live_require_active_work "$LIVE_TUI_SESSION" 15 "work block mounts fresh for the new burst"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
-live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 2 "asking verb once on the activity line and once on the work card"
+live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking verb renders once, on the Work card only"
 live_assert_count "$LIVE_TUI_SESSION" "FakeAgent │ working" 1 "fresh burst lists only its own active card"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
 # Review fix (finding 1): queued rows are DM-only by construction, so the
@@ -803,7 +804,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 15 "assignment line for the attribution probe"
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 1 "probe assignment emitted exactly once"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the probe turn is in flight"
-live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 2 "probe asking verb once on the activity line and once on the work card"
+live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "probe asking verb renders once, on the Work card only"
 # v5.6 T3: the long fixture keeps the work zone live while Tab focuses it.
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" Tab
@@ -1631,8 +1632,8 @@ live_invoke task.cancel "{\"id\":\"$t4_native_id\"}" >/dev/null
 live_log "work-list o opens the selected work's native session"
 
 # Slice B reduced-motion run: restart the TUI with ENSEMBLE_REDUCED_MOTION=1
-# and prove live work renders static frame-0 glyphs only — the working
-# activity line stays on ⠋, and no non-zero motion codepoint
+# and prove live work renders static frame-0 glyphs only — the Work card stays
+# on ⠋ and no non-zero motion codepoint
 # (⠙⠹⠸⠼⠴⠦⠧⠇⠏▪▹▌) appears across sustained captures while work is in flight.
 live_log "restarting TUI under ENSEMBLE_REDUCED_MOTION=1"
 "$LIVE_TMUX_BIN" kill-session -t "$LIVE_TUI_SESSION" 2>/dev/null || true
@@ -1647,7 +1648,7 @@ live_require_text "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leav
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "⠋ FakeAgent │ working…" 15 "frame-0 activity line under reduced motion"
+live_require_text "$LIVE_TUI_SESSION" "⠋ FakeAgent │ working" 15 "frame-0 Work card under reduced motion"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 for _ in $(seq 1 8); do

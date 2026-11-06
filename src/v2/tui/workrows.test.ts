@@ -12,6 +12,7 @@ import {
   activityVerb,
   hasActiveWork,
   isNeedsYouTask,
+  mergeStreamingActivity,
   needsYouSuffix,
   orderedWorkItems,
   pendingWorkLabel,
@@ -23,6 +24,7 @@ import {
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
+  suppressCardedActivity,
   terminalAnnouncement,
   terminalAnnouncements,
   workCardDetail,
@@ -221,6 +223,41 @@ test("activity groups mark in-flight peer turns with the asking variant", () => 
   // the generic checking default (reserved for genuinely unknown activity).
   assert.equal(groups.live.find((entry) => entry.label === "Ana")?.verb, "working…")
   assert.equal(groups.live.find((entry) => entry.label === "Ana")?.kind, "working")
+})
+
+test("ticket115: carded tasks suppress their duplicate activity line, uncarded work stays", () => {
+  const keyFor = (item: Subtask) => item.assigneeID ?? "unassigned"
+  const labelFor = (item: Subtask) => item.id
+  const items = [
+    task({ id: "carded-live", workKind: "turn", assigneeID: "a", state: "working", claimedBy: "r", leaseUntil: 9999, attempts: 1, createdAt: 1, turn: { correlationID: "c1", askerKind: "user" } }),
+    task({ id: "uncarded-live", assigneeID: "b", state: "working", claimedBy: "r", leaseUntil: 9999, attempts: 1, createdAt: 2 }),
+    task({ id: "carded-queued", assigneeID: "c", state: "pending", createdAt: 3 }),
+    task({ id: "uncarded-queued", assigneeID: "d", state: "pending", createdAt: 4 }),
+  ]
+  const groups = splitActivityGroups(items, keyFor, labelFor, 1000)
+  assert.deepEqual(groups.live.map((entry) => entry.taskID), ["carded-live", "uncarded-live"])
+  assert.deepEqual(groups.queued.map((entry) => entry.taskID), ["carded-queued", "uncarded-queued"])
+
+  // Ticket #115 follow-up: merge before suppressing. The task-backed entry
+  // keeps its agent key during the merge, so the streaming row cannot replace
+  // the suppressed card detail. A stream-only agent with no card survives.
+  const merged = mergeStreamingActivity(
+    groups.live,
+    [
+      { agentID: "a", author: "CardedAgent", createdAt: 5 },
+      { agentID: "stream", author: "StreamAgent", createdAt: 10 },
+    ],
+    1000,
+  )
+  assert.equal(merged.filter((entry) => entry.agentID === "a").length, 1, "no streaming duplicate for a carded agent")
+  const visible = suppressCardedActivity({ live: merged, queued: groups.queued }, new Set(["carded-live", "carded-queued"]))
+  assert.deepEqual(visible.live.map((entry) => entry.taskID), ["uncarded-live", undefined])
+  assert.ok(visible.live.some((entry) => entry.agentID === "stream"), "streaming-only activity without a card stays visible")
+  assert.deepEqual(visible.queued.map((entry) => entry.taskID), ["uncarded-queued"])
+  assert.deepEqual(
+    suppressCardedActivity(groups, new Set()).live.map((entry) => entry.taskID),
+    groups.live.map((entry) => entry.taskID),
+  )
 })
 
 test("live/finalized split keeps concurrent live rows distinct and folds finalize in place", () => {

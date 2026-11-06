@@ -102,6 +102,21 @@ test("ticket115: Work renders active subtasks as cards with a full-width tide ro
   assert.ok(!components.includes("<span"), "the tide strip is one styled line, not nested spans")
 })
 
+test("ticket115 follow-up: carded tasks suppress duplicate activity lines without dropping uncarded work", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const workrows = readFileSync(new URL("./workrows.ts", import.meta.url), "utf8")
+  assert.ok(app.includes("suppressCardedActivity("), "the app suppresses carded task activity")
+  assert.ok(app.includes("cardedTaskIDs()"), "the suppression set follows the visible card limit")
+  assert.ok(app.includes("workCardLayout(renderSize().height, ordered.length, recentCount)"), "the set uses the same height-based layout seam")
+  assert.ok(app.includes('if (layout.mode !== "cards") return new Set<string>()'), "compact fallback rows keep their activity lines")
+  const mergeAt = app.indexOf("const merged = mergeStreamingActivity")
+  const suppressAt = app.indexOf("const visible = suppressCardedActivity")
+  assert.ok(mergeAt >= 0 && suppressAt > mergeAt, "task-backed entries survive the streaming merge, then the carded ones are suppressed")
+  assert.ok(workrows.includes("taskID: task.id"), "task-backed activity entries carry their source task id")
+  assert.ok(workrows.includes("export function suppressCardedActivity"), "the suppression rule is a pure seam")
+  assert.ok(workrows.includes("entry.taskID === undefined || !cardTaskIDs.has(entry.taskID)"), "streaming-only entries survive suppression")
+})
+
 test("ticket117: recent Work cards stay mounted, counted, and display-only", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
