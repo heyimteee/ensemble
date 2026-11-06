@@ -5,6 +5,7 @@ import {
   OVERLAY_PRESENCE_START,
   OVERLAY_PRESENCE_STEP_MS,
   filterEdit,
+  overlayPresenceKey,
   overlayPresenceOpacity,
   singleChoiceValue,
 } from "./overlays.ts"
@@ -59,4 +60,36 @@ test("overlay presence treats negative and non-finite elapsed time as the mount 
   assert.equal(overlayPresenceOpacity(-50, {}), OVERLAY_PRESENCE_START)
   assert.equal(overlayPresenceOpacity(Number.NaN, {}), OVERLAY_PRESENCE_START)
   assert.equal(overlayPresenceOpacity(Number.POSITIVE_INFINITY, {}), 1)
+})
+
+test("ticket126: presence keys cover help, approvals, and leader which-key without changing dialog precedence", () => {
+  const closed = {
+    picker: false,
+    prompt: false,
+    confirm: false,
+    result: false,
+    wizard: false,
+    help: false,
+    approvals: false,
+    leader: false,
+  }
+  assert.equal(overlayPresenceKey(closed), "none")
+  assert.equal(overlayPresenceKey({ ...closed, help: true }), "help")
+  assert.equal(overlayPresenceKey({ ...closed, approvals: true }), "approvals")
+  assert.equal(overlayPresenceKey({ ...closed, leader: true }), "leader")
+  assert.equal(
+    overlayPresenceKey({ ...closed, help: true, approvals: true, leader: true }),
+    "help",
+    "the surface rendered first owns the settle",
+  )
+  assert.equal(
+    overlayPresenceKey({ ...closed, picker: true, help: true }),
+    "picker",
+    "a dialog panel keeps precedence over the inbox surfaces",
+  )
+  assert.equal(
+    overlayPresenceKey({ ...closed, wizard: true, approvals: true }),
+    "wizard",
+    "the wizard keeps precedence over the inbox surfaces",
+  )
 })
