@@ -1495,7 +1495,17 @@ live_require_text "$LIVE_TUI_SESSION" "1 line" 10 "the statusline names the line
 live_key "$LIVE_TUI_SESSION" '$'
 live_assert_text "$LIVE_TUI_SESSION" "V-LINE  │ COMPOSER" "motions keep Visual Line active"
 live_key "$LIVE_TUI_SESSION" "y"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ COMPOSER" 10 "y copies and leaves Visual Line"
+# Ticket #119: copy feedback is the app-owned toast, anchored top-right, and
+# it never takes focus. The normal-mode statusline stays unchanged and the
+# following `p` still pastes before the toast auto-dismisses.
+live_require_text "$LIVE_TUI_SESSION" "Clipboard" 5 "copy feedback uses the app toast"
+toast_cell=$(live_capture "$LIVE_TUI_SESSION" | awk 'index($0, "Clipboard") { print NR " " index($0, "Clipboard"); exit }')
+[[ -n "$toast_cell" ]] || live_fail "copy toast disappeared before its placement could be read"
+read -r toast_row toast_col <<<"$toast_cell"
+[[ "$toast_row" -le 8 ]] || live_fail "copy toast is not near the top (row $toast_row)"
+[[ "$toast_col" -ge 90 ]] || live_fail "copy toast is not right-aligned at 160 columns (column $toast_col)"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ COMPOSER" 10 "copy toast does not steal composer focus"
+live_log "ticket #119 copy toast is top-right and leaves keys with the composer"
 live_key "$LIVE_TUI_SESSION" "p"
 sleep 0.5
 live_assert_count "$LIVE_TUI_SESSION" "vim visual line" 2 "a V-LINE yank pastes as whole lines"
