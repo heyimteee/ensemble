@@ -599,12 +599,12 @@ live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "WORK │" 15 "ephemeral work block mounts while active"
 live_require_text "$LIVE_TUI_SESSION" "│ FakeAgent │ working" 15 "work row loading state with assignee"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
-# Slice B: live activity lines animate across the named working frames
-# (◐◑◒◓). Bursts finalize in about half a second on this fixture, so a slow
-# capture cadence after further requires observes a single tick. Collect at
-# 0.15 s from the moment live work is known (the WORK row) across both
-# delegation bursts instead: the loop subsumes the "activity line while live"
-# wait, and zero frames means the line never rendered.
+# Slice B: live activity lines animate across the approved ten-frame Braille
+# working set (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏). Bursts finalize in about half a second on this
+# fixture, so a slow capture cadence after further requires observes a single
+# tick. Collect at 0.15 s from the moment live work is known (the WORK row)
+# across both delegation bursts instead: the loop subsumes the "activity line
+# while live" wait, and zero frames means the line never rendered.
 live_log "observing working-frame animation across ticks"
 seen_frames=0
 seen_which=""
@@ -612,7 +612,7 @@ collect_work_frames() {
   local rounds="${1:-16}" _ pane frame
   for _ in $(seq 1 "$rounds"); do
     pane=$(live_capture "$LIVE_TUI_SESSION")
-    for frame in "◐" "◑" "◒" "◓"; do
+    for frame in "⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"; do
       if grep -qF -- "${frame} FakeAgent │ working" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
         seen_which="${seen_which}${frame}"
         seen_frames=$((seen_frames + 1))
@@ -1595,8 +1595,8 @@ live_log "work-list o opens the selected work's native session"
 
 # Slice B reduced-motion run: restart the TUI with ENSEMBLE_REDUCED_MOTION=1
 # and prove live work renders static frame-0 glyphs only — the working
-# activity line stays on ◐, and no non-zero motion codepoint (◑◒◓◌▹▌)
-# appears across sustained captures while work is in flight.
+# activity line stays on ⠋, and no non-zero motion codepoint
+# (⠙⠹⠸⠼⠴⠦⠧⠇⠏▪▹▌) appears across sustained captures while work is in flight.
 live_log "restarting TUI under ENSEMBLE_REDUCED_MOTION=1"
 "$LIVE_TMUX_BIN" kill-session -t "$LIVE_TUI_SESSION" 2>/dev/null || true
 live_tmux_env_add "ENSEMBLE_REDUCED_MOTION=1"
@@ -1610,12 +1610,12 @@ live_require_text "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leav
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "◐ FakeAgent │ working…" 15 "frame-0 activity line under reduced motion"
+live_require_text "$LIVE_TUI_SESSION" "⠋ FakeAgent │ working…" 15 "frame-0 activity line under reduced motion"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 for _ in $(seq 1 8); do
   pane=$(live_capture "$LIVE_TUI_SESSION")
-  for glyph in "◑" "◒" "◓" "◌" "▹" "▌"; do
+  for glyph in "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏" "▪" "▹" "▌"; do
     grep -qF -- "$glyph" <<<"$pane" && live_fail "reduced-motion run animated (saw $glyph)"
   done
   sleep 0.3
