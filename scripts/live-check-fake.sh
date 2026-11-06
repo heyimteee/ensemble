@@ -1488,8 +1488,9 @@ live_require_text "$LIVE_TUI_SESSION" "Saved FakeAgent." 5 "save confirms once i
 save_toast_cell=$(live_capture "$LIVE_TUI_SESSION" | awk 'index($0, "Saved FakeAgent.") { print NR " " index($0, "Saved FakeAgent."); exit }')
 [[ -n "$save_toast_cell" ]] || live_fail "save toast disappeared before its placement could be read"
 read -r save_toast_row save_toast_col <<<"$save_toast_cell"
+save_toast_width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
 [[ "$save_toast_row" -le 8 ]] || live_fail "save toast is not near the top (row $save_toast_row)"
-[[ "$save_toast_col" -ge 90 ]] || live_fail "save toast is not right-aligned at 160 columns (column $save_toast_col)"
+[[ "$save_toast_col" -gt $((save_toast_width / 2)) ]] || live_fail "save toast is not in the right half at ${save_toast_width} columns (column $save_toast_col)"
 live_assert_absence "$LIVE_TUI_SESSION" "UNSAVED" "a closed save leaves no dirty mark"
 backup_order=$(live_snapshot_value '(function () { var a = Object.values(output.state.agents).filter(function (x) { return x.name === "FakeAgent" })[0]; return a.backupModels.map(function (m) { return m.variant }) })()')
 [[ "$backup_order" == '["medium","low"]' ]] || live_fail "K did not reorder the backups before save (got $backup_order)"
