@@ -5,6 +5,7 @@
  * completion popup. Wizard navigation keys live in the shared dialog catalog.
  */
 import type { InteractionEvent } from "./interaction.ts"
+import { isReducedMotion } from "./motion.ts"
 import { chromeJoin } from "./separators.ts"
 
 export type WizardEnterAction = "select" | "continue" | "submit" | "text"
@@ -96,6 +97,42 @@ export function wizardDraftDirty(initial: WizardDraft, current: WizardDraft): bo
   )
 }
 
+export type WizardValidationModel = { key: string; variants: readonly string[] }
+
+export type WizardValidationInput = {
+  flow: "workspace" | "agent"
+  draft: WizardDraft
+  agentNames: readonly string[]
+  models: readonly WizardValidationModel[]
+}
+
+/** The first validation failure plus the step key it belongs to. Pure. */
+export type WizardValidation = { error: string | undefined; stepKey: string }
+
+/**
+ * Validate the complete draft at submit time. The draft is read-only here:
+ * a failure jumps the wizard to `stepKey` and keeps every entered value.
+ */
+export function wizardValidation(input: WizardValidationInput): WizardValidation {
+  const { flow, draft } = input
+  const invalid = (error: string, stepKey: string): WizardValidation => ({ error, stepKey })
+  if (flow === "workspace") {
+    if (!draft.directory.trim()) return invalid("Choose a workspace directory.", "directory")
+    if (!draft.name.trim()) return invalid("Workspace name is required.", "name")
+    if (draft.memberIDs.length === 0) return invalid("Choose at least one member.", "members")
+    if (!draft.leaderID || !draft.memberIDs.includes(draft.leaderID)) return invalid("Choose a leader from the selected members.", "leader")
+    return { error: undefined, stepKey: "" }
+  }
+  if (!draft.name.trim()) return invalid("Agent name is required.", "name")
+  if (!draft.role.trim()) return invalid("Agent role is required.", "role")
+  if (!draft.modelKey) return invalid("Choose a main model.", "model")
+  const normalizedName = draft.name.trim().toLowerCase()
+  if (input.agentNames.some((name) => name.toLowerCase() === normalizedName)) return invalid("An agent with that name already exists.", "name")
+  const model = input.models.find((item) => item.key === draft.modelKey)
+  if (model && model.variants.length > 0 && !model.variants.includes(draft.variant)) return invalid("Choose a reasoning effort.", "variant")
+  return { error: undefined, stepKey: "" }
+}
+
 /**
  * Step arrival is a focus move, never a mode move. A text step focuses its
  * field so Normal keeps a caret and Insert can type; a list step reports no
@@ -103,6 +140,48 @@ export function wizardDraftDirty(initial: WizardDraft, current: WizardDraft): bo
  */
 export function wizardStepArrival(kind: string | undefined): InteractionEvent {
   return kind === "text" ? { type: "field.enter", target: "wizard" } : { type: "field.leave" }
+}
+
+/**
+ * One-line step rail: one terminal cell per step. Completed steps stay filled,
+ * the current step is the larger mark, and upcoming steps stay hollow. The
+ * rail carries position only; the step title directly below announces the
+ * current step, so a narrow overlay never has to truncate labels.
+ */
+export const WIZARD_STEP_MARKS = { done: "▪", current: "▣", upcoming: "▫" } as const
+
+export function wizardStepRail(count: number, index: number): string {
+  const total = Math.max(0, Math.trunc(count))
+  if (total === 0) return ""
+  const current = Math.max(0, Math.min(total - 1, Math.trunc(index)))
+  const cells: string[] = []
+  for (let cell = 0; cell < total; cell++) {
+    cells.push(cell < current ? WIZARD_STEP_MARKS.done : cell === current ? WIZARD_STEP_MARKS.current : WIZARD_STEP_MARKS.upcoming)
+  }
+  return cells.join(" ")
+}
+
+/** Transient announcement shown when a step moves forward or back. */
+export function wizardStepAnnouncement(title: string | undefined, index: number, count: number): string {
+  const total = Math.max(0, Math.trunc(count))
+  const position = total === 0 ? 0 : Math.max(0, Math.min(total - 1, Math.trunc(index))) + 1
+  return title ? `Step ${position}/${total} · ${title}` : `Step ${position}/${total}`
+}
+
+/**
+ * The step transition is a short one-shot opacity settle, never geometry.
+ * Reduced motion (or No Color) pins the content at its final state, so the
+ * new step swaps instantly with no dim interval.
+ */
+export const WIZARD_STEP_SETTLE_MS = 140
+export const WIZARD_STEP_SETTLE_OPACITY = 0.55
+
+export function wizardStepSettleMs(env: NodeJS.ProcessEnv = process.env): number {
+  return isReducedMotion(env) ? 0 : WIZARD_STEP_SETTLE_MS
+}
+
+export function wizardStepSettleOpacity(settling: boolean): number {
+  return settling ? WIZARD_STEP_SETTLE_OPACITY : 1
 }
 
 /** Memory add/edit/delete only exist on the one-by-one memories step. */
@@ -139,4 +218,21 @@ export function clampWizardMemoryCursor(cursor: number, count: number): number {
 /** The exact texts to persist when the agent is created; an empty list skips. */
 export function wizardMemorySaveList(memories: readonly string[]): string[] {
   return memories.map((text) => text.trim()).filter((text) => text.length > 0)
+}
+
+export type WizardToast = { title: string; message: string; variant: "success" }
+export type WizardSuccessOutcome = "workspace-created" | "workspace-updated" | "agent-created"
+
+/**
+ * One success toast per submitted wizard outcome. The caller shows it only
+ * after the workspace or agent operation actually succeeds, so a failed
+ * create never claims success. The transport is the app's toast surface.
+ */
+export function wizardSuccessToast(outcome: WizardSuccessOutcome, name: string, memories = 0): WizardToast {
+  const message = outcome === "workspace-created"
+    ? `#${name} created.`
+    : outcome === "workspace-updated"
+      ? `#${name} updated.`
+      : `${name} created. Opening a direct chat.${memories > 0 ? ` Saved ${memories} ${memories === 1 ? "memory" : "memories"}.` : ""}`
+  return { title: "Ensemble", message, variant: "success" }
 }

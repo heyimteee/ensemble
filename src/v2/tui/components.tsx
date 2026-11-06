@@ -30,6 +30,7 @@ import {
   approvalsEmptyLine,
   helpEmptyLine,
   pickerEmptyLine,
+  railBusyMark,
   railEmptyLine,
 } from "./chrome.ts"
 import { helpEntryKey, type HelpEntry, type HelpSection } from "./help.ts"
@@ -294,6 +295,7 @@ export function Rail(props: {
   pendingApprovals: number
   width: number
   filter: string
+  motionTick?: number
 }) {
   return (
     <box id={MOUSE_PANE_IDS.rail} width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
@@ -338,7 +340,7 @@ export function Rail(props: {
                   <text fg={props.colors.leader} bg={props.colors.bg} flexShrink={0} attributes={TextAttributes.BOLD}>LEADER</text>
                 </Show>
                 <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
-                <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ◐{busy}</text></Show>
+                <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> {railBusyMark(busy, props.motionTick ?? 0, process.env)}</text></Show>
                 <Show when={unread > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> ●{unread}</text></Show>
               </box>
               <Show when={item.kind === "agent"}>
@@ -362,14 +364,14 @@ export function Rail(props: {
 }
 
 
-export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cursor: number; resolvingID: string | null; state: SnapshotState | null; onResolve: (approval: Approval) => Promise<void> }) {
+export function ApprovalList(props: { colors: Palette; approvals: Approval[]; cursor: number; resolvingID: string | null; state: SnapshotState | null; onResolve: (approval: Approval) => Promise<void>; motionTick?: number }) {
   return (
     <box flexDirection="column">
       <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>Approvals inbox</text>
       <Show when={props.approvals.length === 0}><text fg={props.colors.muted}>{approvalsEmptyLine()}</text></Show>
       <For each={props.approvals}>{(approval, index) => (
         <box flexDirection="column">
-          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}[{approvalSourceTag(approvalSource(approval))}] {approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id)}</text>
+          <text fg={props.cursor === index() ? props.colors.good : props.colors.warn} bg={props.colors.bg} width="100%" truncate>{props.cursor === index() ? "› " : "  "}[{approvalSourceTag(approvalSource(approval))}] {approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)}</text>
           <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
         </box>
       )}</For>

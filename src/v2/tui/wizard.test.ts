@@ -3,6 +3,8 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { initialInteractionState, insertWithoutTarget, interactionReducer } from "./interaction.ts"
 import {
+  WIZARD_STEP_SETTLE_MS,
+  WIZARD_STEP_SETTLE_OPACITY,
   addWizardMemory,
   clampWizardMemoryCursor,
   deleteWizardMemory,
@@ -16,7 +18,13 @@ import {
   wizardModelKeyFor,
   wizardModelOptions,
   wizardMemorySaveList,
+  wizardStepAnnouncement,
   wizardStepArrival,
+  wizardStepRail,
+  wizardStepSettleMs,
+  wizardStepSettleOpacity,
+  wizardSuccessToast,
+  wizardValidation,
 } from "./wizard.ts"
 
 test("overlay geometry centers a bounded box and recomputes on resize", () => {
@@ -162,4 +170,84 @@ test("the app guards every memory action and the Enter path behind the memories 
     assert.ok(source.includes(`case "wizard.memory.${id}": if (wizardIsMemoryStep())`), `${id} action is guarded in runDialogAction`)
   }
   assert.ok(source.includes("wizardIsMemoryStep() && wizard()!.memoryEditor"), "a stale memory editor cannot swallow Enter on another step")
+})
+
+test("the wizard step rail is a single line of one-cell step marks around the current step", () => {
+  assert.equal(wizardStepRail(5, 0), "▣ ▫ ▫ ▫ ▫")
+  assert.equal(wizardStepRail(5, 2), "▪ ▪ ▣ ▫ ▫")
+  assert.equal(wizardStepRail(5, 4), "▪ ▪ ▪ ▪ ▣")
+  assert.equal(wizardStepRail(5, 99), "▪ ▪ ▪ ▪ ▣", "the current cell clamps to the last step")
+  assert.equal(wizardStepRail(5, -1), "▣ ▫ ▫ ▫ ▫", "the current cell clamps to the first step")
+  assert.equal(wizardStepRail(0, 0), "", "an empty wizard has no rail")
+  assert.ok(!wizardStepRail(6, 2).includes("\n"), "the rail is always one line")
+  assert.equal(wizardStepRail(6, 2).split(" ").length, 6, "one cell per step")
+})
+
+test("forward and back announce the new step title and position", () => {
+  assert.equal(wizardStepAnnouncement("Agent title", 1, 5), "Step 2/5 · Agent title")
+  assert.equal(wizardStepAnnouncement(undefined, 0, 5), "Step 1/5")
+  assert.equal(wizardStepAnnouncement("Workspace directory", 9, 5), "Step 5/5 · Workspace directory", "the position clamps")
+})
+
+test("the step settle is one shot and vanishes under reduced motion", () => {
+  assert.equal(wizardStepSettleMs({}), WIZARD_STEP_SETTLE_MS)
+  assert.ok(WIZARD_STEP_SETTLE_MS > 0 && WIZARD_STEP_SETTLE_MS <= 200, "the settle is short")
+  assert.equal(wizardStepSettleMs({ ENSEMBLE_REDUCED_MOTION: "1" }), 0)
+  assert.equal(wizardStepSettleMs({ NO_COLOR: "1" }), 0)
+  assert.equal(wizardStepSettleOpacity(true), WIZARD_STEP_SETTLE_OPACITY)
+  assert.equal(wizardStepSettleOpacity(false), 1)
+})
+
+test("workspace validation reports the first missing field without touching the draft", () => {
+  const valid = draft({ directory: "/tmp/project", name: "Site", memberIDs: ["a"], leaderID: "a" })
+  const before = structuredClone(valid)
+  assert.deepEqual(wizardValidation({ flow: "workspace", draft: valid, agentNames: [], models: [] }), { error: undefined, stepKey: "" })
+  assert.deepEqual(wizardValidation({ flow: "workspace", draft: draft({ directory: " " }), agentNames: [], models: [] }), { error: "Choose a workspace directory.", stepKey: "directory" })
+  assert.deepEqual(wizardValidation({ flow: "workspace", draft: draft({ name: "Site", memberIDs: [], leaderID: "" }), agentNames: [], models: [] }), { error: "Choose at least one member.", stepKey: "members" })
+  assert.deepEqual(wizardValidation({ flow: "workspace", draft: draft({ name: "Site", memberIDs: ["a"], leaderID: "b" }), agentNames: [], models: [] }), { error: "Choose a leader from the selected members.", stepKey: "leader" })
+  assert.deepEqual(valid, before, "validation never mutates the entered values")
+})
+
+test("agent validation checks required text, unique names, and the live model variants", () => {
+  const models = [{ key: "fake/m1", variants: ["low", "high"] }]
+  const valid = draft({ name: "Nova", role: "Engineer", modelKey: "fake/m1", variant: "low" })
+  assert.deepEqual(wizardValidation({ flow: "agent", draft: valid, agentNames: ["Other"], models }), { error: undefined, stepKey: "" })
+  assert.deepEqual(wizardValidation({ flow: "agent", draft: draft({ name: " ", role: "Engineer" }), agentNames: [], models }), { error: "Agent name is required.", stepKey: "name" })
+  assert.deepEqual(wizardValidation({ flow: "agent", draft: draft({ name: "Nova", role: " ", modelKey: "fake/m1" }), agentNames: [], models }), { error: "Agent role is required.", stepKey: "role" })
+  assert.deepEqual(wizardValidation({ flow: "agent", draft: draft({ name: "Nova", role: "Engineer", modelKey: "" }), agentNames: [], models }), { error: "Choose a main model.", stepKey: "model" })
+  assert.deepEqual(wizardValidation({ flow: "agent", draft: draft({ name: "nova", role: "Engineer", modelKey: "fake/m1" }), agentNames: ["Nova"], models }), { error: "An agent with that name already exists.", stepKey: "name" })
+  assert.deepEqual(wizardValidation({ flow: "agent", draft: draft({ name: "Nova", role: "Engineer", modelKey: "fake/m1", variant: "max" }), agentNames: [], models }), { error: "Choose a reasoning effort.", stepKey: "variant" })
+})
+
+test("submitted wizards use one success toast per outcome", () => {
+  assert.deepEqual(wizardSuccessToast("workspace-created", "Site"), { title: "Ensemble", message: "#Site created.", variant: "success" })
+  assert.deepEqual(wizardSuccessToast("workspace-updated", "Site"), { title: "Ensemble", message: "#Site updated.", variant: "success" })
+  assert.deepEqual(wizardSuccessToast("agent-created", "Nova"), { title: "Ensemble", message: "Nova created. Opening a direct chat.", variant: "success" })
+  assert.deepEqual(wizardSuccessToast("agent-created", "Nova", 2), { title: "Ensemble", message: "Nova created. Opening a direct chat. Saved 2 memories.", variant: "success" })
+})
+
+test("closing a wizard overlay in Insert restores the composer focus", () => {
+  let state = interactionReducer(initialInteractionState(), { type: "insert.enter" }).state
+  state = interactionReducer(state, { type: "overlay.set", overlay: "wizard" }).state
+  state = interactionReducer(state, { type: "field.enter", target: "wizard" }).state
+  state = interactionReducer(state, { type: "field.leave" }).state
+  const closed = interactionReducer(state, { type: "overlay.set", overlay: "none" })
+  assert.equal(closed.state.mode, "insert", "closing the wizard never assigns a mode")
+  assert.equal(closed.state.focus, "composer")
+  assert.deepEqual(closed.intents.at(-1), { type: "focus-editor", target: "composer" })
+})
+
+test("the wizard wires the rail, the one-shot settle, validation, and submit feedback", () => {
+  const source = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  assert.ok(source.includes("wizardStepRail(wizard()!.steps.length, wizard()!.index)"), "the header renders the current step rail")
+  assert.ok(source.includes("wizardStepSettleMs()"), "the settle duration follows reduced motion")
+  assert.ok(source.includes("opacity={wizardStepSettleOpacity(wizardSettling())}"), "only the content settles")
+  assert.ok(source.includes("notify(wizardStepAnnouncement("), "moving a step announces its title and position")
+  assert.ok(source.includes("wizardValidation({"), "submit uses the pure validation seam")
+  assert.ok(source.includes('notify(`Wizard: ${validation.error}`, "error")'), "validation failure announces once without a toast")
+  assert.ok(source.includes("if (wizard() !== state) return"), "a stale submit cannot close the wizard twice")
+  assert.ok(source.includes('! ${wizard()!.error}') && source.includes('wrapMode="word"'), "validation feedback wraps instead of truncating")
+  for (const outcome of ["workspace-created", "workspace-updated", "agent-created"]) {
+    assert.ok(source.includes(`showWizardToast(wizardSuccessToast("${outcome}"`), `${outcome} uses the app toast`)
+  }
 })

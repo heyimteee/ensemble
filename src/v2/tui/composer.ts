@@ -50,3 +50,60 @@ export function composerHeight(value: string, width: number, max = 8): number {
   const lines = value.split("\n").reduce((total, line) => total + Math.max(1, Math.ceil(line.length / usable)), 0)
   return Math.max(1, Math.min(max, lines))
 }
+
+/**
+ * One-shot validation feedback for the composer (ticket #123). An invalid
+ * command or failed submission starts this signal; the app keeps the draft
+ * and flashes the composer border. Typing or a successful send clears it.
+ *
+ * The signal is a pure reducer so the lifecycle is testable without a TUI.
+ */
+export type ComposerValidationState = {
+  /** The validation message that accompanied the one-shot border. */
+  message: string
+  /** Wall-clock start; the signal expires after COMPOSER_VALIDATION_MS. */
+  startedAt: number
+}
+
+export type ComposerValidationEvent =
+  | { type: "invalid"; message: string; at: number }
+  | { type: "input" }
+  | { type: "send-success" }
+  | { type: "tick"; at: number }
+
+/** Short, bounded lifetime of the bad-border state (one shot, never a loop). */
+export const COMPOSER_VALIDATION_MS = 1_000
+
+export function composerValidationReducer(
+  state: ComposerValidationState | null,
+  event: ComposerValidationEvent,
+): ComposerValidationState | null {
+  switch (event.type) {
+    case "invalid":
+      return { message: event.message, startedAt: event.at }
+    case "input":
+    case "send-success":
+      return null
+    case "tick":
+      if (!state) return null
+      return event.at - state.startedAt >= COMPOSER_VALIDATION_MS ? null : state
+  }
+}
+
+/**
+ * Border role for the active signal. Normal motion shows one bounded
+ * bad-to-default pulse (the first half of the window); reduced motion holds
+ * the bad color for the whole window without repeated movement. `undefined`
+ * means no signal is active.
+ */
+export function composerValidationBorder(
+  state: ComposerValidationState | null,
+  at: number,
+  reducedMotion = false,
+): "bad" | "default" | undefined {
+  if (!state) return undefined
+  const elapsed = at - state.startedAt
+  if (elapsed >= COMPOSER_VALIDATION_MS) return undefined
+  if (reducedMotion) return "bad"
+  return elapsed < COMPOSER_VALIDATION_MS / 2 ? "bad" : "default"
+}
