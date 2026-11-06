@@ -61,6 +61,18 @@ test("the rail stays transparent and renders the leader as inline colored text",
   assert.ok(!rail.includes("const selected = props.cursor === index()"), "the cursor is not captured as a one-time boolean")
 })
 
+test("ticket114: rail busy and resolving approvals render the shared Braille motion frame", () => {
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const rail = components.slice(components.indexOf("export function Rail"), components.indexOf("export function ApprovalList"))
+  const approvals = components.slice(components.indexOf("export function ApprovalList"))
+  assert.ok(rail.includes("railBusyMark(busy, props.motionTick ?? 0, process.env)"), "rail busy uses the shared Braille marker")
+  assert.ok(!rail.includes("◐"), "rail busy no longer draws a circle-family glyph")
+  assert.ok(approvals.includes("approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)"), "resolving approvals pass the motion tick")
+  assert.ok(app.includes("motionTick={motionFrame()}"), "the app threads the shared motion tick into chrome")
+  assert.ok(app.includes("resolvingApprovalID() !== null"), "an in-flight approval keeps the motion clock running")
+})
+
 test("ticket101: the composer submits through the shared skill planner", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   assert.ok(app.includes('from "../skill-invocation.ts"'), "the TUI imports the shared planner")
@@ -68,6 +80,33 @@ test("ticket101: the composer submits through the shared skill planner", () => {
   assert.ok(app.includes('const action = plan?.kind === "skills" ? "skill.send" : "message.send"'), "skill messages use the deliberate delivery action")
   assert.ok(app.includes('plan?.kind === "command" || plan?.kind === "init"'), "known commands still execute before send")
   assert.ok(!app.includes("slashCommands"), "one shared command catalog replaces the private palette list")
+})
+
+test("ticket120: every shell overlay fades in once without owning focus", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const overlays = readFileSync(new URL("./overlays.ts", import.meta.url), "utf8")
+  assert.ok(overlays.includes("export function overlayPresenceOpacity"), "the one-shot presence curve lives in the overlay helper seam")
+
+  const effectStart = app.indexOf("let overlayPresenceTimer")
+  const effectEnd = app.indexOf("const overlayOpacity", effectStart)
+  assert.ok(effectStart >= 0 && effectEnd > effectStart, "the presence effect and opacity accessor are present")
+  const effect = app.slice(effectStart, effectEnd)
+  assert.ok(effect.includes("setInterval"), "the settle advances on a timer")
+  assert.ok(effect.includes("clearInterval"), "the timer stops instead of looping")
+  assert.ok(effect.includes("isReducedMotion"), "reduced motion skips the ramp")
+  assert.ok(!effect.includes("dispatchInteraction"), "presence never changes focus, mode, overlay ownership, or keys")
+
+  assert.equal(
+    (app.match(/opacity=\{overlayOpacity\(\)\}/g) ?? []).length,
+    5,
+    "picker, prompt, confirm, result, and wizard share the settle",
+  )
+  assert.ok(app.includes('if (key === "none") return 1'), "closing restores full opacity immediately")
+  assert.equal(
+    (app.match(/opacity=\{overlayOpen\(\) \? 0\.35 : 1\}/g) ?? []).length,
+    3,
+    "the background panes stay dimmed while an overlay is open",
+  )
 })
 
 test("System Agent rows use one attribution source and never fall through to native /init", () => {

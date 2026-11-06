@@ -9,6 +9,7 @@
  */
 
 import { statuslineHints } from "./keymap.ts"
+import { effectiveTick, workingFrame } from "./motion.ts"
 import { chromeJoin, chromeSeparator } from "./separators.ts"
 
 /** Columns that can own the chat-surface focus. The composer is a distinct focus state (brief §2.10). */
@@ -78,6 +79,12 @@ export function railEmptyLine(): string {
   return chromeJoin(["No agents or workspaces yet. n new workspace", "a new agent"])
 }
 
+/** Rail busy count: one Braille working cell followed by the count. Empty at zero. Pure. */
+export function railBusyMark(count: number, tick = 0, env: NodeJS.ProcessEnv = process.env): string {
+  if (count <= 0) return ""
+  return `${workingFrame(effectiveTick(tick, env))}${count}`
+}
+
 /** Skill palette zero state: names the miss and the fix (filter without a dialog). */
 export function skillsEmptyLine(): string {
   return "No matching skills — refine filter."
@@ -103,9 +110,10 @@ export function dmEmptyDetail(): string {
   return "Send a direct message. It goes to this agent's native OpenCode session. i to compose."
 }
 
-/** Approval row suffix: `Resolving…` while that approval's resolve RPC is in flight, else empty. */
-export function approvalResolvingSuffix(resolving: boolean): string {
-  return resolving ? ` ${chromeSeparator()} Resolving…` : ""
+/** Approval row suffix: animated Braille `Resolving…` while that approval's resolve RPC is in flight, else empty. */
+export function approvalResolvingSuffix(resolving: boolean, tick = 0, env: NodeJS.ProcessEnv = process.env): string {
+  if (!resolving) return ""
+  return ` ${chromeSeparator()} ${workingFrame(effectiveTick(tick, env))} Resolving…`
 }
 
 /** Inbox origin tag: native host blocks read differently from product decisions. Pure. */

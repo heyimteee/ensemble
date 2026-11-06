@@ -1,6 +1,13 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { singleChoiceValue, filterEdit } from "./overlays.ts"
+import {
+  OVERLAY_PRESENCE_MS,
+  OVERLAY_PRESENCE_START,
+  OVERLAY_PRESENCE_STEP_MS,
+  filterEdit,
+  overlayPresenceOpacity,
+  singleChoiceValue,
+} from "./overlays.ts"
 
 test("single-choice picker resolves the focused item", () => {
   const items = [{ id: "a", label: "Alpha" }, { id: "b", label: "Beta" }]
@@ -21,4 +28,35 @@ test("inline skill filter edits the query without a dialog", () => {
 test("inline skill filter ignores modifier chords and multi-character sequences", () => {
   assert.deepEqual(filterEdit("a", { name: "", sequence: "b", ctrl: true }), { query: "a", done: false, cancelled: false })
   assert.deepEqual(filterEdit("a", { name: "", sequence: "Z?" }), { query: "a", done: false, cancelled: false })
+})
+
+test("overlay presence fades once from a quiet baseline to full opacity", () => {
+  assert.ok(OVERLAY_PRESENCE_MS > 0 && OVERLAY_PRESENCE_MS <= 250, "the settle is short")
+  assert.ok(OVERLAY_PRESENCE_START > 0 && OVERLAY_PRESENCE_START < 1, "the panel starts visibly faded")
+  assert.ok(OVERLAY_PRESENCE_STEP_MS > 0 && OVERLAY_PRESENCE_STEP_MS < OVERLAY_PRESENCE_MS, "the interval samples the settle")
+
+  assert.equal(overlayPresenceOpacity(0, {}), OVERLAY_PRESENCE_START)
+  let previous = OVERLAY_PRESENCE_START
+  for (let elapsed = OVERLAY_PRESENCE_STEP_MS; elapsed < OVERLAY_PRESENCE_MS; elapsed += OVERLAY_PRESENCE_STEP_MS) {
+    const current = overlayPresenceOpacity(elapsed, {})
+    assert.ok(current >= previous, `opacity never moves backwards at ${elapsed}ms`)
+    assert.ok(current < 1, `opacity is still settling at ${elapsed}ms`)
+    previous = current
+  }
+  assert.equal(overlayPresenceOpacity(OVERLAY_PRESENCE_MS, {}), 1)
+  assert.equal(overlayPresenceOpacity(OVERLAY_PRESENCE_MS + 1, {}), 1, "the settle ends, it does not loop")
+  assert.equal(overlayPresenceOpacity(OVERLAY_PRESENCE_MS * 100, {}), 1, "later ticks hold the final state")
+})
+
+test("overlay presence mounts at the final state under reduced motion", () => {
+  assert.equal(overlayPresenceOpacity(0, { ENSEMBLE_REDUCED_MOTION: "1" }), 1)
+  assert.equal(overlayPresenceOpacity(0, { ENSEMBLE_REDUCED_MOTION: "true" }), 1)
+  assert.equal(overlayPresenceOpacity(0, { NO_COLOR: "1" }), 1)
+  assert.equal(overlayPresenceOpacity(0, {}), OVERLAY_PRESENCE_START)
+})
+
+test("overlay presence treats negative and non-finite elapsed time as the mount frame", () => {
+  assert.equal(overlayPresenceOpacity(-50, {}), OVERLAY_PRESENCE_START)
+  assert.equal(overlayPresenceOpacity(Number.NaN, {}), OVERLAY_PRESENCE_START)
+  assert.equal(overlayPresenceOpacity(Number.POSITIVE_INFINITY, {}), 1)
 })
