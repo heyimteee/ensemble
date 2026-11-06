@@ -18,7 +18,6 @@ import {
   wizardModelKeyFor,
   wizardModelOptions,
   wizardMemorySaveList,
-  wizardStepAnnouncement,
   wizardStepArrival,
   wizardStepRail,
   wizardStepSettleMs,
@@ -183,12 +182,6 @@ test("the wizard step rail is a single line of one-cell step marks around the cu
   assert.equal(wizardStepRail(6, 2).split(" ").length, 6, "one cell per step")
 })
 
-test("forward and back announce the new step title and position", () => {
-  assert.equal(wizardStepAnnouncement("Agent title", 1, 5), "Step 2/5 · Agent title")
-  assert.equal(wizardStepAnnouncement(undefined, 0, 5), "Step 1/5")
-  assert.equal(wizardStepAnnouncement("Workspace directory", 9, 5), "Step 5/5 · Workspace directory", "the position clamps")
-})
-
 test("the step settle is one shot and vanishes under reduced motion", () => {
   assert.equal(wizardStepSettleMs({}), WIZARD_STEP_SETTLE_MS)
   assert.ok(WIZARD_STEP_SETTLE_MS > 0 && WIZARD_STEP_SETTLE_MS <= 200, "the settle is short")
@@ -242,7 +235,6 @@ test("the wizard wires the rail, the one-shot settle, validation, and submit fee
   assert.ok(source.includes("wizardStepRail(wizard()!.steps.length, wizard()!.index)"), "the header renders the current step rail")
   assert.ok(source.includes("wizardStepSettleMs()"), "the settle duration follows reduced motion")
   assert.ok(source.includes("opacity={wizardStepSettleOpacity(wizardSettling())}"), "only the content settles")
-  assert.ok(source.includes("notify(wizardStepAnnouncement("), "moving a step announces its title and position")
   assert.ok(source.includes("wizardValidation({"), "submit uses the pure validation seam")
   assert.ok(source.includes('notify(`Wizard: ${validation.error}`, "error")'), "validation failure announces once without a toast")
   assert.ok(source.includes("if (wizard() !== state) return"), "a stale submit cannot close the wizard twice")

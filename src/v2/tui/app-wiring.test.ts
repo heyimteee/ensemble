@@ -116,13 +116,18 @@ test("ticket120: every shell overlay fades in once without owning focus", () => 
   assert.ok(effect.includes("isReducedMotion"), "reduced motion skips the ramp")
   assert.ok(!effect.includes("dispatchInteraction"), "presence never changes focus, mode, overlay ownership, or keys")
 
-  const panelKeyStart = app.indexOf("const overlayPanelKey = ()")
+  const panelKeyStart = app.indexOf("const overlayPanelKey = createMemo(")
   const panelKeyEnd = app.indexOf("let overlayPresenceTimer", panelKeyStart)
-  assert.ok(panelKeyStart >= 0 && panelKeyEnd > panelKeyStart, "the presence panel key is present")
+  assert.ok(panelKeyStart >= 0 && panelKeyEnd > panelKeyStart, "the presence panel key is memoized")
   const panelKey = app.slice(panelKeyStart, panelKeyEnd)
   for (const panel of ["helpOpen()", "approvalsOpen()", "leaderPopup()"]) {
     assert.ok(panelKey.includes(panel), `the presence key includes ${panel}`)
   }
+  assert.ok(panelKey.includes("wizard: wizard() !== null"), "wizard ownership is part of the presence key")
+  assert.ok(
+    !app.includes("const overlayPanelKey = ()"),
+    "the key is a memo, so unrelated wizard state updates cannot restart the one-shot presence settle",
+  )
   assert.equal(
     (app.match(/opacity=\{overlayOpacity\(\)\}/g) ?? []).length,
     8,

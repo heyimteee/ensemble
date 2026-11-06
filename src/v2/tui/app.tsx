@@ -41,7 +41,6 @@ import {
   wizardModelKeyFor,
   wizardModelOptions,
   wizardMemorySaveList,
-  wizardStepAnnouncement,
   wizardStepArrival,
   wizardStepRail,
   wizardStepSettleMs,
@@ -1291,7 +1290,11 @@ export function EnsembleV2App() {
   // geometry, layout, focus, mode, overlay ownership, or key routing moves.
   // Close clears the timer and resets the baseline so repeated open/close
   // cannot leave stale translucency; reduced motion mounts at full opacity.
-  const overlayPanelKey = () => presencePanelKey({
+  // The key is memoized so unrelated state churn inside an open panel (a
+  // wizard filter keystroke, approvals list refresh) cannot restart the
+  // one-shot presence settle or leave the panel translucent. Only a change of
+  // the owning panel produces a new key.
+  const overlayPanelKey = createMemo(() => presencePanelKey({
     picker: picker() !== null,
     prompt: textPrompt() !== null,
     confirm: confirm() !== null,
@@ -1300,7 +1303,7 @@ export function EnsembleV2App() {
     help: helpOpen(),
     approvals: approvalsOpen(),
     leader: leaderPopup(),
-  })
+  }))
   let overlayPresenceTimer: ReturnType<typeof setInterval> | undefined
   const stopOverlayPresence = () => {
     if (overlayPresenceTimer === undefined) return
@@ -4117,7 +4120,6 @@ export function EnsembleV2App() {
     wizardMemoryRef = null
     setWizard(next)
     syncWizardMode(next)
-    notify(wizardStepAnnouncement(next.steps[next.index]?.title, next.index, next.steps.length), "info")
   }
 
   const wizardNext = () => {
@@ -4144,7 +4146,6 @@ export function EnsembleV2App() {
       const next = { ...state, customDirectory: false, query: "", filtering: false, cursor: 0, error: undefined }
       setWizard(next)
       syncWizardMode(next)
-      notify(wizardStepAnnouncement(next.steps[next.index]?.title, next.index, next.steps.length), "info")
       return
     }
     const step = wizardStep()
@@ -4167,7 +4168,6 @@ export function EnsembleV2App() {
     wizardMemoryRef = null
     setWizard(previous)
     syncWizardMode(previous)
-    notify(wizardStepAnnouncement(previous.steps[previous.index]?.title, previous.index, previous.steps.length), "info")
   }
 
   const wizardMove = (delta: number) => {
