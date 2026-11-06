@@ -79,6 +79,14 @@ export type Workspace = {
 export type InitJobState = "running" | "succeeded" | "failed" | "interrupted" | "cancelled"
 
 /**
+ * One honest init stage (ticket #118). `running` covers the opaque native
+ * `/init` call: it never carries a fabricated percentage or within-stage
+ * progress. `reporting` is entered by every terminal path before its explicit
+ * report settles.
+ */
+export type InitPhase = "starting" | "running" | "writing" | "reporting"
+
+/**
  * Durable workspace init job (ticket #100). Not a Subtask: it never enters
  * the work queue. It owns the System Agent transcript row and the temporary
  * native session that runs native `/init`.
@@ -89,6 +97,10 @@ export type InitJob = {
   messageID: Id
   sessionID?: Id
   state: InitJobState
+  /** Current lifecycle stage; absent on jobs persisted before ticket #118. */
+  phase?: InitPhase
+  /** Stages entered in order, including the current one. */
+  phases?: InitPhase[]
   /** AGENTS.md captured before the run; null means the file did not exist. */
   previousAgentsMD: string | null
   error?: string

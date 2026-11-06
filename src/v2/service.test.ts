@@ -8,7 +8,7 @@ import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
-import { INIT_START_TEXT, SYSTEM_AGENT_NAME } from "./system-agent.ts"
+import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME } from "./system-agent.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -1462,6 +1462,75 @@ test("init runs as a visible System Agent job and publishes the full report", as
   }
 })
 
+test("init carries the starting, running, writing, reporting phases in order", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  let releaseCreate: (() => void) | undefined
+  const createParked = new Promise<void>((resolve) => { releaseCreate = resolve })
+  ;(ctx.session as any).create = async ({ title }: any) => {
+    await createParked
+    return { data: { id: "session_phase", title } }
+  }
+  let releaseWait: (() => void) | undefined
+  const waitParked = new Promise<void>((resolve) => { releaseWait = resolve })
+  ;(ctx.session as any).wait = async () => { await waitParked }
+  ;(ctx.session as any).context = async () => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Native init inspected the repo." }] }],
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const init = await handlers.invoke({ directory, action: "workspace.init", payload: { id: workspace.result.id, text: "/init" } })
+    assert.equal(init.ok, true)
+
+    const starting = await handlers.snapshot({ directory })
+    const startJob = starting.state.initJobs[init.result.jobID]
+    assert.equal(startJob.state, "running")
+    assert.equal(startJob.phase, "starting")
+    assert.deepEqual(startJob.phases, ["starting"])
+    const startMessage = starting.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
+    assert.ok(startMessage)
+    assert.equal(startMessage.text, INIT_START_TEXT)
+    assert.equal(startMessage.streaming, true)
+    assert.equal(String(startMessage.text).includes("%"), false)
+
+    releaseCreate?.()
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.initJobs[init.result.jobID]?.phase === "running"
+    })
+    const running = await handlers.snapshot({ directory })
+    const runningJob = running.state.initJobs[init.result.jobID]
+    assert.equal(runningJob.state, "running")
+    assert.deepEqual(runningJob.phases, ["starting", "running"])
+    const runningMessage = running.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
+    assert.ok(runningMessage)
+    assert.equal(runningMessage.text, INIT_PROGRESS_TEXT)
+    assert.equal(runningMessage.streaming, true)
+
+    releaseWait?.()
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.initJobs[init.result.jobID]?.state === "succeeded"
+    }, 3000)
+    const final = await handlers.snapshot({ directory })
+    const job = final.state.initJobs[init.result.jobID]
+    assert.equal(job.phase, "reporting")
+    assert.deepEqual(job.phases, ["starting", "running", "writing", "reporting"])
+    const report = final.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
+    assert.ok(report)
+    assert.equal(report.streaming, false)
+    assert.match(report.text, /Ensemble init complete/)
+  } finally {
+    releaseCreate?.()
+    releaseWait?.()
+    await stop()
+  }
+})
+
 test("init streams native worker text into the System Agent message before finalizing", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx, emitEvent } = fakeContext()
@@ -1697,6 +1766,8 @@ test("failed init removes AGENTS.md that did not exist and reports the failure",
     const failedJob = final.state.initJobs[init.result.jobID]
     assert.ok(failedJob.error)
     assert.match(failedJob.error, /agent failed/)
+    assert.equal(failedJob.phase, "reporting")
+    assert.deepEqual(failedJob.phases, ["starting", "running", "reporting"])
     assert.equal(existsSync(join(directory, "AGENTS.md")), false)
     const report = final.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
     assert.ok(report)
@@ -1766,7 +1837,7 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
   await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
   await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: "Initializing workspace…", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
   await seed.saveMessage({ id: "other", workspaceID: "w", seq: 2, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: INIT_START_TEXT, kind: "text", createdAt: 2 })
-  await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", previousAgentsMD: previous, startedAt: 1 })
+  await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", phase: "running", phases: ["starting", "running"], previousAgentsMD: previous, startedAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -1775,12 +1846,15 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
     assert.equal(after.state.initJobs.init_1.state, "interrupted")
     assert.ok(after.state.initJobs.init_1.error)
     assert.match(after.state.initJobs.init_1.error, /restart/i)
+    assert.equal(after.state.initJobs.init_1.phase, "reporting")
+    assert.deepEqual(after.state.initJobs.init_1.phases, ["starting", "running", "reporting"])
     const message = after.state.messages.w.find((item: any) => item.id === "m")
     assert.ok(message)
     assert.equal(message.streaming, false)
     assert.equal(message.interrupted, true)
     assert.match(message.text, /restart/i)
     assert.match(message.text, /rerun/i)
+    assert.match(message.text, /restored/i)
     const unrelated = after.state.messages.w.find((item: any) => item.id === "other")
     assert.ok(unrelated)
     assert.equal(unrelated.interrupted, undefined, "reconciliation only settles the running init job's row")
@@ -1825,6 +1899,8 @@ test("workspace archive cancels an active init, restores AGENTS.md, and removes 
     assert.equal(job.state, "cancelled")
     assert.ok(job.error)
     assert.match(job.error, /archiv/i)
+    assert.equal(job.phase, "reporting")
+    assert.deepEqual(job.phases, ["starting", "running", "reporting"])
     const message = after.state.messages[workspace.result.id].find((item: any) => item.id === init.result.messageID)
     assert.ok(message)
     assert.equal(message.streaming, false)

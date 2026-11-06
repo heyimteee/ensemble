@@ -5,7 +5,7 @@ import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
 import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
-import { INIT_COMMAND, INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initSuccessReport } from "./system-agent.ts"
+import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
@@ -21,6 +21,7 @@ import type {
   Approval,
   DmQueueEntry,
   InitJob,
+  InitPhase,
   Memory,
   MemoryScope,
   Message,
@@ -95,6 +96,14 @@ function sameModel(a: ModelRef, b: ModelRef): boolean {
 
 function sameModels(a: ModelRef[], b: ModelRef[]): boolean {
   return a.length === b.length && a.every((model, index) => sameModel(model, b[index]))
+}
+
+/** Record one init stage without duplicating consecutive entries or dropping history. */
+function recordInitPhase(job: InitJob, phase: InitPhase): void {
+  const phases = job.phases ? [...job.phases] : job.phase ? [job.phase] : []
+  if (phases[phases.length - 1] !== phase) phases.push(phase)
+  job.phase = phase
+  job.phases = phases
 }
 
 /**
@@ -1125,6 +1134,8 @@ export class EnsembleV2Service {
       workspaceID: workspace.id,
       messageID: message.id,
       state: "running",
+      phase: "starting",
+      phases: ["starting"],
       previousAgentsMD,
       startedAt: now(),
     }
@@ -1150,13 +1161,16 @@ export class EnsembleV2Service {
       if (job.state !== "running") continue
       const workspace = state.workspaces[job.workspaceID]
       if (workspace) this.restoreAgentsFile(workspace.directory, job)
+      recordInitPhase(job, "reporting")
+      const report = initInterruptedReport(job.previousAgentsMD !== null)
       const message = this.initMessage(state, job)
       if (message) {
-        settleStreamMessage(message, "Ensemble init was interrupted by a service restart. Rerun /init.", true)
+        settleStreamMessage(message, report, true)
         await this.store.saveMessage(message)
       }
       job.state = "interrupted"
       job.error = "Ensemble restarted while init was running."
+      job.report = report
       job.finishedAt = now()
       await this.store.saveInitJob(job)
       if (job.sessionID) await this.ctx.session.remove({ sessionID: job.sessionID }).catch(() => undefined)
@@ -1179,6 +1193,26 @@ export class EnsembleV2Service {
       // Best-effort rollback: the failure report still names the intended
       // state. A read-only checkout cannot be repaired by the service.
     }
+  }
+
+  /** Move a live init job to a stage and persist it before doing that stage's work. */
+  private async advanceInitPhase(jobID: string, phase: InitPhase): Promise<InitJob | undefined> {
+    const state = this.store.snapshot()
+    const job = state.initJobs[jobID]
+    if (!job || job.state !== "running") return undefined
+    recordInitPhase(job, phase)
+    await this.store.saveInitJob(job)
+    return job
+  }
+
+  /** Replace the live System Agent row text for a stage; the job owns liveness. */
+  private async updateInitRow(job: InitJob, text: string): Promise<void> {
+    const message = this.initMessage(this.store.snapshot(), job)
+    if (!message) return
+    message.text = text
+    message.streaming = true
+    message.updatedAt = now()
+    await this.store.saveMessage(message)
   }
 
   private async runInit(jobID: string): Promise<void> {
@@ -1213,13 +1247,14 @@ export class EnsembleV2Service {
         return
       }
       claimed.sessionID = sessionID
+      recordInitPhase(claimed, "running")
       await this.store.saveInitJob(claimed)
       const message = this.initMessage(this.store.snapshot(), claimed)
       const registration = registerLiveSlot(this.liveBySession, sessionID, now())
       if (registration.orphaned) {
         await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || "Reply interrupted.", true, globalEpoch, workspaceEpoch, workspace.id)
       }
-      const progress = INIT_PROGRESS_TEXT
+      const progress = initPhaseText("running")
       if (message) {
         message.text = progress
         message.streaming = true
@@ -1239,22 +1274,36 @@ export class EnsembleV2Service {
       const currentWorkspace = current.workspaces[claimed.workspaceID]
       if (!currentJob || currentJob.state !== "running" || !currentWorkspace) return
       if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(claimed.workspaceID) ?? 0) !== workspaceEpoch) return
+      const writing = await this.advanceInitPhase(jobID, "writing")
+      if (!writing) return
+      await this.updateInitRow(writing, initPhaseText("writing"))
+      if (run.cancelled) {
+        this.restoreAgentsFile(currentWorkspace.directory, writing)
+        return
+      }
       writeAgentsBlock(currentWorkspace.directory, ensembleBlock())
       writeInitMetadata(currentWorkspace.directory, ENSEMBLE_BLOCK_VERSION)
       if (run.cancelled) {
-        this.restoreAgentsFile(currentWorkspace.directory, currentJob)
+        this.restoreAgentsFile(currentWorkspace.directory, writing)
+        return
+      }
+      const reporting = await this.advanceInitPhase(jobID, "reporting")
+      if (!reporting) return
+      await this.updateInitRow(reporting, initPhaseText("reporting"))
+      if (run.cancelled) {
+        this.restoreAgentsFile(currentWorkspace.directory, reporting)
         return
       }
       const report = initSuccessReport(currentWorkspace.directory, result.text)
-      currentJob.state = "succeeded"
-      currentJob.report = report
-      currentJob.finishedAt = now()
-      currentJob.error = undefined
+      reporting.state = "succeeded"
+      reporting.report = report
+      reporting.finishedAt = now()
+      reporting.error = undefined
       // Mark the job terminal before awaiting storage so a concurrent delete
       // or archive sees a finished job and cannot half-cancel the write.
-      await this.store.saveInitJob(currentJob)
+      await this.store.saveInitJob(reporting)
       const latest = this.store.snapshot()
-      const messageNow = this.initMessage(latest, currentJob)
+      const messageNow = this.initMessage(latest, reporting)
       if (messageNow) {
         settleStreamMessage(messageNow, report, false)
         await this.store.saveMessage(messageNow)
@@ -1273,6 +1322,7 @@ export class EnsembleV2Service {
     if (!job || job.state !== "running") return
     const workspace = state.workspaces[job.workspaceID]
     if (workspace) this.restoreAgentsFile(workspace.directory, job)
+    recordInitPhase(job, "reporting")
     const report = initFailureReport(message, job.previousAgentsMD !== null)
     job.state = "failed"
     job.error = message
@@ -1298,6 +1348,7 @@ export class EnsembleV2Service {
     const sessionID = current.sessionID ?? run?.sessionID
     const workspace = snapshot.workspaces[current.workspaceID]
     if (workspace) this.restoreAgentsFile(workspace.directory, current)
+    recordInitPhase(current, "reporting")
     const report = initCancelReport(reason, current.previousAgentsMD !== null)
     current.state = "cancelled"
     current.error = reason

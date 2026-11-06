@@ -5,10 +5,11 @@ import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChatContext, ChatMessage, InitJobState, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
-import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
+import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
 import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceGroupLabel, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import {
@@ -709,6 +710,18 @@ export function EnsembleV2App() {
   const orderedTasks = createMemo(() => orderedWorkItems(activeTasks(), Date.now()))
   const selectedTask = createMemo(() => orderedTasks()[taskCursor()])
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
+  // Ticket #118: the System Agent init row is a live, staged row. It belongs
+  // to the workspace surface, survives navigation through snapshot state, and
+  // shows only honest stages. The ids keep the generic streaming-activity
+  // line from duplicating the same System Agent job.
+  const liveInitJobs = createMemo(() => {
+    if (surface()?.kind !== "workspace") return []
+    const workspace = activeWorkspace()
+    if (!workspace) return []
+    return activeInitJobs(state()?.initJobs ?? {}, workspace.id)
+  })
+  const initRows = createMemo(() => liveInitJobs().map((job) => initRowForJob(job, motionFrame(), process.env)))
+  const initRowMessageIDs = createMemo(() => initJobMessageIDs(state()?.initJobs ?? {}, surface()?.kind === "workspace" ? activeWorkspace()?.id : undefined))
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
   // Ticket #126: one-shot inbox transitions. The first snapshot is the
   // baseline; later arrivals emphasize once and resolved rows settle once.
@@ -916,6 +929,9 @@ export function EnsembleV2App() {
   // items fold into the transcript in place with no duplicates or stale
   // lines. The transcript scrollbox keeps a stable identity throughout.
   const liveMessages = createMemo(() => splitTranscript().live.filter((line) => {
+    // The dedicated init row owns this System Agent stream; the generic
+    // activity line would be a duplicate and could not show phases.
+    if (initRowMessageIDs().has(line.id)) return false
     if (!line.taskID) return true
     const task = state()?.subtasks[line.taskID]
     return Boolean(task && !isTerminalWorkStatus(deriveWorkStatus(task, Date.now())))
@@ -1107,6 +1123,7 @@ export function EnsembleV2App() {
   const hasChatContent = createMemo(
     () =>
       finalizedLines().length > 0 ||
+      liveInitJobs().length > 0 ||
       liveMessages().length > 0 ||
       completionMap().size > 0 ||
       (showWorkBlock() ?? false) ||
@@ -3129,7 +3146,7 @@ export function EnsembleV2App() {
     shouldRunMotion(
       {
         busy: isBusy() || resolvingApprovalID() !== null,
-        live: liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
+        live: liveInitJobs().length > 0 || liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
         composerActive: composerActive() || composerValidation() !== null,
       },
       process.env,
@@ -5171,6 +5188,13 @@ export function EnsembleV2App() {
                               <Show when={liveActivity().overflow > 0}>
                                 <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{liveActivity().overflow} more</text>
                               </Show>
+                            </box>
+                          </Show>
+                          <Show when={initRows().length > 0}>
+                            <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1}>
+                              <For each={initRows()}>{(row) => (
+                                <InitRowView colors={colors} row={row} />
+                              )}</For>
                             </box>
                           </Show>
                           <Show when={showWorkBlock()}>
