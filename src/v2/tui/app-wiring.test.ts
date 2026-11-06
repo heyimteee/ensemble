@@ -96,10 +96,17 @@ test("ticket120: every shell overlay fades in once without owning focus", () => 
   assert.ok(effect.includes("isReducedMotion"), "reduced motion skips the ramp")
   assert.ok(!effect.includes("dispatchInteraction"), "presence never changes focus, mode, overlay ownership, or keys")
 
+  const panelKeyStart = app.indexOf("const overlayPanelKey = ()")
+  const panelKeyEnd = app.indexOf("let overlayPresenceTimer", panelKeyStart)
+  assert.ok(panelKeyStart >= 0 && panelKeyEnd > panelKeyStart, "the presence panel key is present")
+  const panelKey = app.slice(panelKeyStart, panelKeyEnd)
+  for (const panel of ["helpOpen()", "approvalsOpen()", "leaderPopup()"]) {
+    assert.ok(panelKey.includes(panel), `the presence key includes ${panel}`)
+  }
   assert.equal(
     (app.match(/opacity=\{overlayOpacity\(\)\}/g) ?? []).length,
-    5,
-    "picker, prompt, confirm, result, and wizard share the settle",
+    8,
+    "picker, prompt, confirm, result, wizard, help, approvals, and leader which-key share the settle",
   )
   assert.ok(app.includes('if (key === "none") return 1'), "closing restores full opacity immediately")
   assert.equal(
@@ -107,6 +114,49 @@ test("ticket120: every shell overlay fades in once without owning focus", () => 
     3,
     "the background panes stay dimmed while an overlay is open",
   )
+})
+
+test("ticket121: rail attention pulses once and settles without owning focus", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  const rail = components.slice(components.indexOf("export function Rail"), components.indexOf("export function ApprovalList"))
+
+  const effectStart = app.indexOf("const railAttentionInput")
+  const effectEnd = app.indexOf("const commandTarget", effectStart)
+  assert.ok(effectStart >= 0 && effectEnd > effectStart, "the rail attention effect is present")
+  const effect = app.slice(effectStart, effectEnd)
+  assert.ok(effect.includes("observeRailAttention"), "transitions come from the pure rail seam")
+  assert.ok(effect.includes("railEmphasisAt"), "active emphasis is resolved from one-shot starts")
+  assert.ok(effect.includes("setInterval"), "pulses advance on a timer")
+  assert.ok(effect.includes("clearInterval"), "the pulse timer stops when the window closes")
+  assert.ok(effect.includes("isReducedMotion"), "reduced motion never starts a pulse")
+  assert.ok(!effect.includes("dispatchInteraction"), "rail attention never changes focus, mode, or key routing")
+  assert.ok(app.includes("emphasis={railEmphasis()}"), "the app threads one-shot emphasis into the rail")
+
+  assert.ok(rail.includes("props.emphasis?.unread.has(item.id)"), "unread growth pulses the count")
+  assert.ok(rail.includes("props.emphasis?.approval"), "the approval count pulses")
+  assert.ok(rail.includes("props.emphasis?.arrivals.has(railRowKey(item.kind, item.id))"), "new rows use the quiet arrival set")
+  assert.ok(rail.includes("const rowTone = () => selected() ? props.colors.good"), "selection wins over arrival emphasis")
+  assert.ok(rail.includes("const selected = () => props.cursor === index()"), "the rail cursor stays reactive between polls")
+  assert.equal((rail.match(/borderColor=/g) ?? []).length, 1, "the rail keeps one focus border")
+  assert.ok(rail.includes("railBusyMark(busy, props.motionTick ?? 0, process.env)"), "the Braille busy count is unchanged")
+})
+
+test("ticket126: approvals render arrival emphasis, Braille resolving, and a one-shot resolution settle", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const components = readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
+  const approvals = components.slice(components.indexOf("export function ApprovalList"))
+
+  assert.ok(app.includes("updateApprovalInboxMotion("), "the app tracks approval arrivals and resolutions")
+  assert.ok(app.includes("approvalMotion().emphasized"), "the inbox receives the one-shot arrival set")
+  assert.ok(app.includes("approvalMotion().resolved"), "the inbox receives the recent resolution settle")
+  assert.ok(app.includes("motionTick={motionFrame()}"), "the Braille resolve frame keeps the shared motion tick")
+
+  assert.ok(approvals.includes("props.emphasized.has(approval.id)"), "a newly arrived approval gets the one-shot emphasis")
+  assert.ok(approvals.includes("approvalResolvingSuffix("), "the resolving row keeps its Braille state")
+  assert.ok(approvals.includes("approvalResolvedLine("), "resolved rows render their settle line")
+  assert.ok(approvals.includes("approvalResolvedTone("), "resolved rows settle their tone once")
+  assert.ok(approvals.includes("props.resolved"), "the inbox renders recent resolved rows")
 })
 
 test("System Agent rows use one attribution source and never fall through to native /init", () => {

@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import {
+  approvalResolvedLine,
   approvalResolvingSuffix,
   approvalsEmptyLine,
   chromeOwnsFocus,
@@ -100,6 +101,11 @@ test("slice E approval rows show Resolving… only while acted on", () => {
   assert.equal(approvalResolvingSuffix(true, 9), " │ ⠏ Resolving…")
   assert.equal(approvalResolvingSuffix(true, 10), " │ ⠋ Resolving…")
   assert.equal(approvalResolvingSuffix(true, 3, { ENSEMBLE_REDUCED_MOTION: "1" }), " │ ⠋ Resolving…")
+})
+
+test("ticket126: a resolved approval renders one display-only settle line", () => {
+  const resolved = approvalResolvedLine({ id: "ap", kind: "outside_roster", title: "Contact Echo", detail: "", status: "approved", createdAt: 1 })
+  assert.equal(resolved, "✓ Resolved │ [Workspace] Contact Echo")
 })
 
 test("ticket114: rail busy counts use the one-cell Braille working frame", () => {
