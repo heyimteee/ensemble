@@ -31,7 +31,7 @@ import {
   wizardStepArrival,
   type WizardDraft,
 } from "./wizard.ts"
-import { EMPTY_MARK, shouldRunMotion } from "./motion.ts"
+import { EMPTY_MARK, isReducedMotion, shouldRunMotion } from "./motion.ts"
 import {
   chromeOwnsFocus,
   dmEmptyDetail,
@@ -60,7 +60,13 @@ import {
   reorderBackupList,
   type SettingsFieldID,
 } from "./settings-grammar.ts"
-import { filterEdit, singleChoiceValue } from "./overlays.ts"
+import {
+  OVERLAY_PRESENCE_MS,
+  OVERLAY_PRESENCE_STEP_MS,
+  filterEdit,
+  overlayPresenceOpacity,
+  singleChoiceValue,
+} from "./overlays.ts"
 import { readGitState, type GitState } from "./git.ts"
 import {
   caretStyleForMode,
@@ -331,6 +337,10 @@ export function EnsembleV2App() {
   const [confirm, setConfirm] = createSignal<ConfirmState | null>(null)
   const [result, setResult] = createSignal<ResultState | null>(null)
   const [motionFrame, setMotionFrame] = createSignal(0)
+  // Ticket #120: shell overlay presence is one-shot; the key tracks which
+  // panel owns the current settle so a replaced panel starts clean.
+  const [overlayPresence, setOverlayPresence] = createSignal(overlayPresenceOpacity(0))
+  const [overlayPresenceKey, setOverlayPresenceKey] = createSignal("none")
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
   // The persistent memory field's live buffer. The renderable's ref can trail
   // a step switch by one frame, so the pure state owns the text Enter saves.
@@ -1012,6 +1022,39 @@ export function EnsembleV2App() {
   const isBusy = () => busy() || chatContext()?.busy === true
 
   const overlayOpen = () => picker() !== null || textPrompt() !== null || wizard() !== null || confirm() !== null || result() !== null
+
+  // Ticket #120: opening a shell overlay plays one short opacity settle while
+  // the background panes stay dimmed. Only the panel opacity changes: no
+  // geometry, layout, focus, mode, overlay ownership, or key routing moves.
+  // Close clears the timer and resets the baseline so repeated open/close
+  // cannot leave stale translucency; reduced motion mounts at full opacity.
+  const overlayPanelKey = () =>
+    picker() ? "picker" : textPrompt() ? "prompt" : confirm() ? "confirm" : result() ? "result" : wizard() ? "wizard" : "none"
+  let overlayPresenceTimer: ReturnType<typeof setInterval> | undefined
+  const stopOverlayPresence = () => {
+    if (overlayPresenceTimer === undefined) return
+    clearInterval(overlayPresenceTimer)
+    overlayPresenceTimer = undefined
+  }
+  const syncOverlayPresence = () => {
+    const key = overlayPanelKey()
+    onCleanup(stopOverlayPresence)
+    setOverlayPresenceKey(key)
+    setOverlayPresence(overlayPresenceOpacity(0))
+    if (key === "none" || isReducedMotion()) return
+    const startedAt = Date.now()
+    overlayPresenceTimer = setInterval(() => {
+      const elapsed = Date.now() - startedAt
+      setOverlayPresence(overlayPresenceOpacity(elapsed))
+      if (elapsed >= OVERLAY_PRESENCE_MS) stopOverlayPresence()
+    }, OVERLAY_PRESENCE_STEP_MS)
+  }
+  createEffect(syncOverlayPresence)
+  const overlayOpacity = () => {
+    const key = overlayPanelKey()
+    if (key === "none") return 1
+    return overlayPresenceKey() === key ? overlayPresence() : overlayPresenceOpacity(0)
+  }
 
   // v5.6 T2 command and search. `:`/`/` open a one-line input in the bottom
   // bar; the pure commands/history/search modules own parsing, recall, and
@@ -4670,7 +4713,7 @@ export function EnsembleV2App() {
         </box>
       <Show when={picker()?.mode} keyed>
         <>
-          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={pickerGeometry().top} left={pickerGeometry().left} width={pickerGeometry().width} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column">
+          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={pickerGeometry().top} left={pickerGeometry().left} width={pickerGeometry().width} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column" opacity={overlayOpacity()}>
             <box position="absolute" top={0} left={0} width="100%" height="100%" zIndex={110}>
               <PickerOverlay colors={colors} title={() => picker()!.title} query={() => picker()!.query} items={() => pickerItems()} cursor={() => picker()!.cursor} multiple={() => picker()!.mode === "members"} footer={() => statuslineHints("picker", { multiple: picker()?.mode === "members" })} />
             </box>
@@ -4679,7 +4722,7 @@ export function EnsembleV2App() {
       </Show>
       <Show when={textPrompt()} keyed>
         <>
-          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={promptGeometry().top} left={promptGeometry().left} width={promptGeometry().width} zIndex={100} height={14} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={promptGeometry().top} left={promptGeometry().left} width={promptGeometry().width} zIndex={100} height={14} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column" opacity={overlayOpacity()}>
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{textPrompt()!.title}</text>
             <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{textPrompt()!.description}</text>
@@ -4693,7 +4736,7 @@ export function EnsembleV2App() {
       </Show>
       <Show when={confirm()} keyed>
         <>
-          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={confirmGeometry().top} left={confirmGeometry().left} width={confirmGeometry().width} zIndex={100} height={10} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={confirmGeometry().top} left={confirmGeometry().left} width={confirmGeometry().width} zIndex={100} height={10} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column" opacity={overlayOpacity()}>
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{confirm()!.title}</text>
             <text fg={colors.text} bg={colors.panel} width="100%" wrapMode="word">{confirm()!.message}</text>
@@ -4704,7 +4747,7 @@ export function EnsembleV2App() {
       </Show>
       <Show when={result()} keyed>
         <>
-          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={resultGeometry().top} left={resultGeometry().left} width={resultGeometry().width} zIndex={100} height={18} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+          <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={resultGeometry().top} left={resultGeometry().left} width={resultGeometry().width} zIndex={100} height={18} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column" opacity={overlayOpacity()}>
             <box position="absolute" top={0} left={0} width="100%" height="100%" padding={1} flexDirection="column" zIndex={110}>
             <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{result()!.title}</text>
             <scrollbox ref={(value: any) => { resultScrollRef = value }} flexGrow={1} minHeight={0} stickyScroll stickyStart="top" width="100%">
@@ -4716,7 +4759,7 @@ export function EnsembleV2App() {
         </>
       </Show>
       <Show when={wizard()}>
-        <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column">
+        <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={wizardGeometry().top} left={wizardGeometry().left} width={wizardGeometry().width} height={wizardHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column" opacity={overlayOpacity()}>
           <ChromeText colors={colors} fg={colors.focus} bg={colors.panel} width="100%" truncate text={chromeJoin([wizard()!.title, `step ${wizard()!.index + 1} / ${wizard()!.steps.length}`])} />
           <text fg={colors.text} bg={colors.panel} width="100%" truncate>{wizardStep()?.title ?? ""}</text>
           <text fg={colors.muted} bg={colors.panel} width="100%" wrapMode="word">{wizardStep()?.description ?? ""}</text>

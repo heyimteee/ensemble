@@ -70,6 +70,33 @@ test("ticket101: the composer submits through the shared skill planner", () => {
   assert.ok(!app.includes("slashCommands"), "one shared command catalog replaces the private palette list")
 })
 
+test("ticket120: every shell overlay fades in once without owning focus", () => {
+  const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
+  const overlays = readFileSync(new URL("./overlays.ts", import.meta.url), "utf8")
+  assert.ok(overlays.includes("export function overlayPresenceOpacity"), "the one-shot presence curve lives in the overlay helper seam")
+
+  const effectStart = app.indexOf("let overlayPresenceTimer")
+  const effectEnd = app.indexOf("const overlayOpacity", effectStart)
+  assert.ok(effectStart >= 0 && effectEnd > effectStart, "the presence effect and opacity accessor are present")
+  const effect = app.slice(effectStart, effectEnd)
+  assert.ok(effect.includes("setInterval"), "the settle advances on a timer")
+  assert.ok(effect.includes("clearInterval"), "the timer stops instead of looping")
+  assert.ok(effect.includes("isReducedMotion"), "reduced motion skips the ramp")
+  assert.ok(!effect.includes("dispatchInteraction"), "presence never changes focus, mode, overlay ownership, or keys")
+
+  assert.equal(
+    (app.match(/opacity=\{overlayOpacity\(\)\}/g) ?? []).length,
+    5,
+    "picker, prompt, confirm, result, and wizard share the settle",
+  )
+  assert.ok(app.includes('if (key === "none") return 1'), "closing restores full opacity immediately")
+  assert.equal(
+    (app.match(/opacity=\{overlayOpen\(\) \? 0\.35 : 1\}/g) ?? []).length,
+    3,
+    "the background panes stay dimmed while an overlay is open",
+  )
+})
+
 test("System Agent rows use one attribution source and never fall through to native /init", () => {
   const app = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
   assert.ok(app.includes("author: message.displayAuthor ?? "), "the transcript maps the display author into the one rendered author")
