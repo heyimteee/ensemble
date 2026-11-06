@@ -4,8 +4,8 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChatContext, ChatMessage, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
-import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import type { Agent, Approval, ChatContext, ChatMessage, InitJobState, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
+import { ApprovalList, ChromeText, HelpView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, composerHeight as computeComposerHeight, composerTrigger, parseSlashCommand } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
@@ -61,7 +61,7 @@ import {
   type SettingsFieldID,
 } from "./settings-grammar.ts"
 import { filterEdit, singleChoiceValue } from "./overlays.ts"
-import { readGitState, type GitState } from "./git.ts"
+import { describeGitChange, readGitState, type GitState } from "./git.ts"
 import {
   caretStyleForMode,
   initialInteractionState,
@@ -81,6 +81,7 @@ import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
 import { createVimRegisterStore, normalizeVimKey, visualSelectionSize, type VimBuffer, type VimOutcome } from "./vim.ts"
 import { dialogEscape, dialogKeyContext } from "./dialogs.ts"
 import { buildStatuslineSegments, composerPosition, contextLabel, listPosition, statuslineRow2Parts, statuslineRow2PromptParts, transcriptPosition, type StatuslineRow2Input, type StatuslineSurface } from "./statusline.ts"
+import { clearToasts, createToastState, expireToasts, feedbackChannel, initToast, nextToastDeadline, pushToast, toastPlacement, type ToastInput } from "./toast.ts"
 import { editLine } from "./line-editor.ts"
 import { commandStatusHints, layerEntries, globalEntries, leaderEntries, leaderHints, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, singleKeyEntry, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
@@ -261,12 +262,19 @@ export function EnsembleV2App() {
   const context = usePlugin()
   const pageToken = {}
   const colors = palette(context.theme as any)
+  // Ticket #119: the host toast is only a fallback for feedback that cannot be
+  // painted by the mounted Ensemble surface (setup failure, or an async
+  // completion while the native route is visible). Everything else renders in
+  // the app-owned toast below.
+  const showHostToast = (input: ToastInput) => {
+    try { context.ui.toast.show({ title: input.title, message: input.message, variant: input.tone ?? "info" }) } catch {}
+  }
   const syntaxStyle = (() => {
     try {
       return SyntaxStyle.fromStyles(markdownStyles(context.theme), (context.renderer as any).nativeScene)
     } catch (error) {
       console.error("ensemble: markdown styling unavailable", error)
-      try { context.ui.toast.show({ title: "Ensemble", message: "Rich Markdown styling unavailable; using plain text.", variant: "warning" }) } catch {}
+      showHostToast({ title: "Ensemble", message: "Rich Markdown styling unavailable; using plain text.", tone: "warning" })
       return undefined
     }
   })()
@@ -331,6 +339,10 @@ export function EnsembleV2App() {
   const [confirm, setConfirm] = createSignal<ConfirmState | null>(null)
   const [result, setResult] = createSignal<ResultState | null>(null)
   const [motionFrame, setMotionFrame] = createSignal(0)
+  // Ticket #119: one visible app toast and a bounded queue. The effect below
+  // schedules exactly one timeout for the visible toast's deadline.
+  const [toasts, setToasts] = createSignal(createToastState())
+  let toastTimer: ReturnType<typeof setTimeout> | undefined
   const [wizard, setWizard] = createSignal<WizardState | null>(null)
   // The persistent memory field's live buffer. The renderable's ref can trail
   // a step switch by one frame, so the pure state owns the text Enter saves.
@@ -453,7 +465,7 @@ export function EnsembleV2App() {
       editor: createEditorPort(ref),
       clipboard: clipboardPort(),
       register: vimRegister,
-      onMessage: (message) => notify(message.text, message.tone),
+      onMessage: (message) => showToast({ title: "Clipboard", message: message.text, tone: message.tone }),
     })
     return cache.buffer
   }
@@ -470,7 +482,7 @@ export function EnsembleV2App() {
       editor: createEditorPort(settingsFieldRef),
       clipboard: clipboardPort(),
       register: vimRegister,
-      onMessage: (message) => notify(message.text, message.tone),
+      onMessage: (message) => showToast({ title: "Clipboard", message: message.text, tone: message.tone }),
     })
     return settingsVim
   }
@@ -1009,6 +1021,52 @@ export function EnsembleV2App() {
   // visible too.
   const ownsRawKeys = () => pageActivation.ownsRawKeys(pageToken, isOurRoute())
   const isModal = () => modal() || helpOpen() || approvalsOpen() || Boolean(settingsAgentID())
+  // Ticket #119: feedback raised while a dialog owns the surface goes to the
+  // statusline; the toast never paints over a modal. The host toast remains a
+  // fallback only when this page is not the visible route.
+  const isToastModal = () => isModal() || wizard() !== null
+  const showToast = (input: ToastInput) => {
+    if (!isOurRoute()) { showHostToast(input); return }
+    if (feedbackChannel(isToastModal()) === "statusline") {
+      const tone = input.tone === "error" ? "error" : input.tone === "success" ? "success" : "info"
+      notify(`${input.title}: ${input.message}`, tone)
+      return
+    }
+    setToasts((state) => pushToast(state, input, Date.now()))
+  }
+  createEffect(() => {
+    const deadline = nextToastDeadline(toasts())
+    if (toastTimer !== undefined) { clearTimeout(toastTimer); toastTimer = undefined }
+    if (deadline === undefined) return
+    toastTimer = setTimeout(() => {
+      toastTimer = undefined
+      setToasts((state) => expireToasts(state, Date.now()))
+    }, Math.max(0, deadline - Date.now()))
+  })
+  onCleanup(() => { if (toastTimer !== undefined) clearTimeout(toastTimer) })
+  // Init completion is asynchronous: report the transition into a terminal
+  // state, not every snapshot. Jobs that finished before this page mounted are
+  // already represented by their System Agent transcript report and stay quiet.
+  const appStartedAt = Date.now()
+  let knownInitStates = new Map<string, InitJobState>()
+  let initStatesInitialized = false
+  createEffect(() => {
+    const jobs = snapshot()?.state.initJobs
+    if (!jobs) return
+    const entries = Object.entries(jobs)
+    for (const [id, job] of entries) {
+      const previous = knownInitStates.get(id)
+      const firstSeenTerminal = previous === undefined && !initStatesInitialized && job.startedAt >= appStartedAt
+      const terminalAfterRunning = previous === "running" && job.state !== "running"
+      const firstSeenAfterRunning = previous === undefined && initStatesInitialized && job.state !== "running" && job.startedAt >= appStartedAt
+      if (terminalAfterRunning || firstSeenTerminal || firstSeenAfterRunning) {
+        const feedback = initToast(job.state, job.error)
+        if (feedback) showToast(feedback)
+      }
+    }
+    knownInitStates = new Map(entries.map(([id, job]) => [id, job.state]))
+    initStatesInitialized = true
+  })
   const isBusy = () => busy() || chatContext()?.busy === true
 
   const overlayOpen = () => picker() !== null || textPrompt() !== null || wizard() !== null || confirm() !== null || result() !== null
@@ -1241,7 +1299,7 @@ export function EnsembleV2App() {
       const message = error?.message ?? String(error)
       setStatus(`${label}: ${message}`)
       notify(`${label}: ${message}`, "error")
-      context.ui.toast.show({ title: "Ensemble", message: error?.message ?? String(error), variant: "error" })
+      showToast({ title: "Ensemble", message: error?.message ?? String(error), tone: "error" })
       return false
     } finally { setBusy(false) }
   }
@@ -1284,7 +1342,10 @@ export function EnsembleV2App() {
     if (Date.now() - lastGitAt < 2000) return
     lastGitAt = Date.now()
     const directory = activeWorkspace()?.directory ?? directoryOf(context)
-    setGitState(readGitState(directory))
+    const next = readGitState(directory)
+    const change = describeGitChange(gitState(), next)
+    setGitState(next)
+    if (change) showToast({ title: "Git", message: change.message, tone: change.tone })
   }
 
   const refresh = async () => {
@@ -1303,7 +1364,7 @@ export function EnsembleV2App() {
       try { (context.renderer as any)?.requestRender?.() } catch {}
       if (next.configError && next.configError !== lastConfigError) {
         lastConfigError = next.configError
-        context.ui.toast.show({ title: "Ensemble config", message: next.configError, variant: "warning" })
+        showToast({ title: "Ensemble config", message: next.configError, tone: "warning" })
       }
       if (!next.configError) lastConfigError = ""
       const directory = directoryOf(context)
@@ -1394,7 +1455,7 @@ export function EnsembleV2App() {
    */
   const focusComposerKeepingMode = () => {
     if (!surface()) {
-      context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" })
+      showToast({ title: "Ensemble", message: "Open an agent or workspace first.", tone: "warning" })
       return
     }
     composerCache.buffer?.invalidate()
@@ -1509,6 +1570,7 @@ export function EnsembleV2App() {
     if (created) {
       await offerMoveHome(created, draft.memberIDs)
       await refresh()
+      showToast({ title: "Workspace", message: `#${created.name} created.`, tone: "success" })
     }
   }
 
@@ -1533,7 +1595,7 @@ export function EnsembleV2App() {
       for (const text of memories) {
         await invoke(context, "memory.add", { agentID: agent.id, scope: "project", text, source: "wizard" }).catch(() => undefined)
       }
-      context.ui.toast.show({ title: "Ensemble", message: `${agent.name} created. Opening a direct chat.${memories.length > 0 ? ` Saved ${memories.length} ${memories.length === 1 ? "memory" : "memories"}.` : ""}`, variant: "success" })
+      showToast({ title: "Ensemble", message: `${agent.name} created. Opening a direct chat.${memories.length > 0 ? ` Saved ${memories.length} ${memories.length === 1 ? "memory" : "memories"}.` : ""}`, tone: "success" })
       openAgent(agent)
     })
   }
@@ -1577,10 +1639,10 @@ export function EnsembleV2App() {
     const value = text.trim()
     if (!value) return false
     const current = surface()
-    if (!current) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return false }
+    if (!current) { showToast({ title: "Ensemble", message: "Open an agent or workspace first.", tone: "warning" }); return false }
     const failure = (message: string) => {
       notify(message, "error")
-      context.ui.toast.show({ title: "Ensemble", message, variant: "error" })
+      showToast({ title: "Ensemble", message, tone: "error" })
       return false
     }
     if (current.kind === "agent") {
@@ -1739,6 +1801,11 @@ export function EnsembleV2App() {
       clearTimeout(messageTimer)
       messageTimer = undefined
     }
+    if (toastTimer !== undefined) {
+      clearTimeout(toastTimer)
+      toastTimer = undefined
+    }
+    setToasts(clearToasts)
     dispatchInteraction({ type: "route.leave" })
   }
   /** The one deliberate quit path behind `:q` and `Space q`. */
@@ -1753,7 +1820,7 @@ export function EnsembleV2App() {
   }
 
   const startCompose = () => {
-    if (!surface()) { context.ui.toast.show({ title: "Ensemble", message: "Open an agent or workspace first.", variant: "warning" }); return }
+    if (!surface()) { showToast({ title: "Ensemble", message: "Open an agent or workspace first.", tone: "warning" }); return }
     composerEpoch++
     composerCache.buffer?.invalidate()
     dispatchInteraction({ type: "insert.enter" })
@@ -1904,11 +1971,11 @@ export function EnsembleV2App() {
 
   const initEnsemble = async () => {
     if (surface()?.kind === "agent") {
-      context.ui.toast.show({ title: "Ensemble", message: "Init is workspace-only. Open the workspace group chat and rerun /init.", variant: "warning" })
+      showToast({ title: "Ensemble", message: "Init is workspace-only. Open the workspace group chat and rerun /init.", tone: "warning" })
       return
     }
     const workspace = activeWorkspace()
-    if (!workspace) { context.ui.toast.show({ title: "Ensemble", message: "Open a workspace first.", variant: "warning" }); return }
+    if (!workspace) { showToast({ title: "Ensemble", message: "Open a workspace first.", tone: "warning" }); return }
     await run("Initialize Ensemble", async () => {
       await invoke(context, "workspace.init", { id: workspace.id, text: "/init" })
       notify("Init started — the System Agent is inspecting the workspace.", "info")
@@ -1958,7 +2025,7 @@ export function EnsembleV2App() {
       case "restart": await restartSelected(); return
       case "cancel": await cancelSelected(); return
       case "reset-ensemble": await resetEnsemble(); return
-      default: context.ui.toast.show({ title: "Ensemble", message: `Unknown command: /${command}`, variant: "warning" })
+      default: showToast({ title: "Ensemble", message: `Unknown command: /${command}`, tone: "warning" })
     }
   }
 
@@ -2164,9 +2231,10 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     if (!workspace) return
     const next = paused ?? !workspace.paused
-    await run(next ? "Pause workspace" : "Resume workspace", async () => {
+    const ok = await run(next ? "Pause workspace" : "Resume workspace", async () => {
       await invoke(context, next ? "workspace.pause" : "workspace.resume", { id: workspace.id })
     })
+    if (ok) showToast({ title: "Workspace", message: `${next ? "Paused" : "Resumed"} #${workspace.name}.`, tone: "success" })
   }
 
   const delegateSelected = async () => {
@@ -2190,7 +2258,7 @@ export function EnsembleV2App() {
   const openResult = async () => {
     const task = selectedTask(); if (!task) return
     const result = resultForTask(state(), task)
-    if (!result) { context.ui.toast.show({ title: "Ensemble", message: "No result yet.", variant: "warning" }); return }
+    if (!result) { showToast({ title: "Ensemble", message: "No result yet.", tone: "warning" }); return }
     await openResultModal(task.title, result.text)
   }
 
@@ -2288,10 +2356,11 @@ export function EnsembleV2App() {
   const saveSettings = async () => {
     const agent = draft(); if (!agent) return
     if (!agent.name.trim()) throw new Error("Agent name is required.")
-    await run("Save settings", async () => {
+    const ok = await run("Save settings", async () => {
       await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color })
       finishSettingsClose()
     })
+    if (ok) showToast({ title: "Settings", message: `Saved ${agent.name}.`, tone: "success" })
   }
 
   const addBackup = async () => {
@@ -2415,6 +2484,7 @@ export function EnsembleV2App() {
         createdID = created?.id
       })
       if (!ok || !createdID) return false
+      showToast({ title: "Memory", message: "Memory saved.", tone: "success" })
       // The created id is authoritative; resolve it now if the snapshot is
       // current, otherwise let the effect above select it when it arrives.
       setPendingMemorySelectID(null)
@@ -2425,7 +2495,9 @@ export function EnsembleV2App() {
       return true
     }
     if (!text || text === field.value.trim()) return false
-    return run("Edit memory", async () => { await invoke(context, "memory.update", { id: field.memoryID!, text }) })
+    const ok = await run("Edit memory", async () => { await invoke(context, "memory.update", { id: field.memoryID!, text }) })
+    if (ok) showToast({ title: "Memory", message: "Memory saved.", tone: "success" })
+    return ok
   }
 
   const clearSettingsMemoryField = (field: SettingsFieldState) => {
@@ -2557,10 +2629,11 @@ export function EnsembleV2App() {
   const archiveWorkspace = async (target?: Workspace) => {
     const workspace = target ?? activeWorkspace(); if (!workspace) return
     if (!(await openConfirm(`Archive #${workspace.name}?`, "History is preserved."))) return
-    await run("Archive workspace", async () => {
+    const ok = await run("Archive workspace", async () => {
       await invoke(context, "workspace.archive", { id: workspace.id })
       if (workspaceID() === workspace.id || surface()?.kind === "workspace" && surface()!.workspaceID === workspace.id) { setSurface(null); setWorkspaceID(null) }
     })
+    if (ok) showToast({ title: "Workspace", message: `#${workspace.name} archived.`, tone: "success" })
   }
   const deleteWorkspace = async (target?: Workspace) => {
     const workspace = target ?? activeWorkspace(); if (!workspace) return
@@ -2574,10 +2647,11 @@ export function EnsembleV2App() {
   const archiveSelectedAgent = async (target?: Agent) => {
     const agent = target ?? selectedAgent(); if (!agent) return
     if (!(await openConfirm(`Archive ${agent.name}?`, "History is preserved."))) return
-    await run("Archive agent", async () => {
+    const ok = await run("Archive agent", async () => {
       await invoke(context, "agent.archive", { id: agent.id })
       if (surfaceAgent()?.id === agent.id) setSurface(null)
     })
+    if (ok) showToast({ title: "Agent", message: `${agent.name} archived.`, tone: "success" })
   }
   const deleteSelectedAgent = async (target?: Agent) => {
     const agent = target ?? selectedAgent(); if (!agent) return
@@ -2895,7 +2969,7 @@ export function EnsembleV2App() {
         event?.preventDefault?.(); event?.stopPropagation?.()
         setLeaderMode(false)
         clearPendingChord()
-        context.ui.toast.show({ title: "Leader", message: `Unknown shortcut: ${String(event?.sequence ?? event?.name ?? token)}`, variant: "warning" })
+        showToast({ title: "Leader", message: `Unknown shortcut: ${String(event?.sequence ?? event?.name ?? token)}`, tone: "warning" })
         return
       }
       // Multi-key chords (gg) live above the host keymap: single keys belong
@@ -2946,10 +3020,7 @@ export function EnsembleV2App() {
             if (context.renderer.getSelection() === selection) context.renderer.clearSelection()
           } catch {}
         },
-        notify: (message, tone) => {
-          notify(message, tone)
-          try { context.ui.toast.show({ title: "Ensemble", message, variant: tone }) } catch {}
-        },
+        notify: (message, tone) => showToast({ title: "Clipboard", message, tone }),
       })
     }
     context.renderer.on("selection", onSelection)
@@ -3053,7 +3124,7 @@ export function EnsembleV2App() {
     return () => { pageActivation.unmount(pageToken); clearInterval(timer); keyInput.off("keypress", onKey); context.renderer.off("selection", onSelection); stopData() }
   })
 
-  const showError = (error: any) => context.ui.toast.show({ title: "Ensemble", message: error?.message ?? String(error), variant: "error" })
+  const showError = (error: any) => showToast({ title: "Ensemble", message: error?.message ?? String(error), tone: "error" })
 
   // Review fix (finding 5): picker rows are value-compared, so the row
   // array keeps identity across snapshot polls unless a value changed.
@@ -3128,7 +3199,7 @@ export function EnsembleV2App() {
     if (!state) return
     if (state.mode === "members") {
       if (state.selected.size === 0) {
-        context.ui.toast.show({ title: "Ensemble", message: "Choose at least one member.", variant: "warning" })
+        showToast({ title: "Ensemble", message: "Choose at least one member.", tone: "warning" })
         return
       }
       finishPicker([...state.selected])
@@ -4668,6 +4739,12 @@ export function EnsembleV2App() {
             </Show>
           </box>
         </box>
+      <Show when={isToastModal() ? null : toasts().visible} keyed>
+        {(toast) => {
+          const placement = toastPlacement(viewWidth())
+          return <ToastOverlay colors={colors} toast={toast} top={placement.top} left={placement.left} width={placement.width} />
+        }}
+      </Show>
       <Show when={picker()?.mode} keyed>
         <>
           <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={pickerGeometry().top} left={pickerGeometry().left} width={pickerGeometry().width} height={16} zIndex={100} backgroundColor={colors.panel} flexDirection="column">

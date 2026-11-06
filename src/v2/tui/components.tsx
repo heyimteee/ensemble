@@ -1,4 +1,4 @@
-import { For, Show, createEffect } from "solid-js"
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { StyledText, TextAttributes, bg as bgStyle, fg as fgStyle } from "@opentui/core"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import { approvalSource } from "../types.ts"
@@ -38,6 +38,8 @@ import { MOUSE_PANE_IDS } from "./mouse.ts"
 import { statuslineHints } from "./keymap.ts"
 import { displayWidth, fitStatuslineSegments, type StatuslinePart, type StatuslineSegment, type StatuslineTone } from "./statusline.ts"
 import { chromeJoin, chromeSeparator, chromeSeparatorParts } from "./separators.ts"
+import { isReducedMotion } from "./motion.ts"
+import type { ToastNotice, ToastTone } from "./toast.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
 
@@ -228,6 +230,55 @@ export function StatuslineMessage(props: { colors: Palette; prompt: StatuslinePa
         <StyledLineText parts={promptParts} fg={props.colors.accent} bg={props.bg} flexShrink={0} wrapMode="none" />
       </Show>
       <StyledLineText parts={inputParts} fg={props.colors.faint} bg={props.bg} width={inputWidth()} wrapMode="none" truncate={props.prompt.length === 0} />
+    </box>
+  )
+}
+
+/**
+ * App-owned feedback toast (ticket #119). One non-focusable card anchored by
+ * the app at a bounded top-right position. The tone owns the border and title
+ * color; the body stays readable text. It never mounts a text editor or takes
+ * part in the focus/key layers.
+ */
+export function ToastOverlay(props: { colors: Palette; toast: ToastNotice; top: number; left: number; width: number }) {
+  // One-shot presence settle. Reduced motion mounts at the final opacity and
+  // unmounting is always instant, so the toast never animates under
+  // ENSEMBLE_REDUCED_MOTION or NO_COLOR.
+  const [settled, setSettled] = createSignal(isReducedMotion())
+  onMount(() => {
+    if (settled()) return
+    const timer = setTimeout(() => setSettled(true), 50)
+    onCleanup(() => clearTimeout(timer))
+  })
+  const tone = (): ToastTone => props.toast.tone
+  const accent = () => {
+    switch (tone()) {
+      case "success": return props.colors.good
+      case "warning": return props.colors.warn
+      case "error": return props.colors.bad
+      default: return props.colors.info
+    }
+  }
+  return (
+    <box
+      position="absolute"
+      top={props.top}
+      left={props.left}
+      width={props.width}
+      height={4}
+      zIndex={80}
+      border
+      borderStyle="rounded"
+      borderColor={accent()}
+      backgroundColor={props.colors.panel}
+      paddingLeft={1}
+      paddingRight={1}
+      flexDirection="column"
+      flexShrink={0}
+      opacity={settled() ? 1 : 0.72}
+    >
+      <text fg={accent()} bg={props.colors.panel} width="100%" truncate>{props.toast.title}</text>
+      <text fg={props.colors.text} bg={props.colors.panel} width="100%" truncate>{props.toast.message}</text>
     </box>
   )
 }

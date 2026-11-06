@@ -30,3 +30,26 @@ export function readGitState(directory: string): GitState | null {
   if (result.error || result.status !== 0 || !result.stdout) return null
   return parseGitStatus(result.stdout)
 }
+
+export type GitChangeFeedback = { message: string; tone: "info" | "warning" }
+
+/**
+ * Feedback for a real change between two git reads (ticket #119). The first
+ * read is a baseline, and losing git state is not a change toast. A dirty tree
+ * keeps warning emphasis even when another field changed in the same poll.
+ */
+export function describeGitChange(previous: GitState | null, next: GitState | null): GitChangeFeedback | undefined {
+  if (!previous || !next) return undefined
+  const parts: string[] = []
+  if (previous.branch !== next.branch) parts.push(`On ${next.branch}`)
+  if (previous.dirty !== next.dirty) parts.push(next.dirty ? "working tree dirty" : "working tree clean")
+  if (previous.ahead !== next.ahead || previous.behind !== next.behind) parts.push(`ahead ${next.ahead}, behind ${next.behind}`)
+  if (parts.length === 0) return undefined
+  if (parts.length === 1 && previous.dirty !== next.dirty) {
+    return { message: next.dirty ? "Uncommitted changes detected." : "Working tree clean.", tone: next.dirty ? "warning" : "info" }
+  }
+  if (parts.length === 1 && (previous.ahead !== next.ahead || previous.behind !== next.behind)) {
+    return { message: `Ahead ${next.ahead}, behind ${next.behind}.`, tone: next.dirty ? "warning" : "info" }
+  }
+  return { message: `${parts.join("; ")}.`, tone: next.dirty ? "warning" : "info" }
+}
