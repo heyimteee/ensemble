@@ -885,10 +885,13 @@ export function EnsembleV2App() {
       workExpiryTimer = undefined
     }
     if (next === undefined) return
+    // Node clamps delays above 2^31-1 ms to 1 ms, which would spin. Wake at
+    // the cap instead and reschedule from the fresh deadline.
+    const delay = Math.min(Math.max(0, next - now) + 1, 2_147_483_647)
     workExpiryTimer = setTimeout(() => {
       workExpiryTimer = undefined
       setWorkRevision((revision) => revision + 1)
-    }, Math.max(0, next - now) + 1)
+    }, delay)
   })
   onCleanup(() => {
     if (workExpiryTimer !== undefined) {

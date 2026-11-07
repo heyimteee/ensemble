@@ -761,6 +761,10 @@ test("ticket142: static cards rebuild only when the task, approval, or layout ch
   })
   assert.notEqual(active, card, "an activity detail change rebuilds the detail line")
   assert.equal(active.detail, "running tests…")
+
+  const variant = workCardForTaskCached(cache, working, "Nova", { ...base, variant: "travel" })
+  assert.notEqual(variant, card, "a tide variant change rebuilds the static variant")
+  assert.equal(variant.tideVariant, "travel")
 })
 
 test("ticket142: only the glyph and tide cells read their animation clocks", () => {
