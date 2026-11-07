@@ -5,6 +5,9 @@ export type { Revision }
 /** Protocol v3 adds shell entities and catalog/config metadata (ticket #140). */
 export const ENSEMBLE_PATCH_PROTOCOL = 3
 
+/** Protocol v4 adds gated scoped reads and per-scope gap resync (ticket #141). */
+export const ENSEMBLE_SCOPED_PROTOCOL = 4
+
 /**
  * The metadata that decides whether a snapshot may touch client state.
  * Entity data is versioned by the store coordination version; catalog and
@@ -65,6 +68,14 @@ export function supportsPatchFeed(previous: SnapshotMeta | undefined): boolean {
   return previous !== undefined
     && typeof previous.protocol === "number"
     && previous.protocol >= ENSEMBLE_PATCH_PROTOCOL
+    && typeof previous.epoch === "number"
+}
+
+/** True when the server advertises the gated scoped reads of ticket #141. */
+export function supportsScopedReads(previous: SnapshotMeta | undefined): boolean {
+  return previous !== undefined
+    && typeof previous.protocol === "number"
+    && previous.protocol >= ENSEMBLE_SCOPED_PROTOCOL
     && typeof previous.epoch === "number"
 }
 

@@ -397,6 +397,51 @@ export type ChatContext = {
   queued: number
 }
 
+/** Server-derived rail counts (ticket #141); never computed by client scans. */
+export type WorkspaceCounts = {
+  unread: number
+  busy: number
+}
+
+/** Scoped-read scopes (ticket #141). */
+export type ScopeName = "shell" | "work" | "transcript"
+
+export type ScopeVersions = Record<ScopeName, number>
+
+/** One paginated transcript window, derived from durable messages. */
+export type TranscriptWindow = {
+  workspaceID?: Id
+  messages: Message[]
+  oldestSeq?: number
+  newestSeq?: number
+  hasMoreOlder: boolean
+  limit: number
+}
+
+/** Recorded Tier 3 gate decision. */
+export type Tier3Gate = {
+  enabled: boolean
+  reason: "small-history" | "history" | "payload" | "latency"
+  messageCount: number
+  taskCount: number
+  snapshotBytes?: number
+  snapshotMs?: number
+}
+
+/** One scoped gap resync: only the requested durable scopes are returned. */
+export type ScopedResync = {
+  epoch: number
+  version: number
+  scopeVersions: ScopeVersions
+  shell?: SnapshotState
+  work?: Record<Id, Subtask>
+  transcript?: TranscriptWindow
+  counts: Record<Id, WorkspaceCounts>
+  gate?: Tier3Gate
+  /** Catalog/config metadata that travels beside the scoped payload. */
+  meta?: FeedMeta
+}
+
 export type Snapshot = {
   state: {
     version: number
@@ -439,6 +484,15 @@ export type Snapshot = {
   configRevision?: number
   protocol?: number
   epoch?: number
+  /**
+   * Ticket #141 scoped bootstrap metadata. `scoped` means the state carries
+   * shell entities, the visible Work projection, and one transcript window
+   * rather than the full history. A full snapshot omits it.
+   */
+  scoped?: boolean
+  window?: Omit<TranscriptWindow, "messages">
+  counts?: Record<Id, WorkspaceCounts>
+  gate?: Tier3Gate
 }
 
 /** Cheap heartbeat response: coordination version plus metadata revisions. */
@@ -448,6 +502,9 @@ export type Revision = {
   configRevision: number
   protocol: number
   epoch: number
+  /** Ticket #141: server-derived counts; absent on older servers. */
+  counts?: Record<Id, WorkspaceCounts>
+  scopeVersions?: ScopeVersions
 }
 
 /**
@@ -525,6 +582,9 @@ export type PatchBatch = {
   entries: ChangeEntry[]
   reset?: boolean
   meta?: FeedMeta
+  /** Ticket #141 server-derived counts carried beside the batch. */
+  counts?: Record<Id, WorkspaceCounts>
+  scopeVersions?: ScopeVersions
 }
 
 /** Cursor response for the revision-heartbeat gap recovery path. */
@@ -534,6 +594,9 @@ export type ChangesSince = {
   reset: boolean
   entries: ChangeEntry[]
   meta?: FeedMeta
+  /** Ticket #141: identifies the minimal scoped resync after a reset. */
+  scopeVersions?: ScopeVersions
+  counts?: Record<Id, WorkspaceCounts>
 }
 
 export type SnapshotState = Snapshot["state"]

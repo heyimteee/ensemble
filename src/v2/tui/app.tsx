@@ -1,10 +1,10 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { SyntaxStyle } from "@opentui/core"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, MessageStream, ModelOption, PatchBatch, Snapshot, Workspace } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
@@ -143,7 +143,8 @@ import { createCommandHistory, recallHistory, rememberHistory, startHistory, typ
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
-import { createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { scopesToResync } from "../scoped-read.ts"
+import { createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createClientStore } from "./client-store.ts"
 import { createStreamCoalescer } from "./stream-coalescer.ts"
 import {
@@ -694,7 +695,7 @@ export function EnsembleV2App() {
   // reset; the version guard cannot express "same version, discard state".
   let forceSnapshotReplace = false
   const snapshotRefresh = createRefreshCoordinator({
-    run: () => loadSnapshot(),
+    run: () => loadData(),
     onError: (error: any) => setStatus(`Ensemble unavailable: ${error?.message ?? error}`),
   })
   const chatRefresh = createRefreshCoordinator({
@@ -912,9 +913,11 @@ export function EnsembleV2App() {
     }))
     return [...agentItems, ...workspaceItems]
   })
+  // Ticket #141: the group transcript renders the bounded loaded window, not
+  // a hard 40-row slice, so paging older rows can actually display them.
   const groupMessages = createMemo(() => {
     const workspace = activeWorkspace()
-    return workspace ? (state()?.messages[workspace.id] ?? []).slice(-TRANSCRIPT_WINDOW) : []
+    return workspace ? (state()?.messages[workspace.id] ?? []) : []
   })
   // Review fix (finding 5): transcript rows memoize on primitives
   // (author/role/text/kind/streaming/interrupted/queued/correlationID/
@@ -1190,7 +1193,10 @@ export function EnsembleV2App() {
   // nothing. New/changed rows still mount; ordering/partition untouched.
   let previousMergedRows: ReturnType<typeof mergeTranscriptRows<ChatLine>> = []
   const mergedRows = createMemo(() => {
-    const fresh = mergeTranscriptRows(finalizedLines(), [...completionMap().values()], TRANSCRIPT_WINDOW)
+    // Ticket #141: the loaded transcript page is already bounded by the
+    // client store; the merge bound must cover it so older pages stay visible.
+    const limit = Math.max(TRANSCRIPT_WINDOW, finalizedLines().length + completionMap().size)
+    const fresh = mergeTranscriptRows(finalizedLines(), [...completionMap().values()], limit)
     const stable = stabilizeMergedRows(previousMergedRows, fresh)
     previousMergedRows = stable
     return stable
@@ -1306,6 +1312,45 @@ export function EnsembleV2App() {
     if (box) box.scrollTop = Number(box.scrollHeight ?? 0)
     setAtBottom(true)
     queueMicrotask(() => syncTranscriptScroll())
+  }
+
+  // Ticket #141: page older durable transcript windows on demand. The client
+  // keeps one bounded loaded window per workspace, not all history.
+  let loadingOlderTranscript = false
+  const loadOlderTranscript = async () => {
+    if (loadingOlderTranscript || !scopedReads || surface()?.kind !== "workspace") return
+    const workspace = activeWorkspace()
+    const window = workspace ? client.windowFor(workspace.id) : undefined
+    if (!workspace || !window?.hasMoreOlder || window.oldestSeq === undefined) return
+    loadingOlderTranscript = true
+    const box = transcriptScrollRef
+    const previousHeight = Number(box?.scrollHeight ?? 0)
+    try {
+      const next = await callRpc<TranscriptWindow & { version: number; epoch: number }>(context, "transcript.window", {
+        directory: directoryOf(context),
+        workspaceID: workspace.id,
+        beforeSeq: window.oldestSeq,
+        limit: window.limit,
+      })
+      client.applyTranscriptWindow(workspace.id, next, "older")
+      try { (context.renderer as any)?.requestRender?.() } catch {}
+      queueMicrotask(() => {
+        const added = Number(box?.scrollHeight ?? 0) - previousHeight
+        if (box && added > 0) box.scrollTop = Number(box.scrollTop ?? 0) + added
+        syncTranscriptScroll()
+      })
+    } catch {
+      // A missing older page is harmless; the loaded window stays usable.
+    } finally {
+      loadingOlderTranscript = false
+    }
+  }
+  const maybeLoadOlderTranscript = () => {
+    const box = transcriptScrollRef
+    if (!box || loadingOlderTranscript || atBottom()) return
+    if (Number(box.scrollHeight ?? 0) <= Number(box.height ?? 0)) return
+    if (Number(box.scrollTop ?? 0) > 1) return
+    void loadOlderTranscript()
   }
 
   const settingsAgent = createMemo(() => settingsAgentID() ? state()?.agents[settingsAgentID()!] : undefined)
@@ -1508,8 +1553,9 @@ export function EnsembleV2App() {
   const railAttentionInput = createMemo<RailAttentionSnapshot | null>(() => {
     const snapshot = state()
     if (!snapshot) return null
+    const serverCounts = client.counts()
     const unread: Record<string, number> = {}
-    for (const workspace of workspaces()) unread[workspace.id] = unreadCount(snapshot, workspace)
+    for (const workspace of workspaces()) unread[workspace.id] = serverCounts?.[workspace.id]?.unread ?? unreadCount(snapshot, workspace)
     return {
       unread,
       approvals: pendingApprovals().length,
@@ -1843,27 +1889,18 @@ export function EnsembleV2App() {
     if (change) showToast({ title: "Git", message: change.message, tone: change.tone })
   }
 
-  const loadSnapshot = async () => {
-    const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
-    const nextMeta = snapshotMeta(next)
-    // A feed reset or epoch change forces a real replacement even when the
-    // restarted store reports a version the client has not seen before.
-    const forced = forceSnapshotReplace
-    forceSnapshotReplace = false
-    const apply = forced ? "replace" : decideSnapshotApply(lastSnapshotMeta, nextMeta)
-    if (apply === "skip") return
-    lastSnapshotMeta = nextMeta
-    if (apply === "replace") client.applySnapshot(next)
-    else client.applyMetadata(next)
+  // Ticket #141: the first fetch tries the gated scoped bootstrap. If the
+  // server does not advertise protocol 4, the full snapshot path is kept.
+  let scopedReads = false
+  let bootstrapTried = false
+
+  const applyStateEffects = (next: Snapshot) => {
     try { (context.renderer as any)?.requestRender?.() } catch {}
     if (next.configError && next.configError !== lastConfigError) {
       lastConfigError = next.configError
       showToast({ title: "Ensemble config", message: next.configError, tone: "warning" })
     }
     if (!next.configError) lastConfigError = ""
-    // An equal-version snapshot only refreshes catalog/config metadata; entity
-    // state, selection, workspace restoration, and git state stay untouched.
-    if (apply === "metadata") return
     // Ticket #77d: keep the composer focused across snapshot repaints. A
     // poll that lands between typing and Enter must not silently drop the
     // key because the textarea lost focus.
@@ -1908,6 +1945,91 @@ export function EnsembleV2App() {
     if (current?.kind === "agent" && !next.state.agents[current.agentID]) setSurface(null)
     setStatus(chromeJoin([`${workspaces().length} workspaces`, `${rosterAgents().length} agents`, `${activeCount()} working`]))
   }
+
+  const loadSnapshot = async () => {
+    const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
+    const nextMeta = snapshotMeta(next)
+    // A feed reset or epoch change forces a real replacement even when the
+    // restarted store reports a version the client has not seen before.
+    const forced = forceSnapshotReplace
+    forceSnapshotReplace = false
+    const apply = forced ? "replace" : decideSnapshotApply(lastSnapshotMeta, nextMeta)
+    if (apply === "skip") return
+    lastSnapshotMeta = nextMeta
+    if (apply === "replace") client.applySnapshot(next)
+    else client.applyMetadata(next)
+    // An equal-version snapshot only refreshes catalog/config metadata; entity
+    // state, selection, workspace restoration, and git state stay untouched.
+    if (apply === "metadata") return
+    applyStateEffects(next)
+  }
+
+  /** Initial gated bootstrap: shell + visible Work + one transcript window. */
+  const loadBootstrap = async () => {
+    const current = activeWorkspace()?.id ?? workspaceID() ?? undefined
+    const next = await callRpc<Snapshot>(context, "bootstrap", {
+      directory: directoryOf(context),
+      ...(current ? { workspaceID: current } : {}),
+    })
+    forceSnapshotReplace = false
+    scopedReads = supportsScopedReads(snapshotMeta(next))
+    lastSnapshotMeta = snapshotMeta(next)
+    client.applySnapshot(next)
+    applyStateEffects(next)
+  }
+
+  const syncScopedSelection = () => {
+    const current = surface()
+    if (current?.kind === "workspace" && !state()?.workspaces[current.workspaceID]) setSurface(null)
+    if (current?.kind === "agent" && !state()?.agents[current.agentID]) setSurface(null)
+    if (workspaceID() && !state()?.workspaces[workspaceID()!]) setWorkspaceID(null)
+  }
+
+  /** Apply one scoped resync atomically; only returned scopes are replaced. */
+  const applyScopedResync = (result: ScopedResync, requestedWorkspaceID?: string) => {
+    batch(() => {
+      if (result.shell) client.applyShellSnapshot(result.shell)
+      if (result.work) client.applyWorkProjection(result.work, result.version)
+      const window = result.transcript
+      const target = window?.workspaceID ?? requestedWorkspaceID
+      if (window && target) client.applyTranscriptWindow(target, window, "replace")
+      client.applyCounts(result.counts)
+      if (result.meta) client.applyChanges([], lastSnapshotMeta?.version, result.meta, result.counts)
+      if (lastSnapshotMeta) lastSnapshotMeta = { ...lastSnapshotMeta, version: result.version, epoch: result.epoch }
+    })
+    syncScopedSelection()
+    repaintFromFeed()
+  }
+
+  const loadScoped = async (scopes: ScopeName[] = ["shell", "work", "transcript"]) => {
+    const target = activeWorkspace()?.id ?? workspaceID() ?? undefined
+    const result = await callRpc<ScopedResync>(context, "resync", {
+      directory: directoryOf(context),
+      scopes,
+      ...(target ? { workspaceID: target } : {}),
+    })
+    applyScopedResync(result, target)
+  }
+
+  /** First fetch and later refresh both select the cheapest valid read path. */
+  const loadData = async () => {
+    if (forceSnapshotReplace) return loadSnapshot()
+    if (!bootstrapTried) {
+      bootstrapTried = true
+      try {
+        await loadBootstrap()
+        return
+      } catch {}
+    }
+    if (scopedReads) {
+      try {
+        await loadScoped()
+        return
+      } catch {}
+    }
+    return loadSnapshot()
+  }
+
   // Ensure at least one fetch that started at or after this call settles. The
   // coordinator queues a dirty pass when an earlier fetch is still in flight.
   const refresh = async () => {
@@ -1937,9 +2059,9 @@ export function EnsembleV2App() {
       if (context?.sessionID === sessionID) setLiveDm({ sessionID, text })
     }
   })
-  const applyFeedDecision = (decision: PatchDecision): boolean => {
+  const applyFeedDecision = (decision: PatchDecision, counts?: Record<string, WorkspaceCounts>): boolean => {
     if (decision.action !== "apply") return false
-    client.applyChanges(decision.changes, decision.version, decision.meta)
+    client.applyChanges(decision.changes, decision.version, decision.meta, counts)
     if (lastSnapshotMeta) {
       lastSnapshotMeta = mergeFeedMeta({ ...lastSnapshotMeta, version: decision.version }, decision.meta)
     }
@@ -1990,12 +2112,31 @@ export function EnsembleV2App() {
           }
           const decision = decideChangesSince(cursor, result)
           if (decision.action === "apply") {
-            applyFeedDecision(decision)
+            applyFeedDecision(decision, result.counts)
             continue
           }
-          if (decision.action === "ignore") continue
-          // A gap, reset, epoch change, or malformed response cannot be
-          // patched; the full snapshot reconstructs every shell entity.
+          if (decision.action === "ignore") {
+            if (result.counts) client.applyCounts(result.counts)
+            continue
+          }
+          // Ticket #141: a gap or reset names only the scopes that moved after
+          // the cursor; unchanged shell/Work/transcript branches stay put.
+          // An epoch change has no comparable cursor and takes the full
+          // snapshot fallback.
+          if (scopedReads && supportsScopedReads(cursor) && decision.reason !== "epoch") {
+            const scopes = scopesToResync(cursor.version, result.scopeVersions)
+            if (scopes.length > 0) {
+              try {
+                await loadScoped(scopes)
+                continue
+              } catch {}
+            } else if (result.version === cursor.version) {
+              client.applyCounts(result.counts)
+              continue
+            }
+          }
+          // A scoped resync that cannot name or repair the gap falls back to
+          // the full durable snapshot.
           await refreshFull().catch(() => undefined)
         } while (feedRecoveryAgain && passes < 3)
       } finally {
@@ -2008,9 +2149,10 @@ export function EnsembleV2App() {
     if (!lastSnapshotMeta || !supportsPatchFeed(lastSnapshotMeta)) return
     const decision = decidePatchApply(lastSnapshotMeta, payload)
     if (decision.action === "apply") {
-      applyFeedDecision(decision)
+      applyFeedDecision(decision, payload.counts)
       return
     }
+    if (payload.counts) client.applyCounts(payload.counts)
     if (decision.action === "ignore") return
     // A malformed batch or a version with state this feed cannot patch (DM
     // retention) cannot be repaired by a scoped resync; the full snapshot
@@ -2128,12 +2270,18 @@ export function EnsembleV2App() {
 
   const scrollTranscriptBy = (delta: number) => {
     try { transcriptScrollRef?.scrollBy?.(delta) } catch {}
-    queueMicrotask(() => syncTranscriptScroll())
+    queueMicrotask(() => {
+      syncTranscriptScroll()
+      if (delta < 0) maybeLoadOlderTranscript()
+    })
   }
   const scrollTranscriptTop = () => {
     if (transcriptScrollRef) transcriptScrollRef.scrollTop = 0
     setAtBottom(false)
-    queueMicrotask(() => syncTranscriptScroll())
+    queueMicrotask(() => {
+      syncTranscriptScroll()
+      maybeLoadOlderTranscript()
+    })
   }
   const scrollTranscriptHalf = (direction: 1 | -1) => {
     scrollTranscriptBy(direction * Math.max(1, Math.floor(messageHeight() / 2)))
@@ -2917,7 +3065,19 @@ export function EnsembleV2App() {
 
   const openResult = async () => {
     const task = selectedTask(); if (!task) return
-    const result = resultForTask(state(), task)
+    let result = resultForTask(state(), task)
+    // Ticket #141: a result outside the loaded transcript window is fetched
+    // by id from durable storage instead of loading the whole history.
+    if (!result && task.resultMessageID) {
+      try {
+        const fetched = await callRpc<{ found: boolean; message?: Message }>(context, "message.get", {
+          directory: directoryOf(context),
+          workspaceID: task.workspaceID,
+          messageID: task.resultMessageID,
+        })
+        result = fetched.found ? fetched.message : undefined
+      } catch {}
+    }
     if (!result) { showToast({ title: "Ensemble", message: "No result yet.", tone: "warning" }); return }
     await openResultModal(task.title, result.text)
   }
@@ -3605,6 +3765,9 @@ export function EnsembleV2App() {
     heartbeatCheck = (async () => {
       try {
         const revision = await callRpc<Revision>(context, "revision", { directory: directoryOf(context) })
+        // Ticket #141: counts are server-derived and refreshed on every beat;
+        // the client never scans all messages or tasks for the rail.
+        client.applyRevisionCounts(revision.counts)
         const cursor = lastSnapshotMeta
         const forced = heartbeatForce
         heartbeatForce = false
@@ -5398,7 +5561,7 @@ export function EnsembleV2App() {
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} />
+          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} counts={client.counts()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={settingsAgentID()} fallback={

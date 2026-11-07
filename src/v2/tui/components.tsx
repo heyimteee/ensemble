@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { StyledText, TextAttributes, bg as bgStyle, fg as fgStyle } from "@opentui/core"
-import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
+import type { Agent, Approval, Memory, SkillOption, SnapshotState, WorkspaceCounts } from "../types.ts"
 import { approvalSource } from "../types.ts"
 import type { InteractionMode } from "./interaction.ts"
 import { contrastText, type Palette, type ThemeColor } from "./theme.ts"
@@ -303,6 +303,8 @@ export function Rail(props: {
   pendingApprovals: number
   width: number
   filter: string
+  /** Ticket #141: server-derived unread/busy counts; falls back for legacy servers. */
+  counts?: Readonly<Record<string, WorkspaceCounts>>
   motionTick?: number
   /** One-shot unread/approval pulses and quiet row arrivals from ticket #121. */
   emphasis?: RailEmphasis
@@ -339,8 +341,11 @@ export function Rail(props: {
         // Slice E single-cursor rule: the `›` position marker renders only on
         // the surface that owns the focus border, never on two surfaces at once.
         const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
-        const unread = workspace ? unreadCount(props.state, workspace) : 0
-        const busy = workspace ? busyCount(props.state, workspace.id) : 0
+        // Ticket #141: the server-derived counts avoid scanning every message
+        // and task in the client. The old scan remains the legacy fallback.
+        const serverCounts = workspace ? props.counts?.[workspace.id] : undefined
+        const unread = serverCounts ? serverCounts.unread : workspace ? unreadCount(props.state, workspace) : 0
+        const busy = serverCounts ? serverCounts.busy : workspace ? busyCount(props.state, workspace.id) : 0
         // Ticket #121: unread growth pulses the count once; a newly arrived row
         // settles from muted to its normal tone without movement. Selection
         // always wins the tone, so arrival emphasis never hides the cursor.

@@ -1,7 +1,9 @@
 import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
-import type { EntityChange, FeedMeta, Id, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
+import { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
+import { CLIENT_MESSAGE_LIMIT, CLIENT_TASK_GRACE_MS, projectVisibleWork, trimMessages } from "../scoped-read.ts"
+import type { EntityChange, FeedMeta, Id, Message, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, TranscriptWindow, WorkspaceCounts } from "../types.ts"
 
 /**
  * Durable client updates. A snapshot is the only full replacement; every
@@ -16,6 +18,12 @@ export type ClientStateUpdate =
   | { type: "entity.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
   | { type: "work.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
   | { type: "work.snapshot"; subtasks: Record<Id, Subtask>; version: number; updatedAt?: number }
+  | { type: "shell.snapshot"; state: SnapshotState }
+  | { type: "transcript.window"; workspaceID: Id; messages: Message[]; mode: "replace" | "older" }
+
+/** Per-workspace loaded transcript range. */
+export type ClientTranscriptWindow = Omit<TranscriptWindow, "messages" | "workspaceID">
+
 
 const bindingKey = (workspaceID: Id, agentID: Id) => `${workspaceID}:${agentID}`
 
@@ -207,7 +215,62 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
         updatedAt: update.updatedAt ?? state.updatedAt,
       }
     }
+    case "shell.snapshot": {
+      const shell = update.state
+      return {
+        ...state,
+        agents: shell.agents,
+        workspaces: shell.workspaces,
+        initJobs: shell.initJobs,
+        bindings: shell.bindings,
+        memories: shell.memories,
+        approvals: shell.approvals,
+        dmQueue: shell.dmQueue,
+        dmTranscripts: shell.dmTranscripts,
+        settings: shell.settings,
+        ui: shell.ui,
+        runs: shell.runs,
+        version: shell.version,
+        updatedAt: shell.updatedAt,
+      }
+    }
+    case "transcript.window": {
+      const existing = state.messages[update.workspaceID] ?? []
+      const merged = update.mode === "replace"
+        ? [...update.messages]
+        : [...existing, ...update.messages]
+      const byID = new Map<Id, Message>()
+      for (const message of merged) byID.set(message.id, message)
+      const ordered = [...byID.values()].sort((a, b) => a.seq - b.seq)
+      const bounded = trimMessages(ordered, CLIENT_MESSAGE_LIMIT, update.mode === "older" ? "oldest" : "newest")
+      return { ...state, messages: { ...state.messages, [update.workspaceID]: [...bounded] } }
+    }
   }
+}
+
+/**
+ * Ticket #141 bounded client cache. Keep at most one transcript window per
+ * workspace and only visible Work rows (plus a short grace so a sibling
+ * transition never needs a resync). Identity is preserved when nothing is
+ * trimmed so Solid invalidation stays path-scoped.
+ */
+export function boundClientState(state: SnapshotState, now: number = Date.now(), keep: "newest" | "oldest" = "newest"): SnapshotState {
+  let next = state
+  let messages: SnapshotState["messages"] | undefined
+  for (const [workspaceID, list] of Object.entries(state.messages)) {
+    const bounded = trimMessages(list, CLIENT_MESSAGE_LIMIT, keep)
+    if (bounded === list) continue
+    messages ??= { ...state.messages }
+    messages[workspaceID] = bounded
+  }
+  if (messages) next = { ...next, messages }
+  const visible = projectVisibleWork(state, now, WORK_GROUP_HOLD_MS + CLIENT_TASK_GRACE_MS)
+  const currentKeys = Object.keys(state.subtasks)
+  const visibleKeys = Object.keys(visible)
+  if (visibleKeys.length !== currentKeys.length || visibleKeys.some((id) => !(id in state.subtasks))) {
+    next = { ...next, subtasks: visible }
+  }
+  return next
 }
 
 export type ClientStore = {
@@ -222,19 +285,33 @@ export type ClientStore = {
   catalogRevision: () => number | undefined
   protocol: () => number | undefined
   epoch: () => number | undefined
+  /** Ticket #141 server-derived rail counts; undefined on legacy servers. */
+  counts: () => Record<Id, WorkspaceCounts> | undefined
+  /** Loaded transcript range for one workspace. */
+  windowFor: (workspaceID: Id) => ClientTranscriptWindow | undefined
   applySnapshot: (snapshot: Snapshot) => void
   /** Update catalog/config metadata without touching entity state. */
   applyMetadata: (snapshot: Snapshot) => void
   applySubtask: (task: Subtask) => void
   removeSubtask: (id: Id) => void
   /** Apply one validated, atomic batch of full-entity changes. */
-  applyChanges: (changes: EntityChange[], version?: number, meta?: FeedMeta) => void
+  applyChanges: (changes: EntityChange[], version?: number, meta?: FeedMeta, counts?: Record<Id, WorkspaceCounts>) => void
   /** Apply one validated, atomic batch of full-entity work changes. */
   applyWorkChanges: (changes: EntityChange[], version?: number) => void
   /** Apply ephemeral live text to one visible streaming row. */
   applyStream: (update: MessageStream) => void
   /** Scoped Work resync: replace subtasks and metadata, keep other entities. */
   applyWorkSnapshot: (snapshot: Snapshot) => void
+  /** Scoped Work projection resync (ticket #141). */
+  applyWorkProjection: (tasks: Record<Id, Subtask>, version: number) => void
+  /** Scoped shell resync: replace shell entities, keep Work and transcript. */
+  applyShellSnapshot: (state: SnapshotState) => void
+  /** Merge one durable transcript page; "older" keeps the paged range. */
+  applyTranscriptWindow: (workspaceID: Id, window: TranscriptWindow, mode?: "replace" | "older") => void
+  /** Apply server-derived counts from a patch, changes.since, or heartbeat. */
+  applyCounts: (counts: Record<Id, WorkspaceCounts> | undefined) => void
+  /** Revision alias kept explicit at the app seam. */
+  applyRevisionCounts: (counts: Record<Id, WorkspaceCounts> | undefined) => void
   reset: () => void
 }
 
@@ -258,9 +335,35 @@ export function createClientStore(): ClientStore {
   const [catalogRevision, setCatalogRevision] = createSignal<number | undefined>(undefined)
   const [protocol, setProtocol] = createSignal<number | undefined>(undefined)
   const [epoch, setEpoch] = createSignal<number | undefined>(undefined)
+  const [counts, setCounts] = createSignal<Record<Id, WorkspaceCounts> | undefined>(undefined)
+  const [windows, setWindows] = createSignal<Record<Id, ClientTranscriptWindow>>({})
 
-  const apply = (update: ClientStateUpdate) => {
-    setData("state", reconcile(reduceClientState(unwrap(data.state), update)))
+  const windowFrom = (messages: readonly Message[], hasMoreOlder: boolean): ClientTranscriptWindow => ({
+    ...(messages.length > 0 ? { oldestSeq: messages[0]!.seq, newestSeq: messages[messages.length - 1]!.seq } : {}),
+    hasMoreOlder,
+    limit: CLIENT_MESSAGE_LIMIT,
+  })
+
+  const apply = (update: ClientStateUpdate, keep: "newest" | "oldest" = "newest") => {
+    const next = reduceClientState(unwrap(data.state), update)
+    setData("state", reconcile(boundClientState(next, Date.now(), keep)))
+    return next
+  }
+
+  /** Refresh window metadata for workspaces whose message rows changed. */
+  const syncWindows = (workspaceIDs: readonly Id[]) => {
+    if (workspaceIDs.length === 0) return
+    setWindows((current) => {
+      const next = { ...current }
+      for (const workspaceID of workspaceIDs) {
+        const messages = data.state.messages[workspaceID] ?? []
+        const previous = current[workspaceID]
+        const trimmed = messages.length >= CLIENT_MESSAGE_LIMIT
+          && (previous === undefined || previous.hasMoreOlder || messages[0]!.seq > (previous.oldestSeq ?? messages[0]!.seq))
+        next[workspaceID] = windowFrom(messages, previous?.hasMoreOlder === true || trimmed)
+      }
+      return next
+    })
   }
 
   const applyMetadata = (snapshot: Snapshot) => {
@@ -299,11 +402,18 @@ export function createClientStore(): ClientStore {
     }
   }
 
-  const applyChanges = (changes: EntityChange[], version?: number, meta?: FeedMeta) => {
+  const applyChanges = (changes: EntityChange[], version?: number, meta?: FeedMeta, nextCounts?: Record<Id, WorkspaceCounts>) => {
     batch(() => {
       const updatedAt = version === undefined || version === data.state.version ? undefined : Date.now()
       apply({ type: "entity.changes", changes, version, updatedAt })
       if (meta) applyFeedMeta(meta)
+      if (nextCounts) setCounts(nextCounts)
+      const touched = new Set<Id>()
+      for (const change of changes) {
+        if (change.entity !== "message") continue
+        touched.add(change.op === "upsert" ? change.message.workspaceID : change.workspaceID)
+      }
+      syncWindows([...touched])
     })
   }
 
@@ -318,9 +428,22 @@ export function createClientStore(): ClientStore {
     catalogRevision,
     protocol,
     epoch,
+    counts,
+    windowFor: (workspaceID) => windows()[workspaceID],
     applySnapshot: (snapshot) => {
       batch(() => {
-        apply({ type: "snapshot", snapshot })
+        const bounded = boundClientState(snapshot.state, Date.now())
+        const scopedWorkspace = snapshot.window ? Object.keys(snapshot.state.messages)[0] : undefined
+        const nextWindows: Record<Id, ClientTranscriptWindow> = {}
+        for (const [workspaceID, list] of Object.entries(snapshot.state.messages)) {
+          const loaded = bounded.messages[workspaceID] ?? []
+          nextWindows[workspaceID] = scopedWorkspace === workspaceID && snapshot.window
+            ? { ...snapshot.window }
+            : windowFrom(loaded, list.length > loaded.length)
+        }
+        apply({ type: "snapshot", snapshot: { ...snapshot, state: bounded } })
+        setWindows(nextWindows)
+        setCounts(snapshot.counts)
         setData("loaded", true)
         applyMetadata(snapshot)
       })
@@ -345,6 +468,28 @@ export function createClientStore(): ClientStore {
         applyMetadata(snapshot)
       })
     },
+    applyWorkProjection: (tasks, version) => {
+      apply({ type: "work.snapshot", subtasks: tasks, version })
+    },
+    applyShellSnapshot: (state) => {
+      apply({ type: "shell.snapshot", state })
+    },
+    applyTranscriptWindow: (workspaceID, window, mode = "replace") => {
+      batch(() => {
+        apply({ type: "transcript.window", workspaceID, messages: window.messages, mode }, mode === "older" ? "oldest" : "newest")
+        const loaded = data.state.messages[workspaceID] ?? []
+        setWindows((current) => ({
+          ...current,
+          [workspaceID]: {
+            ...(loaded.length > 0 ? { oldestSeq: loaded[0]!.seq, newestSeq: loaded[loaded.length - 1]!.seq } : {}),
+            hasMoreOlder: window.hasMoreOlder,
+            limit: window.limit,
+          },
+        }))
+      })
+    },
+    applyCounts: (nextCounts) => setCounts(nextCounts),
+    applyRevisionCounts: (nextCounts) => setCounts(nextCounts),
     reset: () => {
       batch(() => {
         setData("loaded", false)
@@ -358,6 +503,8 @@ export function createClientStore(): ClientStore {
         setCatalogRevision(undefined)
         setProtocol(undefined)
         setEpoch(undefined)
+        setCounts(undefined)
+        setWindows({})
       })
     },
   }

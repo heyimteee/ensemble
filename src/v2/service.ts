@@ -16,6 +16,7 @@ import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HA
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
+import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats } from "./store.ts"
 import type {
   Agent,
@@ -32,12 +33,15 @@ import type {
   ModelRef,
   PatchBatch,
   Revision,
+  ScopeName,
+  ScopedResync,
   Settings,
   Snapshot,
   Run,
   SessionBinding,
   SnapshotState,
   Subtask,
+  Tier3Gate,
   WorkKind,
   Workspace,
 } from "./types.ts"
@@ -49,15 +53,30 @@ type Json = Record<string, any>
  * Protocol version advertised by the snapshot and the revision heartbeat.
  * v2 adds the versioned full-entity patch feed (`patches` + `changes.since`).
  * v3 adds shell entities and version-neutral catalog/config metadata (#140).
+ * v4 adds the gated Tier 3 scoped reads: bootstrap, Work projection,
+ * transcript windows, on-demand messages, and per-scope gap resync (#141).
  */
-export const ENSEMBLE_PROTOCOL_VERSION = 3
+export const ENSEMBLE_PROTOCOL_VERSION = 4
 let bootEpochSeq = 0
 
 function invalidInput(message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code: "invalid_input" })
 }
 
-function rpcInput(value: unknown): { directory: string; action?: string; payload?: Json; epoch?: number; version?: number } {
+type RpcInput = {
+  directory: string
+  action?: string
+  payload?: Json
+  epoch?: number
+  version?: number
+  workspaceID?: string
+  beforeSeq?: number
+  limit?: number
+  messageID?: string
+  scopes?: string[]
+}
+
+function rpcInput(value: unknown): RpcInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidInput("RPC input must be an object.")
   const input = value as Record<string, unknown>
   if (typeof input.directory !== "string" || input.directory.length === 0) throw invalidInput("directory must be a non-empty string.")
@@ -67,12 +86,22 @@ function rpcInput(value: unknown): { directory: string; action?: string; payload
   }
   if (input.epoch !== undefined && typeof input.epoch !== "number") throw invalidInput("epoch must be a number.")
   if (input.version !== undefined && typeof input.version !== "number") throw invalidInput("version must be a number.")
+  if (input.workspaceID !== undefined && typeof input.workspaceID !== "string") throw invalidInput("workspaceID must be a string.")
+  if (input.messageID !== undefined && typeof input.messageID !== "string") throw invalidInput("messageID must be a string.")
+  if (input.beforeSeq !== undefined && typeof input.beforeSeq !== "number") throw invalidInput("beforeSeq must be a number.")
+  if (input.limit !== undefined && typeof input.limit !== "number") throw invalidInput("limit must be a number.")
+  if (input.scopes !== undefined && !Array.isArray(input.scopes)) throw invalidInput("scopes must be a list.")
   return {
     directory: input.directory,
     action: input.action as string | undefined,
     payload: input.payload as Json | undefined,
     epoch: input.epoch as number | undefined,
     version: input.version as number | undefined,
+    workspaceID: input.workspaceID as string | undefined,
+    beforeSeq: input.beforeSeq as number | undefined,
+    limit: input.limit as number | undefined,
+    messageID: input.messageID as string | undefined,
+    scopes: input.scopes as string[] | undefined,
   }
 }
 
@@ -240,6 +269,9 @@ export class EnsembleV2Service {
   /** Last catalog/config metadata published as a version-neutral batch. */
   private lastPublishedCatalogRevision = -1
   private lastPublishedConfig: { directory?: string; revision?: number; error?: string } = {}
+  /** Ticket #141 Tier 3 gate inputs, measured only at the snapshot boundary. */
+  private lastSnapshotBytes: number | undefined
+  private lastSnapshotMs: number | undefined
 
   constructor(ctx: Ctx) {
     this.ctx = ctx
@@ -253,7 +285,7 @@ export class EnsembleV2Service {
       this.emitChanged(version)
     }, {
       epoch: this.epochValue,
-      onPatch: (batch) => this.emitPatches(batch),
+      onPatch: (batch) => this.emitPatches(this.withReadMeta(batch)),
     })
     await this.store.load()
     this.refreshDmClock()
@@ -334,15 +366,37 @@ export class EnsembleV2Service {
 
   handlers(): {
     snapshot: (input: unknown) => Promise<Snapshot>
+    bootstrap: (input: unknown) => Promise<Snapshot>
     revision: (input: unknown) => Promise<Revision>
     "changes.since": (input: unknown) => Promise<ChangesSince>
+    "work.project": (input: unknown) => Promise<any>
+    "transcript.window": (input: unknown) => Promise<any>
+    "message.get": (input: unknown) => Promise<any>
+    resync: (input: unknown) => Promise<ScopedResync>
     diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string }>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
       snapshot: async (input) => this.snapshot(rpcInput(input).directory),
+      bootstrap: async (input) => {
+        const request = rpcInput(input)
+        return this.bootstrap(request.directory, request.workspaceID)
+      },
       revision: async (input) => this.revision(rpcInput(input).directory),
       "changes.since": async (input) => this.changesSince(rpcInput(input)),
+      "work.project": async (input) => this.workProject(rpcInput(input).directory),
+      "transcript.window": async (input) => {
+        const request = rpcInput(input)
+        return this.transcriptWindow(request.directory, request.workspaceID, request.beforeSeq, request.limit)
+      },
+      "message.get": async (input) => {
+        const request = rpcInput(input)
+        return this.messageGet(request.directory, request.workspaceID, request.messageID)
+      },
+      resync: async (input) => {
+        const request = rpcInput(input)
+        return this.resync(request.directory, request.workspaceID, request.scopes)
+      },
       diagnostic: async (input) => this.diagnostic(rpcInput(input).directory),
       invoke: async (input) => {
         try {
@@ -378,6 +432,25 @@ export class EnsembleV2Service {
     for (const registration of this.registrations) {
       void registration?.events?.emit?.("patches", batch)?.catch?.(() => undefined)
     }
+  }
+
+  /**
+   * Ticket #141: per-scope versions ride beside every patch so a later gap can
+   * name the scopes that actually moved. Unread/busy counts are derived on the
+   * revision heartbeat, bootstrap, and scoped resync instead of on every
+   * patch: a 5k-task burst must stay linear, not scan the whole store per
+   * entity write.
+   */
+  private withReadMeta(batch: PatchBatch): PatchBatch {
+    return {
+      ...batch,
+      scopeVersions: this.store.scopeVersions(),
+    }
+  }
+
+  /** Server-derived unread/busy counts for the durable store. */
+  private counts(): Record<string, { unread: number; busy: number }> {
+    return workspaceCounts(this.store.read())
   }
 
   private static streamKey(workspaceID: string, messageID: string): string {
@@ -477,7 +550,12 @@ export class EnsembleV2Service {
    */
   private async changesSince(input: { directory: string; epoch?: number; version?: number }): Promise<ChangesSince> {
     await this.store.sync().catch(() => false)
-    return { ...this.store.changesSince(input.epoch ?? -1, input.version ?? -1), meta: this.feedMeta() }
+    return {
+      ...this.store.changesSince(input.epoch ?? -1, input.version ?? -1),
+      meta: this.feedMeta(),
+      scopeVersions: this.store.scopeVersions(),
+      counts: this.counts(),
+    }
   }
 
   /**
@@ -756,6 +834,8 @@ export class EnsembleV2Service {
       configRevision: this.configFingerprint(directory, local.workspaceDirectories),
       protocol: ENSEMBLE_PROTOCOL_VERSION,
       epoch: this.epochValue,
+      counts: this.counts(),
+      scopeVersions: this.store.scopeVersions(),
     }
   }
 
@@ -791,6 +871,7 @@ export class EnsembleV2Service {
    * before pump work.
    */
   private async snapshot(directory: string): Promise<Snapshot> {
+    const started = performance.now()
     await this.store.sync()
     // Queue-consistent read: finish local writes before cloning the boundary.
     await this.store.settled()
@@ -809,6 +890,7 @@ export class EnsembleV2Service {
       configRevision: this.configFingerprint(directory, Object.values(state.workspaces).filter((workspace) => !workspace.archived).map((workspace) => workspace.directory)),
       protocol: ENSEMBLE_PROTOCOL_VERSION,
       epoch: this.epochValue,
+      counts: workspaceCounts(state),
     }
     if (this.lastConfigError) payload.configError = this.lastConfigError
     if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
@@ -817,6 +899,201 @@ export class EnsembleV2Service {
     // first message exists). Sanitize once at the explicit snapshot boundary;
     // hot read paths never take this copy. This restores the pre-#131 contract
     // while keeping #131's no-hot-path-clone goal.
+    const safe = jsonSafe(payload)
+    // Ticket #141: the measured full-snapshot boundary feeds the Tier 3 gate.
+    this.lastSnapshotBytes = Buffer.byteLength(JSON.stringify(safe))
+    this.lastSnapshotMs = performance.now() - started
+    return safe
+  }
+
+  /** Pick the read workspace: explicit, then UI-active, then directory, then newest. */
+  private readWorkspaceID(state: SnapshotState, directory: string, requested?: string): string | undefined {
+    if (requested && state.workspaces[requested]) return requested
+    const active = state.ui.activeWorkspaceID
+    if (active && state.workspaces[active]) return active
+    let canonical: string | undefined
+    try {
+      canonical = canonicalDirectory(directory)
+    } catch {}
+    const byDirectory = canonical === undefined
+      ? undefined
+      : Object.values(state.workspaces).find((workspace) => {
+        if (workspace.archived) return false
+        try {
+          return canonicalDirectory(workspace.directory) === canonical
+        } catch {
+          return false
+        }
+      })
+    if (byDirectory) return byDirectory.id
+    return Object.values(state.workspaces)
+      .filter((workspace) => !workspace.archived)
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]?.id
+  }
+
+  /** Ticket #141 gate input from durable counts plus the last measured snapshot. */
+  private tier3Gate(state: SnapshotState): Tier3Gate {
+    return tier3Gate({
+      messageCount: Object.values(state.messages).reduce((total, messages) => total + messages.length, 0),
+      taskCount: Object.keys(state.subtasks).length,
+      ...(this.lastSnapshotBytes !== undefined ? { snapshotBytes: this.lastSnapshotBytes } : {}),
+      ...(this.lastSnapshotMs !== undefined ? { snapshotMs: this.lastSnapshotMs } : {}),
+    })
+  }
+
+  /** Work tasks with the derived lifecycle overlay the Work pane reads. */
+  private projectedTasks(state: SnapshotState, at: number): Record<string, Subtask> {
+    const projected = projectVisibleWork(state, at)
+    const tasks: Record<string, Subtask> = {}
+    for (const [id, task] of Object.entries(projected)) {
+      tasks[id] = { ...task, status: deriveWorkStatus(task, at) } as Subtask
+    }
+    return tasks
+  }
+
+  /** Shell entities with Work/transcript branches supplied by the caller. */
+  private shellState(state: SnapshotState, subtasks: Record<string, Subtask>): SnapshotState {
+    return {
+      ...state,
+      messages: {},
+      subtasks,
+      runs: Object.fromEntries(this.activeRuns),
+    }
+  }
+
+  private async workProject(directory: string): Promise<any> {
+    await this.store.sync()
+    await this.store.settled()
+    this.refreshDmClock()
+    this.noteViewDirectory(directory)
+    const state = this.store.read()
+    const at = Date.now()
+    return jsonSafe({
+      version: state.version,
+      epoch: this.epochValue,
+      counts: workspaceCounts(state),
+      tasks: this.projectedTasks(state, at),
+    })
+  }
+
+  private async transcriptWindow(
+    directory: string,
+    workspaceID?: string,
+    beforeSeq?: number,
+    limit?: number,
+  ): Promise<any> {
+    await this.store.sync()
+    await this.store.settled()
+    this.noteViewDirectory(directory)
+    const state = this.store.read()
+    const target = this.readWorkspaceID(state, directory, workspaceID)
+    if (!target) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+    const window = deriveTranscriptWindow(state.messages[target] ?? [], {
+      ...(beforeSeq !== undefined ? { beforeSeq } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    })
+    return jsonSafe({
+      version: state.version,
+      epoch: this.epochValue,
+      workspaceID: target,
+      ...window,
+    })
+  }
+
+  private async messageGet(directory: string, workspaceID?: string, messageID?: string): Promise<any> {
+    if (!messageID) throw invalidInput("messageID is required.")
+    await this.store.sync()
+    await this.store.settled()
+    this.noteViewDirectory(directory)
+    const state = this.store.read()
+    const target = this.readWorkspaceID(state, directory, workspaceID)
+    if (!target) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+    const message = this.store.message(target, messageID)
+    return jsonSafe(message ? { found: true, message } : { found: false })
+  }
+
+  /**
+   * Gated scoped bootstrap: large workspaces get shell metadata, the visible
+   * Work projection, one transcript window, and server-derived counts. Small
+   * workspaces keep the full snapshot path. Every branch comes from the
+   * durable store; the projection/window are disposable read models.
+   */
+  private async bootstrap(directory: string, workspaceID?: string): Promise<Snapshot> {
+    await this.store.sync()
+    await this.store.settled()
+    this.refreshDmClock()
+    this.noteViewDirectory(directory)
+    if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
+    const state = this.store.read()
+    const gate = this.tier3Gate(state)
+    const counts = workspaceCounts(state)
+    if (!gate.enabled) {
+      const full = await this.snapshot(directory)
+      return { ...full, scoped: false, counts, gate }
+    }
+    const at = Date.now()
+    const target = this.readWorkspaceID(state, directory, workspaceID)
+    const window = target
+      ? { ...deriveTranscriptWindow(state.messages[target] ?? [], {}), workspaceID: target }
+      : undefined
+    const subtasks = this.projectedTasks(state, at)
+    const scopedState: SnapshotState = {
+      ...this.shellState(state, subtasks),
+      messages: target && window ? { [target]: window.messages } : {},
+    }
+    const payload: Snapshot = {
+      state: scopedState,
+      models: this.catalog.modelOptions,
+      skills: this.catalog.skillOptions,
+      directory,
+      catalogRevision: this.catalog.revision,
+      configRevision: this.configFingerprint(directory, Object.values(state.workspaces).filter((workspace) => !workspace.archived).map((workspace) => workspace.directory)),
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      epoch: this.epochValue,
+      scoped: true,
+      ...(window ? { window: {
+        ...(window.oldestSeq !== undefined ? { oldestSeq: window.oldestSeq } : {}),
+        ...(window.newestSeq !== undefined ? { newestSeq: window.newestSeq } : {}),
+        hasMoreOlder: window.hasMoreOlder,
+        limit: window.limit,
+      } } : {}),
+      counts,
+      gate,
+    }
+    if (this.lastConfigError) payload.configError = this.lastConfigError
+    if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
+    return jsonSafe(payload)
+  }
+
+  /**
+   * Scoped gap recovery. The caller names the stale scopes (from per-scope
+   * versions); unchanged scopes are not read or transported.
+   */
+  private async resync(directory: string, workspaceID?: string, requested?: string[]): Promise<ScopedResync> {
+    const allowed: ScopeName[] = ["shell", "work", "transcript"]
+    const scopes = requested === undefined
+      ? allowed
+      : [...new Set(requested)].filter((scope): scope is ScopeName => (allowed as string[]).includes(scope))
+    if (requested !== undefined && scopes.length !== requested.length) throw invalidInput("scopes must contain shell, work, or transcript.")
+    await this.store.sync()
+    await this.store.settled()
+    this.refreshDmClock()
+    this.noteViewDirectory(directory)
+    const state = this.store.read()
+    const target = this.readWorkspaceID(state, directory, workspaceID)
+    const payload: ScopedResync = {
+      epoch: this.epochValue,
+      version: state.version,
+      scopeVersions: this.store.scopeVersions(),
+      counts: workspaceCounts(state),
+      gate: this.tier3Gate(state),
+      meta: this.feedMeta(),
+    }
+    if (scopes.includes("work")) payload.work = this.projectedTasks(state, Date.now())
+    if (scopes.includes("shell")) payload.shell = this.shellState(state, {})
+    if (scopes.includes("transcript") && target) {
+      payload.transcript = { ...deriveTranscriptWindow(state.messages[target] ?? [], {}), workspaceID: target }
+    }
     return jsonSafe(payload)
   }
 

@@ -1,4 +1,5 @@
 import { deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
+import { isNeedsYouTask } from "../work-groups.ts"
 import type { Subtask } from "../types.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
@@ -100,12 +101,7 @@ export function needsYouSuffix(): string {
 }
 
 /** True while the task waits on the user: interrupted, gated on a still-pending approval, or blocked by a native permission mirror. */
-export function isNeedsYouTask(task: Subtask, pendingApprovalIDs: ReadonlySet<string>, nativeBlockedSubtaskIDs: ReadonlySet<string> = new Set()): boolean {
-  if (task.interrupted) return true
-  if (task.approvalID && pendingApprovalIDs.has(task.approvalID)) return true
-  if (nativeBlockedSubtaskIDs.has(task.id)) return true
-  return false
-}
+export { isNeedsYouTask }
 
 /**
  * Animated liveness suffix for a WORK row at a tick (brief §4). Working and
