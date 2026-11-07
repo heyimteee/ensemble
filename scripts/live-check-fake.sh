@@ -13,13 +13,13 @@ live_require_runtime
 live_require_node
 live_setup "fake"
 
-# Ticket #117: the Work header distinguishes active and recent work, so a
+# Ticket #136: the Work header names groups, active work, and done work, so a
 # "work is active" wait must assert a non-zero active count instead of the
-# header's mere presence — recent cards keep the header mounted for eight
-# seconds after the last active card finishes.
+# header's mere presence — a complete dispatch group keeps the header mounted
+# for its shared 1.2 s hold after the last task finishes.
 live_capture_active_work() {
   local session="$1"
-  live_capture "$session" | grep -Eq 'WORK [1-9][0-9]* active'
+  live_capture "$session" | grep -Eq 'WORK [0-9]+ groups? · [1-9][0-9]* active'
 }
 
 live_require_active_work() {
@@ -616,10 +616,10 @@ live_log "I, :init, and /init produced visible System Agent jobs and reports"
 # ephemeral WORK block lists exactly the active rows with the assigned agent,
 # and a per-agent activity line shows what each agent is doing; no raw
 # streamed body text appears anywhere. Each terminal outcome is announced
-# once as a transcript system line, finished rows settle as display-only
-# recent cards for eight seconds, and the block unmounts after that window.
-# A second message proves multiple live items each finalize without
-# duplicates or stale lines.
+# once as a transcript system line, finished rows stay inside their dispatch
+# group as display-only cards, and the block unmounts after the shared 1.2 s
+# group hold. A second message proves multiple live items each finalize
+# without duplicates or stale lines.
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus on group surface"
 live_type "$LIVE_TUI_SESSION" "fake-queue-alpha"
@@ -698,9 +698,9 @@ done
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-alpha" 15 "terminal announcement for first work"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-beta" 15 "terminal announcement for second work"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal outcome announced exactly once"
-live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the eight-second recent window"
+live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the shared group hold"
 live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" "no active cards remain in the block"
-live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT REPLIED" "no finished cards remain after the recent window"
+live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT REPLIED" "no finished cards remain after the group hold"
 live_assert_absence "$LIVE_TUI_SESSION" "│ working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
 # and no needs-you marker appears without user-blocked work in this flow.
@@ -729,7 +729,7 @@ live_log "group work ran to replied with derived status ($queue_status)"
 # working, then replied — with the asking mention and the answering agent
 # both visible in order. The new burst mounts a fresh WORK block with only
 # its own row; the terminal outcome is announced once and the block settles
-# through the eight-second recent window. The recipient's reply is the relay:
+# through the shared group hold. The recipient's reply is the relay:
 # exactly one answer row, no second leg.
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"

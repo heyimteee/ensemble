@@ -393,9 +393,9 @@ export function Rail(props: {
 
 
 export function WorkCardView(props: { colors: Palette; card: WorkCard; selected: boolean; width: number }) {
-  const recent = () => props.card.recent
+  const terminal = () => props.card.terminal
   const stateTone = () =>
-    recent()
+    props.card.status === "cancelled"
       ? props.colors.faint
       : props.card.needsYou || props.card.status === "working" || props.card.status === "retrying"
         ? props.colors.warn
@@ -405,7 +405,7 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
             ? props.colors.bad
             : props.colors.muted
   const accentTone = () =>
-    recent()
+    props.card.status === "cancelled"
       ? props.colors.faint
       : props.card.status === "replied"
         ? props.colors.good
@@ -417,16 +417,16 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
   const header = (): StyledLinePart[] => [
     { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.good : props.colors.faint },
     { text: `${props.card.glyph} `, fg: stateTone() },
-    { text: props.card.agent.toUpperCase(), fg: recent() ? props.colors.muted : props.colors.accent },
+    { text: props.card.agent.toUpperCase(), fg: terminal() ? props.colors.muted : props.colors.accent },
     { text: ` ${props.card.state.toUpperCase()}`, fg: stateTone() },
   ]
   // One styled line with one chunk per tide sample. Each sample is exactly
   // two cells: one glyph and one blank. The blank is deliberate: it is the
   // approved Sub-Cell Tide gap and keeps the strip from reading as a solid bar.
-  // Recent cards arrive with a flat settled strip, so this row stops moving.
+  // Terminal cards arrive with a flat settled strip, so this row stops moving.
   const tide = (): StyledLinePart[] => props.card.tideLevels.map((level) => ({
     text: `${TIDE_GLYPHS[level]} `,
-    fg: recent() ? props.colors.faint : props.card.needsYou ? props.colors.warn : props.colors[tideTone(level)],
+    fg: terminal() ? props.colors.faint : props.card.needsYou ? props.colors.warn : props.colors[tideTone(level)],
   }))
   return (
     <box
@@ -441,8 +441,8 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
       <box width={1} flexShrink={0} alignSelf="stretch" backgroundColor={accentTone()} />
       <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
         <StyledLineText parts={header} fg={props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
-        <text fg={props.selected ? props.colors.good : recent() ? props.colors.muted : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.title}</text>
-        <text fg={recent() ? props.colors.faint : props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.detail}</text>
+        <text fg={props.selected ? props.colors.good : terminal() ? props.colors.muted : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.title}</text>
+        <text fg={terminal() ? props.colors.faint : props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.detail}</text>
         <StyledLineText parts={tide} fg={props.colors.faint} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
       </box>
     </box>

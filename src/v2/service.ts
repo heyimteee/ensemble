@@ -659,7 +659,12 @@ export class EnsembleV2Service {
     }
     if (this.lastConfigError) payload.configError = this.lastConfigError
     if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
-    return payload
+    // The host RPC output validator rejects explicit undefined anywhere in a
+    // durable entity (live checks fail on `state.messages` as soon as the
+    // first message exists). Sanitize once at the explicit snapshot boundary;
+    // hot read paths never take this copy. This restores the pre-#131 contract
+    // while keeping #131's no-hot-path-clone goal.
+    return jsonSafe(payload)
   }
 
   private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; clones?: ReturnType<typeof cloneStats> }> {
@@ -669,11 +674,13 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
-    return {
+    // Same host RPC output constraint as snapshot(); diagnostic is also an
+    // explicit full-state boundary, never a hot path.
+    return jsonSafe({
       state,
       directory,
       ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
-    }
+    })
   }
 
   /**
@@ -3923,9 +3930,11 @@ export class EnsembleV2Service {
         } else if (workspace && task.workKind === "turn" && task.turn) {
           const recipientName = this.store.agent(task.assigneeID ?? "")?.name ?? "Unknown agent"
           await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${task.error ?? "the work could not be delivered."} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
-        } else if (workspace) {
-          await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${task.error}`, kind: "system", taskID: task.id })
         }
+        // Ticket #136: plain failed work has one canonical terminal event,
+        // symmetric with success (the TUI derives it from the task row). The
+        // old generic "Subtask failed" line was a duplicate. Correlation-
+        // specific handoff/turn notices above remain their own leg.
         continue
       }
       // A claim whose lease expired without a live owner goes back to the
@@ -4550,9 +4559,11 @@ export class EnsembleV2Service {
     } else if (workspace && task.workKind === "turn" && task.turn) {
       const recipientName = this.store.agent(task.assigneeID ?? "")?.name ?? "Unknown agent"
       await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${error} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
-    } else if (workspace) {
-      await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${error}`, kind: "system", taskID: task.id })
     }
+    // Ticket #136: one canonical terminal event per task. A plain failure is
+    // announced from the terminal task row like success; a generic duplicate
+    // system line made failure feel secondary. Correlation-specific notices
+    // above remain.
     if (task.parentID) await this.maybeSynthesize(task.parentID)
   }
 

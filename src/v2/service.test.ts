@@ -1216,7 +1216,10 @@ test("session creation failures mark a subtask failed with an explanation", asyn
     const task = Object.values(after.state.subtasks)[0] as any
     assert.equal(task.outcome, "failed")
     assert.match(task.error, /native session/)
-    assert.ok(after.state.messages[workspace.result.id].some((message: any) => message.text.includes("Subtask failed")))
+    assert.ok(
+      !after.state.messages[workspace.result.id].some((message: any) => message.text.includes("Subtask failed")),
+      "the terminal task record owns the single failure event; no duplicate generic line",
+    )
   } finally {
     await stop()
   }
@@ -2897,7 +2900,10 @@ test("exhausted attempts fail with the reason preserved", async () => {
     const after = await handlers.snapshot({ directory })
     assert.equal(after.state.subtasks.t.outcome, "failed")
     assert.equal(after.state.subtasks.t.error, "boom")
-    assert.ok((after.state.messages.w as any[]).some((message) => message.text.includes("Subtask failed")))
+    assert.ok(
+      !((after.state.messages.w ?? []) as any[]).some((message) => message.text.includes("Subtask failed")),
+      "exhausted work announces one failure through the canonical terminal record, not a duplicate system line",
+    )
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

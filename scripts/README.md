@@ -154,12 +154,15 @@ onboarding reply. SSE ends with `finish_reason: "stop"` and `[DONE]`.
 
 ## Size matrix
 
-`npm run test:live:sizes` (ticket #127) is the targeted Work-card geometry
-check. It starts the isolated fake host once, creates three agents and one
-workspace through the RPC surface, then restarts the TUI at 80×24, 100×30,
-120×40, and 160×50. At each size it delegates one long-running fake task per
-agent and checks the Work header, the visible card count, the overflow line,
-compact fallback, focus ownership, and the composer. Override the set with
+`npm run test:live:sizes` (ticket #127, group lifecycle ticket #136) is the
+targeted Work-card geometry check. It starts the isolated fake host once,
+creates three agents and one workspace through the RPC surface, then restarts
+the TUI at 80×24, 100×30, 120×40, and 160×50. At each size it starts one
+long-running fake dispatch-group fan-out and checks the group header, the
+visible card count, the overflow line, compact fallback, focus ownership, and
+the composer. At 120×40 and 100×30 it appends a second command mid-group to
+prove newest-group capacity priority, group labels, and independent group
+removal after the shared 1.2 s hold. Override the set with
 `ENSEMBLE_V6_SIZES="120x40 160x50"`.
 
 The same run records the TUI process CPU and tmux pane updates for one, two,
