@@ -120,6 +120,17 @@ test("Work cards own stable tide assignments, freeze frames, and a gated clock",
   assert.ok(source.includes("shouldRunWorkClock(") && source.includes("WORK_CLOCK_INTERVAL_MS"))
 })
 
+test("ticket142: Work cards split static data from the two animation clocks", () => {
+  // Behavior: workrows.test.ts referential stability and independent
+  // glyph/tide clocks; workgroups.test.ts expiry timer targets.
+  const source = app()
+  assert.ok(source.includes("workCardForTaskCached(workCardCache"))
+  assert.ok(source.includes("workCardGlyph(card, motionFrame(), process.env)"))
+  assert.ok(source.includes("workCardTide(card, {"))
+  assert.ok(source.includes("tideTick: workFrame()"))
+  assert.ok(source.includes("nextWorkInvalidation(activeTasks(), workPane().groups, now)"))
+})
+
 test("the app toast is app-owned and the host toast is fallback-only", () => {
   // Behavior: toast.test.ts lifecycle; the live toast placement check.
   const source = app()

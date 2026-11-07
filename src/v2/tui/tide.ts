@@ -208,6 +208,23 @@ export function pruneTideFreezes(
   return removed
 }
 
+/**
+ * Ticket #142: keep a still-visible waiting card's freeze frame inside its
+ * retention window even when the work clock is stopped (a needs-you card is
+ * the only card keeping its frame, so no 10 fps tick refreshes it). Pure
+ * state transition over the caller's freeze object.
+ */
+export function retainTideFreezes(
+  state: TideFreezeState,
+  ids: ReadonlySet<string>,
+  now: number = Date.now(),
+): void {
+  for (const id of ids) {
+    const entry = state.frozen.get(id)
+    if (entry) entry.seenAt = now
+  }
+}
+
 export type TideAssignmentState = {
   assignments: Map<string, { variant: TideVariant; seenAt: number }>
   deck: TideVariant[]

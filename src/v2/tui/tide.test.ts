@@ -13,6 +13,7 @@ import {
   flatTideStrip,
   pruneTideAssignments,
   pruneTideFreezes,
+  retainTideFreezes,
   tideAssignmentFor,
   tideColumns,
   tideLevel,
@@ -176,6 +177,16 @@ test("ticket116: idle freeze assignments prune after the independent tide retent
   assert.deepEqual(pruneTideFreezes(freeze, 1_000 + TIDE_ASSIGNMENT_RETENTION_MS + 1), ["gone"])
   assert.equal(freeze.frozen.has("live"), true, "a still-observed freeze survives")
   assert.equal(TIDE_ASSIGNMENT_RETENTION_MS, 8_000, "presentation retention is independent of the Work group hold")
+})
+
+test("ticket142: visible waiting cards refresh their freeze without a work-clock tick", () => {
+  const freeze = createTideFreezeState()
+  tideTickForCard("working", true, 12, {}, { state: freeze, id: "waiting", now: 1_000 })
+  retainTideFreezes(freeze, new Set(["waiting"]), 9_000)
+  assert.deepEqual(pruneTideFreezes(freeze, 9_001), [], "a visible waiting card keeps its frame")
+  assert.equal(freeze.frozen.get("waiting")?.tick, 12, "retention refreshes the timestamp, never the frame")
+  retainTideFreezes(freeze, new Set(), 30_000)
+  assert.deepEqual(pruneTideFreezes(freeze, 30_001), ["waiting"], "an off-screen freeze still ages out")
 })
 
 function seeded(seed: number): () => number {

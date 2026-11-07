@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
 import { WORK_GROUP_HOLD_MS } from "./work-constants.ts"
 import {
+  nextWorkInvalidation,
   workGroupCounts,
   workGroupLabel,
   workGroupLayout,
@@ -293,4 +294,22 @@ test("ticket136: terminal cards are display-only and overflow is never selectabl
   assert.deepEqual(layout.sections[0].tasks.map((item) => item.id), ["live-1", "live-2"])
   assert.equal(layout.sections[0].overflow, 2)
   assert.deepEqual(layout.selectableTasks.map((item) => item.id), ["live-1", "live-2"])
+})
+
+test("ticket142: Work invalidation targets status and group-hold expiry without an animation clock", () => {
+  const soon = working({ id: "soon", leaseUntil: 6_000 })
+  const deadline = task({ id: "deadline", deadlineAt: 7_000 })
+  const done = replied({ id: "done", finishedAt: 2_000, repliedAt: 2_000 })
+  const items = [soon, deadline, done]
+  const groups = workGroupsForTasks(items, record(...items), { now: 1_500 })
+
+  assert.equal(nextWorkInvalidation(items, groups, 1_500), 3_200, "the shared group hold closes first")
+  assert.equal(nextWorkInvalidation(items, groups, 3_200), 6_000, "then the working lease expires")
+  assert.equal(nextWorkInvalidation([soon, deadline], [], 5_000), 6_000)
+  assert.equal(nextWorkInvalidation([deadline], [], 7_000), undefined, "an expired deadline needs no reschedule")
+  assert.equal(
+    nextWorkInvalidation([replied({ id: "late" })], [], 5_000),
+    undefined,
+    "terminal work with no visible hold needs no timer",
+  )
 })

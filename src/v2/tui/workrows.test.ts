@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
-import { createTideFreezeState } from "./tide.ts"
+import { createTideFreezeState, type TideFreezeState } from "./tide.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -10,6 +10,7 @@ import {
   activityFrameForKind,
   activityLine,
   activityVerb,
+  createWorkCardCache,
   hasActiveWork,
   isNeedsYouTask,
   mergeStreamingActivity,
@@ -25,9 +26,13 @@ import {
   terminalAnnouncements,
   workCardDetail,
   workCardForTask,
+  workCardForTaskCached,
+  workCardGlyph,
   workCardHeader,
   workCardHeaderText,
+  workCardMotion,
   workCardStateWord,
+  workCardTide,
   workCardTones,
   workCompactRow,
   workCompactRowText,
@@ -36,6 +41,9 @@ import {
   workRowFrame,
   workRowText,
   workStatusLabel,
+  type WorkCard,
+  type WorkCardMotion,
+  type WorkCardOptions,
 } from "./workrows.ts"
 
 const task = (patch: Partial<Subtask> = {}): Subtask => ({
@@ -55,6 +63,28 @@ const task = (patch: Partial<Subtask> = {}): Subtask => ({
   createdAt: 1,
   ...patch,
 })
+
+/**
+ * Ticket #142: pre-split assertions are about the rendered card, so tests
+ * compose the static identity data with its animated cells here. Production
+ * rendering passes the two pieces separately; only this helper rebuilds the
+ * legacy full view model.
+ */
+function cardWithMotion(
+  item: Subtask,
+  agentLabel: string,
+  options: WorkCardOptions & {
+    tick?: number
+    tideTick?: number
+    env?: NodeJS.ProcessEnv
+    freezeState?: TideFreezeState
+  },
+): WorkCard & WorkCardMotion & { header: WorkCard["header"] & { glyph: string } } {
+  const { tick = 0, tideTick, env, freezeState, ...staticOptions } = options
+  const card = workCardForTask(item, agentLabel, staticOptions)
+  const motion = workCardMotion(card, { tick, tideTick, env, freezeState, now: options.now })
+  return { ...card, ...motion, header: { ...card.header, glyph: motion.glyph } }
+}
 
 test("work glyphs are distinct per terminal state", () => {
   assert.equal(workGlyph("pending"), "▫")
@@ -387,7 +417,7 @@ test("ticket68: native-blocked tasks read as needs-you without an approvalID", a
 })
 
 test("ticket115: work cards map agent, glyph, state, title, detail, and a full-width tide", () => {
-  const card = workCardForTask(
+  const card = cardWithMotion(
     task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
     "Nova",
     {
@@ -409,12 +439,12 @@ test("ticket115: work cards map agent, glyph, state, title, detail, and a full-w
 })
 
 test("ticket115: contract details are honest for queued, retrying, and stopped work", () => {
-  const pend = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 0, width: 40 })
+  const pend = cardWithMotion(task({ state: "pending" }), "Nova", { now: 1000, tick: 0, width: 40 })
   assert.equal(pend.header.status, "QUEUED")
   assert.equal(pend.header.glyph, "▫")
   assert.equal(pend.detail, "queued")
 
-  const retrying = workCardForTask(
+  const retrying = cardWithMotion(
     task({ state: "working", attempts: 1, retryAfter: 1500 }),
     "Nova",
     { now: 1000, tick: 0, width: 40, detailFor: () => "retrying…" },
@@ -422,7 +452,7 @@ test("ticket115: contract details are honest for queued, retrying, and stopped w
   assert.equal(retrying.header.status, "RETRYING")
   assert.equal(retrying.detail, "retrying…")
 
-  const stopping = workCardForTask(
+  const stopping = cardWithMotion(
     task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
     "Nova",
     { now: 1000, tick: 0, width: 40, pendingFor: (item) => (item.id === "t" ? "cancel" : null) },
@@ -432,7 +462,7 @@ test("ticket115: contract details are honest for queued, retrying, and stopped w
 })
 
 test("ticket115: needs-you cards carry the static marker and waiting detail", () => {
-  const card = workCardForTask(task({ interrupted: true }), "Nova", { now: 1000, tick: 3, width: 40 })
+  const card = cardWithMotion(task({ interrupted: true }), "Nova", { now: 1000, tick: 3, width: 40 })
   assert.equal(card.header.glyph, NEEDS_YOU_MARK)
   assert.equal(card.header.status, "NEEDS YOU")
   assert.equal(card.detail, "waiting for you…")
@@ -441,7 +471,7 @@ test("ticket115: needs-you cards carry the static marker and waiting detail", ()
 
 test("ticket115: card titles truncate to the content width instead of wrapping", () => {
   const longTitle = `t${"i".repeat(100)}`
-  const card = workCardForTask(task({ title: longTitle }), "Nova", { now: 1000, tick: 0, width: 20 })
+  const card = cardWithMotion(task({ title: longTitle }), "Nova", { now: 1000, tick: 0, width: 20 })
   assert.ok(card.title.length <= 18)
   assert.ok(card.title.endsWith("…"))
   assert.ok(card.detail.length <= 18)
@@ -455,7 +485,7 @@ test("ticket115: card ordering keeps active work only, working first and oldest-
     task({ id: "working-old", state: "working", claimedBy: "r", leaseUntil: 9000, attempts: 1, createdAt: 2 }),
     task({ id: "pending-new", state: "pending", createdAt: 6 }),
   ]
-  const cards = workCardsForTasks(items, () => "Nova", { now: 1000, tick: 0, width: 40 })
+  const cards = workCardsForTasks(items, () => "Nova", { now: 1000, width: 40 })
   assert.deepEqual(cards.map((card) => card.id), ["working-old", "working-new", "pending-old", "pending-new"])
 })
 
@@ -475,7 +505,7 @@ test("ticket136: terminal cards keep their final glyph, state word, and a flat s
     [{ state: "replied", outcome: "succeeded", stoppedAt: 1_000, finishedAt: 1_000, repliedAt: 1_000 }, "⊘", "cancelled"],
   ]
   for (const [patch, glyph, state] of cases) {
-    const card = workCardForTask(task({ ...patch, title: `Old ${state}` }), "Nova", {
+    const card = cardWithMotion(task({ ...patch, title: `Old ${state}` }), "Nova", {
       now: 1_500,
       tick: 7,
       tideTick: 7,
@@ -494,11 +524,11 @@ test("ticket136: terminal cards keep their final glyph, state word, and a flat s
     assert.ok(card.tideLevels.every((level) => level === 0), "terminal cards stay settled flat")
     assert.equal(card.tide, "▁ ".repeat(20))
   }
-  assert.equal(workCardForTask(task({ state: "pending" }), "Nova", { now: 1_000, tick: 0, width: 40 }).terminal, false)
+  assert.equal(cardWithMotion(task({ state: "pending" }), "Nova", { now: 1_000, tick: 0, width: 40 }).terminal, false)
 })
 
 test("ticket136: a terminal card with a still-pending approval is still display-only", () => {
-  const card = workCardForTask(
+  const card = cardWithMotion(
     task({ state: "replied", outcome: "succeeded", approvalID: "ap", finishedAt: 1_000, repliedAt: 1_000 }),
     "Nova",
     { now: 1_500, tick: 2, width: 40, pendingApprovalIDs: new Set(["ap"]) },
@@ -510,8 +540,8 @@ test("ticket136: a terminal card with a still-pending approval is still display-
 
 test("ticket116: a working card keeps its assigned variant and advances the strip", () => {
   const working = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
-  const first = workCardForTask(working, "Nova", { now: 1000, tick: 3, width: 40, variant: "ripple" })
-  const later = workCardForTask(working, "Nova", { now: 1000, tick: 9, width: 40, variant: "ripple" })
+  const first = cardWithMotion(working, "Nova", { now: 1000, tick: 3, width: 40, variant: "ripple" })
+  const later = cardWithMotion(working, "Nova", { now: 1000, tick: 9, width: 40, variant: "ripple" })
   assert.equal(first.tideVariant, "ripple")
   assert.equal(later.tideVariant, "ripple")
   assert.equal(first.tide.length, 40)
@@ -520,8 +550,8 @@ test("ticket116: a working card keeps its assigned variant and advances the stri
 
 test("ticket116: needs-you freezes the card's current variant", () => {
   const blocked = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1, interrupted: true })
-  const first = workCardForTask(blocked, "Nova", { now: 1000, tick: 3, width: 40, variant: "echo" })
-  const later = workCardForTask(blocked, "Nova", { now: 1000, tick: 9, width: 40, variant: "echo" })
+  const first = cardWithMotion(blocked, "Nova", { now: 1000, tick: 3, width: 40, variant: "echo" })
+  const later = cardWithMotion(blocked, "Nova", { now: 1000, tick: 9, width: 40, variant: "echo" })
   assert.equal(first.tideVariant, "echo")
   assert.equal(first.needsYou, true)
   assert.equal(first.tide, later.tide, "the strip does not advance while waiting for the user")
@@ -530,10 +560,10 @@ test("ticket116: needs-you freezes the card's current variant", () => {
 test("ticket116: needs-you keeps the tide frame from when the card blocked, not tick 0", () => {
   const blocked = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1, interrupted: true })
   const freezeState = createTideFreezeState()
-  const atBlock = workCardForTask(blocked, "Nova", { now: 1000, tick: 12, width: 40, variant: "echo", freezeState })
-  const later = workCardForTask(blocked, "Nova", { now: 2000, tick: 30, width: 40, variant: "echo", freezeState })
+  const atBlock = cardWithMotion(blocked, "Nova", { now: 1000, tick: 12, width: 40, variant: "echo", freezeState })
+  const later = cardWithMotion(blocked, "Nova", { now: 2000, tick: 30, width: 40, variant: "echo", freezeState })
   assert.equal(atBlock.tide, later.tide, "the blocked card holds one frame")
-  assert.notEqual(atBlock.tide, workCardForTask(blocked, "Nova", { now: 1000, tick: 0, width: 40, variant: "echo" }).tide, "the freeze is not the deterministic tick-0 still")
+  assert.notEqual(atBlock.tide, cardWithMotion(blocked, "Nova", { now: 1000, tick: 0, width: 40, variant: "echo" }).tide, "the freeze is not the deterministic tick-0 still")
 })
 
 test("ticket116: card mapping keeps one stable variant per subtask across polls", () => {
@@ -545,16 +575,14 @@ test("ticket116: card mapping keeps one stable variant per subtask across polls"
     ["one", "echo" as const],
     ["two", "travel" as const],
   ])
-  const render = (tick: number) =>
+  const render = () =>
     workCardsForTasks(items, () => "Nova", {
       now: 1000,
-      tick,
-      tideTick: tick,
       width: 40,
       variantFor: (item) => assigned.get(item.id) ?? "current",
     })
-  assert.deepEqual(render(1).map((card) => card.tideVariant), ["echo", "travel"])
-  assert.deepEqual(render(9).map((card) => card.tideVariant), ["echo", "travel"])
+  assert.deepEqual(render().map((card) => card.tideVariant), ["echo", "travel"])
+  assert.deepEqual(render().map((card) => card.tideVariant), ["echo", "travel"])
 })
 
 test("ticket137: work-card tones reserve green for replied and state colors for the bar", () => {
@@ -603,7 +631,7 @@ test("ticket137: the name truncates first and the status never truncates", () =>
 })
 
 test("ticket137: card headers carry the state word, tones, and reduced-motion final glyphs", () => {
-  const working = workCardForTask(
+  const working = cardWithMotion(
     task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
     "Nova",
     { now: 1000, tick: 9, width: 19, env: { ENSEMBLE_REDUCED_MOTION: "1" } },
@@ -613,7 +641,7 @@ test("ticket137: card headers carry the state word, tones, and reduced-motion fi
   assert.equal(working.header.status, "WORKING")
   assert.deepEqual(working.tones, { glyph: "warn", status: "muted", bar: "warn" })
 
-  const noColor = workCardForTask(
+  const noColor = cardWithMotion(
     task({ state: "replied", outcome: "succeeded", finishedAt: 1000, repliedAt: 1000 }),
     "Nova",
     { now: 1500, tick: 9, width: 40, env: { NO_COLOR: "1" } },
@@ -622,12 +650,12 @@ test("ticket137: card headers carry the state word, tones, and reduced-motion fi
   assert.equal(noColor.header.status, "REPLIED")
   assert.deepEqual(noColor.tones, { glyph: "good", status: "good", bar: "good" })
 
-  const queued = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 3, width: 40 })
+  const queued = cardWithMotion(task({ state: "pending" }), "Nova", { now: 1000, tick: 3, width: 40 })
   assert.equal(queued.header.status, "QUEUED")
   assert.equal(queued.tones.status, "muted")
   assert.equal(queued.tones.bar, "faint")
 
-  const needsYou = workCardForTask(task({ interrupted: true }), "Nova", { now: 1000, tick: 3, width: 40 })
+  const needsYou = cardWithMotion(task({ interrupted: true }), "Nova", { now: 1000, tick: 3, width: 40 })
   assert.equal(needsYou.header.glyph, NEEDS_YOU_MARK)
   assert.equal(needsYou.header.status, "NEEDS YOU")
   assert.deepEqual(needsYou.tones, { glyph: "warn", status: "warn", bar: "warn" })
@@ -654,8 +682,8 @@ test("ticket137: compact rows keep the name left, status right, and never trunca
 })
 
 test("ticket116: queued cards stay still and terminal cards settle flat", () => {
-  const queued = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 3, width: 40, variant: "travel" })
-  const queuedLater = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 9, width: 40, variant: "travel" })
+  const queued = cardWithMotion(task({ state: "pending" }), "Nova", { now: 1000, tick: 3, width: 40, variant: "travel" })
+  const queuedLater = cardWithMotion(task({ state: "pending" }), "Nova", { now: 1000, tick: 9, width: 40, variant: "travel" })
   assert.equal(queued.tide, queuedLater.tide, "parked work never animates")
 
   for (const patch of [
@@ -663,8 +691,101 @@ test("ticket116: queued cards stay still and terminal cards settle flat", () => 
     { state: "replied" as const, outcome: "failed" as const, repliedAt: 10, finishedAt: 10 },
     { state: "replied" as const, outcome: "succeeded" as const, repliedAt: 10, finishedAt: 10, stoppedAt: 10 },
   ]) {
-    const card = workCardForTask(task(patch), "Nova", { now: 2000, tick: 5, width: 40, variant: "inbound" })
+    const card = cardWithMotion(task(patch), "Nova", { now: 2000, tick: 5, width: 40, variant: "inbound" })
     assert.ok(card.tideLevels.every((level) => level === 0), `${card.status} settles flat`)
     assert.equal(card.tide, "▁ ".repeat(20))
   }
+})
+
+test("ticket142: static card data keeps identity across animation ticks", () => {
+  const working = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  const cache = createWorkCardCache()
+  const options = { now: 1000, width: 40, variant: "current" as const }
+  const first = workCardForTaskCached(cache, working, "Nova", options)
+  const frames = [0, 1, 2, 3].map((tick) => ({
+    card: workCardForTaskCached(cache, working, "Nova", options),
+    motion: workCardMotion(first, { tick, tideTick: tick, env: {} }),
+  }))
+
+  for (const frame of frames) assert.equal(frame.card, first, "the static card object is reused across ticks")
+  assert.equal(frames[0].card.title, "Check the build")
+  assert.equal(frames[0].card.detail, "working…")
+  assert.equal(frames[0].card.header.name, "NOVA")
+  assert.equal(frames[0].card.header.status, "WORKING")
+  assert.deepEqual(frames[0].card.tones, { glyph: "warn", status: "muted", bar: "warn" })
+  assert.equal(frames[0].card.tideVariant, "current")
+  assert.equal(new Set(frames.map((frame) => frame.motion.tide)).size > 1, true, "the tide still animates")
+  assert.equal(new Set(frames.map((frame) => frame.motion.glyph)).size > 1, true, "the glyph still animates")
+  assert.equal("tide" in first, false, "identity data carries no animated strip")
+  assert.equal("glyph" in first.header, false, "identity data carries no animated glyph")
+})
+
+test("ticket142: static cards rebuild only when the task, approval, or layout changes", () => {
+  const cache = createWorkCardCache()
+  const base = { now: 1000, width: 40, variant: "ripple" as const }
+  const working = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  const card = workCardForTaskCached(cache, working, "Nova", base)
+
+  assert.equal(workCardForTaskCached(cache, working, "Nova", { ...base }), card, "an identical poll reuses the card")
+
+  const finished = task({
+    ...working,
+    state: "replied",
+    outcome: "succeeded",
+    repliedAt: 1000,
+    finishedAt: 1000,
+  })
+  const replied = workCardForTaskCached(cache, finished, "Nova", base)
+  assert.notEqual(replied, card, "a task transition rebuilds the card")
+  assert.equal(replied.header.status, "REPLIED")
+
+  const gated = task({ ...working, approvalID: "ap" })
+  const blocked = workCardForTaskCached(cache, gated, "Nova", {
+    ...base,
+    pendingApprovalIDs: new Set(["ap"]),
+  })
+  assert.notEqual(blocked, card, "a pending approval rebuilds needs-you data")
+  assert.equal(blocked.needsYou, true)
+  assert.equal(blocked.header.status, "NEEDS YOU")
+
+  const narrow = workCardForTaskCached(cache, working, "Nova", { ...base, width: 20 })
+  assert.notEqual(narrow, card, "a width change rebuilds the truncated layout")
+  assert.notEqual(narrow.header.gap, card.header.gap)
+
+  const renamed = workCardForTaskCached(cache, working, "Sage", base)
+  assert.notEqual(renamed, card, "an agent label change rebuilds the header")
+
+  const active = workCardForTaskCached(cache, working, "Nova", {
+    ...base,
+    detailFor: () => "running tests…",
+  })
+  assert.notEqual(active, card, "an activity detail change rebuilds the detail line")
+  assert.equal(active.detail, "running tests…")
+})
+
+test("ticket142: only the glyph and tide cells read their animation clocks", () => {
+  const working = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  const card = workCardForTask(working, "Nova", { now: 1000, width: 40, variant: "current" })
+  const base = workCardMotion(card, { tick: 1, tideTick: 3, env: {} })
+  const glyphTick = workCardMotion(card, { tick: 2, tideTick: 3, env: {} })
+  const tideTick = workCardMotion(card, { tick: 1, tideTick: 4, env: {} })
+
+  assert.notEqual(glyphTick.glyph, base.glyph, "the glyph advances on the 4 fps tick")
+  assert.equal(glyphTick.tide, base.tide, "the 4 fps tick does not rebuild the tide")
+  assert.equal(tideTick.glyph, base.glyph, "the 10 fps tick does not rebuild the glyph")
+  assert.notEqual(tideTick.tide, base.tide, "the tide advances on the 10 fps tick")
+  assert.equal(workCardGlyph(card, 1, {}), "⠙")
+  assert.equal(workCardTide(card, { tideTick: 3, env: {} }).tide, base.tide)
+})
+
+test("ticket142: reduced motion pins the glyph and tide to frame zero", () => {
+  const working = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  const card = workCardForTask(working, "Nova", { now: 1000, width: 40, variant: "current" })
+  const still = workCardMotion(card, { tick: 0, tideTick: 0, env: {} })
+  const reduced = workCardMotion(card, { tick: 9, tideTick: 9, env: { ENSEMBLE_REDUCED_MOTION: "1" } })
+
+  assert.equal(reduced.glyph, still.glyph)
+  assert.equal(reduced.glyph, "⠋")
+  assert.equal(reduced.tide, still.tide)
+  assert.deepEqual(reduced.tideLevels, still.tideLevels)
 })

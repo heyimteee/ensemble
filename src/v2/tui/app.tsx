@@ -51,7 +51,7 @@ import {
   type WizardDraft,
 } from "./wizard.ts"
 import { EMPTY_MARK, WORK_CLOCK_INTERVAL_MS, isReducedMotion, shouldRunMotion, shouldRunWorkClock } from "./motion.ts"
-import { createTideAssignments, createTideFreezeState, pruneTideAssignments, pruneTideFreezes, tideVariantFor } from "./tide.ts"
+import { createTideAssignments, createTideFreezeState, pruneTideAssignments, pruneTideFreezes, retainTideFreezes, tideVariantFor } from "./tide.ts"
 import {
   TRANSCRIPT_EMPHASIS_MS,
   createTranscriptMotionState,
@@ -161,8 +161,12 @@ import {
   splitActivityGroups,
   splitLiveFinalized,
   suppressCardedActivity,
-  workCardForTask,
+  createWorkCardCache,
+  pruneWorkCardCache,
+  workCardForTaskCached,
+  workCardGlyph,
   workCardStateWord,
+  workCardTide,
   workCardTones,
   workCompactRow,
   workRowFrame,
@@ -172,7 +176,7 @@ import {
   type WorkCard,
   type WorkCardOptions,
 } from "./workrows.ts"
-import { workGroupCounts, workGroupLayout, workGroupsForTasks, workSummaryCounts, type WorkGroupSection } from "./workgroups.ts"
+import { nextWorkInvalidation, workGroupCounts, workGroupLayout, workGroupsForTasks, workSummaryCounts, type WorkGroupSection } from "./workgroups.ts"
 import {
   accumulateCompletions,
   BUBBLE_CHROME,
@@ -432,6 +436,11 @@ export function EnsembleV2App() {
   // of the 4 fps chrome clock. It stops (and resets) when no unblocked
   // working card remains, so idle cards cost nothing.
   const [workFrame, setWorkFrame] = createSignal(0)
+  // Ticket #142: derived Work status and the 1.2 s group hold can expire
+  // without a durable update. One dedicated timer bumps this revision at the
+  // next such instant; it is not an animation clock and never rebuilds the
+  // animated glyph or tide cells.
+  const [workRevision, setWorkRevision] = createSignal(0)
   // Ticket #119: one visible app toast and a bounded queue. The effect below
   // schedules exactly one timeout for the visible toast's deadline.
   const [toasts, setToasts] = createSignal(createToastState())
@@ -799,9 +808,16 @@ export function EnsembleV2App() {
   const tideFreezes = createTideFreezeState()
   // Ticket #136: the Work pane is dispatch groups, not active cards plus
   // per-task recent cards. Group visibility and layout are pure; this memo
-  // joins them to the card mapping, activity detail, and tide assignment.
+  // joins them to the static card mapping, activity detail, and tide
+  // assignment. Ticket #142: it reads no animation clock. Only the glyph and
+  // tide cells are rebuilt per frame, and value-equal cards keep their
+  // previous reference across unrelated snapshot polls.
+  const workCardCache = createWorkCardCache()
   type WorkPaneSection = WorkGroupSection & { cards: WorkCard[] }
   const workPane = createMemo(() => {
+    // Track the dedicated expiry revision; a durable state change re-runs the
+    // memo through activeTasks/state/approvals below.
+    workRevision()
     const now = Date.now()
     const active = activeTasks()
     const groups = workGroupsForTasks(active, state()?.subtasks ?? {}, {
@@ -814,15 +830,11 @@ export function EnsembleV2App() {
     const nativeBlockedSet = nativeBlockedSubtaskIDs()
     const options: WorkCardOptions = {
       now,
-      tick: motionFrame(),
-      tideTick: workFrame(),
       width: Math.max(12, layout.cardContentWidth),
-      env: process.env,
       pendingApprovalIDs: pendingApprovalSet,
       nativeBlockedSubtaskIDs: nativeBlockedSet,
       pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
       variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
-      freezeState: tideFreezes,
       detailFor: (item) => activityStateForTask(item, {
         now,
         pendingApprovalIDs: pendingApprovalSet,
@@ -834,12 +846,55 @@ export function EnsembleV2App() {
     const sections: WorkPaneSection[] = layout.sections.map((section) => ({
       ...section,
       cards: section.mode === "cards"
-        ? section.tasks.map((task) => workCardForTask(task, agentName(state(), task.assigneeID), options))
+        ? section.tasks.map((task) =>
+            workCardForTaskCached(workCardCache, task, agentName(state(), task.assigneeID), options),
+          )
         : [],
     }))
+    pruneWorkCardCache(
+      workCardCache,
+      new Set(sections.flatMap((section) => section.cards.map((card) => card.id))),
+    )
     pruneTideAssignments(tideAssignments, now)
+    // A needs-you card stops the work clock, so its freeze frame has no
+    // per-tick refresh. Keep frames for cards that are still on screen.
+    retainTideFreezes(
+      tideFreezes,
+      new Set(
+        sections
+          .flatMap((section) => section.cards)
+          .filter((card) => card.status === "working" && card.needsYou)
+          .map((card) => card.id),
+      ),
+      now,
+    )
     pruneTideFreezes(tideFreezes, now)
     return { groups, layout, sections, counts: workGroupCounts(groups) }
+  })
+  // Ticket #142: status deadlines, lease expiry, and the shared group hold
+  // are wall-clock transitions, not animation. One one-shot timer invalidates
+  // the static pane exactly when the next transition is due, so the group
+  // lifecycle and honest statuses still settle with both motion clocks off.
+  let workExpiryTimer: ReturnType<typeof setTimeout> | undefined
+  createEffect(() => {
+    workRevision()
+    const now = Date.now()
+    const next = nextWorkInvalidation(activeTasks(), workPane().groups, now)
+    if (workExpiryTimer !== undefined) {
+      clearTimeout(workExpiryTimer)
+      workExpiryTimer = undefined
+    }
+    if (next === undefined) return
+    workExpiryTimer = setTimeout(() => {
+      workExpiryTimer = undefined
+      setWorkRevision((revision) => revision + 1)
+    }, Math.max(0, next - now) + 1)
+  })
+  onCleanup(() => {
+    if (workExpiryTimer !== undefined) {
+      clearTimeout(workExpiryTimer)
+      workExpiryTimer = undefined
+    }
   })
   const cardedTaskIDs = createMemo(() => {
     const sections = workPane().sections
@@ -5517,32 +5572,38 @@ export function EnsembleV2App() {
                                       <ChromeText colors={colors} fg={colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                                     </Show>
                                     <For each={section.tasks}>{(task) => {
-                                      // Compact fallback: one line per visible
-                                      // task with the card grammar (name left,
-                                      // Braille and status right). Terminal rows
-                                      // are display-only and never own the work
-                                      // cursor; the title truncates before the
-                                      // status word.
-                                      const rowStatus = deriveWorkStatus(task, Date.now())
-                                      const terminal = isTerminalWorkStatus(rowStatus)
-                                      const selected = !terminal && interaction().focus === "work" && selectedTask()?.id === task.id
-                                      const needsYou = !terminal && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
-                                      const pending = !terminal && pendingWork()?.id === task.id ? pendingWork()!.action : null
-                                      const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
-                                      const row = workCompactRow(
-                                        agentName(state(), task.assigneeID),
-                                        task.title || "(untitled)",
-                                        glyph,
-                                        pending ? pendingWorkLabel(pending) : workCardStateWord(rowStatus, needsYou),
-                                        Math.max(1, workContentWidth() - 2),
-                                      )
+                                      // Ticket #142: compact rows are not Work
+                                      // cards, but the fallback still needs its
+                                      // own reactive view. A local memo keeps
+                                      // the cursor and glyph live without
+                                      // rebuilding static card data.
+                                      const view = createMemo(() => {
+                                        const now = Date.now()
+                                        const rowStatus = deriveWorkStatus(task, now)
+                                        const terminal = isTerminalWorkStatus(rowStatus)
+                                        const needsYou = !terminal && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
+                                        const pending = !terminal && pendingWork()?.id === task.id ? pendingWork()!.action : null
+                                        const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
+                                        return {
+                                          terminal,
+                                          selected: !terminal && interaction().focus === "work" && selectedTask()?.id === task.id,
+                                          row: workCompactRow(
+                                            agentName(state(), task.assigneeID),
+                                            task.title || "(untitled)",
+                                            glyph,
+                                            pending ? pendingWorkLabel(pending) : workCardStateWord(rowStatus, needsYou),
+                                            Math.max(1, workContentWidth() - 2),
+                                          ),
+                                          tones: workCardTones(rowStatus, needsYou),
+                                        }
+                                      })
                                       return (
                                         <WorkCompactRowView
                                           colors={colors}
-                                          row={row}
-                                          tones={workCardTones(rowStatus, needsYou)}
-                                          selected={selected}
-                                          terminal={terminal}
+                                          row={view().row}
+                                          tones={view().tones}
+                                          selected={view().selected}
+                                          terminal={view().terminal}
                                         />
                                       )
                                     }}</For>
@@ -5564,6 +5625,13 @@ export function EnsembleV2App() {
                                           <WorkCardView
                                             colors={colors}
                                             card={card}
+                                            glyph={workCardGlyph(card, motionFrame(), process.env)}
+                                            tide={workCardTide(card, {
+                                              tideTick: workFrame(),
+                                              env: process.env,
+                                              freezeState: tideFreezes,
+                                              now: Date.now(),
+                                            })}
                                             width={workPane().layout.cardWidth}
                                             selected={interaction().focus === "work" && selectedTask()?.id === card.id}
                                           />
