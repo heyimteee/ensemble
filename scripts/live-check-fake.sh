@@ -657,7 +657,7 @@ collect_work_frames() {
     # Ticket #116/#127: the Work card tide row is a full-width one-row strip
     # of block glyphs inside the chat border. Distinct captures prove the
     # 10 fps tide advances.
-    tide_row=$(grep -oE '[▁▂▃▄▅▆▇█]{16,}' <<<"$pane" | tr '\n' '|' || true)
+    tide_row=$(grep -oE '([▁▂▃▄▅▆▇█] ?){16,}' <<<"$pane" | tr '\n' '|' || true)
     if [[ -n "$tide_row" && "$seen_tide_rows" != *"$tide_row"* ]]; then
       seen_tide_rows="${seen_tide_rows}${tide_row}"$'\n'
       seen_tides=$((seen_tides + 1))
@@ -700,7 +700,7 @@ live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-beta" 
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal outcome announced exactly once"
 live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the eight-second recent window"
 live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" "no active cards remain in the block"
-live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent │ replied" "no finished cards remain after the recent window"
+live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT REPLIED" "no finished cards remain after the recent window"
 live_assert_absence "$LIVE_TUI_SESSION" "│ working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
 # and no needs-you marker appears without user-blocked work in this flow.
