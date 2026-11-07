@@ -13,12 +13,13 @@ set -euo pipefail
 #   npm run test:live:sizes
 #   ENSEMBLE_V6_SIZES="80x24 160x50" npm run test:live:sizes
 #
-# Each size restarts the TUI at that geometry, delegates one long-running fake
-# task to each of three agents, asserts the visible card/compact layout,
-# overflow line, focus ownership, and composer, then cancels the tasks and
-# waits out the eight-second recent-card window. The default size set is
-# 80x24, 100x30, 120x40, and 160x50. Linux/tmux only, like the rest of the
-# live harness.
+# Each size restarts the TUI at that geometry, starts one long-running fake
+# dispatch group, asserts the visible card/compact layout, overflow line,
+# focus ownership, and composer, then cancels the tasks and waits out the
+# shared 1.2 s group hold. The 120x40 and 100x30 checks add a second group
+# mid-run to prove newest-group priority and independent group removal. The
+# default size set is 80x24, 100x30, 120x40, and 160x50. Linux/tmux only, like
+# the rest of the live harness.
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/lib/live-harness.sh"
@@ -103,6 +104,17 @@ delegate() {
   live_invoke task.delegate "{\"workspaceID\":\"$WS_ID\",\"assigneeID\":\"${AGENT_IDS[$agent_index]}\",\"title\":\"$title\",\"instruction\":\"fake-queue-hold\",\"mode\":\"research\"}" >/dev/null
 }
 
+# One user command fans out to the listed agents: one dispatch group per call
+# (ticket #135/#136). The fake-queue-hold prompt keeps every task streaming so
+# the Work cards stay live for the layout checks; the short shared title keeps
+# the compact row readable at 80x24.
+send_group() {
+  local index ids=""
+  for index in "$@"; do ids+="\"${AGENT_IDS[$index]}\","; done
+  ids="[${ids%,}]"
+  live_invoke message.send "{\"workspaceID\":\"$WS_ID\",\"text\":\"fake-queue-hold\",\"recipientIDs\":$ids}" >/dev/null
+}
+
 cancel_tasks() {
   local ids id
   local -a id_list=()
@@ -113,6 +125,18 @@ cancel_tasks() {
     live_invoke task.cancel "{\"id\":\"$id\"}" >/dev/null || true
   done
   live_wait_for 20 "size tasks terminal" live_active_count_is "0" || true
+}
+
+# Cancel every live task in one chronological dispatch group; ordinal 1 is the oldest.
+cancel_group() {
+  local ordinal="$1" ids id
+  local -a id_list=()
+  ids=$(live_snapshot_value "(function () { var tasks = Object.values(output.state.subtasks).filter(function (task) { return task.workspaceID === \"$WS_ID\" && task.dispatchGroupID && task.state !== \"replied\" }); var groups = {}; tasks.forEach(function (task) { (groups[task.dispatchGroupID] = groups[task.dispatchGroupID] || []).push(task) }); var ordered = Object.keys(groups).sort(function (a, b) { return Math.min.apply(null, groups[a].map(function (task) { return task.createdAt })) - Math.min.apply(null, groups[b].map(function (task) { return task.createdAt })) }); var target = ordered[$ordinal - 1]; return target ? groups[target].map(function (task) { return task.id }).join(\",\") : \"\" })()" | tr -d '"')
+  [[ -n "$ids" ]] || return 0
+  IFS=',' read -r -a id_list <<<"$ids"
+  for id in "${id_list[@]}"; do
+    live_invoke task.cancel "{\"id\":\"$id\"}" >/dev/null || true
+  done
 }
 
 start_tui_at() {
@@ -182,26 +206,26 @@ run_load_probe_160x50() {
 
   delegate 0 "size-load-a"
   wait_active 1
-  live_require_text "$LIVE_TUI_SESSION" "WORK 1 active" 20 "one active Work card"
+  live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "one active Work card"
   pct=$(measure_cpu_percent "$pid")
   assert_pane_updates
   live_log "size matrix: 1 working card TUI cpu=${pct}% and tmux output updating"
 
   delegate 1 "size-load-b"
   wait_active 2
-  live_require_text "$LIVE_TUI_SESSION" "WORK 2 active" 20 "two active Work cards"
+  live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 2 active · 0 done" 20 "two active Work cards"
   pct=$(measure_cpu_percent "$pid")
   assert_pane_updates
   live_log "size matrix: 2 working cards TUI cpu=${pct}% and tmux output updating"
 
   delegate 2 "size-load-c"
   wait_active 3
-  live_require_text "$LIVE_TUI_SESSION" "WORK 3 active" 20 "three active Work cards"
+  live_require_text "$LIVE_TUI_SESSION" "WORK 3 groups · 3 active · 0 done" 20 "three active Work cards"
   pct=$(measure_cpu_percent "$pid")
   assert_pane_updates
   live_log "size matrix: 3 working cards TUI cpu=${pct}% and tmux output updating"
   cancel_tasks
-  sleep 8.3
+  sleep 1.8
 }
 
 check_size() {
@@ -209,30 +233,62 @@ check_size() {
   width="${size%x*}"
   height="${size#*x}"
   start_tui_at "$width" "$height"
-  local a="size-${size}-a" b="size-${size}-b" c="size-${size}-c"
-  delegate 0 "$a"
-  delegate 1 "$b"
-  delegate 2 "$c"
+  send_group 0 1 2
   wait_active 3
-  live_require_text "$LIVE_TUI_SESSION" "WORK 3 active · 0 recent" 20 "Work header at $size"
+  live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 3 active · 0 done" 20 "Work group header at $size"
   live_assert_text "$LIVE_TUI_SESSION" "Message…" "composer remains visible at $size"
 
   case "$size" in
-    160x50|120x40)
+    160x50)
       [[ "$(card_header_count)" == "3" ]] || live_fail "expected three Work card headers at $size, got $(card_header_count)"
       live_assert_absence "$LIVE_TUI_SESSION" "+1 more" "no card overflow at $size"
       live_assert_absence "$LIVE_TUI_SESSION" "+2 more" "no compact overflow at $size"
       live_assert_text "$LIVE_TUI_SESSION" "d delegate" "card action hints at $size"
       ;;
+    120x40)
+      [[ "$(card_header_count)" == "3" ]] || live_fail "expected three Work card headers at $size, got $(card_header_count)"
+      live_assert_absence "$LIVE_TUI_SESSION" "+1 more" "no card overflow at $size"
+      live_assert_text "$LIVE_TUI_SESSION" "d delegate" "card action hints at $size"
+      # Second command mid-group: append one group and keep the first intact.
+      send_group 0
+      wait_active 4
+      live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 4 active · 0 done" 20 "two-group Work header at $size"
+      live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 3 active · 0 done" 20 "old group label at $size"
+      live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "new group label at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* PENDING" || live_fail "newest group's pending card is not visible at $size"
+      [[ "$(card_header_count)" == "3" ]] || live_fail "old group cards were disturbed at $size, got $(card_header_count)"
+      # Remove the old group as one unit after the shared hold; the new group stays.
+      cancel_group 1
+      live_wait_for 20 "old size group terminal" live_active_count_is "1" || live_fail "old group did not settle at $size"
+      live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "group cleared without disturbing the second at $size"
+      live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · 3 active" "old group label cleared at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* (PENDING|WORKING)" || live_fail "second group disappeared with the first at $size"
+      ;;
     100x30)
       [[ "$(card_header_count)" == "2" ]] || live_fail "expected two Work card headers at $size, got $(card_header_count)"
       live_assert_text "$LIVE_TUI_SESSION" "+1 more" "overflow names the hidden card at $size"
       live_assert_text "$LIVE_TUI_SESSION" "d delegate" "card action hints at $size"
+      # Second command mid-group: newest-group priority keeps its card row and
+      # summarizes the larger old group in the constrained height.
+      send_group 0
+      wait_active 4
+      live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 4 active · 0 done" 20 "two-group Work header at $size"
+      live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 3 active · 0 done" 20 "old group summary at $size"
+      live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "new group label at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* PENDING" || live_fail "newest group did not receive visible capacity at $size"
+      if live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* WORKING"; then live_fail "old group tasks are summarized at $size"; fi
+      [[ "$(card_header_count)" == "0" ]] || live_fail "summarized old group rendered working card headers at $size"
+      # Remove the old group; the new group keeps the card row and the cursor.
+      cancel_group 1
+      live_wait_for 20 "old size group terminal" live_active_count_is "1" || live_fail "old group did not settle at $size"
+      live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "group cleared without disturbing the second at $size"
+      live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · 3 active" "old group summary cleared at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* (PENDING|WORKING)" || live_fail "second group disappeared with the first at $size"
       ;;
     80x24)
-      live_capture_matches "$LIVE_TUI_SESSION" "$a │ SizeAgent1 │ working" || live_fail "compact active row missing at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "fake-queue-hold │ SizeAgent1" || live_fail "compact active row missing at $size"
       [[ "$(card_header_count)" == "0" ]] || live_fail "compact fallback rendered card headers at $size"
-      live_assert_text "$LIVE_TUI_SESSION" "WORK 3 active · 0 recent │ +2 more" "compact header names two hidden rows at $size"
+      live_assert_text "$LIVE_TUI_SESSION" "WORK 1 group · 3 active · 0 done │ +2 more" "compact header names two hidden rows at $size"
       live_assert_absence "$LIVE_TUI_SESSION" "d delegate" "compact fallback omits card hints at $size"
       ;;
     *) live_fail "unsupported size $size" ;;
@@ -240,22 +296,30 @@ check_size() {
 
   focus_work_list
   if [[ "$size" == "80x24" ]]; then
-    live_capture_matches "$LIVE_TUI_SESSION" "› .*$a" || live_fail "compact Work row did not take the cursor at $size"
+    live_capture_matches "$LIVE_TUI_SESSION" "› .*fake-queue-hold" || live_fail "compact Work row did not take the cursor at $size"
   else
     live_capture_matches "$LIVE_TUI_SESSION" "› .*SIZE" || live_fail "first Work card did not take the cursor at $size"
   fi
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc leaves the Work list at $size"
-  live_log "size matrix: $size Work fit, overflow, focus, and composer checks passed"
+  live_log "size matrix: $size Work fit, overflow, focus, composer, and group lifecycle checks passed"
 
-  cancel_tasks
-  sleep 8.3
+  if [[ "$size" == "120x40" || "$size" == "100x30" ]]; then
+    # The old group is gone; cancel the remaining group and observe the shared
+    # hold clear the block as one unit.
+    cancel_group 1
+    live_wait_for 20 "remaining size group terminal" live_active_count_is "0" || live_fail "remaining group did not settle at $size"
+    live_require_absence "$LIVE_TUI_SESSION" "WORK 1 group" 20 "group hold cleared the final group at $size"
+  else
+    cancel_tasks
+    sleep 1.8
+  fi
 }
 
 check_no_color_static() {
   live_tmux_env_add "NO_COLOR=1"
   start_tui_at 120 40
-  delegate 0 "size-no-color"
+  send_group "size-no-color" 0
   wait_active 1
   live_require_text "$LIVE_TUI_SESSION" "⠋ SIZEAGENT1 WORKING" 20 "NO_COLOR frame-0 Work card"
   live_assert_text "$LIVE_TUI_SESSION" "working" "NO_COLOR keeps the state word"
@@ -270,7 +334,7 @@ check_no_color_static() {
   done
   live_log "NO_COLOR=1 kept frame-0 glyphs and state text while work was live"
   cancel_tasks
-  sleep 8.3
+  sleep 1.8
 }
 
 run_load_probe_160x50

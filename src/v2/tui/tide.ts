@@ -3,8 +3,8 @@
  * (`current`, `ripple`, `travel`, `interference`, `inbound`, `echo`) are pure
  * functions over column, total columns, and tick. Each subtask keeps one
  * variant for its active lifetime via a shuffled deck, so concurrent cards
- * vary without re-rolling on every snapshot poll. Ticket #117 keeps recently
- * finished cards on the same flat settled frame after they leave active work.
+ * vary without re-rolling on every snapshot poll. Terminal cards keep the
+ * same flat settled frame while their dispatch group holds.
  *
  * The strip is one row of block glyphs. Each sample is one glyph plus one
  * deliberate blank cell, so the approved Sub-Cell Tide gap is visible across
@@ -15,7 +15,7 @@
  */
 import type { DerivedWorkStatus } from "../queue.ts"
 import { effectiveTick } from "./motion.ts"
-import { RECENT_WORK_TTL_MS } from "./work-constants.ts"
+import { TIDE_ASSIGNMENT_RETENTION_MS } from "./work-constants.ts"
 
 /** Eight block levels, low to high. */
 export const TIDE_GLYPHS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const
@@ -31,8 +31,8 @@ export const TIDE_VARIANTS = ["current", "ripple", "travel", "interference", "in
 
 export type TideVariant = (typeof TIDE_VARIANTS)[number]
 
-/** Assignment retention is the shared recent-card window (#117). */
-export const TIDE_ASSIGNMENT_RETENTION_MS = RECENT_WORK_TTL_MS
+/** Assignment retention is presentation-only and independent of Work visibility (#136). */
+export { TIDE_ASSIGNMENT_RETENTION_MS }
 
 /** One source of truth for the approved 8–64 sampled-column range. */
 function clampedColumns(columns: number): number {
@@ -192,7 +192,7 @@ export function tideTickForCard(
   return effectiveTick(tick, env)
 }
 
-/** Drop freeze frames for cards that left the recent-card window. */
+/** Drop freeze frames for cards outside the independent presentation-retention window. */
 export function pruneTideFreezes(
   state: TideFreezeState,
   now: number = Date.now(),
@@ -271,7 +271,7 @@ export function tideAssignmentFor(state: TideAssignmentState, id: string): TideV
 }
 
 /**
- * Drop assignments whose card left the recent-card window. Returns the pruned
+ * Drop assignments outside the independent presentation-retention window. Returns the pruned
  * ids so callers can assert bounded state; active ids are refreshed by
  * `tideVariantFor` on every poll.
  */

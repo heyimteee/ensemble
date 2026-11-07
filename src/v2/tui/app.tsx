@@ -152,29 +152,23 @@ import {
   activityFrameForKind,
   activityStateForTask,
   hasActiveWork,
-  hasRecentWork,
   isNeedsYouTask,
   mergeStreamingActivity,
-  orderedWorkItems,
   queuedActivityFrame,
-  recentWorkCardsForTasks,
-  recentWorkItems,
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
   suppressCardedActivity,
-  visibleWorkTasks,
-  workGridLayout,
-  workCardsForTasks,
+  workCardForTask,
   workRowFrame,
   workRowText,
-  workSummaryCounts,
   type ActivityEntry,
   type ActivityVerbKind,
   type PendingWorkAction,
   type WorkCard,
   type WorkCardOptions,
 } from "./workrows.ts"
+import { workGroupCounts, workGroupLayout, workGroupsForTasks, workSummaryCounts, type WorkGroupSection } from "./workgroups.ts"
 import {
   accumulateCompletions,
   BUBBLE_CHROME,
@@ -723,12 +717,6 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? Object.values(state()?.subtasks ?? {}).filter((task) => task.workspaceID === workspace.id) : []
   })
-  // Inline work list (ticket #56): the right-hand task board is gone, so the
-  // group chat surface carries every subtask for the active workspace with
-  // its assigned agent and derived lifecycle state, including distinct
-  // failed/cancelled terminal rows. Active work sorts first (oldest first);
-  // terminal rows are capped to the most recent so history never crowds chat.
-  const orderedTasks = createMemo(() => orderedWorkItems(activeTasks(), Date.now()))
   const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
   onMount(() => {
     const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
@@ -748,18 +736,6 @@ export function EnsembleV2App() {
   // minus the section padding. The layout decides the column count, card
   // width, and row capacity; card content width sits inside border/accent.
   const workContentWidth = () => Math.max(20, messageWidth() - 2)
-  // Ticket #115 follow-up: a visible Work card already carries its task's
-  // detail, so the same task-backed activity line is suppressed. This set uses
-  // the exact width-aware grid limit as the render; compact fallback rows and
-  // overflow tasks keep their activity lines.
-  const cardedTaskIDs = createMemo(() => {
-    const active = activeTasks()
-    const ordered = orderedTasks()
-    const recentCount = recentWorkItems(active, Date.now()).length
-    const layout = workGridLayout(workContentWidth(), viewHeight(), ordered.length, recentCount)
-    if (layout.mode !== "cards") return new Set<string>()
-    return new Set(visibleWorkTasks(ordered, layout).map((task) => task.id))
-  })
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
   // Ticket #118: the System Agent init row is a live, staged row. It belongs
   // to the workspace surface, survives navigation through snapshot state, and
@@ -810,6 +786,95 @@ export function EnsembleV2App() {
   // Native mirrors block their linked subtask's session without setting
   // approvalID, so the needs-you marker needs the subtask set too.
   const nativeBlockedSubtaskIDs = createMemo(() => new Set(pendingApprovals().filter((approval) => approval.kind === "native" && approval.subtaskID).map((approval) => approval.subtaskID!)))
+  // Ticket #116: one shuffled-deck assignment state for the session. Variants
+  // are resolved by subtask id and survive every snapshot refresh. Ticket #136
+  // gives presentation retention its own clock, independent of Work visibility.
+  // A blocked card also keeps the tide frame it had when it started waiting.
+  const tideAssignments = createTideAssignments()
+  const tideFreezes = createTideFreezeState()
+  // Ticket #136: the Work pane is dispatch groups, not active cards plus
+  // per-task recent cards. Group visibility and layout are pure; this memo
+  // joins them to the card mapping, activity detail, and tide assignment.
+  type WorkPaneSection = WorkGroupSection & { cards: WorkCard[] }
+  const workPane = createMemo(() => {
+    const now = Date.now()
+    const active = activeTasks()
+    const groups = workGroupsForTasks(active, state()?.subtasks ?? {}, {
+      now,
+      pendingApprovalIDs: pendingApprovalIDs(),
+      nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
+    })
+    const layout = workGroupLayout(groups, workContentWidth(), viewHeight(), now)
+    const pendingApprovalSet = pendingApprovalIDs()
+    const nativeBlockedSet = nativeBlockedSubtaskIDs()
+    const options: WorkCardOptions = {
+      now,
+      tick: motionFrame(),
+      tideTick: workFrame(),
+      width: Math.max(12, layout.cardContentWidth),
+      env: process.env,
+      pendingApprovalIDs: pendingApprovalSet,
+      nativeBlockedSubtaskIDs: nativeBlockedSet,
+      pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
+      variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
+      freezeState: tideFreezes,
+      detailFor: (item) => activityStateForTask(item, {
+        now,
+        pendingApprovalIDs: pendingApprovalSet,
+        nativeBlockedIDs: nativeBlockedSet,
+        children: active.filter((child) => child.parentID === item.id),
+        agentNameFor: (agentID) => agentName(state(), agentID),
+      }).verb,
+    }
+    const sections: WorkPaneSection[] = layout.sections.map((section) => ({
+      ...section,
+      cards: section.mode === "cards"
+        ? section.tasks.map((task) => workCardForTask(task, agentName(state(), task.assigneeID), options))
+        : [],
+    }))
+    pruneTideAssignments(tideAssignments, now)
+    pruneTideFreezes(tideFreezes, now)
+    return { groups, layout, sections, counts: workGroupCounts(groups) }
+  })
+  const cardedTaskIDs = createMemo(() => {
+    const sections = workPane().sections
+    return new Set(
+      sections
+        .filter((section) => section.mode === "cards")
+        .flatMap((section) => section.cards.map((card) => card.id)),
+    )
+  })
+  // Ticket #136: the cursor and every work action target only visible
+  // non-terminal cards. Terminal cards remain display-only until their group
+  // completes; overflow and summarized tasks are never selectable.
+  const visibleTasks = createMemo(() => workPane().layout.selectableTasks)
+  const taskCursorClamped = () => {
+    const length = visibleTasks().length
+    if (length <= 0) return 0
+    return Math.max(0, Math.min(length - 1, taskCursor()))
+  }
+  const selectedTask = createMemo(() => visibleTasks()[taskCursorClamped()])
+  createEffect(() => {
+    const length = visibleTasks().length
+    if (length <= 0) {
+      if (taskCursor() !== 0) setTaskCursor(0)
+      return
+    }
+    if (taskCursor() >= length) setTaskCursor(length - 1)
+  })
+  const workHeader = () => {
+    const pane = workPane()
+    const summary = workSummaryCounts(pane.counts.groups, pane.counts.active, pane.counts.done)
+    const extras: string[] = []
+    if (pane.layout.hiddenGroups > 0) {
+      extras.push(`+${pane.layout.hiddenGroups} ${pane.layout.hiddenGroups === 1 ? "group" : "groups"}`)
+    }
+    if (pane.layout.mode === "compact" && pane.layout.overflow > 0) extras.push(`+${pane.layout.overflow} more`)
+    return extras.length > 0 ? `${summary} ${chromeSeparator()} ${extras.join(` ${chromeSeparator()} `)}` : summary
+  }
+  // Compact/card-mode gap between card sections, matching the layout budget.
+  const workSectionMarginTop = (index: number) =>
+    workPane().sections.slice(0, index).some((section) => section.mode === "cards") ? 1 : 0
   const selectedApproval = createMemo(() => pendingApprovals()[approvalCursor()])
   // Ticket #77b: each agent row names the workspace it belongs to (active
   // workspace first, else its most recent membership) and whether it leads
@@ -987,25 +1052,21 @@ export function EnsembleV2App() {
     const task = state()?.subtasks[line.taskID]
     return Boolean(task && !isTerminalWorkStatus(deriveWorkStatus(task, Date.now())))
   }))
-  // Slice A (#64), ticket #117: the WORK block is ephemeral — it mounts while
-  // active (non-terminal) work exists or a finished card is still inside the
-  // eight-second recent window. Key actions remain active-only: the work cursor
-  // and every work action still come from `orderedTasks`. Terminal outcomes
-  // render once as transcript system lines (the durable record), and per-agent
-  // activity lines replace the raw streaming dump: no streamed body text
-  // anywhere. `motionFrame()` keeps the recent window closing reactive while
-  // the work clock owns the repaint.
+  // Slice A (#64), ticket #136: the WORK block is ephemeral — it mounts while
+  // a visible dispatch group has active work, needs the user, or is inside its
+  // shared 1.2 s completion hold. Key actions remain active-only: the work
+  // cursor and every work action come from the layout's visible non-terminal
+  // tasks. Terminal outcomes render once as transcript system lines (the
+  // durable record), and per-agent activity lines replace the raw streaming
+  // dump: no streamed body text anywhere. The motion tick keeps the hold
+  // closing reactive while the work clock owns the repaint.
   const hasActiveWorkNow = () => hasActiveWork(activeTasks(), Date.now())
-  const showWorkBlock = createMemo(() => {
-    motionFrame()
-    return (
-      surface()?.kind === "workspace" &&
-      (hasActiveWork(activeTasks(), Date.now()) || hasRecentWork(activeTasks(), Date.now()))
-    )
-  })
+  const showWorkBlock = createMemo(
+    () => surface()?.kind === "workspace" && workPane().groups.length > 0,
+  )
   // Slice C stop affordance (brief §2.5): while active work runs on the group
   // surface a run is abortable, so the composer names `Ctrl+C stop`; the hint
-  // and the binding stay hidden otherwise. Recent cards are display-only.
+  // and the binding stay hidden otherwise. Terminal cards are display-only.
   const stoppable = () => surface()?.kind === "workspace" && hasActiveWorkNow()
   // Ticket #67 muted inline completions: each terminal outcome persists once
   // as a transcript row at its finish position. The accumulator folds newly
@@ -1321,91 +1382,6 @@ export function EnsembleV2App() {
     if (feedback) signalSettingsFeedback(feedback)
   })
   const statuslineWidth = () => Math.max(10, renderSize().width - 2)
-  // Ticket #116: one shuffled-deck assignment state for the session. Variants
-  // are resolved by subtask id and survive every snapshot refresh; entries
-  // leave the map after the recent-card retention window. A blocked card also
-  // keeps the tide frame it had when it started waiting for the user.
-  const tideAssignments = createTideAssignments()
-  const tideFreezes = createTideFreezeState()
-  const workCards = createMemo(() => {
-    const now = Date.now()
-    const active = activeTasks()
-    const activeItems = orderedWorkItems(active, now)
-    const recent = recentWorkItems(active, now)
-    const layout = workGridLayout(workContentWidth(), viewHeight(), activeItems.length, recent.length)
-    const pendingApprovalSet = pendingApprovalIDs()
-    const nativeBlockedSet = nativeBlockedSubtaskIDs()
-    const options: WorkCardOptions = {
-      now,
-      tick: motionFrame(),
-      tideTick: workFrame(),
-      width: Math.max(12, layout.cardContentWidth),
-      env: process.env,
-      pendingApprovalIDs: pendingApprovalSet,
-      nativeBlockedSubtaskIDs: nativeBlockedSet,
-      pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
-      variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
-      freezeState: tideFreezes,
-      detailFor: (item) => activityStateForTask(item, {
-        now,
-        pendingApprovalIDs: pendingApprovalSet,
-        nativeBlockedIDs: nativeBlockedSet,
-        children: active.filter((child) => child.parentID === item.id),
-        agentNameFor: (agentID) => agentName(state(), agentID),
-      }).verb,
-    }
-    const cards = workCardsForTasks(active, (item) => agentName(state(), item.assigneeID), options)
-    const recentCards = recentWorkCardsForTasks(active, (item) => agentName(state(), item.assigneeID), options)
-    pruneTideAssignments(tideAssignments, now)
-    pruneTideFreezes(tideFreezes, now)
-    return {
-      activeCards: cards,
-      recentCards,
-      // Active first: the work cursor indexes into this same prefix.
-      cards: [...cards, ...recentCards],
-      recentTasks: recent,
-      layout,
-    }
-  })
-  const workCardRows = createMemo(() => {
-    const pane = workCards()
-    const columns = Math.max(1, pane.layout.columns)
-    const visible = pane.cards.slice(0, pane.layout.limit)
-    const rows: WorkCard[][] = []
-    for (let index = 0; index < visible.length; index += columns) rows.push(visible.slice(index, index + columns))
-    return rows
-  })
-  // Ticket #115/#117: the cursor and every work action target only cards that
-  // are actually rendered. Overflow active cards and recent cards are
-  // display-only, so a key can never act on hidden work.
-  const visibleTasks = createMemo(() => visibleWorkTasks(orderedTasks(), workCards().layout))
-  const taskCursorClamped = () => {
-    const length = visibleTasks().length
-    if (length <= 0) return 0
-    return Math.max(0, Math.min(length - 1, taskCursor()))
-  }
-  const selectedTask = createMemo(() => visibleTasks()[taskCursorClamped()])
-  createEffect(() => {
-    const length = visibleTasks().length
-    if (length <= 0) {
-      if (taskCursor() !== 0) setTaskCursor(0)
-      return
-    }
-    if (taskCursor() >= length) setTaskCursor(length - 1)
-  })
-  const workHeader = () => {
-    const pane = workCards()
-    const summary = workSummaryCounts(pane.activeCards.length, pane.recentCards.length)
-    return pane.layout.mode === "compact" && pane.layout.overflow > 0
-      ? `${summary} ${chromeSeparator()} +${pane.layout.overflow} more`
-      : summary
-  }
-  // Compact mode is one line per card: active rows first, then the recent
-  // window. Recent rows never receive the cursor marker.
-  const compactWorkRows = () => [
-    ...orderedTasks().map((task) => ({ task, recent: false })),
-    ...workCards().recentTasks.map((task) => ({ task, recent: true })),
-  ]
   const pickerGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 16)
   const promptGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 14)
   const confirmGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 10)
@@ -1798,7 +1774,7 @@ export function EnsembleV2App() {
       default: return null
     }
   }
-  const hasWorkZone = () => hasActiveWorkNow()
+  const hasWorkZone = () => visibleTasks().length > 0
 
   const run = async (label: string, action: () => Promise<void>): Promise<boolean> => {
     if (busy()) return false
@@ -2093,7 +2069,7 @@ export function EnsembleV2App() {
   const moveTask = (delta: number) => {
     const length = visibleTasks().length
     if (length === 0) return
-    const columns = Math.max(1, workCards().layout.columns)
+    const columns = Math.max(1, workPane().layout.columns)
     const cursor = taskCursorClamped()
     const next = cursor + delta * columns
     setTaskCursor(Math.max(0, Math.min(length - 1, next < 0 ? cursor % columns : next)))
@@ -2101,7 +2077,7 @@ export function EnsembleV2App() {
   const moveTaskColumn = (delta: number) => {
     const length = visibleTasks().length
     if (length === 0) return
-    const columns = Math.max(1, workCards().layout.columns)
+    const columns = Math.max(1, workPane().layout.columns)
     const cursor = taskCursorClamped()
     const rowStart = Math.floor(cursor / columns) * columns
     const rowEnd = Math.min(length - 1, rowStart + columns - 1)
@@ -2110,7 +2086,7 @@ export function EnsembleV2App() {
   const moveTaskHalf = (direction: 1 | -1) => {
     const length = visibleTasks().length
     if (length === 0) return
-    const columns = Math.max(1, workCards().layout.columns)
+    const columns = Math.max(1, workPane().layout.columns)
     const delta = direction * columns * Math.max(1, Math.floor(listPage() / 2))
     setTaskCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
   }
@@ -3419,7 +3395,9 @@ export function EnsembleV2App() {
         // Cards only render on the workspace surface; a DM/settings surface
         // must not keep the tide clock alive in the background.
         workingCards: surface()?.kind === "workspace"
-          ? workCards().cards.filter((card) => card.status === "working" && !card.needsYou).length
+          ? workPane()
+              .sections.flatMap((section) => section.cards)
+              .filter((card) => card.status === "working" && !card.needsYou).length
           : 0,
         routeActive: isOurRoute(),
         modalOpen: isModal(),
@@ -5527,45 +5505,60 @@ export function EnsembleV2App() {
                           <Show when={showWorkBlock()}>
                             <box flexShrink={0} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
                               <ChromeText colors={colors} fg={colors.muted} bg={colors.bg} width="100%" truncate text={workHeader()} />
-                              <Show when={workCards().layout.mode === "cards"} fallback={
-                                <For each={compactWorkRows().slice(0, workCards().layout.limit)}>{(row, index) => {
-                                  // Compact fallback below the minimum card
-                                  // height: one line per active or recent card.
-                                  // Only active rows can own the work cursor.
-                                  const task = row.task
-                                  const selected = !row.recent && taskCursor() === index() && interaction().focus === "work"
-                                  const needsYou = !row.recent && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
-                                  const pending = !row.recent && pendingWork()?.id === task.id ? pendingWork()!.action : null
-                                  const rowStatus = deriveWorkStatus(task, Date.now())
-                                  return (
-                                  <ChromeText colors={colors}
-                                    fg={row.recent ? colors.faint : selected ? colors.good : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text}
-                                    bg={colors.bg}
-                                    width="100%"
-                                    truncate
-                                    text={`${selected ? "› " : "  "}${workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })} ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
-                                  />
-                                  )
-                                }}</For>
-                              }>
-                                <For each={workCardRows()}>{(row, rowIndex) => (
-                                  <box flexDirection="row" width="100%" gap={1} marginTop={rowIndex() === 0 ? 0 : 1}>
-                                    <For each={row}>{(card, columnIndex) => {
-                                      const flatIndex = () => rowIndex() * Math.max(1, workCards().layout.columns) + columnIndex()
+                              <Show when={workPane().layout.mode === "cards"} fallback={
+                                <For each={workPane().sections}>{(section) => (
+                                  <box flexDirection="column" width="100%">
+                                    <Show when={section.label}>
+                                      <ChromeText colors={colors} fg={colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                                    </Show>
+                                    <For each={section.tasks}>{(task) => {
+                                      // Compact fallback: one line per visible
+                                      // task. Terminal rows are display-only and
+                                      // never own the work cursor.
+                                      const rowStatus = deriveWorkStatus(task, Date.now())
+                                      const terminal = isTerminalWorkStatus(rowStatus)
+                                      const selected = !terminal && interaction().focus === "work" && selectedTask()?.id === task.id
+                                      const needsYou = !terminal && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
+                                      const pending = !terminal && pendingWork()?.id === task.id ? pendingWork()!.action : null
                                       return (
-                                        <WorkCardView
-                                          colors={colors}
-                                          card={card}
-                                          width={workCards().layout.cardWidth}
-                                          selected={!card.recent && taskCursor() === flatIndex() && interaction().focus === "work"}
-                                        />
+                                      <ChromeText colors={colors}
+                                        fg={terminal ? colors.faint : selected ? colors.good : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text}
+                                        bg={colors.bg}
+                                        width="100%"
+                                        truncate
+                                        text={`${selected ? "› " : "  "}${workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })} ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
+                                      />
                                       )
                                     }}</For>
                                   </box>
                                 )}</For>
-                                <Show when={workCards().layout.overflow > 0}>
-                                  <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{workCards().layout.overflow} more</text>
-                                </Show>
+                              }>
+                                <For each={workPane().sections}>{(section, sectionIndex) => (
+                                  <Show when={section.mode === "cards"} fallback={
+                                    <Show when={section.label}>
+                                      <ChromeText colors={colors} fg={colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                                    </Show>
+                                  }>
+                                    <box flexDirection="column" width="100%" marginTop={workSectionMarginTop(sectionIndex())}>
+                                      <Show when={section.label}>
+                                        <ChromeText colors={colors} fg={colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                                      </Show>
+                                      <box flexDirection="row" width="100%" gap={1}>
+                                        <For each={section.cards}>{(card) => (
+                                          <WorkCardView
+                                            colors={colors}
+                                            card={card}
+                                            width={workPane().layout.cardWidth}
+                                            selected={interaction().focus === "work" && selectedTask()?.id === card.id}
+                                          />
+                                        )}</For>
+                                      </box>
+                                      <Show when={section.overflow > 0}>
+                                        <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{section.overflow} more</text>
+                                      </Show>
+                                    </box>
+                                  </Show>
+                                )}</For>
                                 <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{chromeJoin(["d delegate", "t reassign", "↵ result", "r retry", "R restart", "x cancel", "o native"])}</text>
                               </Show>
                             </box>

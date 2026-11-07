@@ -13,18 +13,15 @@ import {
   type TideFreezeState,
   type TideVariant,
 } from "./tide.ts"
-import { RECENT_WORK_TTL_MS } from "./work-constants.ts"
-
-export { RECENT_WORK_TTL_MS }
 
 /**
  * Inline work-row and Work-card mapping for the group chat surface (ticket
  * #56, slice A ticket #64, slice C ticket #59, card layout ticket #115,
- * recent cards ticket #117). The right-hand task board is gone; the WORK block
- * carries active subtasks plus recently finished cards for the workspace with
- * their assigned agent and derived lifecycle state. Terminal outcomes remain
- * the durable transcript record (see terminalAnnouncement); the card copy is
- * display-only and disappears after the recent window. Attribution lines
+ * dispatch-group cards ticket #136). The right-hand task board is gone; the
+ * WORK block carries dispatch groups for the workspace with their assigned
+ * agent and derived lifecycle state. Terminal outcomes remain the durable
+ * transcript record (see terminalAnnouncement); terminal card copy is
+ * display-only and clears with its group. Attribution lines
  * (`→ Assigned to $AgentName: <title>` events, `Asking $AgentName…` live
  * variants, `Answer from $AgentName` relay headers) are defined in format.ts
  * and wired through activityDetailForTask below and the transcript render in
@@ -182,40 +179,6 @@ export function orderedWorkItems(tasks: Subtask[], now: number): Subtask[] {
 /** True while the surface has active (non-terminal) work — the work cursor and its actions mount exactly then. */
 export function hasActiveWork(tasks: Subtask[], now: number): boolean {
   return tasks.some((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
-}
-
-/**
- * Ticket #117: finished cards settle in the Work pane for the shared
- * eight-second recent window, then disappear. The transcript announcement
- * remains the durable record, so the card copy is allowed to be ephemeral.
- * Only a real terminal timestamp counts: legacy rows without one invent no
- * recency. `RECENT_WORK_TTL_MS` lives in work-constants.ts because the tide
- * assignment retention uses the same canonical window.
- */
-
-/** The honest finish time for a terminal task, or undefined when none was recorded. */
-export function workFinishedAt(task: Subtask): number | undefined {
-  return task.finishedAt ?? task.repliedAt ?? task.stoppedAt
-}
-
-/** True while a terminal task is inside the eight-second recent-card window. */
-export function isRecentWork(task: Subtask, now: number): boolean {
-  if (!isTerminalWorkStatus(deriveWorkStatus(task, now))) return false
-  const finished = workFinishedAt(task)
-  if (finished === undefined) return false
-  return now < finished + RECENT_WORK_TTL_MS
-}
-
-/** Recently finished tasks, oldest terminal first, so cards settle in finish order. */
-export function recentWorkItems(tasks: Subtask[], now: number): Subtask[] {
-  return tasks
-    .filter((task) => isRecentWork(task, now))
-    .sort((a, b) => (workFinishedAt(a) ?? 0) - (workFinishedAt(b) ?? 0) || a.createdAt - b.createdAt)
-}
-
-/** True while the Work pane still has a recent card to show after active work ends. */
-export function hasRecentWork(tasks: Subtask[], now: number): boolean {
-  return tasks.some((task) => isRecentWork(task, now))
 }
 
 /** One terminal outcome announced once as a transcript system line. Non-terminal work announces nothing. */
@@ -517,18 +480,6 @@ export function suppressCardedActivity(
 }
 
 /**
- * Ticket #117: the Work header names both live and recently finished work.
- * The block stays mounted while either count is non-zero, so a pane holding
- * only recent cards still tells the user nothing is running.
- */
-export function workSummaryCounts(activeCount: number, recentCount: number): string {
-  const active = Math.max(0, Math.floor(activeCount))
-  const recent = Math.max(0, Math.floor(recentCount))
-  if (active === 0 && recent === 0) return chromeJoin(["WORK", "none yet"])
-  return `WORK ${active} active · ${recent} recent`
-}
-
-/**
  * Ticket #115: the Work pane's card model. One card carries the agent, the
  * animated Braille state glyph, the state word, a truncated title, an honest
  * detail line, and the full-width one-row tide strip. This is a pure mapping
@@ -544,8 +495,8 @@ export type WorkCard = {
   detail: string
   status: DerivedWorkStatus
   needsYou: boolean
-  /** Ticket #117: a recently finished card that is display-only, never a cursor target. */
-  recent: boolean
+  /** Ticket #136: terminal cards stay in their group as display-only, never a cursor target. */
+  terminal: boolean
   /** Stable tide motion for this subtask's active lifetime. */
   tideVariant: TideVariant
   /** Rendered one-row strip: one glyph plus one blank per tide column. */
@@ -573,8 +524,6 @@ export type WorkCardOptions = {
   variantFor?: (task: Subtask) => TideVariant
   /** Freeze frames for cards that started waiting on the user. */
   freezeState?: TideFreezeState
-  /** Recent cards share this mapping but are display-only and never needs-you. */
-  recent?: boolean
 }
 
 /**
@@ -604,17 +553,18 @@ const NO_TASK_IDS: ReadonlySet<string> = new Set<string>()
 
 export function workCardForTask(task: Subtask, agentLabel: string, options: WorkCardOptions): WorkCard {
   const status = deriveWorkStatus(task, options.now)
-  const recent = options.recent ?? false
-  // A recent card is display-only: the terminal state owns the glyph and
-  // detail, and an old interruption/approval must not revive needs-you.
-  const needsYou = recent
+  const terminal = isTerminalWorkStatus(status)
+  // A terminal card is display-only: the terminal state owns the glyph and
+  // detail, and an old interruption must not revive needs-you. A still-pending
+  // approval still keeps the surrounding group visible (workgroups.ts).
+  const needsYou = terminal
     ? false
     : isNeedsYouTask(
         task,
         options.pendingApprovalIDs ?? NO_TASK_IDS,
         options.nativeBlockedSubtaskIDs ?? NO_TASK_IDS,
       )
-  const pending = recent ? null : options.pendingFor?.(task) ?? null
+  const pending = terminal ? null : options.pendingFor?.(task) ?? null
   const width = Math.max(16, Math.floor(options.width))
   const textWidth = Math.max(8, width - 2)
   const variant = options.variantFor?.(task) ?? options.variant ?? "current"
@@ -625,7 +575,6 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     options.env,
     options.freezeState ? { state: options.freezeState, id: task.id, now: options.now } : undefined,
   )
-  const settled = isTerminalWorkStatus(status)
   return {
     id: task.id,
     agent: short(agentLabel, Math.max(8, width - 16)),
@@ -635,10 +584,10 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     detail: short(workCardDetail(status, { pending, needsYou, activity: options.detailFor?.(task) }), textWidth),
     status,
     needsYou,
-    recent,
+    terminal,
     tideVariant: variant,
-    tide: settled ? flatTideStrip(width) : tideStrip(variant, width, tideTick, options.env),
-    tideLevels: settled ? flatTideLevels(tideColumns(width)) : tideLevels(variant, tideColumns(width), tideTick, options.env),
+    tide: terminal ? flatTideStrip(width) : tideStrip(variant, width, tideTick, options.env),
+    tideLevels: terminal ? flatTideLevels(tideColumns(width)) : tideLevels(variant, tideColumns(width), tideTick, options.env),
   }
 }
 
@@ -651,22 +600,6 @@ export function workCardsForTasks(
   return orderedWorkItems(tasks, options.now).map((task) => workCardForTask(task, agentLabelFor(task), options))
 }
 
-/**
- * Ticket #117: recently finished cards. They keep the fixed terminal glyph and
- * state word, carry a flat settled strip, and are display-only — the work
- * cursor and every work action are built from `workCardsForTasks`, never from
- * this set. Oldest finish first, matching the transcript announcement order.
- */
-export function recentWorkCardsForTasks(
-  tasks: Subtask[],
-  agentLabelFor: (task: Subtask) => string,
-  options: WorkCardOptions,
-): WorkCard[] {
-  return recentWorkItems(tasks, options.now).map((task) =>
-    workCardForTask(task, agentLabelFor(task), { ...options, recent: true }),
-  )
-}
-
 /** One card row: header, title, detail, tide, plus the rounded border. */
 export const WORK_CARD_ROWS = 6
 export const WORK_CARD_GAP_ROWS = 1
@@ -674,8 +607,6 @@ export const WORK_CARD_GAP_ROWS = 1
 export const WORK_CARD_GAP_COLS = 1
 /** Minimum outer card width that keeps the header, title, detail, and tide legible. */
 export const WORK_CARD_MIN_WIDTH = 24
-/** The Work pane uses at most two card rows so the transcript keeps breathing room. */
-export const WORK_MAX_ROWS = 2
 /** Section header plus the key-hint row in card mode. */
 export const WORK_BLOCK_CHROME_ROWS = 2
 /**
@@ -687,112 +618,6 @@ export const WORK_BLOCK_CHROME_ROWS = 2
 export const WORK_BASE_ROWS = 13
 /** Minimum transcript rows kept above the Work block. */
 export const WORK_TRANSCRIPT_RESERVE = 4
-
-export type WorkGridLayout = {
-  mode: "cards" | "compact"
-  /** Card columns in the grid. Zero in compact mode. */
-  columns: number
-  /** Card rows in the grid. Zero in compact mode. */
-  rows: number
-  /** Visible card/row count. */
-  limit: number
-  overflow: number
-  /** Outer card width, including border and padding. */
-  cardWidth: number
-  /** Content width available to title/detail/tide after border, accent, and padding. */
-  cardContentWidth: number
-  /** Rows the Work block consumes, including header, gaps, and overflow. */
-  height: number
-}
-
-function cardBlockRows(rows: number, overflow: number): number {
-  return (
-    rows * WORK_CARD_ROWS +
-    Math.max(0, rows - 1) * WORK_CARD_GAP_ROWS +
-    WORK_BLOCK_CHROME_ROWS +
-    (overflow > 0 ? 1 : 0)
-  )
-}
-
-function compactLimit(terminalHeight: number): number {
-  return terminalHeight >= 27 ? 2 : 1
-}
-
-function gridColumns(contentWidth: number): number {
-  const fit = Math.floor(
-    (Math.max(0, Math.floor(contentWidth)) + WORK_CARD_GAP_COLS) /
-    (WORK_CARD_MIN_WIDTH + WORK_CARD_GAP_COLS),
-  )
-  return Math.max(1, Math.min(3, fit))
-}
-
-/**
- * Pick the Work grid from both width and height. Wide terminals use three
- * equal card columns; medium terminals use two; short/very narrow terminals
- * fall back to compact rows. Cards never stretch to full width merely because
- * only one task is active — the column rhythm stays stable.
- */
-export function workGridLayout(
-  contentWidth: number,
-  terminalHeight: number,
-  activeCount: number,
-  recentCount = 0,
-): WorkGridLayout {
-  const total = Math.max(0, Math.floor(activeCount)) + Math.max(0, Math.floor(recentCount))
-  const compact = (): WorkGridLayout => {
-    const limit = Math.min(total, compactLimit(terminalHeight))
-    return {
-      mode: "compact",
-      columns: 0,
-      rows: 0,
-      limit,
-      overflow: total - limit,
-      cardWidth: 0,
-      cardContentWidth: 0,
-      height: 1 + limit,
-    }
-  }
-  if (total === 0) return compact()
-
-  const width = Math.max(0, Math.floor(contentWidth))
-  const columns = gridColumns(width)
-  if (columns < 2) return compact()
-
-  const cardWidth = Math.floor((width - WORK_CARD_GAP_COLS * (columns - 1)) / columns)
-  const cardContentWidth = Math.max(12, cardWidth - 5) // border 2 + accent 1 + padding 2
-  const available = Math.max(0, terminalHeight - WORK_BASE_ROWS)
-  const wantedRows = Math.min(WORK_MAX_ROWS, Math.max(1, Math.ceil(total / columns)))
-  for (const rowCount of [wantedRows, wantedRows - 1]) {
-    if (rowCount < 1) continue
-    const capacity = columns * rowCount
-    const limit = Math.min(total, capacity)
-    const overflow = total - limit
-    const height = cardBlockRows(rowCount, overflow)
-    if (height + WORK_TRANSCRIPT_RESERVE <= available) {
-      return {
-        mode: "cards",
-        columns,
-        rows: rowCount,
-        limit,
-        overflow,
-        cardWidth,
-        cardContentWidth,
-        height,
-      }
-    }
-  }
-  return compact()
-}
-
-/**
- * Ticket #115/#117: the work cursor and every work action target only the
- * visible prefix. Active work is ordered before recent cards, so the first
- * `limit` rows are the visible active cards; overflow and recent cards stay
- * display-only. No action can reach an off-screen task.
- */
-export function visibleWorkTasks<T>(ordered: readonly T[], layout: WorkGridLayout): T[] {
-  return ordered.slice(0, Math.max(0, Math.floor(layout.limit)))
-}
 
 /**
  * Partition transcript lines into finalized and live (streaming) rows.
