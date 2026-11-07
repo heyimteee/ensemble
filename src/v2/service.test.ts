@@ -2082,6 +2082,112 @@ test("streaming deltas accumulate into the live reply and reconcile with the fin
 })
 
 
+test("workspace streams coalesce ephemeral text and durable message patches finalize exactly once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-stream-patches-"))
+  const { ctx, emitEvent, values } = fakeContext()
+  ctx.session.wait = async () => { await new Promise((resolve) => setTimeout(resolve, 650)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const emitted: Array<{ name: string; data: any }> = []
+  service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "stream", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const workspaceID = workspace.result.id
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID, text: "Hello team" } })
+
+    let sessionID = ""
+    let liveID = ""
+    let liveSeq = 1
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const run = Object.values(next.state.runs).find((item: any) => item.status === "running") as any
+      sessionID = run?.sessionID ?? ""
+      const live = (next.state.messages[workspaceID] ?? []).find((message: any) => message.streaming)
+      liveID = live?.id ?? ""
+      liveSeq = live?.seq ?? 1
+      return Boolean(sessionID && liveID)
+    })
+    const before = await handlers.revision({ directory })
+
+    // A burst of native deltas becomes one coalesced ephemeral update, not one
+    // event per chunk and never a coordination-version change.
+    emitEvent({ type: "session.text.delta", data: { sessionID, delta: "Working" } })
+    emitEvent({ type: "session.text.delta", data: { sessionID, delta: " on" } })
+    emitEvent({ type: "session.text.delta", data: { sessionID, delta: " it" } })
+
+    await waitFor(async () => Promise.resolve(emitted.some((event) => event.name === "stream" && event.data.id === liveID && event.data.text === "Working on it")))
+    const streamEvents = emitted.filter((event) => event.name === "stream" && event.data.id === liveID)
+    assert.equal(streamEvents.length, 1, "a synchronous delta burst coalesces into one stream event")
+    assert.equal(streamEvents[0]!.data.workspaceID, workspaceID)
+    assert.equal(streamEvents[0]!.data.epoch, before.epoch)
+    assert.equal(streamEvents[0]!.data.updatedAt >= 1, true)
+
+    const key = `v2/message/${workspaceID}/${String(liveSeq).padStart(8, "0")}`
+    await waitFor(async () => Promise.resolve((values.get(key) as any)?.text === "Working on it" && (values.get(key) as any)?.streaming === true), 3000)
+    const afterCheckpoint = await handlers.revision({ directory })
+    assert.equal(afterCheckpoint.version, before.version, "live-text checkpoints never bump the coordination version")
+
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    }, 4000)
+    const finalPatches = emitted
+      .filter((event) => event.name === "patches")
+      .flatMap((event) => event.data.entries ?? [])
+      .flatMap((entry: any) => entry.entities ?? entry.changes ?? [])
+      .filter((change: any) => change.entity === "message" && change.op === "upsert" && change.message.id === liveID)
+    const final = finalPatches.at(-1)
+    assert.ok(final, "the final text arrives as a durable message upsert")
+    assert.equal(final!.message.text, "OK")
+    assert.equal(final!.message.streaming, false)
+    assert.equal(finalPatches.filter((change: any) => change.message.text === "OK" && !change.message.streaming).length, 1, "the final text replaces the live row exactly once")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("user and system messages publish durable upserts without a snapshot fallback", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-message-patches-"))
+  const { ctx } = fakeContext()
+  let calls = 0
+  ;(ctx.session as any).context = async () => {
+    calls++
+    if (calls === 1) return { data: [{ type: "idle", outcome: "failed", error: { type: "provider.unavailable", message: "503 unavailable" } }] }
+    return { data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Recovered" }] }] }
+  }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const emitted: Array<{ name: string; data: any }> = []
+  service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", backupModels: [{ providerID: "probe", modelID: "probe-model" }] } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "patches", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Try" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+
+    const entries = emitted
+      .filter((event) => event.name === "patches")
+      .flatMap((event) => event.data.entries ?? [])
+      .filter((entry: any) => (entry.entities ?? entry.changes ?? []).some((change: any) => change.entity === "message"))
+    assert.ok(entries.some((entry: any) => (entry.entities ?? []).some((change: any) => change.entity === "message" && change.op === "upsert" && change.message.author === "user" && change.message.text === "Try")))
+    assert.ok(entries.some((entry: any) => (entry.entities ?? []).some((change: any) => change.entity === "message" && change.op === "upsert" && change.message.kind === "system" && change.message.text.startsWith("Model unavailable; switched to"))))
+    for (const entry of entries) {
+      assert.equal(entry.nonEntity, undefined, `message ${entry.version} applies from patches without a snapshot`)
+    }
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+
 test("the shared registry keeps one service and one store across locations", async () => {
   const values = new Map<string, unknown>()
   const first = fakeContext(values)

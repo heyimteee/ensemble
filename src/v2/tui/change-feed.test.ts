@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { createInitialState } from "../defaults.ts"
 import type { PatchBatch, Snapshot, Subtask } from "../types.ts"
 import { createClientStore } from "./client-store.ts"
-import { decideChangesSince, decidePatchApply, mergeFeedMeta, supportsPatchFeed, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { decideChangesSince, decidePatchApply, mergeFeedMeta, supportsPatchFeed, validMessageStream, type SnapshotMeta } from "./refresh-coordinator.ts"
 
 const meta = (value: Partial<SnapshotMeta> & { version: number }): SnapshotMeta => ({
   catalogRevision: 1,
@@ -143,6 +143,69 @@ test("shell entity changes apply atomically through the same feed", () => {
     decision.action === "apply" ? decision.changes.map((change) => `${change.entity}:${change.op}`) : [],
     ["agent:upsert", "workspace:upsert", "approval:upsert", "binding:upsert", "memory:upsert", "initJob:upsert", "settings:upsert", "ui:upsert", "binding:remove", "memory:remove", "initJob:remove", "approval:remove", "agent:remove", "workspace:remove"],
   )
+})
+
+test("message upserts and removals apply atomically through the feed", () => {
+  const first = {
+    id: "m1", workspaceID: "w1", seq: 1, author: "agent" as const, text: "partial", kind: "text" as const, createdAt: 1, streaming: true,
+  }
+  const final = {
+    id: "m1", workspaceID: "w1", seq: 1, author: "agent" as const, text: "exact final", kind: "text" as const, createdAt: 1, streaming: false,
+  }
+  const decision = decidePatchApply(meta({ version: 4 }), batch({
+    from: 4,
+    version: 6,
+    entries: [
+      { version: 5, changes: [], entities: [{ entity: "message", op: "upsert", message: first }] },
+      { version: 6, changes: [], entities: [
+        { entity: "message", op: "upsert", message: final },
+        { entity: "message", op: "remove", workspaceID: "w1", id: "m2" },
+      ] },
+    ] as any,
+  }))
+  assert.equal(decision.action, "apply")
+  assert.equal(decision.action === "apply" ? decision.version : 0, 6)
+  assert.deepEqual(decision.action === "apply" ? decision.changes : [], [
+    { entity: "message", op: "upsert", message: first },
+    { entity: "message", op: "upsert", message: final },
+    { entity: "message", op: "remove", workspaceID: "w1", id: "m2" },
+  ])
+})
+
+test("duplicate and reordered message patches are harmless", () => {
+  const first = {
+    id: "m1", workspaceID: "w1", seq: 1, author: "agent" as const, text: "partial", kind: "text" as const, createdAt: 1, streaming: true,
+  }
+  const applied = meta({ version: 6 })
+  assert.deepEqual(decidePatchApply(applied, batch({
+    from: 4,
+    version: 6,
+    entries: [
+      { version: 5, changes: [], entities: [{ entity: "message", op: "upsert", message: first }] },
+      { version: 6, changes: [], entities: [{ entity: "message", op: "remove", workspaceID: "w1", id: "m2" }] },
+    ] as any,
+  })), { action: "ignore" })
+  const overlapping = decidePatchApply(meta({ version: 5 }), batch({
+    from: 4,
+    version: 6,
+    entries: [
+      { version: 5, changes: [], entities: [{ entity: "message", op: "upsert", message: first }] },
+      { version: 6, changes: [], entities: [{ entity: "message", op: "remove", workspaceID: "w1", id: "m2" }] },
+    ] as any,
+  }))
+  assert.equal(overlapping.action, "apply")
+  assert.deepEqual(overlapping.action === "apply" ? overlapping.changes : [], [
+    { entity: "message", op: "remove", workspaceID: "w1", id: "m2" },
+  ])
+})
+
+test("a malformed message patch asks for a resync", () => {
+  const decision = decidePatchApply(meta({ version: 4 }), batch({
+    from: 4,
+    version: 5,
+    entries: [{ version: 5, changes: [], entities: [{ entity: "message", op: "upsert", message: { text: "missing identity" } }] }] as any,
+  }))
+  assert.deepEqual(decision, { action: "resync", reason: "malformed" })
 })
 
 test("a version-neutral metadata batch updates catalog and config revision metadata", () => {
@@ -303,6 +366,15 @@ test("the client store applies full-entity upserts and removals without replacin
   assert.equal(store.state()?.version, 9)
   assert.equal(store.state()?.messages.w1?.[0]?.text, "hello", "a scoped Work resync preserves the transcript")
   assert.equal(store.epoch(), 10)
+})
+
+test("an ephemeral stream event validates without a coordination version", () => {
+  const update = { epoch: 10, workspaceID: "w1", id: "m1", text: "live", updatedAt: 12 }
+  assert.equal(validMessageStream(update), true)
+  assert.equal(validMessageStream({ ...update, epoch: "10" }), false)
+  assert.equal(validMessageStream({ ...update, id: "" }), false)
+  assert.equal(validMessageStream({ ...update, text: undefined }), false)
+  assert.equal(validMessageStream({ ...update, version: 7 }), true, "extra transport fields do not matter")
 })
 
 test("SnapshotMeta stays the feed cursor shape", () => {

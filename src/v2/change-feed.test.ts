@@ -224,11 +224,12 @@ test("shell removals publish explicit remove changes", async () => {
   ])
 })
 
-test("pruning a workspace publishes every removed shell entity", async () => {
+test("pruning a workspace publishes message removals and every removed shell entity", async () => {
   const ctx = fakeContext()
   const batches: PatchBatch[] = []
   const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
   await store.saveWorkspace(workspace())
+  await store.saveMessage(message())
   await store.saveSubtask(task())
   await store.saveApproval(approval())
   await store.saveMemory(memory())
@@ -241,22 +242,69 @@ test("pruning a workspace publishes every removed shell entity", async () => {
   const entry = batches.at(-1)!.entries.at(-1)!
   const changes = entry.entities ?? entry.changes
   assert.equal(entry.other, true, "protocol-2 clients resync after a prune")
-  assert.equal(entry.nonEntity, true, "protocol-3 clients also resync because messages were removed")
+  assert.equal(entry.nonEntity, undefined, "protocol-3 clients remove patches without a snapshot")
   assert.deepEqual(
     changes.map((change) => `${change.entity}:${change.op}`).sort(),
-    ["approval:remove", "binding:remove", "initJob:remove", "memory:remove", "subtask:remove", "workspace:remove"],
+    ["approval:remove", "binding:remove", "initJob:remove", "memory:remove", "message:remove", "subtask:remove", "workspace:remove"],
   )
+  assert.deepEqual(changes.find((change) => change.entity === "message"), { entity: "message", op: "remove", workspaceID: "w", id: "m" })
 })
 
-test("a message version still marks its entry so every client falls back to a snapshot", async () => {
+test("durable messages publish full-entity upserts without a snapshot fallback", async () => {
   const ctx = fakeContext()
   const batches: PatchBatch[] = []
   const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
-  await store.saveMessage(message())
+  await store.saveMessage(message({ text: "failed", kind: "system" }))
+  await store.saveMessage(message({ id: "m2", seq: 2, text: "task", kind: "task" }))
   store.publishPending()
-  assert.equal(batches[0]!.entries[0]!.other, true)
-  assert.equal(batches[0]!.entries[0]!.nonEntity, true)
-  assert.equal(batches[0]!.entries[0]!.entities, undefined)
+  const entries = batches.flatMap((batch) => batch.entries)
+  assert.equal(entries.length, 2)
+  for (const entry of entries) {
+    assert.equal(entry.other, true, "protocol-2 clients keep the snapshot fallback")
+    assert.equal(entry.nonEntity, undefined, "protocol-3 clients apply message upserts")
+    assert.deepEqual(
+      entry.entities?.map((change) => `${change.entity}:${change.op}`),
+      ["message:upsert"],
+    )
+  }
+  assert.deepEqual(entries[0]!.entities?.[0], { entity: "message", op: "upsert", message: message({ text: "failed", kind: "system" }) })
+  assert.deepEqual(entries[1]!.entities?.[0], { entity: "message", op: "upsert", message: message({ id: "m2", seq: 2, text: "task", kind: "task" }) })
+})
+
+test("a live-text checkpoint persists without a coordination version or patch", async () => {
+  const ctx = fakeContext()
+  const batches: PatchBatch[] = []
+  const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
+  const live = message({ streaming: true, text: "partial", updatedAt: 2 })
+  await store.saveMessage(live)
+  store.publishPending()
+  batches.length = 0
+  const version = store.version()
+
+  live.text = "partial checkpoint"
+  live.updatedAt = 3
+  await store.checkpointMessage(live)
+
+  assert.equal(store.version(), version, "a checkpoint never bumps the coordination version")
+  assert.deepEqual(batches, [], "a checkpoint publishes no durable patch")
+  assert.equal((ctx.values.get("v2/message/w/00000001") as Message).text, "partial checkpoint")
+})
+
+test("a crash recovers the last streamed checkpoint and marks the run interrupted", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx, undefined, { epoch: 1 })
+  const live = message({ streaming: true, text: "partial", updatedAt: 2 })
+  await store.saveMessage(live)
+  live.text = "partial checkpoint"
+  live.updatedAt = 3
+  await store.checkpointMessage(live)
+
+  const recovered = new V2Store(ctx, undefined, { epoch: 2 })
+  await recovered.load()
+  const messageRow = recovered.message("w", "m")
+  assert.equal(messageRow?.text, "partial checkpoint", "at most the text after the last checkpoint is lost")
+  assert.equal(messageRow?.streaming, false)
+  assert.equal(messageRow?.interrupted, true, "the crashed run is visibly interrupted")
 })
 
 test("a removal publishes a full remove change", async () => {

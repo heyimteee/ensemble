@@ -28,6 +28,7 @@ import type {
   Memory,
   MemoryScope,
   Message,
+  MessageStream,
   ModelRef,
   PatchBatch,
   Revision,
@@ -104,6 +105,10 @@ function now(): number {
  */
 const MAINTENANCE_INTERVAL_MS = 1_000
 const CONFIG_DISCOVERY_MS = 1_000
+/** Ticket #139: one ephemeral live-text event per window, never per chunk. */
+const STREAM_COALESCE_MS = 32
+/** Live-text crash checkpoints; no coordination version or patch is written. */
+const STREAM_CHECKPOINT_MS = 250
 
 function unwrap<T>(value: any): T {
   return (value && typeof value === "object" && "data" in value ? value.data : value) as T
@@ -219,6 +224,9 @@ export class EnsembleV2Service {
     this.lastDmAt = Math.max(this.lastDmAt, this.store.dmMaxCreatedAt())
   }
   private readonly liveBySession = new Map<string, LiveSlot>()
+  /** Coalesced ephemeral live text, keyed by workspace + message id. */
+  private readonly pendingStreams = new Map<string, MessageStream>()
+  private streamTimer: ReturnType<typeof setTimeout> | undefined
   private readonly initRuns = new Map<string, { jobID: string; sessionID?: string; cancelled: boolean; promise: Promise<void> }>()
   private globalEpoch = 0
   /**
@@ -313,6 +321,9 @@ export class EnsembleV2Service {
       this.catalogAbort?.abort()
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer)
       this.maintenanceTimer = undefined
+      if (this.streamTimer) clearTimeout(this.streamTimer)
+      this.streamTimer = undefined
+      this.pendingStreams.clear()
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
       await this.maintenanceRun?.catch(() => undefined)
@@ -367,6 +378,47 @@ export class EnsembleV2Service {
     for (const registration of this.registrations) {
       void registration?.events?.emit?.("patches", batch)?.catch?.(() => undefined)
     }
+  }
+
+  private static streamKey(workspaceID: string, messageID: string): string {
+    return `${workspaceID}\u0000${messageID}`
+  }
+
+  /**
+   * Queue accumulated live text for one row. The window collapses a delta
+   * burst into one event with the full current text, so duplicate/reordered
+   * delivery inside the window is harmless and the event is idempotent. This
+   * path never advances the coordination version or enters the change ring.
+   */
+  private queueStream(message: Message): void {
+    this.pendingStreams.set(EnsembleV2Service.streamKey(message.workspaceID, message.id), {
+      epoch: this.epochValue,
+      workspaceID: message.workspaceID,
+      id: message.id,
+      text: message.text,
+      updatedAt: message.updatedAt ?? now(),
+    })
+    if (this.streamTimer !== undefined) return
+    this.streamTimer = setTimeout(() => {
+      this.streamTimer = undefined
+      this.flushStreams()
+    }, STREAM_COALESCE_MS)
+    this.streamTimer.unref?.()
+  }
+
+  private flushStreams(): void {
+    if (this.pendingStreams.size === 0) return
+    const updates = [...this.pendingStreams.values()]
+    this.pendingStreams.clear()
+    for (const update of updates) {
+      for (const registration of this.registrations) {
+        void registration?.events?.emit?.("stream", update)?.catch?.(() => undefined)
+      }
+    }
+  }
+
+  private dropStream(message: Message): void {
+    this.pendingStreams.delete(EnsembleV2Service.streamKey(message.workspaceID, message.id))
   }
 
   /**
@@ -4259,13 +4311,21 @@ export class EnsembleV2Service {
     // The opening row is persisted just after registration; a delta that
     // lands in between stays buffered and is flushed below, never dropped.
     if (!live.message) return
+    // A late native delta after finalization must never resurrect a settled
+    // row or overwrite the exact final text.
+    if (!live.message.streaming || !this.store.isStreaming(live.message.workspaceID, live.message.id)) return
     live.message.text = live.buffer
     live.message.streaming = true
     live.message.updatedAt = now()
-    if (now() - live.lastSave > 120) {
+    // Smoothness travels on the coalesced ephemeral event; correctness stays
+    // on the durable final patch. A missed event is repaired by that patch.
+    this.queueStream(live.message)
+    if (now() - live.lastSave > STREAM_CHECKPOINT_MS) {
       live.lastSave = now()
       live.message.updatedAt = live.lastSave
-      await this.store.saveMessage(live.message).catch(() => undefined)
+      // Crash recovery checkpoint: durable text, no version, no change ring,
+      // no published patch, so checkpoints never cause snapshot churn.
+      await this.store.checkpointMessage(live.message).catch(() => undefined)
     }
   }
 
@@ -4276,6 +4336,9 @@ export class EnsembleV2Service {
     // live rows until the 120 s age filter. Settle and persist on both
     // paths; only the return value signals staleness.
     const current = this.globalEpoch === epoch && (!workspaceID || (this.workspaceEpoch.get(workspaceID) ?? 0) === workspaceEpoch)
+    // Drop queued live text before the durable final upsert so a late
+    // ephemeral event can never chase the exact final row.
+    this.dropStream(message)
     settleStreamMessage(message, text, interrupted)
     await this.store.saveMessage(message)
     return current ? message : undefined
@@ -4406,7 +4469,7 @@ export class EnsembleV2Service {
         const model = models[index]
         if (index > 0) {
           await this.appendMessage(workspace, { author: "system", text: `Model unavailable; switched to ${model.providerID}/${model.modelID}${model.variant ? `#${model.variant}` : ""}.`, kind: "system", taskID: task.id })
-          if (live) { live.text = ""; this.liveBySession.get(binding.sessionID)!.buffer = ""; await this.store.saveMessage(live) }
+          if (live) { live.text = ""; this.liveBySession.get(binding.sessionID)!.buffer = ""; this.dropStream(live); await this.store.saveMessage(live) }
         }
         await this.ctx.session.switchModel({ sessionID: binding.sessionID, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } }).catch(() => undefined)
         attemptStartedAt = now()

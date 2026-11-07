@@ -1,4 +1,4 @@
-import type { ChangesSince, EntityChange, FeedMeta, PatchBatch, Revision, Snapshot } from "../types.ts"
+import type { ChangesSince, EntityChange, FeedMeta, MessageStream, PatchBatch, Revision, Snapshot } from "../types.ts"
 
 export type { Revision }
 
@@ -85,6 +85,10 @@ function validChange(value: any): value is EntityChange {
   switch (value.entity) {
     case "subtask":
       return upsert ? isRecord(value.task) && validID(value.task.id) : remove && validID(value.id)
+    case "message":
+      return upsert
+        ? isRecord(value.message) && validID(value.message.id) && validID(value.message.workspaceID)
+        : remove && validID(value.workspaceID) && validID(value.id)
     case "agent":
       return upsert ? isRecord(value.agent) && validID(value.agent.id) : remove && validID(value.id)
     case "workspace":
@@ -106,6 +110,16 @@ function validChange(value: any): value is EntityChange {
     default:
       return false
   }
+}
+
+/** Validate one ephemeral live-text event, which never advances the cursor. */
+export function validMessageStream(value: unknown): value is MessageStream {
+  if (!isRecord(value)) return false
+  return typeof value.epoch === "number"
+    && validID(value.workspaceID)
+    && validID(value.id)
+    && typeof value.text === "string"
+    && typeof value.updatedAt === "number"
 }
 
 function validFeedMeta(value: any): value is FeedMeta {
@@ -193,9 +207,9 @@ export function decidePatchApply(previous: SnapshotMeta | undefined, batch: Patc
     if (entry.entities !== undefined && !Array.isArray(entry.entities)) return resync("malformed")
     if (entry.version !== expected) return resync("malformed")
     expected++
-    // A version that changed state this feed cannot patch (messages/DM until
-    // #139) must fall back to the snapshot path. `other` alone is only the
-    // protocol-2 marker for shell changes carried in `entities`.
+    // A version that changed state this feed cannot patch (DM retention) must
+    // fall back to the snapshot path. `other` alone is only the protocol-2
+    // marker for shell/message changes carried in `entities`.
     if (entry.version > previous.version && entry.nonEntity === true) return resync("other")
     const source = entry.entities ?? entry.changes
     for (const change of source) {

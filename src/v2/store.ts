@@ -552,6 +552,11 @@ export class V2Store {
     })
   }
 
+  /** True while one row is still the live stream (ticket #139 finality guard). */
+  isStreaming(workspaceID: string, messageID: string): boolean {
+    return this.streaming.has(V2Store.streamingKey(workspaceID, messageID))
+  }
+
   approvals(): Approval[] {
     return Object.values(this.state.approvals)
   }
@@ -702,7 +707,7 @@ export class V2Store {
       this.trackStreaming(message)
       await this.ctx.storage.set(`v2/message/${workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
       await this.ctx.storage.set(`v2/workspace/${workspaceID}`, workspace)
-      await this.commit([])
+      await this.commit([{ entity: "message", op: "upsert", message: structuredClone(message) }])
       return message
     })
   }
@@ -811,7 +816,28 @@ export class V2Store {
       list.sort((a, b) => a.seq - b.seq)
       this.trackStreaming(message)
       await this.ctx.storage.set(`v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
-      await this.commit([])
+      await this.commit([{ entity: "message", op: "upsert", message: structuredClone(message) }])
+    })
+  }
+
+  /**
+   * Persist live streaming text for crash recovery without a coordination
+   * version, change-ring entry, or published patch (ticket #139). The durable
+   * finalization still goes through `saveMessage`, so a crash loses at most
+   * the text after the last checkpoint and never the exact final row.
+   */
+  async checkpointMessage(message: Message): Promise<void> {
+    await this.write(async () => {
+      const list = (this.state.messages[message.workspaceID] ??= [])
+      const index = list.findIndex((item) => item.id === message.id)
+      if (index >= 0) list[index] = message
+      else list.push(message)
+      list.sort((a, b) => a.seq - b.seq)
+      this.trackStreaming(message)
+      await this.ctx.storage.set(
+        `v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`,
+        structuredClone(message),
+      )
     })
   }
 
@@ -833,12 +859,14 @@ export class V2Store {
 
   async pruneWorkspace(workspaceID: string): Promise<void> {
     await this.write(async () => {
+      const messages = [...(this.state.messages[workspaceID] ?? [])]
       const subtaskIDs = Object.values(this.state.subtasks).filter((subtask) => subtask.workspaceID === workspaceID).map((subtask) => subtask.id)
       const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
       const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
       const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
       const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
       const bindingAgentIDs = Object.values(this.state.bindings).filter((binding) => binding.workspaceID === workspaceID).map((binding) => binding.agentID)
+      const dmTranscriptKeys = Object.keys(this.state.dmTranscripts).filter((key) => key === workspaceID || key.startsWith(`${workspaceID}:`))
       delete this.state.messages[workspaceID]
       for (const key of [...this.streaming]) {
         if (key.startsWith(`${workspaceID}\u0000`)) this.streaming.delete(key)
@@ -849,9 +877,7 @@ export class V2Store {
       for (const id of memoryIDs) delete this.state.memories[id]
       for (const id of approvalIDs) delete this.state.approvals[id]
       for (const id of dmQueueIDs) delete this.state.dmQueue[id]
-      for (const key of Object.keys(this.state.dmTranscripts)) {
-        if (key === workspaceID || key.startsWith(`${workspaceID}:`)) delete this.state.dmTranscripts[key]
-      }
+      for (const key of dmTranscriptKeys) delete this.state.dmTranscripts[key]
       await this.removePrefixNow(`v2/message/${workspaceID}/`)
       await this.removePrefixNow(`v2/binding/${workspaceID}/`)
       await this.removePrefixNow(`v2/dm/${workspaceID}/`)
@@ -862,16 +888,19 @@ export class V2Store {
       for (const id of dmQueueIDs) await this.ctx.storage.remove(`v2/dmqueue/${id}`)
       delete this.state.workspaces[workspaceID]
       await this.ctx.storage.remove(`v2/workspace/${workspaceID}`)
+      // Messages remove through the feed. DM queue/transcript rows are still
+      // outside it, so their removal keeps the protocol-3 snapshot fallback.
       await this.commit(
         [
           { entity: "workspace" as const, op: "remove" as const, id: workspaceID },
+          ...messages.map((message) => ({ entity: "message" as const, op: "remove" as const, workspaceID, id: message.id })),
           ...subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
           ...initJobIDs.map((id) => ({ entity: "initJob" as const, op: "remove" as const, id })),
           ...memoryIDs.map((id) => ({ entity: "memory" as const, op: "remove" as const, id })),
           ...approvalIDs.map((id) => ({ entity: "approval" as const, op: "remove" as const, id })),
           ...bindingAgentIDs.map((agentID) => ({ entity: "binding" as const, op: "remove" as const, workspaceID, agentID })),
         ],
-        true,
+        dmQueueIDs.length > 0 || dmTranscriptKeys.length > 0,
       )
     })
   }

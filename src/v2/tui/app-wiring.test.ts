@@ -108,6 +108,16 @@ test("the patch feed applies shell entity changes and recovers through changes.s
   assert.ok(source.includes('if (type === "rpc.ensemble.v2.changed")'))
 })
 
+test("workspace streams and direct chats share the coalesced client update path", () => {
+  // Behavior: stream-coalescer.test.ts burst coalescing; client-store.test.ts
+  // live overlay/final replacement; service.test.ts ephemeral stream events.
+  const source = app()
+  assert.ok(source.includes("createStreamCoalescer"))
+  assert.ok(source.includes('if (type === "rpc.ensemble.v2.stream")'))
+  assert.ok(source.includes("client.applyStream("))
+  assert.ok(source.includes("dmStream.push("), "the existing direct-chat stream shares the coalescer")
+})
+
 test("the init row reads durable jobs and advances on the shared motion tick", () => {
   // Behavior: initrow.test.ts labels, stages, and phases; the live init check.
   const source = app()
