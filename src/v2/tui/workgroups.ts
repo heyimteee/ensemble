@@ -22,6 +22,7 @@ import { workGroupLabel, type WorkGroup } from "../work-groups.ts"
  */
 
 export {
+  nextWorkInvalidation,
   orderedGroupTasks,
   workFinishedAt,
   workGroupCounts,

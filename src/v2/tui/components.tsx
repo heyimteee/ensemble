@@ -46,7 +46,7 @@ import { isReducedMotion } from "./motion.ts"
 import type { ToastNotice, ToastTone } from "./toast.ts"
 import { approvalResolvedTone, type ApprovalResolvedSettle } from "./approvals.ts"
 import { TIDE_GLYPHS, tideTone } from "./tide.ts"
-import type { WorkCard, WorkCardTones, WorkCompactRow } from "./workrows.ts"
+import type { WorkCard, WorkCardTide, WorkCardTones, WorkCompactRow } from "./workrows.ts"
 import type { InitRow } from "./initrow.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 
@@ -397,7 +397,16 @@ export function Rail(props: {
 }
 
 
-export function WorkCardView(props: { colors: Palette; card: WorkCard; selected: boolean; width: number }) {
+export function WorkCardView(props: {
+  colors: Palette
+  card: WorkCard
+  /** Ticket #142: animated mark; only this cell reads the 4 fps clock. */
+  glyph: string
+  /** Ticket #142: animated strip; only this row reads the 10 fps clock. */
+  tide: WorkCardTide
+  selected: boolean
+  width: number
+}) {
   const terminal = () => props.card.terminal
   const tone = (key: WorkCard["tones"]["glyph"]) => props.colors[key]
   // Ticket #137: name left in pale blue, then the right-aligned Braille and
@@ -406,7 +415,7 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
   const header = (): StyledLinePart[] => [
     { text: props.card.header.name, fg: props.colors.paleBlue },
     { text: props.card.header.gap, fg: props.colors.text },
-    { text: props.card.header.glyph, fg: tone(props.card.tones.glyph) },
+    { text: props.glyph, fg: tone(props.card.tones.glyph) },
     { text: " ", fg: tone(props.card.tones.status) },
     { text: props.card.header.status, fg: tone(props.card.tones.status) },
   ]
@@ -414,7 +423,7 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
   // two cells: one glyph and one blank. The blank is deliberate: it is the
   // approved Sub-Cell Tide gap and keeps the strip from reading as a solid bar.
   // Terminal cards arrive with a flat settled strip, so this row stops moving.
-  const tide = (): StyledLinePart[] => props.card.tideLevels.map((level) => ({
+  const tide = (): StyledLinePart[] => props.tide.tideLevels.map((level) => ({
     text: `${TIDE_GLYPHS[level]} `,
     fg: terminal() ? props.colors.faint : props.card.needsYou ? props.colors.warn : props.colors[tideTone(level)],
   }))

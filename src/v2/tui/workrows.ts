@@ -526,27 +526,47 @@ export function workCardStateWord(status: DerivedWorkStatus, needsYou: boolean):
 }
 
 /**
- * Ticket #137: header order is name, flexible spacer, glyph, one space, and
- * the uppercase status. The status block is right-aligned and never
- * truncated; the name yields and truncates with an ellipsis first. Width is
- * the card's inner content width in terminal cells. Pure.
+ * Ticket #137/#142: static header layout: name left, flexible spacer, then
+ * the uppercase status. The animated glyph sits in a reserved one-cell slot
+ * between the spacer and status; every glyph frame is one terminal cell, so
+ * the layout never depends on the current frame. The status block is
+ * right-aligned and never truncated; the name yields and truncates with an
+ * ellipsis first. Width is the card's inner content width in terminal cells.
+ * Pure.
  */
-export type WorkCardHeader = {
+const WORK_CARD_GLYPH_WIDTH = 1
+
+export type WorkCardHeaderLayout = {
   /** Left-aligned display name, truncated before the status yields. */
   name: string
   /** Padding that pins the glyph and status to the right edge. */
   gap: string
-  glyph: string
+  /** Uppercase state word; never truncated. */
   status: string
 }
 
-export function workCardHeader(agentLabel: string, glyph: string, status: string, width: number): WorkCardHeader {
+export type WorkCardHeader = WorkCardHeaderLayout & {
+  /** Animated Braille or static state mark, supplied per frame. */
+  glyph: string
+}
+
+function headerLayout(agentLabel: string, glyphWidth: number, status: string, width: number): WorkCardHeaderLayout {
   const cells = Math.max(1, Math.floor(width))
-  const blockWidth = glyph.length + 1 + status.length
+  const blockWidth = glyphWidth + 1 + status.length
   const nameBudget = cells - blockWidth - 1
   const name = nameBudget > 0 ? short(agentLabel, nameBudget) : ""
   const gap = " ".repeat(Math.max(1, cells - name.length - blockWidth))
-  return { name, gap, glyph, status }
+  return { name, gap, status }
+}
+
+/** Static header layout; the glyph is animated separately (ticket #142). */
+export function workCardHeaderLayout(agentLabel: string, status: string, width: number): WorkCardHeaderLayout {
+  return headerLayout(agentLabel, WORK_CARD_GLYPH_WIDTH, status, width)
+}
+
+/** Full header including a concrete glyph, for pure layout assertions. */
+export function workCardHeader(agentLabel: string, glyph: string, status: string, width: number): WorkCardHeader {
+  return { ...headerLayout(agentLabel, glyph.length, status, width), glyph }
 }
 
 /** The full header line, used by pure layout tests and live-visible order. */
@@ -605,16 +625,18 @@ export function workCompactRowText(row: WorkCompactRow): string {
 }
 
 /**
- * Ticket #115: the Work pane's card model. One card carries the header
- * (pale-blue name, animated Braille glyph, uppercase status word), state
- * tones, a truncated title, an honest detail line, and the full-width
- * one-row tide strip. This is a pure mapping over one active subtask;
- * ordering and active-only filtering stay in `workCardsForTasks`.
+ * Ticket #115/#142: the Work pane's static card identity. One card carries
+ * the header layout (pale-blue name, reserved Braille slot, uppercase status
+ * word), state tones, a truncated title, an honest detail line, and the tide
+ * variant. Everything here is memoized per task and stable across animation
+ * ticks; the animated glyph and tide cells live in `WorkCardMotion` and never
+ * feed back into this object. Ordering and active-only filtering stay in
+ * `workCardsForTasks`.
  */
 export type WorkCard = {
   id: string
-  /** Ticket #137: name left, Braille, right-aligned uppercase status. */
-  header: WorkCardHeader
+  /** Ticket #137: name left, reserved Braille slot, right-aligned uppercase status. */
+  header: WorkCardHeaderLayout
   title: string
   detail: string
   status: DerivedWorkStatus
@@ -625,21 +647,31 @@ export type WorkCard = {
   tones: WorkCardTones
   /** Stable tide motion for this subtask's active lifetime. */
   tideVariant: TideVariant
+  /** Card content width in terminal cells; the tide sampling derives from it. */
+  width: number
+}
+
+/**
+ * Ticket #142: animated Work-card data. Only the glyph (4 fps chrome clock)
+ * and the tide cells (10 fps work clock) are rebuilt per frame; the static
+ * `WorkCard` above keeps its identity.
+ */
+export type WorkCardTide = {
   /** Rendered one-row strip: one glyph plus one blank per tide column. */
   tide: string
   /** One sampled level per tide column, used for per-cell theme colors. */
   tideLevels: readonly number[]
 }
 
+export type WorkCardMotion = WorkCardTide & {
+  /** Braille or state glyph between the name and status word. */
+  glyph: string
+}
+
 export type WorkCardOptions = {
   now: number
-  /** Braille chrome clock tick (4 fps). */
-  tick: number
-  /** Work-card tide clock tick (10 fps); defaults to `tick`. */
-  tideTick?: number
   /** Card content width in terminal cells. */
   width: number
-  env?: NodeJS.ProcessEnv
   pendingApprovalIDs?: ReadonlySet<string>
   nativeBlockedSubtaskIDs?: ReadonlySet<string>
   pendingFor?: (task: Subtask) => PendingWorkAction | null | undefined
@@ -648,8 +680,23 @@ export type WorkCardOptions = {
   variant?: TideVariant
   /** Stable per-subtask assignment, resolved once on first sight. */
   variantFor?: (task: Subtask) => TideVariant
+}
+
+export type WorkCardTideOptions = {
+  /** Work-card tide clock tick (10 fps). */
+  tideTick: number
+  env?: NodeJS.ProcessEnv
   /** Freeze frames for cards that started waiting on the user. */
   freezeState?: TideFreezeState
+  /** Clock used only for freeze-frame retention; defaults to Date.now(). */
+  now?: number
+}
+
+export type WorkCardMotionOptions = Omit<WorkCardTideOptions, "tideTick"> & {
+  /** Braille chrome clock tick (4 fps). */
+  tick: number
+  /** Work-card tide clock tick (10 fps); defaults to `tick`. */
+  tideTick?: number
 }
 
 /**
@@ -677,6 +724,11 @@ export function workCardDetail(
 
 const NO_TASK_IDS: ReadonlySet<string> = new Set<string>()
 
+/**
+ * Ticket #142: static card data only. Titles, names, details, status,
+ * needs-you, tones, and the tide variant are derived from the task,
+ * approvals, and layout width; no animation clock reaches this function.
+ */
 export function workCardForTask(task: Subtask, agentLabel: string, options: WorkCardOptions): WorkCard {
   const status = deriveWorkStatus(task, options.now)
   const terminal = isTerminalWorkStatus(status)
@@ -694,18 +746,10 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
   const width = Math.max(16, Math.floor(options.width))
   const textWidth = Math.max(8, width - 2)
   const variant = options.variantFor?.(task) ?? options.variant ?? "current"
-  const tideTick = tideTickForCard(
-    status,
-    needsYou,
-    options.tideTick ?? options.tick,
-    options.env,
-    options.freezeState ? { state: options.freezeState, id: task.id, now: options.now } : undefined,
-  )
-  const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(status, options.tick, options.env)
   const state = workCardStateWord(status, needsYou)
   return {
     id: task.id,
-    header: workCardHeader(agentLabel.toUpperCase(), glyph, state, width),
+    header: workCardHeaderLayout(agentLabel.toUpperCase(), state, width),
     title: short(task.title || "(untitled)", textWidth),
     detail: short(workCardDetail(status, { pending, needsYou, activity: options.detailFor?.(task) }), textWidth),
     status,
@@ -713,9 +757,110 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     terminal,
     tones: workCardTones(status, needsYou),
     tideVariant: variant,
-    tide: terminal ? flatTideStrip(width) : tideStrip(variant, width, tideTick, options.env),
-    tideLevels: terminal ? flatTideLevels(tideColumns(width)) : tideLevels(variant, tideColumns(width), tideTick, options.env),
+    width,
   }
+}
+
+/** The animated Braille/state glyph; only this cell reads the 4 fps clock. */
+export function workCardGlyph(
+  card: Pick<WorkCard, "status" | "needsYou">,
+  tick: number,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return card.needsYou ? NEEDS_YOU_MARK : workRowFrame(card.status, tick, env)
+}
+
+/** The animated tide strip; only these cells read the 10 fps clock. */
+export function workCardTide(
+  card: Pick<WorkCard, "id" | "status" | "needsYou" | "terminal" | "tideVariant" | "width">,
+  options: WorkCardTideOptions,
+): WorkCardTide {
+  if (card.terminal) {
+    return { tide: flatTideStrip(card.width), tideLevels: flatTideLevels(tideColumns(card.width)) }
+  }
+  const tick = tideTickForCard(
+    card.status,
+    card.needsYou,
+    options.tideTick,
+    options.env,
+    options.freezeState
+      ? { state: options.freezeState, id: card.id, now: options.now ?? Date.now() }
+      : undefined,
+  )
+  return {
+    tide: tideStrip(card.tideVariant, card.width, tick, options.env),
+    tideLevels: tideLevels(card.tideVariant, tideColumns(card.width), tick, options.env),
+  }
+}
+
+/** Compose the static card with its animated cells for a render frame. */
+export function workCardMotion(card: WorkCard, options: WorkCardMotionOptions): WorkCardMotion {
+  return {
+    glyph: workCardGlyph(card, options.tick, options.env),
+    ...workCardTide(card, {
+      tideTick: options.tideTick ?? options.tick,
+      env: options.env,
+      freezeState: options.freezeState,
+      now: options.now,
+    }),
+  }
+}
+
+/**
+ * Ticket #142: per-task identity cache. A snapshot or layout refresh rebuilds
+ * the value-equal static card but keeps the previous reference, so Solid does
+ * not repaint the header, title, detail, status, or tones until one of them
+ * actually changes. Animation ticks never enter this path.
+ */
+export type WorkCardCache = {
+  cards: Map<string, WorkCard>
+}
+
+export function createWorkCardCache(): WorkCardCache {
+  return { cards: new Map() }
+}
+
+function sameWorkCard(a: WorkCard, b: WorkCard): boolean {
+  return (
+    a.id === b.id &&
+    a.header.name === b.header.name &&
+    a.header.gap === b.header.gap &&
+    a.header.status === b.header.status &&
+    a.title === b.title &&
+    a.detail === b.detail &&
+    a.status === b.status &&
+    a.needsYou === b.needsYou &&
+    a.terminal === b.terminal &&
+    a.tones.glyph === b.tones.glyph &&
+    a.tones.status === b.tones.status &&
+    a.tones.bar === b.tones.bar &&
+    a.tideVariant === b.tideVariant &&
+    a.width === b.width
+  )
+}
+
+export function workCardForTaskCached(
+  cache: WorkCardCache,
+  task: Subtask,
+  agentLabel: string,
+  options: WorkCardOptions,
+): WorkCard {
+  const next = workCardForTask(task, agentLabel, options)
+  const prior = cache.cards.get(next.id)
+  const card = prior && sameWorkCard(prior, next) ? prior : next
+  cache.cards.set(card.id, card)
+  return card
+}
+
+/** Drop cache entries for cards that left the visible layout. */
+export function pruneWorkCardCache(cache: WorkCardCache, ids: ReadonlySet<string>): string[] {
+  const removed: string[] = []
+  for (const id of cache.cards.keys()) {
+    if (ids.has(id)) continue
+    cache.cards.delete(id)
+    removed.push(id)
+  }
+  return removed
 }
 
 /** Active cards in the existing work-row order (working first, oldest first). */
