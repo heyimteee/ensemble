@@ -2161,4 +2161,105 @@ live_assert_text "$LIVE_TUI_SESSION" "/init extra" "composer rejection keeps the
 clear_composer_text
 live_log "ticket #103 init General row remains solo-only with single-channel validation"
 
+# v7 Work group lifecycle (ticket #136, final verification #143): two
+# overlapping commands stay independent, each group clears as one unit, and
+# cancellation emits one canonical terminal event. The size matrix covers the
+# same lifecycle at constrained geometries; this block proves the default
+# fake surface and the terminal event.
+#
+# Earlier probes leave a completion batch and queued turns active. Settle
+# them first so the header assertions observe only this block's groups.
+no_work_header() {
+  ! live_capture "$LIVE_TUI_SESSION" | grep -Eq 'WORK [0-9]+ groups?'
+}
+settle_previous_work() {
+  local ids id
+  local -a id_list=()
+  ids=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state !== "replied" }).map(function (t) { return t.id }).join(",")' | tr -d '"')
+  [[ -n "$ids" && "$ids" != "null" ]] || return 0
+  IFS=',' read -r -a id_list <<<"$ids"
+  for id in "${id_list[@]}"; do
+    live_invoke "task.cancel" "{\"id\":\"$id\"}" >/dev/null || true
+  done
+}
+clear_composer_text
+live_key "$LIVE_TUI_SESSION" C-g
+live_key "$LIVE_TUI_SESSION" "w"
+live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface for the v7 lifecycle probe"
+settle_previous_work
+live_wait_for 20 "earlier scenario work cleared" no_work_header \
+  || live_fail "earlier scenario work did not clear before the v7 lifecycle probe"
+v7_one_title="v7-group-one fake-queue-hold-long"
+v7_two_title="v7-group-two fake-queue-hold-long"
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"$v7_one_title\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
+live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "first v7 group is visible"
+live_require_text "$LIVE_TUI_SESSION" "v7-group-one" 20 "first v7 group card is visible"
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"$v7_two_title\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
+live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 2 active · 0 done" 20 "second v7 group appends without replacing the first"
+live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 1 active · 0 done" 20 "first v7 group label"
+live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "second v7 group label"
+live_require_text "$LIVE_TUI_SESSION" "v7-group-two" 20 "second v7 group card is visible"
+v7_first_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$v7_one_title\" })[0]?.id" | tr -d '"')
+[[ -n "$v7_first_id" && "$v7_first_id" != "null" ]] || live_fail "first v7 group task id is missing"
+live_invoke "task.cancel" "{\"id\":\"$v7_first_id\"}" >/dev/null
+live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "cancelled v7 group clears after the shared hold"
+live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · 1 active" "cancelled v7 group label is gone"
+live_require_text "$LIVE_TUI_SESSION" "v7-group-two" 20 "second v7 group survives the first group's removal"
+live_require_text "$LIVE_TUI_SESSION" "⊘ $v7_one_title cancelled" 15 "cancelled v7 task emits one terminal event"
+live_assert_count "$LIVE_TUI_SESSION" "⊘ $v7_one_title cancelled" 1 "cancelled v7 terminal event appears exactly once"
+live_assert_absence "$LIVE_TUI_SESSION" "Subtask failed" "no duplicate generic failure line for cancelled work"
+v7_second_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$v7_two_title\" })[0]?.id" | tr -d '"')
+[[ -n "$v7_second_id" && "$v7_second_id" != "null" ]] || live_fail "second v7 group task id is missing"
+live_invoke "task.cancel" "{\"id\":\"$v7_second_id\"}" >/dev/null
+live_wait_for 20 "v7 groups cleared" no_work_header \
+  || live_fail "second v7 group did not clear after the shared hold"
+live_require_text "$LIVE_TUI_SESSION" "⊘ $v7_two_title cancelled" 15 "second cancelled v7 task emits its terminal event"
+live_assert_count "$LIVE_TUI_SESSION" "⊘ $v7_two_title cancelled" 1 "second cancelled v7 terminal event appears exactly once"
+live_log "v7 two-group append, independent removal, and canonical cancellation events verified"
+
+# v7 needs-you (ticket #136/#143): the fake provider emits one native
+# ask_person tool call, so the approval is real, durable, and linked to the
+# running task. The group keeps the NEEDS YOU treatment beyond the 1.2 s hold
+# window; resolving the approval releases the task and the group then clears
+# normally.
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-person\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
+live_require_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "ask_person reaches the approvals surface"
+live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 30 "needs-you card treatment"
+live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "needs-you group is visible"
+sleep 2.2
+live_assert_text "$LIVE_TUI_SESSION" "NEEDS YOU" "needs-you persists beyond the shared hold window"
+live_assert_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" "needs-you group stays mounted"
+v7_ask_id=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (a) { return a.status === "pending" && a.kind === "ask_person" }).pop()?.id' | tr -d '"')
+[[ -n "$v7_ask_id" && "$v7_ask_id" != "null" ]] || live_fail "pending ask_person approval is missing"
+live_invoke "approval.resolve" "{\"id\":\"$v7_ask_id\",\"approve\":true,\"resolution\":\"Use the stable channel.\"}" >/dev/null
+v7_ask_replied=""
+for _ in $(seq 1 80); do
+  v7_ask_replied=$(live_snapshot_value "(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.title === \"fake-ask-person\" })[0]; return task ? task.state + \":\" + (task.approvalID || \"cleared\") : \"missing\" })()")
+  [[ "$v7_ask_replied" == '"replied:cleared"' ]] && break
+  sleep 0.5
+done
+[[ "$v7_ask_replied" == '"replied:cleared"' ]] || live_fail "needs-you task did not reply after its approval resolved (got $v7_ask_replied)"
+live_require_absence "$LIVE_TUI_SESSION" "NEEDS YOU" 20 "needs-you marker clears after the decision"
+live_wait_for 20 "needs-you group cleared" no_work_header \
+  || live_fail "needs-you group did not clear after resolution"
+live_log "v7 needs-you approval persisted, resolved, and cleared live"
+
+# v7 failure event (ticket #136/#143): rejecting the ask fails the linked task
+# with one canonical failure row. This proves the live failed transition, the
+# FAILED card treatment, and the absence of the old duplicate generic line.
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-person-reject\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
+live_require_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "rejected ask reaches the approvals surface"
+live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 30 "rejected ask starts as needs-you"
+v7_reject_id=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (a) { return a.status === "pending" && a.kind === "ask_person" }).pop()?.id' | tr -d '"')
+[[ -n "$v7_reject_id" && "$v7_reject_id" != "null" ]] || live_fail "pending rejected ask approval is missing"
+live_invoke "approval.resolve" "{\"id\":\"$v7_reject_id\",\"approve\":false}" >/dev/null
+live_require_text "$LIVE_TUI_SESSION" "✕ FakeAgent failed: User rejected the request." 20 "rejected ask emits one failure event"
+live_assert_count "$LIVE_TUI_SESSION" "✕ FakeAgent failed: User rejected the request." 1 "failure event appears exactly once"
+live_require_text "$LIVE_TUI_SESSION" "FAILED" 10 "failed card treatment"
+live_assert_absence "$LIVE_TUI_SESSION" "Subtask failed" "no duplicate generic failure line for failed work"
+live_require_absence "$LIVE_TUI_SESSION" "NEEDS YOU" 10 "rejected ask clears its needs-you state"
+live_wait_for 20 "failed group cleared" no_work_header \
+  || live_fail "failed group did not clear after its hold"
+live_log "v7 failed transition, FAILED card, and single terminal event verified live"
+
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

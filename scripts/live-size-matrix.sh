@@ -206,10 +206,15 @@ assert_pane_updates() {
 }
 
 run_load_probe_160x50() {
-  local pid pct
+  local pid pct idle_pct
   start_tui_at 160 50
   pid=$(find_tui_pid) || live_fail "could not resolve the TUI opencode process"
   live_log "size matrix: load probe TUI pid=$pid"
+  # Ticket #143: record the idle TUI CPU before any work mounts. Let the
+  # initial catalog/page settle first so the sample is not startup churn.
+  sleep 1.5
+  idle_pct=$(measure_cpu_percent "$pid")
+  live_log "size matrix: idle TUI cpu=${idle_pct}%"
 
   delegate 0 "size-load-a"
   wait_active 1

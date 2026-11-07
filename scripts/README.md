@@ -43,8 +43,10 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   deterministic and is not the CI guardrail.
 - `npm run test:live:latency`: a reproducible keypress-to-repaint probe on the
   isolated fake host. It reports min/p50/p95/max/mean and raw samples for rail
-  `j`/`k` navigation; it is a measurement, not a pass/fail threshold. Set
-  `ENSEMBLE_LATENCY_SAMPLES` (default 10) to change the sample count.
+  `j`/`k` navigation and for v7 delegation-card appearance (task.delegate RPC
+  to the first capture showing the Work card title); it is a measurement, not
+  a pass/fail threshold. Set `ENSEMBLE_LATENCY_SAMPLES` (default 10) for rail
+  samples and `ENSEMBLE_LATENCY_CARD_SAMPLES` (default 5) for card samples.
 - `npm run test:live:preflight`: resolves the harness binaries and prints the
   Node, OpenCode, and tmux versions. The default fake scope does not require
   `fd`; `npm run test:live:preflight -- all` also requires and prints it for the
@@ -140,8 +142,11 @@ visual tests.
 `npm run test:live:latency` starts the isolated fake provider, server, and TUI,
 creates one agent and one workspace through the RPC surface, then times rail
 `j`/`k` cursor moves from `tmux send-keys` until a pane capture first shows the
-cursor on the target row. It reports raw samples plus min/p50/p95/max/mean and
-the measurement boundary. `ENSEMBLE_LATENCY_SAMPLES` controls the count.
+cursor on the target row. It then opens the workspace and times `task.delegate`
+RPC invocations until the first capture shows the new Work card title. It
+reports raw samples plus min/p50/p95/max/mean and both measurement boundaries.
+`ENSEMBLE_LATENCY_SAMPLES` controls the rail sample count and
+`ENSEMBLE_LATENCY_CARD_SAMPLES` the card sample count.
 
 The number includes tmux send/capture overhead, so compare runs from the same
 machine and terminal host rather than treating it as pure render time. The
@@ -165,9 +170,9 @@ prove newest-group capacity priority, group labels, and independent group
 removal after the shared 1.2 s hold. Override the set with
 `ENSEMBLE_V6_SIZES="120x40 160x50"`.
 
-The same run records the TUI process CPU and tmux pane updates for one, two,
-and three working cards at 160×50. These numbers are observations, not
-thresholds. It also restarts once with `NO_COLOR=1` and checks frame-0
+The same run records the idle TUI process CPU at 160×50, then the TUI process
+CPU and tmux pane updates for one, two, and three working cards. These numbers
+are observations, not thresholds. It also restarts once with `NO_COLOR=1` and checks frame-0
 motion plus the state word. It is Linux/tmux only, like the rest of the live
 harness, and is not a substitute for the full `test:live:fake` scenario or the
 macOS/Herdr checklist.

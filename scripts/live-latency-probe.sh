@@ -77,6 +77,8 @@ probe_agent=$(live_snapshot_value 'Object.values(output.state.agents).filter(fun
 live_invoke workspace.create "{\"name\":\"LatencyProbe\",\"memberIDs\":[\"$probe_agent\"],\"leaderID\":\"$probe_agent\"}" >/dev/null
 live_wait_for "$LIVE_STEP_TIMEOUT" "LatencyProbe in the snapshot" live_snapshot_has_workspace_named "LatencyProbe" \
   || live_fail "latency fixture workspace was not created"
+probe_ws=$(live_snapshot_value 'Object.keys(output.state.workspaces)[0]' | tr -d '"')
+[[ -n "$probe_ws" && "$probe_ws" != "null" ]] || live_fail "latency fixture workspace id is missing"
 
 live_start_tui
 live_wait_for_native_tui
@@ -169,4 +171,63 @@ summary=$(
 live_log "rail keypress-to-repaint latency: $summary"
 live_log "raw samples (ms): ${samples[*]}"
 live_log "measurement boundary: tmux send-keys -> first capture-pane showing the moved cursor"
+
+# v7 delegation-card appearance (ticket #138, final verification #143): time
+# from the task.delegate RPC to the first capture showing the Work card title.
+# This crosses the same tmux boundary as the rail probe and exercises the
+# durable patch path; it is a measurement, not a threshold. Each sample is a
+# separate dispatch group, cancelled and held out before the next sample.
+live_key "$LIVE_TUI_SESSION" "j"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Message…" 15 "workspace surface for the card probe"
+CARD_SAMPLES="${ENSEMBLE_LATENCY_CARD_SAMPLES:-5}"
+if ! [[ "$CARD_SAMPLES" =~ ^[1-9][0-9]*$ ]]; then
+  live_fail "ENSEMBLE_LATENCY_CARD_SAMPLES must be a positive integer (got: $CARD_SAMPLES)"
+fi
+
+CARD_MEASURED_MS=""
+measure_card() {
+  local title="$1" start now pane task_id lines
+  start=$(date +%s%N)
+  live_invoke "task.delegate" "{\"workspaceID\":\"$probe_ws\",\"assigneeID\":\"$probe_agent\",\"title\":\"$title\",\"instruction\":\"fake-queue-hold\",\"mode\":\"research\"}" >/dev/null
+  while true; do
+    pane=$(live_capture "$LIVE_TUI_SESSION")
+    lines=$(grep -F -- "$title" <<<"$pane" | grep -vF "Assigned to" || true)
+    if [[ -n "$lines" ]]; then
+      now=$(date +%s%N)
+      CARD_MEASURED_MS=$(( (now - start) / 1000000 ))
+      break
+    fi
+    now=$(date +%s%N)
+    if (( now - start > 10000000000 )); then
+      live_fail "Work card for '$title' did not appear within 10s after task.delegate"
+    fi
+  done
+  task_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$title\" })[0]?.id" | tr -d '"')
+  [[ -n "$task_id" && "$task_id" != "null" ]] || live_fail "card probe task '$title' is missing from the snapshot"
+  live_invoke "task.cancel" "{\"id\":\"$task_id\"}" >/dev/null
+  live_wait_for 15 "card probe group cleared" live_capture_absence "$LIVE_TUI_SESSION" "WORK 1 group" \
+    || live_fail "card probe group did not clear after cancellation"
+}
+
+card_samples=()
+for ((i = 0; i < CARD_SAMPLES; i++)); do
+  measure_card "latency-card-$((i + 1))"
+  card_samples+=("$CARD_MEASURED_MS")
+done
+
+card_summary=$(
+  printf '%s\n' "${card_samples[@]}" | sort -n | awk '
+    { values[NR] = $1; total += $1 }
+    END {
+      n = NR
+      p50 = values[int((n + 1) / 2)]
+      p95 = values[int((n * 95 + 99) / 100)]
+      printf "min=%dms p50=%dms p95=%dms max=%dms mean=%.1fms n=%d", values[1], p50, p95, values[n], total / n, n
+    }
+  '
+)
+live_log "delegation-card appearance latency: $card_summary"
+live_log "raw card samples (ms): ${card_samples[*]}"
+live_log "card measurement boundary: task.delegate RPC invoke -> first capture-pane showing the Work card title"
 live_log "latency probe complete (measurement only; no threshold gate)"
