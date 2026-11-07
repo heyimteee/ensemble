@@ -29,7 +29,7 @@ OpenCode engine
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
 - **`src/v2/skill-invocation.ts`** — the shared pure skill invocation planner used by composer completion and server validation: anchors, assigned/General skills, owner choices, direct-chat rejection, and work titles.
 - **`src/v2/tui/`** — page shell, presentational components, palette, formatting, and keymap layers.
-- **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval. Reads use targeted accessors or the live read-only view; `snapshot()` is the single full-state clone boundary. Read-modify-save paths clone only the entity they save. Set `ENSEMBLE_DEBUG_CLONES=1` to expose full-clone counts and timing on the `diagnostic` RPC (`clones`).
+- **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval. Reads use targeted accessors or the live read-only view; `snapshot()` is the single full-state clone boundary. Read-modify-save paths clone only the entity they save. Live streaming rows are indexed by id, and foreign-version message merges use an id index rather than nested scans. Set `ENSEMBLE_DEBUG_CLONES=1` to expose full-clone counts and timing on the `diagnostic` RPC (`clones`).
 - **`src/v2/routing.ts`** — `$`/`!` mention routing and leader fallback.
 - **`src/v2/paths.ts`** — canonical workspace directories and file references.
 - **`src/v2/workspace-config.ts`** — `.ensemble/config.json`, handoff paths, `.gitignore`, AGENTS.md insertion.
@@ -284,7 +284,7 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 
 ## v4 reliability, shortcuts, and team rules
 
-- One process-level service registry owns a single Ensemble service/store, with reference-counted location setup and changes broadcast to every RPC registration. Stores also merge roster/membership/binding updates and reconcile every workspace config when snapshots are read.
+- One process-level service registry owns a single Ensemble service/store, with reference-counted location setup and changes broadcast to every RPC registration. Stores also merge roster/membership/binding updates, and every workspace config is reconciled on the serialized maintenance timer and before pump work, never on a snapshot read.
 - Direct-chat assistant messages use the same `agent` transcript role as group replies.
 - Markdown styling covers heading levels, strong, italic, strikethrough, inline/block code, links, lists, quotes, images, and syntax token scopes. Styling failures are reported instead of silently downgrading.
 - The interaction layer is modal: Normal, Insert, Visual, and Command share one binding catalog and one Esc ladder. `Space` is the leader, `Esc` never leaves, and the old Ctrl app shortcuts are gone.

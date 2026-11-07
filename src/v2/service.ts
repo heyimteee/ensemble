@@ -81,6 +81,14 @@ function now(): number {
   return Date.now()
 }
 
+/**
+ * Ticket #134: maintenance is timer-driven and serialized, never a snapshot
+ * side effect. Config discovery is additionally throttled because it reads
+ * each workspace's `.ensemble/config.json` from disk.
+ */
+const MAINTENANCE_INTERVAL_MS = 1_000
+const CONFIG_DISCOVERY_MS = 1_000
+
 function unwrap<T>(value: any): T {
   return (value && typeof value === "object" && "data" in value ? value.data : value) as T
 }
@@ -141,7 +149,14 @@ export function settleStreamMessage(message: Message, text: string, interrupted:
  */
 export function newestOpenSenderTaskID(state: SnapshotState, workspaceID: string, senderID: string): string | undefined {
   const open = Object.values(state.subtasks).filter(
-    (task) => task.workspaceID === workspaceID && task.assigneeID === senderID && task.state !== "replied",
+    (task) =>
+      task.workspaceID === workspaceID &&
+      task.assigneeID === senderID &&
+      task.state !== "replied" &&
+      // Completion deliveries are inbound work, not the sender's own turn:
+      // anchoring a new hop to one would apply the wrong depth and can refuse
+      // a legitimate parentless handoff.
+      task.handoff?.completion !== true,
   )
   open.sort((a, b) => b.createdAt - a.createdAt)
   return open[0]?.id
@@ -155,6 +170,14 @@ export class EnsembleV2Service {
   private stopped = false
   private pumping = false
   private repump = false
+  private maintaining = false
+  private maintenanceQueued = false
+  private maintenanceRun: Promise<void> | undefined
+  private maintenanceTimer: ReturnType<typeof setInterval> | undefined
+  private maintenanceWaiters: Array<() => void> = []
+  private viewDirectory: string | undefined
+  private configDirty = true
+  private lastConfigPassAt = 0
   private readonly running = new Set<Promise<void>>()
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   private readonly runBySession = new Map<string, string>()
@@ -239,12 +262,34 @@ export class EnsembleV2Service {
         }
       } catch {}
     })()
+    // Ticket #134: react to host-exposed config changes instead of polling
+    // `.ensemble/config.json` on every read. `config.updated` covers host
+    // config; `file.edited` covers a direct edit of the workspace config.
+    void (async () => {
+      try {
+        for await (const event of this.ctx.event.subscribe({ types: ["config.updated", "file.edited"], signal: this.catalogAbort!.signal })) {
+          if (!this.isConfigEvent(event as any)) continue
+          this.configDirty = true
+          void this.maintain()
+        }
+      } catch {}
+    })()
+    await this.maintain()
+    this.maintenanceTimer = setInterval(() => {
+      void this.maintain()
+    }, MAINTENANCE_INTERVAL_MS)
+    if (typeof (this.maintenanceTimer as unknown as { unref?: () => void }).unref === "function") {
+      ;(this.maintenanceTimer as unknown as { unref: () => void }).unref()
+    }
     this.pump()
     return async () => {
       this.stopped = true
       this.catalogAbort?.abort()
+      if (this.maintenanceTimer) clearInterval(this.maintenanceTimer)
+      this.maintenanceTimer = undefined
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
+      await this.maintenanceRun?.catch(() => undefined)
       await this.retryRegistration?.dispose?.().catch(() => undefined)
       await Promise.allSettled([...this.running])
     }
@@ -452,6 +497,88 @@ export class EnsembleV2Service {
     this.timers.add(timer)
   }
 
+  /** Host config events that can change Ensemble workspace config. */
+  private isConfigEvent(event: any): boolean {
+    if (event?.type === "config.updated") return true
+    if (event?.type !== "file.edited") return false
+    const file = String(event?.data?.file ?? event?.file ?? "").replaceAll("\\", "/")
+    return file === ".ensemble/config.json" || file.endsWith("/.ensemble/config.json")
+  }
+
+  /** Remember the location a client is viewing; a change forces discovery. */
+  private noteViewDirectory(directory: string): void {
+    if (this.viewDirectory === directory) return
+    this.viewDirectory = directory
+    this.configDirty = true
+  }
+
+  /**
+   * Serialized maintenance entry point. A request that lands mid-pass is
+   * coalesced into one follow-up pass; every caller resolves after a pass that
+   * includes its request has finished. Maintenance never runs from a read.
+   */
+  private maintain(): Promise<void> {
+    if (this.stopped) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      this.maintenanceWaiters.push(resolve)
+      this.maintenanceQueued = true
+      this.drainMaintenance()
+    })
+  }
+
+  private drainMaintenance(): void {
+    if (this.maintaining) return
+    this.maintaining = true
+    const run = (async () => {
+      try {
+        while (this.maintenanceQueued && !this.stopped) {
+          this.maintenanceQueued = false
+          const waiters = this.maintenanceWaiters
+          this.maintenanceWaiters = []
+          try {
+            await this.performMaintenance()
+          } catch {
+            // Maintenance is best-effort: one failed pass must not stop the
+            // timer or strand callers waiting for a settled state.
+          }
+          for (const resolve of waiters) resolve()
+        }
+      } finally {
+        this.maintaining = false
+        const pending = this.maintenanceWaiters
+        this.maintenanceWaiters = []
+        for (const resolve of pending) resolve()
+      }
+    })()
+    this.maintenanceRun = run
+  }
+
+  private async performMaintenance(): Promise<void> {
+    await this.store.sync().catch(() => false)
+    this.refreshDmClock()
+    const at = now()
+    if (this.configDirty || at - this.lastConfigPassAt >= CONFIG_DISCOVERY_MS) {
+      this.configDirty = false
+      this.lastConfigPassAt = at
+      await this.maintainConfigs()
+    }
+    await this.reapAndRetire()
+    await this.reconcileWaitingWork()
+    await this.settleTerminalStreams()
+  }
+
+  private async maintainConfigs(): Promise<void> {
+    if (this.viewDirectory) {
+      try {
+        await this.discoverWorkspace(this.viewDirectory)
+        this.lastConfigError = undefined
+      } catch (error: any) {
+        this.lastConfigError = error?.message ?? String(error)
+      }
+    }
+    await this.reconcileWorkspaceConfigs()
+  }
+
   /**
    * Schedule work after every mutation that creates or changes it. Agent
    * tool calls (`ensemble_delegate`, handoff registration, agent-to-agent
@@ -506,24 +633,17 @@ export class EnsembleV2Service {
     return hash >>> 0
   }
 
+  /**
+   * Ticket #134: the snapshot boundary is pure. It may merge foreign storage
+   * (a read) but performs no writes, discovery, reconciliation, reaping,
+   * stream settling, or purging; those run on the maintenance timer and
+   * before pump work.
+   */
   private async snapshot(directory: string): Promise<Snapshot> {
     await this.store.sync()
     this.refreshDmClock()
-    try {
-      await this.discoverWorkspace(directory)
-      this.lastConfigError = undefined
-    } catch (error: any) {
-      this.lastConfigError = error?.message ?? String(error)
-    }
-    await this.reconcileWorkspaceConfigs()
+    this.noteViewDirectory(directory)
     if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
-    // Read-path reconciliation: reset expired claims, retire exhausted work,
-    // repair waiting/stale rows, and settle streams whose task is already
-    // terminal. This never spawns runs — starting work happens only in
-    // pump() via schedule().
-    await this.reapAndRetire()
-    await this.reconcileWaitingWork()
-    await this.settleTerminalStreams()
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
@@ -545,9 +665,7 @@ export class EnsembleV2Service {
   private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; clones?: ReturnType<typeof cloneStats> }> {
     await this.store.sync()
     this.refreshDmClock()
-    await this.reapAndRetire()
-    await this.reconcileWaitingWork()
-    await this.settleTerminalStreams()
+    this.noteViewDirectory(directory)
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
@@ -573,6 +691,7 @@ export class EnsembleV2Service {
   private async invoke(directory: string, action: string, payload: Json): Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }> {
     await this.store.sync()
     this.refreshDmClock()
+    this.noteViewDirectory(directory)
     try {
       const result = await this.dispatch(directory, action, payload)
       this.pump()
@@ -2986,6 +3105,26 @@ export class EnsembleV2Service {
     const askingTask = askingSubtaskID ? state.subtasks[askingSubtaskID] : undefined
     const dispatchGroupID = askingTask ? resolveDispatchGroupID(askingTask, state.subtasks) : newDispatchGroupID()
     const askingDepth = askingSubtaskID ? this.delegationDepth(state, askingSubtaskID) : 0
+    // Idempotency spans terminal rows for the row's lifetime: the handoff hop
+    // is the effect, so a retried or resubmitted handoff from the same run
+    // returns the existing record instead of executing twice. Checked before
+    // the depth/per-run caps so an idempotent replay never turns into a cap
+    // refusal. When the original run has already finished, the anchor can be a
+    // newer open row (for example an inbound completion hop); fall back to the
+    // same logical ask so anchor drift cannot duplicate the hop either.
+    const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: askingSubtaskID, recipientID: recipient.id, task, instruction: brief, constraints, expected })
+    const duplicate = this.findWorkByKey(workspace.id, key) ?? (!run ? Object.values(state.subtasks).find((item) =>
+      item.workspaceID === workspace.id &&
+      item.workKind === "handoff" &&
+      item.handoff?.completion !== true &&
+      item.handoff?.senderID === sender.id &&
+      item.handoff?.recipientID === recipient.id &&
+      item.title === task &&
+      item.instruction === hopInstruction &&
+      (item.constraints ?? "") === (constraints ?? "") &&
+      (item.expected ?? "") === (expected ?? "")
+    ) : undefined)
+    if (duplicate) return { content: handoffDuplicateText(recipient.name, task) }
     // Handoff-specific caps (spec #53): chains stop after one hop, and one
     // run fans out at most HANDOFF_MAX_PER_RUN hops. Only handoff hops count
     // toward the per-run budget — relay/failure-notice legs are messages,
@@ -2999,12 +3138,6 @@ export class EnsembleV2Service {
         return fail(`the handoff limit is ${HANDOFF_MAX_PER_RUN} per run.`)
       }
     }
-    // Idempotency spans terminal rows for the row's lifetime: the handoff hop
-    // is the effect, so a retried or resubmitted handoff from the same run
-    // returns the existing record instead of executing twice.
-    const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: askingSubtaskID, recipientID: recipient.id, task, instruction: brief, constraints, expected })
-    const duplicate = this.findWorkByKey(workspace.id, key)
-    if (duplicate) return { content: handoffDuplicateText(recipient.name, task) }
     const at = now()
     const correlationID = parsed.data.correlationID || correlationIDForKey("handoff", key)
     const hop: Subtask = {
@@ -3756,10 +3889,10 @@ export class EnsembleV2Service {
   }
 
   /**
-   * Reap stale leases, retire exhausted work, and purge long-finished rows.
-   * Runs on every schedule pass and on snapshot/diagnostic reads so the
-   * derived lifecycle stays honest between scheduler passes. Never spawns
-   * runs — starting work happens only in pump().
+   * Reap stale leases, retire exhausted work, and purge long-finished rows
+   * (ticket #134). Runs on the serialized maintenance timer and before pump
+   * work, never on a snapshot read. Never spawns runs — starting work happens
+   * only in pump().
    */
   private async reapAndRetire(): Promise<void> {
     const at = now()
@@ -3826,21 +3959,20 @@ export class EnsembleV2Service {
    * A message whose task is already terminal must never remain `streaming`:
    * a late run result or a cancelled/approval-settled run can leave the row
    * live, and the activity surface would then show a finished task as
-   * working. Settle it on the read path (idempotent, no run started).
+   * working. Iterates the store's active streaming-id index, never the whole
+   * transcript (ticket #134).
    */
   private async settleTerminalStreams(): Promise<void> {
-    for (const [workspaceID, list] of Object.entries(this.store.read().messages)) {
-      for (const candidate of list) {
-        if (!candidate.streaming) continue
-        const task = candidate.taskID ? this.store.subtask(candidate.taskID) : undefined
-        if (candidate.taskID && (!task || task.state === "replied")) {
-          const message = this.store.cloneMessage(workspaceID, candidate.id)
-          if (!message) continue
-          const interrupted = task ? task.outcome !== "succeeded" : true
-          settleStreamMessage(message, message.text || (interrupted ? "Reply interrupted." : "Reply completed."), interrupted)
-          await this.store.saveMessage(message)
-        }
-      }
+    for (const { workspaceID, messageID } of this.store.streamingMessages()) {
+      const candidate = this.store.message(workspaceID, messageID)
+      if (!candidate?.streaming || !candidate.taskID) continue
+      const task = this.store.subtask(candidate.taskID)
+      if (task && task.state !== "replied") continue
+      const message = this.store.cloneMessage(workspaceID, candidate.id)
+      if (!message) continue
+      const interrupted = task ? task.outcome !== "succeeded" : true
+      settleStreamMessage(message, message.text || (interrupted ? "Reply interrupted." : "Reply completed."), interrupted)
+      await this.store.saveMessage(message)
     }
   }
 
@@ -3851,15 +3983,25 @@ export class EnsembleV2Service {
    * is gone; either state wedges the activity surface forever. Completion
    * deliveries are excluded from the wait set. Pure state repair: no run is
    * started here; the normal pump does that.
+   *
+   * Ticket #134: children are indexed by parent in one pass, so a 5k-task
+   * queue is O(n) instead of O(n²).
    */
   private async reconcileWaitingWork(): Promise<void> {
-    for (const candidate of this.store.subtasks()) {
+    const tasks = this.store.subtasks()
+    const childrenByParent = new Map<string, Subtask[]>()
+    for (const task of tasks) {
+      if (!task.parentID || task.handoff?.completion === true) continue
+      const children = childrenByParent.get(task.parentID)
+      if (children) children.push(task)
+      else childrenByParent.set(task.parentID, [task])
+    }
+    for (const candidate of tasks) {
       if (candidate.state === "replied") continue
       // Batch reviews close only through ensemble_review.
       if (candidate.handoff?.batch === true) continue
-      const children = this.store.subtasks().filter((child) => child.parentID === candidate.id && child.handoff?.completion !== true)
-      const liveChildren = children.filter((child) => child.state !== "replied")
-      if (candidate.awaitingChildren && liveChildren.length === 0) {
+      const children = childrenByParent.get(candidate.id) ?? []
+      if (candidate.awaitingChildren && !children.some((child) => child.state !== "replied")) {
         const task = this.store.cloneSubtask(candidate.id)
         if (!task) continue
         task.awaitingChildren = false
@@ -3912,8 +4054,10 @@ export class EnsembleV2Service {
     this.pumping = true
     void (async () => {
       try {
-        await this.reapAndRetire()
-        await this.reconcileWaitingWork()
+        // Ticket #134: maintenance (config, reap/retire, waiting-work repair,
+        // terminal-stream settling) runs before pump work, serialized with the
+        // timer.
+        await this.maintain()
         // Ticket #135: consolidate eligible completion hops before claiming
         // any of them. Otherwise a pump that fires exactly at the quiet-window
         // boundary can run two grouped completions as separate direct hops and
@@ -3925,6 +4069,13 @@ export class EnsembleV2Service {
         let slots = state.settings.maxActiveRuns - running.length
         if (slots <= 0) return
         const busyAgents = new Set(running.map((run) => bindingKey(run.workspaceID, run.agentID)))
+        // A run that has claimed its row but has not reached the active-run map
+        // yet (binding/session setup) still owns its agent. Include claims so a
+        // second pump pass cannot start a parallel run for the same agent.
+        for (const task of Object.values(state.subtasks)) {
+          if (!task.claimedBy || !task.assigneeID || task.state === "replied") continue
+          busyAgents.add(bindingKey(task.workspaceID, task.assigneeID))
+        }
         const busyEditDirs = new Set(
           running
             .map((run) => state.subtasks[run.subtaskID])
@@ -3932,6 +4083,11 @@ export class EnsembleV2Service {
             .map((task) => state.workspaces[task!.workspaceID]?.directory)
             .filter(Boolean) as string[],
         )
+        for (const task of Object.values(state.subtasks)) {
+          if (!task.claimedBy || task.mode !== "edit" || task.state === "replied") continue
+          const directory = state.workspaces[task.workspaceID]?.directory
+          if (directory) busyEditDirs.add(directory)
+        }
         const pending = Object.values(state.subtasks)
           .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)

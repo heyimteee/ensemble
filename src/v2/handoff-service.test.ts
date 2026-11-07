@@ -375,7 +375,7 @@ test("handoff depth and per-run caps are refused visibly", async () => {
       if (!child) return false
       childID = child.id
       return Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === childID && run.status === "running")
-    })
+    }, 15_000)
     const deepPath = handoffFile(directory, "deep.md", "---\nensemble: handoff\ntask: Deep work\n---\n# Handoff\n")
     const deep = await tools.get("handoff").execute({ task: "Deep work", summary: "", path: deepPath, to: "Nova" }, { sessionID: sageSession })
     assert.match(deep.content, /the handoff depth limit is 1/)

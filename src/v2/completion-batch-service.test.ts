@@ -253,6 +253,12 @@ test("leader turns terminate without a forced handoff", async () => {
 test("two completions produce one batch review with per-item decisions", async () => {
   const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
   const { ctx, tools } = fakeContext()
+  // Keep the leader's run live while the test issues its three direct tool
+  // calls so every delegation inherits the command's dispatch group. Child
+  // runs finish quickly; only the leader needs a long turn.
+  ;(ctx.session as any).wait = async ({ sessionID }: any) => {
+    await new Promise((resolve) => setTimeout(resolve, String(sessionID).includes("Nova") ? 2_000 : 5))
+  }
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
