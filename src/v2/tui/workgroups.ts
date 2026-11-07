@@ -179,6 +179,36 @@ export function workGroupCounts(groups: ReadonlyArray<Pick<WorkGroup, "active" |
   }
 }
 
+/**
+ * Ticket #142: the earliest wall-clock instant at which derived Work data can
+ * change without a durable update. The app schedules one timer for it instead
+ * of letting the animation clocks rebuild static cards. A task deadline wins
+ * at `deadlineAt`; a working lease stops at `leaseUntil`; a complete group
+ * closes after its shared hold. Pure.
+ */
+export function nextWorkInvalidation(
+  tasks: ReadonlyArray<Subtask>,
+  groups: ReadonlyArray<Pick<WorkGroup, "complete" | "latestTerminalAt">>,
+  now: number,
+  holdMs: number = WORK_GROUP_HOLD_MS,
+): number | undefined {
+  let next: number | undefined
+  const consider = (time: number) => {
+    if (!Number.isFinite(time) || time <= now) return
+    if (next === undefined || time < next) next = time
+  }
+  for (const task of tasks) {
+    if (isTerminalWorkStatus(deriveWorkStatus(task, now))) continue
+    if (task.deadlineAt !== undefined) consider(task.deadlineAt)
+    if (task.claimedBy && task.leaseUntil !== undefined) consider(task.leaseUntil)
+  }
+  for (const group of groups) {
+    if (!group.complete || group.latestTerminalAt === undefined) continue
+    consider(group.latestTerminalAt + Math.max(0, holdMs))
+  }
+  return next
+}
+
 /** The Work header names groups, active work, and terminal work; "recent" is gone. */
 export function workSummaryCounts(groupCount: number, activeCount: number, doneCount: number): string {
   const groups = Math.max(0, Math.floor(groupCount))
