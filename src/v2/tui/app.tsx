@@ -1,4 +1,5 @@
 import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { unwrap } from "solid-js/store"
 import { SyntaxStyle } from "@opentui/core"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
@@ -3217,7 +3218,9 @@ export function EnsembleV2App() {
     const target = agent ?? selectedAgent() ?? rosterAgents()[0]
     if (!target) return
     if (interaction().focus !== "settings") settingsReturnFocus = interaction().focus
-    setSettingsAgentID(target.id); setSettingsTab("general"); setDraft(structuredClone(target)); setDirty(false)
+    // Ticket #141: target may be a Solid store node; unwrap before the draft
+    // clone so scoped-resync proxies can never make settings unopenable.
+    setSettingsAgentID(target.id); setSettingsTab("general"); setDraft(structuredClone(unwrap(target))); setDirty(false)
     // Fresh filters and cursor so the settings surface always opens on a row
     // that exists in the current tab.
     setSkillFilter(""); setMemoryFilter(""); setSettingsCursor(0)
