@@ -224,6 +224,15 @@ export type Subtask = {
   startedAt?: number
   repliedAt?: number
   /**
+   * Durable dispatch-group identity (ticket #135): the set of Subtasks caused
+   * by one dispatch action. One user command mints one group; every descendant
+   * handoff, delegation, peer turn, synthesis, completion hop,
+   * approval-created task, and group-scoped completion batch inherits it.
+   * Legacy rows omit it and resolve a deterministic group from their root
+   * ancestor; retry, restart, reassign, and cancel never change it.
+   */
+  dispatchGroupID?: Id
+  /**
    * Durable coordination queue fields (v5.3, ticket #54). The subtask row is
    * the work item: no parallel table, one source of truth. `error` doubles
    * as the last error and `repliedAt` mirrors `finishedAt` for older
@@ -413,8 +422,18 @@ export type Snapshot = {
    * catalog or config refresh never replaces entity state.
    */
   catalogRevision?: number
+  configRevision?: number
   protocol?: number
   epoch?: number
+}
+
+/** Cheap heartbeat response: coordination version plus metadata revisions. */
+export type Revision = {
+  version: number
+  catalogRevision: number
+  configRevision: number
+  protocol: number
+  epoch: number
 }
 
 export type SnapshotState = Snapshot["state"]

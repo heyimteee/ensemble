@@ -1,4 +1,5 @@
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
+import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
   Agent,
@@ -177,6 +178,10 @@ export class V2Store {
         subtask.error = "Ensemble restarted while this subtask was working."
       }
     }
+    // Legacy rows (persisted before ticket #135) carry no dispatch group.
+    // Resolve one from the root ancestor so in-flight work keeps a coherent
+    // group; the row becomes durable on its next save.
+    this.backfillDispatchGroups()
     if (this.state.ui.activeWorkspaceID && !this.state.workspaces[this.state.ui.activeWorkspaceID]) {
       this.state.ui.activeWorkspaceID = undefined
     }
@@ -347,6 +352,7 @@ export class V2Store {
       }
       this.state.subtasks[subtask.id] = subtask
     }
+    this.backfillDispatchGroups()
     for (const { value } of await this.scanAll("v2/init/")) {
       const job = value as InitJob
       if (!job?.id) continue
@@ -419,6 +425,22 @@ export class V2Store {
 
   version(): number {
     return this.state.version
+  }
+
+  /** Cheap heartbeat read: no full-state clone. */
+  revisionInfo(): { version: number; workspaceDirectories: string[] } {
+    return {
+      version: this.state.version,
+      workspaceDirectories: Object.values(this.state.workspaces)
+        .filter((workspace) => !workspace.archived)
+        .map((workspace) => workspace.directory),
+    }
+  }
+
+  /** Storage version only, used to detect foreign writes without hydrating. */
+  async storedVersion(): Promise<number> {
+    const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
+    return Number((meta as any)?.version ?? 0)
   }
 
   settings(): Settings {
@@ -773,6 +795,19 @@ export class V2Store {
       for (const message of removed) this.streaming.delete(V2Store.streamingKey(parts[2], message.id))
       this.state.messages[parts[2]] = (this.state.messages[parts[2]] ?? []).filter((message) => String(message.seq).padStart(8, "0") !== sequence)
       if (this.state.messages[parts[2]].length === 0) delete this.state.messages[parts[2]]
+    }
+  }
+
+  /**
+   * Legacy dispatch-group derivation (ticket #135). One deterministic pass
+   * over the loaded rows: stored groups win, children inherit the nearest
+   * stored ancestor, and a fully legacy tree derives its group from the root.
+   * In-memory only; a derived id persists with the row's next save.
+   */
+  private backfillDispatchGroups(): void {
+    for (const subtask of Object.values(this.state.subtasks)) {
+      if (subtask.dispatchGroupID) continue
+      subtask.dispatchGroupID = resolveDispatchGroupID(subtask, this.state.subtasks)
     }
   }
 

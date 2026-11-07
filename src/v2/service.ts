@@ -10,6 +10,7 @@ import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey } from "./queue.ts"
+import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
@@ -26,6 +27,7 @@ import type {
   MemoryScope,
   Message,
   ModelRef,
+  Revision,
   Settings,
   Snapshot,
   Run,
@@ -38,6 +40,9 @@ import type {
 
 type Ctx = any
 type Json = Record<string, any>
+
+/** Protocol version advertised by the snapshot and the revision heartbeat. */
+export const ENSEMBLE_PROTOCOL_VERSION = 1
 
 function invalidInput(message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code: "invalid_input" })
@@ -178,6 +183,8 @@ export class EnsembleV2Service {
   private readonly runBySession = new Map<string, string>()
   private readonly activeRuns = new Map<string, Run>()
   private readonly directBusy = new Set<string>()
+  /** Last identity text version written per native session (chat polls must not rewrite it). */
+  private readonly identityVersions = new Map<string, number>()
   private readonly homeBindingPromises = new Map<string, Promise<{ sessionID: string; directory: string }>>()
   private readonly bindingPromises = new Map<string, Promise<{ sessionID: string } | undefined>>()
   private readonly workspaceEpoch = new Map<string, number>()
@@ -198,6 +205,7 @@ export class EnsembleV2Service {
   private readonly liveBySession = new Map<string, LiveSlot>()
   private readonly initRuns = new Map<string, { jobID: string; sessionID?: string; cancelled: boolean; promise: Promise<void> }>()
   private globalEpoch = 0
+  private epochValue = Date.now()
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
   private catalogAbort: AbortController | undefined
@@ -289,11 +297,13 @@ export class EnsembleV2Service {
 
   handlers(): {
     snapshot: (input: unknown) => Promise<Snapshot>
+    revision: (input: unknown) => Promise<Revision>
     diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string }>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
       snapshot: async (input) => this.snapshot(rpcInput(input).directory),
+      revision: async (input) => this.revision(rpcInput(input).directory),
       diagnostic: async (input) => this.diagnostic(rpcInput(input).directory),
       invoke: async (input) => {
         try {
@@ -581,6 +591,49 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Cheap metadata revision for the TUI heartbeat. It reads the local version
+   * (plus the stored version so a foreign write is noticed), the catalog
+   * revision, and config file stats. It never discovers, reconciles, or
+   * hydrates the full state; the snapshot RPC remains the discovery path.
+   */
+  private async revision(directory: string): Promise<Revision> {
+    const local = this.store.revisionInfo()
+    const stored = await this.store.storedVersion()
+    return {
+      version: Math.max(local.version, stored),
+      catalogRevision: this.catalog.revision,
+      configRevision: this.configFingerprint(directory, local.workspaceDirectories),
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      epoch: this.epochValue,
+    }
+  }
+
+  private configFingerprint(directory: string, workspaceDirectories: string[]): number {
+    const paths = new Set([
+      workspaceConfigPath(canonicalDirectory(directory)),
+      ...workspaceDirectories.map((item) => workspaceConfigPath(item)),
+    ])
+    let hash = 2166136261
+    const mix = (value: string) => {
+      for (let index = 0; index < value.length; index++) {
+        hash ^= value.charCodeAt(index)
+        hash = Math.imul(hash, 16777619)
+      }
+    }
+    for (const path of [...paths].sort()) {
+      mix(path)
+      try {
+        const stat = statSync(path)
+        mix(`${stat.mtimeMs}:${stat.size}`)
+      } catch {
+        mix("missing")
+      }
+    }
+    if (this.lastConfigError) mix(`error:${this.lastConfigError}`)
+    return hash >>> 0
+  }
+
+  /**
    * Ticket #134: the snapshot boundary is pure. It may merge foreign storage
    * (a read) but performs no writes, discovery, reconciliation, reaping,
    * stream settling, or purging; those run on the maintenance timer and
@@ -599,6 +652,10 @@ export class EnsembleV2Service {
       models: this.catalog.modelOptions,
       skills: this.catalog.skillOptions,
       directory,
+      catalogRevision: this.catalog.revision,
+      configRevision: this.configFingerprint(directory, Object.values(state.workspaces).filter((workspace) => !workspace.archived).map((workspace) => workspace.directory)),
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      epoch: this.epochValue,
     }
     if (this.lastConfigError) payload.configError = this.lastConfigError
     if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
@@ -719,7 +776,6 @@ export class EnsembleV2Service {
       location: { directory },
     }))
     if (!created?.id) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
-    await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
     const binding = { workspaceID: "home", agentID: agent.id, sessionID: created.id, kind: "home" as const, directory, agentVersion: agent.version, updatedAt: now() }
     await this.store.saveBinding(binding)
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
@@ -732,31 +788,54 @@ export class EnsembleV2Service {
     return { sessionID: created.id, directory }
   }
 
-  private chatSession(agent: Agent, workspaceID?: string): { workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string } {
+  private chatSession(agent: Agent, workspaceID?: string): { workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number } {
     const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
     if (workspace && workspace.memberIDs.includes(agent.id)) {
       const binding = this.store.binding(workspace.id, agent.id)
-      if (binding) return { workspace, sessionID: binding.sessionID, directory: workspace.directory, bindingKeyID: workspace.id }
+      if (binding) return { workspace, sessionID: binding.sessionID, directory: workspace.directory, bindingKeyID: workspace.id, bindingVersion: binding.agentVersion }
       return { workspace, sessionID: "", directory: workspace.directory, bindingKeyID: workspace.id }
     }
     const home = this.store.binding("home", agent.id)
-    if (home) return { workspace: workspace && workspace.memberIDs.includes(agent.id) ? workspace : undefined, sessionID: home.sessionID, directory: home.directory ?? agent.homeDirectory ?? homedir(), bindingKeyID: "home" }
+    if (home) return { workspace: workspace && workspace.memberIDs.includes(agent.id) ? workspace : undefined, sessionID: home.sessionID, directory: home.directory ?? agent.homeDirectory ?? homedir(), bindingKeyID: "home", bindingVersion: home.agentVersion }
     return { workspace, sessionID: "", directory: workspace && workspace.memberIDs.includes(agent.id) ? workspace.directory : agent.homeDirectory ?? homedir(), bindingKeyID: workspace && workspace.memberIDs.includes(agent.id) ? workspace.id : "home" }
   }
 
-  private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string }> {
+  /**
+   * Write the identity instruction only when the agent version changed. The
+   * direct-chat poll used to rewrite it on every 250 ms refresh; the map also
+   * covers a stale workspace binding until a run replaces that session.
+   */
+  private async ensureIdentity(sessionID: string, agent: Agent, bindingVersion?: number): Promise<void> {
+    if (this.identityVersions.get(sessionID) === agent.version) return
+    if (this.identityVersions.get(sessionID) === undefined && bindingVersion === agent.version) {
+      this.identityVersions.set(sessionID, agent.version)
+      return
+    }
+    try {
+      await this.ctx.session.instructions.entry.put({ sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) })
+      this.identityVersions.set(sessionID, agent.version)
+    } catch {
+      // Leave the version unwritten so the next poll can retry.
+    }
+  }
+
+  private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number }> {
     const target = this.chatSession(agent, workspaceID)
     if (target.sessionID) {
-      await this.ctx.session.instructions.entry.put({ sessionID: target.sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
+      await this.ensureIdentity(target.sessionID, agent, target.bindingVersion)
       return target
     }
     if (target.workspace) {
       const binding = await this.ensureBinding(target.workspace, agent)
       if (!binding) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
-      return { ...target, sessionID: binding.sessionID, bindingKeyID: target.workspace.id }
+      const stored = this.store.binding(target.workspace.id, agent.id)
+      await this.ensureIdentity(binding.sessionID, agent, stored?.agentVersion)
+      return { ...target, sessionID: binding.sessionID, bindingKeyID: target.workspace.id, bindingVersion: stored?.agentVersion }
     }
     const home = await this.ensureHomeBinding(agent)
-    return { workspace: undefined, sessionID: home.sessionID, directory: home.directory, bindingKeyID: "home" }
+    const binding = this.store.binding("home", agent.id)
+    await this.ensureIdentity(home.sessionID, agent, binding?.agentVersion)
+    return { workspace: undefined, sessionID: home.sessionID, directory: home.directory, bindingKeyID: "home", bindingVersion: binding?.agentVersion }
   }
 
   private async chatContext(agentID: string, workspaceID?: string): Promise<any> {
@@ -1536,6 +1615,7 @@ export class EnsembleV2Service {
   private async resetEnsemble(deleteHandoffs: boolean, confirmation: string): Promise<any> {
     if (confirmation !== "RESET") throw Object.assign(new Error('Type RESET to confirm.'), { code: "confirmation_required" })
     this.globalEpoch++
+    this.epochValue++
     this.workspaceEpoch.clear()
     await this.cancelActiveInitJobs(undefined, "Ensemble was reset.")
     await this.waitForInitRuns()
@@ -1736,6 +1816,10 @@ export class EnsembleV2Service {
     // the planner has already validated every addressed skill/owner pair.
     // File references are context for every prompt, including skill prompts.
     const instruction = references.length === 0 ? text : `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}`
+    // One user command mints exactly one dispatch group; every recipient in
+    // this fan-out (and every descendant hop) inherits it. A second command
+    // mints a second group even while the first is still active.
+    const dispatchGroupID = newDispatchGroupID()
     if (plan.kind === "skills" && explicitIDs.length > 0) {
       const expected = skillRecipients.map((recipient) => recipient.agentID).sort()
       const requested = [...explicitIDs].sort()
@@ -1777,6 +1861,7 @@ export class EnsembleV2Service {
           instruction,
           mode: payload.mode === "edit" ? "edit" : "research",
           skillGrants: recipient?.generalSkills,
+          dispatchGroupID,
         })
       }
       this.schedule()
@@ -1816,6 +1901,7 @@ export class EnsembleV2Service {
           title: text.slice(0, 80),
           instruction,
           mode: payload.mode === "edit" ? "edit" : "research",
+          dispatchGroupID,
         })
       }
       this.schedule()
@@ -1863,6 +1949,7 @@ export class EnsembleV2Service {
         instruction,
         mode: payload.mode === "edit" ? "edit" : "research",
         skillGrants: recipient?.generalSkills,
+        dispatchGroupID,
       })
     }
     this.schedule()
@@ -1876,10 +1963,12 @@ export class EnsembleV2Service {
 
   /**
    * Idempotency lookup for one unit of work. Suppression honors the row
-   * lifetime: a matching row suppresses resubmission while it is retained
-   * (live or terminal; finished rows purge after 24h retention). Intentional
-   * re-asks stay explicit — `task.retry`/`task.restart` re-queue the same
-   * row, and asking from a different parent/run hashes a different key.
+   * lifetime: matching run-scoped work suppresses resubmission while it is
+   * retained (live or terminal; finished rows purge after 24h retention).
+   * Root user work hashes its dispatch group, so a repeated command is a new
+   * unit of work. Intentional re-asks stay explicit — `task.retry`/
+   * `task.restart` re-queue the same row, and asking from a different
+   * parent/run hashes a different key.
    */
   private findWorkByKey(workspaceID: string, key: string): Subtask | undefined {
     return this.store.subtasks().find(
@@ -1902,22 +1991,36 @@ export class EnsembleV2Service {
     kind?: string
     skillGrants?: string[]
     turn?: { correlationID?: string; askerKind: "user" | "agent"; askerID?: string }
+    dispatchGroupID?: string
   }): Promise<{ subtask: Subtask; deduped: boolean }> {
     const kind: WorkKind = parseWorkKind(input.kind ?? "delegation") ?? (() => { throw invalidInput(`Unknown work kind: ${String(input.kind)}.`) })()
+    // Central propagation: explicit group (a user command fan-out or an
+    // approval payload) wins, then the parent/run group, then a new group.
+    // Retry/restart/reassign/cancel never pass through here, so they keep the
+    // row's existing identity.
+    const state = this.store.read()
+    const parent = input.parentID ? state.subtasks[input.parentID] : undefined
+    const dispatchGroupID = inheritDispatchGroupID({
+      explicit: input.dispatchGroupID,
+      parent,
+      subtasks: state.subtasks,
+    })
     const key = workKey({
       actor: input.creatorAgentID ?? input.creatorType,
       workspaceID: input.workspace.id,
       kind,
       parentID: input.parentID,
+      dispatchGroupID,
       assigneeID: input.assigneeID,
       title: input.title,
       instruction: input.instruction,
       constraints: input.constraints,
       expected: input.expected,
     })
-    // Idempotency: resubmitting the same work returns the existing item
-    // instead of executing twice — while its row is retained, live or
-    // terminal. Retention expiry ends suppression naturally.
+    // Idempotency: resubmitting the same run-scoped work returns the existing
+    // item instead of executing twice — while its row is retained, live or
+    // terminal. Root work also hashes its dispatch group, so a repeated user
+    // command is a new dispatch. Retention expiry ends suppression naturally.
     const existing = this.findWorkByKey(input.workspace.id, key)
     if (existing) return { subtask: existing, deduped: true }
     const at = now()
@@ -1942,6 +2045,7 @@ export class EnsembleV2Service {
       createdAt: at,
       workKind: kind,
       queueKey: key,
+      dispatchGroupID,
       deadlineAt: at + DEADLINE_MS,
       ...(input.skillGrants && input.skillGrants.length > 0 ? { skillGrants: [...new Set(input.skillGrants)] } : {}),
     }
@@ -1987,6 +2091,7 @@ export class EnsembleV2Service {
     expected?: string
     mode?: "research" | "edit"
     skillGrants?: string[]
+    dispatchGroupID?: string
   }): Promise<{ subtask: Subtask; deduped: boolean }> {
     return this.createWorkItem({
       workspace: input.workspace,
@@ -2001,6 +2106,7 @@ export class EnsembleV2Service {
       mode: input.mode,
       kind: "turn",
       skillGrants: input.skillGrants,
+      dispatchGroupID: input.dispatchGroupID,
       turn: { correlationID: input.correlationID, askerKind: input.askerKind, askerID: input.askerID },
     })
   }
@@ -2018,6 +2124,7 @@ export class EnsembleV2Service {
     mode?: "research" | "edit"
     stage?: "initial" | "synthesis"
     skillGrants?: string[]
+    dispatchGroupID?: string
   }): Promise<Subtask> {
     return (await this.createWorkItem(input)).subtask
   }
@@ -2059,6 +2166,19 @@ export class EnsembleV2Service {
     return this.store.agent(agentID)?.name ?? "Unknown agent"
   }
 
+  /**
+   * Approval-created work inherits the group captured in the approval payload
+   * (written when the request was raised), then the parent task's group, then
+   * a fresh group for an approval raised outside any dispatch.
+   */
+  private approvalDispatchGroupID(approval: Approval, parentID?: string): string {
+    const stored = typeof approval.payload?.dispatchGroupID === "string" ? approval.payload.dispatchGroupID.trim() : ""
+    if (stored) return stored
+    const parent = parentID ? this.store.subtask(parentID) : undefined
+    if (!parent) return newDispatchGroupID()
+    return resolveDispatchGroupID(parent, this.store.read().subtasks) ?? newDispatchGroupID()
+  }
+
   private async delegateFromUser(payload: Json): Promise<Subtask> {
     const state = this.store.read()
     const workspace = state.workspaces[payload.workspaceID]
@@ -2071,6 +2191,9 @@ export class EnsembleV2Service {
       throw Object.assign(new Error("A leader triage task cannot be delegated from; the leader must use the skill or delegate its own guidance."), { code: "triage_no_delegate" })
     }
     if (parent && this.delegationDepth(state, parent.id) >= state.settings.maxDepth) throw Object.assign(new Error(`The delegation depth limit is ${state.settings.maxDepth}.`), { code: "delegation_depth" })
+    // A user-initiated delegation from inside a task joins that task's group;
+    // a root delegation is its own one-task dispatch.
+    const dispatchGroupID = parent ? resolveDispatchGroupID(parent, state.subtasks) : newDispatchGroupID()
     const subtask = await this.createSubtask({
       workspace,
       parentID: parent?.id,
@@ -2081,6 +2204,7 @@ export class EnsembleV2Service {
       constraints: payload.constraints,
       expected: payload.expected,
       mode: payload.mode === "edit" ? "edit" : "research",
+      dispatchGroupID,
     })
     return subtask
   }
@@ -2306,11 +2430,13 @@ export class EnsembleV2Service {
           const recipientID = String(approval.payload.assigneeID ?? "")
           const turnTitle = String(approval.payload.title ?? approval.detail)
           const parentID = typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID
+          const dispatchGroupID = this.approvalDispatchGroupID(approval, parentID)
           const turnKey = workKey({
             actor: approval.agentID ?? "agent",
             workspaceID: workspace.id,
             kind: "turn",
             parentID,
+            dispatchGroupID,
             assigneeID: recipientID,
             title: turnTitle,
             instruction: String(approval.payload.instruction ?? approval.detail),
@@ -2341,6 +2467,7 @@ export class EnsembleV2Service {
               createdAt: at,
               workKind: "turn",
               queueKey: turnKey,
+              dispatchGroupID,
               deadlineAt: at + DEADLINE_MS,
               turn: { correlationID, askerKind: "agent", askerID: approval.agentID },
             }
@@ -2362,6 +2489,7 @@ export class EnsembleV2Service {
           const hopTask = String(approval.payload.title ?? approval.detail ?? "Handoff")
           const hopParentID = typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID
           const hopSenderID = typeof approval.payload.senderID === "string" ? String(approval.payload.senderID) : (approval.agentID ?? "")
+          const dispatchGroupID = this.approvalDispatchGroupID(approval, hopParentID)
           const hopKey = handoffWorkKey({
             actor: hopSenderID,
             workspaceID: workspace.id,
@@ -2396,6 +2524,7 @@ export class EnsembleV2Service {
               createdAt: at,
               workKind: "handoff",
               queueKey: hopKey,
+              dispatchGroupID,
               deadlineAt: at + DEADLINE_MS,
               handoff: {
                 correlationID,
@@ -2420,6 +2549,7 @@ export class EnsembleV2Service {
             this.schedule()
           }
         } else if (approval.payload.assigneeID) {
+          const parentID = typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID
           await this.createSubtask({
             workspace,
             assigneeID: String(approval.payload.assigneeID ?? ""),
@@ -2430,6 +2560,7 @@ export class EnsembleV2Service {
             constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
             expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
             mode: approval.payload.mode === "edit" ? "edit" : "research",
+            dispatchGroupID: this.approvalDispatchGroupID(approval, parentID),
           })
         } else if (approval.payload.agentID && approval.payload.text) {
           // Approved cross-boundary direct message: send once with the
@@ -2737,7 +2868,7 @@ export class EnsembleV2Service {
     const workspaceID = found.workspace?.id ?? input.workspaceID
     const at = Date.now()
     const tasks = Object.values(state.subtasks).filter((task) => !workspaceID || task.workspaceID === workspaceID)
-    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, assignee: task.assigneeID, parent: task.parentID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
+    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, assignee: task.assigneeID, parent: task.parentID, dispatchGroupID: task.dispatchGroupID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
   }
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
@@ -2774,6 +2905,10 @@ export class EnsembleV2Service {
         await this.appendMessage(workspace, { author: "system", text: peerRefusalText(bareMentionToken(token), "no workspace member matches."), kind: "system" })
       }
       const run = this.runForSession(state, context.sessionID)
+      const runTask = run ? state.subtasks[run.subtaskID] : undefined
+      // One agent post is one dispatch: its mentions and approvals share one
+      // group even when the post comes from outside a live run.
+      const dispatchGroupID = runTask ? resolveDispatchGroupID(runTask, state.subtasks) : newDispatchGroupID()
       const askingDepth = run ? this.delegationDepth(state, run.subtaskID) : 0
       // Outside-roster contact follows the existing approval model: the user
       // consents first, then the approved turn runs through the same queue.
@@ -2798,6 +2933,7 @@ export class EnsembleV2Service {
             parentID: run?.subtaskID,
             senderID: found.agent.id,
             depth: askingDepth + 1,
+            dispatchGroupID,
           },
           status: "pending",
           createdAt: now(),
@@ -2842,6 +2978,7 @@ export class EnsembleV2Service {
           title: text.slice(0, 80),
           instruction: text,
           mode: "research",
+          dispatchGroupID,
         })
         created.push(agent.name)
         void deduped
@@ -2935,6 +3072,8 @@ export class EnsembleV2Service {
     const hopInstruction = `${brief} (${path})`
     if (!workspace.memberIDs.includes(recipient.id)) {
       const run = this.runForSession(state, context.sessionID)
+      const runTask = run ? state.subtasks[run.subtaskID] : undefined
+      const dispatchGroupID = runTask ? resolveDispatchGroupID(runTask, state.subtasks) : newDispatchGroupID()
       const correlationID = parsed.data.correlationID || newCorrelationID()
       const approval: Approval = {
         id: id("approval"),
@@ -2945,7 +3084,7 @@ export class EnsembleV2Service {
         source: "workspace",
         title: `${sender.name} wants to hand off to ${recipient.name}`,
         detail: task,
-        payload: { assigneeID: recipient.id, title: task, instruction: hopInstruction, constraints, expected, mode: "research", handoff: true, correlationID, path, depth: (run ? this.delegationDepth(state, run.subtaskID) : 0) + 1, parentID: run?.subtaskID, senderID: sender.id },
+        payload: { assigneeID: recipient.id, title: task, instruction: hopInstruction, constraints, expected, mode: "research", handoff: true, correlationID, path, depth: (run ? this.delegationDepth(state, run.subtaskID) : 0) + 1, parentID: run?.subtaskID, senderID: sender.id, dispatchGroupID },
         status: "pending",
         createdAt: now(),
       }
@@ -2963,6 +3102,8 @@ export class EnsembleV2Service {
     // delivered/answered. No second delegate is needed (leader-only;
     // would double-queue under a separate key).
     const askingSubtaskID = run?.subtaskID ?? newestOpenSenderTaskID(state, workspace.id, sender.id)
+    const askingTask = askingSubtaskID ? state.subtasks[askingSubtaskID] : undefined
+    const dispatchGroupID = askingTask ? resolveDispatchGroupID(askingTask, state.subtasks) : newDispatchGroupID()
     const askingDepth = askingSubtaskID ? this.delegationDepth(state, askingSubtaskID) : 0
     // Idempotency spans terminal rows for the row's lifetime: the handoff hop
     // is the effect, so a retried or resubmitted handoff from the same run
@@ -3020,6 +3161,7 @@ export class EnsembleV2Service {
       createdAt: at,
       workKind: "handoff",
       queueKey: key,
+      dispatchGroupID,
       deadlineAt: at + DEADLINE_MS,
       handoff: {
         correlationID,
@@ -3083,6 +3225,7 @@ export class EnsembleV2Service {
       return undefined
     }
     const recipient = state.agents[route.to] ?? leader
+    const dispatchGroupID = resolveDispatchGroupID(finished, state.subtasks)
     const key = completionWorkKey({ workspaceID: workspace.id, finishedTaskID: finished.id, recipientID: recipient.id })
     const duplicate = this.findWorkByKey(workspace.id, key)
     if (duplicate) return duplicate
@@ -3122,6 +3265,7 @@ export class EnsembleV2Service {
       createdAt: at,
       workKind: "handoff",
       queueKey: key,
+      dispatchGroupID,
       deadlineAt: at + DEADLINE_MS,
       retryAfter: at + COMPLETION_QUIET_WINDOW_MS,
       handoff: {
@@ -3145,7 +3289,7 @@ export class EnsembleV2Service {
       correlationID,
     })
     this.defer(COMPLETION_QUIET_WINDOW_MS, () => {
-      void this.maybeConsolidateCompletionBatch(workspace.id, recipient.id).finally(() => this.schedule())
+      void this.maybeConsolidateCompletionBatch(workspace.id, recipient.id, dispatchGroupID).finally(() => this.schedule())
     })
     this.schedule()
     return hop
@@ -3159,14 +3303,34 @@ export class EnsembleV2Service {
    * and handoff path per item; grouped items wait for the batch and never
    * race it as direct hops. A second trigger with new arrivals extends the
    * open batch instead of opening another.
+   *
+   * Ticket #135: consolidation is group-scoped. Each dispatch group owns its
+   * own review batch, so one command's completion can never keep another
+   * command's group alive or merge unrelated outcomes into one review.
    */
-  private async maybeConsolidateCompletionBatch(workspaceID: string, recipientID: string): Promise<void> {
+  private async maybeConsolidateCompletionBatch(workspaceID: string, recipientID: string, dispatchGroupID?: string): Promise<void> {
     const state = this.store.read()
     const workspace = state.workspaces[workspaceID]
     const recipient = state.agents[recipientID]
     if (!workspace || workspace.archived || workspace.paused || !recipient || recipient.archived) return
     if (!workspace.memberIDs.includes(recipientID)) return
-    const ids = groupCompletionCandidates(Object.values(state.subtasks), workspaceID, recipientID)
+    const resolved = Object.values(state.subtasks).map((task) => ({
+      ...task,
+      dispatchGroupID: resolveDispatchGroupID(task, state.subtasks) ?? task.dispatchGroupID,
+    }))
+    if (!dispatchGroupID) {
+      const groups = new Map(resolved.map((task) => [task.id, task.dispatchGroupID]))
+      const groupsWithCandidates = new Set(
+        groupCompletionCandidates(resolved, workspaceID, recipientID)
+          .map((itemID) => groups.get(itemID))
+          .filter((group): group is string => Boolean(group)),
+      )
+      for (const group of groupsWithCandidates) {
+        await this.maybeConsolidateCompletionBatch(workspaceID, recipientID, group)
+      }
+      return
+    }
+    const ids = groupCompletionCandidates(resolved, workspaceID, recipientID, dispatchGroupID)
     if (ids.length < 2) return
     const openBatch = this.store.subtasks().find(
       (task) =>
@@ -3174,7 +3338,8 @@ export class EnsembleV2Service {
         task.workKind === "handoff" &&
         task.assigneeID === recipientID &&
         task.handoff?.batch === true &&
-        task.state !== "replied",
+        task.state !== "replied" &&
+        resolveDispatchGroupID(task, state.subtasks) === dispatchGroupID,
     )
     if (openBatch?.handoff) {
       const batch = this.store.cloneSubtask(openBatch.id)
@@ -3225,7 +3390,8 @@ export class EnsembleV2Service {
       attempts: 0,
       createdAt: at,
       workKind: "handoff",
-      queueKey: `batch:${workspaceID}:${recipientID}:${stableHash(ids.join("\0"))}`,
+      queueKey: `batch:${workspaceID}:${recipientID}:${stableHash(`${dispatchGroupID}\0${ids.join("\0")}`)}`,
+      dispatchGroupID,
       deadlineAt: at + DEADLINE_MS,
       handoff: {
         correlationID,
@@ -3261,6 +3427,32 @@ export class EnsembleV2Service {
     if (!batchedIn) return false
     const batch = state.subtasks[batchedIn]
     return !!batch && batch.state !== "replied"
+  }
+
+  /**
+   * Consolidate every dispatch group that has at least two claimable
+   * completion hops for the same recipient. Runs inside the serialized pump
+   * before work is claimed, so grouping wins over the quiet-window boundary.
+   */
+  private async consolidateDueCompletionBatches(): Promise<void> {
+    const state = this.store.read()
+    const at = now()
+    const groups = new Map<string, { workspaceID: string; recipientID: string; dispatchGroupID: string; count: number }>()
+    for (const task of Object.values(state.subtasks)) {
+      if (task.state !== "pending" || task.workKind !== "handoff" || task.handoff?.completion !== true) continue
+      if (task.handoff?.batch === true || task.handoff?.batchedIn || !task.assigneeID) continue
+      if (task.retryAfter !== undefined && task.retryAfter > at) continue
+      const dispatchGroupID = resolveDispatchGroupID(task, state.subtasks)
+      if (!dispatchGroupID) continue
+      const key = `${task.workspaceID}\0${task.assigneeID}\0${dispatchGroupID}`
+      const current = groups.get(key) ?? { workspaceID: task.workspaceID, recipientID: task.assigneeID, dispatchGroupID, count: 0 }
+      current.count++
+      groups.set(key, current)
+    }
+    for (const group of groups.values()) {
+      if (group.count < 2) continue
+      await this.maybeConsolidateCompletionBatch(group.workspaceID, group.recipientID, group.dispatchGroupID)
+    }
   }
 
   /**
@@ -3458,6 +3650,7 @@ export class EnsembleV2Service {
       .filter(Boolean)
       .join("\n")
     const chain = [...prior, reviewer.id]
+    const dispatchGroupID = resolveDispatchGroupID(batch, this.store.read().subtasks)
     const key = completionWorkKey({ workspaceID: workspace.id, finishedTaskID: batch.id, recipientID: route.to })
     if (!this.findWorkByKey(workspace.id, key)) {
       const correlationID = correlationIDForKey("handoff", key)
@@ -3480,6 +3673,7 @@ export class EnsembleV2Service {
         createdAt: at,
         workKind: "handoff",
         queueKey: key,
+        dispatchGroupID,
         deadlineAt: at + DEADLINE_MS,
         retryAfter: at + COMPLETION_QUIET_WINDOW_MS,
         handoff: {
@@ -3503,7 +3697,7 @@ export class EnsembleV2Service {
         correlationID,
       })
       this.defer(COMPLETION_QUIET_WINDOW_MS, () => {
-        void this.maybeConsolidateCompletionBatch(workspace.id, route.to).finally(() => this.schedule())
+        void this.maybeConsolidateCompletionBatch(workspace.id, route.to, dispatchGroupID).finally(() => this.schedule())
       })
       this.schedule()
     }
@@ -3519,6 +3713,7 @@ export class EnsembleV2Service {
     const { workspace, agent } = found
     const run = this.runForSession(state, context.sessionID)
     const subtask = run ? state.subtasks[run.subtaskID] : undefined
+    const dispatchGroupID = subtask ? resolveDispatchGroupID(subtask, state.subtasks) : newDispatchGroupID()
     // Every refusal below is posted to the group chat as well as returned to
     // the caller: a tool-result string alone is invisible from the board's
     // perspective, which read as silently missing delegation state.
@@ -3556,7 +3751,7 @@ export class EnsembleV2Service {
         source: "workspace",
         title: `${agent.name} wants to contact ${target.name}`,
         detail: String(input.instruction),
-        payload: { assigneeID: target.id, title: input.title, instruction: input.instruction, constraints: input.constraints, expected: input.expected, mode: input.mode },
+        payload: { assigneeID: target.id, title: input.title, instruction: input.instruction, constraints: input.constraints, expected: input.expected, mode: input.mode, parentID: subtask?.id, dispatchGroupID },
         status: "pending",
         createdAt: now(),
       }
@@ -3575,6 +3770,7 @@ export class EnsembleV2Service {
       constraints: input.constraints ? String(input.constraints) : undefined,
       expected: input.expected ? String(input.expected) : undefined,
       mode: input.mode === "edit" ? "edit" : "research",
+      dispatchGroupID,
     })
     this.schedule()
     if (deduped) return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.` }
@@ -3862,6 +4058,11 @@ export class EnsembleV2Service {
         // terminal-stream settling) runs before pump work, serialized with the
         // timer.
         await this.maintain()
+        // Ticket #135: consolidate eligible completion hops before claiming
+        // any of them. Otherwise a pump that fires exactly at the quiet-window
+        // boundary can run two grouped completions as separate direct hops and
+        // the group-scoped batch never forms.
+        await this.consolidateDueCompletionBatches()
         const state = this.store.read()
         const at = now()
         const running = [...this.activeRuns.values()].filter((run) => run.status === "running")

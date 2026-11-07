@@ -12,6 +12,7 @@ import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } 
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
+  revision: (input: unknown) => Promise<any>
   invoke: (input: unknown) => Promise<any>
 }
 
@@ -86,6 +87,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     rpc: {
       register: async (_schema: unknown, value: Handlers) => {
         handlers.snapshot = value.snapshot
+        handlers.revision = value.revision
         handlers.invoke = value.invoke
         return { events: { emit: async () => undefined } }
       },
@@ -2288,6 +2290,101 @@ test("snapshot explains an empty or failed model catalog without leaking credent
   }
 })
 
+test("revision reports the coordinated version and catalog metadata without a store bump", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-revision-catalog-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).models.length > 0)
+    const before = await handlers.revision({ directory })
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(before.version, snapshot.state.version)
+    assert.equal(before.catalogRevision, snapshot.catalogRevision)
+    assert.equal(before.configRevision, snapshot.configRevision)
+    assert.equal(before.protocol, snapshot.protocol)
+    assert.equal(before.epoch, snapshot.epoch)
+
+    ctx.skill.list = async () => [{ id: "review", name: "Review", description: "Review changes" }]
+    await (service as any).catalog.refresh()
+    const after = await handlers.revision({ directory })
+
+    assert.equal(after.version, before.version, "a catalog revision does not bump the coordination version")
+    assert.ok(after.catalogRevision > before.catalogRevision)
+    const refreshed = await handlers.snapshot({ directory })
+    assert.equal(refreshed.state.version, before.version)
+    assert.equal(refreshed.catalogRevision, after.catalogRevision)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("revision notices workspace config changes without hydrating the full store", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-revision-config-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const created = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    const workspaceID = created.result.id
+    const before = await handlers.revision({ directory })
+
+    const path = join(directory, ".ensemble", "config.json")
+    const config = JSON.parse(readFileSync(path, "utf8"))
+    config.name = "renamed site"
+    writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`)
+
+    const after = await handlers.revision({ directory })
+    assert.equal(after.version, before.version, "the revision check does not discover or persist the config")
+    assert.notEqual(after.configRevision, before.configRevision)
+
+    let snapshot: any
+    await waitFor(async () => {
+      snapshot = await handlers.snapshot({ directory })
+      return snapshot.state.workspaces[workspaceID]?.name === "renamed site"
+    }, 10_000)
+    assert.ok(snapshot.state.version > before.version, "maintenance discovery applies the config change")
+    assert.equal(snapshot.configRevision, after.configRevision)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("direct chat context does not rewrite identity metadata on every poll", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-identity-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-dm-identity-home-"))
+  const { ctx, instructions, createdSessionIDs } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    for (let poll = 0; poll < 3; poll++) await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    assert.equal(createdSessionIDs.length, 1)
+    assert.equal(instructions.filter((entry) => entry.key === "ensemble.v2.identity").length, 1)
+
+    await handlers.invoke({ directory, action: "agent.update", payload: { id: "a", role: "Updated role" } })
+    for (let poll = 0; poll < 2; poll++) await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    assert.equal(createdSessionIDs.length, 1, "a behavioral edit does not fork the direct session")
+    assert.equal(instructions.filter((entry) => entry.key === "ensemble.v2.identity").length, 2, "the new identity is written once")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test("a direct message is stored durably and renders exactly once", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
   const { ctx } = fakeContext()
@@ -2702,7 +2799,7 @@ test("resubmitting the same delegation executes once", async () => {
   }
 })
 
-test("terminal rows still suppress resubmission until retention expires, with retry as the explicit re-ask", async () => {
+test("a repeated user command forms a new dispatch group and task, with retry as the explicit re-ask", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
   const shared = new Map<string, unknown>()
   const seed = new V2Store(fakeContext(shared).ctx)
@@ -2719,15 +2816,23 @@ test("terminal rows still suppress resubmission until retention expires, with re
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    // The same ask dedupes against the retained terminal row: one row, no
-    // second execution. The user line is still posted, so nothing is silent.
+    // A repeated identical user command is a new dispatch: the group is part
+    // of the root work idempotency key, so no retained row may suppress it.
     const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "Coordinate" } })
     assert.deepEqual(sent.result.recipients, ["n"])
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const rows = Object.values(next.state.subtasks).filter((task: any) => task.title === "Coordinate") as any[]
+      return rows.length === 2 && rows.every((task) => task.state === "replied")
+    })
     const after = await handlers.snapshot({ directory })
-    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.title === "Coordinate").length, 1)
-    assert.equal((after.state.subtasks as any).t?.outcome, "succeeded")
+    const rows = Object.values(after.state.subtasks).filter((task: any) => task.title === "Coordinate") as any[]
+    assert.equal(rows.length, 2)
+    assert.ok(rows.every((task) => typeof task.dispatchGroupID === "string" && task.dispatchGroupID.length > 0))
+    assert.notEqual(rows[0].dispatchGroupID, rows[1].dispatchGroupID)
     // Intentional re-asks stay explicit: task.retry re-queues the same row,
-    // which then runs exactly once through the normal queue path.
+    // which then runs exactly once through the normal queue path with its
+    // original dispatch group intact.
     const retried = await handlers.invoke({ directory, action: "task.retry", payload: { id: "t" } })
     assert.equal(retried.result.id, "t")
     assert.equal(retried.result.state, "pending")
@@ -2736,7 +2841,8 @@ test("terminal rows still suppress resubmission until retention expires, with re
       return (next.state.subtasks as any).t?.state === "replied" && (next.state.subtasks as any).t?.attempts === 2
     })
     const rerun = await handlers.snapshot({ directory })
-    assert.equal(Object.values(rerun.state.subtasks).filter((task: any) => task.title === "Coordinate").length, 1)
+    assert.equal(Object.values(rerun.state.subtasks).filter((task: any) => task.title === "Coordinate").length, 2)
+    assert.equal((rerun.state.subtasks as any).t.dispatchGroupID, rows.find((task) => task.id === "t").dispatchGroupID)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
