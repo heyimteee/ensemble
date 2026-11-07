@@ -691,8 +691,12 @@ export class EnsembleV2Service {
       this.identityVersions.set(sessionID, agent.version)
       return
     }
-    await this.ctx.session.instructions.entry.put({ sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-    this.identityVersions.set(sessionID, agent.version)
+    try {
+      await this.ctx.session.instructions.entry.put({ sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) })
+      this.identityVersions.set(sessionID, agent.version)
+    } catch {
+      // Leave the version unwritten so the next poll can retry.
+    }
   }
 
   private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number }> {
