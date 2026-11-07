@@ -20,12 +20,11 @@ import type { Subtask, WorkKind } from "./types.ts"
  * - OpenBot reaps with `REAP_OLDER_THAN_MS = 24h` for idempotency retention.
  *   Ensemble keeps finished rows for the same 24h (`FINISHED_RETENTION_MS`)
  *   before retention-bounded cleanup. Duplicate suppression honors the row
- *   lifetime: resubmitting the same work while its row exists (live or
- *   terminal) returns the existing item instead of executing twice, for all
- *   work kinds. Retention expiry ends suppression naturally. Intentional
- *   re-asks stay explicit: `task.retry`/`task.restart` re-queue the same row,
- *   and asking from a different parent/run is a different unit of work by
- *   construction (the run prefix differs).
+ *   lifetime: resubmitting the same run-scoped work while its row exists
+ *   (live or terminal) returns the existing item instead of executing twice.
+ *   Root user work is scoped by its dispatch group (ticket #135), so an
+ *   identical user command is a new dispatch rather than a suppressed retry;
+ *   intentional re-asks stay explicit via `task.retry`/`task.restart`.
  * - Relay and failure-notice legs are messages keyed by the hop correlation,
  *   not work rows: control legs never enter the queue and never consume the
  *   asking run's fan-out budget.
@@ -83,10 +82,16 @@ export function parseWorkKind(value: unknown): WorkKind | undefined {
 /**
  * Hashed run prefix for idempotency keys. The asking run's subtask id scopes
  * the key, but only as a hash — raw parent ids never appear in stored keys.
- * A root (user-level) ask hashes its own constant prefix.
+ * A root (user-level) ask hashes its own constant prefix; when the root ask
+ * belongs to a dispatch group (ticket #135), that group scopes the prefix too,
+ * so a repeated identical user command forms a new group and a new task.
+ * Run-scoped work stays anchored by its parent alone, so duplicate tool calls
+ * in one run still dedupe.
  */
-export function runPrefixHash(parentID?: string): string {
-  return stableHash(`run:${parentID ?? "root"}`)
+export function runPrefixHash(parentID?: string, dispatchGroupID?: string): string {
+  const scope = parentID ?? "root"
+  const group = parentID === undefined && dispatchGroupID ? `:${dispatchGroupID}` : ""
+  return stableHash(`run:${scope}${group}`)
 }
 
 function canonicalField(value: string | undefined): string {
@@ -99,20 +104,23 @@ function canonicalField(value: string | undefined): string {
  * hashed run prefix (never the raw parent id), the addressed recipient, and
  * a hash of the canonical task/constraints/expected/instruction body.
  * Resubmitting the same work (same key, row still retained) executes once,
- * not twice, for live and terminal rows alike.
+ * not twice, for live and terminal rows alike. Root user work also hashes its
+ * dispatch group, so a new command never collides with retained work from an
+ * earlier command while same-run tool retries keep deduping.
  */
 export function workKey(input: {
   actor: string
   workspaceID: string
   kind: WorkKind
   parentID?: string
+  dispatchGroupID?: string
   assigneeID: string
   title: string
   instruction: string
   constraints?: string
   expected?: string
 }): string {
-  const run = runPrefixHash(input.parentID)
+  const run = runPrefixHash(input.parentID, input.dispatchGroupID)
   const body = stableHash(
     [input.assigneeID, canonicalField(input.title), canonicalField(input.instruction), canonicalField(input.constraints), canonicalField(input.expected)].join("\0"),
   )

@@ -126,6 +126,28 @@ test("idempotency keys scope actor, workspace, kind, hashed run prefix, and reci
   assert.equal(workKey({ ...input, title: "  Child  " }), key)
 })
 
+test("root work keys include the dispatch group so repeated commands never dedupe", () => {
+  const root = {
+    actor: "user",
+    workspaceID: "w",
+    kind: "delegation" as const,
+    assigneeID: "agent_s",
+    title: "Coordinate",
+    instruction: "Coordinate",
+  }
+  const first = workKey({ ...root, dispatchGroupID: "dispatch_first" })
+  assert.equal(workKey({ ...root, dispatchGroupID: "dispatch_first" }), first)
+  assert.notEqual(workKey({ ...root, dispatchGroupID: "dispatch_second" }), first)
+  assert.notEqual(workKey(root), first)
+  // Group identity is hashed, never stored raw inside the idempotency key.
+  assert.ok(!first.includes("dispatch_first"))
+  // Run-scoped work stays anchored by its parent, so same-run tool retries
+  // still dedupe even when the inherited group is passed through.
+  const child = { ...root, parentID: "task_parent" }
+  assert.equal(workKey({ ...child, dispatchGroupID: "dispatch_first" }), workKey(child))
+  assert.equal(workKey({ ...child, dispatchGroupID: "dispatch_second" }), workKey(child))
+})
+
 test("correlation ids derive deterministically from the work key", () => {
   const key = workKey({
     actor: "user",
