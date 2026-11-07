@@ -27,6 +27,7 @@ import type {
   MemoryScope,
   Message,
   ModelRef,
+  Revision,
   Settings,
   Snapshot,
   Run,
@@ -39,6 +40,9 @@ import type {
 
 type Ctx = any
 type Json = Record<string, any>
+
+/** Protocol version advertised by the snapshot and the revision heartbeat. */
+export const ENSEMBLE_PROTOCOL_VERSION = 1
 
 function invalidInput(message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code: "invalid_input" })
@@ -156,6 +160,8 @@ export class EnsembleV2Service {
   private readonly runBySession = new Map<string, string>()
   private readonly activeRuns = new Map<string, Run>()
   private readonly directBusy = new Set<string>()
+  /** Last identity text version written per native session (chat polls must not rewrite it). */
+  private readonly identityVersions = new Map<string, number>()
   private readonly homeBindingPromises = new Map<string, Promise<{ sessionID: string; directory: string }>>()
   private readonly bindingPromises = new Map<string, Promise<{ sessionID: string } | undefined>>()
   private readonly workspaceEpoch = new Map<string, number>()
@@ -176,6 +182,7 @@ export class EnsembleV2Service {
   private readonly liveBySession = new Map<string, LiveSlot>()
   private readonly initRuns = new Map<string, { jobID: string; sessionID?: string; cancelled: boolean; promise: Promise<void> }>()
   private globalEpoch = 0
+  private epochValue = Date.now()
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
   private catalogAbort: AbortController | undefined
@@ -245,11 +252,13 @@ export class EnsembleV2Service {
 
   handlers(): {
     snapshot: (input: unknown) => Promise<Snapshot>
+    revision: (input: unknown) => Promise<Revision>
     diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string }>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
       snapshot: async (input) => this.snapshot(rpcInput(input).directory),
+      revision: async (input) => this.revision(rpcInput(input).directory),
       diagnostic: async (input) => this.diagnostic(rpcInput(input).directory),
       invoke: async (input) => {
         try {
@@ -454,6 +463,49 @@ export class EnsembleV2Service {
     this.pump()
   }
 
+  /**
+   * Cheap metadata revision for the TUI heartbeat. It reads the local version
+   * (plus the stored version so a foreign write is noticed), the catalog
+   * revision, and config file stats. It never discovers, reconciles, or
+   * hydrates the full state; the snapshot RPC remains the discovery path.
+   */
+  private async revision(directory: string): Promise<Revision> {
+    const local = this.store.revisionInfo()
+    const stored = await this.store.storedVersion()
+    return {
+      version: Math.max(local.version, stored),
+      catalogRevision: this.catalog.revision,
+      configRevision: this.configFingerprint(directory, local.workspaceDirectories),
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      epoch: this.epochValue,
+    }
+  }
+
+  private configFingerprint(directory: string, workspaceDirectories: string[]): number {
+    const paths = new Set([
+      workspaceConfigPath(canonicalDirectory(directory)),
+      ...workspaceDirectories.map((item) => workspaceConfigPath(item)),
+    ])
+    let hash = 2166136261
+    const mix = (value: string) => {
+      for (let index = 0; index < value.length; index++) {
+        hash ^= value.charCodeAt(index)
+        hash = Math.imul(hash, 16777619)
+      }
+    }
+    for (const path of [...paths].sort()) {
+      mix(path)
+      try {
+        const stat = statSync(path)
+        mix(`${stat.mtimeMs}:${stat.size}`)
+      } catch {
+        mix("missing")
+      }
+    }
+    if (this.lastConfigError) mix(`error:${this.lastConfigError}`)
+    return hash >>> 0
+  }
+
   private async snapshot(directory: string): Promise<Snapshot> {
     await this.store.sync()
     this.refreshDmClock()
@@ -480,6 +532,10 @@ export class EnsembleV2Service {
       models: this.catalog.modelOptions,
       skills: this.catalog.skillOptions,
       directory,
+      catalogRevision: this.catalog.revision,
+      configRevision: this.configFingerprint(directory, Object.values(state.workspaces).filter((workspace) => !workspace.archived).map((workspace) => workspace.directory)),
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      epoch: this.epochValue,
     }
     if (this.lastConfigError) payload.configError = this.lastConfigError
     if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
@@ -601,7 +657,6 @@ export class EnsembleV2Service {
       location: { directory },
     }))
     if (!created?.id) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
-    await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
     const binding = { workspaceID: "home", agentID: agent.id, sessionID: created.id, kind: "home" as const, directory, agentVersion: agent.version, updatedAt: now() }
     await this.store.saveBinding(binding)
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
@@ -614,31 +669,54 @@ export class EnsembleV2Service {
     return { sessionID: created.id, directory }
   }
 
-  private chatSession(agent: Agent, workspaceID?: string): { workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string } {
+  private chatSession(agent: Agent, workspaceID?: string): { workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number } {
     const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
     if (workspace && workspace.memberIDs.includes(agent.id)) {
       const binding = this.store.binding(workspace.id, agent.id)
-      if (binding) return { workspace, sessionID: binding.sessionID, directory: workspace.directory, bindingKeyID: workspace.id }
+      if (binding) return { workspace, sessionID: binding.sessionID, directory: workspace.directory, bindingKeyID: workspace.id, bindingVersion: binding.agentVersion }
       return { workspace, sessionID: "", directory: workspace.directory, bindingKeyID: workspace.id }
     }
     const home = this.store.binding("home", agent.id)
-    if (home) return { workspace: workspace && workspace.memberIDs.includes(agent.id) ? workspace : undefined, sessionID: home.sessionID, directory: home.directory ?? agent.homeDirectory ?? homedir(), bindingKeyID: "home" }
+    if (home) return { workspace: workspace && workspace.memberIDs.includes(agent.id) ? workspace : undefined, sessionID: home.sessionID, directory: home.directory ?? agent.homeDirectory ?? homedir(), bindingKeyID: "home", bindingVersion: home.agentVersion }
     return { workspace, sessionID: "", directory: workspace && workspace.memberIDs.includes(agent.id) ? workspace.directory : agent.homeDirectory ?? homedir(), bindingKeyID: workspace && workspace.memberIDs.includes(agent.id) ? workspace.id : "home" }
   }
 
-  private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string }> {
+  /**
+   * Write the identity instruction only when the agent version changed. The
+   * direct-chat poll used to rewrite it on every 250 ms refresh; the map also
+   * covers a stale workspace binding until a run replaces that session.
+   */
+  private async ensureIdentity(sessionID: string, agent: Agent, bindingVersion?: number): Promise<void> {
+    if (this.identityVersions.get(sessionID) === agent.version) return
+    if (this.identityVersions.get(sessionID) === undefined && bindingVersion === agent.version) {
+      this.identityVersions.set(sessionID, agent.version)
+      return
+    }
+    try {
+      await this.ctx.session.instructions.entry.put({ sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) })
+      this.identityVersions.set(sessionID, agent.version)
+    } catch {
+      // Leave the version unwritten so the next poll can retry.
+    }
+  }
+
+  private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number }> {
     const target = this.chatSession(agent, workspaceID)
     if (target.sessionID) {
-      await this.ctx.session.instructions.entry.put({ sessionID: target.sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
+      await this.ensureIdentity(target.sessionID, agent, target.bindingVersion)
       return target
     }
     if (target.workspace) {
       const binding = await this.ensureBinding(target.workspace, agent)
       if (!binding) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
-      return { ...target, sessionID: binding.sessionID, bindingKeyID: target.workspace.id }
+      const stored = this.store.binding(target.workspace.id, agent.id)
+      await this.ensureIdentity(binding.sessionID, agent, stored?.agentVersion)
+      return { ...target, sessionID: binding.sessionID, bindingKeyID: target.workspace.id, bindingVersion: stored?.agentVersion }
     }
     const home = await this.ensureHomeBinding(agent)
-    return { workspace: undefined, sessionID: home.sessionID, directory: home.directory, bindingKeyID: "home" }
+    const binding = this.store.binding("home", agent.id)
+    await this.ensureIdentity(home.sessionID, agent, binding?.agentVersion)
+    return { workspace: undefined, sessionID: home.sessionID, directory: home.directory, bindingKeyID: "home", bindingVersion: binding?.agentVersion }
   }
 
   private async chatContext(agentID: string, workspaceID?: string): Promise<any> {
@@ -1418,6 +1496,7 @@ export class EnsembleV2Service {
   private async resetEnsemble(deleteHandoffs: boolean, confirmation: string): Promise<any> {
     if (confirmation !== "RESET") throw Object.assign(new Error('Type RESET to confirm.'), { code: "confirmation_required" })
     this.globalEpoch++
+    this.epochValue++
     this.workspaceEpoch.clear()
     await this.cancelActiveInitJobs(undefined, "Ensemble was reset.")
     await this.waitForInitRuns()

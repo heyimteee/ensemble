@@ -422,8 +422,18 @@ export type Snapshot = {
    * catalog or config refresh never replaces entity state.
    */
   catalogRevision?: number
+  configRevision?: number
   protocol?: number
   epoch?: number
+}
+
+/** Cheap heartbeat response: coordination version plus metadata revisions. */
+export type Revision = {
+  version: number
+  catalogRevision: number
+  configRevision: number
+  protocol: number
+  epoch: number
 }
 
 export type SnapshotState = Snapshot["state"]

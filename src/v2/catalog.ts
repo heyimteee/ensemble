@@ -6,6 +6,24 @@ function listData(value: any): any[] {
   return []
 }
 
+function sameModels(left: ModelOption[], right: ModelOption[]): boolean {
+  return left.length === right.length && left.every((model, index) => {
+    const other = right[index]
+    return model.providerID === other?.providerID
+      && model.modelID === other.modelID
+      && model.name === other.name
+      && model.variants.length === other.variants.length
+      && model.variants.every((variant, variantIndex) => variant === other.variants[variantIndex])
+  })
+}
+
+function sameSkills(left: SkillOption[], right: SkillOption[]): boolean {
+  return left.length === right.length && left.every((skill, index) => {
+    const other = right[index]
+    return skill.id === other?.id && skill.name === other.name && skill.description === other.description
+  })
+}
+
 function sanitizeCatalogError(error: unknown): string {
   const raw = String((error as any)?.message ?? error ?? "unknown error")
     .replace(/[\r\n\t]+/g, " ")
@@ -25,11 +43,17 @@ export class Catalog {
   private promise: Promise<void> | undefined
   private failure: string | undefined
   private generation = 0
+  private revisionValue = 0
   lastRefreshedAt = 0
 
   constructor(ctx: any, onChange?: () => void) {
     this.ctx = ctx
     this.onChange = onChange
+  }
+
+  /** Monotonic revision for catalog metadata changes that do not bump the store. */
+  get revision(): number {
+    return this.revisionValue
   }
 
   get modelOptions(): ModelOption[] {
@@ -57,18 +81,22 @@ export class Catalog {
       ])
       // A timed-out earlier attempt must not clobber a newer refresh.
       if (generation !== this.generation) return
-      this.models = listData(modelsResult.value).map((model: any) => ({
+      const nextModels = listData(modelsResult.value).map((model: any) => ({
         providerID: model.providerID,
         modelID: model.id ?? model.modelID,
         name: model.name ?? model.id ?? model.modelID,
         variants: Array.isArray(model.variants) ? model.variants.map((variant: any) => (typeof variant === "string" ? variant : variant.id)).filter(Boolean) : [],
       }))
-      this.failure = modelsResult.error
+      const nextFailure = modelsResult.error
         ? `OpenCode model list failed: ${sanitizeCatalogError(modelsResult.error)}`
-        : this.models.length === 0
+        : nextModels.length === 0
           ? "OpenCode reported no models for this project."
           : undefined
-      this.skills = listData(skillsRaw).map((skill: any) => ({ id: skill.id, name: skill.name ?? skill.id, description: skill.description }))
+      const nextSkills = listData(skillsRaw).map((skill: any) => ({ id: skill.id, name: skill.name ?? skill.id, description: skill.description }))
+      if (!sameModels(this.models, nextModels) || !sameSkills(this.skills, nextSkills) || this.failure !== nextFailure) this.revisionValue++
+      this.models = nextModels
+      this.skills = nextSkills
+      this.failure = nextFailure
       this.lastRefreshedAt = Date.now()
       this.onChange?.()
     })().catch(() => undefined)
