@@ -327,6 +327,22 @@ export class V2Store {
     return structuredClone(this.state)
   }
 
+  /** Cheap heartbeat read: no full-state clone. */
+  revisionInfo(): { version: number; workspaceDirectories: string[] } {
+    return {
+      version: this.state.version,
+      workspaceDirectories: Object.values(this.state.workspaces)
+        .filter((workspace) => !workspace.archived)
+        .map((workspace) => workspace.directory),
+    }
+  }
+
+  /** Storage version only, used to detect foreign writes without hydrating. */
+  async storedVersion(): Promise<number> {
+    const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
+    return Number((meta as any)?.version ?? 0)
+  }
+
   settings(): Settings {
     return structuredClone(this.state.settings)
   }

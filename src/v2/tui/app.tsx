@@ -143,7 +143,7 @@ import { createCommandHistory, recallHistory, rememberHistory, startHistory, typ
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
-import { shouldApplySnapshot } from "../snapshot-guard.ts"
+import { createRefreshCoordinator, decideSnapshotApply, heartbeatDelay, revisionChanged, snapshotMeta, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createClientStore } from "./client-store.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
@@ -685,12 +685,18 @@ export function EnsembleV2App() {
   })
 
   const lineCache = new Map<string, ChatLine>()
-  let refreshSeq = 0
-  let chatSeq = 0
-  // Highest snapshot store version applied so far. Out-of-order RPC
-  // responses (250ms poll overlapping an event-triggered refresh) must not
-  // repaint older state over newer: stale versions are dropped.
-  let lastAppliedVersion: number | undefined = undefined
+  // Ticket #133: one coordinator per fetch path. At most one refresh runs and
+  // a burst collapses into one queued dirty pass; no request sequence discards
+  // a completed response. The metadata of the last applied snapshot decides
+  // version application and catalog/config refreshes.
+  let lastSnapshotMeta: SnapshotMeta | undefined = undefined
+  const snapshotRefresh = createRefreshCoordinator({
+    run: () => loadSnapshot(),
+    onError: (error: any) => setStatus(`Ensemble unavailable: ${error?.message ?? error}`),
+  })
+  const chatRefresh = createRefreshCoordinator({
+    run: () => loadChat(),
+  })
   const [restored, setRestored] = createSignal(false)
   let lastSavedHistory = ""
   let lastConfigError = ""
@@ -1021,7 +1027,7 @@ export function EnsembleV2App() {
   // observed streaming and then finalizes gets one brief brighter
   // border/background beat; failed/cancelled completions and interrupted
   // agent messages get one error beat. `observeTranscriptMotion` owns the
-  // exactly-once guard, so 250 ms snapshot polls never restart a beat.
+  // exactly-once guard, so heartbeat refreshes never restart a beat.
   // Reduced motion records the final state and emits nothing. The beat is a
   // short-lived signal only: row keys, the scrollbox, sticky scroll, and the
   // scroll cue are untouched.
@@ -1110,7 +1116,7 @@ export function EnsembleV2App() {
   // identity and the live/finalized partition stays intact upstream.
   // Ticket #72 idle-quiescence: merged wrappers are referentially stabilized
   // onto the previous array (same treatment as `stableLines` inner refs), so
-  // Solid's `<For>` reconciles by stable reference and idle 250ms polls mount
+  // Solid's `<For>` reconciles by stable reference and idle refreshes mount
   // nothing. New/changed rows still mount; ordering/partition untouched.
   let previousMergedRows: ReturnType<typeof mergeTranscriptRows<ChatLine>> = []
   const mergedRows = createMemo(() => {
@@ -1803,21 +1809,26 @@ export function EnsembleV2App() {
     } finally { setBusy(false) }
   }
 
-  const refreshChat = async () => {
+  const loadChat = async () => {
     const value = surface()
     if (value?.kind !== "agent") { setChatContext(null); return }
-    const seq = ++chatSeq
     try {
       const next = await invoke(context, "chat.context", { agentID: value.agentID, workspaceID: value.workspaceID })
-      if (seq !== chatSeq) return
       const current = surface()
       if (current?.kind !== "agent" || current.agentID !== value.agentID || current.workspaceID !== value.workspaceID) return
       setChatContext(next)
     } catch (error: any) {
-      if (seq !== chatSeq) return
+      const current = surface()
+      if (current?.kind !== "agent" || current.agentID !== value.agentID || current.workspaceID !== value.workspaceID) return
       setChatContext(null)
       setStatus(`Chat unavailable: ${error?.message ?? error}`)
     }
+  }
+  // Same coalescing as the snapshot path: a slow chat fetch never starves and
+  // a surface switch queues one dirty pass for the new target.
+  const refreshChat = async () => {
+    chatRefresh.request()
+    await chatRefresh.whenIdle()
   }
 
   const persistHistory = async (value: Surface | null) => {
@@ -1847,66 +1858,72 @@ export function EnsembleV2App() {
     if (change) showToast({ title: "Git", message: change.message, tone: change.tone })
   }
 
-  const refresh = async () => {
-    const seq = ++refreshSeq
-    try {
-      const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
-      if (seq !== refreshSeq) return
-      if (!shouldApplySnapshot(lastAppliedVersion, next.state.version)) return
-      lastAppliedVersion = next.state.version
-      client.applySnapshot(next)
-      // Ticket #77d: keep the composer focused across snapshot repaints. A
-      // poll that lands between typing and Enter must not silently drop the
-      // key because the textarea lost focus.
-      if (composerActive() && interaction().mode === "insert") focusWhenReady(() => composerRef)
-      syncTranscriptScroll()
-      try { (context.renderer as any)?.requestRender?.() } catch {}
-      if (next.configError && next.configError !== lastConfigError) {
-        lastConfigError = next.configError
-        showToast({ title: "Ensemble config", message: next.configError, tone: "warning" })
-      }
-      if (!next.configError) lastConfigError = ""
-      const directory = directoryOf(context)
-      const workspace = Object.values(next.state.workspaces ?? {}).find((item) => !item.archived && item.directory === directory)
-      const history = next.state.ui?.history?.[directory]
-      const historyWorkspace = history?.workspaceID && next.state.workspaces[history.workspaceID] && !next.state.workspaces[history.workspaceID].archived ? history.workspaceID : undefined
-      const currentWorkspace = workspaceID()
-      if (workspace) {
-        if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(historyWorkspace ?? workspace.id)
-        if (!surface()) {
-          const targetWorkspace = historyWorkspace ?? workspace.id
-          if (history?.surface === "agent" && history.agentID && next.state.agents[history.agentID]) {
-            const member = next.state.workspaces[targetWorkspace]?.memberIDs.includes(history.agentID)
-            setSurface({ kind: "agent", agentID: history.agentID, workspaceID: member ? targetWorkspace : undefined })
-          } else {
-            setSurface({ kind: "workspace", workspaceID: targetWorkspace })
-          }
-        }
-        if (!restored()) {
-          setRestored(true)
-          // The task column is gone (ticket #56); a persisted "tasks" focus
-          // from an older session lands on the chat surface, which now owns
-          // the inline work rows.
-          if (history?.column) setFocusArea(history.column === ("tasks" as string) ? "chat" : history.column)
-          const taskID = history?.taskID ?? uiState.taskID
-          if (taskID) {
-            const index = visibleTasks().findIndex((task) => task.id === taskID)
-            if (index >= 0) setTaskCursor(index)
-          }
-        }
-      } else {
-        if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(null)
-        if (!surface()) setSurface(null)
-      }
-      if (surface()?.kind === "agent") await refreshChat()
-      refreshGit()
-      const current = surface()
-      if (current?.kind === "workspace" && !next.state.workspaces[current.workspaceID]) setSurface(null)
-      if (current?.kind === "agent" && !next.state.agents[current.agentID]) setSurface(null)
-      setStatus(chromeJoin([`${workspaces().length} workspaces`, `${rosterAgents().length} agents`, `${activeCount()} working`]))
-    } catch (error: any) {
-      setStatus(`Ensemble unavailable: ${error?.message ?? error}`)
+  const loadSnapshot = async () => {
+    const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
+    const nextMeta = snapshotMeta(next)
+    const apply = decideSnapshotApply(lastSnapshotMeta, nextMeta)
+    if (apply === "skip") return
+    lastSnapshotMeta = nextMeta
+    if (apply === "replace") client.applySnapshot(next)
+    else client.applyMetadata(next)
+    try { (context.renderer as any)?.requestRender?.() } catch {}
+    if (next.configError && next.configError !== lastConfigError) {
+      lastConfigError = next.configError
+      showToast({ title: "Ensemble config", message: next.configError, tone: "warning" })
     }
+    if (!next.configError) lastConfigError = ""
+    // An equal-version snapshot only refreshes catalog/config metadata; entity
+    // state, selection, workspace restoration, and git state stay untouched.
+    if (apply === "metadata") return
+    // Ticket #77d: keep the composer focused across snapshot repaints. A
+    // poll that lands between typing and Enter must not silently drop the
+    // key because the textarea lost focus.
+    if (composerActive() && interaction().mode === "insert") focusWhenReady(() => composerRef)
+    syncTranscriptScroll()
+    const directory = directoryOf(context)
+    const workspace = Object.values(next.state.workspaces ?? {}).find((item) => !item.archived && item.directory === directory)
+    const history = next.state.ui?.history?.[directory]
+    const historyWorkspace = history?.workspaceID && next.state.workspaces[history.workspaceID] && !next.state.workspaces[history.workspaceID].archived ? history.workspaceID : undefined
+    const currentWorkspace = workspaceID()
+    if (workspace) {
+      if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(historyWorkspace ?? workspace.id)
+      if (!surface()) {
+        const targetWorkspace = historyWorkspace ?? workspace.id
+        if (history?.surface === "agent" && history.agentID && next.state.agents[history.agentID]) {
+          const member = next.state.workspaces[targetWorkspace]?.memberIDs.includes(history.agentID)
+          setSurface({ kind: "agent", agentID: history.agentID, workspaceID: member ? targetWorkspace : undefined })
+        } else {
+          setSurface({ kind: "workspace", workspaceID: targetWorkspace })
+        }
+      }
+      if (!restored()) {
+        setRestored(true)
+        // The task column is gone (ticket #56); a persisted "tasks" focus
+        // from an older session lands on the chat surface, which now owns the
+        // inline work rows.
+        if (history?.column) setFocusArea(history.column === ("tasks" as string) ? "chat" : history.column)
+        const taskID = history?.taskID ?? uiState.taskID
+        if (taskID) {
+          const index = visibleTasks().findIndex((task) => task.id === taskID)
+          if (index >= 0) setTaskCursor(index)
+        }
+      }
+    } else {
+      if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(null)
+      if (!surface()) setSurface(null)
+    }
+    if (surface()?.kind === "agent") chatRefresh.request()
+    refreshGit()
+    const current = surface()
+    if (current?.kind === "workspace" && !next.state.workspaces[current.workspaceID]) setSurface(null)
+    if (current?.kind === "agent" && !next.state.agents[current.agentID]) setSurface(null)
+    setStatus(chromeJoin([`${workspaces().length} workspaces`, `${rosterAgents().length} agents`, `${activeCount()} working`]))
+  }
+  // Ensure at least one fetch that started at or after this call settles. The
+  // coordinator queues a dirty pass when an earlier fetch is still in flight.
+  const refresh = async () => {
+    snapshotRefresh.request()
+    await snapshotRefresh.whenIdle()
   }
 
   const openAgent = (agent: Agent) => {
@@ -3257,10 +3274,10 @@ export function EnsembleV2App() {
   // and body colors are stable; only frames/glyphs animate.
 
   // Idle-quiescent frame clock (slice B): one 4 fps interval per
-  // motion-active epoch. Snapshot polls re-run this effect ~4×/s, so the
-  // interval is reconciled by boolean transition only — never cleared and
-  // recreated while motion stays active. Cleanup clears it on
-  // finalize/unmount/route-leave, and the still frame (tick 0) holds
+  // motion-active epoch. Heartbeat refreshes re-run this effect only when a
+  // tracked flag changes, so the interval is reconciled by boolean transition
+  // — never cleared and recreated while motion stays active. Cleanup clears
+  // it on finalize/unmount/route-leave, and the still frame (tick 0) holds
   // whenever motion is off, including reduced motion.
   let clockTimer: ReturnType<typeof setInterval> | undefined;
   let clockRunning = false;
@@ -3466,32 +3483,108 @@ export function EnsembleV2App() {
     runAction(leaderActionHandlers[id])
   }
 
+  // Ticket #133: the 250 ms full-snapshot poll is gone. A cheap revision
+  // check runs every 2 s idle and 1 s while work is live, plus immediately on
+  // reconnect and route activation. Full refresh pauses off-route.
+  let heartbeatTimer: ReturnType<typeof setTimeout> | undefined
+  let heartbeatGeneration = 0
+  let heartbeatCheck: Promise<void> | undefined
+  let heartbeatForce = false
+  let heartbeatDisposed = false
+  const heartbeatActive = () =>
+    isBusy() || chatContext()?.busy === true || hasActiveWorkNow() || liveInitJobs().length > 0
+  const stopHeartbeat = () => {
+    heartbeatGeneration++
+    if (heartbeatTimer !== undefined) { clearTimeout(heartbeatTimer); heartbeatTimer = undefined }
+  }
+  const checkRevision = (force = false): Promise<void> => {
+    if (force) heartbeatForce = true
+    if (heartbeatCheck) return heartbeatCheck
+    heartbeatCheck = (async () => {
+      try {
+        const revision = await callRpc<Revision>(context, "revision", { directory: directoryOf(context) })
+        const refreshNeeded = heartbeatForce || revisionChanged(lastSnapshotMeta, revision)
+        heartbeatForce = false
+        if (refreshNeeded) snapshotRefresh.request()
+        if (surface()?.kind === "agent") chatRefresh.request()
+      } catch {
+        // The revision RPC is an optimization; keep the snapshot path as the
+        // fallback whenever it is unavailable.
+        heartbeatForce = false
+        snapshotRefresh.request()
+      } finally {
+        heartbeatCheck = undefined
+        if (!heartbeatDisposed) {
+          syncClock()
+          // Git state is outside the coordination version; keep its existing
+          // throttled cadence without a full snapshot refresh.
+          refreshGit()
+        }
+      }
+    })()
+    return heartbeatCheck
+  }
+  const scheduleHeartbeat = (active = heartbeatActive()) => {
+    stopHeartbeat()
+    if (!isOurRoute()) return
+    const generation = heartbeatGeneration
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = undefined
+      void checkRevision().finally(() => {
+        if (generation === heartbeatGeneration && isOurRoute()) scheduleHeartbeat()
+      })
+    }, heartbeatDelay(active))
+  }
+  let heartbeatStarted = false
+  let heartbeatVisible = false
+  createEffect(() => {
+    const visible = isOurRoute()
+    const active = heartbeatActive()
+    snapshotRefresh.setPaused(!visible)
+    chatRefresh.setPaused(!visible)
+    if (!visible) {
+      heartbeatVisible = false
+      stopHeartbeat()
+      return
+    }
+    const resumed = heartbeatStarted && !heartbeatVisible
+    heartbeatStarted = true
+    heartbeatVisible = true
+    scheduleHeartbeat(active)
+    if (resumed) void checkRevision()
+  })
+  onCleanup(() => {
+    heartbeatDisposed = true
+    stopHeartbeat()
+    snapshotRefresh.dispose()
+    chatRefresh.dispose()
+  })
+
   onMount(() => {
     pageActivation.mount(pageToken)
     void refresh()
-    const timer = setInterval(() => {
-      if (surface()?.kind === "agent") void refreshChat()
-      void refresh().then(() => syncTranscriptScroll()).catch(() => undefined)
-      // Reconcile the motion clock on the same proven tick: snapshot polls
-      // are the heartbeat that effect reactivity alone cannot guarantee, so
-      // the 4 fps interval starts the same cycle its epoch begins.
-      syncClock()
-    }, 250)
     const stopData = context.data.listen(({ details }: any) => {
       const type = typeof details?.type === "string" ? details.type : ""
       if (type === "session.text.delta" || type === "session.idle" || type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") handleNativeEvent(details)
+      // Reconnect may have missed events; recover with an immediate forced
+      // snapshot while the version guard still prevents an older response
+      // from repainting newer state.
+      if (type === "server.connected") {
+        void checkRevision(true)
+        return
+      }
       // Durable writes emit the `changed` event with the affected scope
       // (workspace, subtask, correlation, kind); the UI invalidates and
       // refreshes on it — no navigation required. An event that is not newer
       // than the applied snapshot is already visible, so it skips the fetch.
-      // The 250ms poll below stays as a fallback.
+      // The revision heartbeat remains the fallback for missed events.
       if (type === "rpc.ensemble.v2.changed") {
         const eventVersion = typeof details?.version === "number" ? details.version : typeof details?.data?.version === "number" ? details.data.version : undefined
-        if (eventVersion !== undefined && lastAppliedVersion !== undefined && eventVersion <= lastAppliedVersion) return
-        void refresh()
+        if (eventVersion !== undefined && lastSnapshotMeta !== undefined && eventVersion <= lastSnapshotMeta.version) return
+        snapshotRefresh.request()
         return
       }
-      if (type.startsWith("rpc.ensemble.v2.")) void refresh()
+      if (type.startsWith("rpc.ensemble.v2.")) snapshotRefresh.request()
     })
     const keyInput = context.renderer.keyInput
     const onKey = (event: any) => {
@@ -3726,7 +3819,7 @@ export function EnsembleV2App() {
     }))
     // v5.6 T6: the wizard/dialog catalog owns its keys through the raw
     // listener above; the help overlay owns its grammar there too (T10).
-    return () => { pageActivation.unmount(pageToken); clearInterval(timer); keyInput.off("keypress", onKey); context.renderer.off("selection", onSelection); stopData() }
+    return () => { pageActivation.unmount(pageToken); keyInput.off("keypress", onKey); context.renderer.off("selection", onSelection); stopData() }
   })
 
   const showError = (error: any) => showToast({ title: "Ensemble", message: error?.message ?? String(error), tone: "error" })
