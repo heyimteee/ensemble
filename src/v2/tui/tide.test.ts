@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { RECENT_WORK_TTL_MS } from "./work-constants.ts"
+
 import {
   TIDE_ASSIGNMENT_RETENTION_MS,
   TIDE_GLYPHS,
@@ -168,14 +168,14 @@ test("ticket116: needs-you freezes at the tick it became blocked and releases wh
   assert.equal(freeze.frozen.size, 0, "an unblocked card leaves no freeze entry")
 })
 
-test("ticket116: idle freeze assignments prune after the recent-card window", () => {
+test("ticket116: idle freeze assignments prune after the independent tide retention window", () => {
   const freeze = createTideFreezeState()
   tideTickForCard("working", true, 12, {}, { state: freeze, id: "gone", now: 1_000 })
   tideTickForCard("working", true, 12, {}, { state: freeze, id: "live", now: 5_000 })
   assert.deepEqual(pruneTideFreezes(freeze, 1_000 + TIDE_ASSIGNMENT_RETENTION_MS), [], "the boundary still belongs to the window")
   assert.deepEqual(pruneTideFreezes(freeze, 1_000 + TIDE_ASSIGNMENT_RETENTION_MS + 1), ["gone"])
   assert.equal(freeze.frozen.has("live"), true, "a still-observed freeze survives")
-  assert.equal(TIDE_ASSIGNMENT_RETENTION_MS, RECENT_WORK_TTL_MS, "assignment retention uses the recent-card window")
+  assert.equal(TIDE_ASSIGNMENT_RETENTION_MS, 8_000, "presentation retention is independent of the Work group hold")
 })
 
 function seeded(seed: number): () => number {
@@ -211,7 +211,7 @@ test("ticket116: assignment is stable across snapshot refreshes", () => {
   }
 })
 
-test("ticket116: assignments survive the recent-card window then prune", () => {
+test("ticket116: assignments survive the independent retention window then prune", () => {
   const state = createTideAssignments(seeded(11))
   const doneVariant = tideVariantFor(state, "done", 0)
   const liveVariant = tideVariantFor(state, "live", 5_000)

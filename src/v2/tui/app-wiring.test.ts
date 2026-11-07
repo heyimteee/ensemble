@@ -40,25 +40,27 @@ test("the composer submits through the shared plan and catalog", () => {
   assert.ok(!source.includes("slashCommands"))
 })
 
-test("the Work pane renders active cards and caps the compact fallback by height", () => {
-  // Behavior: workrows.test.ts ordering, layout, and card mapping.
+test("the Work pane renders dispatch-group sections and caps the compact fallback by height", () => {
+  // Behavior: workgroups.test.ts group visibility and layout.
   const source = app()
-  assert.ok(source.includes("workCardsForTasks("))
-  assert.ok(source.includes("compactWorkRows().slice(0, workCards().layout.limit)"))
+  assert.ok(source.includes("workGroupsForTasks(active, state()?.subtasks"))
+  assert.ok(source.includes("workGroupLayout(groups, workContentWidth(), viewHeight(), now)"))
+  assert.ok(source.includes("section.mode === \"cards\""))
 })
 
-test("the Work cursor and actions only walk the visible active prefix", () => {
-  // Behavior: workrows.test.ts `visibleWorkTasks`; the live Work checks.
+test("the Work cursor and actions only walk visible non-terminal cards", () => {
+  // Behavior: workgroups.test.ts selectable tasks; the live Work checks.
   const source = app()
-  assert.ok(source.includes("visibleWorkTasks(orderedTasks(), workCards().layout)"))
+  assert.ok(source.includes("workPane().layout.selectableTasks"))
   assert.ok(source.includes("visibleTasks()[taskCursorClamped()]"))
+  assert.ok(!source.includes("hasRecentWork"))
 })
 
-test("recent Work cards stay mounted while the recent window is open", () => {
-  // Behavior: workrows.test.ts recent-window tests; the live recent-card check.
+test("dispatch-group Work cards stay mounted through the shared hold", () => {
+  // Behavior: workgroups.test.ts 1.2 s shared hold; the live group-removal check.
   const source = app()
-  assert.ok(source.includes("hasRecentWork(activeTasks(), Date.now())"))
-  assert.ok(source.includes("recentWorkCardsForTasks("))
+  assert.ok(source.includes("workGroupsForTasks("))
+  assert.ok(source.includes("workPane().groups.length > 0"))
 })
 
 test("the TUI reads durable state through the fine-grained client store", () => {
