@@ -20,6 +20,7 @@ import { V2Store, bindingKey, cloneDebugEnabled, cloneStats } from "./store.ts"
 import type {
   Agent,
   Approval,
+  ChangesSince,
   DmQueueEntry,
   InitJob,
   InitPhase,
@@ -27,6 +28,7 @@ import type {
   MemoryScope,
   Message,
   ModelRef,
+  PatchBatch,
   Revision,
   Settings,
   Snapshot,
@@ -41,14 +43,18 @@ import type {
 type Ctx = any
 type Json = Record<string, any>
 
-/** Protocol version advertised by the snapshot and the revision heartbeat. */
-export const ENSEMBLE_PROTOCOL_VERSION = 1
+/**
+ * Protocol version advertised by the snapshot and the revision heartbeat.
+ * v2 adds the versioned full-entity patch feed (`patches` + `changes.since`).
+ */
+export const ENSEMBLE_PROTOCOL_VERSION = 2
+let bootEpochSeq = 0
 
 function invalidInput(message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code: "invalid_input" })
 }
 
-function rpcInput(value: unknown): { directory: string; action?: string; payload?: Json } {
+function rpcInput(value: unknown): { directory: string; action?: string; payload?: Json; epoch?: number; version?: number } {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidInput("RPC input must be an object.")
   const input = value as Record<string, unknown>
   if (typeof input.directory !== "string" || input.directory.length === 0) throw invalidInput("directory must be a non-empty string.")
@@ -56,7 +62,15 @@ function rpcInput(value: unknown): { directory: string; action?: string; payload
   if (input.payload !== undefined && (!input.payload || typeof input.payload !== "object" || Array.isArray(input.payload))) {
     throw invalidInput("payload must be an object.")
   }
-  return { directory: input.directory, action: input.action as string | undefined, payload: input.payload as Json | undefined }
+  if (input.epoch !== undefined && typeof input.epoch !== "number") throw invalidInput("epoch must be a number.")
+  if (input.version !== undefined && typeof input.version !== "number") throw invalidInput("version must be a number.")
+  return {
+    directory: input.directory,
+    action: input.action as string | undefined,
+    payload: input.payload as Json | undefined,
+    epoch: input.epoch as number | undefined,
+    version: input.version as number | undefined,
+  }
 }
 
 function stringList(value: unknown, field: string): string[] {
@@ -205,7 +219,11 @@ export class EnsembleV2Service {
   private readonly liveBySession = new Map<string, LiveSlot>()
   private readonly initRuns = new Map<string, { jobID: string; sessionID?: string; cancelled: boolean; promise: Promise<void> }>()
   private globalEpoch = 0
-  private epochValue = Date.now()
+  /**
+   * Boot identity for the versioned feed. The sub-millisecond counter keeps
+   * two in-process restarts distinct even when `Date.now()` ties.
+   */
+  private epochValue = Date.now() * 1000 + (bootEpochSeq++ % 1000)
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
   private catalogAbort: AbortController | undefined
@@ -220,6 +238,9 @@ export class EnsembleV2Service {
   async start(): Promise<() => Promise<void>> {
     this.store = new V2Store(this.ctx, (version) => {
       this.emitChanged(version)
+    }, {
+      epoch: this.epochValue,
+      onPatch: (batch) => this.emitPatches(batch),
     })
     await this.store.load()
     this.refreshDmClock()
@@ -298,12 +319,14 @@ export class EnsembleV2Service {
   handlers(): {
     snapshot: (input: unknown) => Promise<Snapshot>
     revision: (input: unknown) => Promise<Revision>
+    "changes.since": (input: unknown) => Promise<ChangesSince>
     diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string }>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
       snapshot: async (input) => this.snapshot(rpcInput(input).directory),
       revision: async (input) => this.revision(rpcInput(input).directory),
+      "changes.since": async (input) => this.changesSince(rpcInput(input)),
       diagnostic: async (input) => this.diagnostic(rpcInput(input).directory),
       invoke: async (input) => {
         try {
@@ -334,6 +357,23 @@ export class EnsembleV2Service {
     }
   }
 
+  /** Batched durable patches for clients that negotiated protocol v2. */
+  private emitPatches(batch: PatchBatch): void {
+    for (const registration of this.registrations) {
+      void registration?.events?.emit?.("patches", batch)?.catch?.(() => undefined)
+    }
+  }
+
+  /**
+   * Cursor recovery for a client that missed a `patches` event. Foreign writes
+   * are hydrated first so the ring can answer honestly (a foreign version is a
+   * reset, never a fabricated patch); the read path itself writes nothing.
+   */
+  private async changesSince(input: { directory: string; epoch?: number; version?: number }): Promise<ChangesSince> {
+    await this.store.sync().catch(() => false)
+    return this.store.changesSince(input.epoch ?? -1, input.version ?? -1)
+  }
+
   /**
    * Scoped change notification for work-lifecycle transitions. The TUI
    * subscribes to the `changed` event and refreshes; the payload carries the
@@ -342,6 +382,9 @@ export class EnsembleV2Service {
    * remains as a fallback.
    */
   private noteWorkChanged(task: Subtask): void {
+    // Ticket #138: publish the durable task patch before any pump starts, so a
+    // handoff/delegation card never waits for a full snapshot or for a claim.
+    this.store.publishPending()
     this.emitChanged(this.store.version(), {
       workspaceID: task.workspaceID,
       subtaskID: task.id,
@@ -597,6 +640,7 @@ export class EnsembleV2Service {
    * hydrates the full state; the snapshot RPC remains the discovery path.
    */
   private async revision(directory: string): Promise<Revision> {
+    await this.store.settled()
     const local = this.store.revisionInfo()
     const stored = await this.store.storedVersion()
     return {
@@ -641,6 +685,8 @@ export class EnsembleV2Service {
    */
   private async snapshot(directory: string): Promise<Snapshot> {
     await this.store.sync()
+    // Queue-consistent read: finish local writes before cloning the boundary.
+    await this.store.settled()
     this.refreshDmClock()
     this.noteViewDirectory(directory)
     if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
@@ -3331,14 +3377,17 @@ export class EnsembleV2Service {
       return
     }
     const ids = groupCompletionCandidates(resolved, workspaceID, recipientID, dispatchGroupID)
-    if (ids.length < 2) return
+    if (ids.length === 0) return
+    // A quiet-window batch may still be waiting to run when one more completion
+    // lands. Extend that pending batch even for a single late item; once it has
+    // started it can no longer absorb review items.
     const openBatch = this.store.subtasks().find(
       (task) =>
         task.workspaceID === workspaceID &&
         task.workKind === "handoff" &&
         task.assigneeID === recipientID &&
         task.handoff?.batch === true &&
-        task.state !== "replied" &&
+        task.state === "pending" &&
         resolveDispatchGroupID(task, state.subtasks) === dispatchGroupID,
     )
     if (openBatch?.handoff) {
@@ -3355,11 +3404,18 @@ export class EnsembleV2Service {
       }
       batch.handoff.itemIDs = merged
       batch.title = batchReviewTitle(merged.length)
+      // Never run a review before the newest item's quiet window; early
+      // consolidation may have grouped an item that is still parked.
+      for (const itemID of ids) {
+        const item = this.store.subtask(itemID)
+        if (item?.retryAfter !== undefined) batch.retryAfter = Math.max(batch.retryAfter ?? 0, item.retryAfter)
+      }
       await this.store.saveSubtask(batch)
       this.noteWorkChanged(batch)
       this.schedule()
       return
     }
+    if (ids.length < 2) return
     const live = this.store.read()
     const items = ids.map((itemID) => this.store.cloneSubtask(itemID)).filter((item): item is Subtask => Boolean(item))
     if (items.length < 2) return
@@ -3393,6 +3449,9 @@ export class EnsembleV2Service {
       queueKey: `batch:${workspaceID}:${recipientID}:${stableHash(`${dispatchGroupID}\0${ids.join("\0")}`)}`,
       dispatchGroupID,
       deadlineAt: at + DEADLINE_MS,
+      // Early consolidation can group an item that is still inside its quiet
+      // window; the review itself waits for the newest item.
+      retryAfter: Math.max(at, ...items.map((item) => item.retryAfter ?? at)),
       handoff: {
         correlationID,
         senderID: items[0]?.handoff?.senderID ?? recipientID,
@@ -3436,12 +3495,15 @@ export class EnsembleV2Service {
    */
   private async consolidateDueCompletionBatches(): Promise<void> {
     const state = this.store.read()
-    const at = now()
     const groups = new Map<string, { workspaceID: string; recipientID: string; dispatchGroupID: string; count: number }>()
     for (const task of Object.values(state.subtasks)) {
       if (task.state !== "pending" || task.workKind !== "handoff" || task.handoff?.completion !== true) continue
       if (task.handoff?.batch === true || task.handoff?.batchedIn || !task.assigneeID) continue
-      if (task.retryAfter !== undefined && task.retryAfter > at) continue
+      // Ticket #138 follow-through: count siblings that are still inside their
+      // quiet window too. If two completions already exist, batching wins over
+      // the eligibility boundary; otherwise a pump that runs between two
+      // near-simultaneous retryAfter values claims the older hop alone and the
+      // group can never form a batch.
       const dispatchGroupID = resolveDispatchGroupID(task, state.subtasks)
       if (!dispatchGroupID) continue
       const key = `${task.workspaceID}\0${task.assigneeID}\0${dispatchGroupID}`

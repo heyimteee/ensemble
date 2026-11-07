@@ -13,6 +13,7 @@ import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
   revision: (input: unknown) => Promise<any>
+  "changes.since": (input: unknown) => Promise<any>
   invoke: (input: unknown) => Promise<any>
 }
 
@@ -28,6 +29,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   const createdSessionIDs: string[] = []
   let sessions = 0
   const handlers: Partial<Handlers> = {}
+  const emitted: Array<{ name: string; data: any }> = []
   const tools = new Map<string, any>()
   const subscriptions = new Set<any>()
   const event = {
@@ -88,8 +90,15 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
       register: async (_schema: unknown, value: Handlers) => {
         handlers.snapshot = value.snapshot
         handlers.revision = value.revision
+        handlers["changes.since"] = value["changes.since"]
         handlers.invoke = value.invoke
-        return { events: { emit: async () => undefined } }
+        return {
+          events: {
+            emit: async (name: string, data: any) => {
+              emitted.push({ name, data })
+            },
+          },
+        }
       },
     },
     model: {
@@ -98,7 +107,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     skill: { list: async (): Promise<any[]> => [] },
     event,
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, createdSessionIDs, tools, emitEvent }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, createdSessionIDs, tools, emitted, emitEvent }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -4368,5 +4377,139 @@ test("service routing matrix: skills, explicit recipients, files, and direct con
         rmSync(directory, { recursive: true, force: true })
       }
     })
+  }
+})
+
+test("delegation publishes the task change before pump work and changes.since recovers a dropped event", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-change-feed-"))
+  const { ctx } = fakeContext()
+  const emitted: Array<{ name: string; data: any }> = []
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "feed", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    const before = await handlers.snapshot({ directory })
+    const delegated = await handlers.invoke({
+      directory,
+      action: "task.delegate",
+      payload: { workspaceID: workspace.result.id, assigneeID: agent.result.id, title: "Patch card", instruction: "Do it" },
+    })
+    assert.equal(delegated.ok, true)
+    const taskID = delegated.result.id
+
+    const firstPatch = emitted.find((event) =>
+      event.name === "patches"
+      && event.data.entries.some((entry: any) =>
+        entry.changes.some((change: any) => change.entity === "subtask" && change.op === "upsert" && change.task.id === taskID),
+      ),
+    )
+    assert.ok(firstPatch, "the card arrives from a batched patch, without a snapshot")
+    const firstChange = firstPatch!.data.entries
+      .flatMap((entry: any) => entry.changes)
+      .find((change: any) => change.entity === "subtask" && change.op === "upsert" && change.task.id === taskID)
+    assert.equal(firstChange.task.title, "Patch card")
+    assert.equal(firstChange.task.state, "pending", "the change is published before pump work claims the task")
+    assert.equal(firstPatch!.data.epoch, before.epoch)
+
+    assert.ok(
+      emitted.some((event) => event.name === "changed" && event.data.version === firstPatch!.data.version),
+      "old clients keep receiving the legacy changed event",
+    )
+
+    const recovered = await handlers["changes.since"]({ directory, epoch: before.epoch, version: before.state.version })
+    assert.equal(recovered.reset, false)
+    const recoveredChange = recovered.entries
+      .flatMap((entry: any) => entry.changes)
+      .find((change: any) => change.entity === "subtask" && change.op === "upsert" && change.task.id === taskID)
+    assert.equal(recoveredChange.task.id, taskID, "the heartbeat cursor recovers the dropped patch")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a service restart changes the boot epoch and resets the feed without losing work", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-change-epoch-"))
+  const { ctx } = fakeContext()
+  const first = new EnsembleV2Service(ctx)
+  const stopFirst = await first.start()
+  const handlers = first.handlers()
+  let baseline: any
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "epoch", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    baseline = await handlers.snapshot({ directory })
+    const delegated = await handlers.invoke({
+      directory,
+      action: "task.delegate",
+      payload: { workspaceID: workspace.result.id, assigneeID: agent.result.id, title: "Durable card", instruction: "Do it" },
+    })
+    baseline.taskID = delegated.result.id
+  } finally {
+    await stopFirst()
+  }
+
+  const second = new EnsembleV2Service(ctx)
+  const stopSecond = await second.start()
+  try {
+    const next = second.handlers()
+    const recovered = await next["changes.since"]({ directory, epoch: baseline.epoch, version: baseline.state.version })
+    assert.equal(recovered.reset, true, "a new boot epoch always resets the client cursor")
+    assert.notEqual(recovered.epoch, baseline.epoch)
+    const snapshot = await next.snapshot({ directory })
+    assert.ok(snapshot.state.subtasks[baseline.taskID], "the durable task survives the restart")
+  } finally {
+    await stopSecond()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a foreign-version write resets the feed and is recovered without data loss", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-change-foreign-"))
+  const values = new Map<string, unknown>()
+  const first = fakeContext(values)
+  const second = fakeContext(values)
+  const serviceA = new EnsembleV2Service(first.ctx)
+  const stopA = await serviceA.start()
+  const handlersA = serviceA.handlers()
+  const serviceB = new EnsembleV2Service(second.ctx)
+  let stopB = async () => {}
+  try {
+    const agent = await handlersA.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlersA.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "foreign", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    const baseline = await handlersA.snapshot({ directory })
+
+    stopB = await serviceB.start()
+    const handlersB = serviceB.handlers()
+    const delegated = await handlersB.invoke({
+      directory,
+      action: "task.delegate",
+      payload: { workspaceID: workspace.result.id, assigneeID: agent.result.id, title: "Foreign card", instruction: "Do it" },
+    })
+    assert.equal(delegated.ok, true)
+
+    const recovered = await handlersA["changes.since"]({ directory, epoch: baseline.epoch, version: baseline.state.version })
+    assert.equal(recovered.reset, true, "the local ring cannot describe a foreign write")
+    const snapshot = await handlersA.snapshot({ directory })
+    assert.equal(snapshot.state.subtasks[delegated.result.id]?.title, "Foreign card", "the foreign task is hydrated, not lost")
+  } finally {
+    await stopB()
+    await stopA()
+    rmSync(directory, { recursive: true, force: true })
   }
 })

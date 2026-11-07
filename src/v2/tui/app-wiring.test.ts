@@ -84,10 +84,24 @@ test("the revision heartbeat is cheap, version-aware, paused off-route, and reco
   const source = app()
   assert.ok(source.includes('callRpc<Revision>(context, "revision"'))
   assert.ok(source.includes("heartbeatDelay(active)"))
-  assert.ok(source.includes("revisionChanged(lastSnapshotMeta, revision)"))
+  assert.ok(source.includes("revisionChanged(cursor, revision)"))
   assert.ok(source.includes("snapshotRefresh.setPaused(!visible)"))
   assert.ok(source.includes('if (type === "server.connected")'))
   assert.ok(!source.includes("refresh().then(() => syncTranscriptScroll())"))
+})
+
+test("the patch feed applies full-entity Work changes and recovers through changes.since", () => {
+  // Behavior: change-feed.test.ts batch validation, store upserts, and resets.
+  const source = app()
+  assert.ok(source.includes('if (type === "rpc.ensemble.v2.patches")'))
+  assert.ok(source.includes('callRpc<ChangesSince>(context, "changes.since"'))
+  assert.ok(source.includes("client.applyWorkChanges"))
+  assert.ok(source.includes("client.applyWorkSnapshot"))
+  assert.ok(source.includes("decidePatchApply(lastSnapshotMeta, payload)"))
+  assert.ok(source.includes("decideChangesSince(cursor, result)"))
+  assert.ok(source.includes("recoverFeed("))
+  // The legacy changed event and snapshot path remain for older servers.
+  assert.ok(source.includes('if (type === "rpc.ensemble.v2.changed")'))
 })
 
 test("the init row reads durable jobs and advances on the shared motion tick", () => {

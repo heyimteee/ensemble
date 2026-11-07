@@ -4,7 +4,7 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChatContext, ChatMessage, InitJobState, ModelOption, Snapshot, Workspace } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, ModelOption, PatchBatch, Snapshot, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
@@ -143,7 +143,7 @@ import { createCommandHistory, recallHistory, rememberHistory, startHistory, typ
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
-import { createRefreshCoordinator, decideSnapshotApply, heartbeatDelay, revisionChanged, snapshotMeta, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, revisionChanged, snapshotMeta, supportsPatchFeed, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createClientStore } from "./client-store.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
@@ -690,6 +690,9 @@ export function EnsembleV2App() {
   // a completed response. The metadata of the last applied snapshot decides
   // version application and catalog/config refreshes.
   let lastSnapshotMeta: SnapshotMeta | undefined = undefined
+  // Ticket #138: a forced replacement is used for an epoch change or a feed
+  // reset; the version guard cannot express "same version, discard state".
+  let forceSnapshotReplace = false
   const snapshotRefresh = createRefreshCoordinator({
     run: () => loadSnapshot(),
     onError: (error: any) => setStatus(`Ensemble unavailable: ${error?.message ?? error}`),
@@ -1861,7 +1864,11 @@ export function EnsembleV2App() {
   const loadSnapshot = async () => {
     const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
     const nextMeta = snapshotMeta(next)
-    const apply = decideSnapshotApply(lastSnapshotMeta, nextMeta)
+    // A feed reset or epoch change forces a real replacement even when the
+    // restarted store reports a version the client has not seen before.
+    const forced = forceSnapshotReplace
+    forceSnapshotReplace = false
+    const apply = forced ? "replace" : decideSnapshotApply(lastSnapshotMeta, nextMeta)
     if (apply === "skip") return
     lastSnapshotMeta = nextMeta
     if (apply === "replace") client.applySnapshot(next)
@@ -1924,6 +1931,101 @@ export function EnsembleV2App() {
   const refresh = async () => {
     snapshotRefresh.request()
     await snapshotRefresh.whenIdle()
+  }
+
+  // Ticket #138: the fine-grained feed path. Applying a validated batch
+  // touches only the changed Work entities; a gap or malformed batch asks the
+  // server for `changes.since`, then falls back to a scoped Work snapshot and
+  // finally to the full snapshot boundary.
+  const repaintFromFeed = () => {
+    try { (context.renderer as any)?.requestRender?.() } catch {}
+  }
+  const applyFeedDecision = (decision: PatchDecision): boolean => {
+    if (decision.action !== "apply") return false
+    client.applyWorkChanges(decision.changes, decision.version)
+    if (lastSnapshotMeta) lastSnapshotMeta = { ...lastSnapshotMeta, version: decision.version }
+    repaintFromFeed()
+    return true
+  }
+  const refreshFull = async (): Promise<void> => {
+    forceSnapshotReplace = true
+    snapshotRefresh.request()
+    await snapshotRefresh.whenIdle()
+  }
+  const resyncWorkScope = async (): Promise<void> => {
+    const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
+    const nextMeta = snapshotMeta(next)
+    if (!lastSnapshotMeta || !supportsPatchFeed(lastSnapshotMeta) || nextMeta.epoch !== lastSnapshotMeta.epoch) {
+      await refreshFull()
+      return
+    }
+    // A patch that landed during the fetch is newer than this snapshot; keep
+    // it instead of regressing the Work scope to an older version.
+    if (nextMeta.version < lastSnapshotMeta.version) return
+    client.applyWorkSnapshot(next)
+    // The snapshot may contain newer non-Work entities that this scoped apply
+    // intentionally did not take. Advance the cursor only at the same version;
+    // otherwise leave it so `changes.since`/the heartbeat reconciles the rest
+    // instead of silently declaring those entities current.
+    if (nextMeta.version === lastSnapshotMeta.version) lastSnapshotMeta = nextMeta
+    repaintFromFeed()
+  }
+  let feedRecovery: Promise<void> | undefined
+  let feedRecoveryAgain = false
+  const recoverFeed = (mode: "since" | "work"): Promise<void> => {
+    if (feedRecovery) {
+      feedRecoveryAgain = true
+      return feedRecovery
+    }
+    feedRecovery = (async () => {
+      try {
+        let passes = 0
+        do {
+          feedRecoveryAgain = false
+          passes++
+          if (mode === "work" || !lastSnapshotMeta || !supportsPatchFeed(lastSnapshotMeta)) {
+            try { await resyncWorkScope() } catch { await refreshFull().catch(() => undefined) }
+            continue
+          }
+          const cursor = lastSnapshotMeta
+          let result: ChangesSince
+          try {
+            result = await callRpc<ChangesSince>(context, "changes.since", {
+              directory: directoryOf(context),
+              epoch: cursor.epoch,
+              version: cursor.version,
+            })
+          } catch {
+            await refreshFull().catch(() => undefined)
+            continue
+          }
+          const decision = decideChangesSince(cursor, result)
+          if (decision.action === "apply") {
+            applyFeedDecision(decision)
+            continue
+          }
+          if (decision.action === "ignore") continue
+          if (decision.reason === "malformed" || decision.reason === "gap") {
+            try { await resyncWorkScope() } catch { await refreshFull().catch(() => undefined) }
+          } else {
+            await refreshFull().catch(() => undefined)
+          }
+        } while (feedRecoveryAgain && passes < 3)
+      } finally {
+        feedRecovery = undefined
+      }
+    })()
+    return feedRecovery
+  }
+  const handlePatchEvent = (payload: PatchBatch) => {
+    if (!lastSnapshotMeta || !supportsPatchFeed(lastSnapshotMeta)) return
+    const decision = decidePatchApply(lastSnapshotMeta, payload)
+    if (decision.action === "apply") {
+      applyFeedDecision(decision)
+      return
+    }
+    if (decision.action === "ignore") return
+    void recoverFeed(decision.reason === "malformed" ? "work" : "since")
   }
 
   const openAgent = (agent: Agent) => {
@@ -3503,9 +3605,30 @@ export function EnsembleV2App() {
     heartbeatCheck = (async () => {
       try {
         const revision = await callRpc<Revision>(context, "revision", { directory: directoryOf(context) })
-        const refreshNeeded = heartbeatForce || revisionChanged(lastSnapshotMeta, revision)
+        const cursor = lastSnapshotMeta
+        const forced = heartbeatForce
         heartbeatForce = false
-        if (refreshNeeded) snapshotRefresh.request()
+        if (revisionChanged(cursor, revision)) {
+          // Ticket #138: a version gap recovers through `changes.since` instead
+          // of a full snapshot. Epoch/protocol changes, an unloaded client, and
+          // a forced reconnect still take the full-snapshot fallback.
+          const patchCursor = !forced && cursor && supportsPatchFeed(cursor)
+            && revision.epoch === cursor.epoch && revision.protocol === cursor.protocol
+          if (patchCursor) {
+            if (revision.version > cursor!.version) await recoverFeed("since")
+            else if (revision.version < cursor!.version) await refreshFull()
+            // An equal version with a catalog/config revision is the metadata
+            // path: the snapshot decision never replaces entity state.
+            else snapshotRefresh.request()
+          } else {
+            await refreshFull()
+          }
+        } else if (forced) {
+          await refreshFull()
+        }
+        if (lastSnapshotMeta && (revision.catalogRevision !== lastSnapshotMeta.catalogRevision || revision.configRevision !== lastSnapshotMeta.configRevision)) {
+          snapshotRefresh.request()
+        }
         if (surface()?.kind === "agent") chatRefresh.request()
       } catch {
         // The revision RPC is an optimization; keep the snapshot path as the
@@ -3573,12 +3696,22 @@ export function EnsembleV2App() {
         void checkRevision(true)
         return
       }
-      // Durable writes emit the `changed` event with the affected scope
-      // (workspace, subtask, correlation, kind); the UI invalidates and
-      // refreshes on it — no navigation required. An event that is not newer
-      // than the applied snapshot is already visible, so it skips the fetch.
-      // The revision heartbeat remains the fallback for missed events.
+      // Ticket #138: batched full-entity patches drive the client store
+      // directly. A gapped, duplicated, or malformed batch never partially
+      // applies; the cursor recovery path resyncs the Work scope.
+      if (type === "rpc.ensemble.v2.patches") {
+        const payload = details?.data && typeof details.data === "object" ? details.data : details
+        handlePatchEvent(payload as PatchBatch)
+        return
+      }
+      // Durable writes also emit the legacy `changed` event with the affected
+      // scope (workspace, subtask, correlation, kind) for older clients and for
+      // this client when the server does not advertise the patch protocol.
+      // An event that is not newer than the applied snapshot is already
+      // visible, so it skips the fetch. The revision heartbeat remains the
+      // fallback for missed events.
       if (type === "rpc.ensemble.v2.changed") {
+        if (lastSnapshotMeta && supportsPatchFeed(lastSnapshotMeta)) return
         const eventVersion = typeof details?.version === "number" ? details.version : typeof details?.data?.version === "number" ? details.data.version : undefined
         if (eventVersion !== undefined && lastSnapshotMeta !== undefined && eventVersion <= lastSnapshotMeta.version) return
         snapshotRefresh.request()

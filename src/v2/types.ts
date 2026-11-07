@@ -436,4 +436,46 @@ export type Revision = {
   epoch: number
 }
 
+/**
+ * One durable entity change in the versioned feed (ticket #138). Durable work
+ * changes are full-entity upserts/removes, so duplicate delivery is harmless
+ * and a client never needs field-level patch semantics.
+ */
+export type WorkEntityChange =
+  | { entity: "subtask"; op: "upsert"; task: Subtask }
+  | { entity: "subtask"; op: "remove"; id: Id }
+
+/**
+ * One store mutation at one coordination version. `other` marks a version that
+ * also changed entities outside the Work feed (messages, roster, config, ...),
+ * so a client on the Work-only protocol must fall back to the snapshot path
+ * instead of silently leaving those views stale.
+ */
+export type ChangeEntry = {
+  version: number
+  changes: WorkEntityChange[]
+  other?: boolean
+}
+
+/**
+ * One batched `patches` event. `entries` are contiguous versions after
+ * `from`; `version` is the last entry. `reset` asks the client for a snapshot
+ * when the ring could not describe the gap (overflow or a feed reset).
+ */
+export type PatchBatch = {
+  epoch: number
+  from: number
+  version: number
+  entries: ChangeEntry[]
+  reset?: boolean
+}
+
+/** Cursor response for the revision-heartbeat gap recovery path. */
+export type ChangesSince = {
+  epoch: number
+  version: number
+  reset: boolean
+  entries: ChangeEntry[]
+}
+
 export type SnapshotState = Snapshot["state"]
