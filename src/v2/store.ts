@@ -6,6 +6,7 @@ import type {
   Approval,
   ChangeEntry,
   ChatMessage,
+  EntityChange,
   InitJob,
   Memory,
   Message,
@@ -15,7 +16,6 @@ import type {
   Settings,
   SnapshotState,
   Subtask,
-  WorkEntityChange,
   Workspace,
 } from "./types.ts"
 
@@ -649,7 +649,7 @@ export class V2Store {
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
     return this.write(async () => {
       this.state.settings = { ...this.state.settings, ...patch }
-      await this.commit([])
+      await this.commit([{ entity: "settings", op: "upsert", settings: structuredClone(this.state.settings) }])
       return this.settings()
     })
   }
@@ -658,7 +658,7 @@ export class V2Store {
     await this.write(async () => {
       this.state.agents[agent.id] = agent
       await this.ctx.storage.set(`v2/agent/${agent.id}`, agent)
-      await this.commit([])
+      await this.commit([{ entity: "agent", op: "upsert", agent: structuredClone(agent) }])
     })
   }
 
@@ -666,7 +666,7 @@ export class V2Store {
     await this.write(async () => {
       delete this.state.agents[id]
       await this.ctx.storage.remove(`v2/agent/${id}`)
-      await this.commit([])
+      await this.commit([{ entity: "agent", op: "remove", id }])
     })
   }
 
@@ -674,7 +674,7 @@ export class V2Store {
     await this.write(async () => {
       this.state.workspaces[workspace.id] = workspace
       await this.ctx.storage.set(`v2/workspace/${workspace.id}`, workspace)
-      await this.commit([])
+      await this.commit([{ entity: "workspace", op: "upsert", workspace: structuredClone(workspace) }])
     })
   }
 
@@ -685,7 +685,7 @@ export class V2Store {
   private async removeWorkspaceNow(id: string): Promise<void> {
     delete this.state.workspaces[id]
     await this.ctx.storage.remove(`v2/workspace/${id}`)
-    await this.commit([])
+    await this.commit([{ entity: "workspace", op: "remove", id }])
   }
 
   async appendMessage(
@@ -710,7 +710,7 @@ export class V2Store {
   async saveUi(ui: SnapshotState["ui"]): Promise<void> {
     await this.write(async () => {
       this.state.ui = { ...ui }
-      await this.commit([])
+      await this.commit([{ entity: "ui", op: "upsert", ui: structuredClone(this.state.ui) }])
     })
   }
 
@@ -726,7 +726,7 @@ export class V2Store {
     await this.write(async () => {
       this.state.initJobs[job.id] = job
       await this.ctx.storage.set(`v2/init/${job.id}`, job)
-      await this.commit([])
+      await this.commit([{ entity: "initJob", op: "upsert", job: structuredClone(job) }])
     })
   }
 
@@ -734,7 +734,7 @@ export class V2Store {
     await this.write(async () => {
       delete this.state.initJobs[id]
       await this.ctx.storage.remove(`v2/init/${id}`)
-      await this.commit([])
+      await this.commit([{ entity: "initJob", op: "remove", id }])
     })
   }
 
@@ -762,7 +762,7 @@ export class V2Store {
       const key = bindingKey(binding.workspaceID, binding.agentID)
       this.state.bindings[key] = binding
       await this.ctx.storage.set(`v2/binding/${binding.workspaceID}/${binding.agentID}`, binding)
-      await this.commit([])
+      await this.commit([{ entity: "binding", op: "upsert", binding: structuredClone(binding) }])
     })
   }
 
@@ -782,7 +782,7 @@ export class V2Store {
     await this.write(async () => {
       this.state.memories[memory.id] = memory
       await this.ctx.storage.set(`v2/memory/${memory.id}`, memory)
-      await this.commit([])
+      await this.commit([{ entity: "memory", op: "upsert", memory: structuredClone(memory) }])
     })
   }
 
@@ -819,7 +819,7 @@ export class V2Store {
     await this.write(async () => {
       this.state.approvals[approval.id] = approval
       await this.ctx.storage.set(`v2/approval/${approval.id}`, approval)
-      await this.commit([])
+      await this.commit([{ entity: "approval", op: "upsert", approval: structuredClone(approval) }])
     })
   }
 
@@ -827,7 +827,7 @@ export class V2Store {
     await this.write(async () => {
       delete this.state.bindings[bindingKey(workspaceID, agentID)]
       await this.ctx.storage.remove(`v2/binding/${workspaceID}/${agentID}`)
-      await this.commit([])
+      await this.commit([{ entity: "binding", op: "remove", workspaceID, agentID }])
     })
   }
 
@@ -838,6 +838,7 @@ export class V2Store {
       const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
       const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
       const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
+      const bindingAgentIDs = Object.values(this.state.bindings).filter((binding) => binding.workspaceID === workspaceID).map((binding) => binding.agentID)
       delete this.state.messages[workspaceID]
       for (const key of [...this.streaming]) {
         if (key.startsWith(`${workspaceID}\u0000`)) this.streaming.delete(key)
@@ -862,7 +863,14 @@ export class V2Store {
       delete this.state.workspaces[workspaceID]
       await this.ctx.storage.remove(`v2/workspace/${workspaceID}`)
       await this.commit(
-        subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
+        [
+          { entity: "workspace" as const, op: "remove" as const, id: workspaceID },
+          ...subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
+          ...initJobIDs.map((id) => ({ entity: "initJob" as const, op: "remove" as const, id })),
+          ...memoryIDs.map((id) => ({ entity: "memory" as const, op: "remove" as const, id })),
+          ...approvalIDs.map((id) => ({ entity: "approval" as const, op: "remove" as const, id })),
+          ...bindingAgentIDs.map((agentID) => ({ entity: "binding" as const, op: "remove" as const, workspaceID, agentID })),
+        ],
         true,
       )
     })
@@ -951,6 +959,11 @@ export class V2Store {
     return this.epochValue
   }
 
+  /** Last version fully published as a batch (never a mid-write version). */
+  publishedVersion(): number {
+    return this.lastPublishedVersion
+  }
+
   /** Resolve after every queued mutation has persisted. */
   async settled(): Promise<void> {
     await this.writeTail
@@ -1004,7 +1017,7 @@ export class V2Store {
     return run
   }
 
-  private async commit(changes: WorkEntityChange[], other = changes.length === 0): Promise<number> {
+  private async commit(changes: EntityChange[], nonEntity = changes.length === 0): Promise<number> {
     this.state.version++
     this.state.updatedAt = Date.now()
     const version = this.state.version
@@ -1014,7 +1027,18 @@ export class V2Store {
       settings: this.state.settings,
       ui: this.state.ui,
     })
-    this.appendChange({ version, changes, ...(other ? { other: true } : {}) })
+    // Protocol-2 clients only understand subtask changes. Any other entity
+    // change sets `other` so they take the snapshot fallback, while protocol-3
+    // clients read the full `entities` array and stay incremental.
+    const legacy = changes.filter((change) => change.entity === "subtask")
+    const shellChanged = legacy.length !== changes.length
+    this.appendChange({
+      version,
+      changes: legacy,
+      ...(shellChanged ? { entities: changes } : {}),
+      ...(nonEntity || shellChanged ? { other: true } : {}),
+      ...(nonEntity ? { nonEntity: true } : {}),
+    })
     this.onChange?.(version)
     return version
   }

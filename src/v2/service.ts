@@ -22,6 +22,7 @@ import type {
   Approval,
   ChangesSince,
   DmQueueEntry,
+  FeedMeta,
   InitJob,
   InitPhase,
   Memory,
@@ -46,8 +47,9 @@ type Json = Record<string, any>
 /**
  * Protocol version advertised by the snapshot and the revision heartbeat.
  * v2 adds the versioned full-entity patch feed (`patches` + `changes.since`).
+ * v3 adds shell entities and version-neutral catalog/config metadata (#140).
  */
-export const ENSEMBLE_PROTOCOL_VERSION = 2
+export const ENSEMBLE_PROTOCOL_VERSION = 3
 let bootEpochSeq = 0
 
 function invalidInput(message: string): Error & { code: string } {
@@ -227,11 +229,14 @@ export class EnsembleV2Service {
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
   private catalogAbort: AbortController | undefined
+  /** Last catalog/config metadata published as a version-neutral batch. */
+  private lastPublishedCatalogRevision = -1
+  private lastPublishedConfig: { directory?: string; revision?: number; error?: string } = {}
 
   constructor(ctx: Ctx) {
     this.ctx = ctx
     this.catalog = new Catalog(ctx, () => {
-      this.emitChanged(this.store.version())
+      this.publishFeedMetaIfChanged()
     })
   }
 
@@ -365,13 +370,62 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Catalog/model-skill and config-error metadata do not change entity state,
+   * so they travel beside the versioned feed and never bump the coordination
+   * version. The same metadata is attached to every `changes.since` response,
+   * so a missed metadata event recovers through the heartbeat.
+   */
+  private feedMeta(): FeedMeta {
+    const directory = this.viewDirectory
+    const configRevision = directory && this.store
+      ? this.configFingerprint(directory, this.store.revisionInfo().workspaceDirectories)
+      : undefined
+    return {
+      catalogRevision: this.catalog.revision,
+      models: this.catalog.modelOptions,
+      skills: this.catalog.skillOptions,
+      ...(this.catalog.lastError ? { modelsError: this.catalog.lastError } : {}),
+      ...(directory && configRevision !== undefined ? { directory, configRevision } : {}),
+      ...(this.lastConfigError ? { configError: this.lastConfigError } : {}),
+    }
+  }
+
+  /** Publish a revision-only batch when catalog or config metadata changed. */
+  private publishFeedMetaIfChanged(): void {
+    if (!this.store) return
+    const directory = this.viewDirectory
+    const revision = directory ? this.configFingerprint(directory, this.store.revisionInfo().workspaceDirectories) : undefined
+    const error = this.lastConfigError
+    const catalogChanged = this.catalog.revision !== this.lastPublishedCatalogRevision
+    const configChanged = this.lastPublishedConfig.directory !== directory
+      || this.lastPublishedConfig.revision !== revision
+      || this.lastPublishedConfig.error !== error
+    if (!catalogChanged && !configChanged) return
+    this.lastPublishedCatalogRevision = this.catalog.revision
+    this.lastPublishedConfig = { directory, revision, error }
+    // Use the last fully published version: a metadata event must never
+    // advance the cursor past an entity patch that is still mid-write.
+    const version = this.store.publishedVersion()
+    this.emitPatches({
+      epoch: this.epochValue,
+      from: version,
+      version,
+      entries: [],
+      meta: this.feedMeta(),
+    })
+    // Legacy clients still get the metadata-change notification; the
+    // heartbeat's catalog/config revision check remains their fallback.
+    this.emitChanged(version)
+  }
+
+  /**
    * Cursor recovery for a client that missed a `patches` event. Foreign writes
    * are hydrated first so the ring can answer honestly (a foreign version is a
    * reset, never a fabricated patch); the read path itself writes nothing.
    */
   private async changesSince(input: { directory: string; epoch?: number; version?: number }): Promise<ChangesSince> {
     await this.store.sync().catch(() => false)
-    return this.store.changesSince(input.epoch ?? -1, input.version ?? -1)
+    return { ...this.store.changesSince(input.epoch ?? -1, input.version ?? -1), meta: this.feedMeta() }
   }
 
   /**
@@ -620,6 +674,7 @@ export class EnsembleV2Service {
       }
     }
     await this.reconcileWorkspaceConfigs()
+    this.publishFeedMetaIfChanged()
   }
 
   /**

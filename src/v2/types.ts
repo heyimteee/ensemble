@@ -437,30 +437,69 @@ export type Revision = {
 }
 
 /**
- * One durable entity change in the versioned feed (ticket #138). Durable work
+ * One durable entity change in the versioned feed (tickets #138/#140). Durable
  * changes are full-entity upserts/removes, so duplicate delivery is harmless
- * and a client never needs field-level patch semantics.
+ * and a client never needs field-level patch semantics. Messages stay outside
+ * this union until #139 adds their patches.
  */
-export type WorkEntityChange =
+export type EntityChange =
   | { entity: "subtask"; op: "upsert"; task: Subtask }
   | { entity: "subtask"; op: "remove"; id: Id }
+  | { entity: "agent"; op: "upsert"; agent: Agent }
+  | { entity: "agent"; op: "remove"; id: Id }
+  | { entity: "workspace"; op: "upsert"; workspace: Workspace }
+  | { entity: "workspace"; op: "remove"; id: Id }
+  | { entity: "approval"; op: "upsert"; approval: Approval }
+  | { entity: "approval"; op: "remove"; id: Id }
+  | { entity: "binding"; op: "upsert"; binding: SessionBinding }
+  | { entity: "binding"; op: "remove"; workspaceID: Id; agentID: Id }
+  | { entity: "memory"; op: "upsert"; memory: Memory }
+  | { entity: "memory"; op: "remove"; id: Id }
+  | { entity: "initJob"; op: "upsert"; job: InitJob }
+  | { entity: "initJob"; op: "remove"; id: Id }
+  | { entity: "settings"; op: "upsert"; settings: Settings }
+  | { entity: "ui"; op: "upsert"; ui: SnapshotState["ui"] }
+
+/** @deprecated Ticket #138 name; use `EntityChange`. */
+export type WorkEntityChange = EntityChange
 
 /**
- * One store mutation at one coordination version. `other` marks a version that
- * also changed entities outside the Work feed (messages, roster, config, ...),
- * so a client on the Work-only protocol must fall back to the snapshot path
- * instead of silently leaving those views stale.
+ * Catalog/config metadata carried beside the durable feed but not versioned
+ * into the change ring: a catalog refresh or config error must be visible
+ * without bumping the coordination version or replacing entity state.
+ */
+export type FeedMeta = {
+  catalogRevision?: number
+  models?: ModelOption[]
+  skills?: SkillOption[]
+  modelsError?: string
+  directory?: string
+  configRevision?: number
+  configError?: string
+}
+
+/**
+ * One store mutation at one coordination version. `changes` is the legacy
+ * (#138) subtask-only view used by protocol-2 clients. `entities` carries the
+ * full shell change set for protocol-3 clients; it is present only when the
+ * version changed an entity outside the legacy view. `other` keeps the #138
+ * meaning (a protocol-2 client must fall back to a snapshot); `nonEntity`
+ * marks a version that changed state the current feed cannot patch
+ * (messages/DM until #139), so even protocol-3 clients resync.
  */
 export type ChangeEntry = {
   version: number
-  changes: WorkEntityChange[]
+  changes: EntityChange[]
+  entities?: EntityChange[]
   other?: boolean
+  nonEntity?: boolean
 }
 
 /**
  * One batched `patches` event. `entries` are contiguous versions after
  * `from`; `version` is the last entry. `reset` asks the client for a snapshot
- * when the ring could not describe the gap (overflow or a feed reset).
+ * when the ring could not describe the gap (overflow or a feed reset). An
+ * equal-version batch with `entries: []` and `meta` is a metadata revision.
  */
 export type PatchBatch = {
   epoch: number
@@ -468,6 +507,7 @@ export type PatchBatch = {
   version: number
   entries: ChangeEntry[]
   reset?: boolean
+  meta?: FeedMeta
 }
 
 /** Cursor response for the revision-heartbeat gap recovery path. */
@@ -476,6 +516,7 @@ export type ChangesSince = {
   version: number
   reset: boolean
   entries: ChangeEntry[]
+  meta?: FeedMeta
 }
 
 export type SnapshotState = Snapshot["state"]
