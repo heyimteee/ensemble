@@ -1,7 +1,7 @@
 import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
-import type { EntityChange, FeedMeta, Id, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
+import type { EntityChange, FeedMeta, Id, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
 
 /**
  * Durable client updates. A snapshot is the only full replacement; every
@@ -12,6 +12,7 @@ export type ClientStateUpdate =
   | { type: "snapshot"; snapshot: Snapshot }
   | { type: "subtask.upsert"; task: Subtask }
   | { type: "subtask.remove"; id: Id }
+  | { type: "message.stream"; workspaceID: Id; id: Id; text: string; updatedAt: number }
   | { type: "entity.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
   | { type: "work.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
   | { type: "work.snapshot"; subtasks: Record<Id, Subtask>; version: number; updatedAt?: number }
@@ -43,6 +44,27 @@ function reduceEntityChanges(state: SnapshotState, changes: EntityChange[]): Sna
           const subtasks = { ...next.subtasks }
           delete subtasks[change.id]
           copy().subtasks = subtasks
+        }
+        break
+      }
+      case "message": {
+        const workspaceID = change.op === "upsert" ? change.message.workspaceID : change.workspaceID
+        const messageID = change.op === "upsert" ? change.message.id : change.id
+        const list = next.messages[workspaceID] ?? []
+        const index = list.findIndex((message) => message.id === messageID)
+        if (change.op === "upsert") {
+          if (index >= 0 && list[index] === change.message) break
+          const messages = index >= 0 ? list.slice() : [...list, change.message]
+          if (index >= 0) messages[index] = change.message
+          messages.sort((a, b) => a.seq - b.seq)
+          copy().messages = { ...next.messages, [workspaceID]: messages }
+        } else {
+          if (index < 0) break
+          const messages = list.filter((message) => message.id !== messageID)
+          const map = { ...next.messages }
+          if (messages.length === 0) delete map[workspaceID]
+          else map[workspaceID] = messages
+          copy().messages = map
         }
         break
       }
@@ -153,6 +175,22 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
       delete subtasks[update.id]
       return { ...state, subtasks }
     }
+    case "message.stream": {
+      const list = state.messages[update.workspaceID]
+      if (!list) return state
+      const index = list.findIndex((message) => message.id === update.id)
+      if (index < 0) return state
+      const message = list[index]!
+      // Final durable state always wins: a late event cannot overwrite a row
+      // that already settled, and an older event cannot rewind newer text.
+      if (!message.streaming) return state
+      if (update.updatedAt < (message.updatedAt ?? 0)) return state
+      if (update.text === message.text) return state
+      if (update.updatedAt === (message.updatedAt ?? 0) && update.text.length < message.text.length) return state
+      const messages = list.slice()
+      messages[index] = { ...message, text: update.text, updatedAt: update.updatedAt }
+      return { ...state, messages: { ...state.messages, [update.workspaceID]: messages } }
+    }
     case "entity.changes":
     case "work.changes": {
       const next = reduceEntityChanges(state, update.changes)
@@ -193,6 +231,8 @@ export type ClientStore = {
   applyChanges: (changes: EntityChange[], version?: number, meta?: FeedMeta) => void
   /** Apply one validated, atomic batch of full-entity work changes. */
   applyWorkChanges: (changes: EntityChange[], version?: number) => void
+  /** Apply ephemeral live text to one visible streaming row. */
+  applyStream: (update: MessageStream) => void
   /** Scoped Work resync: replace subtasks and metadata, keep other entities. */
   applyWorkSnapshot: (snapshot: Snapshot) => void
   reset: () => void
@@ -290,6 +330,10 @@ export function createClientStore(): ClientStore {
     removeSubtask: (id) => apply({ type: "subtask.remove", id }),
     applyChanges,
     applyWorkChanges: (changes, version) => applyChanges(changes, version),
+    applyStream: (update) => {
+      if (epoch() !== undefined && update.epoch !== epoch()) return
+      apply({ type: "message.stream", workspaceID: update.workspaceID, id: update.id, text: update.text, updatedAt: update.updatedAt })
+    },
     applyWorkSnapshot: (snapshot) => {
       batch(() => {
         apply({

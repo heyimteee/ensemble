@@ -188,5 +188,20 @@ export const EnsembleV2Rpc = Rpc.define({
         additionalProperties: false,
       },
     },
+    /** Ticket #139: coalesced, version-neutral live text for one row. */
+    stream: {
+      schema: {
+        type: "object",
+        properties: {
+          epoch: { type: "number" },
+          workspaceID: { type: "string" },
+          id: { type: "string" },
+          text: { type: "string" },
+          updatedAt: { type: "number" },
+        },
+        required: ["epoch", "workspaceID", "id", "text", "updatedAt"],
+        additionalProperties: false,
+      },
+    },
   },
 })

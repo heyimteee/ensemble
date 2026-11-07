@@ -39,7 +39,7 @@ const task = (id: string, patch: Partial<Subtask> = {}): Subtask => ({
   ...patch,
 })
 
-const message = (id: string, text: string): Message => ({
+const message = (id: string, text: string, patch: Partial<Message> = {}): Message => ({
   id,
   workspaceID: "w1",
   seq: 1,
@@ -47,6 +47,7 @@ const message = (id: string, text: string): Message => ({
   text,
   kind: "text",
   createdAt: 1,
+  ...patch,
 })
 
 const models: ModelOption[] = [{ providerID: "p", modelID: "m", name: "Model", variants: [] }]
@@ -297,6 +298,85 @@ test("shell removals and a full snapshot reconstruct every shell entity", () => 
   assert.equal(store.state()?.bindings["w2:a2"]?.sessionID, "s2")
   assert.equal(store.state()?.memories.mem2?.id, "mem2")
   assert.equal(store.state()?.initJobs.init2?.id, "init2")
+})
+
+test("message patches upsert by id, preserve order, and remove without duplicating rows", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.messages.w1 = [message("m1", "first", { seq: 1 }), message("m3", "third", { seq: 3 })]
+  })))
+  const before = store.state()!
+
+  store.applyChanges([
+    { entity: "message", op: "upsert", message: message("m2", "second", { seq: 2, author: "system", kind: "system" }) },
+    { entity: "message", op: "upsert", message: message("m2", "second", { seq: 2, author: "system", kind: "system" }) },
+  ], 6)
+
+  assert.deepEqual(store.state()!.messages.w1?.map((row) => row.id), ["m1", "m2", "m3"])
+  assert.equal(store.state()!.messages.w1?.filter((row) => row.id === "m2").length, 1, "a duplicate upsert never duplicates a transcript row")
+  assert.deepEqual(store.state()!.messages.w1?.[1], message("m2", "second", { seq: 2, author: "system", kind: "system" }))
+  assert.equal(store.state()!.agents, before.agents, "unrelated entity branches keep their identity")
+
+  store.applyChanges([{ entity: "message", op: "remove", workspaceID: "w1", id: "m2" }], 7)
+  assert.deepEqual(store.state()!.messages.w1?.map((row) => row.id), ["m1", "m3"])
+})
+
+test("an ephemeral stream updates only the visible live row and never bumps the version", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.messages.w1 = [
+      message("m1", "partial", { seq: 1, author: "agent", streaming: true, updatedAt: 10 }),
+      message("m2", "final", { seq: 2, author: "agent", updatedAt: 10 }),
+    ]
+  })))
+  const version = store.state()!.version
+
+  store.applyStream({ epoch: 10, workspaceID: "w1", id: "m1", text: "partial reply", updatedAt: 11 })
+
+  assert.equal(store.state()!.version, version, "ephemeral text does not move the coordination cursor")
+  assert.equal(store.state()!.messages.w1?.[0]?.text, "partial reply")
+  assert.equal(store.state()!.messages.w1?.[0]?.streaming, true)
+  assert.equal(store.state()!.messages.w1?.[1]?.text, "final", "a finalized row ignores live overlays")
+
+  store.applyStream({ epoch: 10, workspaceID: "w1", id: "m1", text: "partial", updatedAt: 9 })
+  assert.equal(store.state()!.messages.w1?.[0]?.text, "partial reply", "an older reordered stream never rewinds the row")
+})
+
+test("the final durable message replaces the live overlay exactly once", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.messages.w1 = [message("m1", "", { seq: 1, author: "agent", streaming: true, updatedAt: 10 })]
+  })))
+  store.applyStream({ epoch: 10, workspaceID: "w1", id: "m1", text: "live partial", updatedAt: 11 })
+
+  const final = message("m1", "Exact final answer.", { seq: 1, author: "agent", streaming: false, updatedAt: 12 })
+  store.applyChanges([{ entity: "message", op: "upsert", message: final }], 8)
+
+  assert.equal(store.state()!.messages.w1?.length, 1)
+  assert.equal(store.state()!.messages.w1?.[0]?.text, "Exact final answer.")
+  assert.equal(store.state()!.messages.w1?.[0]?.streaming, false)
+
+  store.applyStream({ epoch: 10, workspaceID: "w1", id: "m1", text: "stale overlay", updatedAt: 13 })
+  assert.equal(store.state()!.messages.w1?.[0]?.text, "Exact final answer.", "a late overlay cannot replace the durable final text")
+  store.applyChanges([{ entity: "message", op: "upsert", message: final }], 8)
+  assert.equal(store.state()!.messages.w1?.length, 1, "a duplicate final patch is harmless")
+})
+
+test("a missed stream event is recovered by the final message patch", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.messages.w1 = [message("m1", "", { seq: 1, author: "agent", streaming: true, updatedAt: 10 })]
+  })))
+  // No ephemeral stream arrives; only the durable final upsert.
+  store.applyChanges([{
+    entity: "message",
+    op: "upsert",
+    message: message("m1", "Recovered exact final.", { seq: 1, author: "agent", streaming: false, updatedAt: 12 }),
+  }], 9)
+
+  assert.equal(store.state()!.messages.w1?.[0]?.text, "Recovered exact final.")
+  assert.equal(store.state()!.messages.w1?.[0]?.streaming, false)
+  assert.equal(store.state()!.version, 9)
 })
 
 test("catalog and config metadata apply from the feed without replacing entity state", () => {
