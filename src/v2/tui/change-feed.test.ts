@@ -3,12 +3,12 @@ import assert from "node:assert/strict"
 import { createInitialState } from "../defaults.ts"
 import type { PatchBatch, Snapshot, Subtask } from "../types.ts"
 import { createClientStore } from "./client-store.ts"
-import { decideChangesSince, decidePatchApply, supportsPatchFeed, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { decideChangesSince, decidePatchApply, mergeFeedMeta, supportsPatchFeed, type SnapshotMeta } from "./refresh-coordinator.ts"
 
 const meta = (value: Partial<SnapshotMeta> & { version: number }): SnapshotMeta => ({
   catalogRevision: 1,
   configRevision: 1,
-  protocol: 2,
+  protocol: 3,
   epoch: 10,
   directory: "/tmp/ensemble",
   ...value,
@@ -84,7 +84,7 @@ test("overlapping redelivery keeps only the changes after the cursor", () => {
     entries: [upsert(4, "t1"), upsert(5, "t2"), upsert(6, "t3"), upsert(7, "t4")],
   }))
   assert.equal(decision.action, "apply")
-  assert.deepEqual(decision.action === "apply" ? decision.changes.map((change) => change.op === "upsert" ? change.task.id : change.id) : [], ["t3", "t4"])
+  assert.deepEqual(decision.action === "apply" ? decision.changes.map((change: any) => change.op === "upsert" ? change.task.id : change.id) : [], ["t3", "t4"])
   assert.equal(decision.action === "apply" ? decision.version : 0, 7)
 })
 
@@ -97,7 +97,7 @@ test("a gap, epoch change, reset, and malformed batch all ask for a resync", () 
   assert.equal((decidePatchApply(meta({ version: 4 }), batch({
     from: 4,
     version: 5,
-    entries: [{ version: 5, changes: [{ entity: "agent", op: "upsert", task: task("t1") }] } as any],
+    entries: [{ version: 5, changes: [{ entity: "bogus", op: "upsert", task: task("t1") }] } as any],
   })) as any).reason, "malformed")
   assert.equal((decidePatchApply(meta({ version: 4 }), batch({
     from: 4,
@@ -106,16 +106,104 @@ test("a gap, epoch change, reset, and malformed batch all ask for a resync", () 
   })) as any).reason, "malformed")
 })
 
-test("a version with non-Work changes resyncs the full snapshot path", () => {
+test("shell entity changes apply atomically through the same feed", () => {
+  const decision = decidePatchApply(meta({ version: 4 }), batch({
+    from: 4,
+    version: 6,
+    entries: [
+      {
+        version: 5,
+        changes: [
+          { entity: "agent", op: "upsert", agent: { id: "a1", name: "Ada" } },
+          { entity: "workspace", op: "upsert", workspace: { id: "w1", name: "site" } },
+          { entity: "approval", op: "upsert", approval: { id: "ap1", status: "pending" } },
+        ],
+      },
+      {
+        version: 6,
+        changes: [
+          { entity: "binding", op: "upsert", binding: { workspaceID: "w1", agentID: "a1", sessionID: "s1" } },
+          { entity: "memory", op: "upsert", memory: { id: "mem1", text: "note" } },
+          { entity: "initJob", op: "upsert", job: { id: "init1", state: "running" } },
+          { entity: "settings", op: "upsert", settings: { maxActiveRuns: 2 } },
+          { entity: "ui", op: "upsert", ui: { activeWorkspaceID: "w1" } },
+          { entity: "binding", op: "remove", workspaceID: "w1", agentID: "a2" },
+          { entity: "memory", op: "remove", id: "mem2" },
+          { entity: "initJob", op: "remove", id: "init2" },
+          { entity: "approval", op: "remove", id: "ap2" },
+          { entity: "agent", op: "remove", id: "a2" },
+          { entity: "workspace", op: "remove", id: "w2" },
+        ],
+      },
+    ] as any,
+  }))
+  assert.equal(decision.action, "apply")
+  assert.equal(decision.action === "apply" ? decision.version : 0, 6)
+  assert.deepEqual(
+    decision.action === "apply" ? decision.changes.map((change) => `${change.entity}:${change.op}`) : [],
+    ["agent:upsert", "workspace:upsert", "approval:upsert", "binding:upsert", "memory:upsert", "initJob:upsert", "settings:upsert", "ui:upsert", "binding:remove", "memory:remove", "initJob:remove", "approval:remove", "agent:remove", "workspace:remove"],
+  )
+})
+
+test("a version-neutral metadata batch updates catalog and config revision metadata", () => {
+  const decision = decidePatchApply(meta({ version: 4, catalogRevision: 1 }), {
+    epoch: 10,
+    from: 4,
+    version: 4,
+    entries: [],
+    meta: {
+      catalogRevision: 2,
+      models: [{ providerID: "p", modelID: "m", name: "Model", variants: [] }],
+      skills: [],
+      modelsError: "model list failed",
+      directory: "/tmp/ensemble",
+      configRevision: 7,
+      configError: "bad config",
+    },
+  })
+  assert.equal(decision.action, "apply")
+  assert.equal(decision.action === "apply" ? decision.version : 0, 4)
+  assert.deepEqual(decision.action === "apply" ? decision.changes : [{}], [])
+  assert.equal(decision.action === "apply" ? decision.meta?.catalogRevision : 0, 2)
+  assert.equal(decision.action === "apply" ? decision.meta?.configError : "", "bad config")
+
+  const unchanged = decidePatchApply(meta({ version: 4 }), {
+    epoch: 10,
+    from: 4,
+    version: 4,
+    entries: [],
+    meta: { catalogRevision: 1, configRevision: 1 },
+  })
+  assert.deepEqual(unchanged, { action: "ignore" })
+})
+
+test("a version with non-entity changes resyncs the full snapshot path", () => {
   const decision = decidePatchApply(meta({ version: 4 }), batch({
     from: 4,
     version: 6,
     entries: [
       upsert(5, "t1"),
-      { version: 6, changes: [], other: true },
+      { version: 6, changes: [], other: true, nonEntity: true },
     ],
   }))
   assert.deepEqual(decision, { action: "resync", reason: "other" })
+})
+
+test("protocol-3 reads entities and ignores the protocol-2 other marker", () => {
+  const decision = decidePatchApply(meta({ version: 4 }), batch({
+    from: 4,
+    version: 5,
+    entries: [
+      {
+        version: 5,
+        changes: [],
+        other: true,
+        entities: [{ entity: "agent", op: "upsert", agent: { id: "a1" } }],
+      },
+    ] as any,
+  }))
+  assert.equal(decision.action, "apply")
+  assert.equal(decision.action === "apply" ? decision.changes[0]?.entity : "", "agent")
 })
 
 test("a changes.since response recovers a dropped event as patches or a reset", () => {
@@ -126,7 +214,7 @@ test("a changes.since response recovers a dropped event as patches or a reset", 
     entries: [upsert(5, "t1"), upsert(6, "t2")],
   })
   assert.equal(recovered.action, "apply")
-  assert.deepEqual(recovered.action === "apply" ? recovered.changes.map((change) => change.op === "upsert" ? change.task.id : change.id) : [], ["t1", "t2"])
+  assert.deepEqual(recovered.action === "apply" ? recovered.changes.map((change: any) => change.op === "upsert" ? change.task.id : change.id) : [], ["t1", "t2"])
   assert.equal(recovered.action === "apply" ? recovered.version : 0, 6)
 
   assert.equal((decideChangesSince(meta({ version: 4 }), {
@@ -143,9 +231,31 @@ test("a changes.since response recovers a dropped event as patches or a reset", 
   }) as any).reason, "epoch")
 })
 
-test("the client only negotiates the feed on protocol 2 or later", () => {
+test("a changes.since metadata response updates the cursor without a version", () => {
+  const recovered = decideChangesSince(meta({ version: 4, catalogRevision: 1, configRevision: 3 }), {
+    epoch: 10,
+    version: 4,
+    reset: false,
+    entries: [],
+    meta: { catalogRevision: 2, models: [], skills: [], directory: "/tmp/ensemble", configRevision: 4 },
+  })
+  assert.equal(recovered.action, "apply")
+  assert.deepEqual(recovered.action === "apply" ? recovered.changes : [{}], [])
+  const cursor = mergeFeedMeta(meta({ version: 4 }), recovered.action === "apply" ? recovered.meta : undefined)
+  assert.equal(cursor?.version, 4)
+  assert.equal(cursor?.catalogRevision, 2)
+  assert.equal(cursor?.configRevision, 4)
+  assert.equal(mergeFeedMeta(meta({ version: 4, directory: "/tmp/ensemble" }), {
+    catalogRevision: 2,
+    directory: "/tmp/other",
+    configRevision: 99,
+    configError: "not mine",
+  })?.configRevision, 1, "another directory's config metadata never changes this cursor")
+})
+
+test("the client only negotiates the shell feed on protocol 3 or later", () => {
   assert.equal(supportsPatchFeed(meta({ version: 1 })), true)
-  assert.equal(supportsPatchFeed({ ...meta({ version: 1 }), protocol: 1 }), false)
+  assert.equal(supportsPatchFeed({ ...meta({ version: 1 }), protocol: 2 }), false)
   assert.equal(supportsPatchFeed({ ...meta({ version: 1 }), epoch: undefined }), false)
   assert.equal(supportsPatchFeed(undefined), false)
 })
@@ -197,5 +307,5 @@ test("the client store applies full-entity upserts and removals without replacin
 
 test("SnapshotMeta stays the feed cursor shape", () => {
   const value: SnapshotMeta = meta({ version: 3 })
-  assert.equal(value.protocol, 2)
+  assert.equal(value.protocol, 3)
 })

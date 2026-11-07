@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
-import type { PatchBatch, Subtask, Workspace } from "./types.ts"
+import type { Agent, Approval, InitJob, Memory, Message, PatchBatch, SessionBinding, Subtask, Workspace } from "./types.ts"
 
 function fakeContext(values = new Map<string, unknown>()) {
   const writes: string[] = []
@@ -39,6 +39,79 @@ const workspace = (patch: Partial<Workspace> = {}): Workspace => ({
   nextSeq: 1,
   createdAt: 1,
   lastActiveAt: 1,
+  ...patch,
+})
+
+const agent = (patch: Partial<Agent> = {}): Agent => ({
+  id: "a",
+  name: "Nova",
+  title: "",
+  role: "",
+  mainModel: { providerID: "p", modelID: "m" },
+  backupModels: [],
+  skillbox: [],
+  color: "cyan",
+  archived: false,
+  pendingSettings: false,
+  version: 1,
+  createdAt: 1,
+  updatedAt: 1,
+  ...patch,
+})
+
+const approval = (patch: Partial<Approval> = {}): Approval => ({
+  id: "ap",
+  workspaceID: "w",
+  kind: "ask_person",
+  title: "Ask",
+  detail: "?",
+  status: "pending",
+  createdAt: 1,
+  ...patch,
+})
+
+const binding = (patch: Partial<SessionBinding> = {}): SessionBinding => ({
+  workspaceID: "w",
+  agentID: "a",
+  sessionID: "s",
+  kind: "workspace",
+  directory: "/repo",
+  agentVersion: 1,
+  updatedAt: 1,
+  ...patch,
+})
+
+const memory = (patch: Partial<Memory> = {}): Memory => ({
+  id: "mem",
+  workspaceID: "w",
+  scope: "workspace",
+  text: "note",
+  origin: "manual",
+  source: "user",
+  createdAt: 1,
+  updatedAt: 1,
+  history: [],
+  ...patch,
+})
+
+const initJob = (patch: Partial<InitJob> = {}): InitJob => ({
+  id: "init",
+  workspaceID: "w",
+  messageID: "m",
+  state: "running",
+  previousAgentsMD: null,
+  startedAt: 1,
+  ...patch,
+})
+
+const message = (patch: Partial<Message> = {}): Message => ({
+  id: "m",
+  workspaceID: "w",
+  seq: 1,
+  author: "agent",
+  text: "reply",
+  kind: "text",
+  createdAt: 1,
   ...patch,
 })
 
@@ -84,17 +157,106 @@ test("a task mutation persists its entity and meta before a full-entity patch is
   const change = published[0]!.batch.entries[0]!.changes[0]!
   assert.equal(change.entity, "subtask")
   assert.equal(change.op, "upsert")
+  assert.ok(change.entity === "subtask" && change.op === "upsert")
   assert.deepEqual(change.task, task())
   assert.equal(published[0]!.batch.entries[0]!.other, undefined, "a Work-only version needs no snapshot")
 })
 
-test("a non-Work version marks its entry so the client falls back to a snapshot", async () => {
+test("shell entity mutations publish full-entity upserts without a snapshot fallback", async () => {
+  const ctx = fakeContext()
+  const batches: PatchBatch[] = []
+  const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
+
+  await store.saveAgent(agent())
+  await store.saveWorkspace(workspace())
+  await store.saveApproval(approval())
+  await store.saveBinding(binding())
+  await store.saveMemory(memory())
+  await store.saveInitJob(initJob())
+  await store.updateSettings({ maxActiveRuns: 2, maxDelegations: 10, maxDepth: 5, synthesis: true })
+  await store.saveUi({ activeWorkspaceID: "w" })
+  store.publishPending()
+
+  const changes = batches.flatMap((batch) => batch.entries.flatMap((entry) => entry.entities ?? entry.changes))
+  assert.deepEqual(
+    changes.map((change) => `${change.entity}:${change.op}`),
+    ["agent:upsert", "workspace:upsert", "approval:upsert", "binding:upsert", "memory:upsert", "initJob:upsert", "settings:upsert", "ui:upsert"],
+  )
+  assert.deepEqual(changes[0], { entity: "agent", op: "upsert", agent: agent() })
+  assert.deepEqual(changes[1], { entity: "workspace", op: "upsert", workspace: workspace() })
+  assert.deepEqual(changes[2], { entity: "approval", op: "upsert", approval: approval() })
+  assert.deepEqual(changes[3], { entity: "binding", op: "upsert", binding: binding() })
+  assert.deepEqual(changes[4], { entity: "memory", op: "upsert", memory: memory() })
+  assert.deepEqual(changes[5], { entity: "initJob", op: "upsert", job: initJob() })
+  assert.deepEqual(changes[6], { entity: "settings", op: "upsert", settings: { maxActiveRuns: 2, maxDelegations: 10, maxDepth: 5, synthesis: true } })
+  assert.deepEqual(changes[7], { entity: "ui", op: "upsert", ui: { activeWorkspaceID: "w" } })
+  for (const batch of batches) {
+    for (const entry of batch.entries) {
+      assert.equal(entry.other, true, "protocol-2 clients keep the snapshot fallback")
+      assert.equal(entry.nonEntity, undefined, "protocol-3 clients apply the entity batch")
+      assert.ok(entry.entities && entry.entities.length > 0)
+    }
+  }
+})
+
+test("shell removals publish explicit remove changes", async () => {
+  const ctx = fakeContext()
+  const batches: PatchBatch[] = []
+  const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
+  await store.saveAgent(agent())
+  await store.saveWorkspace(workspace())
+  await store.saveInitJob(initJob())
+  await store.saveBinding(binding())
+  store.publishPending()
+
+  await store.removeAgent("a")
+  await store.removeWorkspace("w")
+  await store.removeInitJob("init")
+  await store.removeBinding("w", "a")
+  store.publishPending()
+
+  const changes = batches.flatMap((batch) => batch.entries.flatMap((entry) => entry.entities ?? entry.changes))
+  assert.deepEqual(changes.slice(-4), [
+    { entity: "agent", op: "remove", id: "a" },
+    { entity: "workspace", op: "remove", id: "w" },
+    { entity: "initJob", op: "remove", id: "init" },
+    { entity: "binding", op: "remove", workspaceID: "w", agentID: "a" },
+  ])
+})
+
+test("pruning a workspace publishes every removed shell entity", async () => {
   const ctx = fakeContext()
   const batches: PatchBatch[] = []
   const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
   await store.saveWorkspace(workspace())
+  await store.saveSubtask(task())
+  await store.saveApproval(approval())
+  await store.saveMemory(memory())
+  await store.saveInitJob(initJob())
+  await store.saveBinding(binding())
+  store.publishPending()
+  await store.pruneWorkspace("w")
+  store.publishPending()
+
+  const entry = batches.at(-1)!.entries.at(-1)!
+  const changes = entry.entities ?? entry.changes
+  assert.equal(entry.other, true, "protocol-2 clients resync after a prune")
+  assert.equal(entry.nonEntity, true, "protocol-3 clients also resync because messages were removed")
+  assert.deepEqual(
+    changes.map((change) => `${change.entity}:${change.op}`).sort(),
+    ["approval:remove", "binding:remove", "initJob:remove", "memory:remove", "subtask:remove", "workspace:remove"],
+  )
+})
+
+test("a message version still marks its entry so every client falls back to a snapshot", async () => {
+  const ctx = fakeContext()
+  const batches: PatchBatch[] = []
+  const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
+  await store.saveMessage(message())
   store.publishPending()
   assert.equal(batches[0]!.entries[0]!.other, true)
+  assert.equal(batches[0]!.entries[0]!.nonEntity, true)
+  assert.equal(batches[0]!.entries[0]!.entities, undefined)
 })
 
 test("a removal publishes a full remove change", async () => {
@@ -131,7 +293,7 @@ test("the write queue serializes concurrent mutations into contiguous versions",
 
   assert.deepEqual(Object.keys(store.snapshot().subtasks).sort(), ["t1", "t2", "t3"])
   assert.deepEqual(versions(batches), [1, 2, 3], "one logical version per mutation, in write order")
-  const ids = batches.flatMap((batch) => batch.entries.flatMap((entry) => entry.changes.flatMap((change) => (change.op === "upsert" ? [change.task.id] : []))))
+  const ids = batches.flatMap((batch) => batch.entries.flatMap((entry) => entry.changes.flatMap((change: any) => (change.op === "upsert" ? [change.task.id] : []))))
   assert.deepEqual(ids, ["t1", "t2", "t3"])
 })
 

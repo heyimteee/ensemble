@@ -4519,3 +4519,117 @@ test("a foreign-version write resets the feed and is recovered without data loss
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("shell actions publish incremental patches and an approval resolution reaches the feed", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-shell-feed-"))
+  const { ctx } = fakeContext()
+  const emitted: Array<{ name: string; data: any }> = []
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
+  const handlers = service.handlers()
+  try {
+    const before = await handlers.snapshot({ directory })
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "shell", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    const memory = await handlers.invoke({ directory, action: "memory.add", payload: { agentID: agent.result.id, scope: "project", text: "Use pnpm" } })
+    const promotion = await handlers.invoke({ directory, action: "memory.promote", payload: { id: memory.result.id } })
+    await handlers.invoke({ directory, action: "settings.update", payload: { maxActiveRuns: 2 } })
+
+    const changes = emitted
+      .filter((event) => event.name === "patches")
+      .flatMap((event) => event.data.entries ?? [])
+      .flatMap((entry: any) => entry.entities ?? entry.changes ?? [])
+    const change = (entity: string, op = "upsert") => changes.filter((item: any) => item.entity === entity && item.op === op)
+
+    assert.equal(change("agent").at(-1)?.agent.id, agent.result.id)
+    assert.equal(change("workspace").at(-1)?.workspace.id, workspace.result.id)
+    assert.equal(change("memory").at(-1)?.memory.id, memory.result.id)
+    assert.equal(change("settings").at(-1)?.settings.maxActiveRuns, 2)
+    assert.equal(change("approval").at(-1)?.approval.id, promotion.result.id)
+    assert.equal(change("approval").at(-1)?.approval.status, "pending")
+
+    const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: promotion.result.id, approve: true } })
+    assert.equal(resolved.ok, true)
+    const afterResolution = emitted
+      .filter((event) => event.name === "patches")
+      .flatMap((event) => event.data.entries ?? [])
+      .flatMap((entry: any) => entry.entities ?? entry.changes ?? [])
+      .filter((item: any) => item.entity === "approval" && item.approval?.id === promotion.result.id)
+      .at(-1)
+    assert.equal(afterResolution.approval.status, "approved", "needs-you state updates without a snapshot")
+
+    const recovered = await handlers["changes.since"]({ directory, epoch: before.epoch, version: before.state.version })
+    assert.equal(recovered.reset, false)
+    const recoveredChanges = recovered.entries.flatMap((entry: any) => entry.entities ?? entry.changes)
+    assert.ok(recoveredChanges.some((item: any) => item.entity === "agent" && item.agent.id === agent.result.id))
+    assert.ok(recoveredChanges.some((item: any) => item.entity === "workspace" && item.workspace.id === workspace.result.id))
+    assert.equal(
+      recoveredChanges.filter((item: any) => item.entity === "approval" && item.approval?.id === promotion.result.id).at(-1)?.approval.status,
+      "approved",
+    )
+    assert.ok(emitted.some((event) => event.name === "changed"), "legacy clients keep the changed event")
+
+    const reset = await handlers.invoke({ directory, action: "ensemble.reset", payload: { confirmation: "RESET" } })
+    assert.equal(reset.ok, true)
+    const resetPatch = emitted.filter((event) => event.name === "patches").at(-1)!
+    assert.equal(resetPatch.data.reset, true, "a reset asks every client for a full resync")
+    const resetSince = await handlers["changes.since"]({ directory, epoch: resetPatch.data.epoch, version: resetPatch.data.version - 1 })
+    assert.equal(resetSince.reset, true)
+    const cleared = await handlers.snapshot({ directory })
+    assert.deepEqual(Object.keys(cleared.state.agents), [], "the full resync reconstructs an empty shell")
+    assert.deepEqual(Object.keys(cleared.state.workspaces), [])
+    assert.deepEqual(Object.keys(cleared.state.approvals), [])
+    assert.deepEqual(Object.keys(cleared.state.memories), [])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("catalog and config metadata travel on version-neutral patch events", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-shell-meta-"))
+  const { ctx } = fakeContext()
+  const emitted: Array<{ name: string; data: any }> = []
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => (await handlers.snapshot({ directory })).models.length > 0)
+    const before = await handlers.revision({ directory })
+    ctx.skill.list = async () => [{ id: "review", name: "Review", description: "Review changes" }]
+    await (service as any).catalog.refresh()
+
+    const metadata = emitted
+      .filter((event) => event.name === "patches")
+      .map((event) => event.data)
+      .filter((batch) => batch.meta && batch.version === batch.from && batch.entries.length === 0)
+      .at(-1)
+    assert.ok(metadata, "a catalog refresh publishes a version-neutral metadata batch")
+    assert.equal(metadata.version, before.version, "catalog metadata does not bump the coordination version")
+    assert.ok(metadata.meta.catalogRevision > before.catalogRevision)
+    assert.ok(metadata.meta.skills.some((skill: any) => skill.id === "review"))
+    assert.equal(metadata.meta.directory, directory)
+    assert.ok(typeof metadata.meta.configRevision === "number")
+
+    const since = await handlers["changes.since"]({ directory, epoch: before.epoch, version: before.version })
+    assert.equal(since.reset, false)
+    assert.ok(since.meta)
+    assert.equal(since.meta.catalogRevision, metadata.meta.catalogRevision, "a missed metadata event is recoverable")
+
+    mkdirSync(join(directory, ".ensemble"), { recursive: true })
+    writeFileSync(join(directory, ".ensemble", "config.json"), `${JSON.stringify({ version: 1, name: "broken", leader: "Ghost", members: ["Ghost"] }, null, 2)}\n`)
+    await waitFor(() => Promise.resolve(emitted.some((event) => event.name === "patches" && typeof event.data.meta?.configError === "string")), 4000)
+    const broken = emitted.filter((event) => event.name === "patches" && typeof event.data.meta?.configError === "string").at(-1)!
+    assert.match(broken.data.meta.configError, /unknown or ambiguous/i)
+    assert.equal(broken.data.meta.directory, directory)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

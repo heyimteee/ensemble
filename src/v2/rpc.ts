@@ -7,7 +7,7 @@ const directory = {
   additionalProperties: false,
 }
 
-/** Ticket #138: one full-entity work change plus its coordination version. */
+/** Ticket #138/#140: one entity-change set plus its coordination version. */
 const changeEntry = {
   type: "object",
   properties: {
@@ -16,9 +16,29 @@ const changeEntry = {
       type: "array",
       items: { type: "object", additionalProperties: true },
     },
+    entities: {
+      type: "array",
+      items: { type: "object", additionalProperties: true },
+    },
     other: { type: "boolean" },
+    nonEntity: { type: "boolean" },
   },
   required: ["version", "changes"],
+  additionalProperties: false,
+}
+
+/** Ticket #140: catalog/config metadata carried beside the entity feed. */
+const feedMeta = {
+  type: "object",
+  properties: {
+    catalogRevision: { type: "number" },
+    models: { type: "array", items: { type: "object", additionalProperties: true } },
+    skills: { type: "array", items: { type: "object", additionalProperties: true } },
+    modelsError: { type: "string" },
+    directory: { type: "string" },
+    configRevision: { type: "number" },
+    configError: { type: "string" },
+  },
   additionalProperties: false,
 }
 
@@ -28,6 +48,7 @@ const patchFields = {
   version: { type: "number" },
   entries: { type: "array", items: changeEntry },
   reset: { type: "boolean" },
+  meta: feedMeta,
 }
 
 export const EnsembleV2Rpc = Rpc.define({
@@ -86,6 +107,7 @@ export const EnsembleV2Rpc = Rpc.define({
           version: { type: "number" },
           reset: { type: "boolean" },
           entries: { type: "array", items: changeEntry },
+          meta: feedMeta,
         },
         required: ["epoch", "version", "reset", "entries"],
         additionalProperties: false,
