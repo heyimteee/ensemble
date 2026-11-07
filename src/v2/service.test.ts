@@ -1168,6 +1168,33 @@ test("deleting an agent replaces the leader, cancels work, and removes sessions"
   }
 })
 
+test("workspace_info refreshes a binding written after startup", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [nova.result.id], leaderID: nova.result.id } })
+    const externalSession = "ses_external_binding"
+    await ctx.storage.set(`v2/binding/${workspace.result.id}/${nova.result.id}`, {
+      workspaceID: workspace.result.id,
+      agentID: nova.result.id,
+      sessionID: externalSession,
+      kind: "workspace",
+      directory,
+      agentVersion: 1,
+      updatedAt: Date.now(),
+    })
+    const info = await tools.get("workspace_info").execute({}, { sessionID: externalSession })
+    assert.match(info.content, /site/)
+    assert.match(info.content, /Nova/)
+  } finally {
+    await stop()
+  }
+})
+
 test("session creation failures mark a subtask failed with an explanation", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
@@ -1293,6 +1320,7 @@ test("workspace config is authoritative and can register a workspace on discover
     assert.deepEqual(workspace.memberIDs, [nova.result.id, sage.result.id])
     assert.equal(workspace.synthesis, false)
     assert.equal(workspace.paused, true)
+    assert.equal(workspace.configVersion, 1)
     writeFileSync(join(directory, ".ensemble", "config.json"), JSON.stringify({ version: 1, name: "Edited", leader: "Nova", members: ["Nova"], synthesis: true, paused: false }))
     const edited = await handlers.snapshot({ directory })
     const current = Object.values(edited.state.workspaces)[0] as any

@@ -1315,8 +1315,9 @@ export function EnsembleV2App() {
   const workCards = createMemo(() => {
     const now = Date.now()
     const active = activeTasks()
+    const activeItems = orderedWorkItems(active, now)
     const recent = recentWorkItems(active, now)
-    const layout = workGridLayout(workContentWidth(), viewHeight(), active.length, recent.length)
+    const layout = workGridLayout(workContentWidth(), viewHeight(), activeItems.length, recent.length)
     const pendingApprovalSet = pendingApprovalIDs()
     const nativeBlockedSet = nativeBlockedSubtaskIDs()
     const options: WorkCardOptions = {

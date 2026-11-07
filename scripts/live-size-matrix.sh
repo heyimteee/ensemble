@@ -242,7 +242,7 @@ check_size() {
   if [[ "$size" == "80x24" ]]; then
     live_capture_matches "$LIVE_TUI_SESSION" "› .*$a" || live_fail "compact Work row did not take the cursor at $size"
   else
-    live_capture_matches "$LIVE_TUI_SESSION" "› .*SizeAgent1" || live_fail "first Work card did not take the cursor at $size"
+    live_capture_matches "$LIVE_TUI_SESSION" "› .*SIZE" || live_fail "first Work card did not take the cursor at $size"
   fi
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc leaves the Work list at $size"
