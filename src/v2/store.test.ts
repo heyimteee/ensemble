@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
-import type { Agent, Subtask, Workspace } from "./types.ts"
+import type { Agent, Message, Subtask, Workspace } from "./types.ts"
 
 function fakeContext() {
   const values = new Map<string, unknown>()
@@ -34,6 +34,9 @@ const workspace = (patch: Partial<Workspace> = {}): Workspace => ({
 const subtask = (patch: Partial<Subtask> = {}): Subtask => ({
   id: "t", workspaceID: "w", creatorType: "user", title: "Task", instruction: "Do", mode: "research",
   state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 1, ...patch,
+})
+const message = (patch: Partial<Message> = {}): Message => ({
+  id: "m", workspaceID: "w", seq: 1, author: "agent", text: "reply", kind: "text", createdAt: 1, ...patch,
 })
 
 test("store reloads settings, UI state, and bindings", async () => {
@@ -291,4 +294,53 @@ test("retrying a move after an interruption between phases loses nothing", async
   assert.equal(snapshot.dmTranscripts["home:a"], undefined)
   const remaining = await (store as any).scanAll("v2/dm/home/a/")
   assert.equal(remaining.length, 0)
+})
+
+test("streaming rows are indexed across save, foreign sync, and removal", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveWorkspace(workspace({ nextSeq: 3 }))
+  const live = message({ id: "m1", seq: 1, streaming: true, text: "partial" })
+  await store.saveMessage(live)
+  assert.deepEqual(store.streamingMessages(), [{ workspaceID: "w", messageID: "m1" }])
+  await store.saveMessage({ ...live, streaming: false, text: "done" })
+  assert.deepEqual(store.streamingMessages(), [])
+
+  const writer = new V2Store(ctx)
+  await writer.load()
+  await writer.saveMessage(message({ id: "m2", seq: 2, streaming: true, text: "foreign partial" }))
+  assert.equal(await store.sync(), true)
+  assert.deepEqual(store.streamingMessages(), [{ workspaceID: "w", messageID: "m2" }])
+
+  await store.removePrefix("v2/message/w/")
+  assert.deepEqual(store.streamingMessages(), [])
+})
+
+test("foreign-version sync merges 10k messages within budget", async (t) => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveAgent(agent())
+  await store.saveWorkspace(workspace({ nextSeq: 5_001 }))
+  for (let seq = 1; seq <= 5_000; seq++) {
+    ctx.values.set(`v2/message/w/${String(seq).padStart(8, "0")}`, message({ id: `m${seq}`, seq, text: "x".repeat(500), createdAt: seq }))
+  }
+  const reader = new V2Store(ctx)
+  await reader.load()
+  assert.equal(reader.messages("w").length, 5_000)
+  for (let seq = 5_001; seq <= 10_000; seq++) {
+    ctx.values.set(`v2/message/w/${String(seq).padStart(8, "0")}`, message({ id: `m${seq}`, seq, text: "x".repeat(500), createdAt: seq }))
+  }
+  const meta = ctx.values.get("v2/meta") as { version: number }
+  ctx.values.set("v2/meta", { ...(meta as object), version: meta.version + 1 })
+
+  const started = performance.now()
+  assert.equal(await reader.sync(), true)
+  const elapsed = performance.now() - started
+  const merged = reader.messages("w")
+  assert.equal(merged.length, 10_000)
+  assert.deepEqual([merged[0].seq, merged.at(-1)?.seq], [1, 10_000])
+  t.diagnostic(`10k foreign message sync=${elapsed.toFixed(1)}ms`)
+  assert.ok(elapsed < 500, `10k foreign message sync ${elapsed.toFixed(1)}ms must stay under the 500ms budget`)
 })

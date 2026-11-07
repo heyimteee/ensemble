@@ -63,6 +63,23 @@ export class V2Store {
   private readonly ctx: Ctx
   private state: SnapshotState
   private readonly onChange?: (version: number) => void
+  /**
+   * Live streaming rows indexed by `workspaceID + NUL + messageID`. Maintenance
+   * settles only these rows instead of scanning every message in every
+   * workspace. Kept in sync by `saveMessage`/`appendMessage` and the storage
+   * merge; cleared on load/reset/prune.
+   */
+  private readonly streaming = new Set<string>()
+
+  private static streamingKey(workspaceID: string, messageID: string): string {
+    return `${workspaceID}\u0000${messageID}`
+  }
+
+  private trackStreaming(message: Message): void {
+    const key = V2Store.streamingKey(message.workspaceID, message.id)
+    if (message.streaming) this.streaming.add(key)
+    else this.streaming.delete(key)
+  }
 
   constructor(ctx: Ctx, onChange?: (version: number) => void) {
     this.ctx = ctx
@@ -72,6 +89,7 @@ export class V2Store {
 
   async load(): Promise<void> {
     this.state = createInitialState()
+    this.streaming.clear()
     const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
     if (meta && typeof meta === "object") {
       this.state.version = Number(meta.version ?? 0)
@@ -237,14 +255,19 @@ export class V2Store {
    * both the initial load and sync paths so they cannot drift apart.
    */
   private async mergeDmScan(): Promise<void> {
+    const known = new Set<string>()
+    for (const [binding, list] of Object.entries(this.state.dmTranscripts)) {
+      for (const message of list) known.add(`${binding}\u0000${message.id}`)
+    }
     for (const { value } of await this.scanAll("v2/dm/")) {
       const message = value as ChatMessage & { bindingKey: string }
       if (!message?.id || !message?.bindingKey) continue
+      const key = `${message.bindingKey}\u0000${message.id}`
+      if (known.has(key)) continue
+      known.add(key)
       const list = (this.state.dmTranscripts[message.bindingKey] ??= [])
-      if (!list.some((item) => item.id === message.id)) {
-        const { bindingKey: _dropped, ...rest } = message
-        list.push(rest)
-      }
+      const { bindingKey: _dropped, ...rest } = message
+      list.push(rest)
     }
     for (const list of Object.values(this.state.dmTranscripts)) {
       list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -339,11 +362,28 @@ export class V2Store {
       if (current?.state === "running" && job.state === "running") continue
       this.state.initJobs[job.id] = job
     }
+    const knownMessages = new Map<string, Set<string>>()
+    for (const [workspaceID, list] of Object.entries(this.state.messages)) {
+      const ids = new Set<string>()
+      for (const message of list) ids.add(message.id)
+      knownMessages.set(workspaceID, ids)
+    }
     for (const { value } of await this.scanAll("v2/message/")) {
       const message = value as Message
       if (!message?.workspaceID || !message?.id) continue
+      let ids = knownMessages.get(message.workspaceID)
+      if (!ids) {
+        ids = new Set<string>()
+        knownMessages.set(message.workspaceID, ids)
+      }
+      // Merge by id in one pass: the stored scan is linear and the local id
+      // index turns the duplicate check into O(1) instead of a list scan per
+      // foreign row (the old merge was quadratic at 10k messages).
+      if (ids.has(message.id)) continue
+      ids.add(message.id)
       const list = (this.state.messages[message.workspaceID] ??= [])
-      if (!list.some((item) => item.id === message.id)) list.push(message)
+      list.push(message)
+      this.trackStreaming(message)
     }
     for (const list of Object.values(this.state.messages)) {
       list.sort((a, b) => a.seq - b.seq)
@@ -441,6 +481,18 @@ export class V2Store {
 
   allMessages(): ReadonlyArray<readonly Message[]> {
     return Object.values(this.state.messages)
+  }
+
+  /**
+   * Active streaming rows only, as maintenance input. This index is updated on
+   * every save/merge/remove, so terminal-stream settling never scans the
+   * transcript.
+   */
+  streamingMessages(): Array<{ workspaceID: string; messageID: string }> {
+    return [...this.streaming].map((key) => {
+      const separator = key.indexOf("\u0000")
+      return { workspaceID: key.slice(0, separator), messageID: key.slice(separator + 1) }
+    })
   }
 
   approvals(): Approval[] {
@@ -577,6 +629,7 @@ export class V2Store {
     const list = (this.state.messages[workspaceID] ??= [])
     list.push(message)
     list.sort((a, b) => a.seq - b.seq)
+    this.trackStreaming(message)
     await this.ctx.storage.set(`v2/message/${workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
     await this.ctx.storage.set(`v2/workspace/${workspaceID}`, workspace)
     await this.bump()
@@ -666,6 +719,7 @@ export class V2Store {
     if (index >= 0) list[index] = message
     else list.push(message)
     list.sort((a, b) => a.seq - b.seq)
+    this.trackStreaming(message)
     await this.ctx.storage.set(`v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
     await this.bump()
   }
@@ -689,6 +743,9 @@ export class V2Store {
     const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
     const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
     delete this.state.messages[workspaceID]
+    for (const key of [...this.streaming]) {
+      if (key.startsWith(`${workspaceID}\u0000`)) this.streaming.delete(key)
+    }
     for (const id of subtaskIDs) delete this.state.subtasks[id]
     for (const id of initJobIDs) delete this.state.initJobs[id]
     for (const [key, binding] of Object.entries(this.state.bindings)) if (binding.workspaceID === workspaceID) delete this.state.bindings[key]
@@ -734,6 +791,8 @@ export class V2Store {
     }
     if (parts[1] === "message" && parts[2]) {
       const sequence = parts[3]
+      const removed = (this.state.messages[parts[2]] ?? []).filter((message) => String(message.seq).padStart(8, "0") === sequence)
+      for (const message of removed) this.streaming.delete(V2Store.streamingKey(parts[2], message.id))
       this.state.messages[parts[2]] = (this.state.messages[parts[2]] ?? []).filter((message) => String(message.seq).padStart(8, "0") !== sequence)
       if (this.state.messages[parts[2]].length === 0) delete this.state.messages[parts[2]]
     }
@@ -758,6 +817,7 @@ export class V2Store {
     }
     await this.ctx.storage.remove("v2/meta")
     this.state = createInitialState()
+    this.streaming.clear()
     await this.bump()
   }
 
