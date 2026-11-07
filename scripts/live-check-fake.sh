@@ -28,6 +28,30 @@ live_require_active_work() {
     || live_fail "TUI did not show: $description"
 }
 
+# Ticket #137: a Work card header reads `NAME<pad>GLYPH STATUS`; green is
+# reserved for REPLIED and the name may truncate before the status word.
+live_capture_work_card() {
+  local session="$1" agent="$2" status="$3"
+  live_capture "$session" | grep -Eq "${agent} +[^ ]+ ${status}"
+}
+
+live_require_work_card() {
+  local session="$1" agent="$2" status="$3" seconds="${4:-$LIVE_STEP_TIMEOUT}" description="${5:-$agent $status card}"
+  live_wait_for "$seconds" "$description" live_capture_work_card "$session" "$agent" "$status" \
+    || live_fail "TUI did not show: $description"
+}
+
+live_assert_absence_work_card() {
+  local session="$1" agent="$2" status="$3" description="${4:-absence of $agent $status card}"
+  live_capture_work_card "$session" "$agent" "$status" && live_fail "TUI unexpectedly shows: $description"
+  return 0
+}
+
+live_count_work_card() {
+  local session="$1" agent="$2" status="$3"
+  live_capture "$session" | { grep -oE "${agent} +[^ ]+ ${status}" || true; } | wc -l | tr -d ' '
+}
+
 # v5.8 T2/T3: deterministic project skills give the composer palette real
 # host catalog rows to assign and invoke. OpenCode discovers project skills
 # from .opencode/skills/<name>/SKILL.md before the server starts.
@@ -628,7 +652,7 @@ live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message poste
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_active_work "$LIVE_TUI_SESSION" 15 "ephemeral work block mounts while active"
-live_require_text "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" 15 "work card loading state with assignee"
+live_require_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" 15 "work card loading state with assignee"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 # Slice B: live activity lines animate across the approved ten-frame Braille
 # working set (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏). Bursts finalize in about half a second on this
@@ -646,10 +670,10 @@ collect_work_frames() {
   local rounds="${1:-16}" _ pane frame tide_row work_sample
   for _ in $(seq 1 "$rounds"); do
     pane=$(live_capture "$LIVE_TUI_SESSION")
-    work_sample=$(grep -n -A 4 'FAKEAGENT WORKING' <<<"$pane" | head -n 12 || true)
+    work_sample=$(grep -n -A 4 -E 'FAKEAGENT.*WORKING' <<<"$pane" | head -n 12 || true)
     [[ -n "$work_sample" ]] && seen_work_sample="$work_sample"
     for frame in "⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"; do
-      if grep -qF -- "${frame} FAKEAGENT WORKING" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
+      if grep -qE "FAKEAGENT +${frame} WORKING" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
         seen_which="${seen_which}${frame}"
         seen_frames=$((seen_frames + 1))
       fi
@@ -657,7 +681,10 @@ collect_work_frames() {
     # Ticket #116/#127: the Work card tide row is a full-width one-row strip
     # of block glyphs inside the chat border. Distinct captures prove the
     # 10 fps tide advances.
-    tide_row=$(grep -oE '([▁▂▃▄▅▆▇█] ?){16,}' <<<"$pane" | tr '\n' '|' || true)
+    # Ticket #137: the default 160-wide card interior yields 15 sampled
+    # columns (tideColumns clamps to 8–64), so require the documented minimum
+    # rather than a 16-pair floor that no approved card width reaches here.
+    tide_row=$(grep -oE '([▁▂▃▄▅▆▇█] ?){8,}' <<<"$pane" | tr '\n' '|' || true)
     if [[ -n "$tide_row" && "$seen_tide_rows" != *"$tide_row"* ]]; then
       seen_tide_rows="${seen_tide_rows}${tide_row}"$'\n'
       seen_tides=$((seen_tides + 1))
@@ -699,8 +726,8 @@ live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-alpha"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-beta" 15 "terminal announcement for second work"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal outcome announced exactly once"
 live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the shared group hold"
-live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" "no active cards remain in the block"
-live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT REPLIED" "no finished cards remain after the group hold"
+live_assert_absence_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" "no active cards remain in the block"
+live_assert_absence_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "REPLIED" "no finished cards remain after the group hold"
 live_assert_absence "$LIVE_TUI_SESSION" "│ working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
 # and no needs-you marker appears without user-blocked work in this flow.
@@ -708,7 +735,7 @@ live_assert_absence "$LIVE_TUI_SESSION" "Stopping…" "no stuck stop label after
 live_assert_absence "$LIVE_TUI_SESSION" "Cancelling…" "no stuck cancel label after terminal"
 live_assert_absence "$LIVE_TUI_SESSION" "Retrying…" "no stuck retry label after terminal"
 live_assert_absence "$LIVE_TUI_SESSION" "Restarting…" "no stuck restart label after terminal"
-live_assert_absence "$LIVE_TUI_SESSION" "needs you" "no needs-you marker without blocked work"
+live_assert_absence "$LIVE_TUI_SESSION" "NEEDS YOU" "no needs-you marker without blocked work"
 # Review fix (finding 4): stagger is glyph/color-only with no text marker, so
 # text anchors stay stable; finalization order is unaffected and each row
 # renders exactly once (no per-chunk re-animation duplicates). Deterministic
@@ -748,7 +775,7 @@ live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent 
 live_require_active_work "$LIVE_TUI_SESSION" 15 "work block mounts fresh for the new burst"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
 live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking verb renders once, on the Work card only"
-live_assert_count "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" 1 "fresh burst lists only its own active card"
+[[ "$(live_count_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING")" == "1" ]] || live_fail "fresh burst lists only its own active card"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
 # Review fix (finding 1): queued rows are DM-only by construction, so the
 # group surface never offers `[x remove]` — `x` there keeps cancelling work.
@@ -763,7 +790,7 @@ done
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished:" 15 "peer turn announced once"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 3 "two delegation rows plus one peer row, no duplicates"
 live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the peer burst"
-live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" "no active cards remain after the peer burst"
+live_assert_absence_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" "no active cards remain after the peer burst"
 live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
 # Slice C: the relayed answer lands headed `Answer from $Name` (correlation
 # link, not a second independent turn); the asking row is gone with it, and
@@ -1699,7 +1726,8 @@ live_require_text "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leav
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "⠋ FAKEAGENT WORKING" 15 "frame-0 Work card under reduced motion"
+live_require_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" 15 "frame-0 Work card under reduced motion"
+live_capture_matches "$LIVE_TUI_SESSION" "FAKEAGENT +⠋ WORKING" || live_fail "reduced-motion Work card is not on frame 0"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 for _ in $(seq 1 8); do

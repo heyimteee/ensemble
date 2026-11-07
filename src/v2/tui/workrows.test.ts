@@ -25,6 +25,12 @@ import {
   terminalAnnouncements,
   workCardDetail,
   workCardForTask,
+  workCardHeader,
+  workCardHeaderText,
+  workCardStateWord,
+  workCardTones,
+  workCompactRow,
+  workCompactRowText,
   workCardsForTasks,
   workGlyph,
   workRowFrame,
@@ -391,9 +397,9 @@ test("ticket115: work cards map agent, glyph, state, title, detail, and a full-w
       detailFor: () => "reading src/auth.ts",
     },
   )
-  assert.equal(card.agent, "Nova")
-  assert.equal(card.glyph, "⠹")
-  assert.equal(card.state, "working")
+  assert.equal(card.header.name, "NOVA")
+  assert.equal(card.header.glyph, "⠹")
+  assert.equal(card.header.status, "WORKING")
   assert.equal(card.status, "working")
   assert.equal(card.title, "Check the build")
   assert.equal(card.detail, "reading src/auth.ts")
@@ -404,8 +410,8 @@ test("ticket115: work cards map agent, glyph, state, title, detail, and a full-w
 
 test("ticket115: contract details are honest for queued, retrying, and stopped work", () => {
   const pend = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 0, width: 40 })
-  assert.equal(pend.state, "pending")
-  assert.equal(pend.glyph, "▫")
+  assert.equal(pend.header.status, "QUEUED")
+  assert.equal(pend.header.glyph, "▫")
   assert.equal(pend.detail, "queued")
 
   const retrying = workCardForTask(
@@ -413,7 +419,7 @@ test("ticket115: contract details are honest for queued, retrying, and stopped w
     "Nova",
     { now: 1000, tick: 0, width: 40, detailFor: () => "retrying…" },
   )
-  assert.equal(retrying.state, "retrying")
+  assert.equal(retrying.header.status, "RETRYING")
   assert.equal(retrying.detail, "retrying…")
 
   const stopping = workCardForTask(
@@ -421,14 +427,14 @@ test("ticket115: contract details are honest for queued, retrying, and stopped w
     "Nova",
     { now: 1000, tick: 0, width: 40, pendingFor: (item) => (item.id === "t" ? "cancel" : null) },
   )
-  assert.equal(stopping.state, "working")
+  assert.equal(stopping.header.status, "WORKING")
   assert.equal(stopping.detail, "Cancelling…")
 })
 
 test("ticket115: needs-you cards carry the static marker and waiting detail", () => {
   const card = workCardForTask(task({ interrupted: true }), "Nova", { now: 1000, tick: 3, width: 40 })
-  assert.equal(card.glyph, NEEDS_YOU_MARK)
-  assert.equal(card.state, "needs you")
+  assert.equal(card.header.glyph, NEEDS_YOU_MARK)
+  assert.equal(card.header.status, "NEEDS YOU")
   assert.equal(card.detail, "waiting for you…")
   assert.equal(card.needsYou, true)
 })
@@ -482,8 +488,8 @@ test("ticket136: terminal cards keep their final glyph, state word, and a flat s
     assert.equal(card.terminal, true)
     assert.equal(card.needsYou, false, "terminal cards never light needs-you")
     assert.equal(card.detail, state, "terminal details ignore pending/activity callbacks")
-    assert.equal(card.glyph, glyph)
-    assert.equal(card.state, state)
+    assert.equal(card.header.glyph, glyph)
+    assert.equal(card.header.status, state.toUpperCase())
     assert.equal(card.tideVariant, "travel", "the active assignment carries into the terminal card")
     assert.ok(card.tideLevels.every((level) => level === 0), "terminal cards stay settled flat")
     assert.equal(card.tide, "▁ ".repeat(20))
@@ -499,7 +505,7 @@ test("ticket136: a terminal card with a still-pending approval is still display-
   )
   assert.equal(card.terminal, true)
   assert.equal(card.needsYou, false, "the group remains visible through its own needs-you check")
-  assert.equal(card.state, "replied")
+  assert.equal(card.header.status, "REPLIED")
 })
 
 test("ticket116: a working card keeps its assigned variant and advances the strip", () => {
@@ -549,6 +555,102 @@ test("ticket116: card mapping keeps one stable variant per subtask across polls"
     })
   assert.deepEqual(render(1).map((card) => card.tideVariant), ["echo", "travel"])
   assert.deepEqual(render(9).map((card) => card.tideVariant), ["echo", "travel"])
+})
+
+test("ticket137: work-card tones reserve green for replied and state colors for the bar", () => {
+  assert.deepEqual(workCardTones("pending", false), { glyph: "faint", status: "muted", bar: "faint" })
+  assert.deepEqual(workCardTones("working", false), { glyph: "warn", status: "muted", bar: "warn" })
+  assert.deepEqual(workCardTones("retrying", false), { glyph: "warn", status: "muted", bar: "warn" })
+  assert.deepEqual(workCardTones("replied", false), { glyph: "good", status: "good", bar: "good" })
+  assert.deepEqual(workCardTones("failed", false), { glyph: "bad", status: "bad", bar: "bad" })
+  assert.deepEqual(workCardTones("cancelled", false), { glyph: "faint", status: "faint", bar: "faint" })
+  assert.deepEqual(workCardTones("working", true), { glyph: "warn", status: "warn", bar: "warn" })
+  assert.deepEqual(workCardTones("pending", true), { glyph: "warn", status: "warn", bar: "warn" })
+})
+
+test("ticket137: state words are uppercase and queued never reads as pending", () => {
+  assert.equal(workCardStateWord("pending", false), "QUEUED")
+  assert.equal(workCardStateWord("working", false), "WORKING")
+  assert.equal(workCardStateWord("retrying", false), "RETRYING")
+  assert.equal(workCardStateWord("replied", false), "REPLIED")
+  assert.equal(workCardStateWord("failed", false), "FAILED")
+  assert.equal(workCardStateWord("cancelled", false), "CANCELLED")
+  assert.equal(workCardStateWord("working", true), "NEEDS YOU")
+})
+
+test("ticket137: the header is name, spacer, glyph, then the right-aligned status", () => {
+  const header = workCardHeader("NOVA", "⠋", "WORKING", 19)
+  assert.equal(header.name, "NOVA")
+  assert.equal(header.glyph, "⠋")
+  assert.equal(header.status, "WORKING")
+  assert.equal(workCardHeaderText(header), "NOVA      ⠋ WORKING")
+  assert.equal(workCardHeaderText(header).length, 19, "the status sits at the right edge")
+  assert.ok(workCardHeaderText(header).endsWith("⠋ WORKING"))
+})
+
+test("ticket137: the name truncates first and the status never truncates", () => {
+  const wide = workCardHeader("SIZEAGENT1", "⠋", "WORKING", 19)
+  assert.equal(wide.name, "SIZEAGEN…")
+  assert.equal(workCardHeaderText(wide), "SIZEAGEN… ⠋ WORKING")
+  assert.ok(wide.name.endsWith("…"))
+
+  const narrow = workCardHeader("SIZEAGENT1", "◆", "NEEDS YOU", 12)
+  assert.equal(narrow.name, "", "the name yields before the status")
+  assert.ok(workCardHeaderText(narrow).endsWith("◆ NEEDS YOU"))
+
+  const impossible = workCardHeader("SIZEAGENT1", "◆", "NEEDS YOU", 6)
+  assert.ok(workCardHeaderText(impossible).endsWith("◆ NEEDS YOU"), "the status word is never cut")
+})
+
+test("ticket137: card headers carry the state word, tones, and reduced-motion final glyphs", () => {
+  const working = workCardForTask(
+    task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
+    "Nova",
+    { now: 1000, tick: 9, width: 19, env: { ENSEMBLE_REDUCED_MOTION: "1" } },
+  )
+  assert.equal(working.header.name, "NOVA")
+  assert.equal(working.header.glyph, "⠋")
+  assert.equal(working.header.status, "WORKING")
+  assert.deepEqual(working.tones, { glyph: "warn", status: "muted", bar: "warn" })
+
+  const noColor = workCardForTask(
+    task({ state: "replied", outcome: "succeeded", finishedAt: 1000, repliedAt: 1000 }),
+    "Nova",
+    { now: 1500, tick: 9, width: 40, env: { NO_COLOR: "1" } },
+  )
+  assert.equal(noColor.header.glyph, "●")
+  assert.equal(noColor.header.status, "REPLIED")
+  assert.deepEqual(noColor.tones, { glyph: "good", status: "good", bar: "good" })
+
+  const queued = workCardForTask(task({ state: "pending" }), "Nova", { now: 1000, tick: 3, width: 40 })
+  assert.equal(queued.header.status, "QUEUED")
+  assert.equal(queued.tones.status, "muted")
+  assert.equal(queued.tones.bar, "faint")
+
+  const needsYou = workCardForTask(task({ interrupted: true }), "Nova", { now: 1000, tick: 3, width: 40 })
+  assert.equal(needsYou.header.glyph, NEEDS_YOU_MARK)
+  assert.equal(needsYou.header.status, "NEEDS YOU")
+  assert.deepEqual(needsYou.tones, { glyph: "warn", status: "warn", bar: "warn" })
+})
+
+test("ticket137: compact rows keep the name left, status right, and never truncate the status", () => {
+  const row = workCompactRow("SizeAgent1", "fake-queue-hold", "▫", "WORKING", 38)
+  assert.equal(row.name, "SizeAgent1")
+  assert.equal(row.separator, " │ ")
+  assert.equal(row.title, "fake-queue-hold")
+  assert.equal(row.glyph, "▫")
+  assert.equal(row.status, "WORKING")
+  assert.equal(workCompactRowText(row), "SizeAgent1 │ fake-queue-hold ▫ WORKING")
+  assert.equal(workCompactRowText(row).length, 38)
+
+  const needsYou = workCompactRow("SizeAgent1", "a very long queued title", "◆", "NEEDS YOU", 28)
+  assert.equal(needsYou.name, "SizeAgent1")
+  assert.equal(workCompactRowText(needsYou).endsWith("◆ NEEDS YOU"), true, "the status word survives the tight row")
+  assert.ok(needsYou.title.endsWith("…"), "the title truncates before the status")
+
+  const narrow = workCompactRow("AReallyLongAgentName", "long title", "⠋", "RETRYING", 12)
+  assert.equal(narrow.name.endsWith("…"), true)
+  assert.equal(workCompactRowText(narrow).endsWith("⠋ RETRYING"), true)
 })
 
 test("ticket116: queued cards stay still and terminal cards settle flat", () => {
