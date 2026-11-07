@@ -61,6 +61,13 @@ test("recent Work cards stay mounted while the recent window is open", () => {
   assert.ok(source.includes("recentWorkCardsForTasks("))
 })
 
+test("the TUI reads durable state through the fine-grained client store", () => {
+  // Behavior: client-store.test.ts loading, replacement, and entity isolation.
+  const source = app()
+  assert.ok(source.includes("const client = createClientStore()"))
+  assert.ok(source.includes("client.applySnapshot(next)"))
+})
+
 test("the init row reads durable jobs and advances on the shared motion tick", () => {
   // Behavior: initrow.test.ts labels, stages, and phases; the live init check.
   const source = app()
