@@ -85,7 +85,7 @@ active_count() {
 }
 
 card_header_count() {
-  live_capture "$LIVE_TUI_SESSION" | grep -oE 'SIZEAGE[^ ]* WORKING' | wc -l
+  live_capture "$LIVE_TUI_SESSION" | grep -oE 'SIZE[^ ]* WORKING' | wc -l
 }
 
 live_active_count_is() {
