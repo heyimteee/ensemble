@@ -1,6 +1,6 @@
 import { deriveWorkStatus, isTerminalWorkStatus } from "./queue.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
-import type { Subtask } from "./types.ts"
+import type { Approval, Id, Subtask } from "./types.ts"
 
 /**
  * Ticket #136 dispatch-group Work lifecycle, shared by the TUI pane #141's
@@ -47,7 +47,7 @@ export type WorkGroup = {
   needsYou: boolean
   /** Every member is terminal and none needs the user. */
   complete: boolean
-  /** Latest terminal timestamp across members, the shared hold origin. */
+  /** Latest terminal or approval-resolution timestamp, the shared hold origin. */
   latestTerminalAt?: number
   /** Oldest member creation time; the group's chronological position. */
   createdAt: number
@@ -58,6 +58,8 @@ export type WorkGroupOptions = {
   pendingApprovalIDs?: ReadonlySet<string>
   nativeBlockedSubtaskIDs?: ReadonlySet<string>
   holdMs?: number
+  /** Latest approval resolution time for a member, so the hold starts after the last decision. */
+  resolvedAtForTask?: (task: Subtask) => number | undefined
 }
 
 const NO_IDS: ReadonlySet<string> = new Set<string>()
@@ -71,17 +73,42 @@ function terminalNeedsYou(
   return nativeBlockedSubtaskIDs.has(task.id)
 }
 
-/** Group visibility needs-you: terminal work counts only while a decision is still pending. */
-function memberNeedsYou(
+/** One needs-you rule for live and terminal work: a pending decision outranks terminal state. */
+export function taskNeedsYou(
   task: Subtask,
-  status: ReturnType<typeof deriveWorkStatus>,
+  terminal: boolean,
   pendingApprovalIDs: ReadonlySet<string>,
-  nativeBlockedSubtaskIDs: ReadonlySet<string>,
+  nativeBlockedSubtaskIDs: ReadonlySet<string> = NO_IDS,
 ): boolean {
-  if (isTerminalWorkStatus(status)) {
-    return terminalNeedsYou(task, pendingApprovalIDs, nativeBlockedSubtaskIDs)
-  }
+  if (terminal) return terminalNeedsYou(task, pendingApprovalIDs, nativeBlockedSubtaskIDs)
   return isNeedsYouTask(task, pendingApprovalIDs, nativeBlockedSubtaskIDs)
+}
+
+/**
+ * The latest resolution time linked to each task, from a direct approval or a
+ * native permission mirror. A resolved decision starts a fresh completion hold
+ * instead of letting a long-blocked task clear the instant it resolves.
+ */
+export function approvalResolutionAt(
+  approvals: Record<Id, Approval>,
+): (task: Subtask) => number | undefined {
+  const byApproval = new Map<Id, number>()
+  const bySubtask = new Map<Id, number>()
+  for (const approval of Object.values(approvals)) {
+    if (approval.resolvedAt === undefined) continue
+    byApproval.set(approval.id, approval.resolvedAt)
+    if (approval.subtaskID) {
+      const previous = bySubtask.get(approval.subtaskID)
+      if (previous === undefined || approval.resolvedAt > previous) bySubtask.set(approval.subtaskID, approval.resolvedAt)
+    }
+  }
+  return (task) => {
+    const direct = task.approvalID ? byApproval.get(task.approvalID) : undefined
+    const native = bySubtask.get(task.id)
+    if (direct === undefined) return native
+    if (native === undefined) return direct
+    return Math.max(direct, native)
+  }
 }
 
 /** Active members first (working/retrying, then queued), terminal members by finish time. */
@@ -136,14 +163,19 @@ export function workGroupsForTasks(
     for (const task of ordered) {
       createdAt = Math.min(createdAt, task.createdAt)
       const status = deriveWorkStatus(task, now)
-      if (isTerminalWorkStatus(status)) {
+      const terminal = isTerminalWorkStatus(status)
+      if (terminal) {
         done++
         const finished = workFinishedAt(task)
-        if (finished !== undefined && (latestTerminalAt === undefined || finished > latestTerminalAt)) latestTerminalAt = finished
+        const resolved = options.resolvedAtForTask?.(task)
+        const origin = finished === undefined
+          ? resolved
+          : resolved !== undefined && resolved > finished ? resolved : finished
+        if (origin !== undefined && (latestTerminalAt === undefined || origin > latestTerminalAt)) latestTerminalAt = origin
       } else {
         active++
       }
-      if (memberNeedsYou(task, status, pendingApprovalIDs, nativeBlockedSubtaskIDs)) needsYou = true
+      if (taskNeedsYou(task, terminal, pendingApprovalIDs, nativeBlockedSubtaskIDs)) needsYou = true
     }
     const complete = active === 0 && !needsYou
     const holding =
@@ -205,18 +237,4 @@ export function workGroupCounts(groups: ReadonlyArray<Pick<WorkGroup, "active" |
     active: groups.reduce((total, group) => total + group.active, 0),
     done: groups.reduce((total, group) => total + group.done, 0),
   }
-}
-
-/** The Work header names groups, active work, and terminal work; "recent" is gone. */
-export function workSummaryCounts(groupCount: number, activeCount: number, doneCount: number): string {
-  const groups = Math.max(0, Math.floor(groupCount))
-  const active = Math.max(0, Math.floor(activeCount))
-  const done = Math.max(0, Math.floor(doneCount))
-  if (groups === 0 && active === 0 && done === 0) return "WORK │ none yet"
-  return `WORK ${groups} ${groups === 1 ? "group" : "groups"} · ${active} active · ${done} done`
-}
-
-/** A subtle label shown only when more than one group is visible. */
-export function workGroupLabel(group: Pick<WorkGroup, "active" | "done">, ordinal: number): string {
-  return `GROUP ${Math.max(1, Math.floor(ordinal))} · ${group.active} active · ${group.done} done`
 }

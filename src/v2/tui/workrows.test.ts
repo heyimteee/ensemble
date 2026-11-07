@@ -516,7 +516,7 @@ test("ticket136: terminal cards keep their final glyph, state word, and a flat s
       pendingApprovalIDs: new Set(["ap"]),
     })
     assert.equal(card.terminal, true)
-    assert.equal(card.needsYou, false, "terminal cards never light needs-you")
+    assert.equal(card.needsYou, false, "a terminal card without a pending decision keeps its final state")
     assert.equal(card.detail, state, "terminal details ignore pending/activity callbacks")
     assert.equal(card.header.glyph, glyph)
     assert.equal(card.header.status, state.toUpperCase())
@@ -527,15 +527,28 @@ test("ticket136: terminal cards keep their final glyph, state word, and a flat s
   assert.equal(cardWithMotion(task({ state: "pending" }), "Nova", { now: 1_000, tick: 0, width: 40 }).terminal, false)
 })
 
-test("ticket136: a terminal card with a still-pending approval is still display-only", () => {
+test("ticket136: a terminal card with a still-pending approval keeps the NEEDS YOU treatment", () => {
   const card = cardWithMotion(
     task({ state: "replied", outcome: "succeeded", approvalID: "ap", finishedAt: 1_000, repliedAt: 1_000 }),
     "Nova",
     { now: 1_500, tick: 2, width: 40, pendingApprovalIDs: new Set(["ap"]) },
   )
-  assert.equal(card.terminal, true)
-  assert.equal(card.needsYou, false, "the group remains visible through its own needs-you check")
-  assert.equal(card.header.status, "REPLIED")
+  assert.equal(card.terminal, true, "the card stays display-only")
+  assert.equal(card.needsYou, true, "a terminal task with a pending decision still needs the user")
+  assert.equal(card.header.status, "NEEDS YOU")
+  assert.equal(card.header.glyph, NEEDS_YOU_MARK)
+  assert.deepEqual(card.tones, { glyph: "warn", status: "warn", bar: "warn" })
+  assert.equal(card.detail, "waiting for you…")
+})
+
+test("ticket68: a terminal card blocked by a native approval mirror also keeps NEEDS YOU", () => {
+  const card = cardWithMotion(
+    task({ state: "replied", outcome: "succeeded", finishedAt: 1_000, repliedAt: 1_000 }),
+    "Nova",
+    { now: 1_500, tick: 2, width: 40, nativeBlockedSubtaskIDs: new Set(["t"]) },
+  )
+  assert.equal(card.needsYou, true)
+  assert.equal(card.header.status, "NEEDS YOU")
 })
 
 test("ticket116: a working card keeps its assigned variant and advances the strip", () => {

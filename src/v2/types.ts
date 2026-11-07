@@ -505,6 +505,8 @@ export type Revision = {
   /** Ticket #141: server-derived counts; absent on older servers. */
   counts?: Record<Id, WorkspaceCounts>
   scopeVersions?: ScopeVersions
+  /** Ticket #141: the current gate decision, so a growing workspace can switch paths. */
+  gate?: Tier3Gate
 }
 
 /**
@@ -533,9 +535,6 @@ export type EntityChange =
   | { entity: "initJob"; op: "remove"; id: Id }
   | { entity: "settings"; op: "upsert"; settings: Settings }
   | { entity: "ui"; op: "upsert"; ui: SnapshotState["ui"] }
-
-/** @deprecated Ticket #138 name; use `EntityChange`. */
-export type WorkEntityChange = EntityChange
 
 /**
  * Catalog/config metadata carried beside the durable feed but not versioned

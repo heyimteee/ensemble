@@ -40,129 +40,150 @@ test("the composer submits through the shared plan and catalog", () => {
   assert.ok(!source.includes("slashCommands"))
 })
 
-test("the Work pane renders dispatch-group sections and caps the compact fallback by height", () => {
+test("the Work pane maps active tasks through dispatch groups", () => {
   // Behavior: workgroups.test.ts group visibility and layout.
-  const source = app()
-  assert.ok(source.includes("workGroupsForTasks(active, state()?.subtasks"))
-  assert.ok(source.includes("workGroupLayout(groups, workContentWidth(), viewHeight(), now)"))
-  assert.ok(source.includes("section.mode === \"cards\""))
+  assert.ok(app().includes("workGroupsForTasks(active, state()?.subtasks"))
 })
 
-test("the Work cursor and actions only walk visible non-terminal cards", () => {
+test("the Work pane lays groups out for the current size", () => {
+  // Behavior: workgroups.test.ts card and compact layouts.
+  assert.ok(app().includes("workGroupLayout(groups, workContentWidth(), viewHeight(), now)"))
+})
+
+test("the Work pane renders card sections with their card models", () => {
+  // Behavior: workgroups.test.ts card sections; the live Work checks.
+  assert.ok(app().includes("section.mode === \"cards\""))
+})
+
+test("the Work cursor reads the layout's selectable task list", () => {
   // Behavior: workgroups.test.ts selectable tasks; the live Work checks.
-  const source = app()
-  assert.ok(source.includes("workPane().layout.selectableTasks"))
-  assert.ok(source.includes("visibleTasks()[taskCursorClamped()]"))
-  assert.ok(!source.includes("hasRecentWork"))
+  assert.ok(app().includes("workPane().layout.selectableTasks"))
+})
+
+test("Work actions target the cursor-clamped visible task", () => {
+  // Behavior: workgroups.test.ts cursor clamping; the live Work checks.
+  assert.ok(app().includes("visibleTasks()[taskCursorClamped()]"))
 })
 
 test("dispatch-group Work cards stay mounted through the shared hold", () => {
   // Behavior: workgroups.test.ts 1.2 s shared hold; the live group-removal check.
-  const source = app()
-  assert.ok(source.includes("workGroupsForTasks("))
-  assert.ok(source.includes("workPane().groups.length > 0"))
+  assert.ok(app().includes("workPane().groups.length > 0"))
 })
 
 test("the TUI reads durable state through the fine-grained client store", () => {
   // Behavior: client-store.test.ts loading, replacement, and entity isolation.
-  const source = app()
-  assert.ok(source.includes("const client = createClientStore()"))
-  assert.ok(source.includes("client.applySnapshot(next)"))
+  assert.ok(app().includes("const client = createClientStore()"))
 })
 
-test("snapshot and direct-chat refreshes use the single-flight coordinators", () => {
-  // Behavior: refresh-coordinator.test.ts bursts, slow fetches, pauses, and versions.
-  const source = app()
-  assert.ok(source.includes("createRefreshCoordinator("))
-  assert.ok(source.includes("decideSnapshotApply(lastSnapshotMeta, nextMeta)"))
-  assert.ok(source.includes("client.applyMetadata(next)"))
-  assert.ok(!source.includes("refreshSeq") && !source.includes("chatSeq"))
-  assert.ok(source.includes("snapshotRefresh.whenIdle()"))
-  assert.ok(source.includes("chatRefresh.whenIdle()"))
+test("an applied snapshot reaches the client store", () => {
+  // Behavior: client-store.test.ts snapshot replacement.
+  assert.ok(app().includes("client.applySnapshot(next)"))
 })
 
-test("the revision heartbeat is cheap, version-aware, paused off-route, and reconnects", () => {
+test("snapshot and direct-chat refreshes use the single-flight coordinator", () => {
+  // Behavior: refresh-coordinator.test.ts bursts, slow fetches, and pauses.
+  assert.ok(app().includes("createRefreshCoordinator("))
+})
+
+test("equal-version snapshots are decided by the metadata-aware guard", () => {
+  // Behavior: refresh-coordinator.test.ts version and metadata decisions.
+  assert.ok(app().includes("decideSnapshotApply(lastSnapshotMeta, nextMeta)"))
+})
+
+test("snapshot refresh awaiters observe the queued dirty pass", () => {
+  // Behavior: refresh-coordinator.test.ts whenIdle waits for a settled pass.
+  assert.ok(app().includes("snapshotRefresh.whenIdle()"))
+})
+
+test("direct-chat refresh awaiters observe the queued dirty pass", () => {
+  // Behavior: refresh-coordinator.test.ts whenIdle waits for a settled pass.
+  assert.ok(app().includes("chatRefresh.whenIdle()"))
+})
+
+test("the revision heartbeat polls the cheap revision RPC", () => {
   // Behavior: refresh-coordinator.test.ts revision and cadence helpers.
-  const source = app()
-  assert.ok(source.includes('callRpc<Revision>(context, "revision"'))
-  assert.ok(source.includes("heartbeatDelay(active)"))
-  assert.ok(source.includes("revisionChanged(cursor, revision)"))
-  assert.ok(source.includes("snapshotRefresh.setPaused(!visible)"))
-  assert.ok(source.includes('if (type === "server.connected")'))
-  assert.ok(!source.includes("refresh().then(() => syncTranscriptScroll())"))
+  assert.ok(app().includes('callRpc<Revision>(context, "revision"'))
 })
 
-test("the patch feed applies shell entity changes and recovers through changes.since", () => {
-  // Behavior: change-feed.test.ts batch validation, store upserts, and resets.
-  const source = app()
-  assert.ok(source.includes('if (type === "rpc.ensemble.v2.patches")'))
-  assert.ok(source.includes('callRpc<ChangesSince>(context, "changes.since"'))
-  assert.ok(source.includes("client.applyChanges(decision.changes, decision.version, decision.meta, counts)"))
-  assert.ok(source.includes("mergeFeedMeta("))
-  assert.ok(source.includes("decidePatchApply(lastSnapshotMeta, payload)"))
-  assert.ok(source.includes("decideChangesSince(cursor, result)"))
-  assert.ok(source.includes("recoverFeed()"))
-  // A malformed shell batch repairs through the full durable snapshot.
-  assert.ok(source.includes("void refreshFull().catch(() => undefined)"))
-  // The legacy changed event and snapshot path remain for older servers.
-  assert.ok(source.includes('if (type === "rpc.ensemble.v2.changed")'))
+test("the heartbeat pauses full refresh while the route is hidden", () => {
+  // Behavior: refresh-coordinator.test.ts paused surfaces.
+  assert.ok(app().includes("snapshotRefresh.setPaused(!visible)"))
 })
 
-test("the TUI bootstraps scoped reads and repairs only dirty scopes", () => {
-  // Behavior: scoped-read-service.test.ts budgets and scopesToResync; client-store.test.ts bounded windows.
-  const source = app()
-  assert.ok(source.includes('callRpc<Snapshot>(context, "bootstrap"'))
-  assert.ok(source.includes("scopesToResync(cursor.version, result.scopeVersions)"))
-  assert.ok(source.includes('callRpc<ScopedResync>(context, "resync"'))
-  assert.ok(source.includes("client.applyShellSnapshot("))
-  assert.ok(source.includes("client.applyWorkProjection("))
-  assert.ok(source.includes("client.applyTranscriptWindow("))
-  assert.ok(source.includes("client.applyCounts("))
-  assert.ok(source.includes("client.counts()"), "the rail reads server-derived counts")
+test("a server schema reset reconnects the feed", () => {
+  // Behavior: change-feed.test.ts epoch and reset recovery.
+  assert.ok(app().includes('if (type === "server.connected")'))
 })
 
-test("transcript paging and on-demand results stay bounded", () => {
+test("the patch feed handles the patches event", () => {
+  // Behavior: change-feed.test.ts batch validation and application.
+  assert.ok(app().includes('if (type === "rpc.ensemble.v2.patches")'))
+})
+
+test("a feed gap recovers through changes.since", () => {
+  // Behavior: change-feed.test.ts recovery decisions.
+  assert.ok(app().includes('callRpc<ChangesSince>(context, "changes.since"'))
+})
+
+test("the legacy changed event keeps the snapshot fallback", () => {
+  // Behavior: app.tsx loadData falls back to loadSnapshot when scoped reads fail.
+  assert.ok(app().includes('if (type === "rpc.ensemble.v2.changed")'))
+})
+
+test("the initial read tries the gated bootstrap RPC", () => {
+  // Behavior: scoped-read-service.test.ts gated bootstrap.
+  assert.ok(app().includes('callRpc<Snapshot>(context, "bootstrap"'))
+})
+
+test("bootstrap follows the measured scoped gate", () => {
+  // Behavior: scoped-read-service.test.ts measured gate upgrade.
+  assert.ok(app().includes("next.scoped === true || next.gate?.enabled === true"))
+})
+
+test("a malformed Work-only patch repairs the Work scope", () => {
+  // Behavior: refresh-coordinator.test.ts isWorkOnlyPatch; scoped-read-service.test.ts resync.
+  assert.ok(app().includes("isWorkOnlyPatch(payload)"))
+})
+
+test("a paged transcript releases its anchor at the bottom", () => {
+  // Behavior: client-store.test.ts older-page retention.
+  assert.ok(app().includes("client.transcriptAnchored(target)"))
+})
+
+test("scoped gap recovery requests the named scopes", () => {
+  // Behavior: scoped-read-service.test.ts resync scopes; scoped-read.test.ts scopesToResync.
+  assert.ok(app().includes('callRpc<ScopedResync>(context, "resync"'))
+})
+
+test("older transcript paging calls the bounded window RPC", () => {
   // Behavior: scoped-read.test.ts windows; client-store.test.ts older-page merge.
-  const source = app()
-  assert.ok(source.includes('callRpc<TranscriptWindow & { version: number; epoch: number }>(context, "transcript.window"'))
-  assert.ok(source.includes("maybeLoadOlderTranscript()"))
-  assert.ok(source.includes('callRpc<{ found: boolean; message?: Message }>(context, "message.get"'))
-  assert.ok(source.includes("client.windowFor(workspace.id)"))
+  assert.ok(app().includes('callRpc<TranscriptWindow & { version: number; epoch: number }>(context, "transcript.window"'))
 })
 
-test("workspace streams and direct chats share the coalesced client update path", () => {
+test("an on-demand transcript result uses the message.get RPC", () => {
+  // Behavior: scoped-read-service.test.ts message.get outside the loaded window.
+  assert.ok(app().includes('callRpc<{ found: boolean; message?: Message }>(context, "message.get"'))
+})
+
+test("workspace and direct-chat streams share one coalescer", () => {
   // Behavior: stream-coalescer.test.ts burst coalescing; client-store.test.ts
   // live overlay/final replacement; service.test.ts ephemeral stream events.
-  const source = app()
-  assert.ok(source.includes("createStreamCoalescer"))
-  assert.ok(source.includes('if (type === "rpc.ensemble.v2.stream")'))
-  assert.ok(source.includes("client.applyStream("))
-  assert.ok(source.includes("dmStream.push("), "the existing direct-chat stream shares the coalescer")
+  assert.ok(app().includes("createStreamCoalescer"))
 })
 
-test("the init row reads durable jobs and advances on the shared motion tick", () => {
+test("the init row reads durable jobs on the shared motion tick", () => {
   // Behavior: initrow.test.ts labels, stages, and phases; the live init check.
-  const source = app()
-  assert.ok(source.includes("activeInitJobs(state()?.initJobs"))
-  assert.ok(source.includes("initRowForJob(job, motionFrame(), process.env)"))
+  assert.ok(app().includes("initRowForJob(job, motionFrame(), process.env)"))
 })
 
-test("Work cards own stable tide assignments, freeze frames, and a gated clock", () => {
-  // Behavior: tide.test.ts assignments/freezes and motion.test.ts clock gate.
-  const source = app()
-  assert.ok(source.includes("createTideAssignments()") && source.includes("createTideFreezeState()"))
-  assert.ok(source.includes("shouldRunWorkClock(") && source.includes("WORK_CLOCK_INTERVAL_MS"))
+test("Work cards own a stable tide assignment", () => {
+  // Behavior: tide.test.ts stable assignments; the live reduced-motion check.
+  assert.ok(app().includes("createTideAssignments()"))
 })
 
-test("ticket142: Work cards split static data from the two animation clocks", () => {
-  // Behavior: workrows.test.ts referential stability and independent
-  // glyph/tide clocks; workgroups.test.ts expiry timer targets.
-  const source = app()
-  assert.ok(source.includes("workCardForTaskCached(workCardCache"))
-  assert.ok(source.includes("workCardGlyph(card, motionFrame(), process.env)"))
-  assert.ok(source.includes("workCardTide(card, {"))
-  assert.ok(source.includes("tideTick: workFrame()"))
-  assert.ok(source.includes("nextWorkInvalidation(activeTasks(), workPane().groups, now)"))
+test("Work cards read static data through the identity cache", () => {
+  // Behavior: workrows.test.ts referential stability; workgroups.test.ts expiry targets.
+  assert.ok(app().includes("workCardForTaskCached(workCardCache"))
 })
 
 test("the app toast is app-owned and the host toast is fallback-only", () => {

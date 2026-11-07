@@ -1,4 +1,4 @@
-import { workGroupsForTasks } from "./work-groups.ts"
+import { approvalResolutionAt, workGroupsForTasks } from "./work-groups.ts"
 import type { Id, Message, ScopeName, ScopeVersions, SnapshotState, Subtask, Tier3Gate, TranscriptWindow, WorkspaceCounts } from "./types.ts"
 
 /**
@@ -24,15 +24,12 @@ export const TIER3_SNAPSHOT_BYTES = 512 * 1024
 export const TIER3_SNAPSHOT_MS = 120
 
 /** One bootstrap/refresh page of the active transcript. */
-export const TRANSCRIPT_WINDOW_LIMIT = 40
+export const TRANSCRIPT_WINDOW = 40
 /** Largest page a client may request for one transcript window. */
 export const TRANSCRIPT_WINDOW_MAX = 200
 
 /** Hard client-side transcript bound per workspace (ticket #141). */
 export const CLIENT_MESSAGE_LIMIT = 240
-
-/** Terminal Work rows stay cached this long past the visible hold, so a fast sibling update cannot need a resync. */
-export const CLIENT_TASK_GRACE_MS = 10_000
 
 export type Tier3GateInput = {
   messageCount: number
@@ -100,6 +97,7 @@ export function projectVisibleWork(state: SnapshotState, now: number = Date.now(
     ...(holdMs !== undefined ? { holdMs } : {}),
     pendingApprovalIDs: pendingApprovalIDs(state),
     nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(state),
+    resolvedAtForTask: approvalResolutionAt(state.approvals),
   })
   const projected: Record<Id, Subtask> = {}
   for (const group of groups) {
@@ -134,7 +132,7 @@ export function transcriptWindow(
   messages: readonly Message[],
   options: { beforeSeq?: number; limit?: number } = {},
 ): TranscriptWindow {
-  const limit = Math.max(1, Math.min(TRANSCRIPT_WINDOW_MAX, Math.floor(options.limit ?? TRANSCRIPT_WINDOW_LIMIT)))
+  const limit = Math.max(1, Math.min(TRANSCRIPT_WINDOW_MAX, Math.floor(options.limit ?? TRANSCRIPT_WINDOW)))
   const ordered = [...messages].sort((a, b) => a.seq - b.seq)
   const eligible = options.beforeSeq === undefined
     ? ordered

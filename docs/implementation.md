@@ -319,7 +319,7 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 
 ## v7 durable feed and message streaming
 
-- **Message patches.** Durable message append/save/remove publishes full-entity `message` upserts/removes through the protocol-3 patch feed. System and task lines therefore appear without a full snapshot; duplicate and reordered patches are harmless because the client upserts by `(workspaceID, id)` and the version gate drops old batches.
+- **Message patches.** Durable message append/save/remove publishes full-entity `message` upserts/removes through the protocol-3 patch feed. System and task lines therefore appear without a full snapshot; duplicate and reordered patches are harmless because the client upserts by `(workspaceID, id)` and the version gate drops old batches. A remove records a short client tombstone, so a delayed duplicate cannot resurrect a deleted entity; the tombstone map is time- and size-bounded.
 - **Ephemeral live text.** A streaming agent reply publishes a coalesced `stream` event carrying accumulated text for its visible row. The event is version-neutral: it never enters the change ring and never advances the cursor. The client applies it only to a row still marked `streaming`, so a late event cannot overwrite final text.
 - **Checkpoints and finalization.** Live text is checkpointed to storage at a bounded interval with no `v2/meta` version, change-ring entry, or published patch. A crash reloads the last checkpoint, clears `streaming`, and marks the row interrupted. Finalization drops queued live text, persists once through `saveMessage`, and publishes the exact final message upsert; that patch replaces the live overlay exactly once and recovers any missed stream event.
 - **Shared client coalescing.** Workspace stream events and direct-chat native deltas both pass through the same client coalescer, so a chunk burst repaints the visible row once per window rather than once per chunk. Direct-chat finalization clears pending text before the committed transcript refresh.
@@ -335,20 +335,23 @@ disposable read model rebuilt from durable entities when a scope is stale.
   full snapshot payload is at least 512 KiB, or its build took at least 120 ms.
   Small workspaces keep the existing full-snapshot path. The gate, its reason,
   and its measured inputs travel with every bootstrap/resync response
-  (`gate`), and `src/v2/scoped-read.ts` is the single policy source.
+  (`gate`) and the revision heartbeat; `src/v2/scoped-read.ts` is the single
+  policy source. A disabled gate keeps steady-state refreshes on the snapshot
+  path, and the bootstrap measures that snapshot so a borderline workspace can
+  switch paths on the next refresh.
 - **Scoped bootstrap.** `bootstrap` returns shell entities, the visible Work
   projection, one active transcript window (40 rows by default, 200 max), and
   server-derived per-workspace unread/busy counts. The full `snapshot` RPC
   remains the recovery path and still returns the complete state.
 - **Work projection.** Only dispatch groups that are active, needs-you, or
   inside the shared 1.2 s completion hold are included. Long-retained terminal
-  rows (24 h retention) with no visible group do not travel. The client keeps
-  the same visible-set bound plus a short grace so a fast sibling transition
-  never forces a resync.
+  rows (24 h retention) with no visible group do not travel. A fully terminal
+  group whose last approval just resolved starts its hold from that resolution.
 - **Transcript windows.** `transcript.window` pages durable messages by
   `seq` (`beforeSeq`, bounded limit) and reports `hasMoreOlder`. The client
-  keeps at most 240 messages per workspace; paging an older window merges it
-  below the loaded range, while ordinary patches keep the newest rows.
+  keeps at most 240 patched messages per workspace. Paging an older window
+  anchors the loaded range there, so ordinary patches preserve the fetched
+  page; returning to the bottom fetches the newest bounded window.
 - **On-demand results.** A result message outside the loaded window is fetched
   by id through `message.get` when opened; the whole history is never loaded
   to show one result.
@@ -360,11 +363,13 @@ disposable read model rebuilt from durable entities when a scope is stale.
 - **Scoped resync.** The store records the latest version that changed each
   scope (`shell`, `work`, `transcript`). A feed gap asks `changes.since` for
   those versions and calls `resync` with only the scopes whose version moved
-  after the client cursor. An epoch change, malformed response, or failed
-  scoped read falls back to the full snapshot.
-- **Bounded client memory.** Message windows and visible-work pruning are
-  enforced in `src/v2/tui/client-store.ts`; a long-session benchmark feeds
-  thousands of patches and asserts both bounds hold.
+  after the client cursor. A malformed or unknown batch that only mentions Work
+  entities resyncs the Work scope; other malformed responses and epoch changes
+  fall back to the full snapshot.
+- **Bounded client memory.** Patched message windows and visible-work pruning
+  are enforced in `src/v2/tui/client-store.ts`; a long-session benchmark feeds
+  thousands of patches and asserts both bounds hold. A full snapshot remains
+  the legacy recovery path and is applied whole.
 
 The scoped paths are covered by `src/v2/scoped-read.test.ts`,
 `src/v2/scoped-read-service.test.ts`, `src/v2/tui/client-store.test.ts`, and

@@ -17,7 +17,8 @@ import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
-import { V2Store, bindingKey, cloneDebugEnabled, cloneStats } from "./store.ts"
+import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
+import { STREAM_COALESCE_MS } from "./stream-coalescer.ts"
 import type {
   Agent,
   Approval,
@@ -134,8 +135,6 @@ function now(): number {
  */
 const MAINTENANCE_INTERVAL_MS = 1_000
 const CONFIG_DISCOVERY_MS = 1_000
-/** Ticket #139: one ephemeral live-text event per window, never per chunk. */
-const STREAM_COALESCE_MS = 32
 /** Live-text crash checkpoints; no coordination version or patch is written. */
 const STREAM_CHECKPOINT_MS = 250
 
@@ -453,10 +452,6 @@ export class EnsembleV2Service {
     return workspaceCounts(this.store.read())
   }
 
-  private static streamKey(workspaceID: string, messageID: string): string {
-    return `${workspaceID}\u0000${messageID}`
-  }
-
   /**
    * Queue accumulated live text for one row. The window collapses a delta
    * burst into one event with the full current text, so duplicate/reordered
@@ -464,7 +459,7 @@ export class EnsembleV2Service {
    * path never advances the coordination version or enters the change ring.
    */
   private queueStream(message: Message): void {
-    this.pendingStreams.set(EnsembleV2Service.streamKey(message.workspaceID, message.id), {
+    this.pendingStreams.set(streamKey(message.workspaceID, message.id), {
       epoch: this.epochValue,
       workspaceID: message.workspaceID,
       id: message.id,
@@ -491,7 +486,7 @@ export class EnsembleV2Service {
   }
 
   private dropStream(message: Message): void {
-    this.pendingStreams.delete(EnsembleV2Service.streamKey(message.workspaceID, message.id))
+    this.pendingStreams.delete(streamKey(message.workspaceID, message.id))
   }
 
   /**
@@ -828,14 +823,16 @@ export class EnsembleV2Service {
     await this.store.settled()
     const local = this.store.revisionInfo()
     const stored = await this.store.storedVersion()
+    const state = this.store.read()
     return {
       version: Math.max(local.version, stored),
       catalogRevision: this.catalog.revision,
       configRevision: this.configFingerprint(directory, local.workspaceDirectories),
       protocol: ENSEMBLE_PROTOCOL_VERSION,
       epoch: this.epochValue,
-      counts: this.counts(),
+      counts: workspaceCounts(state),
       scopeVersions: this.store.scopeVersions(),
+      gate: this.tier3Gate(state),
     }
   }
 
@@ -865,6 +862,47 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Common preamble for durable read handlers: flush foreign/local writes,
+   * settle the queue, refresh the DM clock, and remember the view directory.
+   * Reads never discover, reconcile, or write.
+   */
+  private async beginRead(
+    directory: string,
+    options: { dmClock?: boolean; refreshCatalog?: boolean } = {},
+  ): Promise<void> {
+    await this.store.sync()
+    await this.store.settled()
+    if (options.dmClock !== false) this.refreshDmClock()
+    this.noteViewDirectory(directory)
+    if (options.refreshCatalog && Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
+  }
+
+  private activeWorkspaceDirectories(state: SnapshotState): string[] {
+    return Object.values(state.workspaces)
+      .filter((workspace) => !workspace.archived)
+      .map((workspace) => workspace.directory)
+  }
+
+  /** Catalog/config/epoch metadata shared by snapshots and scoped bootstrap. */
+  private viewEnvelope(
+    directory: string,
+    state: SnapshotState,
+  ): Omit<Snapshot, "state" | "counts" | "window" | "gate" | "scoped"> {
+    const payload: Omit<Snapshot, "state" | "counts" | "window" | "gate" | "scoped"> = {
+      models: this.catalog.modelOptions,
+      skills: this.catalog.skillOptions,
+      directory,
+      catalogRevision: this.catalog.revision,
+      configRevision: this.configFingerprint(directory, this.activeWorkspaceDirectories(state)),
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      epoch: this.epochValue,
+    }
+    if (this.lastConfigError) payload.configError = this.lastConfigError
+    if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
+    return payload
+  }
+
+  /**
    * Ticket #134: the snapshot boundary is pure. It may merge foreign storage
    * (a read) but performs no writes, discovery, reconciliation, reaping,
    * stream settling, or purging; those run on the maintenance timer and
@@ -872,28 +910,15 @@ export class EnsembleV2Service {
    */
   private async snapshot(directory: string): Promise<Snapshot> {
     const started = performance.now()
-    await this.store.sync()
-    // Queue-consistent read: finish local writes before cloning the boundary.
-    await this.store.settled()
-    this.refreshDmClock()
-    this.noteViewDirectory(directory)
-    if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
+    await this.beginRead(directory, { refreshCatalog: true })
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
     const payload: Snapshot = {
       state,
-      models: this.catalog.modelOptions,
-      skills: this.catalog.skillOptions,
-      directory,
-      catalogRevision: this.catalog.revision,
-      configRevision: this.configFingerprint(directory, Object.values(state.workspaces).filter((workspace) => !workspace.archived).map((workspace) => workspace.directory)),
-      protocol: ENSEMBLE_PROTOCOL_VERSION,
-      epoch: this.epochValue,
+      ...this.viewEnvelope(directory, state),
       counts: workspaceCounts(state),
     }
-    if (this.lastConfigError) payload.configError = this.lastConfigError
-    if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
     // The host RPC output validator rejects explicit undefined anywhere in a
     // durable entity (live checks fail on `state.messages` as soon as the
     // first message exists). Sanitize once at the explicit snapshot boundary;
@@ -965,10 +990,7 @@ export class EnsembleV2Service {
   }
 
   private async workProject(directory: string): Promise<any> {
-    await this.store.sync()
-    await this.store.settled()
-    this.refreshDmClock()
-    this.noteViewDirectory(directory)
+    await this.beginRead(directory)
     const state = this.store.read()
     const at = Date.now()
     return jsonSafe({
@@ -985,9 +1007,7 @@ export class EnsembleV2Service {
     beforeSeq?: number,
     limit?: number,
   ): Promise<any> {
-    await this.store.sync()
-    await this.store.settled()
-    this.noteViewDirectory(directory)
+    await this.beginRead(directory, { dmClock: false })
     const state = this.store.read()
     const target = this.readWorkspaceID(state, directory, workspaceID)
     if (!target) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
@@ -1005,9 +1025,7 @@ export class EnsembleV2Service {
 
   private async messageGet(directory: string, workspaceID?: string, messageID?: string): Promise<any> {
     if (!messageID) throw invalidInput("messageID is required.")
-    await this.store.sync()
-    await this.store.settled()
-    this.noteViewDirectory(directory)
+    await this.beginRead(directory, { dmClock: false })
     const state = this.store.read()
     const target = this.readWorkspaceID(state, directory, workspaceID)
     if (!target) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
@@ -1022,17 +1040,16 @@ export class EnsembleV2Service {
    * durable store; the projection/window are disposable read models.
    */
   private async bootstrap(directory: string, workspaceID?: string): Promise<Snapshot> {
-    await this.store.sync()
-    await this.store.settled()
-    this.refreshDmClock()
-    this.noteViewDirectory(directory)
-    if (Date.now() - this.catalog.lastRefreshedAt > 10_000) void this.catalog.refresh()
+    await this.beginRead(directory, { refreshCatalog: true })
     const state = this.store.read()
     const gate = this.tier3Gate(state)
     const counts = workspaceCounts(state)
     if (!gate.enabled) {
+      // Review fix: a disabled gate keeps the full snapshot path, but that
+      // snapshot is also the measurement that can upgrade a borderline
+      // workspace for its next steady-state read.
       const full = await this.snapshot(directory)
-      return { ...full, scoped: false, counts, gate }
+      return { ...full, scoped: false, counts, gate: this.tier3Gate(state) }
     }
     const at = Date.now()
     const target = this.readWorkspaceID(state, directory, workspaceID)
@@ -1046,13 +1063,7 @@ export class EnsembleV2Service {
     }
     const payload: Snapshot = {
       state: scopedState,
-      models: this.catalog.modelOptions,
-      skills: this.catalog.skillOptions,
-      directory,
-      catalogRevision: this.catalog.revision,
-      configRevision: this.configFingerprint(directory, Object.values(state.workspaces).filter((workspace) => !workspace.archived).map((workspace) => workspace.directory)),
-      protocol: ENSEMBLE_PROTOCOL_VERSION,
-      epoch: this.epochValue,
+      ...this.viewEnvelope(directory, state),
       scoped: true,
       ...(window ? { window: {
         ...(window.oldestSeq !== undefined ? { oldestSeq: window.oldestSeq } : {}),
@@ -1063,8 +1074,6 @@ export class EnsembleV2Service {
       counts,
       gate,
     }
-    if (this.lastConfigError) payload.configError = this.lastConfigError
-    if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
     return jsonSafe(payload)
   }
 
@@ -1078,20 +1087,20 @@ export class EnsembleV2Service {
       ? allowed
       : [...new Set(requested)].filter((scope): scope is ScopeName => (allowed as string[]).includes(scope))
     if (requested !== undefined && scopes.length !== requested.length) throw invalidInput("scopes must contain shell, work, or transcript.")
-    await this.store.sync()
-    await this.store.settled()
-    this.refreshDmClock()
-    this.noteViewDirectory(directory)
+    await this.beginRead(directory)
     const state = this.store.read()
-    const target = this.readWorkspaceID(state, directory, workspaceID)
+    const gate = this.tier3Gate(state)
     const payload: ScopedResync = {
       epoch: this.epochValue,
       version: state.version,
       scopeVersions: this.store.scopeVersions(),
       counts: workspaceCounts(state),
-      gate: this.tier3Gate(state),
+      gate,
       meta: this.feedMeta(),
     }
+    // Review fix: a disabled gate means the caller keeps the snapshot path.
+    if (!gate.enabled) return jsonSafe(payload)
+    const target = this.readWorkspaceID(state, directory, workspaceID)
     if (scopes.includes("work")) payload.work = this.projectedTasks(state, Date.now())
     if (scopes.includes("shell")) payload.shell = this.shellState(state, {})
     if (scopes.includes("transcript") && target) {

@@ -18,6 +18,7 @@
 
 import type { Agent, Subtask } from "../types.ts"
 import { deriveWorkStatus } from "../queue.ts"
+import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 import { agentColor } from "./format.ts"
 import { terminalAnnouncement, TRANSCRIPT_WINDOW } from "./workrows.ts"
@@ -185,6 +186,7 @@ export function accumulateCompletions(
   tasks: Subtask[],
   agentLabelFor: (task: Subtask) => string,
   now: number,
+  limit: number = CLIENT_MESSAGE_LIMIT,
 ): Map<string, InlineCompletion> {
   let next: Map<string, InlineCompletion> | undefined
   for (const task of tasks) {
@@ -194,7 +196,15 @@ export function accumulateCompletions(
     if (!next) next = new Map(previous)
     next.set(task.id, entry)
   }
-  return next ?? previous
+  if (!next) return previous
+  const bounded = Math.max(1, Math.floor(limit))
+  if (next.size <= bounded) return next
+  // Ticket #141: a long session keeps only the newest outcomes. Stable ID
+  // order breaks finish-time ties so the survivor set is deterministic.
+  const oldest = [...next.entries()].sort((a, b) => a[1].at - b[1].at || (a[0] < b[0] ? -1 : 1))
+  const remove = next.size - bounded
+  for (let index = 0; index < remove; index++) next.delete(oldest[index]![0])
+  return next
 }
 
 /** One row of the merged transcript: either a conversation line or a completion. Exactly one side is set. */

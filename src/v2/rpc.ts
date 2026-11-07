@@ -182,6 +182,7 @@ export const EnsembleV2Rpc = Rpc.define({
           epoch: { type: "number" },
           counts,
           scopeVersions,
+          gate: tier3Gate,
         },
         required: ["version", "catalogRevision", "configRevision", "protocol", "epoch"],
         additionalProperties: false,
