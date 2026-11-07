@@ -69,11 +69,13 @@ test("ticket126: presence keys cover help, approvals, and leader which-key witho
     confirm: false,
     result: false,
     wizard: false,
+    logs: false,
     help: false,
     approvals: false,
     leader: false,
   }
   assert.equal(overlayPresenceKey(closed), "none")
+  assert.equal(overlayPresenceKey({ ...closed, logs: true }), "logs")
   assert.equal(overlayPresenceKey({ ...closed, help: true }), "help")
   assert.equal(overlayPresenceKey({ ...closed, approvals: true }), "approvals")
   assert.equal(overlayPresenceKey({ ...closed, leader: true }), "leader")

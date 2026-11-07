@@ -3457,6 +3457,89 @@ test("ticket144: an uncertain tool outcome parks for review instead of auto-retr
   }
 })
 
+test("ticket145: a terminal task failure writes a self-contained failure record", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-145-failure-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).context = async () => ({
+    data: [{ type: "idle", outcome: "failed", error: { type: "provider.internal", message: "quota exhausted" } }],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Terminal", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 4, dispatchGroupID: "g1", createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.subtasks.t?.state === "replied" && next.state.subtasks.t?.outcome === "failed"
+    }, 5_000)
+    const logs = await handlers["logs.recent"]({ directory, limit: 100 })
+    const terminal = logs.entries.find((entry: any) => entry.event === "failure.terminal" && entry.taskID === "t") as any
+    assert.ok(terminal, "the failure sink carries one self-contained terminal record")
+    assert.equal(terminal.failureClass, "provider")
+    assert.equal(terminal.attempts, 5)
+    assert.equal(terminal.dispatchGroupID, "g1")
+    assert.equal(terminal.decision.type, "terminal")
+    assert.equal(terminal.decision.reason, "attempts-exhausted")
+    assert.match(terminal.error.message, /quota exhausted/)
+    assert.ok(terminal.error.stack === undefined || typeof terminal.error.stack === "string")
+    const events = logs.entries.map((entry: any) => entry.event)
+    assert.ok(events.includes("task.claimed"))
+    assert.ok(events.includes("task.failed"))
+    assert.equal(logs.stats.content, false, "conversation text is off by default")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket145: an uncertain park carries tool outcomes and the approval decision", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-145-park-"))
+  const { ctx } = fakeContext()
+  const at = Date.now() + 60_000
+  ;(ctx.session as any).context = async () => ({
+    data: [
+      { type: "assistant", time: { created: at }, content: [{ type: "tool", name: "bash", state: { status: "failed", error: { message: "exit 1", code: "E_TOOL" } } }] },
+      { type: "idle", outcome: "failed", time: { created: at }, error: { message: "provider failed" } },
+    ],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "risky" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.interrupted === true && Boolean(task.approvalID))
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = Object.values(after.state.subtasks).find((item: any) => item.interrupted === true) as any
+    const logs = await handlers["logs.recent"]({ directory, limit: 100 })
+    const parked = logs.entries.find((entry: any) => entry.event === "failure.parked" && entry.taskID === task.id) as any
+    assert.ok(parked)
+    assert.equal(parked.failureClass, "uncertain")
+    assert.equal(parked.decision.type, "park")
+    assert.equal(parked.decision.approvalID, task.approvalID)
+    assert.equal(parked.toolOutcomes[0].name, "bash")
+    assert.equal(parked.toolOutcomes[0].status, "failed")
+    assert.equal(parked.toolOutcomes[0].code, "E_TOOL")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket75: a waiting parent with terminal children is reconciled, not stuck working", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-75-reconcile-"))
   const { ctx } = fakeContext()

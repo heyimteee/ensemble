@@ -38,6 +38,7 @@ const OVERLAY_LABELS: Record<Exclude<InteractionOverlay, "none">, string> = {
   dialog: "Dialog",
   approvals: "Approvals",
   help: "Help",
+  logs: "Logs",
 }
 
 const FOCUS_LABELS: Partial<Record<InteractionFocus, string>> = {

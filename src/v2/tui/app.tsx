@@ -136,6 +136,8 @@ import { editLine } from "./line-editor.ts"
 import { commandStatusHints, layerEntries, globalEntries, leaderEntries, leaderHints, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, singleKeyEntry, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
+import { createLogger, type EnsembleLogger, type LogEntry } from "../logging.ts"
+import { formatLogEntry, formatLogStats, logEntryTone, logsRpcInput, logsTitle, parseLogsCommand, sortLogEntries, type LogsViewFilter } from "./logs.ts"
 import { createPageActivation } from "./page-activation.ts"
 import { chromeJoin, chromeSeparator } from "./separators.ts"
 import { focusWhenReady, halfPageCursor, nextFocusZone, type FocusZone } from "./focus.ts"
@@ -313,9 +315,29 @@ function directoryOf(context: any): string {
 const pageActivation = createPageActivation()
 
 
+/**
+ * Ticket #145: the TUI owns its own per-process log file so it never shares a
+ * rotating sink with the service. `callRpc` records failures and slow calls;
+ * successful calls stay at debug so the ring is not a request feed.
+ */
+let tuiLogger: EnsembleLogger | undefined
+
 async function callRpc<T = any>(context: any, method: string, input: any): Promise<T> {
-  const response = await context.client.rpc.call({ rpcID: "ensemble.v2", method, location: { directory: directoryOf(context) }, input })
-  return response?.output ?? response
+  const started = performance.now()
+  try {
+    const response = await context.client.rpc.call({ rpcID: "ensemble.v2", method, location: { directory: directoryOf(context) }, input })
+    const durationMs = performance.now() - started
+    if (durationMs >= 1_000) tuiLogger?.event("warn", "tui", "tui.rpc.slow", { method, durationMs })
+    else tuiLogger?.event("debug", "tui", "tui.rpc", { method, durationMs })
+    return response?.output ?? response
+  } catch (error: any) {
+    tuiLogger?.event("error", "tui", "tui.rpc.error", {
+      method,
+      durationMs: performance.now() - started,
+      error,
+    })
+    throw error
+  }
 }
 
 async function invoke(context: any, action: string, payload: any = {}): Promise<any> {
@@ -327,6 +349,17 @@ async function invoke(context: any, action: string, payload: any = {}): Promise<
 export function EnsembleV2App() {
   const context = usePlugin()
   const pageToken = {}
+  const logger = createLogger({ role: "tui" })
+  tuiLogger = logger
+  logger.event("info", "tui", "tui.mount", {
+    directory: directoryOf(context),
+    protocol: "ensemble.v2",
+  })
+  onCleanup(() => {
+    logger.event("info", "tui", "tui.unmount", {})
+    void logger.close().catch(() => undefined)
+    if (tuiLogger === logger) tuiLogger = undefined
+  })
   // Ticket #137: the host theme mode selects the readable pale-blue identity pair.
   const colors = palette(context.theme as any, context.themeMode)
   // Ticket #119: the host toast is only a fallback for feedback that cannot be
@@ -379,6 +412,13 @@ export function EnsembleV2App() {
   const helpCatalogSections = helpSections()
   let helpPendingKeys: string[] = []
   const [approvalsOpen, setApprovalsOpen] = createSignal(false)
+  const [logsOpen, setLogsOpen] = createSignal(false)
+  const [logsFilter, setLogsFilter] = createSignal<LogsViewFilter>({ kind: "all" })
+  const [logsEntries, setLogsEntries] = createSignal<LogEntry[]>([])
+  const [logsStats, setLogsStats] = createSignal<any>(null)
+  const [logsLoading, setLogsLoading] = createSignal(false)
+  const [logsError, setLogsError] = createSignal("")
+  let logsScrollRef: any
   const [status, setStatus] = createSignal("Loading workspace…")
   const [gitState, setGitState] = createSignal<GitState | null>(null)
   const [busy, setBusy] = createSignal(false)
@@ -681,6 +721,7 @@ export function EnsembleV2App() {
   const interactionOverlay = (): InteractionOverlay => {
     if (wizard()) return "wizard"
     if (picker() || textPrompt() || confirm() || result()) return "dialog"
+    if (logsOpen()) return "logs"
     if (helpOpen()) return "help"
     if (approvalsOpen()) return "approvals"
     if (settingsAgentID()) return "settings"
@@ -1513,6 +1554,8 @@ export function EnsembleV2App() {
   const promptGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 14)
   const confirmGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 10)
   const resultGeometry = () => overlayGeometry(viewWidth(), viewHeight(), 18)
+  const logsHeight = 22
+  const logsGeometry = () => overlayGeometry(viewWidth(), viewHeight(), logsHeight)
   const wizardHeight = 20
   const wizardGeometry = () => overlayGeometry(viewWidth(), viewHeight(), wizardHeight)
 
@@ -1524,7 +1567,7 @@ export function EnsembleV2App() {
   // keys. The newest mount alone is not enough; the Ensemble route must be
   // visible too.
   const ownsRawKeys = () => pageActivation.ownsRawKeys(pageToken, isOurRoute())
-  const isModal = () => modal() || helpOpen() || approvalsOpen() || Boolean(settingsAgentID())
+  const isModal = () => modal() || helpOpen() || approvalsOpen() || logsOpen() || Boolean(settingsAgentID())
   // Ticket #119: feedback raised while a dialog owns the surface goes to the
   // statusline; the toast never paints over a modal. The host toast remains a
   // fallback only when this page is not the visible route.
@@ -1573,7 +1616,7 @@ export function EnsembleV2App() {
   })
   const isBusy = () => busy() || chatContext()?.busy === true
 
-  const overlayOpen = () => picker() !== null || textPrompt() !== null || wizard() !== null || confirm() !== null || result() !== null
+  const overlayOpen = () => picker() !== null || textPrompt() !== null || wizard() !== null || confirm() !== null || result() !== null || logsOpen()
 
   // Ticket #120: opening a shell overlay plays one short opacity settle while
   // the background panes stay dimmed. Only the panel opacity changes: no
@@ -1590,6 +1633,7 @@ export function EnsembleV2App() {
     confirm: confirm() !== null,
     result: result() !== null,
     wizard: wizard() !== null,
+    logs: logsOpen(),
     help: helpOpen(),
     approvals: approvalsOpen(),
     leader: leaderPopup(),
@@ -1767,6 +1811,7 @@ export function EnsembleV2App() {
       case "resume": await togglePause(false); return
       case "init": await initEnsemble(); return
       case "native": openNative(); return
+      case "logs": openLogs(command.args ?? []); return
       case "help": openHelp(); return
       case "q": leaveEnsemble(); return
     }
@@ -2086,6 +2131,7 @@ export function EnsembleV2App() {
 
   const loadScoped = async (scopes: ScopeName[] = ["shell", "work", "transcript"]): Promise<boolean> => {
     const target = activeWorkspace()?.id ?? workspaceID() ?? undefined
+    logger.event("debug", "refresh", "refresh.scoped", { scopes, workspaceID: target })
     const result = await callRpc<ScopedResync>(context, "resync", {
       directory: directoryOf(context),
       scopes,
@@ -2149,6 +2195,12 @@ export function EnsembleV2App() {
   })
   const applyFeedDecision = (decision: PatchDecision, counts?: Record<string, WorkspaceCounts>): boolean => {
     if (decision.action !== "apply") return false
+    logger.event("debug", "refresh", "refresh.patch", {
+      version: decision.version,
+      changes: decision.changes.length,
+      meta: decision.meta !== undefined,
+      epoch: lastSnapshotMeta?.epoch,
+    })
     client.applyChanges(decision.changes, decision.version, decision.meta, counts)
     if (lastSnapshotMeta) {
       lastSnapshotMeta = mergeFeedMeta({ ...lastSnapshotMeta, version: decision.version }, decision.meta)
@@ -2165,6 +2217,7 @@ export function EnsembleV2App() {
     return true
   }
   const refreshFull = async (): Promise<void> => {
+    logger.event("debug", "refresh", "refresh.full", { version: lastSnapshotMeta?.version, epoch: lastSnapshotMeta?.epoch })
     forceSnapshotReplace = true
     snapshotRefresh.request()
     await snapshotRefresh.whenIdle()
@@ -2250,6 +2303,14 @@ export function EnsembleV2App() {
     }
     if (payload.counts) client.applyCounts(payload.counts)
     if (decision.action === "ignore") return
+    logger.event("warn", "feed", "feed.gap", {
+      reason: decision.reason,
+      epoch: payload.epoch,
+      from: payload.from,
+      version: payload.version,
+      entries: payload.entries?.length,
+      reset: payload.reset === true,
+    })
     // A malformed batch that can only have touched Work resyncs just the Work
     // scope; anything else needs the full durable snapshot boundary.
     if (decision.reason === "malformed" || decision.reason === "other") {
@@ -2681,6 +2742,7 @@ export function EnsembleV2App() {
     const activeWizard = wizard()
     if (activeWizard) completeWizard(activeWizard, undefined)
     if (settingsAgentID()) finishSettingsClose()
+    if (logsOpen()) closeLogs()
     if (helpOpen()) closeHelp()
     setApprovalsOpen(false)
     setModal(false)
@@ -4018,6 +4080,9 @@ export function EnsembleV2App() {
           return
         }
       }
+      // Ticket #145: logs is a read-only overlay that traps every key while
+      // open; it never changes interaction mode or focus.
+      if (logsOpen()) { handleLogsKey(event); return }
       // v5.6 T10: the help overlay owns every key while open. Its grammar is
       // local to the overlay and never changes interaction mode or focus.
       if (helpOpen()) { handleHelpKey(event); return }
@@ -4210,6 +4275,17 @@ export function EnsembleV2App() {
       ],
       bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
     }))
+    // Ticket #145: the host may consume a lone Escape before the raw listener
+    // sees it; keep a thin layer so the logs overlay always closes/refreshes.
+    context.keymap.layer(() => ({
+      mode: "global", priority: 116,
+      enabled: () => ownsRawKeys() && logsOpen() && !leaderMode() && !commandActive() && wizard() === null,
+      commands: [
+        { id: "ensemble.v2.logs.close", title: "Ensemble: Close logs", bind: "escape", run: () => closeLogs() },
+        { id: "ensemble.v2.logs.refresh", title: "Ensemble: Refresh logs", bind: "r", run: () => { void refreshLogs() } },
+      ],
+      bindings: ["ensemble.v2.logs.close", "ensemble.v2.logs.refresh"],
+    }))
     // v5.6 T10: the raw listener owns help navigation, but the host may
     // consume a lone Escape before it reaches that listener. Keep a thin
     // generated layer for the close/page keys so help always closes.
@@ -4228,7 +4304,10 @@ export function EnsembleV2App() {
     return () => { pageActivation.unmount(pageToken); keyInput.off("keypress", onKey); context.renderer.off("selection", onSelection); stopData() }
   })
 
-  const showError = (error: any) => showToast({ title: "Ensemble", message: error?.message ?? String(error), tone: "error" })
+  const showError = (error: any) => {
+    logger.event("error", "tui", "tui.error", { error })
+    showToast({ title: "Ensemble", message: error?.message ?? String(error), tone: "error" })
+  }
 
   // Review fix (finding 5): picker rows are value-compared, so the row
   // array keeps identity across snapshot polls unless a value changed.
@@ -4511,6 +4590,93 @@ export function EnsembleV2App() {
     dispatchInteraction({ type: "overlay.set", overlay: "none" })
   }
 
+  /** Refresh the service ring for the current `:logs` filter. */
+  const refreshLogs = async (): Promise<void> => {
+    setLogsLoading(true)
+    setLogsError("")
+    try {
+      const result = await callRpc<any>(context, "logs.recent", {
+        directory: directoryOf(context),
+        ...logsRpcInput(logsFilter()),
+      })
+      setLogsEntries(sortLogEntries(Array.isArray(result?.entries) ? result.entries : []))
+      setLogsStats(result?.stats ?? null)
+      logger.event("debug", "tui", "tui.logs.open", {
+        filter: logsFilter().kind,
+        entries: Array.isArray(result?.entries) ? result.entries.length : 0,
+      })
+    } catch (error: any) {
+      setLogsError(error?.message ?? String(error))
+      logger.event("error", "tui", "tui.logs.error", { error })
+    } finally {
+      setLogsLoading(false)
+    }
+  }
+
+  const openLogs = (args: readonly string[] = []): void => {
+    const parsed = parseLogsCommand(args)
+    if ("error" in parsed) {
+      notify(parsed.error, "error")
+      return
+    }
+    clearPendingChord()
+    setLogsFilter(parsed)
+    setLogsOpen(true)
+    dispatchInteraction({ type: "overlay.set", overlay: "logs" })
+    void refreshLogs()
+  }
+
+  const closeLogs = (): void => {
+    setLogsOpen(false)
+    setLogsEntries([])
+    setLogsStats(null)
+    setLogsError("")
+    setLogsLoading(false)
+    dispatchInteraction({ type: "overlay.set", overlay: "none" })
+  }
+
+  const scrollLogsBy = (delta: number): void => {
+    try { logsScrollRef?.scrollBy?.(delta) } catch {}
+  }
+
+  // Logs is a read-only overlay: Esc closes, r refetches, and the Vim movement
+  // keys scroll. Every other key is trapped so it cannot leak to the surface.
+  const handleLogsKey = (event: any): void => {
+    event?.preventDefault?.(); event?.stopPropagation?.()
+    const token = normalizeKeyToken(event)
+    switch (token) {
+      case "escape":
+      case "q":
+        closeLogs()
+        return
+      case "r":
+        void refreshLogs()
+        return
+      case "j":
+      case "down":
+        scrollLogsBy(1)
+        return
+      case "k":
+      case "up":
+        scrollLogsBy(-1)
+        return
+      case "pagedown":
+      case "ctrl+d":
+        scrollLogsBy(10)
+        return
+      case "pageup":
+      case "ctrl+u":
+        scrollLogsBy(-10)
+        return
+      case "g":
+        try { logsScrollRef?.scrollTo?.(0) } catch {}
+        return
+      case "shift+g":
+        scrollLogsBy(Number.MAX_SAFE_INTEGER)
+        return
+    }
+  }
+
   /**
    * The reducer's typed close intent maps onto exactly one dialog. Signals
    * update synchronously, so reading them here is the same surface the user
@@ -4525,6 +4691,7 @@ export function EnsembleV2App() {
       return
     }
     if (overlay === "wizard") { wizardCancel(); return }
+    if (overlay === "logs") { closeLogs(); return }
     if (overlay === "approvals") { setApprovalsOpen(false); return }
     if (overlay === "help") { closeHelp(); return }
     if (overlay === "settings") void closeSettings()
@@ -5937,6 +6104,18 @@ export function EnsembleV2App() {
             </Show>
           </box>
         </box>
+      <Show when={logsOpen()}>
+        <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={logsGeometry().top} left={logsGeometry().left} width={logsGeometry().width} height={logsHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column" opacity={overlayOpacity()}>
+          <text fg={colors.focus} bg={colors.panel} width="100%" truncate>{logsTitle(logsFilter())}</text>
+          <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{formatLogStats(logsStats())}</text>
+          <scrollbox ref={(value: any) => { logsScrollRef = value }} flexGrow={1} minHeight={0} stickyScroll stickyStart="bottom" width="100%">
+            <For each={logsEntries()}>{(entry) => (
+              <text fg={colors[logEntryTone(entry.level)]} bg={colors.panel} width="100%" truncate>{formatLogEntry(entry)}</text>
+            )}</For>
+          </scrollbox>
+          <text fg={logsError() ? colors.bad : colors.faint} bg={colors.panel} width="100%" truncate>{logsError() || (logsLoading() ? "loading…" : `${logsEntries().length} entries · r refresh · j/k scroll · esc close`)}</text>
+        </box>
+      </Show>
       <Show when={isToastModal() ? null : toasts().visible} keyed>
         {(toast) => {
           const placement = toastPlacement(viewWidth())

@@ -24,7 +24,7 @@ export type InteractionFocus =
   | "approvals"
   | "help"
 
-export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "approvals" | "help"
+export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "approvals" | "help" | "logs"
 
 export type CommandInput = { kind: ":" | "/"; text: string; cursor: number; returnMode: InteractionMode }
 

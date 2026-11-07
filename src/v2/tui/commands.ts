@@ -18,6 +18,7 @@ export type CommandName =
   | "resume"
   | "init"
   | "native"
+  | "logs"
   | "help"
   | "q"
 
@@ -38,25 +39,29 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: "resume", description: "resume the active workspace" },
   { name: "init", description: "initialize workspace files" },
   { name: "native", description: "open the native session" },
+  { name: "logs", description: "show recent logs (failures | task <id>)" },
   { name: "help", description: "show keyboard help" },
   { name: "q", description: "leave Ensemble" },
 ]
 
 const COMMAND_NAMES = new Set<string>(COMMANDS.map((command) => command.name))
 
-export type ParsedCommand = { name: CommandName }
+export type ParsedCommand = { name: CommandName; args?: string[] }
 
 /**
  * Parse a command line. The leading `:` is optional because the caller also
  * receives the raw text after it; unknown names return null so the caller can
- * report the miss without running anything.
+ * report the miss without running anything. Only `logs` accepts arguments
+ * (`failures`, `task <id>`); every other command keeps its no-argument shape.
  */
 export function parseCommandLine(input: string): ParsedCommand | null {
   const trimmed = input.trim()
   const withoutColon = trimmed.startsWith(":") ? trimmed.slice(1).trim() : trimmed
   if (!withoutColon) return null
-  const name = withoutColon.split(/\s+/)[0]
+  const words = withoutColon.split(/\s+/)
+  const name = words[0]
   if (!COMMAND_NAMES.has(name)) return null
+  if (name === "logs") return { name: "logs", args: words.slice(1) }
   return { name: name as CommandName }
 }
 

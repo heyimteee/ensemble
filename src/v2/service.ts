@@ -20,6 +20,9 @@ import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-i
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
 import { STREAM_COALESCE_MS } from "./stream-coalescer.ts"
+import { createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
+import { createStoreObserver } from "./log-events.ts"
+import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import type {
   Agent,
   Approval,
@@ -65,6 +68,18 @@ function invalidInput(message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code: "invalid_input" })
 }
 
+/** Per-run evidence carried into failure records (ticket #145). */
+type TaskFailureContext = {
+  runID?: string
+  sessionID?: string
+  providerID?: string
+  modelID?: string
+  variant?: string
+  startedAt?: number
+  toolOutcomes?: ToolOutcome[]
+  cause?: unknown
+}
+
 type RpcInput = {
   directory: string
   action?: string
@@ -76,6 +91,10 @@ type RpcInput = {
   limit?: number
   messageID?: string
   scopes?: string[]
+  level?: string
+  cat?: string
+  event?: string
+  taskID?: string
 }
 
 function rpcInput(value: unknown): RpcInput {
@@ -93,6 +112,9 @@ function rpcInput(value: unknown): RpcInput {
   if (input.beforeSeq !== undefined && typeof input.beforeSeq !== "number") throw invalidInput("beforeSeq must be a number.")
   if (input.limit !== undefined && typeof input.limit !== "number") throw invalidInput("limit must be a number.")
   if (input.scopes !== undefined && !Array.isArray(input.scopes)) throw invalidInput("scopes must be a list.")
+  for (const field of ["level", "cat", "event", "taskID"] as const) {
+    if (input[field] !== undefined && typeof input[field] !== "string") throw invalidInput(`${field} must be a string.`)
+  }
   return {
     directory: input.directory,
     action: input.action as string | undefined,
@@ -104,6 +126,10 @@ function rpcInput(value: unknown): RpcInput {
     limit: input.limit as number | undefined,
     messageID: input.messageID as string | undefined,
     scopes: input.scopes as string[] | undefined,
+    level: input.level as string | undefined,
+    cat: input.cat as string | undefined,
+    event: input.event as string | undefined,
+    taskID: input.taskID as string | undefined,
   }
 }
 
@@ -269,9 +295,13 @@ export class EnsembleV2Service {
   /** Last catalog/config metadata published as a version-neutral batch. */
   private lastPublishedCatalogRevision = -1
   private lastPublishedConfig: { directory?: string; revision?: number; error?: string } = {}
+  private lastLoggedCatalogError: string | undefined
   /** Ticket #141 Tier 3 gate inputs, measured only at the snapshot boundary. */
   private lastSnapshotBytes: number | undefined
   private lastSnapshotMs: number | undefined
+  /** Ticket #145: operational logger; owns the service log files. */
+  private logger: EnsembleLogger | undefined
+  private startedAtMs = now()
 
   constructor(ctx: Ctx) {
     this.ctx = ctx
@@ -281,11 +311,22 @@ export class EnsembleV2Service {
   }
 
   async start(): Promise<() => Promise<void>> {
+    this.startedAtMs = now()
+    this.logger = createLogger({ role: "service" })
+    setGlobalLogger(this.logger)
+    this.logger.event("info", "service", "service.start", {
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      directory: process.cwd(),
+      epoch: this.epochValue,
+      pid: process.pid,
+      logFiles: this.logger.stats(),
+    })
     this.store = new V2Store(this.ctx, (version) => {
       this.emitChanged(version)
     }, {
       epoch: this.epochValue,
       onPatch: (batch) => this.emitPatches(this.withReadMeta(batch)),
+      observer: createStoreObserver(this.logger),
     })
     await this.store.load()
     this.refreshDmClock()
@@ -364,6 +405,14 @@ export class EnsembleV2Service {
       await this.maintenanceRun?.catch(() => undefined)
       await this.retryRegistration?.dispose?.().catch(() => undefined)
       await Promise.allSettled([...this.running])
+      this.logger?.event("info", "service", "service.stop", {
+        uptimeMs: now() - this.startedAtMs,
+        activeRuns: this.activeRuns.size,
+        pendingWork: Object.values(this.store.subtasks()).filter((task) => task.state === "pending").length,
+      })
+      await this.logger?.close().catch(() => undefined)
+      setGlobalLogger(undefined)
+      this.logger = undefined
     }
   }
 
@@ -375,8 +424,9 @@ export class EnsembleV2Service {
     "work.project": (input: unknown) => Promise<any>
     "transcript.window": (input: unknown) => Promise<any>
     "message.get": (input: unknown) => Promise<any>
+    "logs.recent": (input: unknown) => Promise<any>
     resync: (input: unknown) => Promise<ScopedResync>
-    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string }>
+    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string; logs?: unknown }>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
@@ -396,6 +446,7 @@ export class EnsembleV2Service {
         const request = rpcInput(input)
         return this.messageGet(request.directory, request.workspaceID, request.messageID)
       },
+      "logs.recent": async (input) => this.logsRecent(rpcInput(input)),
       resync: async (input) => {
         const request = rpcInput(input)
         return this.resync(request.directory, request.workspaceID, request.scopes)
@@ -407,6 +458,11 @@ export class EnsembleV2Service {
           if (!request.action) throw invalidInput("action is required.")
           return await this.invoke(request.directory, request.action, request.payload ?? {})
         } catch (error: any) {
+          this.logger?.event("error", "service", "service.rpc.error", {
+            method: "invoke",
+            action: input && typeof input === "object" ? (input as any).action : undefined,
+            error,
+          })
           return errorResult(error)
         }
       },
@@ -432,6 +488,14 @@ export class EnsembleV2Service {
 
   /** Batched durable patches for clients that negotiated protocol v2. */
   private emitPatches(batch: PatchBatch): void {
+    this.logger?.event("debug", "feed", "feed.batch", {
+      epoch: batch.epoch,
+      from: batch.from,
+      version: batch.version,
+      entries: batch.entries.length,
+      reset: batch.reset === true,
+      meta: batch.meta !== undefined,
+    })
     for (const registration of this.registrations) {
       void registration?.events?.emit?.("patches", batch)?.catch?.(() => undefined)
     }
@@ -524,6 +588,12 @@ export class EnsembleV2Service {
     const configChanged = this.lastPublishedConfig.directory !== directory
       || this.lastPublishedConfig.revision !== revision
       || this.lastPublishedConfig.error !== error
+    const catalogError = this.catalog.lastError
+    if (catalogError !== this.lastLoggedCatalogError) {
+      if (catalogError) this.logger?.event("error", "service", "service.catalog.error", { error: catalogError })
+      else this.lastLoggedCatalogError && this.logger?.event("info", "service", "service.catalog.recovered", {})
+      this.lastLoggedCatalogError = catalogError
+    }
     if (!catalogChanged && !configChanged) return
     this.lastPublishedCatalogRevision = this.catalog.revision
     this.lastPublishedConfig = { directory, revision, error }
@@ -553,8 +623,23 @@ export class EnsembleV2Service {
     // full-entity patch (for example a message's absent agentID). Strip them
     // at this boundary exactly as snapshot/bootstrap do; otherwise a gap
     // recovery request fails with a 500 and falls back to a full snapshot.
+    const result = this.store.changesSince(input.epoch ?? -1, input.version ?? -1)
+    if (result.reset) {
+      this.logger?.event("warn", "feed", "feed.reset", {
+        requestedEpoch: input.epoch,
+        requestedVersion: input.version,
+        epoch: result.epoch,
+        version: result.version,
+      })
+    }
+    this.logger?.event("debug", "feed", "feed.changes", {
+      requestedVersion: input.version,
+      version: result.version,
+      entries: result.entries.length,
+      reset: result.reset === true,
+    })
     return jsonSafe({
-      ...this.store.changesSince(input.epoch ?? -1, input.version ?? -1),
+      ...result,
       meta: this.feedMeta(),
       scopeVersions: this.store.scopeVersions(),
       counts: this.counts(),
@@ -801,9 +886,16 @@ export class EnsembleV2Service {
     if (this.viewDirectory) {
       try {
         await this.discoverWorkspace(this.viewDirectory)
+        if (this.lastConfigError !== undefined) {
+          this.logger?.event("info", "service", "service.config.recovered", { directory: this.viewDirectory })
+        }
         this.lastConfigError = undefined
       } catch (error: any) {
-        this.lastConfigError = error?.message ?? String(error)
+        const message = error?.message ?? String(error)
+        if (message !== this.lastConfigError) {
+          this.logger?.event("error", "service", "service.config.error", { directory: this.viewDirectory, error: message })
+        }
+        this.lastConfigError = message
       }
     }
     await this.reconcileWorkspaceConfigs()
@@ -936,6 +1028,13 @@ export class EnsembleV2Service {
     // Ticket #141: the measured full-snapshot boundary feeds the Tier 3 gate.
     this.lastSnapshotBytes = Buffer.byteLength(JSON.stringify(safe))
     this.lastSnapshotMs = performance.now() - started
+    this.logger?.event("debug", "refresh", "snapshot.build", {
+      durationMs: this.lastSnapshotMs,
+      bytes: this.lastSnapshotBytes,
+      messages: Object.values(state.messages).reduce((total, list) => total + list.length, 0),
+      tasks: Object.keys(state.subtasks).length,
+      workspaces: Object.keys(state.workspaces).length,
+    })
     return safe
   }
 
@@ -1048,6 +1147,7 @@ export class EnsembleV2Service {
    * durable store; the projection/window are disposable read models.
    */
   private async bootstrap(directory: string, workspaceID?: string): Promise<Snapshot> {
+    const started = performance.now()
     await this.beginRead(directory, { refreshCatalog: true })
     const state = this.store.read()
     const gate = this.tier3Gate(state)
@@ -1057,6 +1157,13 @@ export class EnsembleV2Service {
       // snapshot is also the measurement that can upgrade a borderline
       // workspace for its next steady-state read.
       const full = await this.snapshot(directory)
+      this.logger?.event("debug", "refresh", "bootstrap", {
+        scoped: false,
+        gateReason: gate.reason,
+        durationMs: performance.now() - started,
+        bytes: this.lastSnapshotBytes,
+        workspaceID: full.state.ui.activeWorkspaceID,
+      })
       return { ...full, scoped: false, counts, gate: this.tier3Gate(state) }
     }
     const at = Date.now()
@@ -1082,7 +1189,17 @@ export class EnsembleV2Service {
       counts,
       gate,
     }
-    return jsonSafe(payload)
+    const safe = jsonSafe(payload)
+    this.logger?.event("debug", "refresh", "bootstrap", {
+      scoped: true,
+      gateReason: gate.reason,
+      durationMs: performance.now() - started,
+      bytes: Buffer.byteLength(JSON.stringify(safe)),
+      workspaceID: target,
+      windowRows: window?.messages.length ?? 0,
+      hasMoreOlder: window?.hasMoreOlder,
+    })
+    return safe
   }
 
   /**
@@ -1114,10 +1231,18 @@ export class EnsembleV2Service {
     if (scopes.includes("transcript") && target) {
       payload.transcript = { ...deriveTranscriptWindow(state.messages[target] ?? [], {}), workspaceID: target }
     }
+    this.logger?.event("debug", "feed", "feed.resync", {
+      scopes,
+      gateReason: gate.reason,
+      version: payload.version,
+      workspaceID: target,
+      tasks: payload.work ? Object.keys(payload.work).length : 0,
+      windowRows: payload.transcript?.messages.length,
+    })
     return jsonSafe(payload)
   }
 
-  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; clones?: ReturnType<typeof cloneStats> }> {
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; clones?: ReturnType<typeof cloneStats>; logs?: unknown }> {
     await this.store.sync()
     this.refreshDmClock()
     this.noteViewDirectory(directory)
@@ -1130,7 +1255,26 @@ export class EnsembleV2Service {
       state,
       directory,
       ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
+      ...(this.logger ? { logs: this.logger.stats() } : {}),
     })
+  }
+
+  /** Recent service log entries for the TUI viewer and doctor. */
+  private logsRecent(input: RpcInput): { entries: LogEntry[]; stats: unknown } {
+    const logger = this.logger
+    if (!logger) return { entries: [], stats: { enabled: false } }
+    const levels = ["error", "warn", "info", "debug", "trace"]
+    const categories = ["service", "task", "retry", "approval", "message", "feed", "refresh", "tui", "host", "failure"]
+    if (input.level && !levels.includes(input.level)) throw invalidInput(`level must be one of ${levels.join(", ")}.`)
+    if (input.cat && !categories.includes(input.cat)) throw invalidInput(`cat must be one of ${categories.join(", ")}.`)
+    const entries = logger.recent({
+      limit: input.limit,
+      level: input.level as any,
+      cat: input.cat as any,
+      event: input.event,
+      taskID: input.taskID,
+    })
+    return jsonSafe({ entries, stats: logger.stats() })
   }
 
   /**
@@ -2005,6 +2149,21 @@ export class EnsembleV2Service {
     // Terminal first: a cancellation that arrives while the message save
     // yields must observe the finished job rather than restoring twice.
     await this.store.saveInitJob(job)
+    this.logger?.failure({
+      level: "error",
+      cat: "failure",
+      event: "failure.terminal",
+      incidentID: id("failure"),
+      failureClass: "init",
+      workspaceID: job.workspaceID,
+      initJobID: job.id,
+      messageID: job.messageID,
+      sessionID: job.sessionID,
+      error: { name: "InitError", message },
+      decision: { type: "terminal", reason: "init-failed" },
+      version: this.store.read().version,
+      epoch: this.epochValue,
+    })
     const found = this.initMessage(job)
     const row = found ? this.store.cloneMessage(job.workspaceID, found.id) : undefined
     if (row) {
@@ -4567,18 +4726,54 @@ export class EnsembleV2Service {
         const pending = Object.values(state.subtasks)
           .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)
-        for (const task of pending) {
-          if (slots <= 0) break
+        const skipped = (task: Subtask, reason: string, extra: Record<string, unknown> = {}) => {
+          if (task.retryAfter === undefined) return
+          this.logger?.event("debug", "retry", "retry.skipped", {
+            workspaceID: task.workspaceID,
+            taskID: task.id,
+            dispatchGroupID: task.dispatchGroupID,
+            attempt: task.attempts,
+            retryAfter: task.retryAfter,
+            reason,
+            ...extra,
+          })
+        }
+        for (let index = 0; index < pending.length; index++) {
+          const task = pending[index]
+          if (slots <= 0) {
+            this.logger?.event("debug", "retry", "retry.skipped", {
+              reason: "slot_full",
+              pending: pending.length - index,
+              activeSlots: running.length,
+              maxActiveRuns: state.settings.maxActiveRuns,
+            })
+            break
+          }
           const workspace = state.workspaces[task.workspaceID]
           const agent = task.assigneeID ? state.agents[task.assigneeID] : undefined
-          if (!workspace || workspace.archived || workspace.paused || !agent || agent.archived) continue
-          if (busyAgents.has(bindingKey(task.workspaceID, task.assigneeID!))) continue
+          if (!workspace || workspace.archived || workspace.paused || !agent || agent.archived) {
+            skipped(task, workspace?.archived ? "workspace_archived" : workspace?.paused ? "workspace_paused" : "assignee_unavailable")
+            continue
+          }
+          if (busyAgents.has(bindingKey(task.workspaceID, task.assigneeID!))) {
+            skipped(task, "agent_busy")
+            continue
+          }
           const existingBinding = this.store.binding(task.workspaceID, task.assigneeID!)
-          if (existingBinding && this.directBusy.has(existingBinding.sessionID)) continue
+          if (existingBinding && this.directBusy.has(existingBinding.sessionID)) {
+            skipped(task, "direct_busy")
+            continue
+          }
           // A session with an unresolved native permission holds its agent:
           // never start new work behind a host block.
-          if (existingBinding && this.pendingNativeForSession(existingBinding.sessionID)) continue
-          if (task.mode === "edit" && busyEditDirs.has(workspace.directory)) continue
+          if (existingBinding && this.pendingNativeForSession(existingBinding.sessionID)) {
+            skipped(task, "native_permission_pending")
+            continue
+          }
+          if (task.mode === "edit" && busyEditDirs.has(workspace.directory)) {
+            skipped(task, "edit_directory_busy", { directory: workspace.directory })
+            continue
+          }
           busyAgents.add(bindingKey(task.workspaceID, task.assigneeID!))
           if (task.mode === "edit") busyEditDirs.add(workspace.directory)
           slots--
@@ -4674,6 +4869,18 @@ export class EnsembleV2Service {
     // makes this a last-resort guard; see the sync() claim boundary.
     if (!claimWon(await this.store.readSubtask(task.id), runID)) return
     this.noteWorkChanged(task)
+    this.logger?.event("info", "task", "task.claimed", {
+      workspaceID: task.workspaceID,
+      taskID: task.id,
+      dispatchGroupID: task.dispatchGroupID,
+      assigneeID: task.assigneeID,
+      workKind: task.workKind ?? "delegation",
+      mode: task.mode,
+      attempt: task.attempts,
+      maxAttempts: MAX_ATTEMPTS,
+      runID,
+      deadlineAt: task.deadlineAt,
+    })
     // Heartbeat: renew the lease while this run owns the claim. If the
     // process dies, the lease expires and another pass re-queues the work;
     // if the claim was reaped, renewal stops touching the row.
@@ -4688,12 +4895,14 @@ export class EnsembleV2Service {
     if (typeof (heartbeat as unknown as { unref?: () => void }).unref === "function") {
       ;(heartbeat as unknown as { unref: () => void }).unref()
     }
+    const failureContext: TaskFailureContext = { runID }
     const binding = await this.ensureBinding(workspace, agent)
     if (!binding) {
       clearInterval(heartbeat)
-      await this.failTask(task, "Could not create a native session.")
+      await this.failTask(task, "Could not create a native session.", { context: failureContext, failureClass: "session", reason: "session-unavailable" })
       return
     }
+    failureContext.sessionID = binding.sessionID
     if (this.pendingNativeForSession(binding.sessionID)) {
       // The host waits on a user decision for this session: do not pile
       // another prompt behind it. Requeue with a short backoff; the
@@ -4707,6 +4916,16 @@ export class EnsembleV2Service {
       task.leaseUntil = undefined
       task.retryAfter = now() + 10_000
       await this.store.saveSubtask(task)
+      this.logger?.event("warn", "retry", "retry.scheduled", {
+        workspaceID: task.workspaceID,
+        taskID: task.id,
+        dispatchGroupID: task.dispatchGroupID,
+        attempt: task.attempts,
+        maxAttempts: MAX_ATTEMPTS,
+        delayMs: 10_000,
+        retryAfter: task.retryAfter,
+        reason: "native-permission-pending",
+      })
       this.defer(10_000, () => this.schedule())
       return
     }
@@ -4762,19 +4981,36 @@ export class EnsembleV2Service {
         granted = true
       }
       const models = [agent.mainModel, ...agent.backupModels]
-      let result: { text: string; tools: string[]; failure?: any } | undefined
+      let result: { text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any } | undefined
       for (let index = 0; index < models.length; index++) {
         const model = models[index]
+        failureContext.providerID = model.providerID
+        failureContext.modelID = model.modelID
+        failureContext.variant = model.variant
+        failureContext.toolOutcomes = undefined
+        failureContext.cause = undefined
         if (index > 0) {
           await this.appendMessage(workspace, { author: "system", text: `Model unavailable; switched to ${model.providerID}/${model.modelID}${model.variant ? `#${model.variant}` : ""}.`, kind: "system", taskID: task.id })
+          this.logger?.event("warn", "task", "task.model.fallback", {
+            workspaceID: task.workspaceID,
+            taskID: task.id,
+            attempt: task.attempts,
+            fallbackIndex: index,
+            providerID: model.providerID,
+            modelID: model.modelID,
+            variant: model.variant,
+          })
           if (live) { live.text = ""; this.liveBySession.get(binding.sessionID)!.buffer = ""; this.dropStream(live); await this.store.saveMessage(live) }
         }
         await this.ctx.session.switchModel({ sessionID: binding.sessionID, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } }).catch(() => undefined)
         attemptStartedAt = now()
+        failureContext.startedAt = attemptStartedAt
         await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined), delivery: "steer" })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
         const messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)
+        failureContext.toolOutcomes = result.toolOutcomes
+        failureContext.cause = result.failure
         if (!result.failure) break
         if (!availabilityFailure(result.failure) || anyToolCall(messages, attemptStartedAt) || index === models.length - 1) break
       }
@@ -4796,6 +5032,23 @@ export class EnsembleV2Service {
         currentTask.leaseUntil = undefined
         if (linked?.status === "pending") {
           // A decision is still owed: park the run, keep the question open.
+          this.recordTaskFailure({
+            event: "failure.parked",
+            level: "warn",
+            failureClass: "approval",
+            task: currentTask,
+            error: errorText,
+            decision: { type: "park", reason: "decision-pending", approvalID: linked.id },
+            context: failureContext,
+          })
+          this.logger?.event("warn", "retry", "task.approval.parked", {
+            workspaceID: currentTask.workspaceID,
+            taskID: currentTask.id,
+            dispatchGroupID: currentTask.dispatchGroupID,
+            approvalID: linked.id,
+            attempt: currentTask.attempts,
+            reason: errorText,
+          })
           await this.finalizeStream(live, "Paused — waiting for your answer in the approvals inbox.", true, globalEpoch, workspaceEpoch, task.workspaceID)
           await this.store.saveSubtask(currentTask)
           return
@@ -4808,6 +5061,7 @@ export class EnsembleV2Service {
             globalEpoch,
             workspaceEpoch,
             workspaceID: task.workspaceID,
+            context: failureContext,
           })
           return
         }
@@ -4819,10 +5073,11 @@ export class EnsembleV2Service {
             globalEpoch,
             workspaceEpoch,
             workspaceID: task.workspaceID,
+            context: failureContext,
           })
           return
         }
-        await this.failTask(currentTask, errorText)
+        await this.failTask(currentTask, errorText, { context: failureContext, reason: "attempts-exhausted" })
         await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
         return
       }
@@ -4859,10 +5114,12 @@ export class EnsembleV2Service {
             workspaceEpoch,
             workspaceID: task.workspaceID,
             streamText: "No answer produced — retrying.",
+            failureClass: "empty-reply",
+            context: failureContext,
           })
           return
         }
-        await this.failTask(currentTask, errorText)
+        await this.failTask(currentTask, errorText, { context: failureContext, failureClass: "empty-reply", reason: "empty-reply" })
         await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
         return
       }
@@ -4916,6 +5173,7 @@ export class EnsembleV2Service {
       const currentTask = this.store.cloneSubtask(task.id)
       const failureText = error?.message ?? String(error)
       if (currentTask?.activeRunID === runID) {
+        failureContext.cause = error
         // Transient failure: retry inside the attempt budget and deadline
         // with backoff (fast first retry, slower later ones). Exhausted or
         // overdue work fails with its reason preserved.
@@ -4927,9 +5185,11 @@ export class EnsembleV2Service {
             globalEpoch,
             workspaceEpoch,
             workspaceID: task.workspaceID,
+            failureClass: classifyFailure(error, "internal"),
+            context: failureContext,
           })
         } else {
-          await this.failTask(currentTask, failureText)
+          await this.failTask(currentTask, failureText, { context: failureContext, failureClass: classifyFailure(error, "internal"), reason: "attempts-exhausted" })
           await this.finalizeStream(live, failureText, true, globalEpoch, workspaceEpoch, task.workspaceID)
         }
       } else {
@@ -5017,6 +5277,52 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Record one self-contained failure event. Best-effort: a failure while
+   * formatting evidence must never change the retry/terminal decision.
+   */
+  private recordTaskFailure(input: {
+    event: "failure.attempt" | "failure.parked" | "failure.terminal"
+    level: "warn" | "error"
+    failureClass: FailureClass
+    task: Subtask
+    error: unknown
+    decision: FailureDecision
+    context?: TaskFailureContext
+  }): void {
+    const logger = this.logger
+    if (!logger) return
+    try {
+      const state = this.store.read()
+      const agent = input.task.assigneeID ? state.agents[input.task.assigneeID] : undefined
+      const messages = (state.messages[input.task.workspaceID] ?? []).slice(-8)
+      const context = input.context
+      const startedAt = context?.startedAt
+      const record = buildFailureRecord({
+        event: input.event,
+        level: input.level,
+        incidentID: id("failure"),
+        failureClass: input.failureClass,
+        task: input.task,
+        error: context?.cause ?? input.error,
+        decision: input.decision,
+        runID: context?.runID,
+        sessionID: context?.sessionID,
+        providerID: context?.providerID ?? agent?.mainModel.providerID,
+        modelID: context?.modelID ?? agent?.mainModel.modelID,
+        variant: context?.variant ?? agent?.mainModel.variant,
+        startedAt,
+        durationMs: startedAt !== undefined ? Math.max(0, now() - startedAt) : undefined,
+        toolOutcomes: context?.toolOutcomes,
+        lastMessages: messages,
+        version: state.version,
+        epoch: this.epochValue,
+        content: logger.content,
+      })
+      logger.failure(record)
+    } catch {}
+  }
+
+  /**
    * Park a failed run for a later attempt. The system event is the durable
    * explanation; the card countdown is the live one. No terminal state is
    * written here, so the group stays active through the backoff.
@@ -5029,6 +5335,8 @@ export class EnsembleV2Service {
     workspaceEpoch: number
     workspaceID: string
     streamText?: string
+    failureClass?: FailureClass
+    context?: TaskFailureContext
   }): Promise<void> {
     const delayMs = retryDelayMs(input.task.attempts)
     input.task.state = "pending"
@@ -5040,6 +5348,31 @@ export class EnsembleV2Service {
     input.task.retryAfter = now() + delayMs
     await this.store.saveSubtask(input.task)
     const attempt = nextRetryAttempt(input.task.attempts, MAX_ATTEMPTS)
+    this.recordTaskFailure({
+      event: "failure.attempt",
+      level: "warn",
+      failureClass: input.failureClass ?? classifyFailure(input.context?.cause ?? input.error, "internal"),
+      task: input.task,
+      error: input.error,
+      decision: {
+        type: "retry",
+        attempt,
+        maxAttempts: MAX_ATTEMPTS,
+        delayMs,
+        retryAt: input.task.retryAfter,
+      },
+      context: input.context,
+    })
+    this.logger?.event("warn", "retry", "retry.scheduled", {
+      workspaceID: input.task.workspaceID,
+      taskID: input.task.id,
+      dispatchGroupID: input.task.dispatchGroupID,
+      attempt,
+      maxAttempts: MAX_ATTEMPTS,
+      delayMs,
+      retryAfter: input.task.retryAfter,
+      reason: input.error,
+    })
     const seconds = Math.max(1, Math.round(delayMs / 1_000))
     const workspace = this.store.workspace(input.task.workspaceID)
     if (workspace) {
@@ -5075,10 +5408,11 @@ export class EnsembleV2Service {
     globalEpoch: number
     workspaceEpoch: number
     workspaceID: string
+    context?: TaskFailureContext
   }): Promise<void> {
     const workspace = this.store.workspace(input.task.workspaceID)
     if (!workspace) {
-      await this.failTask(input.task, input.error)
+      await this.failTask(input.task, input.error, { context: input.context, failureClass: "uncertain" })
       if (input.live) {
         await this.finalizeStream(input.live, input.error, true, input.globalEpoch, input.workspaceEpoch, input.workspaceID)
       }
@@ -5108,6 +5442,22 @@ export class EnsembleV2Service {
     input.task.retryAfter = undefined
     await this.store.saveApproval(approval)
     await this.store.saveSubtask(input.task)
+    this.recordTaskFailure({
+      event: "failure.parked",
+      level: "warn",
+      failureClass: "uncertain",
+      task: input.task,
+      error: input.error,
+      decision: { type: "park", reason: "uncertain-tool-outcome", approvalID: approval.id },
+      context: input.context,
+    })
+    this.logger?.event("warn", "retry", "task.uncertain.parked", {
+      workspaceID: input.task.workspaceID,
+      taskID: input.task.id,
+      dispatchGroupID: input.task.dispatchGroupID,
+      approvalID: approval.id,
+      reason: input.error,
+    })
     await this.appendMessage(workspace, {
       author: "system",
       text: `Approval needed: ${input.error}`,
@@ -5126,7 +5476,11 @@ export class EnsembleV2Service {
     }
   }
 
-  private async failTask(task: Subtask, error: string): Promise<void> {
+  private async failTask(
+    task: Subtask,
+    error: string,
+    options: { context?: TaskFailureContext; failureClass?: FailureClass; reason?: string } = {},
+  ): Promise<void> {
     const at = now()
     task.state = "replied"
     task.outcome = "failed"
@@ -5139,6 +5493,20 @@ export class EnsembleV2Service {
     task.repliedAt = at
     task.finishedAt = at
     await this.store.saveSubtask(task)
+    this.recordTaskFailure({
+      event: "failure.terminal",
+      level: "error",
+      failureClass: options.failureClass ?? classifyFailure(options.context?.cause ?? error, "provider"),
+      task,
+      error,
+      decision: {
+        type: "terminal",
+        reason: options.reason ?? "attempts-exhausted",
+        attempt: task.attempts,
+        maxAttempts: MAX_ATTEMPTS,
+      },
+      context: options.context,
+    })
     this.noteWorkChanged(task)
     // Dead work surfaces as a failure, not a phantom continue prompt: settle
     // linked product decisions as superseded. Native mirrors are excluded —

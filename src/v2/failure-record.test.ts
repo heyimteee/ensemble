@@ -1,0 +1,89 @@
+import test from "node:test"
+import assert from "node:assert/strict"
+import { buildFailureRecord, classifyFailure } from "./failure-record.ts"
+import type { Message, Subtask } from "./types.ts"
+
+const task = (patch: Partial<Subtask> = {}): Subtask => ({
+  id: "t1", workspaceID: "w1", creatorType: "user", title: "Fix the parser", instruction: "Secret instruction",
+  constraints: "Secret constraints", expected: "Secret expected", mode: "edit", state: "replied", stage: "initial",
+  outcome: "failed", interrupted: false, awaitingChildren: false, attempts: 3, dispatchGroupID: "g1",
+  assigneeID: "a1", deadlineAt: 9_999, createdAt: 1, ...patch,
+})
+
+const messages = (): Message[] => [
+  { id: "m1", workspaceID: "w1", seq: 1, author: "user", text: "Please fix it", kind: "text", createdAt: 1 },
+  { id: "m2", workspaceID: "w1", seq: 2, author: "agent", agentID: "a1", text: "Working on it", kind: "text", taskID: "t1", createdAt: 2 },
+]
+
+test("failure classification separates provider, timeout, and tool errors", () => {
+  assert.equal(classifyFailure({ type: "provider.internal", message: "boom" }), "provider")
+  assert.equal(classifyFailure({ code: "ETIMEDOUT", message: "timed out" }), "timeout")
+  assert.equal(classifyFailure({ message: "tool execution failed" }), "tool")
+  assert.equal(classifyFailure({ message: "odd" }, "uncertain"), "uncertain")
+})
+
+test("a failure record is self-contained without conversation content", () => {
+  const error = Object.assign(new Error("provider exploded"), { code: "E_PROVIDER" })
+  const record: any = buildFailureRecord({
+    event: "failure.terminal",
+    level: "error",
+    incidentID: "failure_1",
+    failureClass: "provider",
+    task: task(),
+    error,
+    decision: { type: "terminal", reason: "attempts-exhausted", attempt: 3, maxAttempts: 3 },
+    runID: "run_1",
+    sessionID: "ses_1",
+    providerID: "openai",
+    modelID: "gpt",
+    variant: "fast",
+    startedAt: 10,
+    durationMs: 90,
+    toolOutcomes: [{ name: "bash", status: "failed", error: "exit 1", code: "E_TOOL" }],
+    lastMessages: messages(),
+    version: 12,
+    epoch: 3,
+    content: false,
+  })
+
+  assert.equal(record.event, "failure.terminal")
+  assert.equal(record.cat, "failure")
+  assert.equal(record.incidentID, "failure_1")
+  assert.equal(record.failureClass, "provider")
+  assert.equal(record.taskID, "t1")
+  assert.equal(record.dispatchGroupID, "g1")
+  assert.equal(record.title, "Fix the parser")
+  assert.equal(record.attempts, 3)
+  assert.equal(record.runID, "run_1")
+  assert.equal(record.sessionID, "ses_1")
+  assert.equal(record.model.providerID, "openai")
+  assert.equal(record.error.name, "Error")
+  assert.match(record.error.stack, /provider exploded/)
+  assert.equal(record.toolOutcomes[0].name, "bash")
+  assert.equal(record.lastMessages.length, 2)
+  assert.equal(record.lastMessages[0].chars, 13)
+  assert.equal("text" in record.lastMessages[0], false)
+  assert.equal(record.decision.type, "terminal")
+  assert.equal(record.version, 12)
+  assert.equal(record.epoch, 3)
+  assert.equal(record.content, undefined)
+})
+
+test("content logging attaches instruction and message text only when enabled", () => {
+  const record: any = buildFailureRecord({
+    event: "failure.attempt",
+    level: "warn",
+    incidentID: "failure_2",
+    failureClass: "empty-reply",
+    task: task(),
+    error: "The agent produced no answer.",
+    decision: { type: "retry", attempt: 1, maxAttempts: 3, delayMs: 5_000, retryAt: 20 },
+    lastMessages: messages(),
+    content: true,
+  })
+
+  assert.equal(record.content.instruction, "Secret instruction")
+  assert.equal(record.content.constraints, "Secret constraints")
+  assert.equal(record.content.expected, "Secret expected")
+  assert.equal(record.lastMessages[1].text, "Working on it")
+})

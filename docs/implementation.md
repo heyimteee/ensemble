@@ -29,7 +29,10 @@ OpenCode engine
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
 - **`src/v2/skill-invocation.ts`** — the shared pure skill invocation planner used by composer completion and server validation: anchors, assigned/General skills, owner choices, direct-chat rejection, and work titles.
 - **`src/v2/tui/`** — page shell, presentational components, palette, formatting, and keymap layers.
-- **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval. Reads use targeted accessors or the live read-only view; `snapshot()` is the single full-state clone boundary. Read-modify-save paths clone only the entity they save. Live streaming rows are indexed by id, foreign-version message merges use an id index rather than nested scans, and checkpoint writes persist live text without a coordination version. Set `ENSEMBLE_DEBUG_CLONES=1` to expose full-clone counts and timing on the `diagnostic` RPC (`clones`).
+- **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval. Reads use targeted accessors or the live read-only view; `snapshot()` is the single full-state clone boundary. Read-modify-save paths clone only the entity they save. Live streaming rows are indexed by id, foreign-version message merges use an id index rather than nested scans, and checkpoint writes persist live text without a coordination version. Set `ENSEMBLE_DEBUG_CLONES=1` to expose full-clone counts and timing on the `diagnostic` RPC (`clones`). Store writes expose optional lifecycle observers for operational logging.
+- **`src/v2/logging.ts`** — bounded in-memory ring, per-process JSONL sinks, level/category filtering, redaction, rotation, and retention.
+- **`src/v2/log-events.ts`** — store observer that projects durable task/message/approval/init transitions into stable log events without heartbeat spam.
+- **`src/v2/failure-record.ts`** — self-contained failure records: error chain, model/session/run, tool outcomes, recent message metadata, and the retry/park/terminal decision.
 - **`src/v2/routing.ts`** — `$`/`!` mention routing and leader fallback.
 - **`src/v2/paths.ts`** — canonical workspace directories and file references.
 - **`src/v2/workspace-config.ts`** — `.ensemble/config.json`, handoff paths, `.gitignore`, AGENTS.md insertion.
@@ -515,6 +518,54 @@ and is applied whole. Clone, patch, bootstrap, and resync diagnostics report
 counts, sizes, versions, and timings only — never credentials or conversation
 content. `ENSEMBLE_DEBUG_CLONES=1` exposes full-clone counts and timing on the
 `diagnostic` RPC.
+
+### Structured operational logging (ticket #145)
+
+The service and TUI each own a small structured logger. The service observes
+store writes and emits task lifecycle (`task.created`, `task.transition`,
+`task.claimed`, `task.completed`, `task.failed`, `task.cancelled`), message
+append/finalize, approval requested/resolved/superseded, init lifecycle,
+retry scheduling/skips, feed batches/resets, and refresh measurements. Lease
+heartbeats and streaming deltas never produce lines; they remain counters or
+trace-only data.
+
+A failure is a self-contained JSONL record, not a longer `task.error` string.
+Each failed attempt emits `failure.attempt` at `warn`, an uncertain outcome
+emits `failure.parked` at `warn`, and a permanent failure emits
+`failure.terminal` at `error`. The record carries the error name/message/code/
+stack/cause chain, task and dispatch-group identity, attempt and deadline,
+provider/model/variant, run/session IDs, tool outcomes, the last eight message
+metadata rows, and the retry/park/terminal decision. Task instruction,
+constraints, expected output, and message text are included only when content
+logging is enabled.
+
+```text
+ENSEMBLE_LOG=0|1                 disable/enable all logging (default on)
+ENSEMBLE_LOG_LEVEL=error|warn|info|debug|trace   default info
+ENSEMBLE_LOG_DIR=<path>          default $XDG_STATE_HOME/ensemble/logs
+ENSEMBLE_LOG_CONTENT=1           include task/message text (default off)
+ENSEMBLE_LOG_STDERR=1            mirror lines to stderr
+```
+
+Each process writes `<role>-<date>-<pid>.jsonl` and
+`<role>-failures-<date>-<pid>.jsonl` with `0600` permissions in a `0700`
+directory. Main logs rotate at 10 MB with five files and seven days; failure
+logs rotate at 20 MB with five files and 30 days. Writes are batched
+asynchronously; overflow drops the oldest queued line and increments
+`dropped`, and a write failure increments `failedWrites` without failing work.
+Tests keep the ring but do not write into the user's state directory unless a
+test supplies an explicit directory.
+
+`logs.recent` returns the bounded ring filtered by limit, level, category,
+event prefix, or task. `:logs` opens the viewer; `:logs failures` filters
+failure records; `:logs task <id>` shows one task timeline. The viewer shows
+the current sink paths, ring/drop counters, and content flag, with `r` to
+refresh, `j`/`k` to scroll, and `Esc` to close. `diagnostic` includes the same
+log summary for the doctor and tests.
+
+Redaction covers bearer/basic tokens, credential-bearing URLs, API-key-shaped
+values, GitHub tokens, and credential field names. Logs stay local and are
+never committed. They must not be attached to public issues without review.
 
 ## Known limitations
 
