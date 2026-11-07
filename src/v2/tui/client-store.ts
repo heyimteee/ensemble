@@ -264,6 +264,13 @@ export function boundClientState(state: SnapshotState, now: number = Date.now(),
     messages[workspaceID] = bounded
   }
   if (messages) next = { ...next, messages }
+  let transcripts: SnapshotState["dmTranscripts"] | undefined
+  for (const [key, list] of Object.entries(state.dmTranscripts)) {
+    if (list.length <= CLIENT_MESSAGE_LIMIT) continue
+    transcripts ??= { ...state.dmTranscripts }
+    transcripts[key] = list.slice(-CLIENT_MESSAGE_LIMIT)
+  }
+  if (transcripts) next = { ...next, dmTranscripts: transcripts }
   const visible = projectVisibleWork(state, now, WORK_GROUP_HOLD_MS + CLIENT_TASK_GRACE_MS)
   const currentKeys = Object.keys(state.subtasks)
   const visibleKeys = Object.keys(visible)

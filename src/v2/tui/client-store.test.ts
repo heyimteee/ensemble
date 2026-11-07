@@ -476,7 +476,7 @@ test("the pure reducer treats a snapshot as a full replacement", () => {
   assert.equal(next.agents.a2, undefined)
 })
 
-test("a long client session keeps transcript and Work memory bounded", () => {
+test("a long client session keeps transcript and Work memory bounded", (t) => {
   const store = createClientStore()
   store.applySnapshot(snapshot(stateWith((state) => {
     state.workspaces.w1 = workspace("w1", "site")
@@ -489,9 +489,17 @@ test("a long client session keeps transcript and Work memory bounded", () => {
       attempts: 1,
     })
     state.messages.w1 = Array.from({ length: 500 }, (_, index) => message(`m${index + 1}`, `row ${index + 1}`, { seq: index + 1 }))
+    state.dmTranscripts["w:a1"] = Array.from({ length: 500 }, (_, index) => ({
+      id: `dm${index + 1}`,
+      role: "user" as const,
+      author: "You",
+      text: `dm ${index + 1}`,
+      createdAt: index + 1,
+    }))
   })))
 
   assert.equal(store.state()!.messages.w1!.length, CLIENT_MESSAGE_LIMIT, "a full fallback snapshot is bounded")
+  assert.equal(store.state()!.dmTranscripts["w:a1"]!.length, CLIENT_MESSAGE_LIMIT, "direct transcript caches are bounded too")
   assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 500)
   assert.equal(store.windowFor("w1")?.hasMoreOlder, true)
 
@@ -503,6 +511,7 @@ test("a long client session keeps transcript and Work memory bounded", () => {
 
   assert.equal(store.state()!.messages.w1!.length, CLIENT_MESSAGE_LIMIT, "streaming patches never grow the transcript without bound")
   assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 5_000)
+  t.diagnostic(`client-bounded messages=${store.state()!.messages.w1!.length} patches=5000 elapsed=${elapsed.toFixed(1)}ms`)
   assert.ok(elapsed < 5_000, `5k bounded message patches stayed responsive (${elapsed.toFixed(1)} ms)`)
 
   for (let index = 0; index < 1_000; index++) {

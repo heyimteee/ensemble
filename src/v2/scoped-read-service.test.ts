@@ -159,9 +159,9 @@ function seed(values: Map<string, unknown>, options: { messages: number; oldTask
   }
 }
 
-test("a large-history workspace bootstraps shell, visible Work, and one bounded transcript window", async () => {
+test("a large-history workspace bootstraps shell, visible Work, and one bounded transcript window", async (t) => {
   const values = new Map<string, unknown>()
-  seed(values, { messages: 3_000, oldTasks: 600 })
+  seed(values, { messages: 10_000, oldTasks: 600 })
   const { ctx } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
@@ -176,11 +176,12 @@ test("a large-history workspace bootstraps shell, visible Work, and one bounded 
     assert.equal(bootstrap.gate.enabled, true)
     assert.equal(bootstrap.protocol, 4)
     assert.equal(bootstrap.state.messages.w.length, 40, "only the active transcript window travels")
-    assert.equal(bootstrap.state.messages.w.at(-1).seq, 3_000)
+    assert.equal(bootstrap.state.messages.w.at(-1).seq, 10_000)
     assert.deepEqual(Object.keys(bootstrap.state.subtasks).sort(), ["live", "liveDone"], "long-retained terminal rows are excluded")
     assert.equal(bootstrap.counts.w.busy, 1)
 
     const bytes = Buffer.byteLength(JSON.stringify(bootstrap))
+    t.diagnostic(`bootstrap payload=${bytes}B latency=${elapsed.toFixed(1)}ms messages=10000 tasks=602`)
     assert.ok(bytes < 128 * 1024, `bootstrap payload stayed bounded (${bytes} bytes)`)
     assert.ok(elapsed < 500, `bootstrap latency stayed bounded (${elapsed.toFixed(1)} ms)`)
   } finally {

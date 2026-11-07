@@ -2046,6 +2046,9 @@ export function EnsembleV2App() {
 
   /** Apply one scoped resync atomically; only returned scopes are replaced. */
   const applyScopedResync = (result: ScopedResync, requestedWorkspaceID?: string) => {
+    // A patch may have advanced the cursor while the resync was in flight.
+    // Never rewind entity state to an older durable version.
+    if (lastSnapshotMeta && result.epoch === lastSnapshotMeta.epoch && result.version < lastSnapshotMeta.version) return
     batch(() => {
       if (result.shell) client.applyShellSnapshot(result.shell)
       if (result.work) client.applyWorkProjection(result.work, result.version)
@@ -2053,7 +2056,7 @@ export function EnsembleV2App() {
       const target = window?.workspaceID ?? requestedWorkspaceID
       if (window && target) client.applyTranscriptWindow(target, window, "replace")
       client.applyCounts(result.counts)
-      if (result.meta) client.applyChanges([], lastSnapshotMeta?.version, result.meta, result.counts)
+      if (result.meta) client.applyChanges([], undefined, result.meta, result.counts)
       if (lastSnapshotMeta) lastSnapshotMeta = { ...lastSnapshotMeta, version: result.version, epoch: result.epoch }
     })
     syncScopedSelection()

@@ -910,7 +910,7 @@ export class EnsembleV2Service {
   private readWorkspaceID(state: SnapshotState, directory: string, requested?: string): string | undefined {
     if (requested && state.workspaces[requested]) return requested
     const active = state.ui.activeWorkspaceID
-    if (active && state.workspaces[active]) return active
+    if (active && state.workspaces[active] && !state.workspaces[active]!.archived) return active
     let canonical: string | undefined
     try {
       canonical = canonicalDirectory(directory)
@@ -956,6 +956,9 @@ export class EnsembleV2Service {
     return {
       ...state,
       messages: {},
+      // Direct-chat transcripts are native-session detail and unread by the
+      // TUI; scoped reads never carry that unbounded history.
+      dmTranscripts: {},
       subtasks,
       runs: Object.fromEntries(this.activeRuns),
     }
