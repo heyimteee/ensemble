@@ -85,7 +85,7 @@ active_count() {
 }
 
 card_header_count() {
-  live_capture "$LIVE_TUI_SESSION" | grep -cE 'SizeAgent[0-9]+ │ working([[:space:]]|│)*$' || true
+  live_capture "$LIVE_TUI_SESSION" | grep -cE 'SIZEAGENT[0-9]+ WORKING' || true
 }
 
 live_active_count_is() {
@@ -257,7 +257,7 @@ check_no_color_static() {
   start_tui_at 120 40
   delegate 0 "size-no-color"
   wait_active 1
-  live_require_text "$LIVE_TUI_SESSION" "⠋ SizeAgent1 │ working" 20 "NO_COLOR frame-0 Work card"
+  live_require_text "$LIVE_TUI_SESSION" "⠋ SIZEAGENT1 WORKING" 20 "NO_COLOR frame-0 Work card"
   live_assert_text "$LIVE_TUI_SESSION" "working" "NO_COLOR keeps the state word"
   live_assert_text "$LIVE_TUI_SESSION" "Message…" "NO_COLOR keeps the composer"
   local pane glyph

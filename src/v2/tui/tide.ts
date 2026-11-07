@@ -6,10 +6,10 @@
  * vary without re-rolling on every snapshot poll. Ticket #117 keeps recently
  * finished cards on the same flat settled frame after they leave active work.
  *
- * The strip is one row of block glyphs, one glyph per two terminal cells.
- * `tideColumns` derives the sampled column count from the card content width
- * (clamped 8–64); the strip helpers double each sample so the rendered row
- * spans the full card width. Reduced motion pins every motion to its tick-0
+ * The strip is one row of block glyphs. Each sample is one glyph plus one
+ * deliberate blank cell, so the approved Sub-Cell Tide gap is visible across
+ * the card. `tideColumns` derives the sampled column count from the card
+ * content width (clamped 8–64). Reduced motion pins every motion to its tick-0
  * frame, needs-you freezes the assigned variant, and terminal cards settle to
  * a flat strip.
  */
@@ -134,17 +134,17 @@ export function tideStrip(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   return levelsForWidth(variant, tideColumns(contentWidth), effectiveTick(tick, env))
-    .map((level) => TIDE_GLYPHS[level].repeat(TIDE_CELLS_PER_GLYPH))
+    .map((level) => `${TIDE_GLYPHS[level]} `)
     .join("")
 }
 
-/** Terminal cards settle to the lowest block, one glyph per two cells. */
+/** Terminal cards settle to the lowest block, one glyph plus one blank per cell. */
 export function flatTideLevels(columns: number): number[] {
   return Array.from({ length: clampedColumns(columns) }, () => 0)
 }
 
 export function flatTideStrip(contentWidth: number): string {
-  return TIDE_GLYPHS[0].repeat(tideColumns(contentWidth) * TIDE_CELLS_PER_GLYPH)
+  return `${TIDE_GLYPHS[0]} `.repeat(tideColumns(contentWidth))
 }
 
 /**

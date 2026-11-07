@@ -1303,10 +1303,11 @@ export function EnsembleV2App() {
   const viewHeight = () => renderSize().height
   const messageHeight = () => Math.max(6, viewHeight() - 14)
   // Ticket #115/#117: Work cards. The card owns the full chat content width
-  // minus the section padding; `workCardLayout` decides whether the terminal
-  // can afford cards or must fall back to compact one-line rows. Recently
-  // finished cards share that budget after active cards and are display-only.
-  const workCardWidth = () => Math.max(20, messageWidth() - 2)
+  // minus the section padding, card border, and card horizontal padding;
+  // `workCardLayout` decides whether the terminal can afford cards or must
+  // fall back to compact one-line rows. Recently finished cards share that
+  // budget after active cards and are display-only.
+  const workCardWidth = () => Math.max(20, messageWidth() - 6)
   // Ticket #116: one shuffled-deck assignment state for the session. Variants
   // are resolved by subtask id and survive every snapshot refresh; entries
   // leave the map after the recent-card retention window. A blocked card also

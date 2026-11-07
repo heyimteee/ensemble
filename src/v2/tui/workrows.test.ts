@@ -471,15 +471,15 @@ test("ticket115: card ordering keeps active work only, working first and oldest-
 
 test("ticket115: card height fits three, two, or one and falls back to compact rows", () => {
   const wide = workCardLayout(40, 5)
-  assert.deepEqual(wide, { mode: "cards", limit: 3, overflow: 2, rows: 17 })
-  assert.deepEqual(workCardLayout(40, 2), { mode: "cards", limit: 2, overflow: 0, rows: 11 })
-  assert.deepEqual(workCardLayout(34, 2), { mode: "cards", limit: 2, overflow: 0, rows: 11 })
-  assert.deepEqual(workCardLayout(33, 2), { mode: "cards", limit: 1, overflow: 1, rows: 7 })
-  assert.deepEqual(workCardLayout(30, 2), { mode: "cards", limit: 1, overflow: 1, rows: 7 })
-  assert.deepEqual(workCardLayout(29, 1), { mode: "cards", limit: 1, overflow: 0, rows: 6 })
+  assert.deepEqual(wide, { mode: "cards", limit: 3, overflow: 2, rows: 23 })
+  assert.deepEqual(workCardLayout(40, 2), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
+  assert.deepEqual(workCardLayout(34, 2), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
+  assert.deepEqual(workCardLayout(33, 2), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
+  assert.deepEqual(workCardLayout(30, 2), { mode: "cards", limit: 1, overflow: 1, rows: 9 })
+  assert.deepEqual(workCardLayout(29, 1), { mode: "cards", limit: 1, overflow: 0, rows: 8 })
   assert.deepEqual(workCardLayout(24, 3), { mode: "compact", limit: 1, overflow: 2, rows: 2 })
-  assert.deepEqual(workCardLayout(27, 3), { mode: "compact", limit: 2, overflow: 1, rows: 3 })
-  assert.deepEqual(workCardLayout(50, 1), { mode: "cards", limit: 1, overflow: 0, rows: 6 })
+  assert.deepEqual(workCardLayout(27, 3), { mode: "cards", limit: 1, overflow: 2, rows: 9 })
+  assert.deepEqual(workCardLayout(50, 1), { mode: "cards", limit: 1, overflow: 0, rows: 8 })
 })
 
 test("ticket115: card layouts leave transcript rows at the reference and compact sizes", () => {
@@ -487,7 +487,7 @@ test("ticket115: card layouts leave transcript rows at the reference and compact
   assert.ok(40 - WORK_BASE_ROWS - tall.rows >= 4, "120x40 keeps at least four transcript rows")
   const short = workCardLayout(24, 3)
   assert.ok(24 - WORK_BASE_ROWS - short.rows >= 3, "80x24 keeps at least three transcript rows")
-  assert.ok(WORK_CARD_ROWS >= 4, "a card is tall enough for header, title, detail, and tide")
+  assert.ok(WORK_CARD_ROWS >= 6, "a card leaves room for border, header, title, detail, and tide")
 })
 
 test("ticket115: card detail defaults stay honest", () => {
@@ -560,7 +560,7 @@ test("ticket117: recent cards settle flat and keep the terminal state word", () 
   assert.equal(stopped.glyph, "⊘")
   assert.equal(stopped.state, "cancelled")
   for (const card of cards) {
-    assert.equal(new Set([...card.tide]).size, 1, "the settled strip is flat")
+    assert.equal(new Set([...card.tide].filter((cell) => cell !== " ")).size, 1, "the settled strip is flat")
     assert.ok(card.tideLevels.every((level) => level === 0), "every settled sample sits at the same level")
     assert.equal(card.tide.length, 40)
     assert.equal(card.tideLevels.length, 20)
@@ -606,9 +606,9 @@ test("ticket117: the Work header distinguishes active and recent counts", () => 
 })
 
 test("ticket117: recent cards share the height budget after active cards", () => {
-  assert.deepEqual(workCardLayout(40, 1, 1), { mode: "cards", limit: 2, overflow: 0, rows: 11 })
-  assert.deepEqual(workCardLayout(40, 1, 3), { mode: "cards", limit: 3, overflow: 1, rows: 17 })
-  assert.deepEqual(workCardLayout(40, 0, 2), { mode: "cards", limit: 2, overflow: 0, rows: 11 })
+  assert.deepEqual(workCardLayout(40, 1, 1), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
+  assert.deepEqual(workCardLayout(40, 1, 3), { mode: "cards", limit: 3, overflow: 1, rows: 23 })
+  assert.deepEqual(workCardLayout(40, 0, 2), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
   assert.deepEqual(workCardLayout(24, 0, 2), { mode: "compact", limit: 1, overflow: 1, rows: 2 })
   assert.deepEqual(workCardLayout(24, 1, 1), { mode: "compact", limit: 1, overflow: 1, rows: 2 })
   assert.deepEqual(workCardLayout(24, 0, 0), { mode: "compact", limit: 0, overflow: 0, rows: 0 })
@@ -712,6 +712,6 @@ test("ticket116: queued cards stay still and terminal cards settle flat", () => 
   ]) {
     const card = workCardForTask(task(patch), "Nova", { now: 2000, tick: 5, width: 40, variant: "inbound" })
     assert.ok(card.tideLevels.every((level) => level === 0), `${card.status} settles flat`)
-    assert.equal(card.tide, "▁".repeat(40))
+    assert.equal(card.tide, "▁ ".repeat(20))
   }
 })
