@@ -375,6 +375,144 @@ The scoped paths are covered by `src/v2/scoped-read.test.ts`,
 `src/v2/scoped-read-service.test.ts`, `src/v2/tui/client-store.test.ts`, and
 the fake TUI checks; payload/latency budgets run as part of `npm test`.
 
+## v7 Work lifecycle and recovery model
+
+This section is the end-to-end model for the v7 Work pane. The architecture
+decision and its invariants are recorded in
+[ADR 0002: Server-authoritative durable patch feed](adr/0002-durable-patch-feed.md).
+The message, feed, and scoped-read mechanics are described in the preceding
+v7 sections; this section explains how Work moves through them.
+
+### Dispatch groups
+
+A **Dispatch group** is the set of Subtasks caused by one dispatch action: one
+user command plus every descendant handoff, delegation, peer turn, synthesis,
+completion hop, and group-scoped completion batch it caused. The group id is
+durable on the Subtask; there is no separate group table.
+
+- **Minting.** A user message mints exactly one group and passes it to every
+  task in that fan-out. The root work item carries the group in its
+  idempotency key, so sending the same command again creates a new group and
+  task, while duplicate tool calls inside one run still dedupe.
+- **Inheritance.** Agent-created work inherits the parent/run group. Handoffs,
+  peer turns, synthesis, completion hops, and approval-created work carry or
+  resolve the same group. Retry, restart, reassign, and cancel preserve it.
+- **Legacy rows.** A task without a stored group resolves one from its root
+  ancestor. The derivation is deterministic and does not expose the root id.
+- **Completion batches.** A leader review consolidates only completions from
+  one group, so unrelated commands never share a review.
+
+### Visibility, hold, and needs-you
+
+The Work pane derives its visible groups from the durable task list on every
+static refresh. For each group it counts active and done members and decides
+whether to show it:
+
+- A group is visible while any member is non-terminal.
+- A complete group remains visible for a shared **1.2 s hold** derived from
+  its latest terminal timestamp (or the latest linked approval resolution).
+  The hold is shared, so all cards in the batch clear together.
+- A **needs-you** member overrides the hold. A task needs the user when it is
+  interrupted, gated on a still-pending approval (`approvalID`), or blocked by
+  a pending native permission mirror. A needs-you group stays until the
+  decision resolves; the hold then starts from the resolution time.
+- Terminal means replied, failed, or cancelled. A terminal task with a pending
+  decision still counts as needs-you.
+- A new command appends a new group without disturbing an older one. The
+  newest group receives visible capacity under height pressure; older groups
+  become compact summaries.
+- The cursor and every Work action operate on non-terminal cards only.
+  Terminal cards are display-only, and overflow is never selectable.
+
+### Terminal events
+
+Each task emits exactly one canonical terminal event: `finished`, `failed`, or
+`cancelled`, with the terminal task row as the durable record. A plain failed
+task no longer emits a duplicate generic `Subtask failed` line; correlation
+specific handoff and peer-turn notices remain. Failure and success are
+therefore symmetric in the transcript and in the Work card state.
+
+### Work pane projection
+
+The Work pane maps visible groups to static cards and a separate animated
+layer:
+
+- The card header is name left in pale blue, a flexible spacer, then the glyph
+  and the uppercase status. The status word never truncates; the name
+  truncates first.
+- State tones are pure mapping: WORKING/RETRYING use a yellow Braille glyph, a
+  grey status word, and a yellow left bar; REPLIED uses a green dot, status,
+  and bar; NEEDS YOU uses a yellow diamond, status, and bar; QUEUED is faint
+  and muted; FAILED is red; CANCELLED is a faint cross-out. The rounded border
+  stays neutral and selection is a focus border, not a green gutter.
+- Static card data (identity, title, detail, status, tones, tide variant) is
+  memoized and rebuilt only when the task, approval, or layout changes. Only
+  the glyph and tide cells read the animation clocks. A one-shot invalidation
+  timer covers status deadlines, lease expiry, and the group hold; it is not
+  an animation clock.
+- Reduced motion and `NO_COLOR` pin the glyph and tide to frame zero while
+  preserving the state word, final glyph, and layout.
+
+### Durable feed and recovery
+
+The server store is the source of truth; the client store is disposable. The
+full recovery ladder is:
+
+1. **Durable write.** A mutation persists its entity and the meta version,
+   appends one change record, and schedules publication.
+2. **Patch.** Protocol-3 clients apply full-entity upserts/removes atomically.
+   Duplicate delivery is harmless; an older batch is ignored; a remove leaves
+   a short client tombstone.
+3. **Heartbeat.** A cheap revision check runs about every 2 s idle and 1 s
+   while Work is live, and immediately on reconnect.
+4. **`changes.since`.** A version gap asks the server for the missing range.
+   The server returns contiguous batched entries or a reset. The response is
+   JSON-sanitized at the RPC boundary: the host rejects explicit `undefined`
+   entity fields, so absent optional fields are omitted exactly as they are at
+   the snapshot/bootstrap boundaries.
+5. **Scoped resync.** A reset repairs only the scopes whose recorded version
+   moved (`shell`, `work`, `transcript`). A malformed batch that mentions only
+   Work entities repairs the Work scope; other malformed input falls back.
+6. **Full snapshot.** An epoch change or an unrecoverable scoped read uses the
+   full durable snapshot. It is the last resort, not the steady-state path.
+7. **Legacy fallback.** Protocol-2 clients keep the old changed event and
+   snapshot path. They never see a protocol-3-only shape as an authoritative
+   replacement.
+
+Steady-state Work changes do not wait for a snapshot. A handoff or delegation
+publishes its task change before pump work, so its card appears from the patch
+path. A task mutation that is still in the write queue is not visible to a
+reader that requires consistency until the queue settles.
+
+### Streaming checkpoints
+
+Workspace text streams as a coalesced ephemeral event carrying the full
+accumulated text for the visible row. The event is version-neutral and never
+enters the change ring. Live text is checkpointed to storage at a bounded
+interval without a coordination version or patch. On reload the last
+checkpoint is present, `streaming` is cleared, and the row is marked
+interrupted; at most the text after the final checkpoint is lost. Finalization
+drops queued stream text, persists once, and publishes one exact durable
+message upsert, which replaces the live overlay exactly once and repairs a
+missed ephemeral event.
+
+### Tier 3 scale path
+
+Scoped bootstrap, Work projection, transcript windows, on-demand result fetch,
+and server-derived counts are gated read models. They are described under
+[the gated Tier 3 reads](#v7-tier-3-scoped-reads-ticket-141). The gate decision
+travels with every bootstrap/resync/heartbeat response. A disabled gate keeps
+the snapshot path; an enabled gate never changes authority, only payload size.
+
+### Bounded memory and diagnosis
+
+The client keeps at most 240 patched transcript rows per workspace and prunes
+invisible terminal Work rows; a full snapshot remains the legacy recovery path
+and is applied whole. Clone, patch, bootstrap, and resync diagnostics report
+counts, sizes, versions, and timings only — never credentials or conversation
+content. `ENSEMBLE_DEBUG_CLONES=1` exposes full-clone counts and timing on the
+`diagnostic` RPC.
+
 ## Known limitations
 
 - The composer completes agents on `$`, files on `@`, and Ensemble commands on `/`; arbitrary native OpenCode slash commands are not proxied into the group chat.

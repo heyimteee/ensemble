@@ -4547,6 +4547,45 @@ test("delegation publishes the task change before pump work and changes.since re
   }
 })
 
+test("changes.since output stays JSON-safe at the RPC boundary", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-change-json-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  const assertJsonValues = (value: any, path: string): void => {
+    if (value === undefined) assert.fail(`${path} is undefined`)
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => assertJsonValues(item, `${path}[${index}]`))
+      return
+    }
+    if (value && typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) assertJsonValues(item, `${path}.${key}`)
+    }
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "json", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    const before = await handlers.snapshot({ directory })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Hello" } })
+    const recovered = await handlers["changes.since"]({ directory, epoch: before.epoch, version: before.state.version })
+    assert.equal(recovered.reset, false)
+    assert.ok(recovered.entries.some((entry: any) =>
+      (entry.entities ?? entry.changes).some((change: any) => change.entity === "message" && change.op === "upsert"),
+    ), "the recovered batch carries a message entity")
+    // The host RPC output validator rejects explicit undefined values; the
+    // snapshot boundary already strips them and changes.since must match it.
+    assertJsonValues(recovered, "changes.since")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("a service restart changes the boot epoch and resets the feed without losing work", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-change-epoch-"))
   const { ctx } = fakeContext()

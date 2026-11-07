@@ -545,12 +545,16 @@ export class EnsembleV2Service {
    */
   private async changesSince(input: { directory: string; epoch?: number; version?: number }): Promise<ChangesSince> {
     await this.store.sync().catch(() => false)
-    return {
+    // The host RPC output validator rejects explicit undefined values in a
+    // full-entity patch (for example a message's absent agentID). Strip them
+    // at this boundary exactly as snapshot/bootstrap do; otherwise a gap
+    // recovery request fails with a 500 and falls back to a full snapshot.
+    return jsonSafe({
       ...this.store.changesSince(input.epoch ?? -1, input.version ?? -1),
       meta: this.feedMeta(),
       scopeVersions: this.store.scopeVersions(),
       counts: this.counts(),
-    }
+    })
   }
 
   /**

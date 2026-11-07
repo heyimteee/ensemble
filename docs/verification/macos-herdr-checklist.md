@@ -3,8 +3,9 @@
 Status: **Manual and unexecuted.** No macOS/Herdr host has run this checklist.
 It is a repeatable procedure, not evidence. Until a run is recorded below or in
 a dated verification record, treat macOS/Herdr behavior as unverified and do
-not cite this document as a pass. Sections 5–8 add the v6 motion checks and are
-also **NOT RUN**.
+not cite this document as a pass. Sections 5–8 add the v6 motion checks and
+section 9 adds the v7 dispatch-group and durable-feed checks. All of 5–9 are
+**NOT RUN**.
 
 This checklist covers the areas that Linux/tmux cannot prove:
 
@@ -20,7 +21,8 @@ This checklist covers the areas that Linux/tmux cannot prove:
 Linux/tmux evidence is not macOS/Herdr evidence. The
 [2026-11-07 v6 record](2026-11-07-v6.md) records Linux/tmux evidence only.
 
-Related records: [v6 verification](2026-11-07-v6.md),
+Related records: [v7 verification](2026-11-07-v7.md),
+[v6 verification](2026-11-07-v6.md),
 [v5.8 verification](2026-11-05-v58.md),
 [spec #113](https://github.com/heyimteee/ensemble/issues/113),
 [tickets #114–#127](https://github.com/heyimteee/ensemble/issues/127),
@@ -325,6 +327,51 @@ the recorded host.
   Expected: no state relies on color alone; needs-you, failed, and resolved
   states keep their text or glyph distinction.
 
+## 9. v7 dispatch groups, durable feed, and card treatments
+
+The goal is to prove the v7 group lifecycle and card treatments on the recorded
+host, including the parts that Linux text capture cannot prove (color, focus,
+and terminal font rendering). The Linux/tmux record is
+[2026-11-07-v7](2026-11-07-v7.md); it is not a substitute for this section.
+
+- [ ] **9.1 One command, one group.** Send one command that fans out to two or
+      three members. Expected: one `WORK 1 group · N active · 0 done` header,
+      one shared group, and one card per active member.
+- [ ] **9.2 Two groups.** Send a second command while the first group runs.
+      Expected: `WORK 2 groups`, `GROUP 1`/`GROUP 2` labels, and the newest
+      group keeps visible capacity when rows are tight. The old group is not
+      disturbed.
+- [ ] **9.3 Shared hold and removal.** Let one group finish while the other
+      stays active. Expected: the complete group stays for about 1.2 s as a
+      unit, then clears without removing the second group.
+- [ ] **9.4 Needs-you persistence.** Create a task that asks the user a
+      question, or trigger a native permission prompt. Expected: the card shows
+      the yellow diamond and `NEEDS YOU`, and the group stays beyond the 1.2 s
+      hold until the decision resolves. After resolution the group holds once
+      from the resolution time.
+- [ ] **9.5 Terminal events.** Fail and cancel one task each. Expected: one
+      `✕ <agent> failed: <reason>` line and one `⊘ <title> cancelled` line, no
+      duplicate generic `Subtask failed` line. Failed and cancelled cards stay
+      in their group until it completes.
+- [ ] **9.6 Card treatment.** Inspect a WORKING, REPLIED, and NEEDS YOU card.
+      Expected: the agent name is pale blue in every state; WORKING has a grey
+      status word with yellow Braille and a yellow left bar; REPLIED has a
+      green dot, green status, and green bar; NEEDS YOU has a yellow diamond,
+      yellow status, and yellow bar. The rounded border is neutral and
+      selection is a focus border, never a green gutter.
+- [ ] **9.7 Card fit.** Resize through 160×50, 120×40, 100×30, and 80×24 with
+      two active groups. Expected: the header and status words never truncate,
+      the name truncates first, and the compact fallback keeps the newest
+      group's active row selectable.
+- [ ] **9.8 Durable recovery.** While a task is live, restart the OpenCode
+      service. Expected: the TUI reconnects without a manual reload, the Work
+      group is reconstructed from durable state, and an interrupted stream is
+      visibly interrupted rather than stale-streaming.
+- [ ] **9.9 Reduced motion and `NO_COLOR`.** Repeat 9.1 and 9.6 with
+      `ENSEMBLE_REDUCED_MOTION=1` and with `NO_COLOR=1`. Expected: the final
+      glyph and state word remain, decorative motion freezes, and no state
+      relies on color alone.
+
 ## Recording the run
 
 Copy this table into a dated verification record or append it below as a run
@@ -342,6 +389,7 @@ The v6 record must say exactly which host and terminal versions ran it; Linux
 | 6. v6 Work cards and recent cards | NOT RUN | |
 | 7. v6 app-owned toast | NOT RUN | |
 | 8. v6 reduced motion and `NO_COLOR` | NOT RUN | |
+| 9. v7 dispatch groups and card treatments | NOT RUN | |
 
 Only change `NOT RUN` to `PASS` after observing the expected outcome on the
 recorded host. Record a `FAIL` as a ticket or a follow-up; do not quietly relax

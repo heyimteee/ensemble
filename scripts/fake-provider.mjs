@@ -15,7 +15,11 @@ import { setTimeout as delay } from "node:timers/promises"
 const FAKE_RICH_PROMPT = "fake-rich-fixture"
 const FAKE_BUBBLE_PROMPT = "fake-bubble-fixture"
 const FAKE_QUEUE_HOLD_PROMPT = "fake-queue-hold"
+const FAKE_QUEUE_HOLD_LONG_PROMPT = "fake-queue-hold-long"
+const FAKE_ASK_PROMPT = "fake-ask-person"
+const ASK_QUESTION = "Which release channel should this task use?"
 const MODEL_ID = "ensemble-fake-model"
+const askedTasks = new Set()
 
 const RICH_MARKDOWN = [
   "# Rich Markdown Fixture",
@@ -70,6 +74,20 @@ const QUEUE_HOLD_MARKDOWN = [
   ...Array.from(
     { length: 36 },
     (_, index) => `hold line ${index + 1} keeps this direct reply streaming while the parked-message probe runs.`,
+  ),
+  "",
+].join("\n")
+
+// v7 group-lifecycle fixture: two overlapping groups must stay visible while
+// the earlier one is cancelled. At the default 35 ms chunk delay this holds
+// for roughly fourteen seconds, well beyond the tmux capture window.
+const QUEUE_HOLD_LONG_MARKDOWN = [
+  "# Long Queue Hold Fixture",
+  "",
+  "QUEUE_HOLD_LONG_MARKER",
+  ...Array.from(
+    { length: 400 },
+    (_, index) => `long hold line ${index + 1} keeps this second dispatch group live while the first group is cancelled.`,
   ),
   "",
 ].join("\n")
@@ -214,6 +232,44 @@ async function streamCompletion(response, text, requestID) {
   log("response_end", { request: requestID, chunks: chunks.length, rich: text === RICH_MARKDOWN, bubble: text === BUBBLE_MARKDOWN })
 }
 
+// v7 needs-you fixture: emit one OpenAI-compatible tool call so the native
+// agent invokes Ensemble's ask_person tool. A follow-up request includes the
+// tool result; the caller then streams the long hold fixture so the task stays
+// active until the live check resolves the approval.
+async function streamAskToolCall(response, requestID) {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "Connection": "close",
+    "X-Accel-Buffering": "no",
+  })
+  response.flushHeaders?.()
+  response.write(roleFrame())
+  if (initialDelay > 0) await delay(initialDelay)
+  response.write(`data: ${JSON.stringify({
+    id: completionId(),
+    object: "chat.completion.chunk",
+    created: 1790000000,
+    model: MODEL_ID,
+    choices: [{
+      index: 0,
+      delta: {
+        tool_calls: [{
+          index: 0,
+          id: "call_ensemble_ask_person",
+          type: "function",
+          function: { name: "ensemble_ask_person", arguments: JSON.stringify({ question: ASK_QUESTION }) },
+        }],
+      },
+      finish_reason: null,
+    }],
+  })}\n\n`)
+  response.write(chunkFrame("", "tool_calls"))
+  response.write("data: [DONE]\n\n")
+  response.end()
+  log("response_tool_call", { request: requestID, tool: "ensemble_ask_person" })
+}
+
 async function nonStreamingCompletion(response, text, requestID) {
   response.writeHead(200, { "Content-Type": "application/json" })
   response.end(JSON.stringify({
@@ -258,6 +314,25 @@ const server = createServer(async (request, response) => {
     // Only the parked-message probe sends it, and no later DM turn depends on a
     // short reply, so the longer stream cannot mask another assertion.
     const hold = prompt.includes(FAKE_QUEUE_HOLD_PROMPT)
+    const holdLong = prompt.includes(FAKE_QUEUE_HOLD_LONG_PROMPT)
+    // v7 needs-you fixture: the first request calls ask_person; the follow-up
+    // request (which carries a tool result) streams the long hold fixture.
+    // The native session accumulates history, so "a tool result exists" is not
+    // enough: only a tool result after the latest user message belongs to the
+    // current turn. An approved re-run carries "User answer:" and must not ask
+    // again.
+    const ask = prompt.includes(FAKE_ASK_PROMPT)
+    let lastUser = -1
+    for (let index = 0; index < messages.length; index++) {
+      if (messages[index]?.role === "user") lastUser = index
+    }
+    const latestUserText = lastUser >= 0 ? textOf(messages[lastUser]?.content) : ""
+    const answered = /User answer:/i.test(latestUserText)
+    const toolResult = lastUser >= 0 && messages.slice(lastUser + 1).some((message) => message?.role === "tool")
+    const taskTitles = [...prompt.matchAll(/title="([^"]+)"/g)]
+    const taskTitle = taskTitles.at(-1)?.[1] ?? ""
+    const askKey = taskTitle || latestUserText || prompt.slice(-200)
+    const askNew = ask && !answered && !askedTasks.has(askKey)
     // Ticket #74 fix-up: the DM session accumulates every earlier trigger,
     // so precedence must follow the LATEST trigger, not a fixed order —
     // otherwise the earlier rich trigger lingering in history shadows the
@@ -265,14 +340,17 @@ const server = createServer(async (request, response) => {
     const richAt = prompt.lastIndexOf(FAKE_RICH_PROMPT)
     const bubbleAt = prompt.lastIndexOf(FAKE_BUBBLE_PROMPT)
     const holdAt = prompt.lastIndexOf(FAKE_QUEUE_HOLD_PROMPT)
-    const latest = Math.max(richAt, bubbleAt, holdAt)
-    const text = latest === holdAt && holdAt >= 0
-      ? QUEUE_HOLD_MARKDOWN
-      : bubbleAt > richAt
-        ? BUBBLE_MARKDOWN
-        : richAt >= 0
-          ? RICH_MARKDOWN
-          : SHORT_REPLY
+    const holdLongAt = prompt.lastIndexOf(FAKE_QUEUE_HOLD_LONG_PROMPT)
+    const latest = Math.max(richAt, bubbleAt, holdAt, holdLongAt)
+    const text = latest === holdLongAt && holdLongAt >= 0
+      ? QUEUE_HOLD_LONG_MARKDOWN
+      : latest === holdAt && holdAt >= 0
+        ? QUEUE_HOLD_MARKDOWN
+        : bubbleAt > richAt
+          ? BUBBLE_MARKDOWN
+          : richAt >= 0
+            ? RICH_MARKDOWN
+            : SHORT_REPLY
     log("request", {
       request: requestID,
       model: body?.model,
@@ -281,10 +359,20 @@ const server = createServer(async (request, response) => {
       rich,
       bubble,
       hold,
+      holdLong,
+      ask,
+      askNew,
+      answered,
+      toolResult,
       promptTail: prompt.slice(-120),
     })
     try {
-      if (body?.stream === false) await nonStreamingCompletion(response, text, requestID)
+      if (ask && body?.stream !== false) {
+        if (askNew) {
+          askedTasks.add(askKey)
+          await streamAskToolCall(response, requestID)
+        } else await streamCompletion(response, QUEUE_HOLD_MARKDOWN, requestID)
+      } else if (body?.stream === false) await nonStreamingCompletion(response, text, requestID)
       else await streamCompletion(response, text, requestID)
     } catch (error) {
       log("response_error", { request: requestID, message: String(error) })
