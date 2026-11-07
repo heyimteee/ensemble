@@ -1,5 +1,6 @@
 import { deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
-import { isNeedsYouTask } from "../work-groups.ts"
+import { isNeedsYouTask, orderedGroupTasks, taskNeedsYou } from "../work-groups.ts"
+import { TRANSCRIPT_WINDOW } from "../scoped-read.ts"
 import type { Subtask } from "../types.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
@@ -32,7 +33,7 @@ import {
 /** Shared transcript window: both the DM and group surfaces keep the most
  * recent N rows. One documented bound so neither surface can drift and grow
  * scrolling cost; raising it re-verifies overlay centering and wrap width. */
-export const TRANSCRIPT_WINDOW = 40
+export { TRANSCRIPT_WINDOW }
 
 const GLYPHS: Record<DerivedWorkStatus, string> = {
   pending: "▫",
@@ -163,13 +164,7 @@ export function queuedActivityFrame(): string {
 
 /** Active work first: working/retrying, then pending, oldest first. Terminal rows never render here. */
 export function orderedWorkItems(tasks: Subtask[], now: number): Subtask[] {
-  const statusOf = (task: Subtask) => deriveWorkStatus(task, now)
-  return tasks
-    .filter((task) => !isTerminalWorkStatus(statusOf(task)))
-    .sort((a, b) => {
-      const rank = (task: Subtask) => (statusOf(task) === "pending" ? 1 : 0)
-      return rank(a) - rank(b) || a.createdAt - b.createdAt
-    })
+  return orderedGroupTasks(tasks, now).filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
 }
 
 /** True while the surface has active (non-terminal) work — the work cursor and its actions mount exactly then. */
@@ -734,14 +729,13 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
   const terminal = isTerminalWorkStatus(status)
   // A terminal card is display-only: the terminal state owns the glyph and
   // detail, and an old interruption must not revive needs-you. A still-pending
-  // approval still keeps the surrounding group visible (workgroups.ts).
-  const needsYou = terminal
-    ? false
-    : isNeedsYouTask(
-        task,
-        options.pendingApprovalIDs ?? NO_TASK_IDS,
-        options.nativeBlockedSubtaskIDs ?? NO_TASK_IDS,
-      )
+  // approval keeps both the group and the card's NEEDS YOU treatment.
+  const needsYou = taskNeedsYou(
+    task,
+    terminal,
+    options.pendingApprovalIDs ?? NO_TASK_IDS,
+    options.nativeBlockedSubtaskIDs ?? NO_TASK_IDS,
+  )
   const pending = terminal ? null : options.pendingFor?.(task) ?? null
   const width = Math.max(16, Math.floor(options.width))
   const textWidth = Math.max(8, width - 2)

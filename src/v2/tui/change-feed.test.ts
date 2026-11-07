@@ -347,7 +347,7 @@ test("the client store applies full-entity upserts and removals without replacin
   const store = createClientStore()
   store.applySnapshot(snapshot)
 
-  store.applyWorkChanges([
+  store.applyChanges([
     { entity: "subtask", op: "upsert", task: task("t1", { state: "working" }) },
     { entity: "subtask", op: "remove", id: "t2" },
   ], 6)

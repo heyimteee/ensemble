@@ -476,7 +476,7 @@ test("the pure reducer treats a snapshot as a full replacement", () => {
   assert.equal(next.agents.a2, undefined)
 })
 
-test("a long client session keeps transcript and Work memory bounded", (t) => {
+test("a long client session keeps patched transcript and Work memory bounded", (t) => {
   const store = createClientStore()
   store.applySnapshot(snapshot(stateWith((state) => {
     state.workspaces.w1 = workspace("w1", "site")
@@ -498,10 +498,12 @@ test("a long client session keeps transcript and Work memory bounded", (t) => {
     }))
   })))
 
-  assert.equal(store.state()!.messages.w1!.length, CLIENT_MESSAGE_LIMIT, "a full fallback snapshot is bounded")
-  assert.equal(store.state()!.dmTranscripts["w:a1"]!.length, CLIENT_MESSAGE_LIMIT, "direct transcript caches are bounded too")
+  // Review fix: a full snapshot is the legacy recovery path, so it arrives
+  // whole; only the scoped patch/window path applies the client bound.
+  assert.equal(store.state()!.messages.w1!.length, 500, "a full snapshot keeps the legacy transcript")
+  assert.equal(store.state()!.dmTranscripts["w:a1"]!.length, 500, "direct transcript caches keep the legacy full snapshot")
   assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 500)
-  assert.equal(store.windowFor("w1")?.hasMoreOlder, true)
+  assert.equal(store.windowFor("w1")?.hasMoreOlder, false)
 
   const started = performance.now()
   for (let seq = 501; seq <= 5_000; seq++) {
@@ -528,6 +530,25 @@ test("a long client session keeps transcript and Work memory bounded", (t) => {
     }], 6_000 + index)
   }
   assert.deepEqual(Object.keys(store.state()!.subtasks), ["live"], "invisible terminal rows are pruned from the client cache")
+})
+
+test("a short client tombstone rejects a delayed upsert after a remove", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.subtasks.t1 = task("t1")
+  })))
+  store.applyChanges([{ entity: "subtask", op: "remove", id: "t1" }], 10)
+  assert.equal(store.state()?.subtasks.t1, undefined)
+
+  // A delayed duplicate of the deleted row at the delete version cannot
+  // resurrect it while the short tombstone lives.
+  store.applyChanges([{ entity: "subtask", op: "upsert", task: task("t1") }], 10)
+  assert.equal(store.state()?.subtasks.t1, undefined, "the tombstone suppresses the stale upsert")
+
+  // A genuinely newer durable upsert wins and clears the tombstone.
+  store.applyChanges([{ entity: "subtask", op: "upsert", task: task("t1", { state: "working", claimedBy: "run", leaseUntil: 9_000, attempts: 1 }) }], 11)
+  assert.equal(store.state()?.subtasks.t1?.state, "working", "a newer version may recreate the entity")
 })
 
 test("an older transcript page merges below the loaded window and stays bounded", () => {
@@ -561,6 +582,56 @@ test("an older transcript page merges below the loaded window and stays bounded"
   assert.equal(store.windowFor("w1")?.oldestSeq, 21)
   assert.equal(store.windowFor("w1")?.newestSeq, 100)
   assert.equal(store.windowFor("w1")?.hasMoreOlder, true)
+})
+
+test("a patch after paging away keeps the fetched older page", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.agents.a1 = agent("a1", "Ada")
+  })))
+  const newest = Array.from({ length: 240 }, (_, index) => message(`m${index + 161}`, `row ${index + 161}`, { seq: index + 161 }))
+  store.applyTranscriptWindow("w1", {
+    workspaceID: "w1",
+    messages: newest,
+    oldestSeq: 161,
+    newestSeq: 400,
+    hasMoreOlder: true,
+    limit: 240,
+  }, "replace")
+  const older = Array.from({ length: 120 }, (_, index) => message(`m${index + 41}`, `row ${index + 41}`, { seq: index + 41 }))
+  store.applyTranscriptWindow("w1", {
+    workspaceID: "w1",
+    messages: older,
+    oldestSeq: 41,
+    newestSeq: 160,
+    hasMoreOlder: true,
+    limit: 240,
+  }, "older")
+  assert.equal(store.state()!.messages.w1![0]?.seq, 41, "the fetched older page is loaded")
+
+  // Review fix: a durable patch while paged away must not re-trim to the
+  // newest rows and discard the page the user just fetched.
+  store.applyChanges([{ entity: "message", op: "upsert", message: message("m401", "row 401", { seq: 401 }) }], 20)
+  assert.equal(store.state()!.messages.w1![0]?.seq, 41, "the older page survives the next patch")
+  assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 280, "the anchored window stays bounded")
+  assert.equal(store.state()!.messages.w1!.length, CLIENT_MESSAGE_LIMIT)
+  assert.equal(store.transcriptAnchored("w1"), true)
+
+  // The app refreshes the newest window when the user returns to the bottom,
+  // which replaces the loaded range and releases the anchor.
+  const fresh = Array.from({ length: 240 }, (_, index) => message(`m${index + 162}`, `row ${index + 162}`, { seq: index + 162 }))
+  store.applyTranscriptWindow("w1", {
+    workspaceID: "w1",
+    messages: fresh,
+    oldestSeq: 162,
+    newestSeq: 401,
+    hasMoreOlder: true,
+    limit: 240,
+  }, "replace")
+  assert.equal(store.transcriptAnchored("w1"), false)
+  assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 401)
+  assert.equal(store.windowFor("w1")?.newestSeq, 401)
 })
 
 test("a scoped shell resync replaces shell entities but preserves the loaded transcript and Work", () => {
@@ -601,6 +672,6 @@ test("server-derived counts apply from bootstrap, patches, and revisions without
   store.applyChanges([], 5, undefined, { w1: { unread: 4, busy: 0 } })
   assert.deepEqual(store.counts(), { w1: { unread: 4, busy: 0 } })
 
-  store.applyRevisionCounts({ w1: { unread: 0, busy: 2 } })
+  store.applyCounts({ w1: { unread: 0, busy: 2 } })
   assert.deepEqual(store.counts(), { w1: { unread: 0, busy: 2 } })
 })

@@ -2,7 +2,8 @@ import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
 import { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
-import { CLIENT_MESSAGE_LIMIT, CLIENT_TASK_GRACE_MS, projectVisibleWork, trimMessages } from "../scoped-read.ts"
+import { CLIENT_MESSAGE_LIMIT, projectVisibleWork, trimMessages } from "../scoped-read.ts"
+import { configMetadataApplies } from "./refresh-coordinator.ts"
 import type { EntityChange, FeedMeta, Id, Message, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, TranscriptWindow, WorkspaceCounts } from "../types.ts"
 
 /**
@@ -16,13 +17,47 @@ export type ClientStateUpdate =
   | { type: "subtask.remove"; id: Id }
   | { type: "message.stream"; workspaceID: Id; id: Id; text: string; updatedAt: number }
   | { type: "entity.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
-  | { type: "work.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
   | { type: "work.snapshot"; subtasks: Record<Id, Subtask>; version: number; updatedAt?: number }
   | { type: "shell.snapshot"; state: SnapshotState }
   | { type: "transcript.window"; workspaceID: Id; messages: Message[]; mode: "replace" | "older" }
 
 /** Per-workspace loaded transcript range. */
 export type ClientTranscriptWindow = Omit<TranscriptWindow, "messages" | "workspaceID">
+
+/** Which end of a loaded transcript to keep when the client bound trims it. */
+export type TranscriptTrimKeep = "newest" | "oldest" | ((workspaceID: Id) => "newest" | "oldest")
+
+/** A delete tombstone lives only long enough to reject delayed duplicates. */
+export const CLIENT_TOMBSTONE_TTL_MS = 30_000
+/** Keep the tombstone map small; the oldest delete is evicted first. */
+export const CLIENT_TOMBSTONE_LIMIT = 512
+
+type ClientTombstone = { version: number; at: number }
+
+/** Stable identity for one durable entity change, or undefined for singletons. */
+function entityChangeKey(change: EntityChange): string | undefined {
+  switch (change.entity) {
+    case "subtask":
+      return `subtask\u0000${change.op === "upsert" ? change.task.id : change.id}`
+    case "message":
+      return `message\u0000${change.op === "upsert" ? change.message.workspaceID : change.workspaceID}\u0000${change.op === "upsert" ? change.message.id : change.id}`
+    case "agent":
+      return `agent\u0000${change.op === "upsert" ? change.agent.id : change.id}`
+    case "workspace":
+      return `workspace\u0000${change.op === "upsert" ? change.workspace.id : change.id}`
+    case "approval":
+      return `approval\u0000${change.op === "upsert" ? change.approval.id : change.id}`
+    case "binding":
+      return `binding\u0000${change.op === "upsert" ? change.binding.workspaceID : change.workspaceID}\u0000${change.op === "upsert" ? change.binding.agentID : change.agentID}`
+    case "memory":
+      return `memory\u0000${change.op === "upsert" ? change.memory.id : change.id}`
+    case "initJob":
+      return `initJob\u0000${change.op === "upsert" ? change.job.id : change.id}`
+    case "settings":
+    case "ui":
+      return undefined
+  }
+}
 
 
 const bindingKey = (workspaceID: Id, agentID: Id) => `${workspaceID}:${agentID}`
@@ -199,8 +234,7 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
       messages[index] = { ...message, text: update.text, updatedAt: update.updatedAt }
       return { ...state, messages: { ...state.messages, [update.workspaceID]: messages } }
     }
-    case "entity.changes":
-    case "work.changes": {
+    case "entity.changes": {
       const next = reduceEntityChanges(state, update.changes)
       const version = update.version ?? state.version
       const updatedAt = update.updatedAt ?? state.updatedAt
@@ -249,16 +283,21 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
 }
 
 /**
- * Ticket #141 bounded client cache. Keep at most one transcript window per
- * workspace and only visible Work rows (plus a short grace so a sibling
- * transition never needs a resync). Identity is preserved when nothing is
- * trimmed so Solid invalidation stays path-scoped.
+ * Ticket #141 bounded client cache for patch/window updates. Keep at most one
+ * transcript window per workspace and only visible Work rows. A full snapshot
+ * is the legacy recovery path and is applied whole. Identity is preserved when
+ * nothing is trimmed so Solid invalidation stays path-scoped.
  */
-export function boundClientState(state: SnapshotState, now: number = Date.now(), keep: "newest" | "oldest" = "newest"): SnapshotState {
+export function boundClientState(
+  state: SnapshotState,
+  now: number = Date.now(),
+  keep: TranscriptTrimKeep = "newest",
+): SnapshotState {
+  const keepFor = typeof keep === "function" ? keep : () => keep
   let next = state
   let messages: SnapshotState["messages"] | undefined
   for (const [workspaceID, list] of Object.entries(state.messages)) {
-    const bounded = trimMessages(list, CLIENT_MESSAGE_LIMIT, keep)
+    const bounded = trimMessages(list, CLIENT_MESSAGE_LIMIT, keepFor(workspaceID))
     if (bounded === list) continue
     messages ??= { ...state.messages }
     messages[workspaceID] = bounded
@@ -271,7 +310,7 @@ export function boundClientState(state: SnapshotState, now: number = Date.now(),
     transcripts[key] = list.slice(-CLIENT_MESSAGE_LIMIT)
   }
   if (transcripts) next = { ...next, dmTranscripts: transcripts }
-  const visible = projectVisibleWork(state, now, WORK_GROUP_HOLD_MS + CLIENT_TASK_GRACE_MS)
+  const visible = projectVisibleWork(state, now, WORK_GROUP_HOLD_MS)
   const currentKeys = Object.keys(state.subtasks)
   const visibleKeys = Object.keys(visible)
   if (visibleKeys.length !== currentKeys.length || visibleKeys.some((id) => !(id in state.subtasks))) {
@@ -303,8 +342,6 @@ export type ClientStore = {
   removeSubtask: (id: Id) => void
   /** Apply one validated, atomic batch of full-entity changes. */
   applyChanges: (changes: EntityChange[], version?: number, meta?: FeedMeta, counts?: Record<Id, WorkspaceCounts>) => void
-  /** Apply one validated, atomic batch of full-entity work changes. */
-  applyWorkChanges: (changes: EntityChange[], version?: number) => void
   /** Apply ephemeral live text to one visible streaming row. */
   applyStream: (update: MessageStream) => void
   /** Scoped Work resync: replace subtasks and metadata, keep other entities. */
@@ -315,10 +352,10 @@ export type ClientStore = {
   applyShellSnapshot: (state: SnapshotState) => void
   /** Merge one durable transcript page; "older" keeps the paged range. */
   applyTranscriptWindow: (workspaceID: Id, window: TranscriptWindow, mode?: "replace" | "older") => void
+  /** True while a loaded older page anchors the window away from the newest rows. */
+  transcriptAnchored: (workspaceID: Id) => boolean
   /** Apply server-derived counts from a patch, changes.since, or heartbeat. */
   applyCounts: (counts: Record<Id, WorkspaceCounts> | undefined) => void
-  /** Revision alias kept explicit at the app seam. */
-  applyRevisionCounts: (counts: Record<Id, WorkspaceCounts> | undefined) => void
   reset: () => void
 }
 
@@ -344,6 +381,10 @@ export function createClientStore(): ClientStore {
   const [epoch, setEpoch] = createSignal<number | undefined>(undefined)
   const [counts, setCounts] = createSignal<Record<Id, WorkspaceCounts> | undefined>(undefined)
   const [windows, setWindows] = createSignal<Record<Id, ClientTranscriptWindow>>({})
+  /** Workspaces whose loaded window is anchored on an older page. */
+  const pagedOlder = new Set<Id>()
+  /** Short-lived delete tombstones keyed by durable entity identity. */
+  const tombstones = new Map<string, ClientTombstone>()
 
   const windowFrom = (messages: readonly Message[], hasMoreOlder: boolean): ClientTranscriptWindow => ({
     ...(messages.length > 0 ? { oldestSeq: messages[0]!.seq, newestSeq: messages[messages.length - 1]!.seq } : {}),
@@ -351,9 +392,43 @@ export function createClientStore(): ClientStore {
     limit: CLIENT_MESSAGE_LIMIT,
   })
 
-  const apply = (update: ClientStateUpdate, keep: "newest" | "oldest" = "newest") => {
+  /** Drop expired tombstones, then cap the map at its short-term bound. */
+  const pruneTombstones = (now: number) => {
+    for (const [key, tombstone] of tombstones) {
+      if (now - tombstone.at > CLIENT_TOMBSTONE_TTL_MS) tombstones.delete(key)
+    }
+    while (tombstones.size > CLIENT_TOMBSTONE_LIMIT) {
+      const oldest = tombstones.keys().next().value
+      if (oldest === undefined) break
+      tombstones.delete(oldest)
+    }
+  }
+
+  /** Reject an upsert that a still-live tombstone already superseded. */
+  const liveChange = (change: EntityChange, version: number): boolean => {
+    const key = entityChangeKey(change)
+    if (!key || change.op === "remove") return true
+    const tombstone = tombstones.get(key)
+    return tombstone === undefined || version > tombstone.version
+  }
+
+  const recordTombstones = (changes: readonly EntityChange[], version: number) => {
+    const at = Date.now()
+    for (const change of changes) {
+      if (change.op !== "remove") continue
+      const key = entityChangeKey(change)
+      if (key) tombstones.set(key, { version, at })
+    }
+    pruneTombstones(at)
+  }
+
+  const clearTombstones = () => tombstones.clear()
+
+  const keepFor = (workspaceID: Id): "newest" | "oldest" => (pagedOlder.has(workspaceID) ? "oldest" : "newest")
+
+  const apply = (update: ClientStateUpdate, keep: TranscriptTrimKeep = keepFor) => {
     const next = reduceClientState(unwrap(data.state), update)
-    setData("state", reconcile(boundClientState(next, Date.now(), keep)))
+    setData("state", reconcile(update.type === "snapshot" ? next : boundClientState(next, Date.now(), keep)))
     return next
   }
 
@@ -402,7 +477,7 @@ export function createClientStore(): ClientStore {
       setModelsError(meta.modelsError)
     }
     const current = directory()
-    if (!meta.directory || !current || meta.directory === current) {
+    if (configMetadataApplies(meta.directory, current)) {
       if (typeof meta.configRevision === "number") setConfigRevision(meta.configRevision)
       // The metadata carries this view's complete config error state.
       if (typeof meta.configRevision === "number") setConfigError(meta.configError)
@@ -410,13 +485,16 @@ export function createClientStore(): ClientStore {
   }
 
   const applyChanges = (changes: EntityChange[], version?: number, meta?: FeedMeta, nextCounts?: Record<Id, WorkspaceCounts>) => {
+    const batchVersion = version ?? data.state.version
+    const accepted = changes.filter((change) => liveChange(change, batchVersion))
     batch(() => {
       const updatedAt = version === undefined || version === data.state.version ? undefined : Date.now()
-      apply({ type: "entity.changes", changes, version, updatedAt })
+      apply({ type: "entity.changes", changes: accepted, version, updatedAt })
+      recordTombstones(accepted, batchVersion)
       if (meta) applyFeedMeta(meta)
       if (nextCounts) setCounts(nextCounts)
       const touched = new Set<Id>()
-      for (const change of changes) {
+      for (const change of accepted) {
         if (change.entity !== "message") continue
         touched.add(change.op === "upsert" ? change.message.workspaceID : change.workspaceID)
       }
@@ -437,29 +515,37 @@ export function createClientStore(): ClientStore {
     epoch,
     counts,
     windowFor: (workspaceID) => windows()[workspaceID],
+    transcriptAnchored: (workspaceID) => pagedOlder.has(workspaceID),
     applySnapshot: (snapshot) => {
       batch(() => {
-        const bounded = boundClientState(snapshot.state, Date.now())
         const scopedWorkspace = snapshot.window ? Object.keys(snapshot.state.messages)[0] : undefined
         const nextWindows: Record<Id, ClientTranscriptWindow> = {}
         for (const [workspaceID, list] of Object.entries(snapshot.state.messages)) {
-          const loaded = bounded.messages[workspaceID] ?? []
           nextWindows[workspaceID] = scopedWorkspace === workspaceID && snapshot.window
             ? { ...snapshot.window }
-            : windowFrom(loaded, list.length > loaded.length)
+            : windowFrom(list, false)
         }
-        apply({ type: "snapshot", snapshot: { ...snapshot, state: bounded } })
+        // A snapshot is the legacy full-state recovery path: apply it whole.
+        apply({ type: "snapshot", snapshot })
         setWindows(nextWindows)
         setCounts(snapshot.counts)
+        pagedOlder.clear()
+        clearTombstones()
         setData("loaded", true)
         applyMetadata(snapshot)
       })
     },
     applyMetadata,
-    applySubtask: (task) => apply({ type: "subtask.upsert", task }),
-    removeSubtask: (id) => apply({ type: "subtask.remove", id }),
+    applySubtask: (task) => {
+      if (!liveChange({ entity: "subtask", op: "upsert", task }, data.state.version)) return
+      apply({ type: "subtask.upsert", task })
+    },
+    removeSubtask: (id) => {
+      const version = data.state.version
+      apply({ type: "subtask.remove", id })
+      recordTombstones([{ entity: "subtask", op: "remove", id }], version)
+    },
     applyChanges,
-    applyWorkChanges: (changes, version) => applyChanges(changes, version),
     applyStream: (update) => {
       if (epoch() !== undefined && update.epoch !== epoch()) return
       apply({ type: "message.stream", workspaceID: update.workspaceID, id: update.id, text: update.text, updatedAt: update.updatedAt })
@@ -472,18 +558,23 @@ export function createClientStore(): ClientStore {
           version: snapshot.state.version,
           updatedAt: snapshot.state.updatedAt,
         })
+        clearTombstones()
         applyMetadata(snapshot)
       })
     },
     applyWorkProjection: (tasks, version) => {
       apply({ type: "work.snapshot", subtasks: tasks, version })
+      clearTombstones()
     },
     applyShellSnapshot: (state) => {
       apply({ type: "shell.snapshot", state })
+      clearTombstones()
     },
     applyTranscriptWindow: (workspaceID, window, mode = "replace") => {
+      if (mode === "older") pagedOlder.add(workspaceID)
+      else pagedOlder.delete(workspaceID)
       batch(() => {
-        apply({ type: "transcript.window", workspaceID, messages: window.messages, mode }, mode === "older" ? "oldest" : "newest")
+        apply({ type: "transcript.window", workspaceID, messages: window.messages, mode })
         const loaded = data.state.messages[workspaceID] ?? []
         setWindows((current) => ({
           ...current,
@@ -496,7 +587,6 @@ export function createClientStore(): ClientStore {
       })
     },
     applyCounts: (nextCounts) => setCounts(nextCounts),
-    applyRevisionCounts: (nextCounts) => setCounts(nextCounts),
     reset: () => {
       batch(() => {
         setData("loaded", false)
@@ -512,6 +602,8 @@ export function createClientStore(): ClientStore {
         setEpoch(undefined)
         setCounts(undefined)
         setWindows({})
+        pagedOlder.clear()
+        clearTombstones()
       })
     },
   }

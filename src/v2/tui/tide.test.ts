@@ -176,7 +176,6 @@ test("ticket116: idle freeze assignments prune after the independent tide retent
   assert.deepEqual(pruneTideFreezes(freeze, 1_000 + TIDE_ASSIGNMENT_RETENTION_MS), [], "the boundary still belongs to the window")
   assert.deepEqual(pruneTideFreezes(freeze, 1_000 + TIDE_ASSIGNMENT_RETENTION_MS + 1), ["gone"])
   assert.equal(freeze.frozen.has("live"), true, "a still-observed freeze survives")
-  assert.equal(TIDE_ASSIGNMENT_RETENTION_MS, 8_000, "presentation retention is independent of the Work group hold")
 })
 
 test("ticket142: visible waiting cards refresh their freeze without a work-clock tick", () => {

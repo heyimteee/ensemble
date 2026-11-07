@@ -139,6 +139,26 @@ test("a Work projection keeps active, needs-you, and hold groups but drops long-
   assert.deepEqual(Object.keys(afterHold).sort(), ["doneSibling", "gated", "live"])
 })
 
+test("a terminal needs-you group holds for 1.2 s after its last approval resolves", () => {
+  const state = createInitialState()
+  state.workspaces.w = workspace()
+  state.subtasks.gated = replied({ id: "gated", dispatchGroupID: "dispatch_gated", approvalID: "ap", createdAt: 3, finishedAt: 1_000, repliedAt: 1_000 })
+  state.approvals.ap = {
+    id: "ap",
+    workspaceID: "w",
+    kind: "ask_person",
+    title: "Ask",
+    detail: "?",
+    status: "approved",
+    createdAt: 3,
+    resolvedAt: 10_000,
+  }
+  // The task finished long before the decision; the shared hold starts at the
+  // resolution instead of clearing the group the instant it resolves.
+  assert.deepEqual(Object.keys(projectVisibleWork(state, 11_000)), ["gated"])
+  assert.deepEqual(Object.keys(projectVisibleWork(state, 11_200)), [])
+})
+
 test("transcript windows paginate by sequence and report whether older rows remain", () => {
   const messages = Array.from({ length: 100 }, (_, index) => message(index + 1))
   const latest = transcriptWindow(messages, { limit: 40 })

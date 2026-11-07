@@ -21,6 +21,11 @@ import type {
   Workspace,
 } from "./types.ts"
 
+/** Canonical live-stream row identity: one key per workspace/message pair. */
+export function streamKey(workspaceID: string, messageID: string): string {
+  return `${workspaceID}\u0000${messageID}`
+}
+
 type Ctx = any
 
 /** Counters for the explicit full-state snapshot boundary (ticket #131). */
@@ -112,12 +117,8 @@ export class V2Store {
    */
   private readonly streaming = new Set<string>()
 
-  private static streamingKey(workspaceID: string, messageID: string): string {
-    return `${workspaceID}\u0000${messageID}`
-  }
-
   private trackStreaming(message: Message): void {
-    const key = V2Store.streamingKey(message.workspaceID, message.id)
+    const key = streamKey(message.workspaceID, message.id)
     if (message.streaming) this.streaming.add(key)
     else this.streaming.delete(key)
   }
@@ -573,7 +574,7 @@ export class V2Store {
 
   /** True while one row is still the live stream (ticket #139 finality guard). */
   isStreaming(workspaceID: string, messageID: string): boolean {
-    return this.streaming.has(V2Store.streamingKey(workspaceID, messageID))
+    return this.streaming.has(streamKey(workspaceID, messageID))
   }
 
   approvals(): Approval[] {
@@ -954,7 +955,7 @@ export class V2Store {
     if (parts[1] === "message" && parts[2]) {
       const sequence = parts[3]
       const removed = (this.state.messages[parts[2]] ?? []).filter((message) => String(message.seq).padStart(8, "0") === sequence)
-      for (const message of removed) this.streaming.delete(V2Store.streamingKey(parts[2], message.id))
+      for (const message of removed) this.streaming.delete(streamKey(parts[2], message.id))
       this.state.messages[parts[2]] = (this.state.messages[parts[2]] ?? []).filter((message) => String(message.seq).padStart(8, "0") !== sequence)
       if (this.state.messages[parts[2]].length === 0) delete this.state.messages[parts[2]]
     }

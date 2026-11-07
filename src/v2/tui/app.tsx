@@ -145,9 +145,10 @@ import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./sear
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { scopesToResync } from "../scoped-read.ts"
-import { createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { approvalResolutionAt } from "../work-groups.ts"
+import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createClientStore } from "./client-store.ts"
-import { createStreamCoalescer } from "./stream-coalescer.ts"
+import { createStreamCoalescer } from "../stream-coalescer.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -827,6 +828,7 @@ export function EnsembleV2App() {
       now,
       pendingApprovalIDs: pendingApprovalIDs(),
       nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
+      resolvedAtForTask: approvalResolutionAt(state()?.approvals ?? {}),
     })
     const layout = workGroupLayout(groups, workContentWidth(), viewHeight(), now)
     const pendingApprovalSet = pendingApprovalIDs()
@@ -1356,6 +1358,7 @@ export function EnsembleV2App() {
     if (line.interrupted) header += " · interrupted"
     return decorate(header)
   }
+  let refreshingTranscriptNewest = false
   const syncTranscriptScroll = () => {
     const box = transcriptScrollRef
     if (!box) { setAtBottom(true); return }
@@ -1363,8 +1366,22 @@ export function EnsembleV2App() {
     const scrollHeight = Number(box.scrollHeight ?? 0)
     const scrollTop = Number(box.scrollTop ?? 0)
     const max = Math.max(0, scrollHeight - height)
-    setAtBottom(scrollTop >= max - 1)
+    const bottom = scrollTop >= max - 1
+    setAtBottom(bottom)
     setTranscriptScroll({ top: scrollTop, height: scrollHeight, viewport: height })
+    // Ticket #141 review fix: while an older page anchors the window, a new
+    // patch must not discard it. Returning to the bottom replaces the loaded
+    // range with the newest bounded window and releases the anchor.
+    if (bottom && !refreshingTranscriptNewest) {
+      const current = surface()
+      const target = current?.kind === "workspace" ? current.workspaceID : undefined
+      if (target && client.transcriptAnchored(target)) {
+        refreshingTranscriptNewest = true
+        void loadScoped(["transcript"])
+          .catch(() => undefined)
+          .finally(() => { refreshingTranscriptNewest = false })
+      }
+    }
   }
   const jumpToBottom = () => {
     const box = transcriptScrollRef
@@ -2031,8 +2048,12 @@ export function EnsembleV2App() {
       ...(current ? { workspaceID: current } : {}),
     })
     forceSnapshotReplace = false
-    scopedReads = supportsScopedReads(snapshotMeta(next))
-    lastSnapshotMeta = snapshotMeta(next)
+    const meta = snapshotMeta(next)
+    // Review fix: the gate decides the steady-state path. A full bootstrap
+    // still carries its measured gate, so a borderline workspace can switch
+    // to scoped reads on the next refresh.
+    scopedReads = supportsScopedReads(meta) && (next.scoped === true || next.gate?.enabled === true)
+    lastSnapshotMeta = meta
     client.applySnapshot(next)
     applyStateEffects(next)
   }
@@ -2063,14 +2084,20 @@ export function EnsembleV2App() {
     repaintFromFeed()
   }
 
-  const loadScoped = async (scopes: ScopeName[] = ["shell", "work", "transcript"]) => {
+  const loadScoped = async (scopes: ScopeName[] = ["shell", "work", "transcript"]): Promise<boolean> => {
     const target = activeWorkspace()?.id ?? workspaceID() ?? undefined
     const result = await callRpc<ScopedResync>(context, "resync", {
       directory: directoryOf(context),
       scopes,
       ...(target ? { workspaceID: target } : {}),
     })
+    // Review fix: a disabled gate means the caller must keep the snapshot path.
+    if (result.gate && !result.gate.enabled) {
+      scopedReads = false
+      return false
+    }
     applyScopedResync(result, target)
+    return true
   }
 
   /** First fetch and later refresh both select the cheapest valid read path. */
@@ -2085,8 +2112,7 @@ export function EnsembleV2App() {
     }
     if (scopedReads) {
       try {
-        await loadScoped()
-        return
+        if (await loadScoped()) return
       } catch {}
     }
     return loadSnapshot()
@@ -2127,7 +2153,7 @@ export function EnsembleV2App() {
     if (lastSnapshotMeta) {
       lastSnapshotMeta = mergeFeedMeta({ ...lastSnapshotMeta, version: decision.version }, decision.meta)
     }
-    if (decision.meta && (!decision.meta.directory || decision.meta.directory === directoryOf(context))) {
+    if (decision.meta && configMetadataApplies(decision.meta.directory, directoryOf(context))) {
       const configError = decision.meta.configError ?? ""
       if (configError && configError !== lastConfigError) {
         lastConfigError = configError
@@ -2142,6 +2168,15 @@ export function EnsembleV2App() {
     forceSnapshotReplace = true
     snapshotRefresh.request()
     await snapshotRefresh.whenIdle()
+  }
+  /** Review fix: a Work-shaped bad batch repairs only the Work scope. */
+  const recoverWorkScope = async (): Promise<void> => {
+    if (scopedReads && supportsScopedReads(lastSnapshotMeta)) {
+      try {
+        if (await loadScoped(["work"])) return
+      } catch {}
+    }
+    await refreshFull().catch(() => undefined)
   }
   let feedRecovery: Promise<void> | undefined
   let feedRecoveryAgain = false
@@ -2189,8 +2224,7 @@ export function EnsembleV2App() {
             const scopes = scopesToResync(cursor.version, result.scopeVersions)
             if (scopes.length > 0) {
               try {
-                await loadScoped(scopes)
-                continue
+                if (await loadScoped(scopes)) continue
               } catch {}
             } else if (result.version === cursor.version) {
               client.applyCounts(result.counts)
@@ -2216,11 +2250,11 @@ export function EnsembleV2App() {
     }
     if (payload.counts) client.applyCounts(payload.counts)
     if (decision.action === "ignore") return
-    // A malformed batch or a version with state this feed cannot patch (DM
-    // retention) cannot be repaired by a scoped resync; the full snapshot
-    // reconstructs every shell entity from durable storage.
+    // A malformed batch that can only have touched Work resyncs just the Work
+    // scope; anything else needs the full durable snapshot boundary.
     if (decision.reason === "malformed" || decision.reason === "other") {
-      void refreshFull().catch(() => undefined)
+      if (isWorkOnlyPatch(payload)) void recoverWorkScope()
+      else void refreshFull().catch(() => undefined)
       return
     }
     void recoverFeed()
@@ -3830,9 +3864,11 @@ export function EnsembleV2App() {
       try {
         const revision = await callRpc<Revision>(context, "revision", { directory: directoryOf(context) })
         // Ticket #141: counts are server-derived and refreshed on every beat;
-        // the client never scans all messages or tasks for the rail.
-        client.applyRevisionCounts(revision.counts)
+        // the client never scans all messages or tasks for the rail. The gate
+        // rides the same beat so a growing workspace switches read paths.
+        client.applyCounts(revision.counts)
         const cursor = lastSnapshotMeta
+        if (revision.gate && supportsScopedReads(cursor)) scopedReads = revision.gate.enabled
         const forced = heartbeatForce
         heartbeatForce = false
         if (revisionChanged(cursor, revision)) {

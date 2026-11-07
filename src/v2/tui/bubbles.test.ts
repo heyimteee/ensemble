@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
+import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 import { agentColor } from "./format.ts"
 import {
@@ -190,6 +191,24 @@ test("completion accumulator persists one line per outcome and never regenerates
   assert.equal(second.size, 1)
   assert.ok(third.get("t1"))
   assert.equal(third.get("t2")?.at, 21)
+})
+
+test("a long session bounds the completion map to the newest outcomes", () => {
+  const labelFor = () => "Nova"
+  const outcomes = Array.from({ length: CLIENT_MESSAGE_LIMIT + 20 }, (_, index) =>
+    task({
+      id: `t${index + 1}`,
+      state: "replied",
+      outcome: "succeeded",
+      createdAt: index + 1,
+      repliedAt: index + 1,
+      finishedAt: index + 1,
+    }),
+  )
+  const map = accumulateCompletions(new Map(), outcomes, labelFor, 10_000)
+  assert.equal(map.size, CLIENT_MESSAGE_LIMIT, "completion memory stays bounded in a long session")
+  assert.equal(map.has("t1"), false, "the oldest outcome is dropped first")
+  assert.equal(map.has(`t${CLIENT_MESSAGE_LIMIT + 20}`), true, "the newest outcome is retained")
 })
 
 test("merged transcript orders completions at their finish position in one window", () => {

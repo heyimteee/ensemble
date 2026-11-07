@@ -9,7 +9,7 @@ import {
   WORK_CARD_ROWS,
   WORK_TRANSCRIPT_RESERVE,
 } from "./workrows.ts"
-import { workGroupLabel, type WorkGroup } from "../work-groups.ts"
+import { type WorkGroup } from "../work-groups.ts"
 
 /**
  * Ticket #136: dispatch-group Work layout. Group membership, visibility, and
@@ -26,11 +26,23 @@ export {
   orderedGroupTasks,
   workFinishedAt,
   workGroupCounts,
-  workGroupLabel,
   workGroupsForTasks,
-  workSummaryCounts,
 } from "../work-groups.ts"
 export type { WorkGroup, WorkGroupOptions } from "../work-groups.ts"
+
+/** The Work header names groups, active work, and terminal work; "recent" is gone. */
+export function workSummaryCounts(groupCount: number, activeCount: number, doneCount: number): string {
+  const groups = Math.max(0, Math.floor(groupCount))
+  const active = Math.max(0, Math.floor(activeCount))
+  const done = Math.max(0, Math.floor(doneCount))
+  if (groups === 0 && active === 0 && done === 0) return "WORK │ none yet"
+  return `WORK ${groups} ${groups === 1 ? "group" : "groups"} · ${active} active · ${done} done`
+}
+
+/** A subtle label shown only when more than one group is visible. */
+export function workGroupLabel(group: Pick<WorkGroup, "active" | "done">, ordinal: number): string {
+  return `GROUP ${Math.max(1, Math.floor(ordinal))} · ${group.active} active · ${group.done} done`
+}
 
 /** Two card groups fit one card row each; older groups become compact group rows. */
 export const WORK_MAX_CARD_GROUPS = 2

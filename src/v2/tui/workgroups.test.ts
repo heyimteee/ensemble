@@ -1,7 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
-import { WORK_GROUP_HOLD_MS } from "./work-constants.ts"
 import {
   nextWorkInvalidation,
   workGroupCounts,
@@ -59,7 +58,6 @@ test("ticket136: one command fan-out is one group and stays visible while any me
 })
 
 test("ticket136: a complete group holds for 1.2 seconds from its latest terminal timestamp", () => {
-  assert.equal(WORK_GROUP_HOLD_MS, 1_200)
   const items = [
     replied({ id: "a", dispatchGroupID: "dispatch_1", finishedAt: 1_000, repliedAt: 1_000 }),
     failed({ id: "b", dispatchGroupID: "dispatch_1", finishedAt: 1_400, repliedAt: 1_400 }),
@@ -94,7 +92,7 @@ test("ticket136: failed and cancelled members remain until their group completes
   assert.deepEqual(groups[0].tasks.map((item) => item.id), ["live", "bad", "stopped"])
 })
 
-test("ticket136: a needs-you member keeps a complete group visible after the hold, then clears on resolution", () => {
+test("ticket136: a needs-you member keeps a complete group visible after the hold, then completes after its decision", () => {
   const items = [
     replied({ id: "done", dispatchGroupID: "dispatch_1", finishedAt: 1_000, repliedAt: 1_000 }),
     replied({ id: "gated", dispatchGroupID: "dispatch_1", approvalID: "ap", finishedAt: 1_000, repliedAt: 1_000 }),
@@ -104,8 +102,15 @@ test("ticket136: a needs-you member keeps a complete group visible after the hol
   assert.equal(blocked.length, 1, "no timer hides a pending decision")
   assert.equal(blocked[0].needsYou, true)
   assert.equal(blocked[0].complete, false)
-  const resolved = workGroupsForTasks(items, subtasks, { now: 9_999_999 })
-  assert.equal(resolved.length, 0, "resolving the last gate completes the group normally")
+  // Review fix: the last approval resolution starts a fresh shared hold, so
+  // the final task states stay perceptible instead of clearing instantly.
+  const resolvedAtForTask = (item: Subtask) => (item.approvalID === "ap" ? 9_999_999 : undefined)
+  const holding = workGroupsForTasks(items, subtasks, { now: 10_000_500, resolvedAtForTask })
+  assert.equal(holding.length, 1, "the group holds after the last decision")
+  assert.equal(holding[0].needsYou, false)
+  assert.equal(holding[0].latestTerminalAt, 9_999_999, "the hold origin is the resolution time")
+  const resolved = workGroupsForTasks(items, subtasks, { now: 10_001_200, resolvedAtForTask })
+  assert.equal(resolved.length, 0, "the group completes normally after the shared hold")
 })
 
 test("ticket136: a second command appends a group; the first clears without disturbing it", () => {

@@ -145,10 +145,19 @@ function validFeedMeta(value: any): value is FeedMeta {
   return true
 }
 
+/**
+ * Config metadata describes one view directory. Unknown on either side cannot
+ * prove the metadata is foreign, so only two known, different directories
+ * reject it. One predicate keeps client apply, cursor merge, and toasts aligned.
+ */
+export function configMetadataApplies(metadataDirectory: string | undefined, viewDirectory: string | undefined): boolean {
+  return !metadataDirectory || !viewDirectory || metadataDirectory === viewDirectory
+}
+
 function metadataChanged(previous: SnapshotMeta, meta: FeedMeta): boolean {
   if (typeof meta.catalogRevision === "number" && (meta.catalogRevision !== previous.catalogRevision || meta.modelsError !== previous.modelsError)) return true
   // Config fields describe one directory; another view's metadata is not ours.
-  if (meta.directory && previous.directory && meta.directory !== previous.directory) return false
+  if (!configMetadataApplies(meta.directory, previous.directory)) return false
   if (typeof meta.configRevision === "number" && (meta.configRevision !== previous.configRevision || meta.configError !== previous.configError)) return true
   return false
 }
@@ -164,10 +173,9 @@ export function mergeFeedMeta(previous: SnapshotMeta | undefined, meta: FeedMeta
     next.catalogRevision = meta.catalogRevision
     next.modelsError = meta.modelsError
   }
-  if (!meta.directory || !previous.directory || meta.directory === previous.directory) {
-    if (typeof meta.configRevision === "number") next.configRevision = meta.configRevision
-    if (typeof meta.configRevision === "number") next.configError = meta.configError
-  }
+  if (!configMetadataApplies(meta.directory, previous.directory)) return next
+  if (typeof meta.configRevision === "number") next.configRevision = meta.configRevision
+  if (typeof meta.configRevision === "number") next.configError = meta.configError
   return next
 }
 
@@ -230,6 +238,28 @@ export function decidePatchApply(previous: SnapshotMeta | undefined, batch: Patc
   }
   if (expected - 1 !== version) return resync("malformed")
   return { action: "apply", version, changes, ...(meta ? { meta } : {}) }
+}
+
+/**
+ * True when a malformed or unknown batch mentions only Work (subtask)
+ * entities. That evidence lets recovery resync the Work scope instead of
+ * reconstructing the whole shell and transcript.
+ */
+export function isWorkOnlyPatch(batch: PatchBatch | undefined): boolean {
+  const value = batch as any
+  if (!value || typeof value !== "object" || !Array.isArray(value.entries)) return false
+  let sawWork = false
+  for (const entry of value.entries) {
+    if (!entry || typeof entry !== "object") return false
+    if (entry.nonEntity === true) return false
+    const source = entry.entities ?? entry.changes
+    if (!Array.isArray(source)) return false
+    for (const change of source) {
+      if (!change || typeof change !== "object" || change.entity !== "subtask") return false
+      sawWork = true
+    }
+  }
+  return sawWork
 }
 
 /** Validate the `changes.since` recovery response with the same batch rules. */

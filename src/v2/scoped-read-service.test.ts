@@ -206,6 +206,36 @@ test("a small workspace keeps the full snapshot path and records the disabled ga
 
     const revision = await handlers.revision({ directory })
     assert.deepEqual(revision.counts.w, { unread: 10, busy: 0 })
+
+    // Review fix: a disabled gate keeps the caller on the snapshot path at
+    // steady state too; scoped branches are not silently returned.
+    const resync = await handlers.resync({ directory, workspaceID: "w" })
+    assert.equal(resync.gate.enabled, false)
+    assert.equal(resync.shell, undefined)
+    assert.equal(resync.work, undefined)
+    assert.equal(resync.transcript, undefined)
+  } finally {
+    await stop()
+  }
+})
+
+test("a measured full snapshot can enable the gate for the next scoped read", async () => {
+  const values = new Map<string, unknown>()
+  seed(values, { messages: 950, live: false })
+  const { ctx } = fakeContext(values)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers() as any
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-scoped-"))
+  try {
+    const bootstrap = await handlers.bootstrap({ directory })
+    assert.equal(bootstrap.scoped, false, "history size alone keeps this boot on the snapshot path")
+    assert.equal(bootstrap.gate.enabled, true, "the measured full snapshot upgrades the gate")
+    assert.equal(bootstrap.gate.reason, "payload")
+
+    const resync = await handlers.resync({ directory, workspaceID: "w" })
+    assert.equal(resync.gate.enabled, true)
+    assert.equal(resync.transcript.messages.at(-1).seq, 950, "the next scoped read carries the window")
   } finally {
     await stop()
   }
@@ -250,7 +280,7 @@ test("transcript windows page older rows and a result outside the window is fetc
 
 test("a gap resync returns only the scopes whose durable state changed after the cursor", async () => {
   const values = new Map<string, unknown>()
-  seed(values, { messages: 10, version: 100 })
+  seed(values, { messages: 10, oldTasks: 600, version: 100 })
   const { ctx } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()

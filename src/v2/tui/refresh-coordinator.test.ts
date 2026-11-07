@@ -1,9 +1,11 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import {
+  configMetadataApplies,
   createRefreshCoordinator,
   decideSnapshotApply,
   heartbeatDelay,
+  isWorkOnlyPatch,
   revisionChanged,
   supportsScopedReads,
   type SnapshotMeta,
@@ -154,4 +156,46 @@ test("scoped reads negotiate only on protocol 4 with a boot epoch", () => {
   assert.equal(supportsScopedReads(meta({ version: 1, protocol: 4, epoch: 10 })), true)
   assert.equal(supportsScopedReads(meta({ version: 1, protocol: 4, epoch: undefined })), false)
   assert.equal(supportsScopedReads(undefined), false)
+})
+
+test("config metadata applies only to the directory it describes", () => {
+  assert.equal(configMetadataApplies(undefined, "/tmp/a"), true, "unknown metadata cannot prove it is foreign")
+  assert.equal(configMetadataApplies("/tmp/a", undefined), true, "an unknown view accepts the only metadata offered")
+  assert.equal(configMetadataApplies("/tmp/a", "/tmp/a"), true)
+  assert.equal(configMetadataApplies("/tmp/a", "/tmp/b"), false)
+})
+
+test("a malformed or unknown batch is Work-only only when it mentions Work entities", () => {
+  assert.equal(isWorkOnlyPatch({
+    epoch: 1,
+    from: 1,
+    version: 2,
+    entries: [{ version: 2, changes: [{ entity: "subtask", op: "remove" }] }],
+  } as any), true, "a Work-shaped batch can repair just the Work scope")
+  assert.equal(isWorkOnlyPatch({
+    epoch: 1,
+    from: 1,
+    version: 2,
+    entries: [{ version: 2, entities: [{ entity: "subtask", op: "upsert", task: { id: "t1" } }] }],
+  } as any), true)
+  assert.equal(isWorkOnlyPatch({
+    epoch: 1,
+    from: 1,
+    version: 2,
+    entries: [{ version: 2, changes: [{ entity: "message", op: "remove" }] }],
+  } as any), false, "a shell/transcript batch needs the full snapshot path")
+  assert.equal(isWorkOnlyPatch({
+    epoch: 1,
+    from: 1,
+    version: 2,
+    entries: [{ version: 2, changes: [{ entity: "mystery", op: "upsert" }] }],
+  } as any), false, "an unknown entity cannot be scoped")
+  assert.equal(isWorkOnlyPatch({
+    epoch: 1,
+    from: 1,
+    version: 2,
+    entries: [{ version: 2, changes: [{ entity: "subtask", op: "remove" }], nonEntity: true }],
+  } as any), false, "a non-entity version still falls back to the full snapshot")
+  assert.equal(isWorkOnlyPatch({ epoch: 1, from: 1, version: 2, entries: [] } as any), false)
+  assert.equal(isWorkOnlyPatch(undefined), false)
 })
