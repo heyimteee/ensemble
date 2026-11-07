@@ -392,7 +392,7 @@ export function Rail(props: {
 }
 
 
-export function WorkCardView(props: { colors: Palette; card: WorkCard; selected: boolean; index: number }) {
+export function WorkCardView(props: { colors: Palette; card: WorkCard; selected: boolean; width: number }) {
   const recent = () => props.card.recent
   const stateTone = () =>
     recent()
@@ -404,16 +404,16 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
           : props.card.status === "failed"
             ? props.colors.bad
             : props.colors.muted
-  const borderTone = () =>
+  const accentTone = () =>
     recent()
-      ? props.colors.border
+      ? props.colors.faint
       : props.card.status === "replied"
         ? props.colors.good
         : props.card.status === "failed"
           ? props.colors.bad
-          : props.card.needsYou
+          : props.card.needsYou || props.card.status === "working" || props.card.status === "retrying"
             ? props.colors.warn
-            : props.colors.border
+            : props.colors.muted
   const header = (): StyledLinePart[] => [
     { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.good : props.colors.faint },
     { text: `${props.card.glyph} `, fg: stateTone() },
@@ -430,21 +430,21 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
   }))
   return (
     <box
-      flexDirection="column"
-      width="100%"
-      marginTop={props.index === 0 ? 0 : 1}
+      width={props.width}
       flexShrink={0}
+      flexDirection="row"
       border
       borderStyle="rounded"
-      borderColor={borderTone()}
+      borderColor={props.colors.border}
       backgroundColor={props.colors.panel}
-      paddingLeft={1}
-      paddingRight={1}
     >
-      <StyledLineText parts={header} fg={props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
-      <text fg={props.selected ? props.colors.good : recent() ? props.colors.muted : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.title}</text>
-      <text fg={recent() ? props.colors.faint : props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.detail}</text>
-      <StyledLineText parts={tide} fg={props.colors.faint} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
+      <box width={1} flexShrink={0} alignSelf="stretch" backgroundColor={accentTone()} />
+      <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
+        <StyledLineText parts={header} fg={props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
+        <text fg={props.selected ? props.colors.good : recent() ? props.colors.muted : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.title}</text>
+        <text fg={recent() ? props.colors.faint : props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.detail}</text>
+        <StyledLineText parts={tide} fg={props.colors.faint} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
+      </box>
     </box>
   )
 }

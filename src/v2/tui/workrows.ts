@@ -670,6 +670,12 @@ export function recentWorkCardsForTasks(
 /** One card row: header, title, detail, tide, plus the rounded border. */
 export const WORK_CARD_ROWS = 6
 export const WORK_CARD_GAP_ROWS = 1
+/** Horizontal gap between card columns (terminal cells). */
+export const WORK_CARD_GAP_COLS = 1
+/** Minimum outer card width that keeps the header, title, detail, and tide legible. */
+export const WORK_CARD_MIN_WIDTH = 24
+/** The Work pane uses at most two card rows so the transcript keeps breathing room. */
+export const WORK_MAX_ROWS = 2
 /** Section header plus the key-hint row in card mode. */
 export const WORK_BLOCK_CHROME_ROWS = 2
 /**
@@ -682,19 +688,27 @@ export const WORK_BASE_ROWS = 13
 /** Minimum transcript rows kept above the Work block. */
 export const WORK_TRANSCRIPT_RESERVE = 4
 
-export type WorkCardLayout = {
+export type WorkGridLayout = {
   mode: "cards" | "compact"
+  /** Card columns in the grid. Zero in compact mode. */
+  columns: number
+  /** Card rows in the grid. Zero in compact mode. */
+  rows: number
   /** Visible card/row count. */
   limit: number
   overflow: number
+  /** Outer card width, including border and padding. */
+  cardWidth: number
+  /** Content width available to title/detail/tide after border, accent, and padding. */
+  cardContentWidth: number
   /** Rows the Work block consumes, including header, gaps, and overflow. */
-  rows: number
+  height: number
 }
 
-function cardBlockRows(cards: number, overflow: number): number {
+function cardBlockRows(rows: number, overflow: number): number {
   return (
-    cards * WORK_CARD_ROWS +
-    Math.max(0, cards - 1) * WORK_CARD_GAP_ROWS +
+    rows * WORK_CARD_ROWS +
+    Math.max(0, rows - 1) * WORK_CARD_GAP_ROWS +
     WORK_BLOCK_CHROME_ROWS +
     (overflow > 0 ? 1 : 0)
   )
@@ -704,28 +718,70 @@ function compactLimit(terminalHeight: number): number {
   return terminalHeight >= 27 ? 2 : 1
 }
 
+function gridColumns(contentWidth: number): number {
+  const fit = Math.floor(
+    (Math.max(0, Math.floor(contentWidth)) + WORK_CARD_GAP_COLS) /
+    (WORK_CARD_MIN_WIDTH + WORK_CARD_GAP_COLS),
+  )
+  return Math.max(1, Math.min(3, fit))
+}
+
 /**
- * Pick the card count that fits the terminal height while reserving transcript
- * rows. Tall terminals show three cards, medium two, short one, and below the
- * minimum card height the Work pane falls back to compact one-line rows (with
- * no inline hint row). Ticket #117: active and recent cards share the same
- * height budget; callers render active cards first, so overflow never pushes
- * live work out of the visible slots first. Pure.
+ * Pick the Work grid from both width and height. Wide terminals use three
+ * equal card columns; medium terminals use two; short/very narrow terminals
+ * fall back to compact rows. Cards never stretch to full width merely because
+ * only one task is active — the column rhythm stays stable.
  */
-export function workCardLayout(terminalHeight: number, activeCount: number, recentCount = 0): WorkCardLayout {
+export function workGridLayout(
+  contentWidth: number,
+  terminalHeight: number,
+  activeCount: number,
+  recentCount = 0,
+): WorkGridLayout {
   const total = Math.max(0, Math.floor(activeCount)) + Math.max(0, Math.floor(recentCount))
-  if (total === 0) return { mode: "compact", limit: 0, overflow: 0, rows: 0 }
-  const available = Math.max(0, terminalHeight - WORK_BASE_ROWS)
-  for (const count of [3, 2, 1] as const) {
-    if (total < count) continue
-    const overflow = total - count
-    const rows = cardBlockRows(count, overflow)
-    if (rows + WORK_TRANSCRIPT_RESERVE <= available) {
-      return { mode: "cards", limit: count, overflow, rows }
+  const compact = (): WorkGridLayout => {
+    const limit = Math.min(total, compactLimit(terminalHeight))
+    return {
+      mode: "compact",
+      columns: 0,
+      rows: 0,
+      limit,
+      overflow: total - limit,
+      cardWidth: 0,
+      cardContentWidth: 0,
+      height: 1 + limit,
     }
   }
-  const limit = Math.min(total, compactLimit(terminalHeight))
-  return { mode: "compact", limit, overflow: total - limit, rows: 1 + limit }
+  if (total === 0) return compact()
+
+  const width = Math.max(0, Math.floor(contentWidth))
+  const columns = gridColumns(width)
+  if (columns < 2) return compact()
+
+  const cardWidth = Math.floor((width - WORK_CARD_GAP_COLS * (columns - 1)) / columns)
+  const cardContentWidth = Math.max(12, cardWidth - 5) // border 2 + accent 1 + padding 2
+  const available = Math.max(0, terminalHeight - WORK_BASE_ROWS)
+  const wantedRows = Math.min(WORK_MAX_ROWS, Math.max(1, Math.ceil(total / columns)))
+  for (const rowCount of [wantedRows, wantedRows - 1]) {
+    if (rowCount < 1) continue
+    const capacity = columns * rowCount
+    const limit = Math.min(total, capacity)
+    const overflow = total - limit
+    const height = cardBlockRows(rowCount, overflow)
+    if (height + WORK_TRANSCRIPT_RESERVE <= available) {
+      return {
+        mode: "cards",
+        columns,
+        rows: rowCount,
+        limit,
+        overflow,
+        cardWidth,
+        cardContentWidth,
+        height,
+      }
+    }
+  }
+  return compact()
 }
 
 /**
@@ -734,7 +790,7 @@ export function workCardLayout(terminalHeight: number, activeCount: number, rece
  * `limit` rows are the visible active cards; overflow and recent cards stay
  * display-only. No action can reach an off-screen task.
  */
-export function visibleWorkTasks<T>(ordered: readonly T[], layout: WorkCardLayout): T[] {
+export function visibleWorkTasks<T>(ordered: readonly T[], layout: WorkGridLayout): T[] {
   return ordered.slice(0, Math.max(0, Math.floor(layout.limit)))
 }
 

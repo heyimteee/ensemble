@@ -85,7 +85,7 @@ active_count() {
 }
 
 card_header_count() {
-  live_capture "$LIVE_TUI_SESSION" | grep -cE 'SIZEAGENT[0-9]+ WORKING' || true
+  live_capture "$LIVE_TUI_SESSION" | grep -cE 'SIZEAGE[^ ]* WORKING' || true
 }
 
 live_active_count_is() {
@@ -225,8 +225,8 @@ check_size() {
       live_assert_text "$LIVE_TUI_SESSION" "d delegate" "card action hints at $size"
       ;;
     100x30)
-      [[ "$(card_header_count)" == "1" ]] || live_fail "expected one Work card header at $size, got $(card_header_count)"
-      live_assert_text "$LIVE_TUI_SESSION" "+2 more" "overflow names two hidden cards at $size"
+      [[ "$(card_header_count)" == "2" ]] || live_fail "expected two Work card headers at $size, got $(card_header_count)"
+      live_assert_text "$LIVE_TUI_SESSION" "+1 more" "overflow names the hidden card at $size"
       live_assert_text "$LIVE_TUI_SESSION" "d delegate" "card action hints at $size"
       ;;
     80x24)

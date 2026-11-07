@@ -973,7 +973,7 @@ export class EnsembleV2Service {
         const members = this.resolveAgentNames(config.members, state.agents)
         const leaderID = this.resolveAgentNames([config.leader], state.agents)[0]
         if (!members.includes(leaderID)) continue
-        const changed = workspace.name !== config.name || workspace.leaderID !== leaderID || workspace.synthesis !== config.synthesis || workspace.paused !== config.paused || workspace.memberIDs.join("\0") !== members.join("\0")
+        const changed = workspace.name !== config.name || workspace.leaderID !== leaderID || workspace.synthesis !== config.synthesis || workspace.paused !== config.paused || workspace.memberIDs.join("\0") !== members.join("\0") || workspace.configVersion !== config.version
         if (!changed) continue
         workspace.name = config.name
         workspace.leaderID = leaderID
@@ -1023,7 +1023,7 @@ export class EnsembleV2Service {
     const members = this.resolveAgentNames(config.members, state.agents)
     const leaderID = this.resolveAgentNames([config.leader], state.agents)[0]
     if (!members.includes(leaderID)) throw Object.assign(new Error("The configured leader is not a member."), { code: "invalid_config" })
-    const changed = workspace.name !== config.name || workspace.leaderID !== leaderID || workspace.synthesis !== config.synthesis || workspace.paused !== config.paused || workspace.memberIDs.join("\0") !== members.join("\0")
+    const changed = workspace.name !== config.name || workspace.leaderID !== leaderID || workspace.synthesis !== config.synthesis || workspace.paused !== config.paused || workspace.memberIDs.join("\0") !== members.join("\0") || workspace.configVersion !== config.version
     if (changed) {
       workspace.name = config.name
       workspace.leaderID = leaderID
@@ -2561,7 +2561,8 @@ export class EnsembleV2Service {
     })
   }
 
-  private toolWorkspaceInfo(context: any): { content: string } {
+  private async toolWorkspaceInfo(context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.toolSession(state, context.sessionID)
     if (!found.workspace) return { content: "This session is not bound to an Ensemble workspace." }
@@ -2578,7 +2579,8 @@ export class EnsembleV2Service {
     }
   }
 
-  private toolListWorkspaces(): { content: string } {
+  private async toolListWorkspaces(): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     return {
       content: JSON.stringify(
@@ -2594,12 +2596,14 @@ export class EnsembleV2Service {
     }
   }
 
-  private toolListAgents(): { content: string } {
+  private async toolListAgents(): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     return { content: JSON.stringify(Object.values(state.agents).filter((agent) => !agent.archived).map((agent) => ({ id: agent.id, name: agent.name, title: agent.title, busy: [...this.activeRuns.values()].some((run) => run.agentID === agent.id), home: agent.homeDirectory }))) }
   }
 
-  private toolTaskStatus(input: Json, context: any): { content: string } {
+  private async toolTaskStatus(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.toolSession(state, context.sessionID)
     if (input.workspaceID && found.workspace && input.workspaceID !== found.workspace.id) return { content: "Cross-workspace reads require ensemble_share approval." }
@@ -2610,6 +2614,7 @@ export class EnsembleV2Service {
   }
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
@@ -2761,6 +2766,7 @@ export class EnsembleV2Service {
   }
 
   private async toolHandoff(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
@@ -3122,6 +3128,7 @@ export class EnsembleV2Service {
    * leader ends it, a non-leader hands it onward (default leader).
    */
   private async toolReview(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
@@ -3362,6 +3369,7 @@ export class EnsembleV2Service {
   }
 
   private async toolDelegate(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
@@ -3431,6 +3439,7 @@ export class EnsembleV2Service {
   }
 
   private async toolAsk(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
@@ -3459,6 +3468,7 @@ export class EnsembleV2Service {
   }
 
   private async toolRemember(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
@@ -3501,6 +3511,7 @@ export class EnsembleV2Service {
   }
 
   private async toolShare(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
     const state = this.store.snapshot()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
@@ -4075,7 +4086,17 @@ export class EnsembleV2Service {
 
   private async ensureBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string } | undefined> {
     const existing = this.store.binding(workspace.id, agent.id)
-    if (existing && existing.agentVersion === agent.version) return { sessionID: existing.sessionID }
+    if (existing && existing.agentVersion === agent.version) {
+      if (existing.kind !== "workspace" || existing.directory !== workspace.directory) {
+        await this.store.saveBinding({
+          ...existing,
+          kind: "workspace",
+          directory: workspace.directory,
+          updatedAt: now(),
+        })
+      }
+      return { sessionID: existing.sessionID }
+    }
     const key = bindingKey(workspace.id, agent.id)
     const inFlight = this.bindingPromises.get(key)
     if (inFlight) return inFlight
@@ -4094,7 +4115,16 @@ export class EnsembleV2Service {
       location: { directory: workspace.directory },
     }))
     if (!created?.id) return undefined
-    const binding = { workspaceID: workspace.id, agentID: agent.id, sessionID: created.id, history: existing ? [...(existing.history ?? []), existing.sessionID] : [], agentVersion: agent.version, updatedAt: now() }
+    const binding = {
+      workspaceID: workspace.id,
+      agentID: agent.id,
+      sessionID: created.id,
+      history: existing ? [...(existing.history ?? []), existing.sessionID] : [],
+      kind: "workspace" as const,
+      directory: workspace.directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
     await this.store.saveBinding(binding)
     // The replaced session is gone: any native mirror for it can never be
     // answered by the host, so settle it instead of lingering.

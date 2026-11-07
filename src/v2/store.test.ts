@@ -134,6 +134,27 @@ test("pruning a workspace removes its dm transcripts", async () => {
   assert.equal(store.snapshot().dmTranscripts["w:a"], undefined)
 })
 
+test("sync refreshes bindings even when the global version is already current", async () => {
+  const ctx = fakeContext()
+  const writer = new V2Store(ctx)
+  await writer.load()
+  await writer.saveWorkspace(workspace())
+  const reader = new V2Store(ctx)
+  await reader.load()
+  await writer.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s", kind: "workspace", directory: "/repo", agentVersion: 1, updatedAt: 1 })
+  // A local write advances the reader to the same version as storage without
+  // refreshing the binding map. This is the stale tool-session case.
+  await reader.updateSettings({ maxActiveRuns: 2 })
+  assert.equal(reader.binding("w", "a"), undefined)
+  assert.equal(reader.snapshot().version, (await ctx.storage.get("v2/meta") as any).version)
+
+  const changed = await reader.sync()
+  assert.equal(changed, false)
+  assert.equal(reader.binding("w", "a")?.sessionID, "s")
+  assert.equal(reader.binding("w", "a")?.kind, "workspace")
+  assert.equal(reader.binding("w", "a")?.directory, "/repo")
+})
+
 test("sync picks up subtasks, messages, and approvals written by another store", async () => {
   const ctx = fakeContext()
   const writer = new V2Store(ctx)

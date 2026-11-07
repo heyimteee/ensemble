@@ -174,8 +174,10 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "escape", scope: "normal", contexts: ["chat"], keys: ["escape"], title: "Clear search", group: "Navigation", listed: false },
 
   // Work list zone ---------------------------------------------------------
-  { id: "work.down", scope: "normal", contexts: ["work"], keys: ["j"], title: "Next work row", group: "Navigation", hint: "j/k move" },
+  { id: "work.down", scope: "normal", contexts: ["work"], keys: ["j"], title: "Next work row", group: "Navigation", hint: "j/k row" },
   { id: "work.up", scope: "normal", contexts: ["work"], keys: ["k"], title: "Previous work row", group: "Navigation" },
+  { id: "work.left", scope: "normal", contexts: ["work"], keys: ["h"], title: "Previous work column", group: "Navigation", hint: "h/l col" },
+  { id: "work.right", scope: "normal", contexts: ["work"], keys: ["l"], title: "Next work column", group: "Navigation" },
   { id: "work.top", scope: "normal", contexts: ["work"], keys: ["g", "g"], title: "First work row", group: "Navigation", listed: false },
   { id: "work.bottom", scope: "normal", contexts: ["work"], keys: ["shift+g"], title: "Last work row", group: "Navigation", listed: false },
   { id: "work.half.down", scope: "normal", contexts: ["work"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },

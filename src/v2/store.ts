@@ -217,6 +217,11 @@ export class V2Store {
   }
 
   async sync(): Promise<boolean> {
+    // Bindings are the one collection that must be refreshed even when the
+    // global storage version is unchanged. Tool calls resolve the calling
+    // session through this map, and a local write can advance the version
+    // without having refreshed another process's binding.
+    await this.refreshBindings()
     const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
     const version = Number((meta as any)?.version ?? 0)
     if (version <= this.state.version) return false
@@ -421,6 +426,14 @@ export class V2Store {
 
   binding(workspaceID: string, agentID: string): SessionBinding | undefined {
     return this.state.bindings[bindingKey(workspaceID, agentID)]
+  }
+
+  /** Refresh only the binding map; safe when the global version is unchanged. */
+  async refreshBindings(): Promise<void> {
+    for (const { value } of await this.scanAll("v2/binding/")) {
+      const binding = value as SessionBinding
+      if (binding?.workspaceID && binding?.agentID) this.state.bindings[bindingKey(binding.workspaceID, binding.agentID)] = binding
+    }
   }
 
   async saveMemory(memory: Memory): Promise<void> {

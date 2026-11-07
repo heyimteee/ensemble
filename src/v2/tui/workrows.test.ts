@@ -30,7 +30,7 @@ import {
   terminalAnnouncements,
   workCardDetail,
   workCardForTask,
-  workCardLayout,
+  workGridLayout,
   workCardsForTasks,
   workGlyph,
   workRowFrame,
@@ -469,24 +469,42 @@ test("ticket115: card ordering keeps active work only, working first and oldest-
   assert.deepEqual(cards.map((card) => card.id), ["working-old", "working-new", "pending-old", "pending-new"])
 })
 
-test("ticket115: card height fits three, two, or one and falls back to compact rows", () => {
-  const wide = workCardLayout(40, 5)
-  assert.deepEqual(wide, { mode: "cards", limit: 3, overflow: 2, rows: 23 })
-  assert.deepEqual(workCardLayout(40, 2), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
-  assert.deepEqual(workCardLayout(34, 2), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
-  assert.deepEqual(workCardLayout(33, 2), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
-  assert.deepEqual(workCardLayout(30, 2), { mode: "cards", limit: 1, overflow: 1, rows: 9 })
-  assert.deepEqual(workCardLayout(29, 1), { mode: "cards", limit: 1, overflow: 0, rows: 8 })
-  assert.deepEqual(workCardLayout(24, 3), { mode: "compact", limit: 1, overflow: 2, rows: 2 })
-  assert.deepEqual(workCardLayout(27, 3), { mode: "cards", limit: 1, overflow: 2, rows: 9 })
-  assert.deepEqual(workCardLayout(50, 1), { mode: "cards", limit: 1, overflow: 0, rows: 8 })
+test("ticket129: work grid uses three columns wide, two medium, compact short", () => {
+  assert.deepEqual(workGridLayout(76, 40, 5), {
+    mode: "cards", columns: 3, rows: 2, limit: 5, overflow: 0,
+    cardWidth: 24, cardContentWidth: 19, height: 15,
+  })
+  assert.deepEqual(workGridLayout(76, 40, 2), {
+    mode: "cards", columns: 3, rows: 1, limit: 2, overflow: 0,
+    cardWidth: 24, cardContentWidth: 19, height: 8,
+  })
+  assert.deepEqual(workGridLayout(76, 40, 7), {
+    mode: "cards", columns: 3, rows: 2, limit: 6, overflow: 1,
+    cardWidth: 24, cardContentWidth: 19, height: 16,
+  })
+  assert.deepEqual(workGridLayout(60, 30, 4), {
+    mode: "cards", columns: 2, rows: 1, limit: 2, overflow: 2,
+    cardWidth: 29, cardContentWidth: 24, height: 9,
+  })
+  assert.deepEqual(workGridLayout(40, 24, 3), {
+    mode: "compact", columns: 0, rows: 0, limit: 1, overflow: 2,
+    cardWidth: 0, cardContentWidth: 0, height: 2,
+  })
+  assert.deepEqual(workGridLayout(112, 50, 6), {
+    mode: "cards", columns: 3, rows: 2, limit: 6, overflow: 0,
+    cardWidth: 36, cardContentWidth: 31, height: 15,
+  })
+  assert.deepEqual(workGridLayout(76, 40, 0), {
+    mode: "compact", columns: 0, rows: 0, limit: 0, overflow: 0,
+    cardWidth: 0, cardContentWidth: 0, height: 1,
+  })
 })
 
-test("ticket115: card layouts leave transcript rows at the reference and compact sizes", () => {
-  const tall = workCardLayout(40, 5)
-  assert.ok(40 - WORK_BASE_ROWS - tall.rows >= 4, "120x40 keeps at least four transcript rows")
-  const short = workCardLayout(24, 3)
-  assert.ok(24 - WORK_BASE_ROWS - short.rows >= 3, "80x24 keeps at least three transcript rows")
+test("ticket129: work grids leave transcript space at reference and compact sizes", () => {
+  const tall = workGridLayout(76, 40, 6)
+  assert.ok(40 - WORK_BASE_ROWS - tall.height >= 4, "120x40 keeps at least four transcript rows")
+  const short = workGridLayout(40, 24, 3)
+  assert.ok(24 - WORK_BASE_ROWS - short.height >= 3, "80x24 keeps at least three transcript rows")
   assert.ok(WORK_CARD_ROWS >= 6, "a card leaves room for border, header, title, detail, and tide")
 })
 
@@ -605,30 +623,48 @@ test("ticket117: the Work header distinguishes active and recent counts", () => 
   assert.equal(workSummaryCounts(0, recentWorkItems([recent], 15_000 + RECENT_WORK_TTL_MS).length), "WORK │ none yet")
 })
 
-test("ticket117: recent cards share the height budget after active cards", () => {
-  assert.deepEqual(workCardLayout(40, 1, 1), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
-  assert.deepEqual(workCardLayout(40, 1, 3), { mode: "cards", limit: 3, overflow: 1, rows: 23 })
-  assert.deepEqual(workCardLayout(40, 0, 2), { mode: "cards", limit: 2, overflow: 0, rows: 15 })
-  assert.deepEqual(workCardLayout(24, 0, 2), { mode: "compact", limit: 1, overflow: 1, rows: 2 })
-  assert.deepEqual(workCardLayout(24, 1, 1), { mode: "compact", limit: 1, overflow: 1, rows: 2 })
-  assert.deepEqual(workCardLayout(24, 0, 0), { mode: "compact", limit: 0, overflow: 0, rows: 0 })
+test("ticket117: recent cards share the grid capacity after active cards", () => {
+  assert.deepEqual(workGridLayout(76, 40, 1, 1), {
+    mode: "cards", columns: 3, rows: 1, limit: 2, overflow: 0,
+    cardWidth: 24, cardContentWidth: 19, height: 8,
+  })
+  assert.deepEqual(workGridLayout(76, 40, 1, 3), {
+    mode: "cards", columns: 3, rows: 2, limit: 4, overflow: 0,
+    cardWidth: 24, cardContentWidth: 19, height: 15,
+  })
+  assert.deepEqual(workGridLayout(76, 40, 0, 2), {
+    mode: "cards", columns: 3, rows: 1, limit: 2, overflow: 0,
+    cardWidth: 24, cardContentWidth: 19, height: 8,
+  })
+  assert.deepEqual(workGridLayout(40, 24, 0, 2), {
+    mode: "compact", columns: 0, rows: 0, limit: 1, overflow: 1,
+    cardWidth: 0, cardContentWidth: 0, height: 2,
+  })
+  assert.deepEqual(workGridLayout(40, 24, 1, 1), {
+    mode: "compact", columns: 0, rows: 0, limit: 1, overflow: 1,
+    cardWidth: 0, cardContentWidth: 0, height: 2,
+  })
+  assert.deepEqual(workGridLayout(40, 24, 0, 0), {
+    mode: "compact", columns: 0, rows: 0, limit: 0, overflow: 0,
+    cardWidth: 0, cardContentWidth: 0, height: 1,
+  })
 })
 
 test("ticket117: compact fallback keeps transcript and composer at 80x24", () => {
-  const layout = workCardLayout(24, 0, 3)
+  const layout = workGridLayout(40, 24, 0, 3)
   assert.equal(layout.mode, "compact")
-  assert.ok(24 - WORK_BASE_ROWS - layout.rows >= 3, "80x24 keeps at least three transcript rows")
+  assert.ok(24 - WORK_BASE_ROWS - layout.height >= 3, "80x24 keeps at least three transcript rows")
 })
 
 test("ticket115: the work cursor set is the visible active prefix, never overflow", () => {
   const ordered = ["a", "b", "c", "d"].map((id) => task({ id }))
-  const cardLayout = workCardLayout(40, ordered.length, 0)
-  assert.equal(cardLayout.limit, 3, "the tall layout fits three cards")
-  assert.deepEqual(visibleWorkTasks(ordered, cardLayout), ordered.slice(0, 3), "overflow task d is not a cursor target")
-  const compact = workCardLayout(24, ordered.length, 0)
+  const cardLayout = workGridLayout(76, 40, ordered.length, 0)
+  assert.equal(cardLayout.limit, 4, "the wide grid fits four cards in two rows")
+  assert.deepEqual(visibleWorkTasks(ordered, cardLayout), ordered.slice(0, 4), "no hidden active task is selected")
+  const compact = workGridLayout(40, 24, ordered.length, 0)
   assert.equal(compact.limit, 1)
   assert.deepEqual(visibleWorkTasks(ordered, compact), ordered.slice(0, 1), "compact mode exposes the same visible prefix")
-  assert.deepEqual(visibleWorkTasks(ordered, workCardLayout(40, 0, 0)), [], "an empty layout has no selectable task")
+  assert.deepEqual(visibleWorkTasks(ordered, workGridLayout(76, 40, 0, 0)), [], "an empty layout has no selectable task")
 })
 
 test("ticket117: recent cards reuse the card mapping but stay display-only", () => {

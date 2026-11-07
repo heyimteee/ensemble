@@ -163,7 +163,7 @@ import {
   splitLiveFinalized,
   suppressCardedActivity,
   visibleWorkTasks,
-  workCardLayout,
+  workGridLayout,
   workCardsForTasks,
   workRowFrame,
   workRowText,
@@ -171,6 +171,7 @@ import {
   type ActivityEntry,
   type ActivityVerbKind,
   type PendingWorkAction,
+  type WorkCard,
   type WorkCardOptions,
 } from "./workrows.ts"
 import {
@@ -719,16 +720,28 @@ export function EnsembleV2App() {
     context.renderer.on("resize", update)
     onCleanup(() => context.renderer.off("resize", update))
   })
+  // The rail stays transparent; the inline LEADER label uses the leader
+  // color, so there is no badge box or opaque cutout to paint.
+  const viewWidth = () => Math.max(60, renderSize().width - 2)
+  const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
+  // Two-column layout (ticket #56): the task board is gone and the chat
+  // reclaims its width. Only the rail is subtracted now.
+  const messageWidth = () => Math.max(20, viewWidth() - railWidth() - 10)
+  const viewHeight = () => renderSize().height
+  const messageHeight = () => Math.max(6, viewHeight() - 14)
+  // Ticket #115/#117: Work cards. The grid uses the full chat content width
+  // minus the section padding. The layout decides the column count, card
+  // width, and row capacity; card content width sits inside border/accent.
+  const workContentWidth = () => Math.max(20, messageWidth() - 2)
   // Ticket #115 follow-up: a visible Work card already carries its task's
   // detail, so the same task-backed activity line is suppressed. This set uses
-  // the same height-based card limit as the render; compact fallback rows and
-  // overflow tasks keep their activity lines, and streaming-only rows never
-  // enter this set.
+  // the exact width-aware grid limit as the render; compact fallback rows and
+  // overflow tasks keep their activity lines.
   const cardedTaskIDs = createMemo(() => {
     const active = activeTasks()
     const ordered = orderedTasks()
     const recentCount = recentWorkItems(active, Date.now()).length
-    const layout = workCardLayout(renderSize().height, ordered.length, recentCount)
+    const layout = workGridLayout(workContentWidth(), viewHeight(), ordered.length, recentCount)
     if (layout.mode !== "cards") return new Set<string>()
     return new Set(visibleWorkTasks(ordered, layout).map((task) => task.id))
   })
@@ -1293,21 +1306,6 @@ export function EnsembleV2App() {
     if (feedback) signalSettingsFeedback(feedback)
   })
   const statuslineWidth = () => Math.max(10, renderSize().width - 2)
-  // The rail stays transparent; the inline LEADER label uses the leader
-  // color, so there is no badge box or opaque cutout to paint.
-  const viewWidth = () => Math.max(60, renderSize().width - 2)
-  const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
-  // Two-column layout (ticket #56): the task board is gone and the chat
-  // reclaims its width. Only the rail is subtracted now.
-  const messageWidth = () => Math.max(20, viewWidth() - railWidth() - 10)
-  const viewHeight = () => renderSize().height
-  const messageHeight = () => Math.max(6, viewHeight() - 14)
-  // Ticket #115/#117: Work cards. The card owns the full chat content width
-  // minus the section padding, card border, and card horizontal padding;
-  // `workCardLayout` decides whether the terminal can afford cards or must
-  // fall back to compact one-line rows. Recently finished cards share that
-  // budget after active cards and are display-only.
-  const workCardWidth = () => Math.max(20, messageWidth() - 6)
   // Ticket #116: one shuffled-deck assignment state for the session. Variants
   // are resolved by subtask id and survive every snapshot refresh; entries
   // leave the map after the recent-card retention window. A blocked card also
@@ -1317,13 +1315,15 @@ export function EnsembleV2App() {
   const workCards = createMemo(() => {
     const now = Date.now()
     const active = activeTasks()
+    const recent = recentWorkItems(active, now)
+    const layout = workGridLayout(workContentWidth(), viewHeight(), active.length, recent.length)
     const pendingApprovalSet = pendingApprovalIDs()
     const nativeBlockedSet = nativeBlockedSubtaskIDs()
     const options: WorkCardOptions = {
       now,
       tick: motionFrame(),
       tideTick: workFrame(),
-      width: workCardWidth(),
+      width: Math.max(12, layout.cardContentWidth),
       env: process.env,
       pendingApprovalIDs: pendingApprovalSet,
       nativeBlockedSubtaskIDs: nativeBlockedSet,
@@ -1347,9 +1347,17 @@ export function EnsembleV2App() {
       recentCards,
       // Active first: the work cursor indexes into this same prefix.
       cards: [...cards, ...recentCards],
-      recentTasks: recentWorkItems(active, now),
-      layout: workCardLayout(viewHeight(), cards.length, recentCards.length),
+      recentTasks: recent,
+      layout,
     }
+  })
+  const workCardRows = createMemo(() => {
+    const pane = workCards()
+    const columns = Math.max(1, pane.layout.columns)
+    const visible = pane.cards.slice(0, pane.layout.limit)
+    const rows: WorkCard[][] = []
+    for (let index = 0; index < visible.length; index += columns) rows.push(visible.slice(index, index + columns))
+    return rows
   })
   // Ticket #115/#117: the cursor and every work action target only cards that
   // are actually rendered. Overflow active cards and recent cards are
@@ -1959,10 +1967,26 @@ export function EnsembleV2App() {
   const moveTask = (delta: number) => {
     const length = visibleTasks().length
     if (length === 0) return
-    setTaskCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
+    const columns = Math.max(1, workCards().layout.columns)
+    const cursor = taskCursorClamped()
+    const next = cursor + delta * columns
+    setTaskCursor(Math.max(0, Math.min(length - 1, next < 0 ? cursor % columns : next)))
+  }
+  const moveTaskColumn = (delta: number) => {
+    const length = visibleTasks().length
+    if (length === 0) return
+    const columns = Math.max(1, workCards().layout.columns)
+    const cursor = taskCursorClamped()
+    const rowStart = Math.floor(cursor / columns) * columns
+    const rowEnd = Math.min(length - 1, rowStart + columns - 1)
+    setTaskCursor(Math.max(rowStart, Math.min(rowEnd, cursor + delta)))
   }
   const moveTaskHalf = (direction: 1 | -1) => {
-    setTaskCursor((cursor) => halfPageCursor(cursor, visibleTasks().length, direction, listPage()))
+    const length = visibleTasks().length
+    if (length === 0) return
+    const columns = Math.max(1, workCards().layout.columns)
+    const delta = direction * columns * Math.max(1, Math.floor(listPage() / 2))
+    setTaskCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
   }
   /**
    * Tab/Shift+Tab move focus zones. Forward: roster -> chat -> work list ->
@@ -3367,6 +3391,8 @@ export function EnsembleV2App() {
     "chat.page.bottom": () => jumpToBottom(),
     "work.down": () => moveTask(1),
     "work.up": () => moveTask(-1),
+    "work.left": () => moveTaskColumn(-1),
+    "work.right": () => moveTaskColumn(1),
     "work.top": () => setTaskCursor(0),
     "work.bottom": () => setTaskCursor(Math.max(0, visibleTasks().length - 1)),
     "work.half.down": () => moveTaskHalf(1),
@@ -5289,18 +5315,20 @@ export function EnsembleV2App() {
                                   )
                                 }}</For>
                               }>
-                                <For each={workCards().cards.slice(0, workCards().layout.limit)}>{(card, index) => (
-                                  // Ticket #115/#117: active cards first, then
-                                  // settled recent cards. The cursor set is the
-                                  // active prefix, so recent cards are
-                                  // display-only and every work action still
-                                  // targets the selected active card.
-                                  <WorkCardView
-                                    colors={colors}
-                                    card={card}
-                                    selected={!card.recent && taskCursor() === index() && interaction().focus === "work"}
-                                    index={index()}
-                                  />
+                                <For each={workCardRows()}>{(row, rowIndex) => (
+                                  <box flexDirection="row" width="100%" gap={1} marginTop={rowIndex() === 0 ? 0 : 1}>
+                                    <For each={row}>{(card, columnIndex) => {
+                                      const flatIndex = () => rowIndex() * Math.max(1, workCards().layout.columns) + columnIndex()
+                                      return (
+                                        <WorkCardView
+                                          colors={colors}
+                                          card={card}
+                                          width={workCards().layout.cardWidth}
+                                          selected={!card.recent && taskCursor() === flatIndex() && interaction().focus === "work"}
+                                        />
+                                      )
+                                    }}</For>
+                                  </box>
                                 )}</For>
                                 <Show when={workCards().layout.overflow > 0}>
                                   <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{workCards().layout.overflow} more</text>
