@@ -92,16 +92,18 @@ test("the revision heartbeat is cheap, version-aware, paused off-route, and reco
   assert.ok(!source.includes("refresh().then(() => syncTranscriptScroll())"))
 })
 
-test("the patch feed applies full-entity Work changes and recovers through changes.since", () => {
+test("the patch feed applies shell entity changes and recovers through changes.since", () => {
   // Behavior: change-feed.test.ts batch validation, store upserts, and resets.
   const source = app()
   assert.ok(source.includes('if (type === "rpc.ensemble.v2.patches")'))
   assert.ok(source.includes('callRpc<ChangesSince>(context, "changes.since"'))
-  assert.ok(source.includes("client.applyWorkChanges"))
-  assert.ok(source.includes("client.applyWorkSnapshot"))
+  assert.ok(source.includes("client.applyChanges(decision.changes, decision.version, decision.meta)"))
+  assert.ok(source.includes("mergeFeedMeta("))
   assert.ok(source.includes("decidePatchApply(lastSnapshotMeta, payload)"))
   assert.ok(source.includes("decideChangesSince(cursor, result)"))
-  assert.ok(source.includes("recoverFeed("))
+  assert.ok(source.includes("recoverFeed()"))
+  // A malformed shell batch repairs through the full durable snapshot.
+  assert.ok(source.includes("void refreshFull().catch(() => undefined)"))
   // The legacy changed event and snapshot path remain for older servers.
   assert.ok(source.includes('if (type === "rpc.ensemble.v2.changed")'))
 })

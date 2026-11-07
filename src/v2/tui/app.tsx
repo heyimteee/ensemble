@@ -143,7 +143,7 @@ import { createCommandHistory, recallHistory, rememberHistory, startHistory, typ
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
-import { createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, revisionChanged, snapshotMeta, supportsPatchFeed, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createClientStore } from "./client-store.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
@@ -1918,8 +1918,18 @@ export function EnsembleV2App() {
   }
   const applyFeedDecision = (decision: PatchDecision): boolean => {
     if (decision.action !== "apply") return false
-    client.applyWorkChanges(decision.changes, decision.version)
-    if (lastSnapshotMeta) lastSnapshotMeta = { ...lastSnapshotMeta, version: decision.version }
+    client.applyChanges(decision.changes, decision.version, decision.meta)
+    if (lastSnapshotMeta) {
+      lastSnapshotMeta = mergeFeedMeta({ ...lastSnapshotMeta, version: decision.version }, decision.meta)
+    }
+    if (decision.meta && (!decision.meta.directory || decision.meta.directory === directoryOf(context))) {
+      const configError = decision.meta.configError ?? ""
+      if (configError && configError !== lastConfigError) {
+        lastConfigError = configError
+        showToast({ title: "Ensemble config", message: configError, tone: "warning" })
+      }
+      if (!configError) lastConfigError = ""
+    }
     repaintFromFeed()
     return true
   }
@@ -1928,27 +1938,9 @@ export function EnsembleV2App() {
     snapshotRefresh.request()
     await snapshotRefresh.whenIdle()
   }
-  const resyncWorkScope = async (): Promise<void> => {
-    const next = await callRpc<Snapshot>(context, "snapshot", { directory: directoryOf(context) })
-    const nextMeta = snapshotMeta(next)
-    if (!lastSnapshotMeta || !supportsPatchFeed(lastSnapshotMeta) || nextMeta.epoch !== lastSnapshotMeta.epoch) {
-      await refreshFull()
-      return
-    }
-    // A patch that landed during the fetch is newer than this snapshot; keep
-    // it instead of regressing the Work scope to an older version.
-    if (nextMeta.version < lastSnapshotMeta.version) return
-    client.applyWorkSnapshot(next)
-    // The snapshot may contain newer non-Work entities that this scoped apply
-    // intentionally did not take. Advance the cursor only at the same version;
-    // otherwise leave it so `changes.since`/the heartbeat reconciles the rest
-    // instead of silently declaring those entities current.
-    if (nextMeta.version === lastSnapshotMeta.version) lastSnapshotMeta = nextMeta
-    repaintFromFeed()
-  }
   let feedRecovery: Promise<void> | undefined
   let feedRecoveryAgain = false
-  const recoverFeed = (mode: "since" | "work"): Promise<void> => {
+  const recoverFeed = (): Promise<void> => {
     if (feedRecovery) {
       feedRecoveryAgain = true
       return feedRecovery
@@ -1959,11 +1951,11 @@ export function EnsembleV2App() {
         do {
           feedRecoveryAgain = false
           passes++
-          if (mode === "work" || !lastSnapshotMeta || !supportsPatchFeed(lastSnapshotMeta)) {
-            try { await resyncWorkScope() } catch { await refreshFull().catch(() => undefined) }
+          const cursor = lastSnapshotMeta
+          if (!cursor || !supportsPatchFeed(cursor)) {
+            await refreshFull().catch(() => undefined)
             continue
           }
-          const cursor = lastSnapshotMeta
           let result: ChangesSince
           try {
             result = await callRpc<ChangesSince>(context, "changes.since", {
@@ -1981,11 +1973,9 @@ export function EnsembleV2App() {
             continue
           }
           if (decision.action === "ignore") continue
-          if (decision.reason === "malformed" || decision.reason === "gap") {
-            try { await resyncWorkScope() } catch { await refreshFull().catch(() => undefined) }
-          } else {
-            await refreshFull().catch(() => undefined)
-          }
+          // A gap, reset, epoch change, or malformed response cannot be
+          // patched; the full snapshot reconstructs every shell entity.
+          await refreshFull().catch(() => undefined)
         } while (feedRecoveryAgain && passes < 3)
       } finally {
         feedRecovery = undefined
@@ -2001,7 +1991,14 @@ export function EnsembleV2App() {
       return
     }
     if (decision.action === "ignore") return
-    void recoverFeed(decision.reason === "malformed" ? "work" : "since")
+    // A malformed shell batch or a version with unpatched state (messages
+    // until #139) cannot be repaired by a scoped resync; the full snapshot
+    // reconstructs every shell entity from durable storage.
+    if (decision.reason === "malformed" || decision.reason === "other") {
+      void refreshFull().catch(() => undefined)
+      return
+    }
+    void recoverFeed()
   }
 
   const openAgent = (agent: Agent) => {
@@ -3593,11 +3590,11 @@ export function EnsembleV2App() {
           const patchCursor = !forced && cursor && supportsPatchFeed(cursor)
             && revision.epoch === cursor.epoch && revision.protocol === cursor.protocol
           if (patchCursor) {
-            if (revision.version > cursor!.version) await recoverFeed("since")
+            if (revision.version > cursor!.version) await recoverFeed()
             else if (revision.version < cursor!.version) await refreshFull()
-            // An equal version with a catalog/config revision is the metadata
-            // path: the snapshot decision never replaces entity state.
-            else snapshotRefresh.request()
+            // An equal version with a catalog/config revision is metadata-only:
+            // recover it through the feed, never through entity replacement.
+            else await recoverFeed()
           } else {
             await refreshFull()
           }

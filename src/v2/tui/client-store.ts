@@ -1,7 +1,7 @@
 import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
-import type { Id, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, WorkEntityChange } from "../types.ts"
+import type { EntityChange, FeedMeta, Id, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
 
 /**
  * Durable client updates. A snapshot is the only full replacement; every
@@ -12,8 +12,127 @@ export type ClientStateUpdate =
   | { type: "snapshot"; snapshot: Snapshot }
   | { type: "subtask.upsert"; task: Subtask }
   | { type: "subtask.remove"; id: Id }
-  | { type: "work.changes"; changes: WorkEntityChange[]; version?: number; updatedAt?: number }
+  | { type: "entity.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
+  | { type: "work.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
   | { type: "work.snapshot"; subtasks: Record<Id, Subtask>; version: number; updatedAt?: number }
+
+const bindingKey = (workspaceID: Id, agentID: Id) => `${workspaceID}:${agentID}`
+
+/**
+ * Apply full-entity changes to one branch at a time. Unchanged branches keep
+ * their identity so a Solid `reconcile` writes only the updated entity path.
+ */
+function reduceEntityChanges(state: SnapshotState, changes: EntityChange[]): SnapshotState {
+  let next = state
+  let copied = false
+  const copy = () => {
+    if (!copied) {
+      next = { ...state }
+      copied = true
+    }
+    return next
+  }
+  for (const change of changes) {
+    switch (change.entity) {
+      case "subtask": {
+        if (change.op === "upsert") {
+          if (next.subtasks[change.task.id] === change.task) break
+          copy().subtasks = { ...next.subtasks, [change.task.id]: change.task }
+        } else {
+          if (!(change.id in next.subtasks)) break
+          const subtasks = { ...next.subtasks }
+          delete subtasks[change.id]
+          copy().subtasks = subtasks
+        }
+        break
+      }
+      case "agent": {
+        if (change.op === "upsert") {
+          if (next.agents[change.agent.id] === change.agent) break
+          copy().agents = { ...next.agents, [change.agent.id]: change.agent }
+        } else {
+          if (!(change.id in next.agents)) break
+          const agents = { ...next.agents }
+          delete agents[change.id]
+          copy().agents = agents
+        }
+        break
+      }
+      case "workspace": {
+        if (change.op === "upsert") {
+          if (next.workspaces[change.workspace.id] === change.workspace) break
+          copy().workspaces = { ...next.workspaces, [change.workspace.id]: change.workspace }
+        } else {
+          if (!(change.id in next.workspaces)) break
+          const workspaces = { ...next.workspaces }
+          delete workspaces[change.id]
+          copy().workspaces = workspaces
+        }
+        break
+      }
+      case "approval": {
+        if (change.op === "upsert") {
+          if (next.approvals[change.approval.id] === change.approval) break
+          copy().approvals = { ...next.approvals, [change.approval.id]: change.approval }
+        } else {
+          if (!(change.id in next.approvals)) break
+          const approvals = { ...next.approvals }
+          delete approvals[change.id]
+          copy().approvals = approvals
+        }
+        break
+      }
+      case "binding": {
+        const key = change.op === "upsert" ? bindingKey(change.binding.workspaceID, change.binding.agentID) : bindingKey(change.workspaceID, change.agentID)
+        if (change.op === "upsert") {
+          if (next.bindings[key] === change.binding) break
+          copy().bindings = { ...next.bindings, [key]: change.binding }
+        } else {
+          if (!(key in next.bindings)) break
+          const bindings = { ...next.bindings }
+          delete bindings[key]
+          copy().bindings = bindings
+        }
+        break
+      }
+      case "memory": {
+        if (change.op === "upsert") {
+          if (next.memories[change.memory.id] === change.memory) break
+          copy().memories = { ...next.memories, [change.memory.id]: change.memory }
+        } else {
+          if (!(change.id in next.memories)) break
+          const memories = { ...next.memories }
+          delete memories[change.id]
+          copy().memories = memories
+        }
+        break
+      }
+      case "initJob": {
+        if (change.op === "upsert") {
+          if (next.initJobs[change.job.id] === change.job) break
+          copy().initJobs = { ...next.initJobs, [change.job.id]: change.job }
+        } else {
+          if (!(change.id in next.initJobs)) break
+          const initJobs = { ...next.initJobs }
+          delete initJobs[change.id]
+          copy().initJobs = initJobs
+        }
+        break
+      }
+      case "settings": {
+        if (next.settings === change.settings) break
+        copy().settings = change.settings
+        break
+      }
+      case "ui": {
+        if (next.ui === change.ui) break
+        copy().ui = change.ui
+        break
+      }
+    }
+  }
+  return next
+}
 
 /**
  * Pure store primitive: unchanged branches keep their identity so a Solid
@@ -34,27 +153,13 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
       delete subtasks[update.id]
       return { ...state, subtasks }
     }
+    case "entity.changes":
     case "work.changes": {
-      let subtasks = state.subtasks
-      let changed = false
-      for (const change of update.changes) {
-        if (change.entity === "subtask" && change.op === "upsert") {
-          if (subtasks[change.task.id] === change.task) continue
-          if (!changed) subtasks = { ...subtasks }
-          subtasks[change.task.id] = change.task
-          changed = true
-          continue
-        }
-        if (change.entity !== "subtask" || change.op !== "remove") continue
-        if (!(change.id in subtasks)) continue
-        if (!changed) subtasks = { ...subtasks }
-        delete subtasks[change.id]
-        changed = true
-      }
+      const next = reduceEntityChanges(state, update.changes)
       const version = update.version ?? state.version
       const updatedAt = update.updatedAt ?? state.updatedAt
-      if (!changed && version === state.version && updatedAt === state.updatedAt) return state
-      return { ...state, subtasks, version, updatedAt }
+      if (next === state && version === state.version && updatedAt === state.updatedAt) return state
+      return { ...next, version, updatedAt }
     }
     case "work.snapshot": {
       return {
@@ -74,6 +179,7 @@ export type ClientStore = {
   skills: () => SkillOption[]
   directory: () => string
   configError: () => string | undefined
+  configRevision: () => number | undefined
   modelsError: () => string | undefined
   catalogRevision: () => number | undefined
   protocol: () => number | undefined
@@ -83,8 +189,10 @@ export type ClientStore = {
   applyMetadata: (snapshot: Snapshot) => void
   applySubtask: (task: Subtask) => void
   removeSubtask: (id: Id) => void
+  /** Apply one validated, atomic batch of full-entity changes. */
+  applyChanges: (changes: EntityChange[], version?: number, meta?: FeedMeta) => void
   /** Apply one validated, atomic batch of full-entity work changes. */
-  applyWorkChanges: (changes: WorkEntityChange[], version?: number) => void
+  applyWorkChanges: (changes: EntityChange[], version?: number) => void
   /** Scoped Work resync: replace subtasks and metadata, keep other entities. */
   applyWorkSnapshot: (snapshot: Snapshot) => void
   reset: () => void
@@ -105,6 +213,7 @@ export function createClientStore(): ClientStore {
   const [skills, setSkills] = createSignal<SkillOption[]>([])
   const [directory, setDirectory] = createSignal("")
   const [configError, setConfigError] = createSignal<string | undefined>(undefined)
+  const [configRevision, setConfigRevision] = createSignal<number | undefined>(undefined)
   const [modelsError, setModelsError] = createSignal<string | undefined>(undefined)
   const [catalogRevision, setCatalogRevision] = createSignal<number | undefined>(undefined)
   const [protocol, setProtocol] = createSignal<number | undefined>(undefined)
@@ -119,10 +228,43 @@ export function createClientStore(): ClientStore {
     setSkills(snapshot.skills)
     setDirectory(snapshot.directory)
     setConfigError(snapshot.configError)
+    setConfigRevision(snapshot.configRevision)
     setModelsError(snapshot.modelsError)
     setCatalogRevision(snapshot.catalogRevision)
     setProtocol(snapshot.protocol)
     setEpoch(snapshot.epoch)
+  }
+
+  /**
+   * Catalog/config metadata is not part of the coordination version. Apply it
+   * without replacing any entity branch, and only take config fields that
+   * describe this client's directory.
+   */
+  const applyFeedMeta = (meta: FeedMeta) => {
+    if (typeof meta.catalogRevision === "number") {
+      if (meta.catalogRevision !== catalogRevision()) {
+        setCatalogRevision(meta.catalogRevision)
+        if (Array.isArray(meta.models)) setModels(meta.models)
+        if (Array.isArray(meta.skills)) setSkills(meta.skills)
+      }
+      // Feed metadata is a complete catalog revision, so a missing error
+      // clears a previous one.
+      setModelsError(meta.modelsError)
+    }
+    const current = directory()
+    if (!meta.directory || !current || meta.directory === current) {
+      if (typeof meta.configRevision === "number") setConfigRevision(meta.configRevision)
+      // The metadata carries this view's complete config error state.
+      if (typeof meta.configRevision === "number") setConfigError(meta.configError)
+    }
+  }
+
+  const applyChanges = (changes: EntityChange[], version?: number, meta?: FeedMeta) => {
+    batch(() => {
+      const updatedAt = version === undefined || version === data.state.version ? undefined : Date.now()
+      apply({ type: "entity.changes", changes, version, updatedAt })
+      if (meta) applyFeedMeta(meta)
+    })
   }
 
   return {
@@ -131,6 +273,7 @@ export function createClientStore(): ClientStore {
     skills,
     directory,
     configError,
+    configRevision,
     modelsError,
     catalogRevision,
     protocol,
@@ -145,9 +288,8 @@ export function createClientStore(): ClientStore {
     applyMetadata,
     applySubtask: (task) => apply({ type: "subtask.upsert", task }),
     removeSubtask: (id) => apply({ type: "subtask.remove", id }),
-    applyWorkChanges: (changes, version) => {
-      apply({ type: "work.changes", changes, version, updatedAt: version === undefined ? undefined : Date.now() })
-    },
+    applyChanges,
+    applyWorkChanges: (changes, version) => applyChanges(changes, version),
     applyWorkSnapshot: (snapshot) => {
       batch(() => {
         apply({
@@ -167,6 +309,7 @@ export function createClientStore(): ClientStore {
         setSkills([])
         setDirectory("")
         setConfigError(undefined)
+        setConfigRevision(undefined)
         setModelsError(undefined)
         setCatalogRevision(undefined)
         setProtocol(undefined)

@@ -2,7 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { createInitialState } from "../defaults.ts"
-import type { Agent, Message, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
+import type { Agent, Approval, InitJob, Memory, Message, ModelOption, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
 import { createClientStore, reduceClientState } from "./client-store.ts"
 
 const agent = (id: string, name: string): Agent => ({
@@ -51,6 +51,59 @@ const message = (id: string, text: string): Message => ({
 
 const models: ModelOption[] = [{ providerID: "p", modelID: "m", name: "Model", variants: [] }]
 const skills: SkillOption[] = [{ id: "skill", name: "Skill" }]
+
+const workspace = (id: string, name: string) => ({
+  id,
+  name,
+  directory: `/tmp/${id}`,
+  leaderID: "a1",
+  memberIDs: ["a1"],
+  synthesis: true,
+  archived: false,
+  paused: false,
+  nextSeq: 1,
+  createdAt: 1,
+  lastActiveAt: 1,
+})
+
+const approval = (id: string): Approval => ({
+  id,
+  workspaceID: "w1",
+  kind: "ask_person",
+  title: "Ask",
+  detail: "?",
+  status: "pending",
+  createdAt: 1,
+})
+
+const binding = (agentID: string, sessionID: string): SessionBinding => ({
+  workspaceID: "w1",
+  agentID,
+  sessionID,
+  agentVersion: 1,
+  updatedAt: 1,
+})
+
+const memory = (id: string): Memory => ({
+  id,
+  workspaceID: "w1",
+  scope: "workspace",
+  text: "note",
+  origin: "manual",
+  source: "user",
+  createdAt: 1,
+  updatedAt: 1,
+  history: [],
+})
+
+const initJob = (id: string): InitJob => ({
+  id,
+  workspaceID: "w1",
+  messageID: "m1",
+  state: "running",
+  previousAgentsMD: null,
+  startedAt: 1,
+})
 
 function stateWith(entities: (state: SnapshotState) => void): SnapshotState {
   const state = createInitialState()
@@ -163,6 +216,118 @@ test("a metadata update leaves entity state untouched", () => {
   assert.equal(store.models(), nextModels)
   assert.equal(store.configError(), "changed")
   assert.equal(store.catalogRevision(), 8)
+})
+
+test("shell entity changes apply incrementally without replacing unrelated state", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.agents.a1 = agent("a1", "Ada")
+    state.subtasks.t1 = task("t1")
+    state.messages.w1 = [message("m1", "hello")]
+  })))
+  const before = store.state()!
+
+  store.applyChanges([
+    { entity: "agent", op: "upsert", agent: agent("a1", "Ada Lovelace") },
+    { entity: "workspace", op: "upsert", workspace: workspace("w1", "site") },
+    { entity: "approval", op: "upsert", approval: approval("ap1") },
+    { entity: "binding", op: "upsert", binding: binding("a1", "s1") },
+    { entity: "memory", op: "upsert", memory: memory("mem1") },
+    { entity: "initJob", op: "upsert", job: initJob("init1") },
+    { entity: "settings", op: "upsert", settings: { maxActiveRuns: 1, maxDelegations: 2, maxDepth: 3, synthesis: false } },
+    { entity: "ui", op: "upsert", ui: { activeWorkspaceID: "w1" } },
+  ], 6)
+
+  const after = store.state()!
+  assert.equal(after.version, 6)
+  assert.equal(after.agents.a1?.name, "Ada Lovelace")
+  assert.equal(after.workspaces.w1?.name, "site")
+  assert.equal(after.approvals.ap1?.status, "pending")
+  assert.equal(after.bindings["w1:a1"]?.sessionID, "s1")
+  assert.equal(after.memories.mem1?.text, "note")
+  assert.equal(after.initJobs.init1?.state, "running")
+  assert.equal(after.settings.maxActiveRuns, 1)
+  assert.equal(after.ui.activeWorkspaceID, "w1")
+  assert.equal(after.subtasks, before.subtasks, "unrelated Work state keeps its identity")
+  assert.equal(after.messages, before.messages, "unrelated transcript state keeps its identity")
+})
+
+test("shell removals and a full snapshot reconstruct every shell entity", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.agents.a1 = agent("a1", "Ada")
+    state.workspaces.w1 = workspace("w1", "site")
+    state.approvals.ap1 = approval("ap1")
+    state.bindings["w1:a1"] = binding("a1", "s1")
+    state.memories.mem1 = memory("mem1")
+    state.initJobs.init1 = initJob("init1")
+    state.settings.maxActiveRuns = 3
+    state.ui.activeWorkspaceID = "w1"
+  })))
+
+  store.applyChanges([
+    { entity: "agent", op: "remove", id: "a1" },
+    { entity: "workspace", op: "remove", id: "w1" },
+    { entity: "approval", op: "remove", id: "ap1" },
+    { entity: "binding", op: "remove", workspaceID: "w1", agentID: "a1" },
+    { entity: "memory", op: "remove", id: "mem1" },
+    { entity: "initJob", op: "remove", id: "init1" },
+  ], 5)
+
+  assert.deepEqual(Object.keys(store.state()!.agents), [])
+  assert.deepEqual(Object.keys(store.state()!.workspaces), [])
+  assert.deepEqual(Object.keys(store.state()!.approvals), [])
+  assert.deepEqual(Object.keys(store.state()!.bindings), [])
+  assert.deepEqual(Object.keys(store.state()!.memories), [])
+  assert.deepEqual(Object.keys(store.state()!.initJobs), [])
+
+  const reset = stateWith((state) => {
+    state.agents.a2 = agent("a2", "Grace")
+    state.workspaces.w2 = workspace("w2", "other")
+    state.approvals.ap2 = approval("ap2")
+    state.bindings["w2:a2"] = binding("a2", "s2")
+    state.memories.mem2 = memory("mem2")
+    state.initJobs.init2 = initJob("init2")
+  })
+  store.applySnapshot(snapshot(reset))
+
+  assert.equal(store.state()?.agents.a2?.name, "Grace")
+  assert.equal(store.state()?.workspaces.w2?.directory, "/tmp/w2")
+  assert.equal(store.state()?.approvals.ap2?.id, "ap2")
+  assert.equal(store.state()?.bindings["w2:a2"]?.sessionID, "s2")
+  assert.equal(store.state()?.memories.mem2?.id, "mem2")
+  assert.equal(store.state()?.initJobs.init2?.id, "init2")
+})
+
+test("catalog and config metadata apply from the feed without replacing entity state", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.agents.a1 = agent("a1", "Ada")
+    state.subtasks.t1 = task("t1")
+  }), { catalogRevision: 3, configRevision: 4 }))
+  const before = store.state()!
+  const nextModels = [...models, { providerID: "p", modelID: "m2", name: "Second", variants: [] }]
+  const nextSkills = [...skills, { id: "review", name: "Review" }]
+
+  store.applyChanges([], before.version, {
+    catalogRevision: 8,
+    models: nextModels,
+    skills: nextSkills,
+    modelsError: "model list failed",
+    directory: "/tmp/ensemble",
+    configRevision: 9,
+    configError: "bad config",
+  })
+
+  assert.equal(store.state()?.agents, before.agents)
+  assert.equal(store.state()?.subtasks, before.subtasks)
+  assert.equal(store.state()?.version, before.version, "metadata does not bump the coordination version")
+  assert.equal(store.models(), nextModels)
+  assert.equal(store.skills(), nextSkills)
+  assert.equal(store.modelsError(), "model list failed")
+  assert.equal(store.catalogRevision(), 8)
+  assert.equal(store.configRevision(), 9)
+  assert.equal(store.configError(), "bad config")
 })
 
 test("a subtask update invalidates only the updated entity path", () => {
