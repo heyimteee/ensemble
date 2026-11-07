@@ -3379,6 +3379,78 @@ test("ticket75: an empty assistant reply is retried, never a silent success", as
     assert.equal(task.error, "The agent produced no answer.")
     assert.notEqual(task.state, "replied")
     assert.equal(tasks.some((item) => item.workKind === "handoff"), false)
+    const retryEvents = snapshot.state.messages.w.filter((message: any) => /Retrying in \d+s \(attempt 2\/5\): The agent produced no answer\./.test(message.text))
+    assert.equal(retryEvents.length, 1, "one durable event names the retry ETA and reason")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket144: maintenance claims a future retry without an unrelated schedule", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-144-retry-wake-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  const retryAt = Date.now() + 1_500
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Wake retry", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, error: "boom", retryAfter: retryAt, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const task = next.state.subtasks.t
+      return task?.state === "replied" && task.attempts === 2
+    }, 6_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks.t.outcome, "succeeded")
+    assert.equal(after.state.subtasks.t.attempts, 2)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket144: an uncertain tool outcome parks for review instead of auto-retrying", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-144-uncertain-"))
+  const { ctx } = fakeContext()
+  const at = Date.now() + 60_000
+  ;(ctx.session as any).context = async () => ({
+    data: [
+      { type: "assistant", time: { created: at }, content: [{ type: "tool", name: "bash", state: { status: "failed" } }] },
+      { type: "idle", outcome: "failed", time: { created: at }, error: { message: "provider failed" } },
+    ],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "run the risky tool" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const task = Object.values(next.state.subtasks).find((item: any) => item.title === "run the risky tool") as any
+      return task?.interrupted === true && Boolean(task.approvalID)
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = Object.values(after.state.subtasks).find((item: any) => item.title === "run the risky tool") as any
+    assert.equal(task.state, "pending")
+    assert.equal(task.retryAfter, undefined, "uncertain work is not put on a timer")
+    assert.match(task.error, /tool outcome is uncertain/i)
+    const approval = after.state.approvals[task.approvalID]
+    assert.equal(approval.kind, "interrupted")
+    assert.equal(approval.status, "pending")
+    assert.ok(after.state.messages.w.some((message: any) => message.text.startsWith("Approval needed:")))
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

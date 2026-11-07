@@ -400,9 +400,9 @@ export function Rail(props: {
 export function WorkCardView(props: {
   colors: Palette
   card: WorkCard
-  /** Ticket #142: animated mark; only this cell reads the 4 fps clock. */
+  /** Ticket #142: animated mark; only this cell reads the 8 fps clock. */
   glyph: string
-  /** Ticket #142: animated strip; only this row reads the 10 fps clock. */
+  /** Ticket #142: animated strip; only this row reads the 15 fps clock. */
   tide: WorkCardTide
   selected: boolean
   width: number

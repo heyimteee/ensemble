@@ -24,6 +24,7 @@ import {
   suppressCardedActivity,
   terminalAnnouncement,
   terminalAnnouncements,
+  retryCardDetail,
   workCardDetail,
   workCardForTask,
   workCardForTaskCached,
@@ -445,12 +446,12 @@ test("ticket115: contract details are honest for queued, retrying, and stopped w
   assert.equal(pend.detail, "queued")
 
   const retrying = cardWithMotion(
-    task({ state: "working", attempts: 1, retryAfter: 1500 }),
+    task({ state: "pending", attempts: 1, error: "boom", retryAfter: 1500 }),
     "Nova",
-    { now: 1000, tick: 0, width: 40, detailFor: () => "retrying…" },
+    { now: 1000, tick: 0, width: 40 },
   )
   assert.equal(retrying.header.status, "RETRYING")
-  assert.equal(retrying.detail, "retrying…")
+  assert.equal(retrying.detail, "retry 1s · 2/5")
 
   const stopping = cardWithMotion(
     task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
@@ -459,6 +460,22 @@ test("ticket115: contract details are honest for queued, retrying, and stopped w
   )
   assert.equal(stopping.header.status, "WORKING")
   assert.equal(stopping.detail, "Cancelling…")
+})
+
+test("ticket144: retrying detail counts down, names the attempt, and yields to needs-you", () => {
+  assert.equal(retryCardDetail(61_000, 1, 1_000, 40), "retry 60s · 2/5")
+  assert.equal(retryCardDetail(61_000, 3, 1_000, 40), "retry 60s · 4/5")
+  assert.equal(retryCardDetail(1_500, 1, 1_500, 40), "retry due · r now")
+  assert.equal(retryCardDetail(1_500, 1, 1_600, 17), "retry due · r now")
+  assert.equal(retryCardDetail(undefined, 1, 1_000, 40), "retrying…")
+  assert.ok(retryCardDetail(61_000, 1, 1_000, 15).length <= 15)
+  const blocked = cardWithMotion(task({ state: "pending", attempts: 1, error: "boom", retryAfter: 61_000, interrupted: true }), "Nova", {
+    now: 1_000,
+    tick: 0,
+    width: 40,
+  })
+  assert.equal(blocked.header.status, "NEEDS YOU")
+  assert.equal(blocked.detail, "waiting for you…")
 })
 
 test("ticket115: needs-you cards carry the static marker and waiting detail", () => {
@@ -787,10 +804,10 @@ test("ticket142: only the glyph and tide cells read their animation clocks", () 
   const glyphTick = workCardMotion(card, { tick: 2, tideTick: 3, env: {} })
   const tideTick = workCardMotion(card, { tick: 1, tideTick: 4, env: {} })
 
-  assert.notEqual(glyphTick.glyph, base.glyph, "the glyph advances on the 4 fps tick")
-  assert.equal(glyphTick.tide, base.tide, "the 4 fps tick does not rebuild the tide")
-  assert.equal(tideTick.glyph, base.glyph, "the 10 fps tick does not rebuild the glyph")
-  assert.notEqual(tideTick.tide, base.tide, "the tide advances on the 10 fps tick")
+  assert.notEqual(glyphTick.glyph, base.glyph, "the glyph advances on the 8 fps tick")
+  assert.equal(glyphTick.tide, base.tide, "the 8 fps tick does not rebuild the tide")
+  assert.equal(tideTick.glyph, base.glyph, "the 15 fps tick does not rebuild the glyph")
+  assert.notEqual(tideTick.tide, base.tide, "the tide advances on the 15 fps tick")
   assert.equal(workCardGlyph(card, 1, {}), "⠙")
   assert.equal(workCardTide(card, { tideTick: 3, env: {} }).tide, base.tide)
 })

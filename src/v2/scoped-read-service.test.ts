@@ -280,7 +280,7 @@ test("transcript windows page older rows and a result outside the window is fetc
 
 test("a gap resync returns only the scopes whose durable state changed after the cursor", async () => {
   const values = new Map<string, unknown>()
-  seed(values, { messages: 10, oldTasks: 600, version: 100 })
+  seed(values, { messages: 10, oldTasks: 600, version: 100, live: false })
   const { ctx } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()

@@ -3,7 +3,7 @@
  *
  * Terminal translation of the OpenBot shimmer (notes §1j/§5): no gradient,
  * no layout animation — every animated indicator is a pure function over an
- * integer tick, advancing at 4 fps only while motion is active and resetting
+ * integer tick, advancing at 8 fps only while motion is active and resetting
  * to tick 0 (the still frame) otherwise. Glyph/fg changes only, never
  * width/height/padding (no reflow). Stillness is the default: idle screens
  * run no motion timers at all.
@@ -29,7 +29,7 @@
  * Stagger is off (lines appear full), functional state words (`working`,
  * `queued`, `● finished`, …) remain — only decorative movement is removed.
  *
- * Independent of this 4 fps chrome cycle, Work cards run a 10 fps tide clock
+ * Independent of this 8 fps chrome cycle, Work cards run a 15 fps tide clock
  * gated by `shouldRunWorkClock`: it runs only while an unblocked working card
  * exists on the visible route with no modal open, and never under reduced
  * motion.
@@ -106,17 +106,19 @@ export function effectiveTick(tick: number, env: NodeJS.ProcessEnv = process.env
 }
 
 /**
- * Idle-quiescence predicate for the 4 fps clock: run an interval only while
+ * Idle-quiescence predicate for the 8 fps clock: run an interval only while
  * motion is active AND reduced motion is off. Idle, finalized, unmounted, or
- * route-left screens hold tick 0 with no timers. The 250 ms snapshot poll is
+ * route-left screens hold tick 0 with no timers. The revision heartbeat is
  * data invalidation, not motion, and is unaffected by this gate.
  */
 export function shouldRunMotion(state: MotionState, env: NodeJS.ProcessEnv = process.env): boolean {
   return motionActive(state) && !isReducedMotion(env)
 }
 
-/** Dedicated Work-card cadence: 10 fps, independent of the 4 fps chrome clock. */
-export const WORK_CLOCK_INTERVAL_MS = 100
+/** Chrome cadence: 8 fps, used by Braille and the other glyph sets. */
+export const CHROME_CLOCK_INTERVAL_MS = 125
+/** Dedicated Work-card cadence: 15 fps, independent of the 8 fps chrome clock. */
+export const WORK_CLOCK_INTERVAL_MS = 66
 
 export type WorkClockState = {
   /** Count of working cards that are not waiting on the user. */

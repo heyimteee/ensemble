@@ -318,3 +318,10 @@ test("ticket142: Work invalidation targets status and group-hold expiry without 
     "terminal work with no visible hold needs no timer",
   )
 })
+
+test("ticket144: a retry countdown refreshes every second and stops at the ETA", () => {
+  const retrying = task({ id: "retry", state: "pending", attempts: 1, error: "boom", retryAfter: 5_500 })
+  assert.equal(nextWorkInvalidation([retrying], [], 1_500), 2_500, "the next second boundary comes first")
+  assert.equal(nextWorkInvalidation([retrying], [], 5_000), 5_500, "the ETA comes before the next second")
+  assert.equal(nextWorkInvalidation([retrying], [], 6_000), 7_000, "a due retry keeps refreshing until claimed")
+})

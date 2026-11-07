@@ -211,7 +211,7 @@ export function pruneTideFreezes(
 /**
  * Ticket #142: keep a still-visible waiting card's freeze frame inside its
  * retention window even when the work clock is stopped (a needs-you card is
- * the only card keeping its frame, so no 10 fps tick refreshes it). Pure
+ * the only card keeping its frame, so no 15 fps tick refreshes it). Pure
  * state transition over the caller's freeze object.
  */
 export function retainTideFreezes(
