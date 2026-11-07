@@ -85,8 +85,15 @@ active_count() {
   live_snapshot_value "Object.values(output.state.subtasks).filter(function (task) { return task.workspaceID === \"$WS_ID\" && task.state !== \"replied\" }).length" | tr -d '"'
 }
 
+# Ticket #137: compact rows now share the card grammar (`NAME<pad>GLYPH
+# STATUS`), so count rounded card borders only inside the Work block (after
+# its header) instead of matching a text pattern that compact rows also use.
 card_header_count() {
-  live_capture "$LIVE_TUI_SESSION" | grep -oE 'SIZE[^ ]* WORKING' | wc -l
+  live_capture "$LIVE_TUI_SESSION" | awk '
+    /WORK [0-9]+ groups?/ { work = 1; next }
+    work { count += gsub(/╭/, "&") }
+    END { print count + 0 }
+  '
 }
 
 live_active_count_is() {
@@ -255,14 +262,14 @@ check_size() {
       live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 4 active · 0 done" 20 "two-group Work header at $size"
       live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 3 active · 0 done" 20 "old group label at $size"
       live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "new group label at $size"
-      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* PENDING" || live_fail "newest group's pending card is not visible at $size"
-      [[ "$(card_header_count)" == "3" ]] || live_fail "old group cards were disturbed at $size, got $(card_header_count)"
+      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* QUEUED" || live_fail "newest group's pending card is not visible at $size"
+      [[ "$(card_header_count)" == "4" ]] || live_fail "old group cards were disturbed at $size, got $(card_header_count)"
       # Remove the old group as one unit after the shared hold; the new group stays.
       cancel_group 1
       live_wait_for 20 "old size group terminal" live_active_count_is "1" || live_fail "old group did not settle at $size"
       live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "group cleared without disturbing the second at $size"
       live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · 3 active" "old group label cleared at $size"
-      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* (PENDING|WORKING)" || live_fail "second group disappeared with the first at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* (QUEUED|WORKING)" || live_fail "second group disappeared with the first at $size"
       ;;
     100x30)
       [[ "$(card_header_count)" == "2" ]] || live_fail "expected two Work card headers at $size, got $(card_header_count)"
@@ -275,18 +282,18 @@ check_size() {
       live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 4 active · 0 done" 20 "two-group Work header at $size"
       live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 3 active · 0 done" 20 "old group summary at $size"
       live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "new group label at $size"
-      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* PENDING" || live_fail "newest group did not receive visible capacity at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* QUEUED" || live_fail "newest group did not receive visible capacity at $size"
       if live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* WORKING"; then live_fail "old group tasks are summarized at $size"; fi
-      [[ "$(card_header_count)" == "0" ]] || live_fail "summarized old group rendered working card headers at $size"
+      [[ "$(card_header_count)" == "1" ]] || live_fail "expected only the newest group's card row at $size, got $(card_header_count)"
       # Remove the old group; the new group keeps the card row and the cursor.
       cancel_group 1
       live_wait_for 20 "old size group terminal" live_active_count_is "1" || live_fail "old group did not settle at $size"
       live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "group cleared without disturbing the second at $size"
       live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · 3 active" "old group summary cleared at $size"
-      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* (PENDING|WORKING)" || live_fail "second group disappeared with the first at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* (QUEUED|WORKING)" || live_fail "second group disappeared with the first at $size"
       ;;
     80x24)
-      live_capture_matches "$LIVE_TUI_SESSION" "fake-queue-hold │ SizeAgent1" || live_fail "compact active row missing at $size"
+      live_capture_matches "$LIVE_TUI_SESSION" "SizeAgent1 │ fake-queue-hold .*WORKING" || live_fail "compact active row missing its name, title, or status at $size"
       [[ "$(card_header_count)" == "0" ]] || live_fail "compact fallback rendered card headers at $size"
       live_assert_text "$LIVE_TUI_SESSION" "WORK 1 group · 3 active · 0 done │ +2 more" "compact header names two hidden rows at $size"
       live_assert_absence "$LIVE_TUI_SESSION" "d delegate" "compact fallback omits card hints at $size"
@@ -298,7 +305,10 @@ check_size() {
   if [[ "$size" == "80x24" ]]; then
     live_capture_matches "$LIVE_TUI_SESSION" "› .*fake-queue-hold" || live_fail "compact Work row did not take the cursor at $size"
   else
-    live_capture_matches "$LIVE_TUI_SESSION" "› .*SIZE" || live_fail "first Work card did not take the cursor at $size"
+    # Ticket #137: card selection is a focus-colored border, not a text gutter.
+    # "NORMAL │ Work list" (focus_work_list) proves focus; re-assert the card
+    # survived the focus transition.
+    live_capture_matches "$LIVE_TUI_SESSION" "SIZEAGEN.* (WORKING|QUEUED)" || live_fail "focused Work card disappeared at $size"
   fi
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc leaves the Work list at $size"
@@ -319,10 +329,10 @@ check_size() {
 check_no_color_static() {
   live_tmux_env_add "NO_COLOR=1"
   start_tui_at 120 40
-  send_group "size-no-color" 0
+  send_group 0
   wait_active 1
-  live_require_text "$LIVE_TUI_SESSION" "⠋ SIZEAGENT1 WORKING" 20 "NO_COLOR frame-0 Work card"
-  live_assert_text "$LIVE_TUI_SESSION" "working" "NO_COLOR keeps the state word"
+  live_wait_for 20 "NO_COLOR frame-0 Work card" live_capture_matches "$LIVE_TUI_SESSION" "SIZEAGEN.*⠋ WORKING"
+  live_assert_text "$LIVE_TUI_SESSION" "WORKING" "NO_COLOR keeps the state word"
   live_assert_text "$LIVE_TUI_SESSION" "Message…" "NO_COLOR keeps the composer"
   local pane glyph
   for _ in $(seq 1 8); do
