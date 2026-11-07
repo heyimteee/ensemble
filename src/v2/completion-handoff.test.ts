@@ -63,6 +63,20 @@ test("batch grouping collects pending unbatched completions per recipient", () =
   assert.deepEqual(groupCompletionCandidates(tasks, "w", "nobody"), [])
 })
 
+test("batch grouping never consolidates completions across dispatch groups", () => {
+  const tasks = [
+    { id: "g1a", workspaceID: "w", state: "pending", workKind: "handoff", assigneeID: "nova", createdAt: 1, dispatchGroupID: "dispatch_1", handoff: { completion: true } },
+    { id: "g2a", workspaceID: "w", state: "pending", workKind: "handoff", assigneeID: "nova", createdAt: 2, dispatchGroupID: "dispatch_2", handoff: { completion: true } },
+    { id: "g1b", workspaceID: "w", state: "pending", workKind: "handoff", assigneeID: "nova", createdAt: 3, dispatchGroupID: "dispatch_1", handoff: { completion: true } },
+  ] as any[]
+  assert.deepEqual(groupCompletionCandidates(tasks, "w", "nova", "dispatch_1"), ["g1a", "g1b"])
+  assert.deepEqual(groupCompletionCandidates(tasks, "w", "nova", "dispatch_2"), ["g2a"])
+  assert.deepEqual(groupCompletionCandidates(tasks, "w", "nova", "dispatch_3"), [])
+  // Without a group filter the pure helper still lists every live candidate;
+  // the service passes one resolved group per consolidation pass.
+  assert.deepEqual(groupCompletionCandidates(tasks, "w", "nova"), ["g1a", "g2a", "g1b"])
+})
+
 test("batch review copy lists sender, title, outcome, and path with $Name grammar", () => {
   assert.equal(batchReviewTitle(2), "Review 2 completions")
   const text = batchReviewText(

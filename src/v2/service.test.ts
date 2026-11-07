@@ -2688,7 +2688,7 @@ test("resubmitting the same delegation executes once", async () => {
   }
 })
 
-test("terminal rows still suppress resubmission until retention expires, with retry as the explicit re-ask", async () => {
+test("a repeated user command forms a new dispatch group and task, with retry as the explicit re-ask", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
   const shared = new Map<string, unknown>()
   const seed = new V2Store(fakeContext(shared).ctx)
@@ -2705,15 +2705,23 @@ test("terminal rows still suppress resubmission until retention expires, with re
   const stop = await service.start()
   const handlers = service.handlers()
   try {
-    // The same ask dedupes against the retained terminal row: one row, no
-    // second execution. The user line is still posted, so nothing is silent.
+    // A repeated identical user command is a new dispatch: the group is part
+    // of the root work idempotency key, so no retained row may suppress it.
     const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "Coordinate" } })
     assert.deepEqual(sent.result.recipients, ["n"])
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const rows = Object.values(next.state.subtasks).filter((task: any) => task.title === "Coordinate") as any[]
+      return rows.length === 2 && rows.every((task) => task.state === "replied")
+    })
     const after = await handlers.snapshot({ directory })
-    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.title === "Coordinate").length, 1)
-    assert.equal((after.state.subtasks as any).t?.outcome, "succeeded")
+    const rows = Object.values(after.state.subtasks).filter((task: any) => task.title === "Coordinate") as any[]
+    assert.equal(rows.length, 2)
+    assert.ok(rows.every((task) => typeof task.dispatchGroupID === "string" && task.dispatchGroupID.length > 0))
+    assert.notEqual(rows[0].dispatchGroupID, rows[1].dispatchGroupID)
     // Intentional re-asks stay explicit: task.retry re-queues the same row,
-    // which then runs exactly once through the normal queue path.
+    // which then runs exactly once through the normal queue path with its
+    // original dispatch group intact.
     const retried = await handlers.invoke({ directory, action: "task.retry", payload: { id: "t" } })
     assert.equal(retried.result.id, "t")
     assert.equal(retried.result.state, "pending")
@@ -2722,7 +2730,8 @@ test("terminal rows still suppress resubmission until retention expires, with re
       return (next.state.subtasks as any).t?.state === "replied" && (next.state.subtasks as any).t?.attempts === 2
     })
     const rerun = await handlers.snapshot({ directory })
-    assert.equal(Object.values(rerun.state.subtasks).filter((task: any) => task.title === "Coordinate").length, 1)
+    assert.equal(Object.values(rerun.state.subtasks).filter((task: any) => task.title === "Coordinate").length, 2)
+    assert.equal((rerun.state.subtasks as any).t.dispatchGroupID, rows.find((task) => task.id === "t").dispatchGroupID)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

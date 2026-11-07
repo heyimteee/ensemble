@@ -289,6 +289,7 @@ test("two completions produce one batch review with per-item decisions", async (
     }, 15000)
     assert.equal(batch.assigneeID, nova.id)
     assert.equal(batch.title, "Review 3 completions")
+    assert.ok(batch.dispatchGroupID, "a completion batch carries its dispatch group")
     assert.ok(batch.instruction.includes("$Sage"))
     assert.ok(batch.instruction.includes("$Kim"))
     assert.ok(batch.instruction.includes("First work"))
@@ -300,6 +301,7 @@ test("two completions produce one batch review with per-item decisions", async (
     for (const item of items) {
       assert.equal(item.parentID, batch.id)
       assert.equal(item.handoff?.batchedIn, batch.id)
+      assert.equal(item.dispatchGroupID, batch.dispatchGroupID)
     }
     // Grouped completions never race the batch as direct hops: the batch
     // presentation parks in awaitingChildren while the items stay pending.
@@ -343,6 +345,9 @@ test("two completions produce one batch review with per-item decisions", async (
     assert.equal(rows[batch.id].state, "replied")
     const delegation = Object.values(rows).find((task: any) => task.workKind === "delegation" && task.title === rows[third].title && task.assigneeID === kim.id)
     assert.ok(delegation)
+    // A review follow-up is part of the same dispatch: the delegated task
+    // inherits the batch's group instead of starting a phantom dispatch.
+    assert.equal((delegation as any).dispatchGroupID, batch.dispatchGroupID)
     const texts = ((after.state.messages[workspaceID] ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
     assert.ok(texts.some((text) => text.includes("Review closed: Review 3 completions")))
@@ -378,7 +383,7 @@ test("non-leader batch review hands onward to the leader on full disposition", a
     id: "batch-1", workspaceID: "w", creatorType: "agent", creatorAgentID: "nova", assigneeID: "sage",
     title: "Review 2 completions", instruction: "Review 2 completions", mode: "research", state: "pending",
     stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true,
-    attempts: 0, createdAt: 1, workKind: "handoff", queueKey: "batch:w:sage:seed",
+    attempts: 0, createdAt: 1, workKind: "handoff", queueKey: "batch:w:sage:seed", dispatchGroupID: "dispatch_batch",
     handoff: { correlationID: "batch_seed", senderID: "nova", recipientID: "sage", depth: 1, completion: true, batch: true, chain: ["nova"], itemIDs: ["i1", "i2"] },
   })
   for (const [id, title] of [["i1", "First work"], ["i2", "Second work"]] as const) {
@@ -386,7 +391,7 @@ test("non-leader batch review hands onward to the leader on full disposition", a
       id, workspaceID: "w", parentID: "batch-1", creatorType: "agent", creatorAgentID: "sage", assigneeID: "sage",
       title, instruction: title, mode: "research", state: "pending",
       stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
-      attempts: 0, createdAt: 1, workKind: "handoff", queueKey: `completion:w:fin:${id}`,
+      attempts: 0, createdAt: 1, workKind: "handoff", queueKey: `completion:w:fin:${id}`, dispatchGroupID: "dispatch_batch",
       handoff: { correlationID: `corr_${id}`, senderID: "nova", recipientID: "sage", depth: 1, parentID: "batch-1", completion: true, chain: ["nova"], batchedIn: "batch-1" },
     })
   }
@@ -420,6 +425,8 @@ test("non-leader batch review hands onward to the leader on full disposition", a
     assert.ok(onward)
     assert.ok(onward.queueKey.startsWith("completion:"))
     assert.ok(onward.instruction.includes("Decided by $Sage"))
+    // The onward completion hop stays inside the batch's dispatch group.
+    assert.equal(onward.dispatchGroupID, "dispatch_batch")
     const texts = ((after.state.messages.w ?? []) as any[]).map((message: any) => message.text)
     assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
     for (const text of texts) assert.ok(!text.includes("@Sage") && !text.includes("@Nova"))

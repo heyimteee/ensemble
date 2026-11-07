@@ -96,18 +96,23 @@ export type CompletionCandidate = {
   workKind?: string
   assigneeID?: string
   createdAt: number
+  /** Resolved dispatch group for this candidate (ticket #135). */
+  dispatchGroupID?: string
   handoff?: { completion?: boolean; batch?: boolean; batchedIn?: string }
 }
 
 /**
  * Pending unbatched completion handoffs for one recipient, oldest first.
  * Only live completion hops count — replied rows, grouped items, batch
- * reviews, and other work kinds never consolidate. Pure.
+ * reviews, and other work kinds never consolidate. When a dispatch group is
+ * given, only that group's completions are eligible: one command's review can
+ * never keep another command's group alive. Pure.
  */
 export function groupCompletionCandidates(
   tasks: CompletionCandidate[],
   workspaceID: string,
   recipientID: string,
+  dispatchGroupID?: string,
 ): string[] {
   return tasks
     .filter(
@@ -118,7 +123,8 @@ export function groupCompletionCandidates(
         task.assigneeID === recipientID &&
         task.handoff?.completion === true &&
         task.handoff?.batch !== true &&
-        !task.handoff?.batchedIn,
+        !task.handoff?.batchedIn &&
+        (dispatchGroupID === undefined || task.dispatchGroupID === dispatchGroupID),
     )
     .sort((a, b) => a.createdAt - b.createdAt)
     .map((task) => task.id)

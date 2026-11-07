@@ -41,6 +41,9 @@ _Avoid_: Channel, room, group (when referring to this concept).
 
 **Work**: A queued or running execution of a subtask, with an agent, mode, and status.
 
+**Dispatch group**: The set of Subtasks caused by one dispatch action: one user command plus every descendant handoff, delegation, peer turn, synthesis, completion hop, and group-scoped completion batch it caused. A new command mints a new group; a legacy task without a stored group derives one from its root ancestor.
+_Avoid_: Batch (for the whole dispatch), run (a single execution, not the fan-out).
+
 **Pending settings**: A saved role, model, or Skillbox change that will apply to subsequent work, not silently to an active turn.
 
 **Proposal**: An agent-initiated request for a roster, membership, leadership, or configuration change that only the user can authorize.
