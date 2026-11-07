@@ -17,12 +17,53 @@ import type {
 
 type Ctx = any
 
+/** Counters for the explicit full-state snapshot boundary (ticket #131). */
+export type CloneStats = {
+  enabled: boolean
+  count: number
+  totalMs: number
+  maxMs: number
+  lastMs: number
+}
+
+const CLONE_DEBUG_ENV = "ENSEMBLE_DEBUG_CLONES"
+const NO_CLONE_STATS = { count: 0, totalMs: 0, maxMs: 0, lastMs: 0 }
+let fullCloneStats = { ...NO_CLONE_STATS }
+
+/** Full-clone metrics are opt-in so ordinary runs pay no timing cost. */
+export function cloneDebugEnabled(): boolean {
+  const value = process.env[CLONE_DEBUG_ENV]
+  return value === "1" || value?.toLowerCase() === "true"
+}
+
+export function cloneStats(): CloneStats {
+  return { enabled: cloneDebugEnabled(), ...fullCloneStats }
+}
+
+export function resetCloneStats(): void {
+  fullCloneStats = { ...NO_CLONE_STATS }
+}
+
+function cloneState<T>(value: T): T {
+  if (!cloneDebugEnabled()) return structuredClone(value)
+  const started = performance.now()
+  try {
+    return structuredClone(value)
+  } finally {
+    const elapsed = performance.now() - started
+    fullCloneStats.count++
+    fullCloneStats.totalMs += elapsed
+    fullCloneStats.lastMs = elapsed
+    if (elapsed > fullCloneStats.maxMs) fullCloneStats.maxMs = elapsed
+  }
+}
+
 export class V2Store {
   private readonly ctx: Ctx
   private state: SnapshotState
-  private readonly onChange?: (state: SnapshotState) => void
+  private readonly onChange?: (version: number) => void
 
-  constructor(ctx: Ctx, onChange?: (state: SnapshotState) => void) {
+  constructor(ctx: Ctx, onChange?: (version: number) => void) {
     this.ctx = ctx
     this.state = createInitialState()
     this.onChange = onChange
@@ -323,12 +364,155 @@ export class V2Store {
     return true
   }
 
+  /**
+   * The one explicit full-state clone boundary. Service reads use the
+   * targeted accessors below or `read()`; tests may also detach state here.
+   */
   snapshot(): SnapshotState {
-    return structuredClone(this.state)
+    return cloneState(this.state)
+  }
+
+  /** Live read-only view for broad read passes (never mutate or persist it). */
+  read(): SnapshotState {
+    return this.state
+  }
+
+  version(): number {
+    return this.state.version
   }
 
   settings(): Settings {
     return structuredClone(this.state.settings)
+  }
+
+  agents(): Agent[] {
+    return Object.values(this.state.agents)
+  }
+
+  agent(agentID: string): Agent | undefined {
+    return this.state.agents[agentID]
+  }
+
+  workspaces(): Workspace[] {
+    return Object.values(this.state.workspaces)
+  }
+
+  workspace(workspaceID: string): Workspace | undefined {
+    return this.state.workspaces[workspaceID]
+  }
+
+  subtasks(): Subtask[] {
+    return Object.values(this.state.subtasks)
+  }
+
+  subtask(subtaskID: string): Subtask | undefined {
+    return this.state.subtasks[subtaskID]
+  }
+
+  messages(workspaceID: string): readonly Message[] {
+    return this.state.messages[workspaceID] ?? []
+  }
+
+  message(workspaceID: string, messageID: string): Message | undefined {
+    return (this.state.messages[workspaceID] ?? []).find((message) => message.id === messageID)
+  }
+
+  allMessages(): ReadonlyArray<readonly Message[]> {
+    return Object.values(this.state.messages)
+  }
+
+  approvals(): Approval[] {
+    return Object.values(this.state.approvals)
+  }
+
+  approval(approvalID: string): Approval | undefined {
+    return this.state.approvals[approvalID]
+  }
+
+  initJobs(): InitJob[] {
+    return Object.values(this.state.initJobs)
+  }
+
+  initJob(jobID: string): InitJob | undefined {
+    return this.state.initJobs[jobID]
+  }
+
+  memories(): Memory[] {
+    return Object.values(this.state.memories)
+  }
+
+  memory(memoryID: string): Memory | undefined {
+    return this.state.memories[memoryID]
+  }
+
+  dmQueue(): DmQueueEntry[] {
+    return Object.values(this.state.dmQueue)
+  }
+
+  dmQueueEntry(entryID: string): DmQueueEntry | undefined {
+    return this.state.dmQueue[entryID]
+  }
+
+  dmTranscript(workspaceKey: string, agentID: string): readonly ChatMessage[] {
+    return this.state.dmTranscripts[bindingKey(workspaceKey, agentID)] ?? []
+  }
+
+  bindings(): SessionBinding[] {
+    return Object.values(this.state.bindings)
+  }
+
+  bindingForSession(sessionID: string): SessionBinding | undefined {
+    return Object.values(this.state.bindings).find(
+      (item) => item.sessionID === sessionID || (item.history ?? []).includes(sessionID),
+    )
+  }
+
+  ui(): SnapshotState["ui"] {
+    return this.state.ui
+  }
+
+  /**
+   * Targeted mutable copies for read-modify-save paths. Only the entity is
+   * cloned; the rest of the state stays shared and untouched until the save.
+   */
+  cloneAgent(agentID: string): Agent | undefined {
+    const agent = this.state.agents[agentID]
+    return agent ? structuredClone(agent) : undefined
+  }
+
+  cloneWorkspace(workspaceID: string): Workspace | undefined {
+    const workspace = this.state.workspaces[workspaceID]
+    return workspace ? structuredClone(workspace) : undefined
+  }
+
+  cloneSubtask(subtaskID: string): Subtask | undefined {
+    const subtask = this.state.subtasks[subtaskID]
+    return subtask ? structuredClone(subtask) : undefined
+  }
+
+  cloneApproval(approvalID: string): Approval | undefined {
+    const approval = this.state.approvals[approvalID]
+    return approval ? structuredClone(approval) : undefined
+  }
+
+  cloneInitJob(jobID: string): InitJob | undefined {
+    const job = this.state.initJobs[jobID]
+    return job ? structuredClone(job) : undefined
+  }
+
+  cloneMemory(memoryID: string): Memory | undefined {
+    const memory = this.state.memories[memoryID]
+    return memory ? structuredClone(memory) : undefined
+  }
+
+  cloneMessage(workspaceID: string, messageID: string): Message | undefined {
+    const message = this.message(workspaceID, messageID)
+    return message ? structuredClone(message) : undefined
+  }
+
+  cloneDmQueueEntry(entryID: string): DmQueueEntry | undefined {
+    const entry = this.state.dmQueue[entryID]
+    return entry ? structuredClone(entry) : undefined
   }
 
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
@@ -551,7 +735,7 @@ export class V2Store {
       settings: this.state.settings,
       ui: this.state.ui,
     })
-    this.onChange?.(this.snapshot())
+    this.onChange?.(this.state.version)
   }
 
   private async scanAll(prefix: string): Promise<Array<{ key: string; value: unknown }>> {

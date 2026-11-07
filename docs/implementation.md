@@ -29,7 +29,7 @@ OpenCode engine
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
 - **`src/v2/skill-invocation.ts`** — the shared pure skill invocation planner used by composer completion and server validation: anchors, assigned/General skills, owner choices, direct-chat rejection, and work titles.
 - **`src/v2/tui/`** — page shell, presentational components, palette, formatting, and keymap layers.
-- **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval.
+- **`src/v2/store.ts`** — durable state in OpenCode plugin storage, keyed per agent, workspace, message, subtask, binding, memory, and approval. Reads use targeted accessors or the live read-only view; `snapshot()` is the single full-state clone boundary. Read-modify-save paths clone only the entity they save. Set `ENSEMBLE_DEBUG_CLONES=1` to expose full-clone counts and timing on the `diagnostic` RPC (`clones`).
 - **`src/v2/routing.ts`** — `$`/`!` mention routing and leader fallback.
 - **`src/v2/paths.ts`** — canonical workspace directories and file references.
 - **`src/v2/workspace-config.ts`** — `.ensemble/config.json`, handoff paths, `.gitignore`, AGENTS.md insertion.

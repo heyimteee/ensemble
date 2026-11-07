@@ -33,6 +33,18 @@ export const EnsembleV2Rpc = Rpc.define({
         properties: {
           state: { type: "object", additionalProperties: true },
           directory: { type: "string" },
+          clones: {
+            type: "object",
+            properties: {
+              enabled: { type: "boolean" },
+              count: { type: "number" },
+              totalMs: { type: "number" },
+              maxMs: { type: "number" },
+              lastMs: { type: "number" },
+            },
+            required: ["enabled", "count", "totalMs", "maxMs", "lastMs"],
+            additionalProperties: false,
+          },
         },
         required: ["state", "directory"],
         additionalProperties: false,
