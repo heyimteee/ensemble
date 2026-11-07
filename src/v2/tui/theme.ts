@@ -2,6 +2,8 @@ import { RGBA } from "@opentui/core"
 
 export type Palette = {
   accent: RGBA | string
+  /** Ticket #137: stable pale-blue agent identity, readable on dark and light themes. */
+  paleBlue: RGBA | string
   info: RGBA | string
   muted: RGBA | string
   faint: RGBA | string
@@ -17,6 +19,9 @@ export type Palette = {
   bg: RGBA | string
 }
 
+const PALE_BLUE_DARK = "#a8c7fa"
+const PALE_BLUE_LIGHT = "#3b6ea5"
+
 export function palette(theme: {
   text: {
     base: RGBA
@@ -28,11 +33,16 @@ export function palette(theme: {
   border: { base: RGBA }
   background?: { base: RGBA; raised?: { base: RGBA; high?: RGBA } }
   hue: { accent: Record<number, RGBA> }
-}): Palette {
+}, mode?: "dark" | "light"): Palette {
   const background = (theme as any).background?.raised?.base ?? (theme as any).background?.base
   const panel = background && typeof background === "object" && background.a >= 1 ? background : "#101010"
+  // Ticket #137: the host's theme mode is authoritative; fall back to the
+  // background luminance so custom themes still get a readable pale blue.
+  const backgroundLuminance = relativeLuminance(panel)
+  const light = mode ? mode === "light" : backgroundLuminance !== null && backgroundLuminance > 0.5
   return {
     accent: (theme as any).hue?.accent?.[200] ?? theme.text.feedback.info.base,
+    paleBlue: light ? PALE_BLUE_LIGHT : PALE_BLUE_DARK,
     info: theme.text.feedback.info.base,
     muted: theme.text.muted,
     faint: theme.text.faint,

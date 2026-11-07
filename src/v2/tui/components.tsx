@@ -46,7 +46,7 @@ import { isReducedMotion } from "./motion.ts"
 import type { ToastNotice, ToastTone } from "./toast.ts"
 import { approvalResolvedTone, type ApprovalResolvedSettle } from "./approvals.ts"
 import { TIDE_GLYPHS, tideTone } from "./tide.ts"
-import type { WorkCard } from "./workrows.ts"
+import type { WorkCard, WorkCardTones, WorkCompactRow } from "./workrows.ts"
 import type { InitRow } from "./initrow.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 
@@ -394,31 +394,16 @@ export function Rail(props: {
 
 export function WorkCardView(props: { colors: Palette; card: WorkCard; selected: boolean; width: number }) {
   const terminal = () => props.card.terminal
-  const stateTone = () =>
-    props.card.status === "cancelled"
-      ? props.colors.faint
-      : props.card.needsYou || props.card.status === "working" || props.card.status === "retrying"
-        ? props.colors.warn
-        : props.card.status === "replied"
-          ? props.colors.good
-          : props.card.status === "failed"
-            ? props.colors.bad
-            : props.colors.muted
-  const accentTone = () =>
-    props.card.status === "cancelled"
-      ? props.colors.faint
-      : props.card.status === "replied"
-        ? props.colors.good
-        : props.card.status === "failed"
-          ? props.colors.bad
-          : props.card.needsYou || props.card.status === "working" || props.card.status === "retrying"
-            ? props.colors.warn
-            : props.colors.muted
+  const tone = (key: WorkCard["tones"]["glyph"]) => props.colors[key]
+  // Ticket #137: name left in pale blue, then the right-aligned Braille and
+  // uppercase status. Selection is a focus border only; green stays reserved
+  // for REPLIED and no state color is painted on the rounded border.
   const header = (): StyledLinePart[] => [
-    { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.good : props.colors.faint },
-    { text: `${props.card.glyph} `, fg: stateTone() },
-    { text: props.card.agent.toUpperCase(), fg: terminal() ? props.colors.muted : props.colors.accent },
-    { text: ` ${props.card.state.toUpperCase()}`, fg: stateTone() },
+    { text: props.card.header.name, fg: props.colors.paleBlue },
+    { text: props.card.header.gap, fg: props.colors.text },
+    { text: props.card.header.glyph, fg: tone(props.card.tones.glyph) },
+    { text: " ", fg: tone(props.card.tones.status) },
+    { text: props.card.header.status, fg: tone(props.card.tones.status) },
   ]
   // One styled line with one chunk per tide sample. Each sample is exactly
   // two cells: one glyph and one blank. The blank is deliberate: it is the
@@ -435,17 +420,52 @@ export function WorkCardView(props: { colors: Palette; card: WorkCard; selected:
       flexDirection="row"
       border
       borderStyle="rounded"
-      borderColor={props.colors.border}
+      borderColor={props.selected ? props.colors.focus : props.colors.border}
       backgroundColor={props.colors.panel}
     >
-      <box width={1} flexShrink={0} alignSelf="stretch" backgroundColor={accentTone()} />
+      <box width={1} flexShrink={0} alignSelf="stretch" backgroundColor={tone(props.card.tones.bar)} />
       <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
-        <StyledLineText parts={header} fg={props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
-        <text fg={props.selected ? props.colors.good : terminal() ? props.colors.muted : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.title}</text>
+        <StyledLineText parts={header} fg={props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" flexShrink={0} />
+        <text fg={terminal() ? props.colors.muted : props.colors.text} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.title}</text>
         <text fg={terminal() ? props.colors.faint : props.colors.muted} bg={props.colors.panel} width="100%" wrapMode="none" truncate>{props.card.detail}</text>
         <StyledLineText parts={tide} fg={props.colors.faint} bg={props.colors.panel} width="100%" wrapMode="none" truncate flexShrink={0} />
       </box>
     </box>
+  )
+}
+
+/**
+ * Ticket #137: compact Work fallback. It keeps the card grammar (pale-blue
+ * name left, Braille and right-aligned status) in one row, with the title
+ * truncating before the status word.
+ */
+export function WorkCompactRowView(props: {
+  colors: Palette
+  row: WorkCompactRow
+  tones: WorkCardTones
+  selected: boolean
+  terminal: boolean
+}) {
+  const tone = (key: WorkCardTones["glyph"]) => props.colors[key]
+  const parts = (): StyledLinePart[] => [
+    { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.focus : props.colors.faint },
+    { text: props.row.name, fg: props.colors.paleBlue },
+    { text: props.row.separator, fg: props.colors.faint },
+    { text: props.row.title, fg: props.terminal ? props.colors.muted : props.colors.text },
+    { text: props.row.gap, fg: props.colors.text },
+    { text: props.row.glyph, fg: tone(props.tones.glyph) },
+    { text: " ", fg: tone(props.tones.status) },
+    { text: props.row.status, fg: tone(props.tones.status) },
+  ]
+  return (
+    <StyledLineText
+      parts={parts}
+      fg={props.colors.text}
+      bg={props.colors.bg}
+      width="100%"
+      wrapMode="none"
+      flexShrink={0}
+    />
   )
 }
 

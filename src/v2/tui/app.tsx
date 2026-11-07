@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, ModelOption, PatchBatch, Snapshot, Workspace } from "../types.ts"
-import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
@@ -148,20 +148,24 @@ import { createClientStore } from "./client-store.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
+  NEEDS_YOU_MARK,
   TRANSCRIPT_WINDOW,
   activityFrameForKind,
   activityStateForTask,
   hasActiveWork,
   isNeedsYouTask,
   mergeStreamingActivity,
+  pendingWorkLabel,
   queuedActivityFrame,
   selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
   suppressCardedActivity,
   workCardForTask,
+  workCardStateWord,
+  workCardTones,
+  workCompactRow,
   workRowFrame,
-  workRowText,
   type ActivityEntry,
   type ActivityVerbKind,
   type PendingWorkAction,
@@ -315,7 +319,8 @@ async function invoke(context: any, action: string, payload: any = {}): Promise<
 export function EnsembleV2App() {
   const context = usePlugin()
   const pageToken = {}
-  const colors = palette(context.theme as any)
+  // Ticket #137: the host theme mode selects the readable pale-blue identity pair.
+  const colors = palette(context.theme as any, context.themeMode)
   // Ticket #119: the host toast is only a fallback for feedback that cannot be
   // painted by the mounted Ensemble surface (setup failure, or an async
   // completion while the native route is visible). Everything else renders in
@@ -5513,21 +5518,32 @@ export function EnsembleV2App() {
                                     </Show>
                                     <For each={section.tasks}>{(task) => {
                                       // Compact fallback: one line per visible
-                                      // task. Terminal rows are display-only and
-                                      // never own the work cursor.
+                                      // task with the card grammar (name left,
+                                      // Braille and status right). Terminal rows
+                                      // are display-only and never own the work
+                                      // cursor; the title truncates before the
+                                      // status word.
                                       const rowStatus = deriveWorkStatus(task, Date.now())
                                       const terminal = isTerminalWorkStatus(rowStatus)
                                       const selected = !terminal && interaction().focus === "work" && selectedTask()?.id === task.id
                                       const needsYou = !terminal && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
                                       const pending = !terminal && pendingWork()?.id === task.id ? pendingWork()!.action : null
+                                      const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
+                                      const row = workCompactRow(
+                                        agentName(state(), task.assigneeID),
+                                        task.title || "(untitled)",
+                                        glyph,
+                                        pending ? pendingWorkLabel(pending) : workCardStateWord(rowStatus, needsYou),
+                                        Math.max(1, workContentWidth() - 2),
+                                      )
                                       return (
-                                      <ChromeText colors={colors}
-                                        fg={terminal ? colors.faint : selected ? colors.good : (needsYou || pending || rowStatus === "working" || rowStatus === "retrying") ? colors.warn : colors.text}
-                                        bg={colors.bg}
-                                        width="100%"
-                                        truncate
-                                        text={`${selected ? "› " : "  "}${workRowText(task, agentName(state(), task.assigneeID), Date.now(), { pending, needsYou })} ${workRowFrame(rowStatus, motionFrame(), process.env)}`}
-                                      />
+                                        <WorkCompactRowView
+                                          colors={colors}
+                                          row={row}
+                                          tones={workCardTones(rowStatus, needsYou)}
+                                          selected={selected}
+                                          terminal={terminal}
+                                        />
                                       )
                                     }}</For>
                                   </box>

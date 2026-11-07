@@ -480,23 +480,153 @@ export function suppressCardedActivity(
 }
 
 /**
- * Ticket #115: the Work pane's card model. One card carries the agent, the
- * animated Braille state glyph, the state word, a truncated title, an honest
- * detail line, and the full-width one-row tide strip. This is a pure mapping
- * over one active subtask; ordering and active-only filtering stay in
- * `workCardsForTasks`.
+ * Ticket #137: Work-card state tones. Green is reserved for REPLIED; the
+ * rounded border stays neutral and only the one-cell left bar carries state.
+ * WORKING/RETRYING keep a calm grey status word with a yellow glyph and bar.
+ * Pure so dark/light palette claims are tested without mounting the TUI.
+ */
+export type WorkCardTone = "good" | "warn" | "bad" | "muted" | "faint"
+
+export type WorkCardTones = {
+  glyph: WorkCardTone
+  status: WorkCardTone
+  bar: WorkCardTone
+}
+
+export function workCardTones(status: DerivedWorkStatus, needsYou: boolean): WorkCardTones {
+  if (needsYou) return { glyph: "warn", status: "warn", bar: "warn" }
+  switch (status) {
+    case "pending":
+      return { glyph: "faint", status: "muted", bar: "faint" }
+    case "working":
+    case "retrying":
+      return { glyph: "warn", status: "muted", bar: "warn" }
+    case "replied":
+      return { glyph: "good", status: "good", bar: "good" }
+    case "failed":
+      return { glyph: "bad", status: "bad", bar: "bad" }
+    case "cancelled":
+      return { glyph: "faint", status: "faint", bar: "faint" }
+  }
+}
+
+/** The uppercase status word in a card header; QUEUED never reads as pending. */
+export function workCardStateWord(status: DerivedWorkStatus, needsYou: boolean): string {
+  if (needsYou) return "NEEDS YOU"
+  switch (status) {
+    case "pending":
+      return "QUEUED"
+    case "working":
+      return "WORKING"
+    case "retrying":
+      return "RETRYING"
+    case "replied":
+      return "REPLIED"
+    case "failed":
+      return "FAILED"
+    case "cancelled":
+      return "CANCELLED"
+  }
+}
+
+/**
+ * Ticket #137: header order is name, flexible spacer, glyph, one space, and
+ * the uppercase status. The status block is right-aligned and never
+ * truncated; the name yields and truncates with an ellipsis first. Width is
+ * the card's inner content width in terminal cells. Pure.
+ */
+export type WorkCardHeader = {
+  /** Left-aligned display name, truncated before the status yields. */
+  name: string
+  /** Padding that pins the glyph and status to the right edge. */
+  gap: string
+  glyph: string
+  status: string
+}
+
+export function workCardHeader(agentLabel: string, glyph: string, status: string, width: number): WorkCardHeader {
+  const cells = Math.max(1, Math.floor(width))
+  const blockWidth = glyph.length + 1 + status.length
+  const nameBudget = cells - blockWidth - 1
+  const name = nameBudget > 0 ? short(agentLabel, nameBudget) : ""
+  const gap = " ".repeat(Math.max(1, cells - name.length - blockWidth))
+  return { name, gap, glyph, status }
+}
+
+/** The full header line, used by pure layout tests and live-visible order. */
+export function workCardHeaderText(header: WorkCardHeader): string {
+  return `${header.name}${header.gap}${header.glyph} ${header.status}`
+}
+
+/**
+ * Ticket #137: the compact one-line fallback keeps the same grammar as the
+ * card header — name left, title next, right-aligned glyph and status. The
+ * status word never truncates; the name and title yield first. Pure.
+ */
+export type WorkCompactRow = {
+  name: string
+  /** `" │ "` when a title fits, otherwise empty. */
+  separator: string
+  title: string
+  gap: string
+  glyph: string
+  status: string
+}
+
+export function workCompactRow(
+  agentLabel: string,
+  title: string,
+  glyph: string,
+  status: string,
+  width: number,
+): WorkCompactRow {
+  const cells = Math.max(1, Math.floor(width))
+  const blockWidth = glyph.length + 1 + status.length
+  const leftBudget = Math.max(0, cells - blockWidth - 1)
+  let name = ""
+  let separator = ""
+  let rowTitle = ""
+  if (leftBudget > 0) {
+    if (agentLabel.length >= leftBudget) {
+      name = short(agentLabel, leftBudget)
+    } else {
+      name = agentLabel
+      const separatorText = " │ "
+      const remaining = leftBudget - name.length
+      if (remaining > separatorText.length) {
+        separator = separatorText
+        rowTitle = short(title || "(untitled)", remaining - separatorText.length)
+      }
+    }
+  }
+  const gap = " ".repeat(Math.max(1, cells - name.length - separator.length - rowTitle.length - blockWidth))
+  return { name, separator, title: rowTitle, gap, glyph, status }
+}
+
+/** The full compact row line, used by pure layout tests and live-visible order. */
+export function workCompactRowText(row: WorkCompactRow): string {
+  return `${row.name}${row.separator}${row.title}${row.gap}${row.glyph} ${row.status}`
+}
+
+/**
+ * Ticket #115: the Work pane's card model. One card carries the header
+ * (pale-blue name, animated Braille glyph, uppercase status word), state
+ * tones, a truncated title, an honest detail line, and the full-width
+ * one-row tide strip. This is a pure mapping over one active subtask;
+ * ordering and active-only filtering stay in `workCardsForTasks`.
  */
 export type WorkCard = {
   id: string
-  agent: string
-  glyph: string
-  state: string
+  /** Ticket #137: name left, Braille, right-aligned uppercase status. */
+  header: WorkCardHeader
   title: string
   detail: string
   status: DerivedWorkStatus
   needsYou: boolean
   /** Ticket #136: terminal cards stay in their group as display-only, never a cursor target. */
   terminal: boolean
+  /** Ticket #137: state color for the glyph, status word, and left bar. */
+  tones: WorkCardTones
   /** Stable tide motion for this subtask's active lifetime. */
   tideVariant: TideVariant
   /** Rendered one-row strip: one glyph plus one blank per tide column. */
@@ -575,16 +705,17 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     options.env,
     options.freezeState ? { state: options.freezeState, id: task.id, now: options.now } : undefined,
   )
+  const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(status, options.tick, options.env)
+  const state = workCardStateWord(status, needsYou)
   return {
     id: task.id,
-    agent: short(agentLabel, Math.max(8, width - 16)),
-    glyph: needsYou ? NEEDS_YOU_MARK : workRowFrame(status, options.tick, options.env),
-    state: needsYou ? "needs you" : workStatusLabel(status),
+    header: workCardHeader(agentLabel.toUpperCase(), glyph, state, width),
     title: short(task.title || "(untitled)", textWidth),
     detail: short(workCardDetail(status, { pending, needsYou, activity: options.detailFor?.(task) }), textWidth),
     status,
     needsYou,
     terminal,
+    tones: workCardTones(status, needsYou),
     tideVariant: variant,
     tide: terminal ? flatTideStrip(width) : tideStrip(variant, width, tideTick, options.env),
     tideLevels: terminal ? flatTideLevels(tideColumns(width)) : tideLevels(variant, tideColumns(width), tideTick, options.env),
