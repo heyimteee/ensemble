@@ -15,6 +15,7 @@ import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalT
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
+import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
@@ -341,12 +342,15 @@ export class EnsembleV2Service {
     })()
     await this.maintain()
     this.maintenanceTimer = setInterval(() => {
-      void this.maintain()
+      // Repairs are not enough: a repaired claim or a due retry must be
+      // claimed without waiting for an unrelated user action. The pump guard
+      // coalesces this with an in-flight pass.
+      void this.maintain().then(() => this.pump(false)).catch(() => undefined)
     }, MAINTENANCE_INTERVAL_MS)
     if (typeof (this.maintenanceTimer as unknown as { unref?: () => void }).unref === "function") {
       ;(this.maintenanceTimer as unknown as { unref: () => void }).unref()
     }
-    this.pump()
+    this.pump(false)
     return async () => {
       this.stopped = true
       this.catalogAbort?.abort()
@@ -4514,7 +4518,7 @@ export class EnsembleV2Service {
     }
   }
 
-  private pump(): void {
+  private pump(maintainFirst = true): void {
     // A schedule request that lands mid-pass must not be dropped: atomic
     // claim means the in-flight pass already snapshotted state, so re-run
     // after it instead of losing the new work.
@@ -4527,8 +4531,9 @@ export class EnsembleV2Service {
       try {
         // Ticket #134: maintenance (config, reap/retire, waiting-work repair,
         // terminal-stream settling) runs before pump work, serialized with the
-        // timer.
-        await this.maintain()
+        // timer. The maintenance timer already ran its repair pass, so it calls
+        // pump(false) to claim the work it just repaired.
+        if (maintainFirst) await this.maintain()
         // Ticket #135: consolidate eligible completion hops before claiming
         // any of them. Otherwise a pump that fires exactly at the quiet-window
         // boundary can run two grouped completions as separate direct hops and
@@ -4795,15 +4800,26 @@ export class EnsembleV2Service {
           await this.store.saveSubtask(currentTask)
           return
         }
+        if (uncertain) {
+          await this.parkUncertain({
+            task: currentTask,
+            error: errorText,
+            live,
+            globalEpoch,
+            workspaceEpoch,
+            workspaceID: task.workspaceID,
+          })
+          return
+        }
         if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
-          const delayMs = currentTask.attempts <= 1 ? 5_000 : 60_000
-          currentTask.state = "pending"
-          currentTask.outcome = "pending"
-          currentTask.error = errorText
-          currentTask.retryAfter = now() + delayMs
-          await this.store.saveSubtask(currentTask)
-          await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
-          this.defer(delayMs, () => this.schedule())
+          await this.retryLater({
+            task: currentTask,
+            error: errorText,
+            live,
+            globalEpoch,
+            workspaceEpoch,
+            workspaceID: task.workspaceID,
+          })
           return
         }
         await this.failTask(currentTask, errorText)
@@ -4834,18 +4850,16 @@ export class EnsembleV2Service {
       }
       if (!reply) {
         const errorText = "The agent produced no answer."
-        currentTask.activeRunID = undefined
-        currentTask.claimedBy = undefined
-        currentTask.leaseUntil = undefined
         if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
-          const delayMs = currentTask.attempts <= 1 ? 5_000 : 60_000
-          currentTask.state = "pending"
-          currentTask.outcome = "pending"
-          currentTask.error = errorText
-          currentTask.retryAfter = now() + delayMs
-          await this.store.saveSubtask(currentTask)
-          await this.finalizeStream(live, "No answer produced — retrying.", true, globalEpoch, workspaceEpoch, task.workspaceID)
-          this.defer(delayMs, () => this.schedule())
+          await this.retryLater({
+            task: currentTask,
+            error: errorText,
+            live,
+            globalEpoch,
+            workspaceEpoch,
+            workspaceID: task.workspaceID,
+            streamText: "No answer produced — retrying.",
+          })
           return
         }
         await this.failTask(currentTask, errorText)
@@ -4906,17 +4920,14 @@ export class EnsembleV2Service {
         // with backoff (fast first retry, slower later ones). Exhausted or
         // overdue work fails with its reason preserved.
         if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
-          const delayMs = currentTask.attempts <= 1 ? 5_000 : 60_000
-          currentTask.state = "pending"
-          currentTask.outcome = "pending"
-          currentTask.error = failureText
-          currentTask.activeRunID = undefined
-          currentTask.claimedBy = undefined
-          currentTask.leaseUntil = undefined
-          currentTask.retryAfter = now() + delayMs
-          await this.store.saveSubtask(currentTask)
-          await this.finalizeStream(live, failureText, true, globalEpoch, workspaceEpoch, task.workspaceID)
-          this.defer(delayMs, () => this.schedule())
+          await this.retryLater({
+            task: currentTask,
+            error: failureText,
+            live,
+            globalEpoch,
+            workspaceEpoch,
+            workspaceID: task.workspaceID,
+          })
         } else {
           await this.failTask(currentTask, failureText)
           await this.finalizeStream(live, failureText, true, globalEpoch, workspaceEpoch, task.workspaceID)
@@ -5002,6 +5013,116 @@ export class EnsembleV2Service {
       current.claimedBy = undefined
       current.leaseUntil = undefined
       await this.store.saveSubtask(current)
+    }
+  }
+
+  /**
+   * Park a failed run for a later attempt. The system event is the durable
+   * explanation; the card countdown is the live one. No terminal state is
+   * written here, so the group stays active through the backoff.
+   */
+  private async retryLater(input: {
+    task: Subtask
+    error: string
+    live?: Message
+    globalEpoch: number
+    workspaceEpoch: number
+    workspaceID: string
+    streamText?: string
+  }): Promise<void> {
+    const delayMs = retryDelayMs(input.task.attempts)
+    input.task.state = "pending"
+    input.task.outcome = "pending"
+    input.task.error = input.error
+    input.task.activeRunID = undefined
+    input.task.claimedBy = undefined
+    input.task.leaseUntil = undefined
+    input.task.retryAfter = now() + delayMs
+    await this.store.saveSubtask(input.task)
+    const attempt = nextRetryAttempt(input.task.attempts, MAX_ATTEMPTS)
+    const seconds = Math.max(1, Math.round(delayMs / 1_000))
+    const workspace = this.store.workspace(input.task.workspaceID)
+    if (workspace) {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: `Retrying in ${seconds}s (attempt ${attempt}/${MAX_ATTEMPTS}): ${input.error}`,
+        kind: "system",
+        taskID: input.task.id,
+      })
+    }
+    if (input.live) {
+      await this.finalizeStream(
+        input.live,
+        input.streamText ?? input.error,
+        true,
+        input.globalEpoch,
+        input.workspaceEpoch,
+        input.workspaceID,
+      )
+    }
+    this.defer(delayMs, () => this.schedule())
+  }
+
+  /**
+   * A tool outcome is uncertain: retrying could duplicate a side effect. Park
+   * the run behind an interrupted approval so the user reviews the native
+   * session and explicitly resumes or discards it.
+   */
+  private async parkUncertain(input: {
+    task: Subtask
+    error: string
+    live?: Message
+    globalEpoch: number
+    workspaceEpoch: number
+    workspaceID: string
+  }): Promise<void> {
+    const workspace = this.store.workspace(input.task.workspaceID)
+    if (!workspace) {
+      await this.failTask(input.task, input.error)
+      if (input.live) {
+        await this.finalizeStream(input.live, input.error, true, input.globalEpoch, input.workspaceEpoch, input.workspaceID)
+      }
+      return
+    }
+    const approval: Approval = {
+      id: id("approval"),
+      workspaceID: input.task.workspaceID,
+      subtaskID: input.task.id,
+      agentID: input.task.assigneeID,
+      kind: "interrupted",
+      source: "workspace",
+      title: `Resume interrupted work: ${input.task.title}`,
+      detail: input.error,
+      payload: { subtaskID: input.task.id },
+      status: "pending",
+      createdAt: now(),
+    }
+    input.task.state = "pending"
+    input.task.outcome = "pending"
+    input.task.interrupted = true
+    input.task.approvalID = approval.id
+    input.task.error = input.error
+    input.task.activeRunID = undefined
+    input.task.claimedBy = undefined
+    input.task.leaseUntil = undefined
+    input.task.retryAfter = undefined
+    await this.store.saveApproval(approval)
+    await this.store.saveSubtask(input.task)
+    await this.appendMessage(workspace, {
+      author: "system",
+      text: `Approval needed: ${input.error}`,
+      kind: "approval",
+      taskID: input.task.id,
+    })
+    if (input.live) {
+      await this.finalizeStream(
+        input.live,
+        input.error,
+        true,
+        input.globalEpoch,
+        input.workspaceEpoch,
+        input.workspaceID,
+      )
     }
   }
 

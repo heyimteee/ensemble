@@ -229,6 +229,8 @@ pending ──assign──▶ working ──result──▶ replied
 - Cancelling, retrying, or reassigning a subtask closes its pending question/interrupted approvals, so stale decisions cannot restart dead work.
 - Model fallback uses the ordered backup list and surfaces switches.
 - Permission denials, tool failures, and provider exhaustion pause the subtask with an interrupted approval; an uncertain tool outcome is never retried automatically.
+- Transient failures retry at 5 s, 15 s, 30 s, then a 60 s cap, with jitter. The Work card shows `retry <n>s · <attempt>/5` (or `retry due · r now`) and the transcript gets one `Retrying in …` event with the reason.
+- Maintenance claims due work after its repair pass. A future retry therefore resumes within about one second of its ETA after a restart, hot reload, or lost in-memory timer, without waiting for an unrelated action.
 - Message sequence numbers are allocated inside the store, so concurrent appends cannot overwrite a transcript key.
 
 ## Memory and approvals
@@ -446,10 +448,11 @@ layer:
   and muted; FAILED is red; CANCELLED is a faint cross-out. The rounded border
   stays neutral and selection is a focus border, not a green gutter.
 - Static card data (identity, title, detail, status, tones, tide variant) is
-  memoized and rebuilt only when the task, approval, or layout changes. Only
-  the glyph and tide cells read the animation clocks. A one-shot invalidation
-  timer covers status deadlines, lease expiry, and the group hold; it is not
-  an animation clock.
+  memoized and rebuilt only when the task, approval, retry countdown, or layout
+  changes. Only the glyph and tide cells read the animation clocks: Braille
+  runs at 8 fps and the tide at 15 fps. A one-shot invalidation timer covers
+  status deadlines, lease expiry, retry countdowns, and the group hold; it is
+  not an animation clock.
 - Reduced motion and `NO_COLOR` pin the glyph and tide to frame zero while
   preserving the state word, final glyph, and layout.
 

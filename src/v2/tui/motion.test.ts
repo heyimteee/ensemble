@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import {
+  CHROME_CLOCK_INTERVAL_MS,
   EMPTY_MARK,
   STAGGER_CAP,
   STAGGER_STEP_MS,
@@ -125,8 +126,9 @@ test("motion clock runs only while active and never under reduced motion", () =>
   assert.equal(shouldRunMotion(idle, { ENSEMBLE_REDUCED_MOTION: "1" }), false)
 })
 
-test("ticket116: the 10 fps work clock runs only while a working card exists", () => {
-  assert.equal(WORK_CLOCK_INTERVAL_MS, 100)
+test("ticket116: the 15 fps work clock runs only while a working card exists", () => {
+  assert.equal(CHROME_CLOCK_INTERVAL_MS, 125)
+  assert.equal(WORK_CLOCK_INTERVAL_MS, 66)
   const working = { workingCards: 1, routeActive: true, modalOpen: false }
   assert.equal(shouldRunWorkClock(working, {}), true)
   assert.equal(shouldRunWorkClock({ ...working, workingCards: 0 }, {}), false)

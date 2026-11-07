@@ -216,9 +216,18 @@ export function nextWorkInvalidation(
     if (next === undefined || time < next) next = time
   }
   for (const task of tasks) {
-    if (isTerminalWorkStatus(deriveWorkStatus(task, now))) continue
+    const status = deriveWorkStatus(task, now)
+    if (isTerminalWorkStatus(status)) continue
     if (task.deadlineAt !== undefined) consider(task.deadlineAt)
     if (task.claimedBy && task.leaseUntil !== undefined) consider(task.leaseUntil)
+    // A retry countdown changes every second even when no durable update
+    // arrives. Schedule the next second boundary, or the retry instant when it
+    // comes first; a due retry refreshes until the scheduler claims it.
+    if (task.retryAfter !== undefined) {
+      consider(status === "retrying"
+        ? (task.retryAfter > now ? Math.min(task.retryAfter, now + 1_000) : now + 1_000)
+        : task.retryAfter)
+    }
   }
   for (const group of groups) {
     if (!group.complete || group.latestTerminalAt === undefined) continue

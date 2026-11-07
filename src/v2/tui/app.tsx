@@ -51,7 +51,7 @@ import {
   wizardValidation,
   type WizardDraft,
 } from "./wizard.ts"
-import { EMPTY_MARK, WORK_CLOCK_INTERVAL_MS, isReducedMotion, shouldRunMotion, shouldRunWorkClock } from "./motion.ts"
+import { CHROME_CLOCK_INTERVAL_MS, EMPTY_MARK, WORK_CLOCK_INTERVAL_MS, isReducedMotion, shouldRunMotion, shouldRunWorkClock } from "./motion.ts"
 import { createTideAssignments, createTideFreezeState, pruneTideAssignments, pruneTideFreezes, retainTideFreezes, tideVariantFor } from "./tide.ts"
 import {
   TRANSCRIPT_EMPHASIS_MS,
@@ -436,8 +436,8 @@ export function EnsembleV2App() {
   const [confirm, setConfirm] = createSignal<ConfirmState | null>(null)
   const [result, setResult] = createSignal<ResultState | null>(null)
   const [motionFrame, setMotionFrame] = createSignal(0)
-  // Ticket #116: the Work-card tide runs on its own 10 fps clock, independent
-  // of the 4 fps chrome clock. It stops (and resets) when no unblocked
+  // Ticket #116: the Work-card tide runs on its own 15 fps clock, independent
+  // of the 8 fps chrome clock. It stops (and resets) when no unblocked
   // working card remains, so idle cards cost nothing.
   const [workFrame, setWorkFrame] = createSignal(0)
   // Ticket #142: derived Work status and the 1.2 s group hold can expire
@@ -3610,7 +3610,7 @@ export function EnsembleV2App() {
     setSettingsCursor(halfPageCursor(settingsCursorClamped(), settingsRowTotal(), direction, listPage()))
   }
 
-  // Slice B motion gate: the 4 fps clock runs only while something is in
+  // Slice B motion gate: the 8 fps clock runs only while something is in
   // flight (busy, live streaming text, task-backed activity lines, the
   // ephemeral WORK block, or an approval resolve RPC) or composing — and
   // never under reduced motion (`ENSEMBLE_REDUCED_MOTION`/`NO_COLOR`), where
@@ -3631,7 +3631,7 @@ export function EnsembleV2App() {
   // full color, and the modulo motion tick could re-dim old rows. Attribution
   // and body colors are stable; only frames/glyphs animate.
 
-  // Idle-quiescent frame clock (slice B): one 4 fps interval per
+  // Idle-quiescent frame clock (slice B): one 8 fps interval per
   // motion-active epoch. Heartbeat refreshes re-run this effect only when a
   // tracked flag changes, so the interval is reconciled by boolean transition
   // — never cleared and recreated while motion stays active. Cleanup clears
@@ -3648,7 +3648,7 @@ export function EnsembleV2App() {
       // Ticket #77: monotonic tick — never modulo-wrapped. Frame helpers do
       // their own modular cycle; wrapping here could make a new tick equal an
       // old mount tick and re-trigger stale state.
-      clockTimer = setInterval(() => setMotionFrame((frame) => frame + 1), 250)
+      clockTimer = setInterval(() => setMotionFrame((frame) => frame + 1), CHROME_CLOCK_INTERVAL_MS)
     } else {
       setMotionFrame(0)
     }
@@ -3661,7 +3661,7 @@ export function EnsembleV2App() {
     syncClock()
   })
 
-  // Ticket #116: dedicated 10 fps Work-card clock. It runs only while at
+  // Ticket #116: dedicated 15 fps Work-card clock. It runs only while at
   // least one working card is not waiting on the user, the Ensemble route is
   // visible, no modal owns attention, and reduced motion is off. Needs-you
   // cards freeze on their assigned variant; pending, retrying, and terminal

@@ -1,4 +1,5 @@
-import { deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
+import { MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
+import { nextRetryAttempt } from "../retry.ts"
 import { isNeedsYouTask, orderedGroupTasks, taskNeedsYou } from "../work-groups.ts"
 import { TRANSCRIPT_WINDOW } from "../scoped-read.ts"
 import type { Subtask } from "../types.ts"
@@ -647,8 +648,8 @@ export type WorkCard = {
 }
 
 /**
- * Ticket #142: animated Work-card data. Only the glyph (4 fps chrome clock)
- * and the tide cells (10 fps work clock) are rebuilt per frame; the static
+ * Ticket #142: animated Work-card data. Only the glyph (8 fps chrome clock)
+ * and the tide cells (15 fps work clock) are rebuilt per frame; the static
  * `WorkCard` above keeps its identity.
  */
 export type WorkCardTide = {
@@ -678,7 +679,7 @@ export type WorkCardOptions = {
 }
 
 export type WorkCardTideOptions = {
-  /** Work-card tide clock tick (10 fps). */
+  /** Work-card tide clock tick (15 fps). */
   tideTick: number
   env?: NodeJS.ProcessEnv
   /** Freeze frames for cards that started waiting on the user. */
@@ -688,9 +689,9 @@ export type WorkCardTideOptions = {
 }
 
 export type WorkCardMotionOptions = Omit<WorkCardTideOptions, "tideTick"> & {
-  /** Braille chrome clock tick (4 fps). */
+  /** Braille chrome clock tick (8 fps). */
   tick: number
-  /** Work-card tide clock tick (10 fps); defaults to `tick`. */
+  /** Work-card tide clock tick (15 fps); defaults to `tick`. */
   tideTick?: number
 }
 
@@ -701,7 +702,15 @@ export type WorkCardMotionOptions = Omit<WorkCardTideOptions, "tideTick"> & {
  */
 export function workCardDetail(
   status: DerivedWorkStatus,
-  opts: { pending?: PendingWorkAction | null; needsYou?: boolean; activity?: string } = {},
+  opts: {
+    pending?: PendingWorkAction | null
+    needsYou?: boolean
+    activity?: string
+    retryAfter?: number
+    attempts?: number
+    now?: number
+    width?: number
+  } = {},
 ): string {
   if (opts.pending) return pendingWorkLabel(opts.pending)
   if (opts.needsYou) return waitingForYouLine()
@@ -709,12 +718,34 @@ export function workCardDetail(
     case "pending":
       return "queued"
     case "retrying":
-      return retryingLine()
+      return retryCardDetail(opts.retryAfter, opts.attempts ?? 0, opts.now ?? Date.now(), opts.width)
     case "working":
       return opts.activity?.trim() || workingLine()
     default:
       return workStatusLabel(status)
   }
+}
+
+/**
+ * A retrying card must say how long the backoff has left. Without this the
+ * static `retrying…` copy looks indistinguishable from a stall, especially
+ * after the second failure where the delay is a full minute.
+ */
+export function retryCardDetail(
+  retryAfter: number | undefined,
+  attempts: number,
+  now: number,
+  width = 60,
+): string {
+  if (retryAfter === undefined || !Number.isFinite(retryAfter)) return retryingLine()
+  const remaining = retryAfter - now
+  if (remaining <= 0) return short("retry due · r now", width)
+  const seconds = Math.max(1, Math.ceil(remaining / 1_000))
+  const attempt = nextRetryAttempt(attempts, MAX_ATTEMPTS)
+  const text = width >= 16
+    ? `retry ${seconds}s · ${attempt}/${MAX_ATTEMPTS}`
+    : `retry ${seconds}s`
+  return short(text, width)
 }
 
 const NO_TASK_IDS: ReadonlySet<string> = new Set<string>()
@@ -745,7 +776,15 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     id: task.id,
     header: workCardHeaderLayout(agentLabel.toUpperCase(), state, width),
     title: short(task.title || "(untitled)", textWidth),
-    detail: short(workCardDetail(status, { pending, needsYou, activity: options.detailFor?.(task) }), textWidth),
+    detail: short(workCardDetail(status, {
+      pending,
+      needsYou,
+      activity: options.detailFor?.(task),
+      retryAfter: task.retryAfter,
+      attempts: task.attempts,
+      now: options.now,
+      width: textWidth,
+    }), textWidth),
     status,
     needsYou,
     terminal,
@@ -755,7 +794,7 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
   }
 }
 
-/** The animated Braille/state glyph; only this cell reads the 4 fps clock. */
+/** The animated Braille/state glyph; only this cell reads the 8 fps clock. */
 export function workCardGlyph(
   card: Pick<WorkCard, "status" | "needsYou">,
   tick: number,
@@ -764,7 +803,7 @@ export function workCardGlyph(
   return card.needsYou ? NEEDS_YOU_MARK : workRowFrame(card.status, tick, env)
 }
 
-/** The animated tide strip; only these cells read the 10 fps clock. */
+/** The animated tide strip; only these cells read the 15 fps clock. */
 export function workCardTide(
   card: Pick<WorkCard, "id" | "status" | "needsYou" | "terminal" | "tideVariant" | "width">,
   options: WorkCardTideOptions,
