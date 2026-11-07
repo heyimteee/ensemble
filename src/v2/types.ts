@@ -407,6 +407,14 @@ export type Snapshot = {
   directory: string
   configError?: string
   modelsError?: string
+  /**
+   * Versioned-feed metadata reserved for the fine-grained client store.
+   * Legacy snapshots omit these; the TUI keeps each in its own signal so a
+   * catalog or config refresh never replaces entity state.
+   */
+  catalogRevision?: number
+  protocol?: number
+  epoch?: number
 }
 
 export type SnapshotState = Snapshot["state"]

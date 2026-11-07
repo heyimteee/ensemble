@@ -4,7 +4,7 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChatContext, ChatMessage, InitJobState, ModelOption, SkillOption, Snapshot, SnapshotState, Workspace } from "../types.ts"
+import type { Agent, Approval, ChatContext, ChatMessage, InitJobState, ModelOption, Snapshot, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
@@ -144,6 +144,7 @@ import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./sear
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { shouldApplySnapshot } from "../snapshot-guard.ts"
+import { createClientStore } from "./client-store.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -338,7 +339,10 @@ export function EnsembleV2App() {
     }
   })()
   onCleanup(() => { try { syntaxStyle?.destroy?.() } catch {} })
-  const [snapshot, setSnapshot] = createSignal<Snapshot | null>(null)
+  // Ticket #132: the TUI owns a disposable fine-grained client store. The
+  // initial full snapshot seeds entity paths once; catalog/model/skill/config
+  // metadata lives in sibling signals, so entity updates never replace it.
+  const client = createClientStore()
   const [workspaceID, setWorkspaceID] = createSignal<string | null>(null)
   const [surface, setSurface] = createSignal<Surface | null>(null)
   // v5.6 T1 interaction foundation: the pure reducer owns mode, focus,
@@ -692,9 +696,11 @@ export function EnsembleV2App() {
   let lastConfigError = ""
   const [uiState] = context.storage.store("ensemble.v2.ui", { initial: { workspaceID: null as string | null, taskID: null as string | null, transcriptOffset: 0 } })
 
-  const state = createMemo<SnapshotState | null>(() => snapshot()?.state ?? null)
-  const models = createMemo<ModelOption[]>(() => snapshot()?.models ?? [])
-  const skills = createMemo<SkillOption[]>(() => snapshot()?.skills ?? [])
+  // Compatibility accessors: existing selectors keep reading through
+  // `state()` and the catalog signals while entity paths migrate to the store.
+  const state = client.state
+  const models = client.models
+  const skills = client.skills
   const rosterAgents = createMemo(() => Object.values(state()?.agents ?? {}).filter((agent) => !agent.archived).sort((a, b) => a.name.localeCompare(b.name)))
   const workspaces = createMemo(() => Object.values(state()?.workspaces ?? {}).filter((workspace) => !workspace.archived).sort((a, b) => b.lastActiveAt - a.lastActiveAt))
   const activeWorkspace = createMemo(() => workspaceID() ? state()?.workspaces[workspaceID()!] : undefined)
@@ -1437,7 +1443,7 @@ export function EnsembleV2App() {
   let knownInitStates = new Map<string, InitJobState>()
   let initStatesInitialized = false
   createEffect(() => {
-    const jobs = snapshot()?.state.initJobs
+    const jobs = state()?.initJobs
     if (!jobs) return
     const entries = Object.entries(jobs)
     for (const [id, job] of entries) {
@@ -1848,7 +1854,7 @@ export function EnsembleV2App() {
       if (seq !== refreshSeq) return
       if (!shouldApplySnapshot(lastAppliedVersion, next.state.version)) return
       lastAppliedVersion = next.state.version
-      setSnapshot(next)
+      client.applySnapshot(next)
       // Ticket #77d: keep the composer focused across snapshot repaints. A
       // poll that lands between typing and Enter must not silently drop the
       // key because the textarea lost focus.
@@ -2517,7 +2523,7 @@ export function EnsembleV2App() {
       setSurface(null)
       setWorkspaceID(null)
       setChatContext(null)
-      setSnapshot(null)
+      client.reset()
       await refresh()
     })
   }
@@ -5475,7 +5481,7 @@ export function EnsembleV2App() {
                       <text fg={colors.muted} bg={colors.panel} width="100%" truncate>{pickerEmptyLine()}</text>
                     </Show>
                   }>
-                    <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(snapshot()?.modelsError)}</text>
+                    <text fg={colors.warn} bg={colors.panel} width="100%" wrapMode="word">{wizardModelEmptyHint(client.modelsError())}</text>
                   </Show>
                 </box>
               }>
