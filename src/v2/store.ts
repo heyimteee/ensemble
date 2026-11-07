@@ -4,15 +4,18 @@ import { parseWorkKind, workKey } from "./queue.ts"
 import type {
   Agent,
   Approval,
+  ChangeEntry,
   ChatMessage,
   InitJob,
   Memory,
   Message,
+  PatchBatch,
   SessionBinding,
   DmQueueEntry,
   Settings,
   SnapshotState,
   Subtask,
+  WorkEntityChange,
   Workspace,
 } from "./types.ts"
 
@@ -29,6 +32,17 @@ export type CloneStats = {
 
 const CLONE_DEBUG_ENV = "ENSEMBLE_DEBUG_CLONES"
 const NO_CLONE_STATS = { count: 0, totalMs: 0, maxMs: 0, lastMs: 0 }
+/** Ticket #138: bounded in-memory change ring for `changes.since`. */
+export const CHANGE_RING_LIMIT = 256
+
+export type StoreChangeOptions = {
+  /** Boot identity. A different epoch always resets client cursors. */
+  epoch?: number
+  /** Ring capacity; older cursors receive a reset. */
+  ringLimit?: number
+  /** Called with one batched set of full-entity changes after persistence. */
+  onPatch?: (batch: PatchBatch) => void
+}
 let fullCloneStats = { ...NO_CLONE_STATS }
 
 /** Full-clone metrics are opt-in so ordinary runs pay no timing cost. */
@@ -63,6 +77,23 @@ export class V2Store {
   private readonly ctx: Ctx
   private state: SnapshotState
   private readonly onChange?: (version: number) => void
+  private readonly epochValue: number
+  private readonly ringLimit: number
+  private readonly onPatch?: (batch: PatchBatch) => void
+  /**
+   * Ticket #138: every mutation is serialized through one write queue so the
+   * persisted entity, meta version, and change record cannot interleave with
+   * another mutation. `writeTail` always settles (never rejects) so one failed
+   * write cannot strand the queue.
+   */
+  private writeTail: Promise<void> = Promise.resolve()
+  /** Recent change entries, oldest first, bounded by `ringLimit`. */
+  private changeRing: ChangeEntry[] = []
+  /** Entries not yet published as a batched `patches` event. */
+  private pendingChanges: ChangeEntry[] = []
+  private publishScheduled = false
+  /** Last version included in a published batch. */
+  private lastPublishedVersion = 0
   /**
    * Live streaming rows indexed by `workspaceID + NUL + messageID`. Maintenance
    * settles only these rows instead of scanning every message in every
@@ -81,10 +112,13 @@ export class V2Store {
     else this.streaming.delete(key)
   }
 
-  constructor(ctx: Ctx, onChange?: (version: number) => void) {
+  constructor(ctx: Ctx, onChange?: (version: number) => void, options: StoreChangeOptions = {}) {
     this.ctx = ctx
     this.state = createInitialState()
     this.onChange = onChange
+    this.epochValue = options.epoch ?? 0
+    this.ringLimit = Math.max(1, options.ringLimit ?? CHANGE_RING_LIMIT)
+    this.onPatch = options.onPatch
   }
 
   async load(): Promise<void> {
@@ -185,9 +219,18 @@ export class V2Store {
     if (this.state.ui.activeWorkspaceID && !this.state.workspaces[this.state.ui.activeWorkspaceID]) {
       this.state.ui.activeWorkspaceID = undefined
     }
+    // A loaded store has no replayable history before its persisted version;
+    // clients at that version can resume from the next patch.
+    this.changeRing = []
+    this.pendingChanges = []
+    this.lastPublishedVersion = this.state.version
   }
 
   async saveDmMessage(workspaceKey: string, agentID: string, message: ChatMessage): Promise<void> {
+    await this.write(() => this.saveDmMessageNow(workspaceKey, agentID, message))
+  }
+
+  private async saveDmMessageNow(workspaceKey: string, agentID: string, message: ChatMessage): Promise<void> {
     const key = bindingKey(workspaceKey, agentID)
     const list = (this.state.dmTranscripts[key] ??= [])
     const index = list.findIndex((item) => item.id === message.id)
@@ -195,48 +238,52 @@ export class V2Store {
     else list.push({ ...message })
     list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     await this.ctx.storage.set(`v2/dm/${workspaceKey}/${agentID}/${message.id}`, { ...message, bindingKey: key })
-    await this.bump()
+    await this.commit([])
   }
 
   async removeDmMessage(workspaceKey: string, agentID: string, id: string): Promise<void> {
-    const key = bindingKey(workspaceKey, agentID)
-    const list = this.state.dmTranscripts[key]
-    if (list) {
-      const index = list.findIndex((item) => item.id === id)
-      if (index >= 0) list.splice(index, 1)
-      if (list.length === 0) delete this.state.dmTranscripts[key]
-    }
-    await this.ctx.storage.remove(`v2/dm/${workspaceKey}/${agentID}/${id}`)
-    await this.bump()
+    await this.write(async () => {
+      const key = bindingKey(workspaceKey, agentID)
+      const list = this.state.dmTranscripts[key]
+      if (list) {
+        const index = list.findIndex((item) => item.id === id)
+        if (index >= 0) list.splice(index, 1)
+        if (list.length === 0) delete this.state.dmTranscripts[key]
+      }
+      await this.ctx.storage.remove(`v2/dm/${workspaceKey}/${agentID}/${id}`)
+      await this.commit([])
+    })
   }
 
   async moveDmTranscript(fromWorkspaceKey: string, agentID: string, toWorkspaceKey: string): Promise<void> {
     const fromKey = bindingKey(fromWorkspaceKey, agentID)
     const toKey = bindingKey(toWorkspaceKey, agentID)
     if (fromKey === toKey) return
-    // Authoritative source is storage: union the stored from-prefix rows with
-    // any in-memory lines so a retry after an interruption converges instead
-    // of losing messages. Phase 1 writes every new key; phase 2 deletes old
-    // keys. A crash between phases leaves both copies; retrying the move
-    // overwrites the new keys by id and then deletes the old keys, so the
-    // worst case is a transient duplicate across bindings, never loss.
-    const seen = new Map<string, ChatMessage>()
-    for (const { value } of await this.scanAll(`v2/dm/${fromWorkspaceKey}/${agentID}/`)) {
-      const stored = value as ChatMessage & { bindingKey?: string }
-      if (stored?.id) {
-        const { bindingKey: _dropped, ...rest } = stored
-        seen.set(stored.id, rest as ChatMessage)
+    await this.write(async () => {
+      // Authoritative source is storage: union the stored from-prefix rows with
+      // any in-memory lines so a retry after an interruption converges instead
+      // of losing messages. Phase 1 writes every new key; phase 2 deletes old
+      // keys. A crash between phases leaves both copies; retrying the move
+      // overwrites the new keys by id and then deletes the old keys, so the
+      // worst case is a transient duplicate across bindings, never loss.
+      const seen = new Map<string, ChatMessage>()
+      for (const { value } of await this.scanAll(`v2/dm/${fromWorkspaceKey}/${agentID}/`)) {
+        const stored = value as ChatMessage & { bindingKey?: string }
+        if (stored?.id) {
+          const { bindingKey: _dropped, ...rest } = stored
+          seen.set(stored.id, rest as ChatMessage)
+        }
       }
-    }
-    for (const message of this.state.dmTranscripts[fromKey] ?? []) {
-      if (message?.id && !seen.has(message.id)) seen.set(message.id, { ...message })
-    }
-    for (const message of seen.values()) {
-      await this.saveDmMessage(toWorkspaceKey, agentID, { ...message, queued: false })
-    }
-    // Phase 2 runs only after every new key is durable.
-    delete this.state.dmTranscripts[fromKey]
-    await this.removePrefix(`v2/dm/${fromWorkspaceKey}/${agentID}/`)
+      for (const message of this.state.dmTranscripts[fromKey] ?? []) {
+        if (message?.id && !seen.has(message.id)) seen.set(message.id, { ...message })
+      }
+      for (const message of seen.values()) {
+        await this.saveDmMessageNow(toWorkspaceKey, agentID, { ...message, queued: false })
+      }
+      // Phase 2 runs only after every new key is durable.
+      delete this.state.dmTranscripts[fromKey]
+      await this.removePrefixNow(`v2/dm/${fromWorkspaceKey}/${agentID}/`)
+    })
   }
 
   /** Highest stored DM `createdAt` across all transcripts (0 when empty). */
@@ -275,17 +322,27 @@ export class V2Store {
   }
 
   async pruneDmForAgent(agentID: string): Promise<void> {
-    for (const { key } of await this.scanAll("v2/dm/")) {
-      const parts = key.split("/")
-      if (parts[3] === agentID) await this.ctx.storage.remove(key)
-    }
-    for (const key of Object.keys(this.state.dmTranscripts)) {
-      if (key.endsWith(`:${agentID}`)) delete this.state.dmTranscripts[key]
-    }
-    await this.bump()
+    await this.write(async () => {
+      for (const { key } of await this.scanAll("v2/dm/")) {
+        const parts = key.split("/")
+        if (parts[3] === agentID) await this.ctx.storage.remove(key)
+      }
+      for (const key of Object.keys(this.state.dmTranscripts)) {
+        if (key.endsWith(`:${agentID}`)) delete this.state.dmTranscripts[key]
+      }
+      await this.commit([])
+    })
   }
 
   async sync(): Promise<boolean> {
+    // Consistency boundary for readers (ticket #138): sync hydrates local
+    // state, so it runs on the same queue as writes. A concurrent mutation can
+    // neither be mistaken for a foreign version nor be overwritten by an older
+    // stored version when the scan resumes.
+    return this.write(() => this.syncNow())
+  }
+
+  private async syncNow(): Promise<boolean> {
     // Bindings are the one collection that must be refreshed even when the
     // global storage version is unchanged. Tool calls resolve the calling
     // session through this map, and a local write can advance the version
@@ -590,73 +647,95 @@ export class V2Store {
   }
 
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
-    this.state.settings = { ...this.state.settings, ...patch }
-    await this.bump()
-    return this.settings()
+    return this.write(async () => {
+      this.state.settings = { ...this.state.settings, ...patch }
+      await this.commit([])
+      return this.settings()
+    })
   }
 
   async saveAgent(agent: Agent): Promise<void> {
-    this.state.agents[agent.id] = agent
-    await this.ctx.storage.set(`v2/agent/${agent.id}`, agent)
-    await this.bump()
+    await this.write(async () => {
+      this.state.agents[agent.id] = agent
+      await this.ctx.storage.set(`v2/agent/${agent.id}`, agent)
+      await this.commit([])
+    })
   }
 
   async removeAgent(id: string): Promise<void> {
-    delete this.state.agents[id]
-    await this.ctx.storage.remove(`v2/agent/${id}`)
-    await this.bump()
+    await this.write(async () => {
+      delete this.state.agents[id]
+      await this.ctx.storage.remove(`v2/agent/${id}`)
+      await this.commit([])
+    })
   }
 
   async saveWorkspace(workspace: Workspace): Promise<void> {
-    this.state.workspaces[workspace.id] = workspace
-    await this.ctx.storage.set(`v2/workspace/${workspace.id}`, workspace)
-    await this.bump()
+    await this.write(async () => {
+      this.state.workspaces[workspace.id] = workspace
+      await this.ctx.storage.set(`v2/workspace/${workspace.id}`, workspace)
+      await this.commit([])
+    })
   }
 
   async removeWorkspace(id: string): Promise<void> {
+    await this.write(() => this.removeWorkspaceNow(id))
+  }
+
+  private async removeWorkspaceNow(id: string): Promise<void> {
     delete this.state.workspaces[id]
     await this.ctx.storage.remove(`v2/workspace/${id}`)
-    await this.bump()
+    await this.commit([])
   }
 
   async appendMessage(
     workspaceID: string,
     input: Omit<Message, "workspaceID" | "seq">,
   ): Promise<Message> {
-    const workspace = this.state.workspaces[workspaceID]
-    if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
-    const message: Message = { ...input, workspaceID, seq: workspace.nextSeq++ }
-    const list = (this.state.messages[workspaceID] ??= [])
-    list.push(message)
-    list.sort((a, b) => a.seq - b.seq)
-    this.trackStreaming(message)
-    await this.ctx.storage.set(`v2/message/${workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
-    await this.ctx.storage.set(`v2/workspace/${workspaceID}`, workspace)
-    await this.bump()
-    return message
+    return this.write(async () => {
+      const workspace = this.state.workspaces[workspaceID]
+      if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+      const message: Message = { ...input, workspaceID, seq: workspace.nextSeq++ }
+      const list = (this.state.messages[workspaceID] ??= [])
+      list.push(message)
+      list.sort((a, b) => a.seq - b.seq)
+      this.trackStreaming(message)
+      await this.ctx.storage.set(`v2/message/${workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
+      await this.ctx.storage.set(`v2/workspace/${workspaceID}`, workspace)
+      await this.commit([])
+      return message
+    })
   }
 
   async saveUi(ui: SnapshotState["ui"]): Promise<void> {
-    this.state.ui = { ...ui }
-    await this.bump()
+    await this.write(async () => {
+      this.state.ui = { ...ui }
+      await this.commit([])
+    })
   }
 
   async saveSubtask(subtask: Subtask): Promise<void> {
-    this.state.subtasks[subtask.id] = subtask
-    await this.ctx.storage.set(`v2/subtask/${subtask.id}`, subtask)
-    await this.bump()
+    await this.write(async () => {
+      this.state.subtasks[subtask.id] = subtask
+      await this.ctx.storage.set(`v2/subtask/${subtask.id}`, subtask)
+      await this.commit([{ entity: "subtask", op: "upsert", task: structuredClone(subtask) }])
+    })
   }
 
   async saveInitJob(job: InitJob): Promise<void> {
-    this.state.initJobs[job.id] = job
-    await this.ctx.storage.set(`v2/init/${job.id}`, job)
-    await this.bump()
+    await this.write(async () => {
+      this.state.initJobs[job.id] = job
+      await this.ctx.storage.set(`v2/init/${job.id}`, job)
+      await this.commit([])
+    })
   }
 
   async removeInitJob(id: string): Promise<void> {
-    delete this.state.initJobs[id]
-    await this.ctx.storage.remove(`v2/init/${id}`)
-    await this.bump()
+    await this.write(async () => {
+      delete this.state.initJobs[id]
+      await this.ctx.storage.remove(`v2/init/${id}`)
+      await this.commit([])
+    })
   }
 
   /**
@@ -671,16 +750,20 @@ export class V2Store {
   }
 
   async removeSubtask(id: string): Promise<void> {
-    delete this.state.subtasks[id]
-    await this.ctx.storage.remove(`v2/subtask/${id}`)
-    await this.bump()
+    await this.write(async () => {
+      delete this.state.subtasks[id]
+      await this.ctx.storage.remove(`v2/subtask/${id}`)
+      await this.commit([{ entity: "subtask", op: "remove", id }])
+    })
   }
 
   async saveBinding(binding: SessionBinding): Promise<void> {
-    const key = bindingKey(binding.workspaceID, binding.agentID)
-    this.state.bindings[key] = binding
-    await this.ctx.storage.set(`v2/binding/${binding.workspaceID}/${binding.agentID}`, binding)
-    await this.bump()
+    await this.write(async () => {
+      const key = bindingKey(binding.workspaceID, binding.agentID)
+      this.state.bindings[key] = binding
+      await this.ctx.storage.set(`v2/binding/${binding.workspaceID}/${binding.agentID}`, binding)
+      await this.commit([])
+    })
   }
 
   binding(workspaceID: string, agentID: string): SessionBinding | undefined {
@@ -696,77 +779,100 @@ export class V2Store {
   }
 
   async saveMemory(memory: Memory): Promise<void> {
-    this.state.memories[memory.id] = memory
-    await this.ctx.storage.set(`v2/memory/${memory.id}`, memory)
-    await this.bump()
+    await this.write(async () => {
+      this.state.memories[memory.id] = memory
+      await this.ctx.storage.set(`v2/memory/${memory.id}`, memory)
+      await this.commit([])
+    })
   }
 
   async saveDmQueueEntry(entry: DmQueueEntry): Promise<void> {
-    this.state.dmQueue[entry.id] = entry
-    await this.ctx.storage.set(`v2/dmqueue/${entry.id}`, entry)
-    await this.bump()
+    await this.write(async () => {
+      this.state.dmQueue[entry.id] = entry
+      await this.ctx.storage.set(`v2/dmqueue/${entry.id}`, entry)
+      await this.commit([])
+    })
   }
 
   async removeDmQueueEntry(id: string): Promise<void> {
-    delete this.state.dmQueue[id]
-    await this.ctx.storage.remove(`v2/dmqueue/${id}`)
-    await this.bump()
+    await this.write(async () => {
+      delete this.state.dmQueue[id]
+      await this.ctx.storage.remove(`v2/dmqueue/${id}`)
+      await this.commit([])
+    })
   }
 
   async saveMessage(message: Message): Promise<void> {
-    const list = (this.state.messages[message.workspaceID] ??= [])
-    const index = list.findIndex((item) => item.id === message.id)
-    if (index >= 0) list[index] = message
-    else list.push(message)
-    list.sort((a, b) => a.seq - b.seq)
-    this.trackStreaming(message)
-    await this.ctx.storage.set(`v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
-    await this.bump()
+    await this.write(async () => {
+      const list = (this.state.messages[message.workspaceID] ??= [])
+      const index = list.findIndex((item) => item.id === message.id)
+      if (index >= 0) list[index] = message
+      else list.push(message)
+      list.sort((a, b) => a.seq - b.seq)
+      this.trackStreaming(message)
+      await this.ctx.storage.set(`v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
+      await this.commit([])
+    })
   }
 
   async saveApproval(approval: Approval): Promise<void> {
-    this.state.approvals[approval.id] = approval
-    await this.ctx.storage.set(`v2/approval/${approval.id}`, approval)
-    await this.bump()
+    await this.write(async () => {
+      this.state.approvals[approval.id] = approval
+      await this.ctx.storage.set(`v2/approval/${approval.id}`, approval)
+      await this.commit([])
+    })
   }
 
   async removeBinding(workspaceID: string, agentID: string): Promise<void> {
-    delete this.state.bindings[bindingKey(workspaceID, agentID)]
-    await this.ctx.storage.remove(`v2/binding/${workspaceID}/${agentID}`)
-    await this.bump()
+    await this.write(async () => {
+      delete this.state.bindings[bindingKey(workspaceID, agentID)]
+      await this.ctx.storage.remove(`v2/binding/${workspaceID}/${agentID}`)
+      await this.commit([])
+    })
   }
 
   async pruneWorkspace(workspaceID: string): Promise<void> {
-    const subtaskIDs = Object.values(this.state.subtasks).filter((subtask) => subtask.workspaceID === workspaceID).map((subtask) => subtask.id)
-    const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
-    const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
-    const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
-    const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
-    delete this.state.messages[workspaceID]
-    for (const key of [...this.streaming]) {
-      if (key.startsWith(`${workspaceID}\u0000`)) this.streaming.delete(key)
-    }
-    for (const id of subtaskIDs) delete this.state.subtasks[id]
-    for (const id of initJobIDs) delete this.state.initJobs[id]
-    for (const [key, binding] of Object.entries(this.state.bindings)) if (binding.workspaceID === workspaceID) delete this.state.bindings[key]
-    for (const id of memoryIDs) delete this.state.memories[id]
-    for (const id of approvalIDs) delete this.state.approvals[id]
-    for (const id of dmQueueIDs) delete this.state.dmQueue[id]
-    for (const key of Object.keys(this.state.dmTranscripts)) {
-      if (key === workspaceID || key.startsWith(`${workspaceID}:`)) delete this.state.dmTranscripts[key]
-    }
-    await this.removePrefix(`v2/message/${workspaceID}/`)
-    await this.removePrefix(`v2/binding/${workspaceID}/`)
-    await this.removePrefix(`v2/dm/${workspaceID}/`)
-    for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
-    for (const id of initJobIDs) await this.ctx.storage.remove(`v2/init/${id}`)
-    for (const id of memoryIDs) await this.ctx.storage.remove(`v2/memory/${id}`)
-    for (const id of approvalIDs) await this.ctx.storage.remove(`v2/approval/${id}`)
-    for (const id of dmQueueIDs) await this.ctx.storage.remove(`v2/dmqueue/${id}`)
-    await this.removeWorkspace(workspaceID)
+    await this.write(async () => {
+      const subtaskIDs = Object.values(this.state.subtasks).filter((subtask) => subtask.workspaceID === workspaceID).map((subtask) => subtask.id)
+      const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
+      const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
+      const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
+      const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
+      delete this.state.messages[workspaceID]
+      for (const key of [...this.streaming]) {
+        if (key.startsWith(`${workspaceID}\u0000`)) this.streaming.delete(key)
+      }
+      for (const id of subtaskIDs) delete this.state.subtasks[id]
+      for (const id of initJobIDs) delete this.state.initJobs[id]
+      for (const [key, binding] of Object.entries(this.state.bindings)) if (binding.workspaceID === workspaceID) delete this.state.bindings[key]
+      for (const id of memoryIDs) delete this.state.memories[id]
+      for (const id of approvalIDs) delete this.state.approvals[id]
+      for (const id of dmQueueIDs) delete this.state.dmQueue[id]
+      for (const key of Object.keys(this.state.dmTranscripts)) {
+        if (key === workspaceID || key.startsWith(`${workspaceID}:`)) delete this.state.dmTranscripts[key]
+      }
+      await this.removePrefixNow(`v2/message/${workspaceID}/`)
+      await this.removePrefixNow(`v2/binding/${workspaceID}/`)
+      await this.removePrefixNow(`v2/dm/${workspaceID}/`)
+      for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
+      for (const id of initJobIDs) await this.ctx.storage.remove(`v2/init/${id}`)
+      for (const id of memoryIDs) await this.ctx.storage.remove(`v2/memory/${id}`)
+      for (const id of approvalIDs) await this.ctx.storage.remove(`v2/approval/${id}`)
+      for (const id of dmQueueIDs) await this.ctx.storage.remove(`v2/dmqueue/${id}`)
+      delete this.state.workspaces[workspaceID]
+      await this.ctx.storage.remove(`v2/workspace/${workspaceID}`)
+      await this.commit(
+        subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
+        true,
+      )
+    })
   }
 
   async removePrefix(prefix: string): Promise<void> {
+    await this.write(() => this.removePrefixNow(prefix))
+  }
+
+  private async removePrefixNow(prefix: string): Promise<void> {
     for (const { key } of await this.scanAll(prefix)) {
       await this.ctx.storage.remove(key)
       this.removeFromMemory(key)
@@ -812,25 +918,123 @@ export class V2Store {
   }
 
   async reset(): Promise<void> {
-    for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/init/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
-      await this.removePrefix(prefix)
-    }
-    await this.ctx.storage.remove("v2/meta")
-    this.state = createInitialState()
-    this.streaming.clear()
-    await this.bump()
+    await this.write(async () => {
+      const previousPublished = this.lastPublishedVersion
+      for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/init/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
+        await this.removePrefixNow(prefix)
+      }
+      await this.ctx.storage.remove("v2/meta")
+      this.state = createInitialState()
+      this.streaming.clear()
+      await this.commit([])
+      // A reset destroys prior entity state, so the ring cannot describe the
+      // difference. Keep only the new version and publish an explicit reset.
+      this.changeRing = []
+      this.pendingChanges = []
+      this.lastPublishedVersion = this.state.version
+      this.onPatch?.({
+        epoch: this.epochValue,
+        from: previousPublished,
+        version: this.state.version,
+        entries: [],
+        reset: true,
+      })
+    })
   }
 
   async bump(): Promise<void> {
+    await this.write(() => this.commit([]))
+  }
+
+  /** Boot epoch that versions every patch and `changes.since` reset. */
+  epoch(): number {
+    return this.epochValue
+  }
+
+  /** Resolve after every queued mutation has persisted. */
+  async settled(): Promise<void> {
+    await this.writeTail
+  }
+
+  /**
+   * Cursor recovery for the revision heartbeat. A cursor outside the ring, an
+   * unknown epoch, a cursor ahead of the store, or a gapped ring all reset to
+   * the snapshot path; a fresh cursor gets contiguous full-entity entries.
+   */
+  changesSince(epoch: number, version: number): { epoch: number; version: number; reset: boolean; entries: ChangeEntry[] } {
+    const current = this.state.version
+    const reset = () => ({ epoch: this.epochValue, version: current, reset: true, entries: [] as ChangeEntry[] })
+    if (!Number.isFinite(epoch) || !Number.isFinite(version)) return reset()
+    if (epoch !== this.epochValue) return reset()
+    if (version > current) return reset()
+    if (version === current) return { epoch: this.epochValue, version: current, reset: false, entries: [] }
+    const entries = this.changeRing.filter((entry) => entry.version > version)
+    if (entries.length === 0 || entries[0]!.version !== version + 1) return reset()
+    for (let index = 1; index < entries.length; index++) {
+      if (entries[index]!.version !== entries[index - 1]!.version + 1) return reset()
+    }
+    return { epoch: this.epochValue, version: current, reset: false, entries: structuredClone(entries) }
+  }
+
+  /** Publish queued changes now (used to put a task patch ahead of pump work). */
+  publishPending(): void {
+    if (!this.onPatch || this.pendingChanges.length === 0) return
+    const entries = this.pendingChanges
+    this.pendingChanges = []
+    const version = entries.at(-1)!.version
+    let reset = false
+    let expected = this.lastPublishedVersion + 1
+    for (const entry of entries) {
+      if (entry.version !== expected) {
+        reset = true
+        break
+      }
+      expected++
+    }
+    const batch: PatchBatch = reset
+      ? { epoch: this.epochValue, from: this.lastPublishedVersion, version, entries: [], reset: true }
+      : { epoch: this.epochValue, from: this.lastPublishedVersion, version, entries }
+    this.lastPublishedVersion = version
+    this.onPatch(batch)
+  }
+
+  private write<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.writeTail.then(work, work)
+    this.writeTail = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  private async commit(changes: WorkEntityChange[], other = changes.length === 0): Promise<number> {
     this.state.version++
     this.state.updatedAt = Date.now()
+    const version = this.state.version
     await this.ctx.storage.set("v2/meta", {
-      version: this.state.version,
+      version,
       updatedAt: this.state.updatedAt,
       settings: this.state.settings,
       ui: this.state.ui,
     })
-    this.onChange?.(this.state.version)
+    this.appendChange({ version, changes, ...(other ? { other: true } : {}) })
+    this.onChange?.(version)
+    return version
+  }
+
+  private appendChange(entry: ChangeEntry): void {
+    this.changeRing.push(entry)
+    if (this.changeRing.length > this.ringLimit) {
+      this.changeRing.splice(0, this.changeRing.length - this.ringLimit)
+    }
+    this.pendingChanges.push(entry)
+    this.schedulePublish()
+  }
+
+  private schedulePublish(): void {
+    if (!this.onPatch || this.publishScheduled) return
+    this.publishScheduled = true
+    queueMicrotask(() => {
+      this.publishScheduled = false
+      this.publishPending()
+    })
   }
 
   private async scanAll(prefix: string): Promise<Array<{ key: string; value: unknown }>> {

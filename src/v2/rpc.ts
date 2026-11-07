@@ -7,6 +7,29 @@ const directory = {
   additionalProperties: false,
 }
 
+/** Ticket #138: one full-entity work change plus its coordination version. */
+const changeEntry = {
+  type: "object",
+  properties: {
+    version: { type: "number" },
+    changes: {
+      type: "array",
+      items: { type: "object", additionalProperties: true },
+    },
+    other: { type: "boolean" },
+  },
+  required: ["version", "changes"],
+  additionalProperties: false,
+}
+
+const patchFields = {
+  epoch: { type: "number" },
+  from: { type: "number" },
+  version: { type: "number" },
+  entries: { type: "array", items: changeEntry },
+  reset: { type: "boolean" },
+}
+
 export const EnsembleV2Rpc = Rpc.define({
   id: "ensemble.v2",
   methods: {
@@ -42,6 +65,29 @@ export const EnsembleV2Rpc = Rpc.define({
           epoch: { type: "number" },
         },
         required: ["version", "catalogRevision", "configRevision", "protocol", "epoch"],
+        additionalProperties: false,
+      },
+    },
+    "changes.since": {
+      input: {
+        type: "object",
+        properties: {
+          directory: { type: "string" },
+          epoch: { type: "number" },
+          version: { type: "number" },
+        },
+        required: ["directory", "epoch", "version"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          epoch: { type: "number" },
+          version: { type: "number" },
+          reset: { type: "boolean" },
+          entries: { type: "array", items: changeEntry },
+        },
+        required: ["epoch", "version", "reset", "entries"],
         additionalProperties: false,
       },
     },
@@ -109,6 +155,14 @@ export const EnsembleV2Rpc = Rpc.define({
           kind: { type: "string" },
         },
         required: ["version"],
+        additionalProperties: false,
+      },
+    },
+    patches: {
+      schema: {
+        type: "object",
+        properties: patchFields,
+        required: ["epoch", "from", "version", "entries"],
         additionalProperties: false,
       },
     },

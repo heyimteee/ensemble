@@ -1,7 +1,7 @@
 import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
-import type { Id, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
+import type { Id, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, WorkEntityChange } from "../types.ts"
 
 /**
  * Durable client updates. A snapshot is the only full replacement; every
@@ -12,6 +12,8 @@ export type ClientStateUpdate =
   | { type: "snapshot"; snapshot: Snapshot }
   | { type: "subtask.upsert"; task: Subtask }
   | { type: "subtask.remove"; id: Id }
+  | { type: "work.changes"; changes: WorkEntityChange[]; version?: number; updatedAt?: number }
+  | { type: "work.snapshot"; subtasks: Record<Id, Subtask>; version: number; updatedAt?: number }
 
 /**
  * Pure store primitive: unchanged branches keep their identity so a Solid
@@ -32,6 +34,36 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
       delete subtasks[update.id]
       return { ...state, subtasks }
     }
+    case "work.changes": {
+      let subtasks = state.subtasks
+      let changed = false
+      for (const change of update.changes) {
+        if (change.entity === "subtask" && change.op === "upsert") {
+          if (subtasks[change.task.id] === change.task) continue
+          if (!changed) subtasks = { ...subtasks }
+          subtasks[change.task.id] = change.task
+          changed = true
+          continue
+        }
+        if (change.entity !== "subtask" || change.op !== "remove") continue
+        if (!(change.id in subtasks)) continue
+        if (!changed) subtasks = { ...subtasks }
+        delete subtasks[change.id]
+        changed = true
+      }
+      const version = update.version ?? state.version
+      const updatedAt = update.updatedAt ?? state.updatedAt
+      if (!changed && version === state.version && updatedAt === state.updatedAt) return state
+      return { ...state, subtasks, version, updatedAt }
+    }
+    case "work.snapshot": {
+      return {
+        ...state,
+        subtasks: update.subtasks,
+        version: update.version,
+        updatedAt: update.updatedAt ?? state.updatedAt,
+      }
+    }
   }
 }
 
@@ -51,6 +83,10 @@ export type ClientStore = {
   applyMetadata: (snapshot: Snapshot) => void
   applySubtask: (task: Subtask) => void
   removeSubtask: (id: Id) => void
+  /** Apply one validated, atomic batch of full-entity work changes. */
+  applyWorkChanges: (changes: WorkEntityChange[], version?: number) => void
+  /** Scoped Work resync: replace subtasks and metadata, keep other entities. */
+  applyWorkSnapshot: (snapshot: Snapshot) => void
   reset: () => void
 }
 
@@ -109,6 +145,20 @@ export function createClientStore(): ClientStore {
     applyMetadata,
     applySubtask: (task) => apply({ type: "subtask.upsert", task }),
     removeSubtask: (id) => apply({ type: "subtask.remove", id }),
+    applyWorkChanges: (changes, version) => {
+      apply({ type: "work.changes", changes, version, updatedAt: version === undefined ? undefined : Date.now() })
+    },
+    applyWorkSnapshot: (snapshot) => {
+      batch(() => {
+        apply({
+          type: "work.snapshot",
+          subtasks: snapshot.state.subtasks,
+          version: snapshot.state.version,
+          updatedAt: snapshot.state.updatedAt,
+        })
+        applyMetadata(snapshot)
+      })
+    },
     reset: () => {
       batch(() => {
         setData("loaded", false)
