@@ -324,6 +324,52 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 - **Checkpoints and finalization.** Live text is checkpointed to storage at a bounded interval with no `v2/meta` version, change-ring entry, or published patch. A crash reloads the last checkpoint, clears `streaming`, and marks the row interrupted. Finalization drops queued live text, persists once through `saveMessage`, and publishes the exact final message upsert; that patch replaces the live overlay exactly once and recovers any missed stream event.
 - **Shared client coalescing.** Workspace stream events and direct-chat native deltas both pass through the same client coalescer, so a chunk burst repaints the visible row once per window rather than once per chunk. Direct-chat finalization clears pending text before the committed transcript refresh.
 
+## v7 Tier 3 scoped reads (ticket #141)
+
+Tier 3 is a gated scale layer over the durable store, not a second source of
+truth. The store remains authoritative; every projection and window is a
+disposable read model rebuilt from durable entities when a scope is stale.
+
+- **Recorded gate.** Scoped bootstrap/projection engages when durable history
+  reaches 1,000 messages or 500 retained task rows, or when the last measured
+  full snapshot payload is at least 512 KiB, or its build took at least 120 ms.
+  Small workspaces keep the existing full-snapshot path. The gate, its reason,
+  and its measured inputs travel with every bootstrap/resync response
+  (`gate`), and `src/v2/scoped-read.ts` is the single policy source.
+- **Scoped bootstrap.** `bootstrap` returns shell entities, the visible Work
+  projection, one active transcript window (40 rows by default, 200 max), and
+  server-derived per-workspace unread/busy counts. The full `snapshot` RPC
+  remains the recovery path and still returns the complete state.
+- **Work projection.** Only dispatch groups that are active, needs-you, or
+  inside the shared 1.2 s completion hold are included. Long-retained terminal
+  rows (24 h retention) with no visible group do not travel. The client keeps
+  the same visible-set bound plus a short grace so a fast sibling transition
+  never forces a resync.
+- **Transcript windows.** `transcript.window` pages durable messages by
+  `seq` (`beforeSeq`, bounded limit) and reports `hasMoreOlder`. The client
+  keeps at most 240 messages per workspace; paging an older window merges it
+  below the loaded range, while ordinary patches keep the newest rows.
+- **On-demand results.** A result message outside the loaded window is fetched
+  by id through `message.get` when opened; the whole history is never loaded
+  to show one result.
+- **Server-derived counts.** Unread and busy counts are computed from durable
+  messages/tasks at bootstrap, snapshot, scoped resync, and the revision
+  heartbeat. Patches stay entity-only so a 5k-task burst remains linear; the
+  rail reads the server counts and falls back to the old scan only for legacy
+  servers.
+- **Scoped resync.** The store records the latest version that changed each
+  scope (`shell`, `work`, `transcript`). A feed gap asks `changes.since` for
+  those versions and calls `resync` with only the scopes whose version moved
+  after the client cursor. An epoch change, malformed response, or failed
+  scoped read falls back to the full snapshot.
+- **Bounded client memory.** Message windows and visible-work pruning are
+  enforced in `src/v2/tui/client-store.ts`; a long-session benchmark feeds
+  thousands of patches and asserts both bounds hold.
+
+The scoped paths are covered by `src/v2/scoped-read.test.ts`,
+`src/v2/scoped-read-service.test.ts`, `src/v2/tui/client-store.test.ts`, and
+the fake TUI checks; payload/latency budgets run as part of `npm test`.
+
 ## Known limitations
 
 - The composer completes agents on `$`, files on `@`, and Ensemble commands on `/`; arbitrary native OpenCode slash commands are not proxied into the group chat.

@@ -5,6 +5,7 @@ import {
   decideSnapshotApply,
   heartbeatDelay,
   revisionChanged,
+  supportsScopedReads,
   type SnapshotMeta,
 } from "./refresh-coordinator.ts"
 
@@ -146,4 +147,11 @@ test("the revision check ignores an unchanged metadata revision and accepts cata
 test("the heartbeat is cheap when idle and faster while work is live", () => {
   assert.equal(heartbeatDelay(false), 2000)
   assert.equal(heartbeatDelay(true), 1000)
+})
+
+test("scoped reads negotiate only on protocol 4 with a boot epoch", () => {
+  assert.equal(supportsScopedReads(meta({ version: 1, protocol: 3 })), false)
+  assert.equal(supportsScopedReads(meta({ version: 1, protocol: 4, epoch: 10 })), true)
+  assert.equal(supportsScopedReads(meta({ version: 1, protocol: 4, epoch: undefined })), false)
+  assert.equal(supportsScopedReads(undefined), false)
 })

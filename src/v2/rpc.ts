@@ -42,6 +42,59 @@ const feedMeta = {
   additionalProperties: false,
 }
 
+/** Ticket #141: server-derived unread/busy counts, never client scans. */
+const counts = {
+  type: "object",
+  additionalProperties: {
+    type: "object",
+    properties: {
+      unread: { type: "number" },
+      busy: { type: "number" },
+    },
+    required: ["unread", "busy"],
+    additionalProperties: false,
+  },
+}
+
+const scopeVersions = {
+  type: "object",
+  properties: {
+    shell: { type: "number" },
+    work: { type: "number" },
+    transcript: { type: "number" },
+  },
+  required: ["shell", "work", "transcript"],
+  additionalProperties: false,
+}
+
+const transcriptWindow = {
+  type: "object",
+  properties: {
+    workspaceID: { type: "string" },
+    messages: { type: "array", items: { type: "object", additionalProperties: true } },
+    oldestSeq: { type: "number" },
+    newestSeq: { type: "number" },
+    hasMoreOlder: { type: "boolean" },
+    limit: { type: "number" },
+  },
+  required: ["messages", "hasMoreOlder", "limit"],
+  additionalProperties: false,
+}
+
+const tier3Gate = {
+  type: "object",
+  properties: {
+    enabled: { type: "boolean" },
+    reason: { type: "string" },
+    messageCount: { type: "number" },
+    taskCount: { type: "number" },
+    snapshotBytes: { type: "number" },
+    snapshotMs: { type: "number" },
+  },
+  required: ["enabled", "reason", "messageCount", "taskCount"],
+  additionalProperties: false,
+}
+
 const patchFields = {
   epoch: { type: "number" },
   from: { type: "number" },
@@ -49,6 +102,8 @@ const patchFields = {
   entries: { type: "array", items: changeEntry },
   reset: { type: "boolean" },
   meta: feedMeta,
+  counts,
+  scopeVersions,
 }
 
 export const EnsembleV2Rpc = Rpc.define({
@@ -69,6 +124,47 @@ export const EnsembleV2Rpc = Rpc.define({
           configRevision: { type: "number" },
           protocol: { type: "number" },
           epoch: { type: "number" },
+          counts,
+        },
+        required: ["state", "models", "skills", "directory"],
+        additionalProperties: false,
+      },
+    },
+    /** Ticket #141: gated scoped bootstrap. Same shape as a snapshot, with read models. */
+    bootstrap: {
+      input: {
+        type: "object",
+        properties: { directory: { type: "string" }, workspaceID: { type: "string" } },
+        required: ["directory"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          state: { type: "object", additionalProperties: true },
+          models: { type: "array", items: { type: "object", additionalProperties: true } },
+          skills: { type: "array", items: { type: "object", additionalProperties: true } },
+          directory: { type: "string" },
+          configError: { type: "string" },
+          modelsError: { type: "string" },
+          catalogRevision: { type: "number" },
+          configRevision: { type: "number" },
+          protocol: { type: "number" },
+          epoch: { type: "number" },
+          scoped: { type: "boolean" },
+          window: {
+            type: "object",
+            properties: {
+              oldestSeq: { type: "number" },
+              newestSeq: { type: "number" },
+              hasMoreOlder: { type: "boolean" },
+              limit: { type: "number" },
+            },
+            required: ["hasMoreOlder", "limit"],
+            additionalProperties: false,
+          },
+          counts,
+          gate: tier3Gate,
         },
         required: ["state", "models", "skills", "directory"],
         additionalProperties: false,
@@ -84,8 +180,100 @@ export const EnsembleV2Rpc = Rpc.define({
           configRevision: { type: "number" },
           protocol: { type: "number" },
           epoch: { type: "number" },
+          counts,
+          scopeVersions,
         },
         required: ["version", "catalogRevision", "configRevision", "protocol", "epoch"],
+        additionalProperties: false,
+      },
+    },
+    /** Ticket #141: visible Work projection only; no long-retained terminal rows. */
+    "work.project": {
+      input: directory,
+      output: {
+        type: "object",
+        properties: {
+          version: { type: "number" },
+          epoch: { type: "number" },
+          counts,
+          tasks: { type: "object", additionalProperties: true },
+        },
+        required: ["version", "epoch", "counts", "tasks"],
+        additionalProperties: false,
+      },
+    },
+    /** Ticket #141: one paginated durable transcript window. */
+    "transcript.window": {
+      input: {
+        type: "object",
+        properties: {
+          directory: { type: "string" },
+          workspaceID: { type: "string" },
+          beforeSeq: { type: "number" },
+          limit: { type: "number" },
+        },
+        required: ["directory"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          version: { type: "number" },
+          epoch: { type: "number" },
+          ...transcriptWindow.properties,
+        },
+        required: ["version", "epoch", "workspaceID", "messages", "hasMoreOlder", "limit"],
+        additionalProperties: false,
+      },
+    },
+    /** Ticket #141: fetch one durable message (for example a result outside the window). */
+    "message.get": {
+      input: {
+        type: "object",
+        properties: {
+          directory: { type: "string" },
+          workspaceID: { type: "string" },
+          messageID: { type: "string" },
+        },
+        required: ["directory", "messageID"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          found: { type: "boolean" },
+          message: { type: "object", additionalProperties: true },
+        },
+        required: ["found"],
+        additionalProperties: false,
+      },
+    },
+    /** Ticket #141: repair only the scopes whose durable state moved. */
+    resync: {
+      input: {
+        type: "object",
+        properties: {
+          directory: { type: "string" },
+          workspaceID: { type: "string" },
+          scopes: { type: "array", items: { type: "string" } },
+        },
+        required: ["directory", "scopes"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          epoch: { type: "number" },
+          version: { type: "number" },
+          scopeVersions,
+          shell: { type: "object", additionalProperties: true },
+          work: { type: "object", additionalProperties: true },
+          transcript: transcriptWindow,
+          counts,
+          gate: tier3Gate,
+          meta: feedMeta,
+        },
+        required: ["epoch", "version", "scopeVersions", "counts"],
         additionalProperties: false,
       },
     },
@@ -108,6 +296,8 @@ export const EnsembleV2Rpc = Rpc.define({
           reset: { type: "boolean" },
           entries: { type: "array", items: changeEntry },
           meta: feedMeta,
+          counts,
+          scopeVersions,
         },
         required: ["epoch", "version", "reset", "entries"],
         additionalProperties: false,

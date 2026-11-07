@@ -11,6 +11,8 @@ import type {
   Memory,
   Message,
   PatchBatch,
+  ScopeName,
+  ScopeVersions,
   SessionBinding,
   DmQueueEntry,
   Settings,
@@ -89,6 +91,14 @@ export class V2Store {
   private writeTail: Promise<void> = Promise.resolve()
   /** Recent change entries, oldest first, bounded by `ringLimit`. */
   private changeRing: ChangeEntry[] = []
+  /**
+   * Ticket #141: latest coordination version that changed each scoped-read
+   * scope. A gap uses this to name only the scopes that moved after the
+   * client cursor, so recovery never reloads unchanged shell/Work/transcript.
+   * On load every scope starts at the loaded version (conservative: a client
+   * from before the load cannot prove any scope unchanged).
+   */
+  private scopeVersionMap: ScopeVersions = { shell: 0, work: 0, transcript: 0 }
   /** Entries not yet published as a batched `patches` event. */
   private pendingChanges: ChangeEntry[] = []
   private publishScheduled = false
@@ -224,6 +234,7 @@ export class V2Store {
     this.changeRing = []
     this.pendingChanges = []
     this.lastPublishedVersion = this.state.version
+    this.scopeVersionMap = { shell: this.state.version, work: this.state.version, transcript: this.state.version }
   }
 
   async saveDmMessage(workspaceKey: string, agentID: string, message: ChatMessage): Promise<void> {
@@ -464,6 +475,9 @@ export class V2Store {
     await this.mergeDmScan()
     this.state.version = version
     this.state.updatedAt = Number((meta as any)?.updatedAt ?? this.state.updatedAt)
+    // A foreign version cannot be attributed to one scope from the merge
+    // alone; every scope is conservatively stale at this version.
+    this.scopeVersionMap = { shell: version, work: version, transcript: version }
     return true
   }
 
@@ -482,6 +496,11 @@ export class V2Store {
 
   version(): number {
     return this.state.version
+  }
+
+  /** Latest version that changed each scoped-read scope (ticket #141). */
+  scopeVersions(): ScopeVersions {
+    return { ...this.scopeVersionMap }
   }
 
   /** Cheap heartbeat read: no full-state clone. */
@@ -969,6 +988,7 @@ export class V2Store {
       this.changeRing = []
       this.pendingChanges = []
       this.lastPublishedVersion = this.state.version
+      this.scopeVersionMap = { shell: this.state.version, work: this.state.version, transcript: this.state.version }
       this.onPatch?.({
         epoch: this.epochValue,
         from: previousPublished,
@@ -1059,6 +1079,7 @@ export class V2Store {
     // Protocol-2 clients only understand subtask changes. Any other entity
     // change sets `other` so they take the snapshot fallback, while protocol-3
     // clients read the full `entities` array and stay incremental.
+    this.recordScopeVersions(changes, nonEntity, version)
     const legacy = changes.filter((change) => change.entity === "subtask")
     const shellChanged = legacy.length !== changes.length
     this.appendChange({
@@ -1070,6 +1091,26 @@ export class V2Store {
     })
     this.onChange?.(version)
     return version
+  }
+
+  /**
+   * Attribute one committed version to the scoped reads it invalidates.
+   * Non-entity changes (DM retention) cannot be scoped from the change set,
+   * so they conservatively move every scope.
+   */
+  private recordScopeVersions(changes: EntityChange[], nonEntity: boolean, version: number): void {
+    if (nonEntity) {
+      this.scopeVersionMap = { shell: version, work: version, transcript: version }
+      return
+    }
+    for (const change of changes) {
+      const scope: ScopeName = change.entity === "subtask"
+        ? "work"
+        : change.entity === "message"
+          ? "transcript"
+          : "shell"
+      this.scopeVersionMap[scope] = version
+    }
   }
 
   private appendChange(entry: ChangeEntry): void {

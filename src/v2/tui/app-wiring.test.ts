@@ -97,7 +97,7 @@ test("the patch feed applies shell entity changes and recovers through changes.s
   const source = app()
   assert.ok(source.includes('if (type === "rpc.ensemble.v2.patches")'))
   assert.ok(source.includes('callRpc<ChangesSince>(context, "changes.since"'))
-  assert.ok(source.includes("client.applyChanges(decision.changes, decision.version, decision.meta)"))
+  assert.ok(source.includes("client.applyChanges(decision.changes, decision.version, decision.meta, counts)"))
   assert.ok(source.includes("mergeFeedMeta("))
   assert.ok(source.includes("decidePatchApply(lastSnapshotMeta, payload)"))
   assert.ok(source.includes("decideChangesSince(cursor, result)"))
@@ -106,6 +106,28 @@ test("the patch feed applies shell entity changes and recovers through changes.s
   assert.ok(source.includes("void refreshFull().catch(() => undefined)"))
   // The legacy changed event and snapshot path remain for older servers.
   assert.ok(source.includes('if (type === "rpc.ensemble.v2.changed")'))
+})
+
+test("the TUI bootstraps scoped reads and repairs only dirty scopes", () => {
+  // Behavior: scoped-read-service.test.ts budgets and scopesToResync; client-store.test.ts bounded windows.
+  const source = app()
+  assert.ok(source.includes('callRpc<Snapshot>(context, "bootstrap"'))
+  assert.ok(source.includes("scopesToResync(cursor.version, result.scopeVersions)"))
+  assert.ok(source.includes('callRpc<ScopedResync>(context, "resync"'))
+  assert.ok(source.includes("client.applyShellSnapshot("))
+  assert.ok(source.includes("client.applyWorkProjection("))
+  assert.ok(source.includes("client.applyTranscriptWindow("))
+  assert.ok(source.includes("client.applyCounts("))
+  assert.ok(source.includes("client.counts()"), "the rail reads server-derived counts")
+})
+
+test("transcript paging and on-demand results stay bounded", () => {
+  // Behavior: scoped-read.test.ts windows; client-store.test.ts older-page merge.
+  const source = app()
+  assert.ok(source.includes('callRpc<TranscriptWindow & { version: number; epoch: number }>(context, "transcript.window"'))
+  assert.ok(source.includes("maybeLoadOlderTranscript()"))
+  assert.ok(source.includes('callRpc<{ found: boolean; message?: Message }>(context, "message.get"'))
+  assert.ok(source.includes("client.windowFor(workspace.id)"))
 })
 
 test("workspace streams and direct chats share the coalesced client update path", () => {

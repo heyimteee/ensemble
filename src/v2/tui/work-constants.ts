@@ -5,7 +5,7 @@
  */
 
 /** A complete dispatch group stays mounted for this long after its latest terminal task. */
-export const WORK_GROUP_HOLD_MS = 1_200
+export { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
 
 /** Tide assignments are presentation state and keep their own independent retention. */
 export const TIDE_ASSIGNMENT_RETENTION_MS = 8_000

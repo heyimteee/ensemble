@@ -2,6 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { createInitialState } from "../defaults.ts"
+import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
 import type { Agent, Approval, InitJob, Memory, Message, ModelOption, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
 import { createClientStore, reduceClientState } from "./client-store.ts"
 
@@ -473,4 +474,133 @@ test("the pure reducer treats a snapshot as a full replacement", () => {
   const next = reduceClientState(state, { type: "snapshot", snapshot: snapshot(replacement) })
   assert.equal(next, replacement)
   assert.equal(next.agents.a2, undefined)
+})
+
+test("a long client session keeps transcript and Work memory bounded", (t) => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.agents.a1 = agent("a1", "Ada")
+    state.subtasks.live = task("live", {
+      dispatchGroupID: "dispatch_live",
+      state: "working",
+      claimedBy: "run",
+      leaseUntil: Date.now() + 60_000,
+      attempts: 1,
+    })
+    state.messages.w1 = Array.from({ length: 500 }, (_, index) => message(`m${index + 1}`, `row ${index + 1}`, { seq: index + 1 }))
+    state.dmTranscripts["w:a1"] = Array.from({ length: 500 }, (_, index) => ({
+      id: `dm${index + 1}`,
+      role: "user" as const,
+      author: "You",
+      text: `dm ${index + 1}`,
+      createdAt: index + 1,
+    }))
+  })))
+
+  assert.equal(store.state()!.messages.w1!.length, CLIENT_MESSAGE_LIMIT, "a full fallback snapshot is bounded")
+  assert.equal(store.state()!.dmTranscripts["w:a1"]!.length, CLIENT_MESSAGE_LIMIT, "direct transcript caches are bounded too")
+  assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 500)
+  assert.equal(store.windowFor("w1")?.hasMoreOlder, true)
+
+  const started = performance.now()
+  for (let seq = 501; seq <= 5_000; seq++) {
+    store.applyChanges([{ entity: "message", op: "upsert", message: message(`m${seq}`, `row ${seq}`, { seq }) }], seq)
+  }
+  const elapsed = performance.now() - started
+
+  assert.equal(store.state()!.messages.w1!.length, CLIENT_MESSAGE_LIMIT, "streaming patches never grow the transcript without bound")
+  assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 5_000)
+  t.diagnostic(`client-bounded messages=${store.state()!.messages.w1!.length} patches=5000 elapsed=${elapsed.toFixed(1)}ms`)
+  assert.ok(elapsed < 5_000, `5k bounded message patches stayed responsive (${elapsed.toFixed(1)} ms)`)
+
+  for (let index = 0; index < 1_000; index++) {
+    store.applyChanges([{
+      entity: "subtask",
+      op: "upsert",
+      task: task(`old${index}`, {
+        dispatchGroupID: `dispatch_old_${index}`,
+        state: "replied",
+        outcome: "succeeded",
+        finishedAt: 1,
+        repliedAt: 1,
+      }),
+    }], 6_000 + index)
+  }
+  assert.deepEqual(Object.keys(store.state()!.subtasks), ["live"], "invisible terminal rows are pruned from the client cache")
+})
+
+test("an older transcript page merges below the loaded window and stays bounded", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.agents.a1 = agent("a1", "Ada")
+  })))
+  const latest = Array.from({ length: 40 }, (_, index) => message(`m${index + 61}`, `row ${index + 61}`, { seq: index + 61 }))
+  store.applyTranscriptWindow("w1", {
+    workspaceID: "w1",
+    messages: latest,
+    oldestSeq: 61,
+    newestSeq: 100,
+    hasMoreOlder: true,
+    limit: 40,
+  }, "replace")
+  const older = Array.from({ length: 40 }, (_, index) => message(`m${index + 21}`, `row ${index + 21}`, { seq: index + 21 }))
+  store.applyTranscriptWindow("w1", {
+    workspaceID: "w1",
+    messages: older,
+    oldestSeq: 21,
+    newestSeq: 60,
+    hasMoreOlder: true,
+    limit: 40,
+  }, "older")
+
+  assert.deepEqual(store.state()!.messages.w1!.map((row) => row.seq).slice(0, 3), [21, 22, 23])
+  assert.deepEqual(store.state()!.messages.w1!.map((row) => row.seq).slice(-2), [99, 100])
+  assert.equal(store.state()!.messages.w1!.length, 80)
+  assert.equal(store.windowFor("w1")?.oldestSeq, 21)
+  assert.equal(store.windowFor("w1")?.newestSeq, 100)
+  assert.equal(store.windowFor("w1")?.hasMoreOlder, true)
+})
+
+test("a scoped shell resync replaces shell entities but preserves the loaded transcript and Work", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.agents.a1 = agent("a1", "Ada")
+    state.workspaces.w1 = workspace("w1", "site")
+    state.messages.w1 = [message("m1", "hello")]
+    state.subtasks.t1 = task("t1")
+  })))
+
+  const shell = stateWith((state) => {
+    state.version = 9
+    state.agents.a2 = agent("a2", "Grace")
+    state.workspaces.w2 = workspace("w2", "other")
+    state.messages = {}
+    state.subtasks = {}
+  })
+  store.applyShellSnapshot(shell)
+
+  assert.equal(store.state()?.agents.a1, undefined, "removed shell rows disappear")
+  assert.equal(store.state()?.agents.a2?.name, "Grace")
+  assert.equal(store.state()?.workspaces.w2?.name, "other")
+  assert.equal(store.state()?.messages.w1?.[0]?.text, "hello", "transcript is untouched by shell resync")
+  assert.equal(store.state()?.subtasks.t1?.id, "t1", "Work is untouched by shell resync")
+  assert.equal(store.state()?.version, 9)
+})
+
+test("server-derived counts apply from bootstrap, patches, and revisions without scanning", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.agents.a1 = agent("a1", "Ada")
+  }), { counts: { w1: { unread: 3, busy: 1 } } }))
+
+  assert.deepEqual(store.counts(), { w1: { unread: 3, busy: 1 } })
+
+  store.applyChanges([], 5, undefined, { w1: { unread: 4, busy: 0 } })
+  assert.deepEqual(store.counts(), { w1: { unread: 4, busy: 0 } })
+
+  store.applyRevisionCounts({ w1: { unread: 0, busy: 2 } })
+  assert.deepEqual(store.counts(), { w1: { unread: 0, busy: 2 } })
 })
