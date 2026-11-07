@@ -1313,7 +1313,11 @@ test("workspace config is authoritative and can register a workspace on discover
     const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
     mkdirSync(join(directory, ".ensemble"), { recursive: true })
     writeFileSync(join(directory, ".ensemble", "config.json"), JSON.stringify({ version: 1, name: "Manual", leader: "Sage", members: ["Nova", "Sage"], synthesis: false, paused: true }))
-    const imported = await handlers.snapshot({ directory })
+    let imported: any
+    await waitFor(async () => {
+      imported = await handlers.snapshot({ directory })
+      return (Object.values(imported.state.workspaces)[0] as any)?.name === "Manual"
+    }, 10_000)
     const workspace = Object.values(imported.state.workspaces)[0] as any
     assert.equal(workspace.name, "Manual")
     assert.equal(workspace.leaderID, sage.result.id)
@@ -1322,7 +1326,11 @@ test("workspace config is authoritative and can register a workspace on discover
     assert.equal(workspace.paused, true)
     assert.equal(workspace.configVersion, 1)
     writeFileSync(join(directory, ".ensemble", "config.json"), JSON.stringify({ version: 1, name: "Edited", leader: "Nova", members: ["Nova"], synthesis: true, paused: false }))
-    const edited = await handlers.snapshot({ directory })
+    let edited: any
+    await waitFor(async () => {
+      edited = await handlers.snapshot({ directory })
+      return (Object.values(edited.state.workspaces)[0] as any)?.name === "Edited"
+    }, 10_000)
     const current = Object.values(edited.state.workspaces)[0] as any
     assert.equal(current.name, "Edited")
     assert.deepEqual(current.memberIDs, [nova.result.id])
@@ -2100,8 +2108,14 @@ test("config discovery restores a member missing from a stale workspace row", as
       synthesis: true,
       paused: false,
     }))
-    const next = await handlers.snapshot({ directory })
-    const restored = next.state.workspaces[workspace.result.id]
+    let restored: any
+    await waitFor(async () => {
+      const fresh = await handlers.snapshot({ directory })
+      restored = fresh.state.workspaces[workspace.result.id]
+      return Boolean(restored?.memberIDs?.includes(jessy.result.id))
+    }, 10_000)
+    const final = await handlers.snapshot({ directory })
+    restored = final.state.workspaces[workspace.result.id]
     assert.ok(restored.memberIDs.includes(jessy.result.id))
     assert.deepEqual(restored.memberIDs, [clark.result.id, angkasa.result.id, jessy.result.id])
   } finally {
@@ -3616,7 +3630,12 @@ test("a General skill routes to the leader with a one-run native grant, then res
     assert.equal(task.triage, undefined, "there is one triage source of truth")
     assert.equal(task.instruction, text, "the exact user text stays the instruction")
     assert.equal(task.title, `/public-research — ${text}`)
-    const binding = Object.values(next.state.bindings).find((item: any) => item.workspaceID === "w" && item.agentID === "nova") as any
+    let binding: any
+    await waitFor(async () => {
+      const fresh = await handlers.snapshot({ directory })
+      binding = Object.values(fresh.state.bindings).find((item: any) => item.workspaceID === "w" && item.agentID === "nova")
+      return Boolean(binding)
+    })
     assert.ok(binding)
     await waitFor(async () => prompts.some((prompt) => prompt.sessionID === binding.sessionID && prompt.text.includes(text)))
     const leaderPrompt = prompts.find((prompt) => prompt.sessionID === binding.sessionID && prompt.text.includes(text))

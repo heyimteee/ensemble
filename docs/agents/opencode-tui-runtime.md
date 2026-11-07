@@ -8,7 +8,7 @@ Read before changing the TUI or host integration, or diagnosing location diverge
 - **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. CI now pins Node **26.12.1** and OpenCode **2.2.5** for the deterministic fake/empty live job. These are not the same as the pinned type-package version. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
 - **Repository behavior:** links below describe the current implementation. A passing typecheck establishes agreement with installed types, not compatibility with every installed host. Record `node --version` and `opencode --version` with live results; recheck assumptions when upgrading.
 
-Research proposals are not implemented guarantees. In particular, one local service descriptor does not discover every service process, and a snapshot request is not guaranteed to be free of server-side writes.
+Research proposals are not implemented guarantees. In particular, one local service descriptor does not discover every service process, and a snapshot request is not guaranteed to be free of server-side writes from unrelated maintenance.
 
 ## Page inputs and reactive access
 
@@ -57,13 +57,13 @@ Preserve that identity through snapshot refreshes and streaming finalization. Do
 
 **Repository source:** [shared-service.ts](../../src/v2/shared-service.ts) reference-counts one Ensemble service/store through the registry used by [server.ts](../../src/v2/server.ts). Location setup in that process shares the registry. It is not a cross-process singleton, distributed lock, or service directory.
 
-[store.ts](../../src/v2/store.ts) syncs durable plugin state; [service.ts](../../src/v2/service.ts) discovers and reconciles workspace config during snapshot reads. Separate processes can still have separate in-memory state over shared storage. Compare canonical directory, agent IDs, workspace membership/leader, and [session bindings](../../GLOSSARY.md) as well as `.ensemble/config.json`; config membership uses names while stored membership uses IDs. Do not infer consistency merely from two matching snapshots of the same shared service.
+[store.ts](../../src/v2/store.ts) syncs durable plugin state; [service.ts](../../src/v2/service.ts) discovers and reconciles workspace config on a serialized maintenance timer and before pump work, not during snapshot reads. Separate processes can still have separate in-memory state over shared storage. Compare canonical directory, agent IDs, workspace membership/leader, and [session bindings](../../GLOSSARY.md) as well as `.ensemble/config.json`; config membership uses names while stored membership uses IDs. Do not infer consistency merely from two matching snapshots of the same shared service.
 
 **Source-backed and observed on 2.2.3:** the local managed-service descriptor is `${XDG_STATE_HOME:-$HOME/.local/state}/opencode/service.json`, not the remote/pairing config under the config directory. It may contain a password. Plain standalone `opencode serve` does not supply that managed descriptor; the harness manages its own connection details.
 
 The snapshot RPC selects the location with `location[directory]` and supplies the same directory in its input. Its declared output is in [rpc.ts](../../src/v2/rpc.ts). The research probe observed only `state`, `models`, `skills`, and `directory`; do not rely on the service's internal `configError` surviving the declared output schema. Validate workspace config independently when diagnosing errors.
 
-Snapshot is the supported read surface, but its server-side discovery/reconciliation may write. Avoid `invoke` for diagnosis. One descriptor targets one service; it cannot establish agreement with other processes without explicit connections to those processes. Do not read opaque storage internals, print descriptors/auth headers, restart unrelated services, or use real conversation data as fixtures.
+Snapshot is the supported read surface; its server-side path merges foreign storage but performs no writes, discovery, reconciliation, or purging. Maintenance runs on the service's serialized timer and before pump work. Avoid `invoke` for diagnosis. One descriptor targets one service; it cannot establish agreement with other processes without explicit connections to those processes. Do not read opaque storage internals, print descriptors/auth headers, restart unrelated services, or use real conversation data as fixtures.
 
 Use the checked-in doctor rather than ad hoc credential-bearing probes:
 
