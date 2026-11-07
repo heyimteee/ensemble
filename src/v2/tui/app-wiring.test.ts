@@ -68,6 +68,28 @@ test("the TUI reads durable state through the fine-grained client store", () => 
   assert.ok(source.includes("client.applySnapshot(next)"))
 })
 
+test("snapshot and direct-chat refreshes use the single-flight coordinators", () => {
+  // Behavior: refresh-coordinator.test.ts bursts, slow fetches, pauses, and versions.
+  const source = app()
+  assert.ok(source.includes("createRefreshCoordinator("))
+  assert.ok(source.includes("decideSnapshotApply(lastSnapshotMeta, nextMeta)"))
+  assert.ok(source.includes("client.applyMetadata(next)"))
+  assert.ok(!source.includes("refreshSeq") && !source.includes("chatSeq"))
+  assert.ok(source.includes("snapshotRefresh.whenIdle()"))
+  assert.ok(source.includes("chatRefresh.whenIdle()"))
+})
+
+test("the revision heartbeat is cheap, version-aware, paused off-route, and reconnects", () => {
+  // Behavior: refresh-coordinator.test.ts revision and cadence helpers.
+  const source = app()
+  assert.ok(source.includes('callRpc<Revision>(context, "revision"'))
+  assert.ok(source.includes("heartbeatDelay(active)"))
+  assert.ok(source.includes("revisionChanged(lastSnapshotMeta, revision)"))
+  assert.ok(source.includes("snapshotRefresh.setPaused(!visible)"))
+  assert.ok(source.includes('if (type === "server.connected")'))
+  assert.ok(!source.includes("refresh().then(() => syncTranscriptScroll())"))
+})
+
 test("the init row reads durable jobs and advances on the shared motion tick", () => {
   // Behavior: initrow.test.ts labels, stages, and phases; the live init check.
   const source = app()
