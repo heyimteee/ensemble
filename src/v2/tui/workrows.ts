@@ -548,7 +548,7 @@ export type WorkCard = {
   recent: boolean
   /** Stable tide motion for this subtask's active lifetime. */
   tideVariant: TideVariant
-  /** Rendered one-row strip: two cells per tide column, `width` cells total. */
+  /** Rendered one-row strip: one glyph plus one blank per tide column. */
   tide: string
   /** One sampled level per tide column, used for per-cell theme colors. */
   tideLevels: readonly number[]
@@ -667,8 +667,8 @@ export function recentWorkCardsForTasks(
   )
 }
 
-/** One card row: header, title, detail, tide. Gap rows sit between cards. */
-export const WORK_CARD_ROWS = 4
+/** One card row: header, title, detail, tide, plus the rounded border. */
+export const WORK_CARD_ROWS = 6
 export const WORK_CARD_GAP_ROWS = 1
 /** Section header plus the key-hint row in card mode. */
 export const WORK_BLOCK_CHROME_ROWS = 2
@@ -678,7 +678,7 @@ export const WORK_BLOCK_CHROME_ROWS = 2
  * composer, and composer hint. Used to reserve transcript space when choosing
  * the card count.
  */
-export const WORK_BASE_ROWS = 19
+export const WORK_BASE_ROWS = 13
 /** Minimum transcript rows kept above the Work block. */
 export const WORK_TRANSCRIPT_RESERVE = 4
 

@@ -628,7 +628,7 @@ live_require_text "$LIVE_TUI_SESSION" "fake-queue-alpha" 15 "group message poste
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_active_work "$LIVE_TUI_SESSION" 15 "ephemeral work block mounts while active"
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ working" 15 "work card loading state with assignee"
+live_require_text "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" 15 "work card loading state with assignee"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed"
 # Slice B: live activity lines animate across the approved ten-frame Braille
 # working set (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏). Bursts finalize in about half a second on this
@@ -646,10 +646,10 @@ collect_work_frames() {
   local rounds="${1:-16}" _ pane frame tide_row work_sample
   for _ in $(seq 1 "$rounds"); do
     pane=$(live_capture "$LIVE_TUI_SESSION")
-    work_sample=$(grep -n -A 4 'FakeAgent │ working' <<<"$pane" | head -n 12 || true)
+    work_sample=$(grep -n -A 4 'FAKEAGENT WORKING' <<<"$pane" | head -n 12 || true)
     [[ -n "$work_sample" ]] && seen_work_sample="$work_sample"
     for frame in "⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"; do
-      if grep -qF -- "${frame} FakeAgent │ working" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
+      if grep -qF -- "${frame} FAKEAGENT WORKING" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
         seen_which="${seen_which}${frame}"
         seen_frames=$((seen_frames + 1))
       fi
@@ -699,7 +699,7 @@ live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-alpha"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-beta" 15 "terminal announcement for second work"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal outcome announced exactly once"
 live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the eight-second recent window"
-live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent │ working" "no active cards remain in the block"
+live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" "no active cards remain in the block"
 live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent │ replied" "no finished cards remain after the recent window"
 live_assert_absence "$LIVE_TUI_SESSION" "│ working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
@@ -748,7 +748,7 @@ live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent 
 live_require_active_work "$LIVE_TUI_SESSION" 15 "work block mounts fresh for the new burst"
 live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
 live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking verb renders once, on the Work card only"
-live_assert_count "$LIVE_TUI_SESSION" "FakeAgent │ working" 1 "fresh burst lists only its own active card"
+live_assert_count "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" 1 "fresh burst lists only its own active card"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
 # Review fix (finding 1): queued rows are DM-only by construction, so the
 # group surface never offers `[x remove]` — `x` there keeps cancelling work.
@@ -763,7 +763,7 @@ done
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished:" 15 "peer turn announced once"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 3 "two delegation rows plus one peer row, no duplicates"
 live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the peer burst"
-live_assert_absence "$LIVE_TUI_SESSION" "FakeAgent │ working" "no active cards remain after the peer burst"
+live_assert_absence "$LIVE_TUI_SESSION" "FAKEAGENT WORKING" "no active cards remain after the peer burst"
 live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
 # Slice C: the relayed answer lands headed `Answer from $Name` (correlation
 # link, not a second independent turn); the asking row is gone with it, and
@@ -1699,7 +1699,7 @@ live_require_text "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leav
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "⠋ FakeAgent │ working" 15 "frame-0 Work card under reduced motion"
+live_require_text "$LIVE_TUI_SESSION" "⠋ FAKEAGENT WORKING" 15 "frame-0 Work card under reduced motion"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 for _ in $(seq 1 8); do

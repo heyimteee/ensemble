@@ -36,9 +36,10 @@ test("ticket115: one tide glyph covers two cells and the strip spans the card wi
   const strip = tideStrip("current", 40, 0)
   assert.equal(strip.length, 40)
   for (let index = 0; index < strip.length; index += 2) {
-    assert.equal(strip[index], strip[index + 1], "each tide column renders the same glyph twice")
+    assert.ok((TIDE_GLYPHS as readonly string[]).includes(strip[index]), "each tide column starts with one glyph")
+    assert.equal(strip[index + 1], " ", "each tide column keeps one deliberate blank gap")
   }
-  const cells = [...strip]
+  const cells = [...strip].filter((cell) => cell !== " ")
   assert.ok(cells.every((cell) => (TIDE_GLYPHS as readonly string[]).includes(cell)))
 })
 
@@ -67,8 +68,8 @@ test("ticket115: tide levels map onto faint, muted, and text theme roles", () =>
 })
 
 test("ticket117: the settled tide stays flat at the shared card width", () => {
-  assert.equal(flatTideStrip(40), TIDE_GLYPHS[0].repeat(40))
-  assert.equal(flatTideStrip(12), TIDE_GLYPHS[0].repeat(16), "the strip honours the minimum column clamp")
+  assert.equal(flatTideStrip(40), `${TIDE_GLYPHS[0]} `.repeat(20))
+  assert.equal(flatTideStrip(12), `${TIDE_GLYPHS[0]} `.repeat(8), "the strip honours the minimum column clamp")
   assert.deepEqual(flatTideLevels(20), new Array(20).fill(0))
 })
 
@@ -103,9 +104,10 @@ test("ticket116: all six motions produce distinct fixed-width one-row strips", (
   for (const strip of strips) {
     assert.equal(strip.length, 48)
     const cells = [...strip]
-    assert.ok(cells.every((cell) => (TIDE_GLYPHS as readonly string[]).includes(cell)))
+    assert.ok(cells.filter((cell) => cell !== " ").every((cell) => (TIDE_GLYPHS as readonly string[]).includes(cell)))
     for (let index = 0; index < strip.length; index += 2) {
-      assert.equal(strip[index], strip[index + 1], "each tide sample still covers two cells")
+      assert.ok((TIDE_GLYPHS as readonly string[]).includes(strip[index]), "each tide sample starts with a glyph")
+      assert.equal(strip[index + 1], " ", "each tide sample keeps one blank gap")
     }
   }
 })
@@ -139,7 +141,7 @@ test("ticket116: reduced motion freezes every motion to its deterministic still 
 
 test("ticket116: terminal cards settle to a flat strip", () => {
   assert.deepEqual(flatTideLevels(20), Array.from({ length: 20 }, () => 0))
-  assert.equal(flatTideStrip(40), TIDE_GLYPHS[0].repeat(40))
+  assert.equal(flatTideStrip(40), `${TIDE_GLYPHS[0]} `.repeat(20))
   assert.equal(flatTideStrip(40).length, 40)
 })
 
