@@ -7,7 +7,7 @@
 
 import { isReducedMotion } from "./motion.ts"
 
-export type OverlayPresenceKey = "picker" | "prompt" | "confirm" | "result" | "wizard" | "help" | "approvals" | "leader" | "none"
+export type OverlayPresenceKey = "picker" | "prompt" | "confirm" | "result" | "wizard" | "logs" | "help" | "approvals" | "leader" | "none"
 
 export type OverlayPresencePanels = {
   picker: boolean
@@ -15,6 +15,7 @@ export type OverlayPresencePanels = {
   confirm: boolean
   result: boolean
   wizard: boolean
+  logs: boolean
   help: boolean
   approvals: boolean
   leader: boolean
@@ -31,6 +32,7 @@ export function overlayPresenceKey(panels: OverlayPresencePanels): OverlayPresen
   if (panels.confirm) return "confirm"
   if (panels.result) return "result"
   if (panels.wizard) return "wizard"
+  if (panels.logs) return "logs"
   if (panels.help) return "help"
   if (panels.approvals) return "approvals"
   if (panels.leader) return "leader"

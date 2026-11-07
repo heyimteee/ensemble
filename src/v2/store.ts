@@ -49,6 +49,27 @@ export type StoreChangeOptions = {
   ringLimit?: number
   /** Called with one batched set of full-entity changes after persistence. */
   onPatch?: (batch: PatchBatch) => void
+  /**
+   * Optional domain-event observer for operational logging (ticket #145).
+   * Called synchronously after a durable write succeeds. Implementations must
+   * be cheap and must never throw; the store guards the call anyway.
+   */
+  observer?: StoreObserver
+}
+
+/**
+ * Lifecycle events observed at the store choke points. Keeping this here
+ * means retries, approvals, reaping, and cancellation all produce the same
+ * transition events without hand-placed log calls at every service branch.
+ */
+export type StoreObserver = {
+  subtask?: (next: Subtask, previous: Subtask | undefined) => void
+  subtaskRemoved?: (previous: Subtask) => void
+  messageAppended?: (message: Message) => void
+  messageSaved?: (next: Message, previous: Message | undefined) => void
+  messageRemoved?: (previous: Message) => void
+  approval?: (next: Approval, previous: Approval | undefined) => void
+  initJob?: (next: InitJob, previous: InitJob | undefined) => void
 }
 let fullCloneStats = { ...NO_CLONE_STATS }
 
@@ -87,6 +108,7 @@ export class V2Store {
   private readonly epochValue: number
   private readonly ringLimit: number
   private readonly onPatch?: (batch: PatchBatch) => void
+  private readonly observer?: StoreObserver
   /**
    * Ticket #138: every mutation is serialized through one write queue so the
    * persisted entity, meta version, and change record cannot interleave with
@@ -130,6 +152,14 @@ export class V2Store {
     this.epochValue = options.epoch ?? 0
     this.ringLimit = Math.max(1, options.ringLimit ?? CHANGE_RING_LIMIT)
     this.onPatch = options.onPatch
+    this.observer = options.observer
+  }
+
+  /** Observers are best-effort; a logging bug must never fail a write. */
+  private notify(event: () => void): void {
+    try {
+      event()
+    } catch {}
   }
 
   async load(): Promise<void> {
@@ -728,6 +758,7 @@ export class V2Store {
       await this.ctx.storage.set(`v2/message/${workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
       await this.ctx.storage.set(`v2/workspace/${workspaceID}`, workspace)
       await this.commit([{ entity: "message", op: "upsert", message: structuredClone(message) }])
+      this.notify(() => this.observer?.messageAppended?.(message))
       return message
     })
   }
@@ -741,25 +772,31 @@ export class V2Store {
 
   async saveSubtask(subtask: Subtask): Promise<void> {
     await this.write(async () => {
+      const previous = this.state.subtasks[subtask.id]
       this.state.subtasks[subtask.id] = subtask
       await this.ctx.storage.set(`v2/subtask/${subtask.id}`, subtask)
       await this.commit([{ entity: "subtask", op: "upsert", task: structuredClone(subtask) }])
+      this.notify(() => this.observer?.subtask?.(subtask, previous))
     })
   }
 
   async saveInitJob(job: InitJob): Promise<void> {
     await this.write(async () => {
+      const previous = this.state.initJobs[job.id]
       this.state.initJobs[job.id] = job
       await this.ctx.storage.set(`v2/init/${job.id}`, job)
       await this.commit([{ entity: "initJob", op: "upsert", job: structuredClone(job) }])
+      this.notify(() => this.observer?.initJob?.(job, previous))
     })
   }
 
   async removeInitJob(id: string): Promise<void> {
     await this.write(async () => {
+      const previous = this.state.initJobs[id]
       delete this.state.initJobs[id]
       await this.ctx.storage.remove(`v2/init/${id}`)
       await this.commit([{ entity: "initJob", op: "remove", id }])
+      if (previous) this.notify(() => this.observer?.initJob?.({ ...previous }, previous))
     })
   }
 
@@ -776,9 +813,11 @@ export class V2Store {
 
   async removeSubtask(id: string): Promise<void> {
     await this.write(async () => {
+      const previous = this.state.subtasks[id]
       delete this.state.subtasks[id]
       await this.ctx.storage.remove(`v2/subtask/${id}`)
       await this.commit([{ entity: "subtask", op: "remove", id }])
+      if (previous) this.notify(() => this.observer?.subtaskRemoved?.(previous))
     })
   }
 
@@ -831,12 +870,14 @@ export class V2Store {
     await this.write(async () => {
       const list = (this.state.messages[message.workspaceID] ??= [])
       const index = list.findIndex((item) => item.id === message.id)
+      const previous = index >= 0 ? list[index] : undefined
       if (index >= 0) list[index] = message
       else list.push(message)
       list.sort((a, b) => a.seq - b.seq)
       this.trackStreaming(message)
       await this.ctx.storage.set(`v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
       await this.commit([{ entity: "message", op: "upsert", message: structuredClone(message) }])
+      this.notify(() => this.observer?.messageSaved?.(message, previous))
     })
   }
 
@@ -863,9 +904,11 @@ export class V2Store {
 
   async saveApproval(approval: Approval): Promise<void> {
     await this.write(async () => {
+      const previous = this.state.approvals[approval.id]
       this.state.approvals[approval.id] = approval
       await this.ctx.storage.set(`v2/approval/${approval.id}`, approval)
       await this.commit([{ entity: "approval", op: "upsert", approval: structuredClone(approval) }])
+      this.notify(() => this.observer?.approval?.(approval, previous))
     })
   }
 

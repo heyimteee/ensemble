@@ -304,6 +304,31 @@ export const EnsembleV2Rpc = Rpc.define({
         additionalProperties: false,
       },
     },
+    /** Ticket #145: bounded recent service log entries plus sink metadata. */
+    "logs.recent": {
+      input: {
+        type: "object",
+        properties: {
+          directory: { type: "string" },
+          limit: { type: "number" },
+          level: { type: "string" },
+          cat: { type: "string" },
+          event: { type: "string" },
+          taskID: { type: "string" },
+        },
+        required: ["directory"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          entries: { type: "array", items: { type: "object", additionalProperties: true } },
+          stats: { type: "object", additionalProperties: true },
+        },
+        required: ["entries", "stats"],
+        additionalProperties: false,
+      },
+    },
     diagnostic: {
       input: directory,
       output: {
@@ -311,6 +336,7 @@ export const EnsembleV2Rpc = Rpc.define({
         properties: {
           state: { type: "object", additionalProperties: true },
           directory: { type: "string" },
+          logs: { type: "object", additionalProperties: true },
           clones: {
             type: "object",
             properties: {

@@ -24,9 +24,17 @@ export function anyToolCall(messages: any[], since: number): boolean {
   )
 }
 
-export function assistantResult(messages: any[], since: number): { text: string; tools: string[]; failure?: any } {
+export type ToolOutcome = {
+  name: string
+  status: string
+  error?: string
+  code?: string
+}
+
+export function assistantResult(messages: any[], since: number): { text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any } {
   const texts: string[] = []
   const tools: string[] = []
+  const toolOutcomes: ToolOutcome[] = []
   let failure: any
   for (const message of messages) {
     if (!message || message.time?.created < since) continue
@@ -34,10 +42,21 @@ export function assistantResult(messages: any[], since: number): { text: string;
     if (message.type !== "assistant" || !Array.isArray(message.content)) continue
     for (const part of message.content) {
       if (part?.type === "text" && part.text) texts.push(part.text)
-      if (part?.type === "tool") tools.push(`${part.name}:${part.state?.status ?? "unknown"}`)
+      if (part?.type !== "tool") continue
+      const status = String(part.state?.status ?? "unknown")
+      tools.push(`${part.name}:${status}`)
+      const error = part.state?.error
+      const errorMessage = typeof error === "string" ? error : typeof error?.message === "string" ? error.message : undefined
+      const errorCode = typeof error?.code === "string" ? error.code : undefined
+      toolOutcomes.push({
+        name: String(part.name ?? "tool"),
+        status,
+        ...(errorMessage ? { error: errorMessage } : {}),
+        ...(errorCode ? { code: errorCode } : {}),
+      })
     }
   }
-  return { text: texts.join("\n").trim(), tools, failure }
+  return { text: texts.join("\n").trim(), tools, toolOutcomes, failure }
 }
 
 export function visibleMemories(state: SnapshotState, agentID: string, workspaceID: string): Memory[] {

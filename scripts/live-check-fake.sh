@@ -160,6 +160,16 @@ live_require_text "$LIVE_TUI_SESSION" "I init" 10 "I init shortcut"
 live_require_text "$LIVE_TUI_SESSION" "git:(" 10 "git metadata"
 live_check_help
 
+# Ticket #145: the logs viewer reads the service ring over RPC, shows sink
+# state, and closes without disturbing the surface underneath.
+live_type "$LIVE_TUI_SESSION" ":logs"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Logs · recent" 10 "logs viewer"
+live_require_text "$LIVE_TUI_SESSION" "service.start" 10 "service log line in the viewer"
+live_assert_text "$LIVE_TUI_SESSION" "content=off" "content logging is off by default"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "Logs · recent" 10 "logs viewer closed"
+
 # The fake catalog contains one model with variants, so the agent wizard always
 # offers a Reasoning effort step. T2: a text step keeps the mode it arrived
 # with (Normal from the roster); `i` is the explicit Insert entry.
