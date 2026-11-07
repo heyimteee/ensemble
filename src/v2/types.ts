@@ -139,6 +139,20 @@ export type Message = {
   correlationID?: string
 }
 
+/**
+ * Ephemeral live text for one streaming transcript row (ticket #139). It is
+ * coalesced by the service, never enters the change ring, and never bumps the
+ * coordination version. The durable message upsert replaces it on
+ * finalization, so a missed event costs only smoothness, never correctness.
+ */
+export type MessageStream = {
+  epoch: number
+  workspaceID: Id
+  id: Id
+  text: string
+  updatedAt: number
+}
+
 export type SubtaskState = "pending" | "working" | "replied"
 export type SubtaskOutcome = "succeeded" | "failed" | "pending"
 export type SubtaskStage = "initial" | "synthesis"
@@ -437,14 +451,17 @@ export type Revision = {
 }
 
 /**
- * One durable entity change in the versioned feed (tickets #138/#140). Durable
- * changes are full-entity upserts/removes, so duplicate delivery is harmless
- * and a client never needs field-level patch semantics. Messages stay outside
- * this union until #139 adds their patches.
+ * One durable entity change in the versioned feed (tickets #138/#140/#139).
+ * Durable changes are full-entity upserts/removes, so duplicate delivery is
+ * harmless and a client never needs field-level patch semantics. Message
+ * upserts carry the durable row (including a final exact text); ephemeral
+ * live text travels on a separate version-neutral event.
  */
 export type EntityChange =
   | { entity: "subtask"; op: "upsert"; task: Subtask }
   | { entity: "subtask"; op: "remove"; id: Id }
+  | { entity: "message"; op: "upsert"; message: Message }
+  | { entity: "message"; op: "remove"; workspaceID: Id; id: Id }
   | { entity: "agent"; op: "upsert"; agent: Agent }
   | { entity: "agent"; op: "remove"; id: Id }
   | { entity: "workspace"; op: "upsert"; workspace: Workspace }
@@ -481,11 +498,11 @@ export type FeedMeta = {
 /**
  * One store mutation at one coordination version. `changes` is the legacy
  * (#138) subtask-only view used by protocol-2 clients. `entities` carries the
- * full shell change set for protocol-3 clients; it is present only when the
- * version changed an entity outside the legacy view. `other` keeps the #138
- * meaning (a protocol-2 client must fall back to a snapshot); `nonEntity`
- * marks a version that changed state the current feed cannot patch
- * (messages/DM until #139), so even protocol-3 clients resync.
+ * full shell/message change set for protocol-3 clients; it is present only
+ * when the version changed an entity outside the legacy view. `other` keeps
+ * the #138 meaning (a protocol-2 client must fall back to a snapshot);
+ * `nonEntity` marks a version that changed state the current feed cannot
+ * patch (DM retention), so even protocol-3 clients resync.
  */
 export type ChangeEntry = {
   version: number

@@ -4,7 +4,7 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { relative } from "node:path"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, ModelOption, PatchBatch, Snapshot, Workspace } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, MessageStream, ModelOption, PatchBatch, Snapshot, Workspace } from "../types.ts"
 import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
@@ -143,8 +143,9 @@ import { createCommandHistory, recallHistory, rememberHistory, startHistory, typ
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
 import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
-import { createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createClientStore } from "./client-store.ts"
+import { createStreamCoalescer } from "./stream-coalescer.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -1979,6 +1980,21 @@ export function EnsembleV2App() {
   const repaintFromFeed = () => {
     try { (context.renderer as any)?.requestRender?.() } catch {}
   }
+  // Ticket #139: workspace live text and direct-chat deltas share one
+  // coalescing primitive, so a burst updates the visible row once per window.
+  // The workspace event is already an accumulated-text snapshot; the direct
+  // path appends native deltas locally.
+  const groupStream = createStreamCoalescer<MessageStream>((updates) => {
+    for (const update of updates.values()) client.applyStream(update)
+    repaintFromFeed()
+  })
+  const dmStream = createStreamCoalescer<string>((updates) => {
+    const context = chatContext()
+    if (surface()?.kind !== "agent") return
+    for (const [sessionID, text] of updates) {
+      if (context?.sessionID === sessionID) setLiveDm({ sessionID, text })
+    }
+  })
   const applyFeedDecision = (decision: PatchDecision): boolean => {
     if (decision.action !== "apply") return false
     client.applyChanges(decision.changes, decision.version, decision.meta)
@@ -2054,8 +2070,8 @@ export function EnsembleV2App() {
       return
     }
     if (decision.action === "ignore") return
-    // A malformed shell batch or a version with unpatched state (messages
-    // until #139) cannot be repaired by a scoped resync; the full snapshot
+    // A malformed batch or a version with state this feed cannot patch (DM
+    // retention) cannot be repaired by a scoped resync; the full snapshot
     // reconstructs every shell entity from durable storage.
     if (decision.reason === "malformed" || decision.reason === "other") {
       void refreshFull().catch(() => undefined)
@@ -2070,6 +2086,7 @@ export function EnsembleV2App() {
     setSurface({ kind: "agent", agentID: agent.id, workspaceID })
     setFocusArea("chat")
     setChatContext(null)
+    dmStream.clear()
     setLiveDm(null)
     setTranscriptSearch(null)
     void refreshChat()
@@ -2079,6 +2096,8 @@ export function EnsembleV2App() {
     setWorkspaceID(workspace.id)
     setSurface({ kind: "workspace", workspaceID: workspace.id })
     setFocusArea("chat")
+    dmStream.clear()
+    setLiveDm(null)
     setTaskCursor(0)
     setTranscriptSearch(null)
     await run("Activate workspace", async () => { await invoke(context, "workspace.activate", { id: workspace.id }) })
@@ -2415,11 +2434,12 @@ export function EnsembleV2App() {
     const delta = String(data?.delta ?? "")
     if (event?.type === "session.text.delta" && session && delta) {
       if (chatContext()?.sessionID === session && surface()?.kind === "agent") {
-        setLiveDm((current) => current?.sessionID === session ? { sessionID: session, text: current.text + delta } : { sessionID: session, text: delta })
+        const current = liveDm()
+        dmStream.push(session, (previous) => (previous ?? (current?.sessionID === session ? current.text : "")) + delta)
       }
     }
     if ((event?.type === "session.idle" || event?.type === "session.execution.succeeded" || event?.type === "session.execution.failed" || event?.type === "session.execution.interrupted") && session) {
-      if (chatContext()?.sessionID === session) { setLiveDm(null); void refreshChat() }
+      if (chatContext()?.sessionID === session) { dmStream.clear(); setLiveDm(null); void refreshChat() }
       void refresh()
     }
   }
@@ -3717,6 +3737,8 @@ export function EnsembleV2App() {
   onCleanup(() => {
     heartbeatDisposed = true
     stopHeartbeat()
+    groupStream.dispose()
+    dmStream.dispose()
     snapshotRefresh.dispose()
     chatRefresh.dispose()
   })
@@ -3740,6 +3762,14 @@ export function EnsembleV2App() {
       if (type === "rpc.ensemble.v2.patches") {
         const payload = details?.data && typeof details.data === "object" ? details.data : details
         handlePatchEvent(payload as PatchBatch)
+        return
+      }
+      // Ticket #139: ephemeral, coalesced live text. It never advances the
+      // patch cursor; the durable final message upsert replaces it.
+      if (type === "rpc.ensemble.v2.stream") {
+        const payload = details?.data && typeof details.data === "object" ? details.data : details
+        if (!validMessageStream(payload)) return
+        groupStream.push(`${payload.workspaceID}\u0000${payload.id}`, () => payload)
         return
       }
       // Durable writes also emit the legacy `changed` event with the affected
