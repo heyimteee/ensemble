@@ -15,7 +15,7 @@ import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HA
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
-import { V2Store, bindingKey } from "./store.ts"
+import { V2Store, bindingKey, cloneDebugEnabled, cloneStats } from "./store.ts"
 import type {
   Agent,
   Approval,
@@ -182,13 +182,13 @@ export class EnsembleV2Service {
   constructor(ctx: Ctx) {
     this.ctx = ctx
     this.catalog = new Catalog(ctx, () => {
-      this.emitChanged(this.store.snapshot().version)
+      this.emitChanged(this.store.version())
     })
   }
 
   async start(): Promise<() => Promise<void>> {
-    this.store = new V2Store(this.ctx, (state) => {
-      this.emitChanged(state.version)
+    this.store = new V2Store(this.ctx, (version) => {
+      this.emitChanged(version)
     })
     await this.store.load()
     this.refreshDmClock()
@@ -287,7 +287,7 @@ export class EnsembleV2Service {
    * remains as a fallback.
    */
   private noteWorkChanged(task: Subtask): void {
-    this.emitChanged(this.store.snapshot().version, {
+    this.emitChanged(this.store.version(), {
       workspaceID: task.workspaceID,
       subtaskID: task.id,
       correlationID: task.handoff?.correlationID ?? task.turn?.correlationID,
@@ -300,7 +300,7 @@ export class EnsembleV2Service {
     if (!old || typeof old !== "object" || !old.agents) return
     for (const legacy of Object.values(old.agents as Record<string, any>)) {
       if (!legacy?.id || !legacy?.name) continue
-      if (this.store.snapshot().agents[legacy.id]) continue
+      if (this.store.agent(legacy.id)) continue
       const model = legacy.mainModel ?? { providerID: "opencode", modelID: "unknown" }
       const agent: Agent = {
         id: legacy.id,
@@ -346,7 +346,7 @@ export class EnsembleV2Service {
       if (!sessionID || !permissionID) return
       const owner = this.ownerForSession(sessionID)
       if (!owner) return
-      const state = this.store.snapshot()
+      const state = this.store.read()
       const duplicate = Object.values(state.approvals).some(
         (approval) => approval.status === "pending" && approval.kind === "native" && approval.payload?.permissionID === permissionID,
       )
@@ -376,10 +376,11 @@ export class EnsembleV2Service {
     if (event?.type === "permission.replied") {
       const requestID = String(data?.requestID ?? "")
       if (!requestID) return
-      const state = this.store.snapshot()
-      const approval = Object.values(state.approvals).find(
+      const found = this.store.approvals().find(
         (item) => item.status === "pending" && item.kind === "native" && item.payload?.permissionID === requestID,
       )
+      if (!found) return
+      const approval = this.store.cloneApproval(found.id)
       if (!approval) return
       const reply = String(data?.reply ?? "")
       approval.status = reply === "reject" ? "rejected" : "approved"
@@ -396,26 +397,26 @@ export class EnsembleV2Service {
    * open — no approval is minted for sessions Ensemble does not own.
    */
   private ownerForSession(sessionID: string): { workspaceID?: string; agentID?: string; subtaskID?: string } | undefined {
-    const run = this.runForSession(this.store.snapshot(), sessionID)
+    const run = this.runForSession(this.store.read(), sessionID)
     if (run) return { workspaceID: run.workspaceID, agentID: run.agentID, subtaskID: run.subtaskID }
-    const state = this.store.snapshot()
-    const binding = Object.values(state.bindings).find((item) => item.sessionID === sessionID || (item.history ?? []).includes(sessionID))
+    const binding = this.store.bindingForSession(sessionID)
     if (!binding) return undefined
     return { workspaceID: binding.workspaceID, agentID: binding.agentID }
   }
 
   /** True while the host waits on a user decision for this session. */
   private pendingNativeForSession(sessionID: string): boolean {
-    return Object.values(this.store.snapshot().approvals).some(
+    return this.store.approvals().some(
       (approval) => approval.status === "pending" && approval.kind === "native" && approval.payload?.sessionID === sessionID,
     )
   }
 
   /** Drop native mirrors for a session that no longer exists (binding replaced/removed). */
   private async settleNativeForSession(sessionID: string, reason: string): Promise<void> {
-    const state = this.store.snapshot()
-    for (const approval of Object.values(state.approvals)) {
-      if (approval.status !== "pending" || approval.kind !== "native" || approval.payload?.sessionID !== sessionID) continue
+    for (const found of this.store.approvals()) {
+      if (found.status !== "pending" || found.kind !== "native" || found.payload?.sessionID !== sessionID) continue
+      const approval = this.store.cloneApproval(found.id)
+      if (!approval) continue
       approval.status = "rejected"
       approval.resolution = reason
       approval.resolvedAt = now()
@@ -474,7 +475,7 @@ export class EnsembleV2Service {
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
     const payload: Snapshot = {
-      state: jsonSafe(state),
+      state,
       models: this.catalog.modelOptions,
       skills: this.catalog.skillOptions,
       directory,
@@ -484,7 +485,7 @@ export class EnsembleV2Service {
     return payload
   }
 
-  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string }> {
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; clones?: ReturnType<typeof cloneStats> }> {
     await this.store.sync()
     this.refreshDmClock()
     await this.reapAndRetire()
@@ -494,8 +495,9 @@ export class EnsembleV2Service {
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
     return {
-      state: jsonSafe(state),
+      state,
       directory,
+      ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
     }
   }
 
@@ -602,7 +604,7 @@ export class EnsembleV2Service {
     const binding = { workspaceID: "home", agentID: agent.id, sessionID: created.id, kind: "home" as const, directory, agentVersion: agent.version, updatedAt: now() }
     await this.store.saveBinding(binding)
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-    const current = this.store.snapshot().agents[agent.id]
+    const current = this.store.cloneAgent(agent.id)
     if (current) {
       current.homeSessionID = created.id
       current.homeDirectory = directory
@@ -612,8 +614,7 @@ export class EnsembleV2Service {
   }
 
   private chatSession(agent: Agent, workspaceID?: string): { workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string } {
-    const state = this.store.snapshot()
-    const workspace = workspaceID ? state.workspaces[workspaceID] : undefined
+    const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
     if (workspace && workspace.memberIDs.includes(agent.id)) {
       const binding = this.store.binding(workspace.id, agent.id)
       if (binding) return { workspace, sessionID: binding.sessionID, directory: workspace.directory, bindingKeyID: workspace.id }
@@ -640,13 +641,11 @@ export class EnsembleV2Service {
   }
 
   private async chatContext(agentID: string, workspaceID?: string): Promise<any> {
-    const state = this.store.snapshot()
-    const agent = state.agents[agentID]
+    const agent = this.store.agent(agentID)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     const target = await this.ensureChatSession(agent, workspaceID)
-    const key = bindingKey(target.bindingKeyID, agent.id)
     const queuedIDs = new Set(
-      Object.values(state.dmQueue)
+      this.store.dmQueue()
         .filter((entry) => entry.id && entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID))
         .map((entry) => entry.id),
     )
@@ -655,18 +654,18 @@ export class EnsembleV2Service {
     // made that stale bit outrank the queue's own truth. The queue entry is
     // authoritative: a line is queued exactly while its entry is still
     // `queued`; sent/failed/removed entries mean the line renders as sent.
-    const stored = (state.dmTranscripts[key] ?? []).map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
+    const stored = this.store.dmTranscript(target.bindingKeyID, agent.id).map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
     const native = mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
     const messages = mergeDmTranscript(stored, native)
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
-    const queued = Object.values(state.dmQueue).filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID)).length
+    const queued = this.store.dmQueue().filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID)).length
     return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages, queued }
   }
 
   private async chatSend(agentID: string, workspaceID: string | undefined, text: string, envelope?: { fromID?: string; correlationID?: string }): Promise<any> {
     const value = String(text ?? "").trim()
     if (!value) throw Object.assign(new Error("Message is empty."), { code: "empty" })
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const agent = state.agents[agentID]
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     // Ticket #103: direct conversations have no leader triage. General
@@ -724,12 +723,11 @@ export class EnsembleV2Service {
    * queued entry when no id is given keeps the keybinding total.
    */
   private async removeQueuedDm(agentID: string, workspaceID?: string, id?: string): Promise<any> {
-    const state = this.store.snapshot()
-    const agent = state.agents[agentID]
+    const agent = this.store.agent(agentID)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     const target = await this.ensureChatSession(agent, workspaceID)
     const workspaceKey = target.bindingKeyID
-    const queued = Object.values(state.dmQueue)
+    const queued = this.store.dmQueue()
       .filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (workspaceKey === "home" ? "home" : workspaceKey))
       .sort((a, b) => a.createdAt - b.createdAt)
     const targets = id ? queued.filter((entry) => entry.id === id) : queued.slice(0, 1)
@@ -741,9 +739,8 @@ export class EnsembleV2Service {
   }
 
   private async moveHomeSession(agentID: string, workspaceID: string): Promise<any> {
-    const state = this.store.snapshot()
-    const agent = state.agents[agentID]
-    const workspace = state.workspaces[workspaceID]
+    const agent = this.store.cloneAgent(agentID)
+    const workspace = this.store.workspace(workspaceID)
     if (!agent || !workspace) throw Object.assign(new Error("Agent or workspace not found."), { code: "not_found" })
     if (!workspace.memberIDs.includes(agent.id)) throw Object.assign(new Error("The agent is not a member."), { code: "not_member" })
     if (this.store.binding(workspace.id, agent.id)) return { moved: false }
@@ -760,15 +757,18 @@ export class EnsembleV2Service {
   }
 
   private async flushDmQueue(agentID: string, workspaceID?: string): Promise<void> {
-    const state = this.store.snapshot()
-    if (workspaceID && !state.workspaces[workspaceID]) return
+    if (workspaceID && !this.store.workspace(workspaceID)) return
     const workspaceKey = workspaceID ?? "home"
-    const entries = Object.values(state.dmQueue)
+    const candidates = this.store.dmQueue()
       .filter((entry) => entry.agentID === agentID && entry.status === "queued" && (entry.workspaceID ?? "home") === workspaceKey)
       .sort((a, b) => a.createdAt - b.createdAt)
-    for (const entry of entries) {
+    for (const candidate of candidates) {
+      const entry = this.store.cloneDmQueueEntry(candidate.id)
+      if (!entry) continue
       try {
-        const target = await this.ensureChatSession(state.agents[agentID], workspaceID)
+        const agent = this.store.agent(agentID)
+        if (!agent) throw new Error("Agent not found.")
+        const target = await this.ensureChatSession(agent, workspaceID)
         this.directBusy.add(target.sessionID)
         try {
           await this.ctx.session.prompt({ sessionID: target.sessionID, text: entry.text, delivery: "queue" })
@@ -782,7 +782,7 @@ export class EnsembleV2Service {
         entry.status = "failed"
       }
       await this.store.saveDmQueueEntry(entry)
-      const stored = (this.store.snapshot().dmTranscripts[bindingKey(workspaceKey, agentID)] ?? []).find((message) => message.id === entry.id)
+      const stored = this.store.dmTranscript(workspaceKey, agentID).find((message) => message.id === entry.id)
       if (stored) await this.store.saveDmMessage(workspaceKey, agentID, { ...stored, queued: false })
     }
   }
@@ -796,7 +796,7 @@ export class EnsembleV2Service {
     for (const model of backupModels) this.catalog.validate(model)
     const name = String(payload.name ?? "").trim()
     if (!name) throw Object.assign(new Error("Agent name is required."), { code: "invalid_name" })
-    const state = this.store.snapshot()
+    const state = this.store.read()
     if (Object.values(state.agents).some((agent) => !agent.archived && agent.name.toLowerCase() === name.toLowerCase())) {
       throw Object.assign(new Error(`Agent name already exists: ${name}`), { code: "duplicate_name" })
     }
@@ -823,18 +823,18 @@ export class EnsembleV2Service {
   }
 
   private async onboardAgent(agent: Agent): Promise<void> {
-    const current = this.store.snapshot().agents[agent.id]
+    const current = this.store.agent(agent.id)
     if (!current || current.archived) return
     const home = await this.ensureHomeBinding(agent)
-    const latest = this.store.snapshot().agents[agent.id]
+    const latest = this.store.agent(agent.id)
     if (!latest || latest.archived) return
     await this.ctx.session.prompt({ sessionID: home.sessionID, text: onboardingPrompt(agent), delivery: "steer" })
   }
 
   private async updateAgent(payload: Json): Promise<Agent> {
     await this.catalog.ensureModels()
-    const state = this.store.snapshot()
-    const agent = state.agents[payload.id]
+    const state = this.store.read()
+    const agent = this.store.cloneAgent(payload.id)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     let behavioral = false
     if (payload.name !== undefined) {
@@ -868,7 +868,7 @@ export class EnsembleV2Service {
     }
     agent.updatedAt = now()
     await this.store.saveAgent(agent)
-    const synced = this.store.snapshot()
+    const synced = this.store.read()
     for (const workspace of Object.values(synced.workspaces)) {
       if (workspace.memberIDs.includes(agent.id)) writeWorkspaceConfig(workspace, synced.agents)
     }
@@ -876,14 +876,16 @@ export class EnsembleV2Service {
   }
 
   private async archiveAgent(agentID: string, replacementLeaderID?: string): Promise<any> {
-    const state = this.store.snapshot()
-    const agent = state.agents[agentID]
+    const agent = this.store.cloneAgent(agentID)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
-    const led = Object.values(state.workspaces).filter((workspace) => !workspace.archived && workspace.leaderID === agentID)
+    const workspaces = this.store.workspaces()
+    const led = workspaces.filter((workspace) => !workspace.archived && workspace.leaderID === agentID)
     if (led.length > 0 && !replacementLeaderID) throw Object.assign(new Error("Choose a replacement leader before archiving this agent."), { code: "leader_replacement_required" })
     if (replacementLeaderID) {
-      for (const workspace of led) {
-        if (!workspace.memberIDs.includes(replacementLeaderID)) throw Object.assign(new Error("The replacement leader must be a member."), { code: "leader_replacement_required" })
+      for (const candidate of led) {
+        if (!candidate.memberIDs.includes(replacementLeaderID)) throw Object.assign(new Error("The replacement leader must be a member."), { code: "leader_replacement_required" })
+        const workspace = this.store.cloneWorkspace(candidate.id)
+        if (!workspace) continue
         workspace.leaderID = replacementLeaderID
         await this.store.saveWorkspace(workspace)
       }
@@ -895,11 +897,13 @@ export class EnsembleV2Service {
     agent.version++
     agent.updatedAt = now()
     await this.store.saveAgent(agent)
-    for (const workspace of Object.values(state.workspaces)) {
-      if (workspace.memberIDs.includes(agentID)) {
+    for (const candidate of workspaces) {
+      if (candidate.memberIDs.includes(agentID)) {
+        const workspace = this.store.cloneWorkspace(candidate.id)
+        if (!workspace) continue
         workspace.memberIDs = workspace.memberIDs.filter((member) => member !== agentID)
         await this.store.saveWorkspace(workspace)
-        writeWorkspaceConfig(workspace, this.store.snapshot().agents)
+        writeWorkspaceConfig(workspace, this.store.read().agents)
       }
     }
     await this.cancelAgentSubtasks(agentID, "Agent archived.")
@@ -907,14 +911,16 @@ export class EnsembleV2Service {
   }
 
   private async deleteAgent(agentID: string, replacementLeaderID?: string, deleteNativeSessions = false): Promise<any> {
-    const state = this.store.snapshot()
-    const agent = state.agents[agentID]
+    const agent = this.store.cloneAgent(agentID)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
-    const led = Object.values(state.workspaces).filter((workspace) => !workspace.archived && workspace.leaderID === agentID)
+    const workspaces = this.store.workspaces()
+    const led = workspaces.filter((workspace) => !workspace.archived && workspace.leaderID === agentID)
     if (led.length > 0 && !replacementLeaderID) throw Object.assign(new Error("Choose a replacement leader before deleting this agent."), { code: "leader_replacement_required" })
     if (replacementLeaderID) {
-      for (const workspace of led) {
-        if (!workspace.memberIDs.includes(replacementLeaderID)) throw Object.assign(new Error("The replacement leader must be a member."), { code: "leader_replacement_required" })
+      for (const candidate of led) {
+        if (!candidate.memberIDs.includes(replacementLeaderID)) throw Object.assign(new Error("The replacement leader must be a member."), { code: "leader_replacement_required" })
+        const workspace = this.store.cloneWorkspace(candidate.id)
+        if (!workspace) continue
         workspace.leaderID = replacementLeaderID
         await this.store.saveWorkspace(workspace)
       }
@@ -924,18 +930,20 @@ export class EnsembleV2Service {
     }
     await this.cancelAgentSubtasks(agentID, "Agent deleted.")
     await this.store.pruneDmForAgent(agentID)
-    for (const workspace of Object.values(state.workspaces)) {
-      if (workspace.memberIDs.includes(agentID)) {
+    for (const candidate of workspaces) {
+      if (candidate.memberIDs.includes(agentID)) {
+        const workspace = this.store.cloneWorkspace(candidate.id)
+        if (!workspace) continue
         workspace.memberIDs = workspace.memberIDs.filter((member) => member !== agentID)
         await this.store.saveWorkspace(workspace)
-        writeWorkspaceConfig(workspace, this.store.snapshot().agents)
+        writeWorkspaceConfig(workspace, this.store.read().agents)
       }
-      const binding = this.store.binding(workspace.id, agentID)
+      const binding = this.store.binding(candidate.id, agentID)
       if (binding) {
         if (deleteNativeSessions) {
           for (const sessionID of [...(binding.history ?? []), binding.sessionID]) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
         }
-        await this.store.removeBinding(workspace.id, agentID)
+        await this.store.removeBinding(candidate.id, agentID)
       }
     }
     const home = this.store.binding("home", agentID)
@@ -943,10 +951,12 @@ export class EnsembleV2Service {
       if (deleteNativeSessions) await this.ctx.session.remove({ sessionID: home.sessionID }).catch(() => undefined)
       await this.store.removeBinding("home", agentID)
     }
-    for (const memory of Object.values(state.memories)) {
+    for (const memory of this.store.memories()) {
       if (memory.agentID === agentID) {
-        memory.deletedAt = now()
-        await this.store.saveMemory(memory)
+        const stored = this.store.cloneMemory(memory.id)
+        if (!stored) continue
+        stored.deletedAt = now()
+        await this.store.saveMemory(stored)
       }
     }
     await this.store.removeAgent(agentID)
@@ -964,17 +974,19 @@ export class EnsembleV2Service {
   }
 
   private async reconcileWorkspaceConfigs(): Promise<void> {
-    const state = this.store.snapshot()
-    for (const workspace of Object.values(state.workspaces)) {
-      if (workspace.archived) continue
-      const config = readWorkspaceConfig(workspace.directory)
+    const state = this.store.read()
+    for (const candidate of Object.values(state.workspaces)) {
+      if (candidate.archived) continue
+      const config = readWorkspaceConfig(candidate.directory)
       if (!config) continue
       try {
         const members = this.resolveAgentNames(config.members, state.agents)
         const leaderID = this.resolveAgentNames([config.leader], state.agents)[0]
         if (!members.includes(leaderID)) continue
-        const changed = workspace.name !== config.name || workspace.leaderID !== leaderID || workspace.synthesis !== config.synthesis || workspace.paused !== config.paused || workspace.memberIDs.join("\0") !== members.join("\0") || workspace.configVersion !== config.version
+        const changed = candidate.name !== config.name || candidate.leaderID !== leaderID || candidate.synthesis !== config.synthesis || candidate.paused !== config.paused || candidate.memberIDs.join("\0") !== members.join("\0") || candidate.configVersion !== config.version
         if (!changed) continue
+        const workspace = this.store.cloneWorkspace(candidate.id)
+        if (!workspace) continue
         workspace.name = config.name
         workspace.leaderID = leaderID
         workspace.memberIDs = members
@@ -992,16 +1004,16 @@ export class EnsembleV2Service {
   private async discoverWorkspace(directory: string): Promise<Workspace | undefined> {
     const config = readWorkspaceConfig(directory)
     if (!config) return undefined
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const canonical = canonicalDirectory(directory)
-    let workspace = Object.values(state.workspaces).find((item) => item.directory === canonical && !item.archived)
-    if (!workspace) {
+    let found = Object.values(state.workspaces).find((item) => item.directory === canonical && !item.archived)
+    if (!found) {
       const members = this.resolveAgentNames(config.members, state.agents)
       const leaderID = this.resolveAgentNames([config.leader], state.agents)[0]
       if (!members.includes(leaderID)) throw Object.assign(new Error("The configured leader is not a member."), { code: "invalid_config" })
       const at = now()
       const configID = config.id && (!state.workspaces[config.id] || state.workspaces[config.id].directory === canonical) ? config.id : undefined
-      workspace = {
+      const workspace: Workspace = {
         id: configID ?? id("workspace"),
         name: config.name,
         directory: canonical,
@@ -1023,8 +1035,10 @@ export class EnsembleV2Service {
     const members = this.resolveAgentNames(config.members, state.agents)
     const leaderID = this.resolveAgentNames([config.leader], state.agents)[0]
     if (!members.includes(leaderID)) throw Object.assign(new Error("The configured leader is not a member."), { code: "invalid_config" })
-    const changed = workspace.name !== config.name || workspace.leaderID !== leaderID || workspace.synthesis !== config.synthesis || workspace.paused !== config.paused || workspace.memberIDs.join("\0") !== members.join("\0") || workspace.configVersion !== config.version
+    const changed = found.name !== config.name || found.leaderID !== leaderID || found.synthesis !== config.synthesis || found.paused !== config.paused || found.memberIDs.join("\0") !== members.join("\0") || found.configVersion !== config.version
     if (changed) {
+      const workspace = this.store.cloneWorkspace(found.id)
+      if (!workspace) return found
       workspace.name = config.name
       workspace.leaderID = leaderID
       workspace.memberIDs = members
@@ -1033,13 +1047,14 @@ export class EnsembleV2Service {
       workspace.configVersion = config.version
       workspace.lastActiveAt = now()
       await this.store.saveWorkspace(workspace)
+      return workspace
     }
-    return workspace
+    return found
   }
 
   private async createWorkspace(directory: string, payload: Json): Promise<Workspace> {
     const canonical = canonicalDirectory(String(payload.directory ?? directory))
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const existing = Object.values(state.workspaces).find((workspace) => !workspace.archived && workspace.directory === canonical)
     if (existing) throw Object.assign(new Error(`A workspace already exists for this directory: ${existing.name}`), { code: "workspace_exists" })
     const name = String(payload.name ?? "").trim()
@@ -1073,8 +1088,7 @@ export class EnsembleV2Service {
   }
 
   private async updateWorkspace(payload: Json): Promise<Workspace> {
-    const state = this.store.snapshot()
-    const workspace = state.workspaces[payload.id]
+    const workspace = this.store.cloneWorkspace(payload.id)
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     if (payload.name !== undefined) workspace.name = String(payload.name).trim() || workspace.name
     if (payload.memberIDs !== undefined) {
@@ -1087,29 +1101,27 @@ export class EnsembleV2Service {
     if (payload.synthesis !== undefined) workspace.synthesis = Boolean(payload.synthesis)
     workspace.lastActiveAt = now()
     await this.store.saveWorkspace(workspace)
-    writeWorkspaceConfig(workspace, this.store.snapshot().agents)
+    writeWorkspaceConfig(workspace, this.store.read().agents)
     return workspace
   }
 
   private async saveUiState(payload: Json): Promise<any> {
-    const state = this.store.snapshot()
-    const ui = { ...state.ui, ...(payload ?? {}) }
+    const ui = { ...this.store.ui(), ...(payload ?? {}) }
     await this.store.saveUi(ui)
     return { ok: true }
   }
 
   private async activateWorkspace(workspaceID: string): Promise<any> {
-    const state = this.store.snapshot()
-    const workspace = state.workspaces[workspaceID]
+    const workspace = this.store.cloneWorkspace(workspaceID)
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     workspace.lastActiveAt = now()
     await this.store.saveWorkspace(workspace)
-    await this.store.saveUi({ ...state.ui, activeWorkspaceID: workspaceID })
+    await this.store.saveUi({ ...this.store.ui(), activeWorkspaceID: workspaceID })
     return { ok: true }
   }
 
   private async initWorkspace(payload: Json): Promise<any> {
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const workspace = state.workspaces[payload.id]
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     if (workspace.archived) throw Object.assign(new Error("This workspace is archived."), { code: "workspace_archived" })
@@ -1161,14 +1173,16 @@ export class EnsembleV2Service {
    * temporary session if the host still knows it.
    */
   private async reconcileInitJobs(): Promise<void> {
-    const state = this.store.snapshot()
-    for (const job of Object.values(state.initJobs)) {
-      if (job.state !== "running") continue
-      const workspace = state.workspaces[job.workspaceID]
+    for (const candidate of this.store.initJobs()) {
+      if (candidate.state !== "running") continue
+      const job = this.store.cloneInitJob(candidate.id)
+      if (!job) continue
+      const workspace = this.store.workspace(job.workspaceID)
       if (workspace) this.restoreAgentsFile(workspace.directory, job)
       recordInitPhase(job, "reporting")
       const report = initInterruptedReport(job.previousAgentsMD !== null)
-      const message = this.initMessage(state, job)
+      const found = this.initMessage(job)
+      const message = found ? this.store.cloneMessage(job.workspaceID, found.id) : undefined
       if (message) {
         settleStreamMessage(message, report, true)
         await this.store.saveMessage(message)
@@ -1182,8 +1196,8 @@ export class EnsembleV2Service {
     }
   }
 
-  private initMessage(state: SnapshotState, job: InitJob): Message | undefined {
-    return (state.messages[job.workspaceID] ?? []).find((message) => message.id === job.messageID)
+  private initMessage(job: InitJob): Message | undefined {
+    return this.store.message(job.workspaceID, job.messageID)
   }
 
   private restoreAgentsFile(directory: string, job: InitJob): void {
@@ -1202,8 +1216,7 @@ export class EnsembleV2Service {
 
   /** Move a live init job to a stage and persist it before doing that stage's work. */
   private async advanceInitPhase(jobID: string, phase: InitPhase): Promise<InitJob | undefined> {
-    const state = this.store.snapshot()
-    const job = state.initJobs[jobID]
+    const job = this.store.cloneInitJob(jobID)
     if (!job || job.state !== "running") return undefined
     recordInitPhase(job, phase)
     await this.store.saveInitJob(job)
@@ -1212,7 +1225,9 @@ export class EnsembleV2Service {
 
   /** Replace the live System Agent row text for a stage; the job owns liveness. */
   private async updateInitRow(job: InitJob, text: string): Promise<void> {
-    const message = this.initMessage(this.store.snapshot(), job)
+    const found = this.initMessage(job)
+    if (!found) return
+    const message = this.store.cloneMessage(job.workspaceID, found.id)
     if (!message) return
     message.text = text
     message.streaming = true
@@ -1222,10 +1237,9 @@ export class EnsembleV2Service {
 
   private async runInit(jobID: string): Promise<void> {
     const run = this.initRuns.get(jobID)
-    const state = this.store.snapshot()
-    const job = state.initJobs[jobID]
+    const job = this.store.initJob(jobID)
     if (!run || !job || job.state !== "running") return
-    const workspace = state.workspaces[job.workspaceID]
+    const workspace = this.store.workspace(job.workspaceID)
     if (!workspace) {
       await this.failInit(jobID, "Workspace not found.")
       return
@@ -1246,7 +1260,7 @@ export class EnsembleV2Service {
         await this.ctx.session.remove({ sessionID }).catch(() => undefined)
         return
       }
-      const claimed = this.store.snapshot().initJobs[jobID]
+      const claimed = this.store.cloneInitJob(jobID)
       if (!claimed || claimed.state !== "running") {
         await this.ctx.session.remove({ sessionID }).catch(() => undefined)
         return
@@ -1254,7 +1268,8 @@ export class EnsembleV2Service {
       claimed.sessionID = sessionID
       recordInitPhase(claimed, "running")
       await this.store.saveInitJob(claimed)
-      const message = this.initMessage(this.store.snapshot(), claimed)
+      const foundMessage = this.initMessage(claimed)
+      const message = foundMessage ? this.store.cloneMessage(claimed.workspaceID, foundMessage.id) : undefined
       const registration = registerLiveSlot(this.liveBySession, sessionID, now())
       if (registration.orphaned) {
         await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || "Reply interrupted.", true, globalEpoch, workspaceEpoch, workspace.id)
@@ -1274,7 +1289,7 @@ export class EnsembleV2Service {
       const result = assistantResult(listData(await this.ctx.session.context({ sessionID })), job.startedAt)
       if (result.failure) throw new Error(result.failure.message ?? "Native init failed.")
       if (run.cancelled) return
-      const current = this.store.snapshot()
+      const current = this.store.read()
       const currentJob = current.initJobs[jobID]
       const currentWorkspace = current.workspaces[claimed.workspaceID]
       if (!currentJob || currentJob.state !== "running" || !currentWorkspace) return
@@ -1307,8 +1322,8 @@ export class EnsembleV2Service {
       // Mark the job terminal before awaiting storage so a concurrent delete
       // or archive sees a finished job and cannot half-cancel the write.
       await this.store.saveInitJob(reporting)
-      const latest = this.store.snapshot()
-      const messageNow = this.initMessage(latest, reporting)
+      const foundNow = this.initMessage(reporting)
+      const messageNow = foundNow ? this.store.cloneMessage(reporting.workspaceID, foundNow.id) : undefined
       if (messageNow) {
         settleStreamMessage(messageNow, report, false)
         await this.store.saveMessage(messageNow)
@@ -1322,10 +1337,9 @@ export class EnsembleV2Service {
   }
 
   private async failInit(jobID: string, message: string): Promise<void> {
-    const state = this.store.snapshot()
-    const job = state.initJobs[jobID]
+    const job = this.store.cloneInitJob(jobID)
     if (!job || job.state !== "running") return
-    const workspace = state.workspaces[job.workspaceID]
+    const workspace = this.store.workspace(job.workspaceID)
     if (workspace) this.restoreAgentsFile(workspace.directory, job)
     recordInitPhase(job, "reporting")
     const report = initFailureReport(message, job.previousAgentsMD !== null)
@@ -1336,8 +1350,8 @@ export class EnsembleV2Service {
     // Terminal first: a cancellation that arrives while the message save
     // yields must observe the finished job rather than restoring twice.
     await this.store.saveInitJob(job)
-    const latest = this.store.snapshot()
-    const row = this.initMessage(latest, job)
+    const found = this.initMessage(job)
+    const row = found ? this.store.cloneMessage(job.workspaceID, found.id) : undefined
     if (row) {
       settleStreamMessage(row, report, true)
       await this.store.saveMessage(row)
@@ -1345,13 +1359,12 @@ export class EnsembleV2Service {
   }
 
   private async cancelInitJob(job: InitJob, reason: string): Promise<void> {
-    const snapshot = this.store.snapshot()
-    const current = snapshot.initJobs[job.id]
+    const current = this.store.cloneInitJob(job.id)
     if (!current || current.state !== "running") return
     const run = this.initRuns.get(job.id)
     if (run) run.cancelled = true
     const sessionID = current.sessionID ?? run?.sessionID
-    const workspace = snapshot.workspaces[current.workspaceID]
+    const workspace = this.store.workspace(current.workspaceID)
     if (workspace) this.restoreAgentsFile(workspace.directory, current)
     recordInitPhase(current, "reporting")
     const report = initCancelReport(reason, current.previousAgentsMD !== null)
@@ -1360,8 +1373,8 @@ export class EnsembleV2Service {
     current.report = report
     current.finishedAt = now()
     await this.store.saveInitJob(current)
-    const latest = this.store.snapshot()
-    const row = this.initMessage(latest, current)
+    const found = this.initMessage(current)
+    const row = found ? this.store.cloneMessage(current.workspaceID, found.id) : undefined
     if (row) {
       settleStreamMessage(row, report, true)
       await this.store.saveMessage(row)
@@ -1374,7 +1387,7 @@ export class EnsembleV2Service {
   }
 
   private async cancelActiveInitJobs(workspaceID: string | undefined, reason: string): Promise<void> {
-    const jobs = Object.values(this.store.snapshot().initJobs)
+    const jobs = this.store.initJobs()
       .filter((job) => job.state === "running" && (!workspaceID || job.workspaceID === workspaceID))
     for (const job of jobs) await this.cancelInitJob(job, reason)
   }
@@ -1432,19 +1445,17 @@ export class EnsembleV2Service {
   }
 
   private async pauseWorkspace(workspaceID: string, paused: boolean): Promise<Workspace> {
-    const state = this.store.snapshot()
-    const workspace = state.workspaces[workspaceID]
+    const workspace = this.store.cloneWorkspace(workspaceID)
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     workspace.paused = paused
     workspace.lastActiveAt = now()
     await this.store.saveWorkspace(workspace)
-    writeWorkspaceConfig(workspace, this.store.snapshot().agents)
+    writeWorkspaceConfig(workspace, this.store.read().agents)
     return workspace
   }
 
   private async archiveWorkspace(workspaceID: string): Promise<any> {
-    const state = this.store.snapshot()
-    const workspace = state.workspaces[workspaceID]
+    const workspace = this.store.cloneWorkspace(workspaceID)
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     workspace.archived = true
     workspace.lastActiveAt = now()
@@ -1452,7 +1463,8 @@ export class EnsembleV2Service {
     await this.cancelActiveInitJobs(workspaceID, "Workspace archived.")
     await this.store.saveWorkspace(workspace)
     try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
-    if (state.ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...state.ui, activeWorkspaceID: undefined })
+    const ui = this.store.ui()
+    if (ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...ui, activeWorkspaceID: undefined })
     for (const run of this.activeRuns.values()) {
       if (run.workspaceID === workspaceID) await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
     }
@@ -1461,8 +1473,7 @@ export class EnsembleV2Service {
   }
 
   private async deleteWorkspace(workspaceID: string, deleteNativeSessions = false): Promise<any> {
-    const state = this.store.snapshot()
-    const workspace = state.workspaces[workspaceID]
+    const workspace = this.store.workspace(workspaceID)
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     this.workspaceEpoch.set(workspaceID, (this.workspaceEpoch.get(workspaceID) ?? 0) + 1)
     await this.cancelActiveInitJobs(workspaceID, "Workspace deleted.")
@@ -1472,23 +1483,25 @@ export class EnsembleV2Service {
     }
     await this.waitForRuns()
     if (deleteNativeSessions) {
-      for (const binding of Object.values(state.bindings)) {
+      for (const binding of this.store.bindings()) {
         if (binding.workspaceID !== workspaceID) continue
         for (const sessionID of [...(binding.history ?? []), binding.sessionID]) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
       }
     }
     try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
-    if (state.ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...state.ui, activeWorkspaceID: undefined })
+    const ui = this.store.ui()
+    if (ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...ui, activeWorkspaceID: undefined })
     await this.store.pruneWorkspace(workspaceID)
     return { ok: true }
   }
 
   private async cancelSubtasks(matches: (subtask: Subtask) => boolean, reason: string): Promise<void> {
     const at = now()
-    const state = this.store.snapshot()
-    for (const subtask of Object.values(state.subtasks)) {
-      if (!matches(subtask)) continue
-      if (subtask.state !== "pending" && subtask.state !== "working") continue
+    for (const candidate of this.store.subtasks()) {
+      if (!matches(candidate)) continue
+      if (candidate.state !== "pending" && candidate.state !== "working") continue
+      const subtask = this.store.cloneSubtask(candidate.id)
+      if (!subtask) continue
       subtask.state = "replied"
       subtask.outcome = "failed"
       subtask.error = reason
@@ -1523,10 +1536,11 @@ export class EnsembleV2Service {
    * mirror, since the host request may still be live after our run ends.
    */
   private async settleLinkedApprovals(subtaskID: string, resolution: string, exclude: ReadonlySet<Approval["kind"]>): Promise<void> {
-    const state = this.store.snapshot()
-    for (const approval of Object.values(state.approvals)) {
-      if (approval.status !== "pending" || approval.subtaskID !== subtaskID) continue
-      if (exclude.has(approval.kind)) continue
+    for (const candidate of this.store.approvals()) {
+      if (candidate.status !== "pending" || candidate.subtaskID !== subtaskID) continue
+      if (exclude.has(candidate.kind)) continue
+      const approval = this.store.cloneApproval(candidate.id)
+      if (!approval) continue
       approval.status = "rejected"
       approval.resolution = resolution
       approval.resolvedAt = now()
@@ -1536,9 +1550,10 @@ export class EnsembleV2Service {
 
   private async cancelAgentSubtasks(agentID: string, reason: string): Promise<void> {
     await this.cancelSubtasks((subtask) => subtask.assigneeID === agentID, reason)
-    const state = this.store.snapshot()
-    for (const approval of Object.values(state.approvals)) {
-      if (approval.agentID === agentID && approval.status === "pending") {
+    for (const candidate of this.store.approvals()) {
+      if (candidate.agentID === agentID && candidate.status === "pending") {
+        const approval = this.store.cloneApproval(candidate.id)
+        if (!approval) continue
         approval.status = "rejected"
         approval.resolution = reason
         await this.store.saveApproval(approval)
@@ -1548,9 +1563,10 @@ export class EnsembleV2Service {
 
   private async cancelWorkspaceSubtasks(workspaceID: string, reason: string): Promise<void> {
     await this.cancelSubtasks((subtask) => subtask.workspaceID === workspaceID, reason)
-    const state = this.store.snapshot()
-    for (const approval of Object.values(state.approvals)) {
-      if (approval.workspaceID === workspaceID && approval.status === "pending") {
+    for (const candidate of this.store.approvals()) {
+      if (candidate.workspaceID === workspaceID && candidate.status === "pending") {
+        const approval = this.store.cloneApproval(candidate.id)
+        if (!approval) continue
         approval.status = "rejected"
         approval.resolution = reason
         await this.store.saveApproval(approval)
@@ -1559,7 +1575,7 @@ export class EnsembleV2Service {
   }
 
   private async sendMessage(payload: Json): Promise<any> {
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const workspace = state.workspaces[payload.workspaceID]
     if (!workspace || workspace.archived) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     if (workspace.paused) throw Object.assign(new Error("This workspace is paused. Resume it before sending work."), { code: "workspace_paused" })
@@ -1645,7 +1661,7 @@ export class EnsembleV2Service {
         })
       }
       this.schedule()
-      const current = this.store.snapshot().workspaces[workspace.id]
+      const current = this.store.cloneWorkspace(workspace.id)
       if (current) {
         current.lastActiveAt = now()
         await this.store.saveWorkspace(current)
@@ -1684,7 +1700,7 @@ export class EnsembleV2Service {
         })
       }
       this.schedule()
-      const current = this.store.snapshot().workspaces[workspace.id]
+      const current = this.store.cloneWorkspace(workspace.id)
       if (current) {
         current.lastActiveAt = now()
         await this.store.saveWorkspace(current)
@@ -1731,7 +1747,7 @@ export class EnsembleV2Service {
       })
     }
     this.schedule()
-    const current = this.store.snapshot().workspaces[workspace.id]
+    const current = this.store.cloneWorkspace(workspace.id)
     if (current) {
       current.lastActiveAt = now()
       await this.store.saveWorkspace(current)
@@ -1747,7 +1763,7 @@ export class EnsembleV2Service {
    * row, and asking from a different parent/run hashes a different key.
    */
   private findWorkByKey(workspaceID: string, key: string): Subtask | undefined {
-    return Object.values(this.store.snapshot().subtasks).find(
+    return this.store.subtasks().find(
       (task) => task.workspaceID === workspaceID && task.queueKey === key,
     )
   }
@@ -1921,11 +1937,11 @@ export class EnsembleV2Service {
 
   private agentName(agentID: string | undefined): string {
     if (!agentID) return "Unassigned"
-    return this.store.snapshot().agents[agentID]?.name ?? "Unknown agent"
+    return this.store.agent(agentID)?.name ?? "Unknown agent"
   }
 
   private async delegateFromUser(payload: Json): Promise<Subtask> {
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const workspace = state.workspaces[payload.workspaceID]
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     if (workspace.paused) throw Object.assign(new Error("This workspace is paused. Resume it before delegating work."), { code: "workspace_paused" })
@@ -1986,26 +2002,23 @@ export class EnsembleV2Service {
   }
 
   private async retryTask(subtaskID: string): Promise<Subtask> {
-    const state = this.store.snapshot()
-    const subtask = state.subtasks[subtaskID]
+    const subtask = this.store.cloneSubtask(subtaskID)
     if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
     await this.claimForRetry(subtask)
     return subtask
   }
 
   private async restartTask(subtaskID: string): Promise<Subtask> {
-    const state = this.store.snapshot()
-    const subtask = state.subtasks[subtaskID]
+    const subtask = this.store.cloneSubtask(subtaskID)
     if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
     await this.claimForRetry(subtask)
-    const workspace = state.workspaces[subtask.workspaceID]
+    const workspace = this.store.workspace(subtask.workspaceID)
     if (workspace) await this.appendMessage(workspace, { author: "system", text: `Restarting work: ${subtask.title}`, kind: "system", taskID: subtask.id })
     return subtask
   }
 
   private async cancelTask(subtaskID: string): Promise<Subtask> {
-    const state = this.store.snapshot()
-    const subtask = state.subtasks[subtaskID]
+    const subtask = this.store.cloneSubtask(subtaskID)
     if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
     await this.stopSubtaskRun(subtask)
     await this.settlePendingApprovals(subtask.id, "Subtask cancelled by the user.")
@@ -2027,9 +2040,8 @@ export class EnsembleV2Service {
   }
 
   private async reassignTask(subtaskID: string, assigneeID: string): Promise<Subtask> {
-    const state = this.store.snapshot()
-    const subtask = state.subtasks[subtaskID]
-    const workspace = subtask ? state.workspaces[subtask.workspaceID] : undefined
+    const subtask = this.store.cloneSubtask(subtaskID)
+    const workspace = subtask ? this.store.workspace(subtask.workspaceID) : undefined
     if (!subtask || !workspace) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
     if (this.isTriageTask(subtask) && assigneeID !== workspace.leaderID) {
       throw Object.assign(new Error("A leader triage task can only be reassigned to the workspace leader."), { code: "triage_leader_only" })
@@ -2056,8 +2068,7 @@ export class EnsembleV2Service {
   }
 
   private async resolveApproval(payload: Json): Promise<Approval> {
-    const state = this.store.snapshot()
-    const approval = state.approvals[payload.id]
+    const approval = this.store.cloneApproval(payload.id)
     if (!approval) throw Object.assign(new Error("Approval not found."), { code: "not_found" })
     const requested = payload.approve ? "approved" : "rejected"
     if (approval.status !== "pending") {
@@ -2065,7 +2076,7 @@ export class EnsembleV2Service {
       throw Object.assign(new Error("Approval was already resolved differently."), { code: "already_resolved" })
     }
     if (approval.subtaskID && (approval.kind === "ask_person" || approval.kind === "interrupted" || approval.kind === "outside_roster" || approval.kind === "cross_project" || approval.kind === "promote_memory")) {
-      const subtask = state.subtasks[approval.subtaskID]
+      const subtask = this.store.subtask(approval.subtaskID)
       if (!subtask || subtask.state === "replied") {
         approval.status = "rejected"
         approval.resolvedAt = now()
@@ -2077,7 +2088,7 @@ export class EnsembleV2Service {
     // Promote rows carry no subtask: they go stale when the memory is
     // already promoted or gone, so resolving must not re-apply.
     if (approval.kind === "promote_memory") {
-      const memory = approval.payload?.memoryID ? state.memories[String(approval.payload.memoryID)] : undefined
+      const memory = approval.payload?.memoryID ? this.store.memory(String(approval.payload.memoryID)) : undefined
       if (!memory || memory.deletedAt || memory.scope === "global") {
         approval.status = "rejected"
         approval.resolvedAt = now()
@@ -2109,7 +2120,7 @@ export class EnsembleV2Service {
     await this.store.saveApproval(approval)
     if (!payload.approve) {
       if (approval.kind === "interrupted" && approval.subtaskID) {
-        const subtask = state.subtasks[approval.subtaskID]
+        const subtask = this.store.cloneSubtask(approval.subtaskID)
         if (subtask) {
           const at = now()
           subtask.state = "replied"
@@ -2127,7 +2138,7 @@ export class EnsembleV2Service {
         }
       }
       if (approval.kind === "ask_person" && approval.subtaskID) {
-        const subtask = state.subtasks[approval.subtaskID]
+        const subtask = this.store.cloneSubtask(approval.subtaskID)
         if (subtask) {
           const at = now()
           subtask.state = "replied"
@@ -2145,11 +2156,11 @@ export class EnsembleV2Service {
       return approval
     }
     if (approval.kind === "interrupted" && approval.subtaskID) {
-      const subtask = state.subtasks[approval.subtaskID]
+      const subtask = this.store.cloneSubtask(approval.subtaskID)
       if (subtask) await this.claimForRetry(subtask)
     }
     if (approval.kind === "ask_person" && approval.subtaskID) {
-      const subtask = state.subtasks[approval.subtaskID]
+      const subtask = this.store.cloneSubtask(approval.subtaskID)
       if (subtask) {
         subtask.state = "pending"
         subtask.outcome = "pending"
@@ -2167,7 +2178,7 @@ export class EnsembleV2Service {
       }
     }
     if (approval.kind === "outside_roster" && approval.payload) {
-      const workspace = approval.workspaceID ? state.workspaces[approval.workspaceID] : undefined
+      const workspace = approval.workspaceID ? this.store.workspace(approval.workspaceID) : undefined
       if (workspace) {
         if (approval.payload.peerTurn) {
           // Approved cross-boundary peer turn: the turn is the effect. It
@@ -2278,7 +2289,7 @@ export class EnsembleV2Service {
             }
             await this.store.saveSubtask(hop)
             this.noteWorkChanged(hop)
-            const recipientName = state.agents[recipientID]?.name ?? recipientID
+            const recipientName = this.store.agent(recipientID)?.name ?? recipientID
             // Ticket #73: concise system ack — no policy sentence, no ref, no agent bubble.
             await this.appendMessage(workspace, {
               author: "system",
@@ -2312,7 +2323,7 @@ export class EnsembleV2Service {
       }
     }
     if (approval.kind === "promote_memory" && approval.payload?.memoryID) {
-      const memory = state.memories[String(approval.payload.memoryID)]
+      const memory = this.store.cloneMemory(String(approval.payload.memoryID))
       if (memory) {
         memory.scope = "global"
         memory.updatedAt = now()
@@ -2360,8 +2371,7 @@ export class EnsembleV2Service {
   }
 
   private async updateMemory(payload: Json): Promise<Memory> {
-    const state = this.store.snapshot()
-    const memory = state.memories[payload.id]
+    const memory = this.store.cloneMemory(payload.id)
     if (!memory || memory.deletedAt) throw Object.assign(new Error("Memory not found."), { code: "not_found" })
     const text = String(payload.text ?? memory.text).trim()
     if (!text) throw Object.assign(new Error("Memory text is required."), { code: "empty" })
@@ -2373,8 +2383,7 @@ export class EnsembleV2Service {
   }
 
   private async deleteMemory(payload: Json): Promise<any> {
-    const state = this.store.snapshot()
-    const memory = state.memories[payload.id]
+    const memory = this.store.cloneMemory(payload.id)
     if (!memory || memory.deletedAt) throw Object.assign(new Error("Memory not found."), { code: "not_found" })
     memory.deletedAt = now()
     memory.updatedAt = now()
@@ -2384,8 +2393,7 @@ export class EnsembleV2Service {
   }
 
   private async promoteMemory(payload: Json): Promise<any> {
-    const state = this.store.snapshot()
-    const memory = state.memories[payload.id]
+    const memory = this.store.memory(payload.id)
     if (!memory || memory.deletedAt) throw Object.assign(new Error("Memory not found."), { code: "not_found" })
     if (memory.scope === "global") return { alreadyGlobal: true }
     const approval: Approval = {
@@ -2563,7 +2571,7 @@ export class EnsembleV2Service {
 
   private async toolWorkspaceInfo(context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.toolSession(state, context.sessionID)
     if (!found.workspace) return { content: "This session is not bound to an Ensemble workspace." }
     const leader = state.agents[found.workspace.leaderID]
@@ -2581,7 +2589,7 @@ export class EnsembleV2Service {
 
   private async toolListWorkspaces(): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     return {
       content: JSON.stringify(
         Object.values(state.workspaces).map((workspace) => ({
@@ -2598,13 +2606,13 @@ export class EnsembleV2Service {
 
   private async toolListAgents(): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     return { content: JSON.stringify(Object.values(state.agents).filter((agent) => !agent.archived).map((agent) => ({ id: agent.id, name: agent.name, title: agent.title, busy: [...this.activeRuns.values()].some((run) => run.agentID === agent.id), home: agent.homeDirectory }))) }
   }
 
   private async toolTaskStatus(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.toolSession(state, context.sessionID)
     if (input.workspaceID && found.workspace && input.workspaceID !== found.workspace.id) return { content: "Cross-workspace reads require ensemble_share approval." }
     const workspaceID = found.workspace?.id ?? input.workspaceID
@@ -2615,7 +2623,7 @@ export class EnsembleV2Service {
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
     const text = String(input.text ?? "").trim()
@@ -2698,7 +2706,7 @@ export class EnsembleV2Service {
           continue
         }
         if (run) {
-          const siblings = Object.values(this.store.snapshot().subtasks).filter((item) => item.parentID === run.subtaskID)
+          const siblings = this.store.subtasks().filter((item) => item.parentID === run.subtaskID)
           if (siblings.length >= state.settings.maxDelegations) {
             const reason = `the delegation limit is ${state.settings.maxDelegations}.`
             await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, reason), kind: "system" })
@@ -2767,7 +2775,7 @@ export class EnsembleV2Service {
 
   private async toolHandoff(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
     const { workspace, agent: sender } = found
@@ -2920,7 +2928,7 @@ export class EnsembleV2Service {
     replyText: string,
     children: Subtask[],
   ): Promise<Subtask | undefined> {
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const workspace = state.workspaces[finished.workspaceID]
     if (!workspace || workspace.archived || workspace.paused) return undefined
     const finisherID = finished.assigneeID
@@ -3020,14 +3028,14 @@ export class EnsembleV2Service {
    * open batch instead of opening another.
    */
   private async maybeConsolidateCompletionBatch(workspaceID: string, recipientID: string): Promise<void> {
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const workspace = state.workspaces[workspaceID]
     const recipient = state.agents[recipientID]
     if (!workspace || workspace.archived || workspace.paused || !recipient || recipient.archived) return
     if (!workspace.memberIDs.includes(recipientID)) return
     const ids = groupCompletionCandidates(Object.values(state.subtasks), workspaceID, recipientID)
     if (ids.length < 2) return
-    const openBatch = Object.values(state.subtasks).find(
+    const openBatch = this.store.subtasks().find(
       (task) =>
         task.workspaceID === workspaceID &&
         task.workKind === "handoff" &&
@@ -3036,24 +3044,26 @@ export class EnsembleV2Service {
         task.state !== "replied",
     )
     if (openBatch?.handoff) {
-      const merged = [...(openBatch.handoff.itemIDs ?? [])]
+      const batch = this.store.cloneSubtask(openBatch.id)
+      if (!batch?.handoff) return
+      const merged = [...(batch.handoff.itemIDs ?? [])]
       for (const itemID of ids) {
-        const item = this.store.snapshot().subtasks[itemID]
+        const item = this.store.cloneSubtask(itemID)
         if (!item) continue
-        item.parentID = openBatch.id
-        if (item.handoff) item.handoff.batchedIn = openBatch.id
+        item.parentID = batch.id
+        if (item.handoff) item.handoff.batchedIn = batch.id
         await this.store.saveSubtask(item)
         if (!merged.includes(item.id)) merged.push(item.id)
       }
-      openBatch.handoff.itemIDs = merged
-      openBatch.title = batchReviewTitle(merged.length)
-      await this.store.saveSubtask(openBatch)
-      this.noteWorkChanged(openBatch)
+      batch.handoff.itemIDs = merged
+      batch.title = batchReviewTitle(merged.length)
+      await this.store.saveSubtask(batch)
+      this.noteWorkChanged(batch)
       this.schedule()
       return
     }
-    const live = this.store.snapshot()
-    const items = ids.map((itemID) => live.subtasks[itemID]).filter((item) => Boolean(item))
+    const live = this.store.read()
+    const items = ids.map((itemID) => this.store.cloneSubtask(itemID)).filter((item): item is Subtask => Boolean(item))
     if (items.length < 2) return
     const at = now()
     const correlationID = newCorrelationID()
@@ -3129,7 +3139,7 @@ export class EnsembleV2Service {
    */
   private async toolReview(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
     const { workspace, agent: reviewer } = found
@@ -3152,15 +3162,15 @@ export class EnsembleV2Service {
         lines.push(`${decision.item}: refused — not part of this batch.`)
         continue
       }
-      const item = this.store.snapshot().subtasks[decision.item]
+      const item = this.store.cloneSubtask(decision.item)
       if (!item || item.handoff?.batchedIn !== batch.id || item.handoff?.decided !== undefined) {
         lines.push(`${decision.item}: refused — already decided or no longer in this batch.`)
         continue
       }
       lines.push(await this.applyReviewDecision(workspace, batch, item, reviewer, decision))
     }
-    const latest = this.store.snapshot()
-    const current = latest.subtasks[batch.id]
+    const latest = this.store.read()
+    const current = this.store.cloneSubtask(batch.id)
     const decidedBy: Record<string, string | undefined> = {}
     for (const itemID of current?.handoff?.itemIDs ?? []) {
       decidedBy[itemID] = latest.subtasks[itemID]?.handoff?.decided
@@ -3191,7 +3201,7 @@ export class EnsembleV2Service {
         return `${item.id} (${item.title}): refused — only the workspace leader ($${this.agentName(workspace.leaderID)}) can delegate subtasks.`
       }
       const ref = (decision.assignee ?? "").trim()
-      const target = Object.values(this.store.snapshot().agents).find((agent) => agent.id === ref || agent.name.toLowerCase() === ref.toLowerCase())
+      const target = this.store.agents().find((agent) => agent.id === ref || agent.name.toLowerCase() === ref.toLowerCase())
       if (!target || target.archived || !workspace.memberIDs.includes(target.id)) {
         return `${item.id} (${item.title}): refused — ${ref || "no assignee"} is not available.`
       }
@@ -3283,7 +3293,7 @@ export class EnsembleV2Service {
     let candidateID = workspace.leaderID
     const ref = (handTo ?? "").trim()
     if (ref) {
-      const target = Object.values(this.store.snapshot().agents).find((agent) => agent.id === ref || agent.name.toLowerCase() === ref.toLowerCase())
+      const target = this.store.agents().find((agent) => agent.id === ref || agent.name.toLowerCase() === ref.toLowerCase())
       if (target && !target.archived && workspace.memberIDs.includes(target.id)) candidateID = target.id
     }
     const prior = batch.handoff?.chain ?? []
@@ -3306,10 +3316,10 @@ export class EnsembleV2Service {
       if (batch.parentID) await this.maybeSynthesize(batch.parentID)
       return "Batch closed: the onward chain reached its depth cap, so the batch ends here."
     }
-    const target = this.store.snapshot().agents[route.to]
+    const target = this.store.agent(route.to)
     const summary = itemIDs
       .map((itemID) => {
-        const item = this.store.snapshot().subtasks[itemID]
+        const item = this.store.subtask(itemID)
         return item ? `- ${item.title} (${item.handoff?.decided ?? "undecided"})` : undefined
       })
       .filter(Boolean)
@@ -3370,7 +3380,7 @@ export class EnsembleV2Service {
 
   private async toolDelegate(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
     const { workspace, agent } = found
@@ -3440,7 +3450,7 @@ export class EnsembleV2Service {
 
   private async toolAsk(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
     const run = this.runForSession(state, context.sessionID)
@@ -3459,8 +3469,11 @@ export class EnsembleV2Service {
     }
     await this.store.saveApproval(approval)
     if (subtask) {
-      subtask.approvalID = approval.id
-      await this.store.saveSubtask(subtask)
+      const claimed = this.store.cloneSubtask(subtask.id)
+      if (claimed) {
+        claimed.approvalID = approval.id
+        await this.store.saveSubtask(claimed)
+      }
     }
     await this.appendMessage(found.workspace, { author: "system", text: `Approval needed: ${input.question}`, kind: "approval", taskID: subtask?.id })
     this.schedule()
@@ -3469,7 +3482,7 @@ export class EnsembleV2Service {
 
   private async toolRemember(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
     const workspace = found.workspace
@@ -3512,7 +3525,7 @@ export class EnsembleV2Service {
 
   private async toolShare(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
-    const state = this.store.snapshot()
+    const state = this.store.read()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
     const run = this.runForSession(state, context.sessionID)
@@ -3543,7 +3556,7 @@ export class EnsembleV2Service {
   }
 
   private profileForSession(sessionID: string): string | undefined {
-    return this.runForSession(this.store.snapshot(), sessionID)?.agentID
+    return this.runForSession(this.store.read(), sessionID)?.agentID
   }
 
   /**
@@ -3554,10 +3567,11 @@ export class EnsembleV2Service {
    */
   private async reapAndRetire(): Promise<void> {
     const at = now()
-    const state = this.store.snapshot()
-    for (const task of Object.values(state.subtasks)) {
-      if (task.state === "replied") continue
-      if (task.attempts >= MAX_ATTEMPTS || (task.deadlineAt !== undefined && at >= task.deadlineAt)) {
+    for (const candidate of this.store.subtasks()) {
+      if (candidate.state === "replied") continue
+      if (candidate.attempts >= MAX_ATTEMPTS || (candidate.deadlineAt !== undefined && at >= candidate.deadlineAt)) {
+        const task = this.store.cloneSubtask(candidate.id)
+        if (!task) continue
         task.state = "replied"
         task.outcome = "failed"
         task.error ??= task.attempts >= MAX_ATTEMPTS
@@ -3573,12 +3587,12 @@ export class EnsembleV2Service {
         await this.store.saveSubtask(task)
         this.noteWorkChanged(task)
         await this.settlePendingApprovals(task.id, task.error)
-        const workspace = this.store.snapshot().workspaces[task.workspaceID]
+        const workspace = this.store.workspace(task.workspaceID)
         if (workspace && task.workKind === "handoff" && task.handoff) {
-          const recipientName = this.store.snapshot().agents[task.handoff.recipientID]?.name ?? "Unknown agent"
+          const recipientName = this.store.agent(task.handoff.recipientID)?.name ?? "Unknown agent"
           await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, task.error ?? "the work could not be delivered.", task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
         } else if (workspace && task.workKind === "turn" && task.turn) {
-          const recipientName = this.store.snapshot().agents[task.assigneeID ?? ""]?.name ?? "Unknown agent"
+          const recipientName = this.store.agent(task.assigneeID ?? "")?.name ?? "Unknown agent"
           await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${task.error ?? "the work could not be delivered."} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
         } else if (workspace) {
           await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${task.error}`, kind: "system", taskID: task.id })
@@ -3588,7 +3602,9 @@ export class EnsembleV2Service {
       // A claim whose lease expired without a live owner goes back to the
       // queue with its attempt budget intact. Claims held by a live run in
       // this process are never reaped — the run's heartbeat owns them.
-      if (task.claimedBy && (task.leaseUntil === undefined || task.leaseUntil <= at) && !this.activeRuns.has(task.claimedBy)) {
+      if (candidate.claimedBy && (candidate.leaseUntil === undefined || candidate.leaseUntil <= at) && !this.activeRuns.has(candidate.claimedBy)) {
+        const task = this.store.cloneSubtask(candidate.id)
+        if (!task) continue
         task.claimedBy = undefined
         task.leaseUntil = undefined
         task.activeRunID = undefined
@@ -3600,8 +3616,7 @@ export class EnsembleV2Service {
   }
 
   private async purgeFinishedWork(at: number): Promise<void> {
-    const state = this.store.snapshot()
-    for (const task of Object.values(state.subtasks)) {
+    for (const task of this.store.subtasks()) {
       if (task.state !== "replied") continue
       // Only rows with a known terminal timestamp are eligible. Legacy rows
       // without one are never purged on age suspicion alone.
@@ -3618,12 +3633,13 @@ export class EnsembleV2Service {
    * working. Settle it on the read path (idempotent, no run started).
    */
   private async settleTerminalStreams(): Promise<void> {
-    const state = this.store.snapshot()
-    for (const list of Object.values(state.messages)) {
-      for (const message of list) {
-        if (!message.streaming) continue
-        const task = message.taskID ? state.subtasks[message.taskID] : undefined
-        if (message.taskID && (!task || task.state === "replied")) {
+    for (const [workspaceID, list] of Object.entries(this.store.read().messages)) {
+      for (const candidate of list) {
+        if (!candidate.streaming) continue
+        const task = candidate.taskID ? this.store.subtask(candidate.taskID) : undefined
+        if (candidate.taskID && (!task || task.state === "replied")) {
+          const message = this.store.cloneMessage(workspaceID, candidate.id)
+          if (!message) continue
           const interrupted = task ? task.outcome !== "succeeded" : true
           settleStreamMessage(message, message.text || (interrupted ? "Reply interrupted." : "Reply completed."), interrupted)
           await this.store.saveMessage(message)
@@ -3641,14 +3657,15 @@ export class EnsembleV2Service {
    * started here; the normal pump does that.
    */
   private async reconcileWaitingWork(): Promise<void> {
-    const state = this.store.snapshot()
-    for (const task of Object.values(state.subtasks)) {
-      if (task.state === "replied") continue
+    for (const candidate of this.store.subtasks()) {
+      if (candidate.state === "replied") continue
       // Batch reviews close only through ensemble_review.
-      if (task.handoff?.batch === true) continue
-      const children = Object.values(state.subtasks).filter((child) => child.parentID === task.id && child.handoff?.completion !== true)
+      if (candidate.handoff?.batch === true) continue
+      const children = this.store.subtasks().filter((child) => child.parentID === candidate.id && child.handoff?.completion !== true)
       const liveChildren = children.filter((child) => child.state !== "replied")
-      if (task.awaitingChildren && liveChildren.length === 0) {
+      if (candidate.awaitingChildren && liveChildren.length === 0) {
+        const task = this.store.cloneSubtask(candidate.id)
+        if (!task) continue
         task.awaitingChildren = false
         if (children.length === 0) {
           task.state = "replied"
@@ -3664,7 +3681,7 @@ export class EnsembleV2Service {
         }
         await this.store.saveSubtask(task)
         await this.maybeSynthesize(task.id)
-        const latest = this.store.snapshot().subtasks[task.id]
+        const latest = this.store.cloneSubtask(task.id)
         if (latest && latest.state !== "replied" && latest.stage === "synthesis" && latest.state === "working" && !latest.activeRunID) {
           latest.state = "pending"
           latest.outcome = "pending"
@@ -3674,8 +3691,10 @@ export class EnsembleV2Service {
         }
         continue
       }
-      const staleRun = task.activeRunID !== undefined && !this.activeRuns.has(task.activeRunID)
-      if (task.state === "working" && !task.awaitingChildren && !task.approvalID && !task.claimedBy && (task.activeRunID === undefined || staleRun)) {
+      const staleRun = candidate.activeRunID !== undefined && !this.activeRuns.has(candidate.activeRunID)
+      if (candidate.state === "working" && !candidate.awaitingChildren && !candidate.approvalID && !candidate.claimedBy && (candidate.activeRunID === undefined || staleRun)) {
+        const task = this.store.cloneSubtask(candidate.id)
+        if (!task) continue
         task.state = "pending"
         task.outcome = "pending"
         task.activeRunID = undefined
@@ -3699,7 +3718,7 @@ export class EnsembleV2Service {
       try {
         await this.reapAndRetire()
         await this.reconcileWaitingWork()
-        const state = this.store.snapshot()
+        const state = this.store.read()
         const at = now()
         const running = [...this.activeRuns.values()].filter((run) => run.status === "running")
         let slots = state.settings.maxActiveRuns - running.length
@@ -3780,16 +3799,15 @@ export class EnsembleV2Service {
   }
 
   private async runTask(taskID: string): Promise<void> {
-    const state = this.store.snapshot()
-    const task = state.subtasks[taskID]
+    const task = this.store.cloneSubtask(taskID)
     if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
     // Do not run work the queue has retired: the next reapAndRetire pass (or
     // the current one) records the terminal state with its reason preserved.
     if (task.attempts >= MAX_ATTEMPTS) return
     if (task.deadlineAt !== undefined && now() >= task.deadlineAt) return
     if (task.retryAfter !== undefined && now() < task.retryAfter) return
-    const workspace = state.workspaces[task.workspaceID]
-    const agent = state.agents[task.assigneeID]
+    const workspace = this.store.workspace(task.workspaceID)
+    const agent = this.store.agent(task.assigneeID)
     if (!workspace || !agent) return
     const runID = id("run")
     const globalEpoch = this.globalEpoch
@@ -3816,8 +3834,10 @@ export class EnsembleV2Service {
     // process dies, the lease expires and another pass re-queues the work;
     // if the claim was reaped, renewal stops touching the row.
     const heartbeat = setInterval(() => {
-      const current = this.store.snapshot().subtasks[task.id]
-      if (!current || current.claimedBy !== runID) return
+      const stored = this.store.subtask(task.id)
+      if (!stored || stored.claimedBy !== runID) return
+      const current = this.store.cloneSubtask(task.id)
+      if (!current) return
       current.leaseUntil = now() + LEASE_MS
       void this.store.saveSubtask(current)
     }, HEARTBEAT_MS)
@@ -3885,7 +3905,7 @@ export class EnsembleV2Service {
       await this.ctx.session.instructions.entry.put({
         sessionID: binding.sessionID,
         key: "ensemble.v2.context",
-        value: contextForTask(state, task, workspace, agent),
+        value: contextForTask(this.store.read(), task, workspace, agent),
       }).catch(() => undefined)
       // Ticket #103: General skills are a one-run leader grant. Apply the
       // extra allow rules before the prompt; the finally block restores the
@@ -3914,8 +3934,8 @@ export class EnsembleV2Service {
         if (!result.failure) break
         if (!availabilityFailure(result.failure) || anyToolCall(messages, attemptStartedAt) || index === models.length - 1) break
       }
-      const current = this.store.snapshot()
-      const currentTask = current.subtasks[task.id]
+      const current = this.store.read()
+      const currentTask = this.store.cloneSubtask(task.id)
       // A terminal state always wins over a late run result: a rejection (or
       // any other settle) that landed while the native session was finishing
       // must not be clobbered by the leftover reply.
@@ -3993,7 +4013,7 @@ export class EnsembleV2Service {
         await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
         return
       }
-      const children = Object.values(current.subtasks).filter((item) => item.parentID === currentTask.id)
+      const children = this.store.subtasks().filter((item) => item.parentID === currentTask.id)
       currentTask.activeRunID = undefined
       currentTask.claimedBy = undefined
       currentTask.leaseUntil = undefined
@@ -4040,8 +4060,7 @@ export class EnsembleV2Service {
       await this.settleLinkedApprovals(currentTask.id, "Superseded: the linked work finished.", new Set(["native"]))
       if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID)
     } catch (error: any) {
-      const current = this.store.snapshot()
-      const currentTask = current.subtasks[task.id]
+      const currentTask = this.store.cloneSubtask(task.id)
       const failureText = error?.message ?? String(error)
       if (currentTask?.activeRunID === runID) {
         // Transient failure: retry inside the attempt budget and deadline
@@ -4130,7 +4149,7 @@ export class EnsembleV2Service {
     // answered by the host, so settle it instead of lingering.
     if (existing && existing.sessionID !== created.id) await this.settleNativeForSession(existing.sessionID, "Session ended before the permission was answered.")
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-    const current = this.store.snapshot().agents[agent.id]
+    const current = this.store.cloneAgent(agent.id)
     if (current?.pendingSettings) {
       current.pendingSettings = false
       await this.store.saveAgent(current)
@@ -4139,7 +4158,7 @@ export class EnsembleV2Service {
   }
 
   private async releaseClaim(taskID: string, runID: string): Promise<void> {
-    const current = this.store.snapshot().subtasks[taskID]
+    const current = this.store.cloneSubtask(taskID)
     if (current && current.claimedBy === runID) {
       current.claimedBy = undefined
       current.leaseUntil = undefined
@@ -4165,14 +4184,14 @@ export class EnsembleV2Service {
     // linked product decisions as superseded. Native mirrors are excluded —
     // only the host or an explicit resolve settles them.
     await this.settleLinkedApprovals(task.id, "Superseded: the linked work finished.", new Set(["native"]))
-    const workspace = this.store.snapshot().workspaces[task.workspaceID]
+    const workspace = this.store.workspace(task.workspaceID)
     // A handoff that cannot be delivered produces a failure notice in the
     // conversation that asked, attributed to the intended recipient.
     if (workspace && task.workKind === "handoff" && task.handoff) {
-      const recipientName = this.store.snapshot().agents[task.handoff.recipientID]?.name ?? "Unknown agent"
+      const recipientName = this.store.agent(task.handoff.recipientID)?.name ?? "Unknown agent"
       await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, error, task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
     } else if (workspace && task.workKind === "turn" && task.turn) {
-      const recipientName = this.store.snapshot().agents[task.assigneeID ?? ""]?.name ?? "Unknown agent"
+      const recipientName = this.store.agent(task.assigneeID ?? "")?.name ?? "Unknown agent"
       await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${error} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
     } else if (workspace) {
       await this.appendMessage(workspace, { author: "system", text: `Subtask failed: ${error}`, kind: "system", taskID: task.id })
@@ -4181,18 +4200,19 @@ export class EnsembleV2Service {
   }
 
   private async maybeSynthesize(parentID: string): Promise<void> {
-    const state = this.store.snapshot()
-    const parent = state.subtasks[parentID]
-    if (!parent || parent.stage === "synthesis" || parent.state === "replied") return
+    const stored = this.store.subtask(parentID)
+    if (!stored || stored.stage === "synthesis" || stored.state === "replied") return
     // Ticket #71: batch reviews close only via the review tool once every
     // item is acted on or dismissed — never by child completion.
-    if (parent.handoff?.batch === true) return
+    if (stored.handoff?.batch === true) return
     // Completion deliveries are post-turn hops, not synthesis inputs; counting
     // them here would let an auto-handoff keep its finisher waiting forever.
-    const children = Object.values(state.subtasks).filter((item) => item.parentID === parentID && item.handoff?.completion !== true)
+    const children = this.store.subtasks().filter((item) => item.parentID === parentID && item.handoff?.completion !== true)
     if (children.length === 0 || children.some((child) => child.state !== "replied")) return
-    const workspace = state.workspaces[parent.workspaceID]
+    const workspace = this.store.workspace(stored.workspaceID)
     if (!workspace) return
+    const parent = this.store.cloneSubtask(parentID)
+    if (!parent) return
     if (workspace.synthesis) {
       parent.state = "pending"
       parent.stage = "synthesis"
