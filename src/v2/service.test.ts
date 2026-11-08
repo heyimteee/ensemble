@@ -2996,6 +2996,171 @@ test("restart recovery re-queues claimed work without duplicating it", async () 
   }
 })
 
+test("ticket148: load leaves a live foreign lease working row untouched", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-live-lease-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  const leaseUntil = Date.now() + 60_000
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Live", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 2, claimedBy: "run_other", activeRunID: "run_other", leaseUntil, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const previousLevel = process.env.ENSEMBLE_LOG_LEVEL
+  process.env.ENSEMBLE_LOG_LEVEL = "debug"
+  let stop = async () => {}
+  try {
+    stop = await service.start()
+  } finally {
+    if (previousLevel === undefined) delete process.env.ENSEMBLE_LOG_LEVEL
+    else process.env.ENSEMBLE_LOG_LEVEL = previousLevel
+  }
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "working")
+    assert.equal(row.claimedBy, "run_other")
+    assert.equal(row.activeRunID, "run_other")
+    assert.equal(row.leaseUntil, leaseUntil)
+    assert.equal(row.attempts, 2)
+    assert.equal(row.error, undefined, "load never writes a restart error onto live work")
+    const logs = await handlers["logs.recent"]({ directory, event: "task.recovery.deferred", limit: 20 })
+    assert.ok(logs.entries.length >= 1, "a live foreign lease is deferred, not reaped")
+    assert.equal((logs.entries[0] as any).claimedBy, "run_other")
+    assert.equal((logs.entries[0] as any).taskID, "t")
+    // A later maintenance pass still defers to the live lease.
+    await new Promise((resolve) => setTimeout(resolve, 1_100))
+    const later = await handlers.snapshot({ directory })
+    assert.equal((later.state.subtasks.t as any).state, "working")
+    assert.equal((later.state.subtasks.t as any).claimedBy, "run_other")
+    assert.equal((later.state.subtasks.t as any).attempts, 2)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: an expired lease is requeued once and attempts rise only on the next claim", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-expired-lease-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: true, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Stale", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 2, claimedBy: "run_dead", leaseUntil: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    // The expired claim is requeued without consuming an attempt.
+    assert.equal(row.state, "pending")
+    assert.equal(row.claimedBy, undefined)
+    assert.equal(row.leaseUntil, undefined)
+    assert.equal(row.attempts, 2)
+    const logs = await handlers["logs.recent"]({ directory, event: "task.recovery.requeued", limit: 50 })
+    assert.equal(logs.entries.length, 1)
+    assert.equal((logs.entries[0] as any).claimedBy, "run_dead")
+    assert.equal((logs.entries[0] as any).attempts, 2)
+    // A second pass sees a claimless row; it is not requeued again.
+    await (service as any).maintain()
+    const again = await handlers["logs.recent"]({ directory, event: "task.recovery.requeued", limit: 50 })
+    assert.equal(again.entries.length, 1)
+    assert.equal((await handlers.snapshot({ directory })).state.subtasks.t.attempts, 2)
+    // The next claim is the one that consumes attempt 3.
+    await handlers.invoke({ directory, action: "workspace.resume", payload: { id: "w" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal((after.state.subtasks.t as any).attempts, 3)
+    assert.equal((after.state.subtasks.t as any).outcome, "succeeded")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: a working row with no claim and no local run is repaired", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-no-claim-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: true, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Orphan", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "pending")
+    assert.equal(row.claimedBy, undefined)
+    assert.equal(row.leaseUntil, undefined)
+    assert.equal(row.attempts, 1, "repair never consumes an attempt")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: stop releases local claims and preserves foreign claims", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-stop-claims-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  const leaseUntil = Date.now() + 60_000
+  await seed.saveSubtask({
+    id: "t_local", workspaceID: "w", creatorType: "user", title: "Local", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, claimedBy: "run_local", activeRunID: "run_local", leaseUntil, createdAt: 1,
+  })
+  await seed.saveSubtask({
+    id: "t_foreign", workspaceID: "w", creatorType: "user", title: "Foreign", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, claimedBy: "run_foreign", activeRunID: "run_foreign", leaseUntil, createdAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  try {
+    // Register the local run identity without starting native work: stop() may
+    // only clear claims owned by this service's run set.
+    ;(service as any).activeRuns.set("run_local", {
+      id: "run_local", subtaskID: "t_local", workspaceID: "w", agentID: "a", sessionID: "session_local", status: "running", startedAt: 1,
+    })
+  } finally {
+    await stop()
+  }
+  try {
+    const reloaded = new V2Store(ctx)
+    await reloaded.load()
+    const local = reloaded.subtask("t_local") as any
+    const foreign = reloaded.subtask("t_foreign") as any
+    assert.equal(local.claimedBy, undefined)
+    assert.equal(local.leaseUntil, undefined)
+    assert.equal(foreign.claimedBy, "run_foreign")
+    assert.equal(foreign.leaseUntil, leaseUntil)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("exhausted attempts fail with the reason preserved", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
   const { ctx } = fakeContext()
@@ -3586,6 +3751,44 @@ test("ticket76: snapshot settles a streaming message whose task is terminal", as
     assert.ok(message)
     assert.equal(message.streaming, false)
     assert.equal(message.text, "partial reply")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: streaming rows survive load only while their lease is live", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-stream-lease-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: true, nextSeq: 10, createdAt: 1, lastActiveAt: 1 })
+  const liveUntil = Date.now() + 60_000
+  await seed.saveSubtask({ id: "t_live", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Live", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, claimedBy: "run_live", leaseUntil: liveUntil, createdAt: 1 })
+  await seed.saveSubtask({ id: "t_dead", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Dead", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, claimedBy: "run_dead", leaseUntil: 1, createdAt: 2 })
+  const nowMs = Date.now()
+  await seed.saveSubtask({ id: "t_done", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Done", instruction: "Do", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: nowMs - 1_000, repliedAt: nowMs, finishedAt: nowMs })
+  await seed.saveMessage({ id: "m_live", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t_live", text: "live partial", kind: "text", streaming: true, createdAt: 1, updatedAt: Date.now() })
+  await seed.saveMessage({ id: "m_dead", workspaceID: "w", seq: 2, author: "agent", agentID: "a", taskID: "t_dead", text: "dead partial", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveMessage({ id: "m_done", workspaceID: "w", seq: 3, author: "agent", agentID: "a", taskID: "t_done", text: "done partial", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveMessage({ id: "m_old", workspaceID: "w", seq: 4, author: "agent", agentID: "a", text: "orphan old", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveMessage({ id: "m_fresh", workspaceID: "w", seq: 5, author: "agent", agentID: "a", text: "orphan fresh", kind: "text", streaming: true, createdAt: Date.now(), updatedAt: Date.now() })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const find = (id: string) => (snapshot.state.messages.w as any[]).find((message) => message.id === id)
+    assert.equal(find("m_live").streaming, true, "a live lease keeps its row open across load")
+    assert.equal(find("m_live").interrupted, undefined)
+    assert.equal(find("m_dead").streaming, false, "an expired task lease settles the row")
+    assert.equal(find("m_dead").interrupted, true)
+    assert.equal(find("m_done").streaming, false, "a terminal task settles the row")
+    assert.equal(find("m_done").interrupted, false)
+    assert.equal(find("m_old").streaming, false, "an old taskless row settles")
+    assert.equal(find("m_old").interrupted, true)
+    assert.equal(find("m_fresh").streaming, true, "a fresh taskless row may still be live")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -4814,6 +5017,82 @@ test("a foreign-version write resets the feed and is recovered without data loss
     const snapshot = await handlersA.snapshot({ directory })
     assert.equal(snapshot.state.subtasks[delegated.result.id]?.title, "Foreign card", "the foreign task is hydrated, not lost")
   } finally {
+    await stopB()
+    await stopA()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: a second service over shared storage never steals a live claim", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-two-services-"))
+  const values = new Map<string, unknown>()
+  const first = fakeContext(values)
+  const second = fakeContext(values)
+  let release: (() => void) | undefined
+  const parked = new Promise<void>((resolve) => { release = resolve })
+  ;(first.ctx.session as any).wait = async () => { await parked }
+  const serviceA = new EnsembleV2Service(first.ctx)
+  const stopA = await serviceA.start()
+  const handlersA = serviceA.handlers()
+  let stopB = async () => {}
+  try {
+    const agent = await handlersA.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlersA.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "shared", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlersA.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Do the thing" } })
+    let taskID = ""
+    let ownerRunID = ""
+    await waitFor(async () => {
+      const next = await handlersA.snapshot({ directory })
+      const task = Object.values(next.state.subtasks).find((item: any) => item.state === "working") as any
+      if (!task?.claimedBy || !task.leaseUntil || task.leaseUntil <= Date.now()) return false
+      if (first.prompts.length !== 1) return false
+      taskID = task.id
+      ownerRunID = task.claimedBy
+      return true
+    })
+    const before = await handlersA.snapshot({ directory })
+    const original = before.state.subtasks[taskID] as any
+    assert.equal(first.prompts.length, 1)
+
+    // The second service loads the same durable state while the first owns a
+    // live claim. Load must not requeue or rewrite the running row.
+    const serviceB = new EnsembleV2Service(second.ctx)
+    stopB = await serviceB.start()
+    const handlersB = serviceB.handlers()
+    const seen = await handlersB.snapshot({ directory })
+    const foreign = seen.state.subtasks[taskID] as any
+    assert.equal(foreign.state, "working")
+    assert.equal(foreign.claimedBy, ownerRunID)
+    assert.equal(foreign.activeRunID, original.activeRunID)
+    assert.equal(foreign.attempts, original.attempts)
+    assert.doesNotMatch(String(foreign.error ?? ""), /restart/i)
+    assert.equal(first.prompts.length + second.prompts.length, 1, "only the claim owner prompts")
+
+    release?.()
+    await waitFor(async () => {
+      const next = await handlersA.snapshot({ directory })
+      return (next.state.subtasks[taskID] as any)?.state === "replied"
+    }, 5_000)
+    await waitFor(async () => {
+      const next = await handlersB.snapshot({ directory })
+      return (next.state.subtasks[taskID] as any)?.state === "replied"
+    }, 5_000)
+    const finalA = await handlersA.snapshot({ directory })
+    const finalB = await handlersB.snapshot({ directory })
+    assert.equal((finalA.state.subtasks[taskID] as any).attempts, 1, "one claim winner, one attempt")
+    assert.equal((finalB.state.subtasks[taskID] as any).attempts, 1)
+    assert.equal((finalA.state.subtasks[taskID] as any).outcome, "succeeded")
+    assert.equal((finalB.state.subtasks[taskID] as any).outcome, "succeeded")
+    assert.equal(first.prompts.length + second.prompts.length, 1, "one prompt total")
+    const replies = (finalB.state.messages[workspace.result.id] as any[]).filter((message) => message.author === "agent")
+    assert.equal(replies.length, 1, "one durable result")
+    assert.equal(replies[0].text, "OK")
+  } finally {
+    release?.()
     await stopB()
     await stopA()
     rmSync(directory, { recursive: true, force: true })

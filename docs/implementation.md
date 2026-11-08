@@ -228,7 +228,7 @@ pending ──assign──▶ working ──result──▶ replied
 - One active run per agent per workspace.
 - One editing run per canonical directory; research can continue.
 - Closing the Ensemble page does not stop native work.
-- On restart, working subtasks return to Pending with an interrupted badge and an `interrupted` approval (or keep an existing pending question approval). They never replay automatically; the user resumes, answers, or discards them.
+- On restart, live `working` rows are never rewritten. A claim with an unexpired lease stays with its owner; an expired claim with no local run is re-queued with attempts preserved, and a working row with no claim is repaired. No approval is synthesized for dead work.
 - Cancelling, retrying, or reassigning a subtask closes its pending question/interrupted approvals, so stale decisions cannot restart dead work.
 - Model fallback uses the ordered backup list and surfaces switches.
 - Permission denials, tool failures, and provider exhaustion pause the subtask with an interrupted approval; an uncertain tool outcome is never retried automatically.

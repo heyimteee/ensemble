@@ -187,23 +187,60 @@ test("sync picks up subtasks, messages, and approvals written by another store",
   assert.equal(reader.snapshot().version, stale.snapshot().version)
 })
 
-test("load recovers claimed work without duplicating it and backfills queue keys", async () => {
+test("load leaves an unexpired working claim untouched and backfills queue keys", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.load()
   await store.saveWorkspace(workspace())
-  await store.saveSubtask(subtask({ id: "t", assigneeID: "a", state: "working", attempts: 2, claimedBy: "run_1", leaseUntil: Date.now() + 60_000, deadlineAt: Date.now() + 300_000 }))
+  const leaseUntil = Date.now() + 60_000
+  await store.saveSubtask(subtask({
+    id: "t",
+    assigneeID: "a",
+    state: "working",
+    attempts: 2,
+    claimedBy: "run_other",
+    activeRunID: "run_other",
+    leaseUntil,
+    error: "in progress",
+    deadlineAt: Date.now() + 300_000,
+  }))
   const loaded = new V2Store(ctx)
   await loaded.load()
   const recovered = loaded.snapshot().subtasks.t
-  assert.equal(recovered.state, "pending")
+  // Ticket #148: a live lease belongs to another instance. Load may backfill
+  // derived fields, but it must not steal the claim or rewrite the row.
+  assert.equal(recovered.state, "working")
   assert.equal(recovered.interrupted, false)
-  assert.equal(recovered.claimedBy, undefined)
-  assert.equal(recovered.leaseUntil, undefined)
-  assert.equal(recovered.activeRunID, undefined)
+  assert.equal(recovered.claimedBy, "run_other")
+  assert.equal(recovered.activeRunID, "run_other")
+  assert.equal(recovered.leaseUntil, leaseUntil)
+  assert.equal(recovered.error, "in progress")
   assert.equal(recovered.attempts, 2)
   assert.ok(recovered.queueKey?.startsWith("work:w:delegation:user:"))
   assert.equal(Object.keys(loaded.snapshot().subtasks).length, 1)
+})
+
+test("load leaves an expired working claim for lease-time recovery", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveWorkspace(workspace())
+  await store.saveSubtask(subtask({
+    id: "t",
+    assigneeID: "a",
+    state: "working",
+    attempts: 3,
+    claimedBy: "run_dead",
+    leaseUntil: 1,
+  }))
+  const loaded = new V2Store(ctx)
+  await loaded.load()
+  const recovered = loaded.snapshot().subtasks.t
+  // Expiry is the reaper's job, not load's: the store must not pre-empt it.
+  assert.equal(recovered.state, "working")
+  assert.equal(recovered.claimedBy, "run_dead")
+  assert.equal(recovered.leaseUntil, 1)
+  assert.equal(recovered.attempts, 3)
 })
 
 test("sync never overwrites a locally held claim but still merges other fields", async () => {
@@ -315,6 +352,26 @@ test("streaming rows are indexed across save, foreign sync, and removal", async 
 
   await store.removePrefix("v2/message/w/")
   assert.deepEqual(store.streamingMessages(), [])
+})
+
+test("load preserves streaming rows and indexes them for settling", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveWorkspace(workspace({ nextSeq: 3 }))
+  await store.saveMessage(message({ id: "m1", seq: 1, streaming: true, text: "partial", updatedAt: 1 }))
+  await store.saveMessage(message({ id: "m2", seq: 2, streaming: true, text: "fresh", updatedAt: Date.now() }))
+  const loaded = new V2Store(ctx)
+  await loaded.load()
+  // Ticket #148: load never decides a live stream is dead. The service
+  // settles terminal, expired, or stale rows from this index after load.
+  assert.equal(loaded.message("w", "m1")?.streaming, true)
+  assert.equal(loaded.message("w", "m1")?.interrupted, undefined)
+  assert.equal(loaded.message("w", "m2")?.streaming, true)
+  assert.deepEqual(
+    loaded.streamingMessages().sort((a, b) => a.messageID.localeCompare(b.messageID)),
+    [{ workspaceID: "w", messageID: "m1" }, { workspaceID: "w", messageID: "m2" }],
+  )
 })
 
 test("foreign-version sync merges 10k messages within budget", async (t) => {
