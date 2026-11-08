@@ -354,3 +354,104 @@ test("ticket144: a retry countdown refreshes every second and stops at the ETA",
   assert.equal(nextWorkInvalidation([retrying], [], 5_000), 5_500, "the ETA comes before the next second")
   assert.equal(nextWorkInvalidation([retrying], [], 6_000), 7_000, "a due retry keeps refreshing until claimed")
 })
+
+test("ticket162: Work shows continuation lineage and exhausted groups as a controlled stop", () => {
+  const items = [
+    working({ id: "root-live", dispatchGroupID: "dispatch_root", createdAt: 1 }),
+    working({ id: "cont-live", dispatchGroupID: "dispatch_cont", createdAt: 2 }),
+  ]
+  const ledger = {
+    dispatch_root: {
+      id: "dispatch_root",
+      workspaceID: "w",
+      rootID: "dispatch_root",
+      continuationIndex: 0,
+      maxHops: 8,
+      usedHops: 8,
+      depthMax: 8,
+      commandMaxHops: 24,
+      commandUsedHops: 8,
+      maxContinuations: 2,
+      continuationsUsed: 1,
+      createdAt: 1,
+      closedAt: 10,
+      closeReason: "continued",
+    },
+    dispatch_cont: {
+      id: "dispatch_cont",
+      workspaceID: "w",
+      rootID: "dispatch_root",
+      parentID: "dispatch_root",
+      continuationIndex: 1,
+      maxHops: 8,
+      usedHops: 3,
+      depthMax: 8,
+      createdAt: 2,
+    },
+  }
+  const groups = workGroupsForTasks(items, record(...items), { now: 5_000, dispatchGroups: ledger })
+  assert.equal(groups.length, 2)
+  assert.equal(groups[0].state, "closed")
+  assert.equal(groups[0].exhausted, true)
+  assert.equal(groups[0].closeReason, "continued")
+  assert.equal(groups[0].continuationIndex, 0)
+  assert.equal(groups[0].rootID, "dispatch_root")
+  assert.equal(groups[1].state, "active")
+  assert.equal(groups[1].exhausted, false)
+  assert.equal(groups[1].continuationIndex, 1)
+  assert.equal(groups[1].parentContinuationIndex, 0)
+  assert.equal(groups[1].parentID, "dispatch_root")
+  assert.equal(groups[1].rootID, "dispatch_root")
+  assert.equal(
+    workGroupLabel(groups[0]!, 1),
+    "GROUP 1 · EXHAUSTED · CONTINUED · hops 8/8 · cmd 16 left · 1 active · 0 done",
+  )
+  assert.equal(
+    workGroupLabel(groups[1]!, 2),
+    "GROUP 2 · CONT 1 · from root · hops 3/8 · cmd 16 left · 1 active · 0 done",
+  )
+  assert.equal(workSummaryCounts(2, 2, 0, 1), "WORK 2 groups · 2 active · 0 done · 1 exhausted")
+
+  const compact = workGroupLayout(groups, 40, 28)
+  assert.equal(compact.mode, "compact")
+  assert.deepEqual(compact.sections.map((section) => section.label), [workGroupLabel(groups[0]!, 1), workGroupLabel(groups[1]!, 2)])
+  assert.deepEqual(compact.sections.map((section) => section.tone), ["warn", "faint"], "exhaustion is a warning stop, not failure")
+  assert.ok((compact.sections[0]!.label ?? "").slice(0, 40).includes("EXHAUSTED"), "the narrow label keeps the controlled stop")
+  assert.ok((compact.sections[1]!.label ?? "").slice(0, 40).includes("CONT 1 · from root"), "the narrow label keeps the lineage")
+
+  const cards = workGroupLayout(groups, 76, 40)
+  assert.equal(cards.mode, "cards")
+  assert.ok(cards.sections.every((section) => section.label !== null), "both groups label their lineage")
+  assert.ok(cards.sections.some((section) => (section.label ?? "").includes("EXHAUSTED")))
+  assert.ok(cards.sections.some((section) => (section.label ?? "").includes("CONT 1 · from root")))
+})
+
+test("ticket162: a just-exhausted group reads as a stop, not a failure", () => {
+  const items = [working({ id: "spent-live", dispatchGroupID: "dispatch_spent", createdAt: 1 })]
+  const ledger = {
+    dispatch_spent: {
+      id: "dispatch_spent",
+      workspaceID: "w",
+      rootID: "dispatch_spent",
+      continuationIndex: 0,
+      maxHops: 8,
+      usedHops: 8,
+      depthMax: 8,
+      commandMaxHops: 24,
+      commandUsedHops: 8,
+      maxContinuations: 2,
+      continuationsUsed: 0,
+      createdAt: 1,
+    },
+  }
+  const groups = workGroupsForTasks(items, record(...items), { now: 5_000, dispatchGroups: ledger })
+  assert.equal(groups[0]?.state, "exhausted")
+  assert.equal(groups[0]?.exhausted, true)
+  const label = workGroupLabel(groups[0]!, 1)
+  assert.match(label, /EXHAUSTED/)
+  assert.doesNotMatch(label, /CONTINUED/)
+  assert.doesNotMatch(label, /FAILED/)
+  const layout = workGroupLayout(groups, 40, 24)
+  assert.equal(layout.sections[0]?.tone, "warn")
+  assert.ok((layout.sections[0]?.label ?? "").includes("EXHAUSTED"), "a lone exhausted group still names its controlled stop")
+})

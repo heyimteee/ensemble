@@ -50,6 +50,8 @@ export type ReviewDecision = {
   action: ReviewAction
   assignee?: string
   note?: string
+  /** Required for `delegate`: direct dispatches the recipient may make. */
+  maxHops?: number
 }
 
 export type CompletionRoute =
@@ -154,7 +156,7 @@ export function batchReviewText(items: CompletionItem[], reviewerName: string): 
   return [
     `$${reviewerName}, ${batchReviewTitle(items.length).toLowerCase()} before continuing:`,
     ...lines,
-    `Act per item with ensemble_review: delegate (name an assignee), start, end, or dismiss. The batch closes only when every item is acted on or dismissed.`,
+    `Act per item with ensemble_review: delegate (name an assignee and a required maxHops budget), start, end, or dismiss. The batch closes only when every item is acted on or dismissed.`,
   ].join("\n")
 }
 
@@ -171,19 +173,37 @@ export function parseReviewDecisions(input: unknown): { ok: true; decisions: Rev
   const decisions: ReviewDecision[] = []
   for (const entry of raw) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return { ok: false, reason: "Each review decision must name an item and an action." }
-    const { item, action, assignee, note } = entry as Record<string, unknown>
+    const { item, action, assignee, note, maxHops } = entry as Record<string, unknown>
     if (typeof item !== "string" || !item.trim()) return { ok: false, reason: "Each review decision must name an item." }
     if (typeof action !== "string" || !(REVIEW_ACTIONS as readonly string[]).includes(action)) {
       return { ok: false, reason: `Unknown review action "${String(action)}"; use delegate, start, end, or dismiss.` }
     }
     if (seen.has(item)) return { ok: false, reason: `Item "${item}" is decided twice; decide each item once.` }
     seen.add(item)
-    if (action === "delegate" && (typeof assignee !== "string" || !assignee.trim())) {
-      return { ok: false, reason: `Delegating item "${item}" must name an assignee.` }
+    if (action === "delegate") {
+      if (typeof assignee !== "string" || !assignee.trim()) {
+        return { ok: false, reason: `Delegating item "${item}" must name an assignee.` }
+      }
+      // Ticket #162: review delegation follows the same required-budget path
+      // as ensemble_delegate. A missing value is an explicit validation error,
+      // never a silent group-remaining default.
+      if (maxHops === undefined || maxHops === null) {
+        return {
+          ok: false,
+          reason: `Delegating item "${item}" must include maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask.`,
+        }
+      }
+      if (typeof maxHops !== "number" || !Number.isInteger(maxHops) || maxHops < 0) {
+        return {
+          ok: false,
+          reason: `Delegating item "${item}" maxHops must be a non-negative integer. Use maxHops: 0 for a one-shot ask.`,
+        }
+      }
     }
     const decision: ReviewDecision = { item, action: action as ReviewAction }
     if (typeof assignee === "string" && assignee.trim()) decision.assignee = assignee.trim()
     if (typeof note === "string" && note.trim()) decision.note = note.trim()
+    if (action === "delegate") decision.maxHops = maxHops as number
     decisions.push(decision)
   }
   return { ok: true, decisions }

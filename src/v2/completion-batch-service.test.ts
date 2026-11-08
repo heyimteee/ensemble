@@ -338,7 +338,7 @@ test("two completions produce one batch review with per-item decisions", async (
         batch: batch.id,
         decisions: [
           { item: secondItem, action: "dismiss" },
-          { item: third, action: "delegate", assignee: "Kim", note: "Take it from here" },
+          { item: third, action: "delegate", assignee: "Kim", note: "Take it from here", maxHops: 1 },
         ],
       },
       { sessionID: novaSession },
@@ -358,6 +358,7 @@ test("two completions produce one batch review with per-item decisions", async (
     // A review follow-up is part of the same dispatch: the delegated task
     // inherits the batch's group instead of starting a phantom dispatch.
     assert.equal((delegation as any).dispatchGroupID, batch.dispatchGroupID)
+    assert.equal((delegation as any).taskMaxHops, 1, "review delegation carries its explicit task budget")
     const texts = ((after.state.messages[workspaceID] ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
     assert.ok(texts.some((text) => text.includes("Review closed: Review 3 completions")))
@@ -412,7 +413,7 @@ test("non-leader batch review hands onward to the leader on full disposition", a
     // Delegate is leader-only: the refusal leaves the item undecided and the
     // batch open — never delegate-after-handoff by another name.
     const refused = await tools.get("review").execute(
-      { batch: "batch-1", decisions: [{ item: "i1", action: "delegate", assignee: "Nova" }] },
+      { batch: "batch-1", decisions: [{ item: "i1", action: "delegate", assignee: "Nova", maxHops: 1 }] },
       { sessionID: "sess_sage" },
     )
     assert.match(refused.content, /only the workspace leader/)
@@ -447,6 +448,59 @@ test("non-leader batch review hands onward to the leader on full disposition", a
     assert.equal(onwardAck.author, "system")
     assert.ok(!onwardAck.text.includes("do not call ensemble_delegate"))
     assert.ok(!onwardAck.text.includes("(ref handoff_"))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket162: review delegation requires an explicit maxHops budget", async () => {
+  const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
+  const { ctx, tools } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  for (const [id, name] of [["nova", "Nova"], ["sage", "Sage"]] as const) {
+    await seed.saveAgent({ id, name, title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  }
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "nova", memberIDs: ["nova", "sage"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: "nova", sessionID: "sess_nova", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveSubtask({
+    id: "batch-budget", workspaceID: "w", creatorType: "agent", creatorAgentID: "sage", assigneeID: "nova",
+    title: "Review 1 completion", instruction: "Review 1 completion", mode: "research", state: "pending",
+    stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true,
+    attempts: 0, createdAt: 1, workKind: "handoff", queueKey: "batch:w:nova:budget", dispatchGroupID: "dispatch_budget",
+    handoff: { correlationID: "batch_budget", senderID: "sage", recipientID: "nova", depth: 1, completion: true, batch: true, chain: ["sage"], itemIDs: ["budget-item"] },
+  })
+  await seed.saveSubtask({
+    id: "budget-item", workspaceID: "w", parentID: "batch-budget", creatorType: "agent", creatorAgentID: "sage", assigneeID: "nova",
+    title: "Budgeted follow-up", instruction: "Budgeted follow-up", mode: "research", state: "pending",
+    stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 0, createdAt: 1, workKind: "handoff", queueKey: "completion:w:fin:budget-item", dispatchGroupID: "dispatch_budget",
+    handoff: { correlationID: "corr_budget", senderID: "sage", recipientID: "nova", depth: 1, parentID: "batch-budget", completion: true, chain: ["sage"], batchedIn: "batch-budget" },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const missing = await tools.get("review").execute(
+      { batch: "batch-budget", decisions: [{ item: "budget-item", action: "delegate", assignee: "Sage" }] },
+      { sessionID: "sess_nova" },
+    )
+    assert.match(missing.content, /must include maxHops/)
+    let snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.subtasks["budget-item"].handoff?.decided, undefined)
+    assert.equal(Object.values(snapshot.state.subtasks).some((task: any) => task.assigneeID === "sage" && task.title === "Budgeted follow-up"), false)
+
+    const accepted = await tools.get("review").execute(
+      { batch: "batch-budget", decisions: [{ item: "budget-item", action: "delegate", assignee: "Sage", maxHops: 0 }] },
+      { sessionID: "sess_nova" },
+    )
+    assert.match(accepted.content, /delegated to \$Sage/)
+    snapshot = await handlers.snapshot({ directory })
+    const delegated = Object.values(snapshot.state.subtasks).find((task: any) => task.title === "Budgeted follow-up" && task.assigneeID === "sage") as any
+    assert.ok(delegated)
+    assert.equal(delegated.taskMaxHops, 0, "the review decision's explicit budget reaches the work item")
+    assert.equal(delegated.dispatchGroupID, "dispatch_budget")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

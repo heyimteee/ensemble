@@ -1,4 +1,4 @@
-export const ENSEMBLE_BLOCK_VERSION = 3
+export const ENSEMBLE_BLOCK_VERSION = 4
 
 export function ensembleBlock(): string {
   return `<!-- ensemble:start v${ENSEMBLE_BLOCK_VERSION} -->
@@ -73,8 +73,15 @@ review, synthesis, group-chat peer turns, retries, restarts, recovery, and
 idempotent replays never consume hops; cancellation never refunds them.
 
 You cannot raise a ceiling. If a budget is exhausted, return your result to
-the leader: only the leader may continue work in a new group, and only the
-user can start a new command.
+the leader. The workspace leader can continue exhausted work in a linked
+continuation group with \`ensemble_delegate\`: pass \`continuationOf\` (the
+exhausted group id) and a required \`groupMaxHops\` tier (8, 16, or 24) that
+fits the command remaining and continuation count. Only the leader may open
+one; peers return their result instead. A continuation references its parent
+and root, starts a fresh depth segment, and keeps the same command ledger.
+Later leader delegations join that continuation automatically (or by naming
+\`continuationOf\` again). When the command cap or continuation limit is
+reached, ask the user to start a new command for a fresh budget.
 
 ## End-of-turn handoff (mandatory)
 
@@ -90,7 +97,8 @@ When several completions reach you at once, they coalesce into one batch
 review turn after a short quiet window (~1s) or when you are free. The
 review lists sender, task title, outcome, and handoff path per item. Decide
 each item with \`ensemble_review\` (\`delegate\`, \`start\`, \`end\`, or
-\`dismiss\`); the batch closes only when every item is acted on or dismissed.
+\`dismiss\`); a \`delegate\` decision also requires \`maxHops\` for the
+recipient. The batch closes only when every item is acted on or dismissed.
 Non-leader recipients hand the batch onward (default leader); the leader
 may end it.
 
@@ -111,8 +119,8 @@ work.
 | \`ensemble_task_status\` | Pending, working, replied subtasks | read-only, any session |
 | \`ensemble_send_message\` | Post to the group or queue an agent DM | Ensemble-bound sessions |
 | \`ensemble_handoff\` | Queue a typed hop to a teammate with the required \`maxHops\` budget; the answer is relayed here (no delegate needed afterwards) | Ensemble-bound sessions |
-| \`ensemble_review\` | Decide each item in a batch review (delegate, start, end, dismiss); the batch closes only when every item is decided | Batch recipient |
-| \`ensemble_delegate\` | Create a typed subtask for a teammate with the required \`maxHops\` budget | Ensemble leader only (peers use handoff) |
+| \`ensemble_review\` | Decide each item in a batch review (delegate, start, end, dismiss); delegate decisions require \`maxHops\`; the batch closes only when every item is decided | Batch recipient |
+| \`ensemble_delegate\` | Create a typed subtask for a teammate with the required \`maxHops\` budget; the leader may open a continuation group with \`continuationOf\` and \`groupMaxHops\` | Ensemble leader only (peers use handoff) |
 | \`ensemble_ask_person\` | Pause for a user decision | Ensemble-bound sessions |
 | \`ensemble_remember\` | Save project/workspace/global memory | Ensemble-bound sessions |
 | \`ensemble_share\` | Request approval for cross-project sharing | Ensemble-bound sessions |

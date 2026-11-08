@@ -1020,7 +1020,7 @@ export function EnsembleV2App() {
   })
   const workHeader = () => {
     const pane = workPane()
-    const summary = workSummaryCounts(pane.counts.groups, pane.counts.active, pane.counts.done)
+    const summary = workSummaryCounts(pane.counts.groups, pane.counts.active, pane.counts.done, pane.groups.filter((group) => group.exhausted === true).length)
     const extras: string[] = []
     if (pane.layout.hiddenGroups > 0) {
       extras.push(`+${pane.layout.hiddenGroups} ${pane.layout.hiddenGroups === 1 ? "group" : "groups"}`)
@@ -6164,7 +6164,7 @@ export function EnsembleV2App() {
                                 <For each={workPane().sections}>{(section) => (
                                   <box flexDirection="column" width="100%">
                                     <Show when={section.label}>
-                                      <ChromeText colors={colors} fg={colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                                      <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                                     </Show>
                                     <For each={section.tasks}>{(task) => {
                                       // Ticket #142: compact rows are not Work
@@ -6209,12 +6209,12 @@ export function EnsembleV2App() {
                                 <For each={workPane().sections}>{(section, sectionIndex) => (
                                   <Show when={section.mode === "cards"} fallback={
                                     <Show when={section.label}>
-                                      <ChromeText colors={colors} fg={colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                                      <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                                     </Show>
                                   }>
                                     <box flexDirection="column" width="100%" marginTop={workSectionMarginTop(sectionIndex())}>
                                       <Show when={section.label}>
-                                        <ChromeText colors={colors} fg={colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                                        <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                                       </Show>
                                       <box flexDirection="row" width="100%" gap={1}>
                                         <For each={section.cards}>{(card) => (

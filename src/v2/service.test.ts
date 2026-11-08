@@ -1546,11 +1546,11 @@ test("init runs as a visible System Agent job and publishes the full report", as
     assert.equal(job.sessionID.startsWith("session_"), true)
     assert.equal(commands.filter((entry) => entry.name === "init").length, 1)
     const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
-    assert.ok(content.startsWith("<!-- ensemble:start v3 -->"))
+    assert.ok(content.startsWith("<!-- ensemble:start v4 -->"))
     assert.ok(content.includes("# Repo"))
     assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1)
     const metadata = JSON.parse(readFileSync(join(directory, ".ensemble", "init.json"), "utf8"))
-    assert.equal(metadata.version, 3)
+    assert.equal(metadata.version, 4)
   } finally {
     await stop()
   }

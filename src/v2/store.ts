@@ -1,5 +1,5 @@
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
-import { dispatchAdmissionRefusal, dispatchBudgetState, dispatchDepthFor, dispatchGroupRemaining, reconcileLegacyDispatchGroup, type DispatchRefusal } from "./dispatch-budget.ts"
+import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchGroupExhausted, dispatchGroupRemaining, reconcileLegacyDispatchGroup, validateContinuation, type ContinuationRefusal, type DispatchRefusal } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
@@ -851,8 +851,13 @@ export class V2Store {
     admitted: boolean
     task: Subtask
     group?: DispatchGroup
+    previousGroup?: DispatchGroup
+    root?: DispatchGroup
+    previousRoot?: DispatchGroup
+    exhaustedBefore?: boolean
+    exhaustedAfter?: boolean
     consumed: boolean
-    reason?: "task-exhausted" | "group-exhausted" | "depth-exhausted" | "command-exhausted" | "fanout-exhausted"
+    reason?: "task-exhausted" | "group-exhausted" | "group-closed" | "depth-exhausted" | "command-exhausted" | "fanout-exhausted"
     refusal?: DispatchRefusal
   }> {
     return this.write(async () => {
@@ -866,9 +871,9 @@ export class V2Store {
         }
       }
       const parent = subtask.parentID ? this.state.subtasks[subtask.parentID] : undefined
-      const depth = parent ? dispatchDepthFor(parent, this.state.subtasks) + 1 : 0
-      subtask.dispatchDepth = depth
       const groupID = subtask.dispatchGroupID
+      const depth = dispatchChildDepth(parent, groupID, this.state.subtasks)
+      subtask.dispatchDepth = depth
       const group = groupID ? this.state.dispatchGroups[groupID] : undefined
       if (!group) {
         this.state.subtasks[subtask.id] = subtask
@@ -878,6 +883,7 @@ export class V2Store {
         return { admitted: true, task: subtask, consumed: false }
       }
       const root = group.id === group.rootID ? group : this.state.dispatchGroups[group.rootID]
+      const exhaustedBefore = dispatchGroupExhausted(group, this.state.dispatchGroups)
       if (options.enforce) {
         const budget = dispatchBudgetState({
           group,
@@ -893,12 +899,17 @@ export class V2Store {
           : 0
         const refusal = dispatchAdmissionRefusal({ state: budget, maxPerRun: options.maxPerRun, fanOutUsed })
         if (refusal) {
+          const reason: "task-exhausted" | "group-exhausted" | "group-closed" | "depth-exhausted" | "command-exhausted" | "fanout-exhausted" =
+            refusal.layer === "closed" ? "group-closed" : `${refusal.layer}-exhausted`
           return {
             admitted: false,
             task: subtask,
             group,
+            previousGroup: group,
+            root,
+            previousRoot: root,
             consumed: false,
-            reason: `${refusal.layer}-exhausted` as const,
+            reason,
             refusal,
           }
         }
@@ -929,7 +940,82 @@ export class V2Store {
       this.notify(() => this.observer?.subtask?.(subtask, undefined))
       this.notify(() => this.observer?.dispatchGroup?.(nextGroup, group))
       if (nextRoot && nextRoot.id !== nextGroup.id) this.notify(() => this.observer?.dispatchGroup?.(nextRoot, root))
-      return { admitted: true, task: subtask, group: nextGroup, consumed: true }
+      return {
+        admitted: true,
+        task: subtask,
+        group: nextGroup,
+        previousGroup: group,
+        root: nextRoot,
+        previousRoot: root,
+        exhaustedBefore,
+        exhaustedAfter: dispatchGroupExhausted(nextGroup, this.state.dispatchGroups),
+        consumed: true,
+      }
+    })
+  }
+
+  /**
+   * Ticket #162 continuation creation. One serialized mutation validates the
+   * referenced exhausted group, increments the root continuation count, seals
+   * the parent as continued, and persists the linked segment. Creation spends
+   * no hop and never creates work; the first delegation spends its own hop
+   * through `admitDispatchedSubtask`.
+   */
+  async createContinuationDispatchGroup(input: {
+    id: Id
+    workspaceID: Id
+    parentID: Id
+    maxHops: number
+    now?: number
+  }): Promise<
+    | { ok: true; group: DispatchGroup; root: DispatchGroup; parent: DispatchGroup }
+    | { ok: false; refusal: ContinuationRefusal }
+  > {
+    return this.write(async () => {
+      const existing = this.state.dispatchGroups[input.id]
+      const parent = this.state.dispatchGroups[input.parentID]
+      if (existing && parent) {
+        const root = this.state.dispatchGroups[existing.rootID]
+        return { ok: true, group: existing, root: root ?? existing, parent }
+      }
+      const validation = validateContinuation({
+        continuationOf: input.parentID,
+        groupMaxHops: input.maxHops,
+        groups: this.state.dispatchGroups,
+        workspaceID: input.workspaceID,
+        isLeader: true,
+      })
+      if (!validation.ok) return { ok: false, refusal: validation.refusal }
+      const ledger = continuationDispatchLedger({
+        id: input.id,
+        root: validation.root,
+        parent: validation.parent,
+        maxHops: validation.maxHops,
+        ...(input.now !== undefined ? { now: input.now } : {}),
+      })
+      this.state.dispatchGroups[ledger.group.id] = ledger.group
+      this.state.dispatchGroups[ledger.root.id] = ledger.root
+      if (ledger.parent.id !== ledger.root.id) this.state.dispatchGroups[ledger.parent.id] = ledger.parent
+      await this.ctx.storage.set(`v2/dispatchgroup/${ledger.group.id}`, ledger.group)
+      await this.ctx.storage.set(`v2/dispatchgroup/${ledger.root.id}`, ledger.root)
+      if (ledger.parent.id !== ledger.root.id) await this.ctx.storage.set(`v2/dispatchgroup/${ledger.parent.id}`, ledger.parent)
+      const changes: EntityChange[] = [
+        { entity: "dispatchGroup", op: "upsert", group: structuredClone(ledger.group) },
+        { entity: "dispatchGroup", op: "upsert", group: structuredClone(ledger.root) },
+        ...(ledger.parent.id !== ledger.root.id
+          ? [{ entity: "dispatchGroup" as const, op: "upsert" as const, group: structuredClone(ledger.parent) }]
+          : []),
+      ]
+      await this.commit(changes)
+      this.notify(() => this.observer?.dispatchGroup?.(ledger.group, undefined))
+      this.notify(() => this.observer?.dispatchGroup?.(ledger.root, validation.parent.id === validation.root.id ? validation.parent : validation.root))
+      if (ledger.parent.id !== ledger.root.id) this.notify(() => this.observer?.dispatchGroup?.(ledger.parent, validation.parent))
+      return {
+        ok: true,
+        group: ledger.group,
+        root: ledger.root,
+        parent: ledger.parent,
+      }
     })
   }
 

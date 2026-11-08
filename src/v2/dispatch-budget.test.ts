@@ -4,18 +4,23 @@ import {
   DISPATCH_COMMAND_TIERS,
   DISPATCH_DEPTH_MAX,
   DISPATCH_GROUP_TIERS,
+  continuationDispatchLedger,
+  continuationRefusalText,
   dispatchAdmissionRefusal,
   dispatchBudgetContext,
   dispatchBudgetLine,
   dispatchBudgetState,
   dispatchBudgetSummary,
+  dispatchChildDepth,
   dispatchCommandRemaining,
   dispatchDepthFor,
   dispatchFanOutCount,
+  dispatchGroupExhausted,
   dispatchGroupRemaining,
   dispatchGroupState,
   dispatchHopCount,
   dispatchRefusalText,
+  dispatchTargetGroup,
   dispatchTaskHopCount,
   dispatchesHop,
   dispatchLimitSettings,
@@ -25,10 +30,11 @@ import {
   reconcileLegacyDispatchGroup,
   reconcileLegacyTaskBudgets,
   stepDispatchLimit,
+  validateContinuation,
   validateDispatchLimits,
   validateTaskMaxHops,
 } from "./dispatch-budget.ts"
-import type { Settings, Subtask } from "./types.ts"
+import type { DispatchGroup, Settings, Subtask } from "./types.ts"
 
 const settings = (patch: Partial<Settings> = {}): Settings => ({
   maxActiveRuns: 3,
@@ -353,4 +359,149 @@ test("ticket161: turn context and tool results show used and remaining budgets",
   assert.match(context, /do not consume/)
   assert.match(context, /cannot raise these ceilings/i)
   assert.ok(!context.includes("secret"), "context carries numbers, never task content")
+})
+
+/* ------------------------------------------------------------------------- *
+ * Ticket #162: exhaustion and continuation groups.
+ * ------------------------------------------------------------------------- */
+
+const exhaustedRoot = (patch: Partial<DispatchGroup> = {}) => ({
+  ...newRootDispatchGroup({ id: "dispatch_root", workspaceID: "w", settings: settings(), now: 1 }),
+  usedHops: 8,
+  commandUsedHops: 8,
+  ...patch,
+})
+
+test("ticket162: continuation requires an exhausted latest group and a fitting tier", () => {
+  const root = exhaustedRoot()
+  const groups = { [root.id]: root }
+  const base = { groups, workspaceID: "w", isLeader: true } as const
+  assert.deepEqual(validateContinuation({ ...base, continuationOf: root.id, groupMaxHops: 8 }), {
+    ok: true,
+    root,
+    parent: root,
+    maxHops: 8,
+  })
+  const refusal = (input: { continuationOf?: unknown; groupMaxHops?: unknown; groups?: any; isLeader?: boolean }) => {
+    const result = validateContinuation({ ...base, ...input } as any)
+    return result.ok ? undefined : result.refusal
+  }
+  assert.equal(refusal({ continuationOf: root.id, groupMaxHops: 8, isLeader: false })?.reason, "not-leader")
+  assert.equal(refusal({ continuationOf: "missing", groupMaxHops: 8 })?.reason, "unknown-group")
+  assert.equal(refusal({ continuationOf: root.id, groupMaxHops: 12 })?.reason, "invalid-group-budget")
+  assert.equal(refusal({ continuationOf: root.id })?.reason, "invalid-group-budget")
+  const active = { ...root, usedHops: 7, commandUsedHops: 7 }
+  assert.deepEqual(refusal({ continuationOf: root.id, groupMaxHops: 8, groups: { [root.id]: active } }), {
+    reason: "group-active",
+    groupID: root.id,
+    rootID: root.id,
+    used: 7,
+    max: 8,
+    remaining: 1,
+  })
+  const commandClosed = { ...root, commandUsedHops: 24 }
+  assert.equal(refusal({ continuationOf: root.id, groupMaxHops: 8, groups: { [root.id]: commandClosed } })?.reason, "command-exhausted")
+  const shortCommand = { ...root, commandUsedHops: 20 }
+  assert.deepEqual(refusal({ continuationOf: root.id, groupMaxHops: 8, groups: { [root.id]: shortCommand } }), {
+    reason: "command-insufficient",
+    groupID: root.id,
+    rootID: root.id,
+    remaining: 4,
+    requested: 8,
+  })
+  const spentContinuationsRoot = { ...root, continuationsUsed: 2 }
+  const spentParent = {
+    ...newContinuationDispatchGroup({ id: "dispatch_c2", root: spentContinuationsRoot, parentID: root.id, maxHops: 8, continuationIndex: 2, now: 2 }),
+    usedHops: 8,
+  }
+  assert.equal(refusal({ continuationOf: spentParent.id, groupMaxHops: 8, groups: { [root.id]: spentContinuationsRoot, [spentParent.id]: spentParent } })?.reason, "continuations-exhausted")
+})
+
+test("ticket162: closed and superseded groups cannot be continued again", () => {
+  const root = exhaustedRoot({ continuationsUsed: 1, closedAt: 9, closeReason: "continued" })
+  const first = {
+    ...newContinuationDispatchGroup({ id: "dispatch_c1", root: { ...root, continuationsUsed: 0 }, parentID: root.id, maxHops: 8, now: 2 }),
+    usedHops: 8,
+    closedAt: 9,
+    closeReason: "continued",
+  }
+  const second = newContinuationDispatchGroup({ id: "dispatch_c2", root: { ...root, continuationsUsed: 2 }, parentID: first.id, maxHops: 8, now: 3 })
+  const groups = { [root.id]: root, [first.id]: first, [second.id]: second }
+  const closed = validateContinuation({ continuationOf: root.id, groupMaxHops: 8, groups, workspaceID: "w", isLeader: true })
+  assert.equal(closed.ok ? "" : closed.refusal.reason, "group-closed")
+  const older = validateContinuation({ continuationOf: first.id, groupMaxHops: 8, groups, workspaceID: "w", isLeader: true })
+  assert.equal(older.ok ? "" : older.refusal.reason, "group-closed")
+})
+
+test("ticket162: continuation ledger links parent and root, resets the segment, and keeps command counters", () => {
+  const root = exhaustedRoot()
+  const first = continuationDispatchLedger({ id: "dispatch_c1", root, parent: root, maxHops: 8, now: 10 })
+  assert.equal(first.root.rootID, root.id)
+  assert.equal(first.root.continuationsUsed, 1)
+  assert.equal(first.root.closedAt, 10)
+  assert.equal(first.root.closeReason, "continued")
+  assert.equal(first.root.commandUsedHops, 8, "the command ledger is unchanged")
+  assert.equal(first.root.commandMaxHops, 24)
+  assert.equal(first.parent, first.root, "a root parent closes with the same record")
+  assert.equal(first.group.id, "dispatch_c1")
+  assert.equal(first.group.rootID, root.id)
+  assert.equal(first.group.parentID, root.id)
+  assert.equal(first.group.continuationIndex, 1)
+  assert.equal(first.group.maxHops, 8)
+  assert.equal(first.group.usedHops, 0)
+  assert.equal(first.group.depthMax, root.depthMax)
+  assert.equal(first.group.commandMaxHops, undefined, "command counters stay root-only")
+
+  const second = continuationDispatchLedger({ id: "dispatch_c2", root: first.root, parent: first.group, maxHops: 16, now: 20 })
+  assert.equal(second.root.continuationsUsed, 2)
+  assert.equal(second.group.continuationIndex, 2)
+  assert.equal(second.parent.id, first.group.id)
+  assert.equal(second.parent.closedAt, 20)
+  assert.equal(second.parent.closeReason, "continued")
+  assert.equal(second.group.rootID, root.id)
+})
+
+test("ticket162: depth resets when work crosses into a continuation segment", () => {
+  const rootTask = task({ id: "root", dispatchGroupID: "dispatch_root", dispatchDepth: 0 })
+  const deep = task({ id: "deep", parentID: "root", dispatchGroupID: "dispatch_root", dispatchDepth: 6 })
+  const byID = { root: rootTask, deep }
+  assert.equal(dispatchChildDepth(rootTask, "dispatch_root", byID), 1)
+  assert.equal(dispatchChildDepth(deep, "dispatch_root", byID), 7)
+  assert.equal(dispatchChildDepth(deep, "dispatch_c1", byID), 0, "a continuation starts a fresh depth segment")
+  assert.equal(dispatchChildDepth(undefined, "dispatch_c1", byID), 0)
+})
+
+test("ticket162: exhaustion and closed states derive consistently and closed groups refuse work", () => {
+  const root = exhaustedRoot({ closedAt: 10, closeReason: "continued" })
+  const continuation = newContinuationDispatchGroup({ id: "dispatch_c1", root: { ...root, continuationsUsed: 0 }, parentID: root.id, maxHops: 8, now: 11 })
+  const groups = { [root.id]: root, [continuation.id]: continuation }
+  assert.equal(dispatchGroupState(root, groups), "closed")
+  assert.equal(dispatchGroupExhausted(root, groups), true)
+  assert.equal(dispatchGroupState(continuation, groups), "active")
+  assert.equal(dispatchGroupExhausted(continuation, groups), false)
+
+  const current = { ...continuation, usedHops: 2 }
+  assert.equal(dispatchTargetGroup(root, { ...groups, [continuation.id]: current })?.id, continuation.id, "the newest active continuation owns new work")
+  assert.equal(dispatchTargetGroup(continuation, groups)?.id, continuation.id)
+  assert.equal(dispatchTargetGroup({ ...root, closedAt: undefined }, { [root.id]: { ...root, closedAt: undefined } })?.id, root.id)
+
+  const asking = task({ id: "ask", dispatchGroupID: root.id, taskMaxHops: 1 })
+  const budget = dispatchBudgetState({ group: { ...root, closedAt: 10 }, groups, task: asking, subtasks: { ask: asking }, nextDepth: 1 })
+  assert.deepEqual(dispatchAdmissionRefusal({ state: budget }), { layer: "closed", used: 8, max: 8 })
+
+  const commandSpent = { ...continuation, usedHops: 1 }
+  const commandRoot = { ...root, commandUsedHops: 24 }
+  assert.equal(dispatchGroupExhausted(commandSpent, { ...groups, [root.id]: commandRoot }), true, "a continuation is exhausted when the command is")
+})
+
+test("ticket162: continuation refusals name the layer and the next action", () => {
+  assert.match(continuationRefusalText({ reason: "not-leader" }), /only the workspace leader .*return your result to the leader/i)
+  assert.match(continuationRefusalText({ reason: "group-active", used: 3, max: 8, remaining: 5 }), /still has 5 of 8 hops; dispatch into it/i)
+  assert.match(continuationRefusalText({ reason: "command-exhausted", used: 24, max: 24 }), /command budget is exhausted .*start a new command/i)
+  assert.match(continuationRefusalText({ reason: "command-insufficient", remaining: 4, requested: 8 }), /4 hops left, .*start a new command/i)
+  assert.match(continuationRefusalText({ reason: "continuations-exhausted", continuationsUsed: 2, maxContinuations: 2 }), /continuation limit .*start a new command/i)
+  assert.match(continuationRefusalText({ reason: "group-closed" }), /closed; continue the newest active group/i)
+  assert.match(continuationRefusalText({ reason: "invalid-group-budget", requested: 12 }), /groupMaxHops must be one of 8, 16, 24/)
+  assert.match(continuationRefusalText({ reason: "invalid-group-budget" }), /groupMaxHops is required with continuationOf/)
+  assert.match(continuationRefusalText({ reason: "group-superseded" }), /already continued; continue the newest group, or ask the user to start a new command/i)
 })
