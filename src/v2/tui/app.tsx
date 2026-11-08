@@ -15,7 +15,7 @@ import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeCom
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
-import { agentName, busyCount, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
+import { agentName, alignedDetailRows, busyCount, fuzzyMatch, headerQueuedSuffix, isWorkingTask, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import {
   RAIL_PULSE_STEP_MS,
@@ -39,7 +39,7 @@ import {
   railSelectableCount,
   toggleCollapsedRailGroup,
 } from "./railmodel.ts"
-import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
+import { boundSessionID, missingNativeSessionMessage, nativePickerCandidates, nativeSessionRoute, pickerCandidateRows, pickerWindow, stablePickerItems, toggleSelected, type PickerCandidate } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import {
   addWizardMemory,
@@ -214,9 +214,9 @@ import {
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat"
 type PickerState = {
-  mode: "members" | "leader" | "workspace" | "choice" | "agent"
+  mode: "members" | "leader" | "workspace" | "choice" | "agent" | "native"
   title: string
-  candidates: Array<{ id: string; label: string }>
+  candidates: PickerCandidate[]
   selected: Set<string>
   cursor: number
   query: string
@@ -3466,23 +3466,49 @@ export function EnsembleV2App() {
     })
   }
 
-  const openNative = () => {
+  /**
+   * Ticket #174: one `o` decision for every surface. A Direct conversation
+   * opens its agent; Work focus opens the focused card's assignee; a group
+   * chat asks which workspace member. A missing binding is a clear toast, not
+   * a silent dead key.
+   */
+  const openNative = async () => {
     const workspace = activeWorkspace()
-    if (surface()?.kind === "agent") {
-      const sessionID = chatContext()?.sessionID
-      if (sessionID) {
-        clearInteractionForLeave()
-        context.ui.router.navigate({ type: "session", sessionID })
-        return
-      }
+    const current = surface()
+    const task = selectedTask()
+    const route = nativeSessionRoute({
+      surface: current?.kind === "agent"
+        ? { kind: "agent", sessionID: chatContext()?.sessionID, agentName: surfaceAgent()?.name }
+        : current?.kind === "workspace"
+          ? { kind: "workspace" }
+          : null,
+      focus: interaction().focus,
+      assignee: task?.assigneeID ? { id: task.assigneeID, name: agentName(state(), task.assigneeID) } : undefined,
+      bindingFor: (agentID) => workspace ? state()?.bindings[`${workspace.id}:${agentID}`] : undefined,
+    })
+    if (route.kind === "missing") {
+      showToast({ title: "Ensemble", message: route.message, tone: "warning" })
+      return
     }
-    const agentID = selectedTask()?.assigneeID ?? workspace?.leaderID
-    if (!workspace || !agentID) return
-    const binding = state()?.bindings[`${workspace.id}:${agentID}`]
-    if (binding) {
+    if (route.kind === "navigate") {
       clearInteractionForLeave()
-      context.ui.router.navigate({ type: "session", sessionID: binding.sessionID })
+      context.ui.router.navigate({ type: "session", sessionID: route.sessionID })
+      return
     }
+    if (!workspace) {
+      showToast({ title: "Ensemble", message: "Open a workspace first.", tone: "warning" })
+      return
+    }
+    const selected = await openPicker("native")
+    const agentID = selected?.[0]
+    if (!agentID) return
+    const sessionID = boundSessionID(state()?.bindings ?? {}, workspace.id, agentID)
+    if (!sessionID) {
+      showToast({ title: "Ensemble", message: missingNativeSessionMessage(agentName(state(), agentID)), tone: "warning" })
+      return
+    }
+    clearInteractionForLeave()
+    context.ui.router.navigate({ type: "session", sessionID })
   }
 
   const restoreSettingsFocus = () => {
@@ -4589,12 +4615,14 @@ export function EnsembleV2App() {
 
   // Review fix (finding 5): picker rows are value-compared, so the row
   // array keeps identity across snapshot polls unless a value changed.
+  // Ticket #174: the label column is computed for the visible rows, so the
+  // separator between a name and its role/leader/busy detail never drifts.
   let pickerItemsPrev: PickerItem[] = []
+  const pickerDetailWidth = () => Math.max(8, Math.min(28, Math.floor(pickerGeometry().width / 2) - 6))
   const pickerItems = createMemo<PickerItem[]>(() => {
     const state = picker()
     if (!state) return []
-    const next = state.candidates
-      .filter((item) => !state.query || fuzzyMatch(state.query, item.label))
+    const next = pickerCandidateRows(state.candidates, state.query, { maxWidth: pickerDetailWidth() })
       .map((item) => ({ id: item.id, label: item.label, selected: state.selected.has(item.id) }))
     const stable = stablePickerItems(pickerItemsPrev, next)
     pickerItemsPrev = stable as PickerItem[]
@@ -4618,10 +4646,18 @@ export function EnsembleV2App() {
       ? workspaces().map((workspace) => ({ id: workspace.id, label: chromeJoin([`#${workspace.name}`, workspaceLabel(workspace.directory)]) }))
       : mode === "leader"
         ? (options.candidates ?? []).map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent)).map((agent) => ({ id: agent.id, label: agent.name }))
-        : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
-    const state: PickerState = {
+        : mode === "native"
+          ? nativePickerCandidates(activeAgents().map((agent) => ({
+              id: agent.id,
+              name: agent.name,
+              title: agent.title,
+              leader: activeWorkspace()?.leaderID === agent.id,
+              busy: isWorkingTask(state(), agent.id, activeWorkspace()?.id),
+            })))
+          : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
+    const next: PickerState = {
       mode,
-      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : "Switch workspace",
+      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : mode === "native" ? "Native session" : "Switch workspace",
       candidates,
       selected: new Set(options.selected ?? []),
       cursor: 0,
@@ -4630,7 +4666,7 @@ export function EnsembleV2App() {
       resolve,
     }
     setModal(true)
-    setPicker(state)
+    setPicker(next)
     dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
   })
 
@@ -5004,7 +5040,7 @@ export function EnsembleV2App() {
     const draft = state.draft
     if (state.flow === "workspace") {
       const members = draft.memberIDs.map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent))
-      const memberStep: WizardStep = { key: "members", title: "Workspace members", description: "Space toggles a member. Enter continues.", kind: "multi", options: rosterAgents().map((agent) => ({ id: agent.id, label: agent.name, detail: agent.title || undefined })) }
+      const memberStep: WizardStep = { key: "members", title: "Workspace members", description: "Space toggles a member. Enter continues.", kind: "multi", options: rosterAgents().map((agent) => ({ id: agent.id, label: agent.name, detail: agent.title.trim() || "no title" })) }
       const leaderStep: WizardStep = { key: "leader", title: "Workspace leader", description: "Only members selected in the previous step are listed.", kind: "pick", options: members.map((agent) => ({ id: agent.id, label: agent.name })) }
       const synthesisStep: WizardStep = { key: "synthesis", title: "Leader synthesis", description: "Combine child replies into one final answer?", kind: "choice", options: [{ id: "yes", label: "Yes — let the leader synthesize" }, { id: "no", label: "No — keep replies separate" }] }
       if (state.edit) return [memberStep, leaderStep, synthesisStep]
@@ -5123,6 +5159,17 @@ export function EnsembleV2App() {
     const query = state.query
     return step.options.filter((option) => option.id === "__manual__" || !query || fuzzyMatch(query, option.label))
   }
+
+  // Ticket #174: the workspace-member step and every other label/detail list
+  // share one padded label column. The budget leaves room for the cursor,
+  // marker, separator, and the detail cell inside the overlay.
+  const wizardDetailWidth = () => Math.max(8, Math.min(24, wizardGeometry().width - 34))
+  const wizardRowLabels = createMemo(() =>
+    alignedDetailRows(
+      wizardItems().map((item) => ({ label: item.label, detail: item.detail })),
+      { maxWidth: wizardDetailWidth() },
+    ),
+  )
 
   const wizardIsMemoryStep = () => isWizardMemoryStep(wizardStep()?.key)
 
@@ -6482,7 +6529,8 @@ export function EnsembleV2App() {
                         const item = items[offset + slot]
                         if (!item) return ""
                         const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
-                        return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.detail ? chromeJoin([item.label, item.detail]) : item.label}`
+                        const label = wizardRowLabels()[offset + slot] ?? item.label
+                        return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${label}`
                       })()}</text>
                     )}</For>
                     }>

@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { ageLabel, agentColor, answerHeader, askingLine, assignmentLine, fuzzyMatch, headerQueuedSuffix, isAssignmentEvent, markdownText, missingSkills, queuedRemovable, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, short, systemLine, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
+import { ageLabel, agentColor, alignedDetailRows, answerHeader, askingLine, assignmentLine, fuzzyMatch, headerQueuedSuffix, isAssignmentEvent, markdownText, missingSkills, queuedRemovable, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, short, systemLine, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
 import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
 
 const agent = (patch: Partial<Agent> = {}): Agent => ({
@@ -36,6 +36,65 @@ test("fuzzy matching accepts subsequences and rejects misses", () => {
   assert.equal(fuzzyMatch("nt", "notes.txt"), true)
   assert.equal(fuzzyMatch("xyz", "notes.txt"), false)
   assert.equal(fuzzyMatch("", "anything"), true)
+})
+
+test("ticket174: label/detail rows share one padded separator column", () => {
+  const rows = alignedDetailRows([
+    { label: "Nova", detail: "Engineering" },
+    { label: "Alexandria", detail: "Design" },
+  ])
+  assert.deepEqual(rows, ["Nova       │ Engineering", "Alexandria │ Design"])
+  assert.equal(rows[0].indexOf("│"), rows[1].indexOf("│"), "the separator sits at one column")
+})
+
+test("ticket174: ASCII and Unicode separators align at the same column", () => {
+  const source = [
+    { label: "Nova", detail: "Engineering" },
+    { label: "Alexandria", detail: "Design" },
+  ]
+  const unicode = alignedDetailRows(source)
+  const ascii = alignedDetailRows(source, { separator: "|" })
+  assert.deepEqual(ascii, ["Nova       | Engineering", "Alexandria | Design"])
+  for (let index = 0; index < source.length; index++) {
+    assert.equal(unicode[index].indexOf("│"), ascii[index].indexOf("|"))
+  }
+})
+
+test("ticket174: long labels truncate consistently to the column cap", () => {
+  const rows = alignedDetailRows([
+    { label: "A very long agent name", detail: "Engineering" },
+    { label: "Nova", detail: "Design" },
+  ], { maxWidth: 12 })
+  assert.deepEqual(rows, ["A very long… │ Engineering", "Nova         │ Design"])
+  assert.equal(rows[0].indexOf("│"), rows[1].indexOf("│"))
+  assert.equal(rows[0].length, 12 + " │ ".length + "Engineering".length, "the line keeps its exact width")
+})
+
+test("ticket174: alignment holds across label width budgets", () => {
+  for (const maxWidth of [8, 12, 20, 32]) {
+    const rows = alignedDetailRows([
+      { label: "Alexandria the very long name", detail: "Design" },
+      { label: "Nova", detail: "Engineering" },
+      { label: "Flint", detail: "QA" },
+    ], { maxWidth, separator: "|" })
+    const column = rows[0].indexOf("|")
+    assert.ok(column > 0)
+    for (const row of rows) assert.equal(row.indexOf("|"), column, `separator aligns at ${maxWidth}`)
+  }
+})
+
+test("ticket174: rows without a detail stay unpadded", () => {
+  assert.deepEqual(
+    alignedDetailRows([{ label: "A longer plain label" }, { label: "Nova", detail: "Design" }]),
+    ["A longer plain label", "Nova │ Design"],
+  )
+})
+
+test("ticket174: plain long labels never widen or truncate the detail column", () => {
+  assert.deepEqual(
+    alignedDetailRows([{ label: "A very long plain path" }, { label: "Nova", detail: "Design" }], { maxWidth: 8 }),
+    ["A very long plain path", "Nova │ Design"],
+  )
 })
 
 test("agent color uses named and hex values with a fallback", () => {
