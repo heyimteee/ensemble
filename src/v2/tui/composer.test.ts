@@ -8,8 +8,11 @@ import {
   composerValidationReducer,
   insertAgentMention,
   insertFileReference,
+  fileReferenceTokenAt,
   parseSlashCommand,
+  replaceFileReference,
 } from "./composer.ts"
+import { fuzzyMatch } from "./format.ts"
 
 test("composer triggers only at the start of a token", () => {
   assert.equal(composerTrigger("/"), "command")
@@ -19,6 +22,8 @@ test("composer triggers only at the start of a token", () => {
   assert.equal(composerTrigger("hello$"), undefined)
   assert.equal(composerTrigger("@"), "file")
   assert.equal(composerTrigger("read @"), "file")
+  assert.equal(composerTrigger("@handover.md"), "file")
+  assert.equal(composerTrigger("read @my\\ notes.md"), "file")
   assert.equal(composerTrigger("mail@example.com"), undefined)
   assert.equal(composerTrigger("plain"), undefined)
 })
@@ -96,4 +101,37 @@ test("reduced motion keeps the bad border color without any pulse", () => {
   assert.ok(roles.length > 0)
   assert.deepEqual(new Set(roles), new Set(["bad"]))
   assert.equal(composerValidationBorder(invalid, 1_000 + COMPOSER_VALIDATION_MS, true), undefined)
+})
+
+test("file completion queries only the bounded token and keeps the sentence", () => {
+  const text = "read @hand the git log"
+  const token = fileReferenceTokenAt(text, "read @hand".length)
+  assert.ok(token)
+  assert.deepEqual({ start: token.start, end: token.end, path: token.path }, { start: 5, end: 10, path: "hand" })
+
+  const files = ["handover.md", "handbook.md", "notes.md"]
+  const matches = files.filter((file) => fuzzyMatch(token.path, file))
+  assert.deepEqual(matches, ["handover.md", "handbook.md"])
+  assert.deepEqual(replaceFileReference(text, matches[0], token.start, token.end), {
+    text: "read @handover.md the git log",
+    cursor: "read @handover.md ".length,
+  })
+})
+
+test("a space closes file completion and cursor moves outside close it", () => {
+  assert.equal(fileReferenceTokenAt("read @hand ", "read @hand ".length), undefined)
+  assert.equal(fileReferenceTokenAt("read @hand the git log", "read @hand the git log".length), undefined)
+  assert.ok(fileReferenceTokenAt("read @hand the git log", "read @hand".length))
+})
+
+test("escaped-space paths complete and reinsert without losing the suffix", () => {
+  const text = "read @my\\ notes.md and the rest"
+  const cursor = "read @my\\ notes.md".length
+  const token = fileReferenceTokenAt(text, cursor)
+  assert.ok(token)
+  assert.equal(token.path, "my notes.md")
+  assert.deepEqual(replaceFileReference(text, "my notes v2.md", token.start, token.end), {
+    text: "read @my\\ notes\\ v2.md and the rest",
+    cursor: "read @my\\ notes\\ v2.md ".length,
+  })
 })
