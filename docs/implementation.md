@@ -25,6 +25,7 @@ OpenCode engine
 ### Components
 
 - **`src/v2/service.ts`** — domain service and orchestrator. Workspaces, agents, messages, subtasks, delegation, approvals, memory, model fallback, scheduling, recovery.
+- **`src/v2/shared-service.ts`** — process-global, versioned `SharedEnsemble` registry on `globalThis`; reference-counts locations so one service starts per host realm.
 - **`src/v2/catalog.ts`** — model/skill catalog refresh with a timeout guard.
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
 - **`src/v2/skill-invocation.ts`** — the shared pure skill invocation planner used by composer completion and server validation: anchors, assigned/General skills, owner choices, direct-chat rejection, and work titles.
@@ -192,7 +193,32 @@ Idempotency keys (`work:`/`handoff:`) scope actor, workspace, kind, a hashed run
 
 Outside-roster rule: the user is the authorizer, so a user group post naming a roster agent outside the workspace fails loudly with a clear message and no leader fallback. Agent posts (group mentions and handoffs) follow the existing approval model instead: contact needs user consent, then the approved turn/hop runs once through the same queue.
 
-Single-process claim boundary: claim ownership (`claimedBy`, `leaseUntil`, `activeRunID`) is process-local. Store `sync()` never overwrites a locally held claim with a storage row's claim fields, and a fresh claim is re-read from storage before work starts (`claimWon`) so a racing writer cannot be double-claimed silently. Two processes actively pumping against one store is unsupported; `SharedEnsemble` keeps one service per process and `sync()` converges cross-location views of that service.
+Single-process claim boundary: claim ownership (`claimedBy`, `leaseUntil`, `activeRunID`) is process-local. Store `sync()` never overwrites a locally held claim with a storage row's claim fields, and a fresh claim is re-read from storage before work starts (`claimWon`) so a racing writer cannot be double-claimed silently. Two processes actively pumping against one store is unsupported; `sharedEnsemble()` keeps one service per host realm and `sync()` converges cross-location views of that service.
+
+### Shared service registry
+
+OpenCode re-evaluates the plugin module once per location (project, channel, or
+agent home). `src/v2/shared-service.ts` keeps one `SharedEnsemble` registry on
+`globalThis` under `Symbol.for("ensemble.v2.shared-service")`, so every module
+load joins the same service and store:
+
+- The registry exposes `SHARED_SERVICE_VERSION`. A location reuses an existing
+  registry only when it is structurally compatible
+  (`typeof registry.acquire === "function"`) and the version matches. The check
+  must never use `instanceof`: class identity changes when the module is
+  evaluated again for another location.
+- `acquire(ctx)` reference-counts the location. The first location's plugin
+  context owns storage, sessions, events, and tools for the realm; later
+  locations share that service and supply their own RPC registration.
+  `release()` is idempotent, and the service stops only after the last location
+  releases it. An `acquire()` that arrives during that final teardown waits for
+  the in-flight stop, then concurrent acquires coalesce onto one replacement
+  service.
+- Every location still registers and disposes its own RPC handlers. The
+  registry shares the service and store, not the transport registration.
+- A version bump creates a new registry while the old one keeps serving its
+  existing locations until they release. Lease-safe recovery covers that
+  overlap window; do not rely on the global slot to point at the old registry.
 
 ## Subtasks
 
@@ -228,7 +254,7 @@ pending ──assign──▶ working ──result──▶ replied
 - One active run per agent per workspace.
 - One editing run per canonical directory; research can continue.
 - Closing the Ensemble page does not stop native work.
-- On restart, working subtasks return to Pending with an interrupted badge and an `interrupted` approval (or keep an existing pending question approval). They never replay automatically; the user resumes, answers, or discards them.
+- On restart, live `working` rows are never rewritten. A claim with an unexpired lease stays with its owner; an expired claim with no local run is re-queued with attempts preserved, and a working row with no claim is repaired. No approval is synthesized for dead work.
 - Cancelling, retrying, or reassigning a subtask closes its pending question/interrupted approvals, so stale decisions cannot restart dead work.
 - Model fallback uses the ordered backup list and surfaces switches.
 - Permission denials, tool failures, and provider exhaustion pause the subtask with an interrupted approval; an uncertain tool outcome is never retried automatically.
@@ -472,14 +498,17 @@ full recovery ladder is:
 3. **Heartbeat.** A cheap revision check runs about every 2 s idle and 1 s
    while Work is live, and immediately on reconnect.
 4. **`changes.since`.** A version gap asks the server for the missing range.
-   The server returns contiguous batched entries or a reset. The response is
+   The server returns contiguous batched entries or a reset that names why
+   (`invalid-cursor`, `epoch`, `future-version`, `ring-gap`). The response is
    JSON-sanitized at the RPC boundary: the host rejects explicit `undefined`
    entity fields, so absent optional fields are omitted exactly as they are at
    the snapshot/bootstrap boundaries.
 5. **Scoped resync.** A reset repairs only the scopes whose recorded version
    moved (`shell`, `work`, `transcript`). A malformed batch that mentions only
    Work entities repairs the Work scope; other malformed input falls back.
-6. **Full snapshot.** An epoch change or an unrecoverable scoped read uses the
+6. **Full snapshot.** A foreign boot epoch on a patch has no comparable
+   cursor, so it never enters `changes.since`; a trailing 200 ms window
+   coalesces one forced snapshot. An unrecoverable scoped read also uses the
    full durable snapshot. It is the last resort, not the steady-state path.
 7. **Legacy fallback.** Protocol-2 clients keep the old changed event and
    snapshot path. They never see a protocol-3-only shape as an authoritative
@@ -519,15 +548,26 @@ counts, sizes, versions, and timings only — never credentials or conversation
 content. `ENSEMBLE_DEBUG_CLONES=1` exposes full-clone counts and timing on the
 `diagnostic` RPC.
 
-### Structured operational logging (ticket #145)
+### Structured operational logging (tickets #145, #150)
 
-The service and TUI each own a small structured logger. The service observes
-store writes and emits task lifecycle (`task.created`, `task.transition`,
-`task.claimed`, `task.completed`, `task.failed`, `task.cancelled`), message
-append/finalize, approval requested/resolved/superseded, init lifecycle,
-retry scheduling/skips, feed batches/resets, and refresh measurements. Lease
-heartbeats and streaming deltas never produce lines; they remain counters or
-trace-only data.
+The service and TUI each own a small structured logger. Every row carries its
+role, a stable instance ID (the service boot epoch or the TUI mount UUID), and
+the `node:worker_threads` thread ID; one service log is kept per role, not per
+instance. The service observes store writes and emits task lifecycle
+(`task.created`, `task.transition`, `task.claimed`, `task.completed`,
+`task.failed`, `task.cancelled`), message append/finalize, approval
+requested/resolved/superseded, init lifecycle, retry scheduling/skips, feed
+batches/resets, and refresh measurements. `service.location` is logged once on
+the first viewed directory, and `logs.recent` accepts an `instanceID` filter.
+Lease heartbeats and streaming deltas never produce lines; they remain counters
+or trace-only data.
+
+`feed.reset` names its reason and identical resets collapse to one warning per
+10 s per instance with a `suppressed` count; a burst that stops also reports a
+trailing summary when the window closes (and `logs.recent`/shutdown flush any
+pending count). The logger counts `feed.gap` events in its stats, `:logs` shows
+`feedGaps`, and the TUI coalesces foreign-epoch patches into one forced snapshot
+instead of a reset loop.
 
 A failure is a self-contained JSONL record, not a longer `task.error` string.
 Each failed attempt emits `failure.attempt` at `warn`, an uncertain outcome

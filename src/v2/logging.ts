@@ -2,6 +2,7 @@ import { appendFile, rename } from "node:fs/promises"
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { threadId } from "node:worker_threads"
 
 /**
  * Structured operational logging for Ensemble.
@@ -37,6 +38,10 @@ export type LogEntry = {
   event: string
   pid: number
   role: string
+  /** Boot/mount identity; ticket #150 keeps one service log per role. */
+  instanceID: string
+  /** `node:worker_threads` thread id, so a hot-reload can be attributed. */
+  threadID: number
   [key: string]: unknown
 }
 
@@ -44,6 +49,8 @@ export type LoggerStats = {
   enabled: boolean
   level: LogLevel
   role: string
+  instanceID: string
+  threadID: number
   dir?: string
   mainFile?: string
   failureFile?: string
@@ -52,11 +59,15 @@ export type LoggerStats = {
   written: number
   failedWrites: number
   content: boolean
+  /** `feed.gap` events observed by this logger (ticket #150 diagnostics). */
+  feedGaps: number
   lastError?: string
 }
 
 export type LoggerOptions = {
   role: "service" | "tui"
+  /** Stable identity for every row (service boot epoch / TUI mount UUID). */
+  instanceID?: string
   enabled?: boolean
   level?: LogLevel
   /** Explicit directory; null disables file sinks while keeping the ring. */
@@ -151,6 +162,8 @@ function filePrefix(role: string, failure = false): string {
 
 export class EnsembleLogger {
   readonly role: string
+  readonly instanceID: string
+  readonly threadID: number
   readonly level: LogLevel
   readonly content: boolean
   readonly enabled: boolean
@@ -172,11 +185,14 @@ export class EnsembleLogger {
   private droppedCount = 0
   private writtenCount = 0
   private failedWriteCount = 0
+  private feedGapCount = 0
   private lastErrorText?: string
   private warnedWrite = false
 
   constructor(options: LoggerOptions) {
     this.role = options.role
+    this.instanceID = options.instanceID ?? String(process.pid)
+    this.threadID = threadId
     this.enabled = options.enabled ?? process.env.ENSEMBLE_LOG !== "0"
     const requested = options.level ?? (process.env.ENSEMBLE_LOG_LEVEL as LogLevel | undefined) ?? "info"
     this.level = requested in LEVELS ? requested : "info"
@@ -216,14 +232,17 @@ export class EnsembleLogger {
 
   event(level: LogLevel, cat: LogCategory, event: string, fields: LogFields = {}): void {
     if (!this.enabledFor(level)) return
+    if (event === "feed.gap") this.feedGapCount += 1
     const entry: LogEntry = {
+      ...redactLogFields(fields),
       ts: new Date(this.now()).toISOString(),
       level,
       cat,
       event,
       pid: process.pid,
       role: this.role,
-      ...redactLogFields(fields),
+      instanceID: this.instanceID,
+      threadID: this.threadID,
     }
     this.pushRing(entry)
     const line = `${JSON.stringify(entry)}\n`
@@ -235,7 +254,7 @@ export class EnsembleLogger {
   }
 
   /** A self-contained failure record; written to the failure sink even at warn. */
-  failure(entry: Omit<LogEntry, "ts" | "pid" | "role"> & { ts?: string }): void {
+  failure(entry: Omit<LogEntry, "ts" | "pid" | "role" | "instanceID" | "threadID"> & { ts?: string }): void {
     if (!this.enabled) return
     const record: LogEntry = {
       ...redactLogFields(entry as LogFields),
@@ -245,6 +264,8 @@ export class EnsembleLogger {
       event: String(entry.event),
       pid: process.pid,
       role: this.role,
+      instanceID: this.instanceID,
+      threadID: this.threadID,
     }
     this.pushRing(record)
     const line = `${JSON.stringify(record)}\n`
@@ -262,6 +283,7 @@ export class EnsembleLogger {
     cat?: LogCategory
     event?: string
     taskID?: string
+    instanceID?: string
   } = {}): LogEntry[] {
     const limit = Math.max(1, Math.min(this.ringLimit, Math.floor(filter.limit ?? 200)))
     const minLevel = filter.level ? LEVELS[filter.level] : 0
@@ -269,7 +291,8 @@ export class EnsembleLogger {
       LEVELS[entry.level] >= minLevel
       && (!filter.cat || entry.cat === filter.cat)
       && (!filter.event || entry.event === filter.event || entry.event.startsWith(`${filter.event}.`))
-      && (!filter.taskID || entry.taskID === filter.taskID),
+      && (!filter.taskID || entry.taskID === filter.taskID)
+      && (!filter.instanceID || entry.instanceID === filter.instanceID),
     )
     return matches.slice(-limit)
   }
@@ -279,6 +302,8 @@ export class EnsembleLogger {
       enabled: this.enabled,
       level: this.level,
       role: this.role,
+      instanceID: this.instanceID,
+      threadID: this.threadID,
       ...(this.dir ? { dir: this.dir } : {}),
       ...(this.mainFile ? { mainFile: this.mainFile } : {}),
       ...(this.failureFile ? { failureFile: this.failureFile } : {}),
@@ -287,6 +312,7 @@ export class EnsembleLogger {
       written: this.writtenCount,
       failedWrites: this.failedWriteCount,
       content: this.content,
+      feedGaps: this.feedGapCount,
       ...(this.lastErrorText ? { lastError: this.lastErrorText } : {}),
     }
   }
@@ -428,6 +454,96 @@ export class EnsembleLogger {
         keep.set(prefix, count + 1)
       }
     } catch {}
+  }
+}
+
+export type LogRateLimitDecision = {
+  /** True when this event should be emitted and its window restarted. */
+  allowed: boolean
+  /** Identical events suppressed since the last emitted one. */
+  suppressed: number
+}
+
+export type LogRateLimiterOptions = {
+  windowMs?: number
+  now?: () => number
+  /**
+   * Trailing summary for a burst that stops inside its window. Called once at
+   * window close with the suppressed total, so the count is never lost.
+   */
+  report?: (key: string, suppressed: number) => void
+}
+
+export type LogRateLimiter = {
+  admit: (key: string) => LogRateLimitDecision
+  /** Report and clear every window with a suppressed count (viewer/shutdown). */
+  flush: () => void
+}
+
+/**
+ * Ticket #150: identical warnings (notably `feed.reset`) collapse to one per
+ * window per instance. The first event emits immediately; the next allowed
+ * event reports how many identical events it swallowed, and a burst that stops
+ * reports its suppressed total when the window closes (or on `flush`).
+ */
+export function createLogRateLimiter(options: LogRateLimiterOptions = {}): LogRateLimiter {
+  const windowMs = Math.max(1, options.windowMs ?? 10_000)
+  const now = options.now ?? Date.now
+  const windows = new Map<string, { last: number; suppressed: number; timer?: ReturnType<typeof setTimeout> }>()
+
+  const report = (key: string, suppressed: number) => {
+    if (suppressed <= 0) return
+    options.report?.(key, suppressed)
+  }
+
+  const clearTimer = (state: { timer?: ReturnType<typeof setTimeout> }) => {
+    if (state.timer === undefined) return
+    clearTimeout(state.timer)
+    state.timer = undefined
+  }
+
+  const scheduleTrailing = (key: string, state: { last: number; suppressed: number; timer?: ReturnType<typeof setTimeout> }) => {
+    if (!options.report || state.timer !== undefined) return
+    const delay = Math.max(1, state.last + windowMs - now())
+    state.timer = setTimeout(() => {
+      state.timer = undefined
+      const suppressed = state.suppressed
+      state.suppressed = 0
+      state.last = now()
+      report(key, suppressed)
+    }, delay)
+    state.timer.unref?.()
+  }
+
+  return {
+    admit(key: string): LogRateLimitDecision {
+      const at = now()
+      const state = windows.get(key)
+      if (!state) {
+        windows.set(key, { last: at, suppressed: 0 })
+        return { allowed: true, suppressed: 0 }
+      }
+      if (at - state.last >= windowMs) {
+        const suppressed = state.suppressed
+        clearTimer(state)
+        state.last = at
+        state.suppressed = 0
+        return { allowed: true, suppressed }
+      }
+      state.suppressed += 1
+      scheduleTrailing(key, state)
+      return { allowed: false, suppressed: state.suppressed }
+    },
+    flush(): void {
+      for (const [key, state] of windows) {
+        const suppressed = state.suppressed
+        if (suppressed <= 0) continue
+        clearTimer(state)
+        state.suppressed = 0
+        state.last = now()
+        report(key, suppressed)
+      }
+    },
   }
 }
 

@@ -290,7 +290,7 @@ test("a live-text checkpoint persists without a coordination version or patch", 
   assert.equal((ctx.values.get("v2/message/w/00000001") as Message).text, "partial checkpoint")
 })
 
-test("a crash recovers the last streamed checkpoint and marks the run interrupted", async () => {
+test("a crash recovers the last streamed checkpoint and leaves settlement to the service", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx, undefined, { epoch: 1 })
   const live = message({ streaming: true, text: "partial", updatedAt: 2 })
@@ -303,8 +303,11 @@ test("a crash recovers the last streamed checkpoint and marks the run interrupte
   await recovered.load()
   const messageRow = recovered.message("w", "m")
   assert.equal(messageRow?.text, "partial checkpoint", "at most the text after the last checkpoint is lost")
-  assert.equal(messageRow?.streaming, false)
-  assert.equal(messageRow?.interrupted, true, "the crashed run is visibly interrupted")
+  // Ticket #148: load never declares a live stream dead. The service settles
+  // terminal/expired/stale rows from the streaming index after load.
+  assert.equal(messageRow?.streaming, true)
+  assert.equal(messageRow?.interrupted, undefined, "load writes no restart marker")
+  assert.deepEqual(recovered.streamingMessages(), [{ workspaceID: "w", messageID: "m" }])
 })
 
 test("a removal publishes a full remove change", async () => {
@@ -356,6 +359,20 @@ test("the change ring is bounded and an old cursor resets instead of returning a
   assert.equal(store.changesSince(5, 0).reset, true, "an evicted cursor cannot be served as a contiguous patch")
   assert.equal(store.changesSince(6, 4).reset, true, "a different boot epoch always resets")
   assert.equal(store.changesSince(5, 99).reset, true, "a cursor ahead of the server resets")
+})
+
+test("a reset names why the cursor cannot be served", async () => {
+  const store = new V2Store(fakeContext(), undefined, { epoch: 5, ringLimit: 3 })
+  for (let index = 1; index <= 5; index++) await store.saveSubtask(task({ id: `t${index}` }))
+
+  assert.equal(store.changesSince(5, 5).reason, undefined, "a current cursor is not a reset")
+  assert.equal(store.changesSince(5, 4).reason, undefined, "a contiguous cursor is not a reset")
+  assert.equal(store.changesSince(5, 0).reason, "ring-gap", "an evicted cursor names the ring gap")
+  assert.equal(store.changesSince(6, 4).reason, "epoch", "a foreign boot epoch names the epoch")
+  assert.equal(store.changesSince(5, 99).reason, "future-version", "a cursor ahead of the store names the future version")
+  assert.equal(store.changesSince(NaN, 4).reason, "invalid-cursor")
+  assert.equal(store.changesSince(5, NaN).reason, "invalid-cursor")
+  assert.equal(store.changesSince(5, -1).reason, "invalid-cursor")
 })
 
 test("a foreign write makes the change feed reset and the synced store keeps the foreign task", async () => {

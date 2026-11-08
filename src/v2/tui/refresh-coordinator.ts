@@ -298,6 +298,18 @@ export function revisionChanged(previous: SnapshotMeta | undefined, next: Revisi
     || previous.epoch !== next.epoch
 }
 
+/**
+ * Ticket #150: a patch from another server boot epoch has no comparable
+ * cursor. It must take the snapshot path, never `changes.since`, because the
+ * old epoch can only answer with a reset. Unknown epochs are not foreign.
+ */
+export function isForeignEpochPatch(previous: SnapshotMeta | undefined, epoch: unknown): boolean {
+  return previous !== undefined
+    && typeof previous.epoch === "number"
+    && typeof epoch === "number"
+    && epoch !== previous.epoch
+}
+
 /** Idle heartbeats are cheap; live work checks twice as often. */
 export function heartbeatDelay(active: boolean): number {
   return active ? 1_000 : 2_000
@@ -306,11 +318,19 @@ export function heartbeatDelay(active: boolean): number {
 export type RefreshCoordinatorOptions = {
   run: () => void | Promise<void>
   onError?: (error: unknown) => void
+  /**
+   * Optional trailing window before a requested pass starts. Used to coalesce a
+   * foreign-epoch burst into one snapshot (ticket #150); the default runs now.
+   */
+  delayMs?: number
 }
 
 export type RefreshCoordinator = {
-  /** Request a refresh. Only one runs; the rest collapse into one dirty pass. */
-  request: () => void
+  /**
+   * Request a refresh. Only one runs; the rest collapse into one dirty pass.
+   * Returns true when this call went from idle to scheduled.
+   */
+  request: () => boolean
   /** Resolve once no requested pass remains (a paused request waits for resume). */
   whenIdle: () => Promise<void>
   /** Stop starting runs while the surface is hidden. An in-flight run finishes. */
@@ -325,24 +345,33 @@ export type RefreshCoordinator = {
  * Single-flight refresh loop. It has no request sequence and never discards a
  * completed response: a request made during a run records one dirty pass that
  * starts after the current run settles. Pausing stops new runs but keeps the
- * dirty bit so activation performs one coalesced catch-up.
+ * dirty bit so activation performs one coalesced catch-up. A positive
+ * `delayMs` adds a trailing window without changing those guarantees.
  */
 export function createRefreshCoordinator(options: RefreshCoordinatorOptions): RefreshCoordinator {
+  const delayMs = Math.max(0, options.delayMs ?? 0)
   let running = false
   let dirty = false
   let paused = false
   let disposed = false
+  let timer: ReturnType<typeof setTimeout> | undefined
   let waiters: Array<() => void> = []
 
+  const clearTimer = () => {
+    if (timer === undefined) return
+    clearTimeout(timer)
+    timer = undefined
+  }
+
   const settle = () => {
-    if (running) return
+    if (running || timer !== undefined) return
     if (dirty && !paused && !disposed) return
     const pendingWaiters = waiters
     waiters = []
     for (const resolve of pendingWaiters) resolve()
   }
 
-  const start = () => {
+  const begin = () => {
     if (running || paused || disposed || !dirty) return
     dirty = false
     running = true
@@ -366,14 +395,30 @@ export function createRefreshCoordinator(options: RefreshCoordinatorOptions): Re
       })
   }
 
-  const request = () => {
-    if (disposed) return
+  const start = () => {
+    if (running || paused || disposed || !dirty) return
+    if (delayMs > 0) {
+      if (timer !== undefined) return
+      timer = setTimeout(() => {
+        timer = undefined
+        begin()
+      }, delayMs)
+      timer.unref?.()
+      return
+    }
+    begin()
+  }
+
+  const request = (): boolean => {
+    if (disposed) return false
+    const scheduled = !dirty && !running && timer === undefined
     dirty = true
     start()
+    return scheduled
   }
 
   const whenIdle = (): Promise<void> => {
-    if (!running && (!dirty || paused || disposed)) return Promise.resolve()
+    if (!running && timer === undefined && (!dirty || paused || disposed)) return Promise.resolve()
     return new Promise<void>((resolve) => { waiters.push(resolve) })
   }
 
@@ -381,6 +426,7 @@ export function createRefreshCoordinator(options: RefreshCoordinatorOptions): Re
     if (paused === value) return
     paused = value
     if (paused) {
+      clearTimer()
       if (!running) settle()
       return
     }
@@ -390,6 +436,7 @@ export function createRefreshCoordinator(options: RefreshCoordinatorOptions): Re
   const dispose = () => {
     disposed = true
     dirty = false
+    clearTimer()
     settle()
   }
 

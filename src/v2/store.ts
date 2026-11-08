@@ -5,8 +5,10 @@ import type {
   Agent,
   Approval,
   ChangeEntry,
+  ChangesSince,
   ChatMessage,
   EntityChange,
+  FeedResetReason,
   InitJob,
   Memory,
   Message,
@@ -134,8 +136,8 @@ export class V2Store {
   /**
    * Live streaming rows indexed by `workspaceID + NUL + messageID`. Maintenance
    * settles only these rows instead of scanning every message in every
-   * workspace. Kept in sync by `saveMessage`/`appendMessage` and the storage
-   * merge; cleared on load/reset/prune.
+   * workspace. Kept in sync by `saveMessage`/`appendMessage`, the load scan,
+   * the storage merge, and removal; cleared on reset/prune.
    */
   private readonly streaming = new Set<string>()
 
@@ -185,15 +187,13 @@ export class V2Store {
       if (!message?.workspaceID) continue
       const list = (this.state.messages[message.workspaceID] ??= [])
       list.push(message)
+      // Ticket #148: live rows survive load. The service settles terminal,
+      // expired, or stale rows from this index after load; load never decides
+      // that a stream is dead on its own.
+      this.trackStreaming(message)
     }
     for (const list of Object.values(this.state.messages)) {
       list.sort((a, b) => a.seq - b.seq)
-      for (const message of list) {
-        if (!message.streaming) continue
-        message.streaming = false
-        message.interrupted = true
-        if (!message.text) message.text = "Reply interrupted before completion."
-      }
     }
     for (const { value } of await this.scanAll("v2/subtask/")) {
       const subtask = value as Subtask
@@ -239,19 +239,11 @@ export class V2Store {
           expected: subtask.expected,
         })
       }
-      if (subtask.state === "working") {
-        // Restart recovery: re-queue interruptible work without duplicating
-        // it and without minting an approval. Attempts and the idempotency
-        // key are kept so the retried work resumes its budget instead of
-        // starting a second copy. Rows that still carry an approvalID keep
-        // waiting on that real pending decision; everything else retries.
-        subtask.state = "pending"
-        subtask.interrupted = false
-        subtask.activeRunID = undefined
-        subtask.claimedBy = undefined
-        subtask.leaseUntil = undefined
-        subtask.error = "Ensemble restarted while this subtask was working."
-      }
+      // Ticket #148: working rows are left exactly as stored. Load must never
+      // recover them: another service location may still own the claim and a
+      // live lease. Recovery belongs to the lease-aware reaper and the
+      // no-claim/waiting-work repair pass; rewriting here caused duplicate
+      // execution and attempt exhaustion.
     }
     // Legacy rows (persisted before ticket #135) carry no dispatch group.
     // Resolve one from the root ancestor so in-flight work keeps a coherent
@@ -432,8 +424,8 @@ export class V2Store {
     // claim stays visible and this instance will not double-claim it while
     // its lease is fresh — always re-check ownership before running (see
     // `claimWon` in queue.ts). Two processes actively pumping against one
-    // store is unsupported: `SharedEnsemble` keeps one service per process
-    // and `sync()` exists to converge cross-location views of that service.
+    // store is unsupported: `sharedEnsemble()` keeps one service per host
+    // realm and `sync()` exists to converge cross-location views of it.
     // Runs stay instance-owned: they track live native sessions, which only
     // the owning process can drive.
     for (const { value } of await this.scanAll("v2/subtask/")) {
@@ -1066,18 +1058,19 @@ export class V2Store {
    * Cursor recovery for the revision heartbeat. A cursor outside the ring, an
    * unknown epoch, a cursor ahead of the store, or a gapped ring all reset to
    * the snapshot path; a fresh cursor gets contiguous full-entity entries.
+   * Ticket #150: every reset names its reason so `feed.reset` is attributable.
    */
-  changesSince(epoch: number, version: number): { epoch: number; version: number; reset: boolean; entries: ChangeEntry[] } {
+  changesSince(epoch: number, version: number): ChangesSince {
     const current = this.state.version
-    const reset = () => ({ epoch: this.epochValue, version: current, reset: true, entries: [] as ChangeEntry[] })
-    if (!Number.isFinite(epoch) || !Number.isFinite(version)) return reset()
-    if (epoch !== this.epochValue) return reset()
-    if (version > current) return reset()
+    const reset = (reason: FeedResetReason): ChangesSince => ({ epoch: this.epochValue, version: current, reset: true, reason, entries: [] as ChangeEntry[] })
+    if (!Number.isFinite(epoch) || !Number.isFinite(version) || version < 0) return reset("invalid-cursor")
+    if (epoch !== this.epochValue) return reset("epoch")
+    if (version > current) return reset("future-version")
     if (version === current) return { epoch: this.epochValue, version: current, reset: false, entries: [] }
     const entries = this.changeRing.filter((entry) => entry.version > version)
-    if (entries.length === 0 || entries[0]!.version !== version + 1) return reset()
+    if (entries.length === 0 || entries[0]!.version !== version + 1) return reset("ring-gap")
     for (let index = 1; index < entries.length; index++) {
-      if (entries[index]!.version !== entries[index - 1]!.version + 1) return reset()
+      if (entries[index]!.version !== entries[index - 1]!.version + 1) return reset("ring-gap")
     }
     return { epoch: this.epochValue, version: current, reset: false, entries: structuredClone(entries) }
   }

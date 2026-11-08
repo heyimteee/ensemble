@@ -3,12 +3,13 @@ import assert from "node:assert/strict"
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { EnsembleV2Service } from "./service.ts"
+import { EnsembleV2Service, streamFinalization } from "./service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
 import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
+import { FALLBACK_REPLIES } from "./execution.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -56,6 +57,9 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   }
   const ctx = {
     onboarding: false,
+    // The declared plugin Context carries the loaded location; tests that
+    // assert `service.start` attribution point this at a sentinel directory.
+    location: { directory: process.cwd() },
     storage: {
       get: async (key: string) => values.get(key),
       set: async (key: string, value: unknown) => { values.set(key, value) },
@@ -108,6 +112,27 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     event,
   }
   return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, createdSessionIDs, tools, emitted, emitEvent }
+}
+
+/** Shared fixtures for tests that need durable work without exercising setup. */
+const novaAgent = (patch: Partial<Agent> = {}): Agent => ({
+  id: "a", name: "Nova", title: "", role: "",
+  mainModel: { providerID: "probe", modelID: "probe-model" },
+  backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false,
+  version: 1, createdAt: 1, updatedAt: 1, ...patch,
+})
+
+const siteWorkspace = (directory: string, patch: Partial<Workspace> = {}): Workspace => ({
+  id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true,
+  archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1, ...patch,
+})
+
+async function seedAgent(store: V2Store, patch: Partial<Agent> = {}): Promise<void> {
+  await store.saveAgent(novaAgent(patch))
+}
+
+async function seedWorkspace(store: V2Store, directory: string, patch: Partial<Workspace> = {}): Promise<void> {
+  await store.saveWorkspace(siteWorkspace(directory, patch))
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -884,8 +909,8 @@ test("stale promote_memory approvals resolve as rejected without re-applying", a
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   // Already promoted: a second pending promote decision is moot.
   await seed.saveMemory({ id: "mem-done", agentID: "a", workspaceID: "w", scope: "global", text: "Keep", origin: "manual", source: "user", createdAt: 1, updatedAt: 1, history: [{ at: 1, action: "created", by: "user" }] })
   await seed.saveApproval({ id: "ap-stale", workspaceID: "w", agentID: "a", kind: "promote_memory", title: "Promote", detail: "Keep", payload: { memoryID: "mem-done" }, status: "pending", createdAt: 1 })
@@ -939,9 +964,9 @@ test("outside-roster approvals create the delegated child once", async () => {
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seedAgent(seed)
   await seed.saveAgent({ id: "b", name: "Echo", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedWorkspace(seed, directory)
   await seed.saveSubtask({ id: "parent", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Parent", instruction: "Parent", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1 })
   await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "parent", agentID: "a", kind: "outside_roster", title: "Contact Echo", detail: "Check", payload: { assigneeID: "b", title: "Child", instruction: "Check" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
@@ -970,8 +995,8 @@ test("cross-project approval becomes global memory", async () => {
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveApproval({ id: "ap", workspaceID: "w", agentID: "a", kind: "cross_project", title: "Share", detail: "Shared note", payload: { text: "Shared note" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
@@ -990,8 +1015,8 @@ test("discarding interrupted work marks it failed without running", async () => 
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Interrupted", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: true, approvalID: "ap", awaitingChildren: false, attempts: 1, createdAt: 1 })
   await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "interrupted", source: "workspace", title: "Resume interrupted work: Interrupted", detail: "The run stopped before it could reply.", payload: { subtaskID: "t" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
@@ -1272,8 +1297,8 @@ test("rejecting a question fails the waiting task", async () => {
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "ask_person", title: "Need input", detail: "Which?", status: "pending", createdAt: 1 })
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Waiting", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, approvalID: "ap", awaitingChildren: false, attempts: 1, createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
@@ -1387,7 +1412,7 @@ test("direct chat creates a home session and queues messages while busy", async 
     backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
     homeDirectory: home, createdAt: 1, updatedAt: 1,
   })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedWorkspace(seed, directory)
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 250)) }
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
@@ -1661,7 +1686,7 @@ test("adding an agent can move its no-workspace direct-chat session into a works
   const { ctx, movedSessions } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, homeDirectory: home, createdAt: 1, updatedAt: 1 })
+  await seedAgent(seed, { homeDirectory: home })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -1712,7 +1737,7 @@ test("a failed direct prompt releases the busy lock", async () => {
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, homeDirectory: home, createdAt: 1, updatedAt: 1 })
+  await seedAgent(seed, { homeDirectory: home })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -1758,7 +1783,7 @@ test("parallel direct-chat opens create only one no-workspace session", async ()
   const { ctx, createdSessionIDs } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, homeDirectory: home, createdAt: 1, updatedAt: 1 })
+  await seedAgent(seed, { homeDirectory: home })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -1883,8 +1908,8 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
   const { ctx, removedSessions } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: "Initializing workspace…", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
   await seed.saveMessage({ id: "other", workspaceID: "w", seq: 2, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: INIT_START_TEXT, kind: "text", createdAt: 2 })
   await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", phases: ["starting", "running"], previousAgentsMD: previous, startedAt: 1 })
@@ -2924,7 +2949,7 @@ test("a repeated user command forms a new dispatch group and task, with retry as
   await seed.load()
   await seed.saveAgent({ id: "n", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
   await seed.saveAgent({ id: "s", name: "Sage", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "n", memberIDs: ["n", "s"], synthesis: false, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedWorkspace(seed, directory, { leaderID: "n", memberIDs: ["n", "s"], synthesis: false })
   // A retained terminal row for the exact work the user path would create.
   const at = Date.now()
   const retainedKey = workKey({ actor: "user", workspaceID: "w", kind: "delegation", parentID: undefined, assigneeID: "n", title: "Coordinate", instruction: "Coordinate" })
@@ -2974,7 +2999,7 @@ test("restart recovery re-queues claimed work without duplicating it", async () 
   await seed.load()
   await seed.saveAgent({ id: "n", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
   await seed.saveAgent({ id: "s", name: "Sage", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "n", memberIDs: ["n", "s"], synthesis: false, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedWorkspace(seed, directory, { leaderID: "n", memberIDs: ["n", "s"], synthesis: false })
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "agent", creatorAgentID: "n", assigneeID: "s", title: "Child", instruction: "Check", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 2, createdAt: 1, claimedBy: "run_old", leaseUntil: 1, queueKey: "work:w:delegation:root:seed", workKind: "delegation" })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
@@ -2996,13 +3021,537 @@ test("restart recovery re-queues claimed work without duplicating it", async () 
   }
 })
 
+test("ticket148: load leaves a live foreign lease working row untouched", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-live-lease-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  const leaseUntil = Date.now() + 60_000
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Live", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 2, claimedBy: "run_other", activeRunID: "run_other", leaseUntil, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const previousLevel = process.env.ENSEMBLE_LOG_LEVEL
+  process.env.ENSEMBLE_LOG_LEVEL = "debug"
+  let stop = async () => {}
+  try {
+    stop = await service.start()
+  } finally {
+    if (previousLevel === undefined) delete process.env.ENSEMBLE_LOG_LEVEL
+    else process.env.ENSEMBLE_LOG_LEVEL = previousLevel
+  }
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "working")
+    assert.equal(row.claimedBy, "run_other")
+    assert.equal(row.activeRunID, "run_other")
+    assert.equal(row.leaseUntil, leaseUntil)
+    assert.equal(row.attempts, 2)
+    assert.equal(row.error, undefined, "load never writes a restart error onto live work")
+    const logs = await handlers["logs.recent"]({ directory, event: "task.recovery.deferred", limit: 20 })
+    assert.ok(logs.entries.length >= 1, "a live foreign lease is deferred, not reaped")
+    assert.equal((logs.entries[0] as any).claimedBy, "run_other")
+    assert.equal((logs.entries[0] as any).taskID, "t")
+    // A later maintenance pass, triggered through the public invoke boundary,
+    // still defers to the live lease.
+    await handlers.invoke({ directory, action: "settings.update", payload: { maxActiveRuns: 2 } })
+    const later = await handlers.snapshot({ directory })
+    assert.equal((later.state.subtasks.t as any).state, "working")
+    assert.equal((later.state.subtasks.t as any).claimedBy, "run_other")
+    assert.equal((later.state.subtasks.t as any).attempts, 2)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: a live lease is never retired for attempts or a passed deadline", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-live-retire-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  const leaseUntil = Date.now() + 60_000
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Live", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 5, claimedBy: "run_live", activeRunID: "run_live", leaseUntil, deadlineAt: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "working", "a live lease survives attempt exhaustion and a passed deadline")
+    assert.equal(row.claimedBy, "run_live")
+    assert.equal(row.leaseUntil, leaseUntil)
+    assert.equal(row.attempts, 5)
+    const live = await handlers["logs.recent"]({ directory, event: "failure.terminal", taskID: "t", limit: 50 })
+    assert.equal(live.entries.length, 0, "no terminal record is written while the lease is live")
+
+    // Expire the lease and force a maintenance pass through the public invoke
+    // boundary; only now may the row retire.
+    const stored = seed.subtask("t")!
+    stored.leaseUntil = 1
+    await seed.saveSubtask(stored)
+    await handlers.invoke({ directory, action: "settings.update", payload: { maxActiveRuns: 2 } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks.t.outcome, "failed")
+    assert.equal(after.state.subtasks.t.error, "Gave up after 5 attempts.")
+    const logs = await handlers["logs.recent"]({ directory, event: "failure.terminal", taskID: "t", limit: 50 })
+    assert.equal((logs.entries.at(-1) as any).failureClass, "internal")
+    assert.equal((logs.entries.at(-1) as any).reason, "attempts-exhausted")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: an expired lease is requeued once and attempts rise only on the next claim", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-expired-lease-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Stale", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 2, claimedBy: "run_dead", leaseUntil: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    // The expired claim is requeued without consuming an attempt.
+    assert.equal(row.state, "pending")
+    assert.equal(row.claimedBy, undefined)
+    assert.equal(row.leaseUntil, undefined)
+    assert.equal(row.attempts, 2)
+    assert.equal(row.error, undefined, "requeue records failure evidence without a new user-visible error")
+    const logs = await handlers["logs.recent"]({ directory, event: "task.recovery.requeued", limit: 50 })
+    assert.equal(logs.entries.length, 1)
+    assert.equal((logs.entries[0] as any).claimedBy, "run_dead")
+    assert.equal((logs.entries[0] as any).attempts, 2)
+    // A second maintenance pass through the public invoke boundary sees a
+    // claimless row; it is not requeued again.
+    await handlers.invoke({ directory, action: "settings.update", payload: { maxActiveRuns: 2 } })
+    const again = await handlers["logs.recent"]({ directory, event: "task.recovery.requeued", limit: 50 })
+    assert.equal(again.entries.length, 1)
+    assert.equal((await handlers.snapshot({ directory })).state.subtasks.t.attempts, 2)
+    // The next claim is the one that consumes attempt 3.
+    await handlers.invoke({ directory, action: "workspace.resume", payload: { id: "w" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal((after.state.subtasks.t as any).attempts, 3)
+    assert.equal((after.state.subtasks.t as any).outcome, "succeeded")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: restart requeue writes a failure attempt with the previous claim and lease", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-requeue-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Recovered", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 2, claimedBy: "run_dead", activeRunID: "run_dead", leaseUntil: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "pending")
+    assert.equal(row.attempts, 2, "requeue never consumes an attempt")
+    assert.equal(row.claimedBy, undefined)
+    const logs = await handlers["logs.recent"]({ directory, event: "failure.attempt", taskID: "t", limit: 50 })
+    const record = logs.entries.at(-1) as any
+    assert.ok(record, "the requeue reaches the failure sink")
+    assert.equal(record.failureClass, "restart")
+    assert.equal(record.previousClaim, "run_dead")
+    assert.equal(record.leaseExpiredAt, 1)
+    assert.equal(record.reason, "lease-expired")
+    assert.equal(typeof record.instanceID, "string", "the logger stamps the service instance")
+    assert.equal(typeof record.threadID, "number", "the logger stamps the worker thread")
+    assert.equal(record.decision.type, "retry")
+    assert.equal(record.decision.reason, "lease-expired")
+    assert.equal(record.decision.attempt, 3)
+    assert.equal(record.decision.maxAttempts, 5)
+    assert.equal(record.decision.delayMs, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: restart retirement writes a terminal failure record", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-retire-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  await seed.saveSubtask({
+    id: "t_exhausted", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Exhausted", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 5, claimedBy: "run_dead", leaseUntil: 1, createdAt: 1,
+  })
+  await seed.saveSubtask({
+    id: "t_expired", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Expired", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 2, claimedBy: "run_dead", leaseUntil: 1, deadlineAt: 1, createdAt: 2,
+  })
+  await seed.saveSubtask({
+    id: "t_transient", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Transient", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 5, claimedBy: "run_dead", leaseUntil: 1, error: "Recovered after an expired lease; retrying.", createdAt: 3,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal((snapshot.state.subtasks.t_exhausted as any).state, "replied")
+    assert.equal((snapshot.state.subtasks.t_exhausted as any).outcome, "failed")
+    assert.equal((snapshot.state.subtasks.t_expired as any).state, "replied")
+    assert.equal((snapshot.state.subtasks.t_expired as any).outcome, "failed")
+    assert.equal((snapshot.state.subtasks.t_transient as any).state, "replied")
+    assert.equal((snapshot.state.subtasks.t_transient as any).error, "Gave up after 5 attempts.", "a transient recovery string never becomes terminal truth")
+
+    const logs = await handlers["logs.recent"]({ directory, event: "failure.terminal", limit: 50 })
+    const exhausted = logs.entries.find((entry: any) => entry.taskID === "t_exhausted") as any
+    assert.ok(exhausted, "attempt exhaustion is never silent")
+    assert.equal(exhausted.failureClass, "internal", "attempt exhaustion is internal truth, not a restart")
+    assert.equal(exhausted.previousClaim, "run_dead")
+    assert.equal(exhausted.leaseExpiredAt, 1)
+    assert.equal(exhausted.reason, "attempts-exhausted")
+    assert.equal(typeof exhausted.instanceID, "string")
+    assert.equal(typeof exhausted.threadID, "number")
+    assert.equal(exhausted.decision.type, "terminal")
+    assert.equal(exhausted.decision.reason, "attempts-exhausted")
+    assert.equal(exhausted.decision.attempt, 5)
+    assert.equal(exhausted.decision.maxAttempts, 5)
+
+    const expired = logs.entries.find((entry: any) => entry.taskID === "t_expired") as any
+    assert.ok(expired, "an expired deadline is never silent")
+    assert.equal(expired.failureClass, "timeout", "a missed deadline is a timeout, not a restart")
+    assert.equal(expired.previousClaim, "run_dead")
+    assert.equal(expired.leaseExpiredAt, 1)
+    assert.equal(expired.reason, "deadline-exceeded")
+    assert.equal(expired.decision.type, "terminal")
+    assert.equal(expired.decision.reason, "deadline-exceeded")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: stream finalization reports settlement and result eligibility separately", () => {
+  const row = {
+    id: "m", workspaceID: "w", seq: 1, author: "agent", agentID: "a", text: "answer",
+    kind: "text", streaming: false, createdAt: 1,
+  } as any
+
+  assert.deepEqual(streamFinalization(undefined, true, false, "answer"), { eligible: false, reason: "no-message" })
+  const eligible = streamFinalization(row, true, false, "answer")
+  assert.equal(eligible.eligible, true)
+  assert.equal(eligible.message, row)
+  assert.equal(eligible.reason, undefined)
+
+  assert.equal(streamFinalization(row, false, false, "answer").reason, "stale", "a stale epoch still settles but is not a result")
+  assert.equal(streamFinalization(row, true, true, "answer").reason, "interrupted")
+  assert.equal(streamFinalization(row, true, false, "Reply completed.").reason, "fallback")
+  assert.equal(streamFinalization(row, true, false, "   ").reason, "empty")
+})
+
+test("ticket149: a recovered then successful task clears its restart error", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-clear-error-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Recovered", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, claimedBy: "run_dead", activeRunID: "run_dead", leaseUntil: 1,
+    error: "Ensemble restarted while this subtask was working.", createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.outcome, "succeeded")
+    assert.equal(task.attempts, 2)
+    assert.equal(task.error, undefined, "a success never retains a restart reason")
+    const result = after.state.messages.w.find((message: any) => message.id === task.resultMessageID) as any
+    assert.ok(result)
+    assert.equal(result.text, "OK")
+    assert.equal(FALLBACK_REPLIES.has(result.text), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: a fallback reply is retried as an empty answer", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-fallback-retry-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).context = async () => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Reply completed." }] }],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { nextSeq: 2 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Placeholder", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.error === "The agent produced no answer."
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.state, "pending")
+    assert.equal(task.outcome, "pending")
+    assert.equal(task.attempts, 2)
+    assert.equal(task.resultMessageID, undefined)
+    assert.ok(task.retryAfter > Date.now() - 1_000)
+    const messages = (after.state.messages.w ?? []) as any[]
+    assert.equal(messages.some((message) => message.text === "Reply completed."), false)
+    assert.equal(messages.some((message) => message.taskID === "t" && FALLBACK_REPLIES.has(message.text)), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: an exhausted fallback reply fails visibly without a result", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-fallback-fail-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).context = async () => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Reply interrupted before completion." }] }],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { nextSeq: 2 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Placeholder exhausted", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 4, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.outcome, "failed")
+    assert.equal(task.error, "The agent produced no answer.")
+    assert.equal(task.resultMessageID, undefined, "a fallback never becomes the result")
+    const messages = (after.state.messages.w ?? []) as any[]
+    assert.equal(messages.some((message) => message.taskID === "t" && FALLBACK_REPLIES.has(message.text) && message.interrupted !== true), false)
+    assert.equal(messages.some((message) => message.id === task.resultMessageID), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: the request-23 shape never succeeds on a stale fallback", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-request23-"))
+  const { ctx } = fakeContext()
+  // A recovered attempt sees the previous attempt's substantive answer in the
+  // native session and only a stale fallback as "new" assistant text.
+  ;(ctx.session as any).context = async () => ({
+    data: [
+      { type: "assistant", time: { created: 1 }, content: [{ type: "text", text: "Previous answer" }] },
+      { type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Reply completed." }] },
+    ],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { nextSeq: 2 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Recovered attempt", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 4, claimedBy: "run_dead", activeRunID: "run_dead", leaseUntil: 1,
+    error: "Ensemble restarted while this subtask was working.", createdAt: 1,
+  })
+  await seed.saveMessage({
+    id: "m_previous", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t",
+    text: "Previous answer", kind: "text", interrupted: false, createdAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.outcome, "failed", "no new substantive native text cannot succeed")
+    assert.equal(task.error, "The agent produced no answer.")
+    assert.equal(task.resultMessageID, undefined, "the result never points at a placeholder")
+    assert.equal(task.attempts, 5)
+    const messages = (after.state.messages.w ?? []) as any[]
+    assert.equal(messages.filter((message) => message.text === "Previous answer").length, 1, "the old answer is not duplicated")
+    assert.equal(messages.some((message) => message.taskID === "t" && FALLBACK_REPLIES.has(message.text) && message.interrupted !== true), false)
+    assert.equal(messages.some((message) => message.id === task.resultMessageID), false)
+    assert.equal(Object.values(after.state.subtasks).some((item: any) => item.parentID === "t" && item.handoff?.completion === true), false, "a failed attempt never emits a completion handoff")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: an empty terminal stream settles as interrupted, never a completed placeholder", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-empty-stream-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { nextSeq: 2 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Done", instruction: "Do", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1, repliedAt: 2, finishedAt: 2 })
+  await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t", text: "", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const message = (snapshot.state.messages.w as any[]).find((item) => item.id === "m") as any
+    assert.equal(message.streaming, false)
+    assert.equal(message.interrupted, true)
+    assert.equal(message.text, "Reply interrupted.")
+    assert.notEqual(message.text, "Reply completed.", "an empty stream is never a successful answer")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: a working row with no claim and no local run is repaired", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-no-claim-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Orphan", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "pending")
+    assert.equal(row.claimedBy, undefined)
+    assert.equal(row.leaseUntil, undefined)
+    assert.equal(row.attempts, 1, "repair never consumes an attempt")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: stop releases local claims and preserves foreign claims", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-stop-claims-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  const leaseUntil = Date.now() + 60_000
+  await seed.saveSubtask({
+    id: "t_local", workspaceID: "w", creatorType: "user", title: "Local", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, claimedBy: "run_local", activeRunID: "run_local", leaseUntil, createdAt: 1,
+  })
+  await seed.saveSubtask({
+    id: "t_foreign", workspaceID: "w", creatorType: "user", title: "Foreign", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, claimedBy: "run_foreign", activeRunID: "run_foreign", leaseUntil, createdAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  try {
+    // Register the local run identity without starting native work: stop() may
+    // only clear claims owned by this service's run set.
+    service.registerLocalRunForTest({
+      id: "run_local", subtaskID: "t_local", workspaceID: "w", agentID: "a", sessionID: "session_local", status: "running", startedAt: 1,
+    } as any)
+  } finally {
+    await stop()
+  }
+  try {
+    const reloaded = new V2Store(ctx)
+    await reloaded.load()
+    const local = reloaded.subtask("t_local") as any
+    const foreign = reloaded.subtask("t_foreign") as any
+    assert.equal(local.claimedBy, undefined)
+    assert.equal(local.leaseUntil, undefined)
+    assert.equal(foreign.claimedBy, "run_foreign")
+    assert.equal(foreign.leaseUntil, leaseUntil)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("exhausted attempts fail with the reason preserved", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Tired", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 5, error: "boom", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
@@ -3158,8 +3707,8 @@ test("ticket68: restart recovery requeues dead work without a phantom approval",
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Stale", instruction: "Do work", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
@@ -3335,8 +3884,8 @@ test("ticket68: settling work rejects stale product approvals of every kind", as
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Work", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 1 })
   await seed.saveApproval({ id: "out", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "outside_roster", title: "Contact", detail: "Check", status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
@@ -3361,8 +3910,8 @@ test("ticket75: an empty assistant reply is retried, never a silent success", as
   })
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -3392,8 +3941,8 @@ test("ticket144: maintenance claims a future retry without an unrelated schedule
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   const retryAt = Date.now() + 1_500
   await seed.saveSubtask({
     id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Wake retry", instruction: "Do",
@@ -3430,8 +3979,8 @@ test("ticket144: an uncertain tool outcome parks for review instead of auto-retr
   })
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -3465,8 +4014,8 @@ test("ticket145: a terminal task failure writes a self-contained failure record"
   })
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveSubtask({
     id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Terminal", instruction: "Do",
     mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
@@ -3512,8 +4061,8 @@ test("ticket145: an uncertain park carries tool outcomes and the approval decisi
   })
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   const service = new EnsembleV2Service(ctx)
   const stop = await service.start()
   const handlers = service.handlers()
@@ -3545,8 +4094,8 @@ test("ticket75: a waiting parent with terminal children is reconciled, not stuck
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
   await seed.saveSubtask({ id: "parent", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Parent", instruction: "Do parent", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true, attempts: 1, createdAt: 1 })
   await seed.saveSubtask({ id: "child", workspaceID: "w", parentID: "parent", creatorType: "agent", creatorAgentID: "a", assigneeID: "a", title: "Child", instruction: "Do child", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 2, repliedAt: 3, finishedAt: 3 })
   const service = new EnsembleV2Service(ctx)
@@ -3573,8 +4122,8 @@ test("ticket76: snapshot settles a streaming message whose task is terminal", as
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
-  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
-  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 2, createdAt: 1, lastActiveAt: 1 })
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { nextSeq: 2 })
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Done", instruction: "Do", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1, repliedAt: 2, finishedAt: 2 })
   await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t", text: "partial reply", kind: "text", streaming: true, createdAt: 2 })
   const service = new EnsembleV2Service(ctx)
@@ -3586,6 +4135,44 @@ test("ticket76: snapshot settles a streaming message whose task is terminal", as
     assert.ok(message)
     assert.equal(message.streaming, false)
     assert.equal(message.text, "partial reply")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket148: streaming rows survive load only while their lease is live", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-stream-lease-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true, nextSeq: 10 })
+  const liveUntil = Date.now() + 60_000
+  await seed.saveSubtask({ id: "t_live", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Live", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, claimedBy: "run_live", leaseUntil: liveUntil, createdAt: 1 })
+  await seed.saveSubtask({ id: "t_dead", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Dead", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, claimedBy: "run_dead", leaseUntil: 1, createdAt: 2 })
+  const nowMs = Date.now()
+  await seed.saveSubtask({ id: "t_done", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Done", instruction: "Do", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: nowMs - 1_000, repliedAt: nowMs, finishedAt: nowMs })
+  await seed.saveMessage({ id: "m_live", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t_live", text: "live partial", kind: "text", streaming: true, createdAt: 1, updatedAt: Date.now() })
+  await seed.saveMessage({ id: "m_dead", workspaceID: "w", seq: 2, author: "agent", agentID: "a", taskID: "t_dead", text: "dead partial", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveMessage({ id: "m_done", workspaceID: "w", seq: 3, author: "agent", agentID: "a", taskID: "t_done", text: "done partial", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveMessage({ id: "m_old", workspaceID: "w", seq: 4, author: "agent", agentID: "a", text: "orphan old", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveMessage({ id: "m_fresh", workspaceID: "w", seq: 5, author: "agent", agentID: "a", text: "orphan fresh", kind: "text", streaming: true, createdAt: Date.now(), updatedAt: Date.now() })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const find = (id: string) => (snapshot.state.messages.w as any[]).find((message) => message.id === id)
+    assert.equal(find("m_live").streaming, true, "a live lease keeps its row open across load")
+    assert.equal(find("m_live").interrupted, undefined)
+    assert.equal(find("m_dead").streaming, false, "an expired task lease settles the row")
+    assert.equal(find("m_dead").interrupted, true)
+    assert.equal(find("m_done").streaming, false, "a terminal task settles the row")
+    assert.equal(find("m_done").interrupted, false)
+    assert.equal(find("m_old").streaming, false, "an old taskless row settles")
+    assert.equal(find("m_old").interrupted, true)
+    assert.equal(find("m_fresh").streaming, true, "a fresh taskless row may still be live")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -4820,6 +5407,82 @@ test("a foreign-version write resets the feed and is recovered without data loss
   }
 })
 
+test("ticket148: a second service over shared storage never steals a live claim", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-148-two-services-"))
+  const values = new Map<string, unknown>()
+  const first = fakeContext(values)
+  const second = fakeContext(values)
+  let release: (() => void) | undefined
+  const parked = new Promise<void>((resolve) => { release = resolve })
+  ;(first.ctx.session as any).wait = async () => { await parked }
+  const serviceA = new EnsembleV2Service(first.ctx)
+  const stopA = await serviceA.start()
+  const handlersA = serviceA.handlers()
+  let stopB = async () => {}
+  try {
+    const agent = await handlersA.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlersA.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "shared", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlersA.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Do the thing" } })
+    let taskID = ""
+    let ownerRunID = ""
+    await waitFor(async () => {
+      const next = await handlersA.snapshot({ directory })
+      const task = Object.values(next.state.subtasks).find((item: any) => item.state === "working") as any
+      if (!task?.claimedBy || !task.leaseUntil || task.leaseUntil <= Date.now()) return false
+      if (first.prompts.length !== 1) return false
+      taskID = task.id
+      ownerRunID = task.claimedBy
+      return true
+    })
+    const before = await handlersA.snapshot({ directory })
+    const original = before.state.subtasks[taskID] as any
+    assert.equal(first.prompts.length, 1)
+
+    // The second service loads the same durable state while the first owns a
+    // live claim. Load must not requeue or rewrite the running row.
+    const serviceB = new EnsembleV2Service(second.ctx)
+    stopB = await serviceB.start()
+    const handlersB = serviceB.handlers()
+    const seen = await handlersB.snapshot({ directory })
+    const foreign = seen.state.subtasks[taskID] as any
+    assert.equal(foreign.state, "working")
+    assert.equal(foreign.claimedBy, ownerRunID)
+    assert.equal(foreign.activeRunID, original.activeRunID)
+    assert.equal(foreign.attempts, original.attempts)
+    assert.doesNotMatch(String(foreign.error ?? ""), /restart/i)
+    assert.equal(first.prompts.length + second.prompts.length, 1, "only the claim owner prompts")
+
+    release?.()
+    await waitFor(async () => {
+      const next = await handlersA.snapshot({ directory })
+      return (next.state.subtasks[taskID] as any)?.state === "replied"
+    }, 5_000)
+    await waitFor(async () => {
+      const next = await handlersB.snapshot({ directory })
+      return (next.state.subtasks[taskID] as any)?.state === "replied"
+    }, 5_000)
+    const finalA = await handlersA.snapshot({ directory })
+    const finalB = await handlersB.snapshot({ directory })
+    assert.equal((finalA.state.subtasks[taskID] as any).attempts, 1, "one claim winner, one attempt")
+    assert.equal((finalB.state.subtasks[taskID] as any).attempts, 1)
+    assert.equal((finalA.state.subtasks[taskID] as any).outcome, "succeeded")
+    assert.equal((finalB.state.subtasks[taskID] as any).outcome, "succeeded")
+    assert.equal(first.prompts.length + second.prompts.length, 1, "one prompt total")
+    const replies = (finalB.state.messages[workspace.result.id] as any[]).filter((message) => message.author === "agent")
+    assert.equal(replies.length, 1, "one durable result")
+    assert.equal(replies[0].text, "OK")
+  } finally {
+    release?.()
+    await stopB()
+    await stopA()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("shell actions publish incremental patches and an approval resolution reaches the feed", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-shell-feed-"))
   const { ctx } = fakeContext()
@@ -4928,6 +5591,74 @@ test("catalog and config metadata travel on version-neutral patch events", async
     const broken = emitted.filter((event) => event.name === "patches" && typeof event.data.meta?.configError === "string").at(-1)!
     assert.match(broken.data.meta.configError, /unknown or ambiguous/i)
     assert.equal(broken.data.meta.directory, directory)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket150: log rows identify the service instance, location, and thread", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-150-logs-"))
+  const pluginLocation = mkdtempSync(join(tmpdir(), "ensemble-150-location-"))
+  const { ctx } = fakeContext()
+  ctx.location.directory = pluginLocation
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await handlers.snapshot({ directory })
+    await handlers.snapshot({ directory })
+    const logs = await handlers["logs.recent"]({ directory, limit: 500 })
+    assert.ok(logs.entries.length > 0)
+    const start = logs.entries.find((entry: any) => entry.event === "service.start")
+    assert.ok(start)
+    assert.equal(start.directory, pluginLocation, "the start row names the plugin location, not the process cwd")
+    assert.equal(start.role, "service")
+    assert.equal(start.instanceID, logs.stats.instanceID)
+    assert.equal(start.threadID, 0)
+    for (const entry of logs.entries) {
+      assert.equal(entry.role, "service")
+      assert.equal(entry.instanceID, logs.stats.instanceID)
+      assert.equal(entry.threadID, 0)
+    }
+    const locations = logs.entries.filter((entry: any) => entry.event === "service.location")
+    assert.equal(locations.length, 1, "the first view directory is logged once per instance")
+    assert.equal(locations[0].directory, directory)
+
+    const filtered = await handlers["logs.recent"]({ directory, instanceID: logs.stats.instanceID, limit: 500 })
+    assert.equal(filtered.entries.length, logs.entries.length)
+    const foreign = await handlers["logs.recent"]({ directory, instanceID: "another-instance", limit: 500 })
+    assert.deepEqual(foreign.entries, [])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(pluginLocation, { recursive: true, force: true })
+  }
+})
+
+test("ticket150: feed resets name the reason and identical resets are rate-limited", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-150-reset-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const first = await handlers["changes.since"]({ directory, epoch: -1, version: 0 })
+    assert.equal(first.reset, true)
+    assert.equal(first.reason, "epoch")
+    const second = await handlers["changes.since"]({ directory, epoch: -2, version: 0 })
+    assert.equal(second.reset, true)
+    assert.equal(second.reason, "epoch")
+
+    const logs = await handlers["logs.recent"]({ directory, event: "feed.reset", limit: 100 })
+    assert.equal(logs.entries.length, 2, "the window summary reaches the viewer")
+    assert.equal(logs.entries[0].reason, "epoch")
+    assert.equal(logs.entries[0].suppressed, 0)
+    assert.equal(logs.entries[0].instanceID, logs.stats.instanceID)
+    const summary = logs.entries[1] as any
+    assert.equal(summary.reason, "epoch")
+    assert.equal(summary.suppressed, 1, "a burst that stopped still reports its suppressed total")
+    assert.equal(summary.trailing, true)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

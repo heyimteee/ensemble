@@ -5,6 +5,7 @@ import {
   createRefreshCoordinator,
   decideSnapshotApply,
   heartbeatDelay,
+  isForeignEpochPatch,
   isWorkOnlyPatch,
   revisionChanged,
   supportsScopedReads,
@@ -149,6 +150,41 @@ test("the revision check ignores an unchanged metadata revision and accepts cata
 test("the heartbeat is cheap when idle and faster while work is live", () => {
   assert.equal(heartbeatDelay(false), 2000)
   assert.equal(heartbeatDelay(true), 1000)
+})
+
+test("a foreign epoch is detected only against a known differing cursor epoch", () => {
+  assert.equal(isForeignEpochPatch(undefined, 2), false, "no cursor has no epoch to compare")
+  assert.equal(isForeignEpochPatch(meta({ version: 1, epoch: undefined }), 2), false, "a legacy cursor never takes the foreign path")
+  assert.equal(isForeignEpochPatch(meta({ version: 1, epoch: 1 }), 1), false)
+  assert.equal(isForeignEpochPatch(meta({ version: 1, epoch: 1 }), 2), true)
+  assert.equal(isForeignEpochPatch(meta({ version: 1, epoch: 1 }), undefined), false)
+  assert.equal(isForeignEpochPatch(meta({ version: 1, epoch: 1 }), "2"), false, "a malformed epoch is not a foreign epoch")
+})
+
+test("foreign-epoch patches coalesce one delayed snapshot and never request cursor recovery", async () => {
+  const cursor = meta({ version: 7, epoch: 1 })
+  let snapshots = 0
+  let cursorRecoveries = 0
+  const refresh = createRefreshCoordinator({ run: () => { snapshots++ }, delayMs: 5 })
+
+  for (let index = 0; index < 25; index++) {
+    if (isForeignEpochPatch(cursor, 2)) {
+      refresh.request()
+      continue
+    }
+    cursorRecoveries++
+  }
+  assert.equal(refresh.request(), false, "a request inside the window is coalesced")
+  assert.equal(snapshots, 0, "the snapshot waits for the coalescing window")
+  await new Promise<void>((resolve) => setTimeout(resolve, 20))
+
+  assert.equal(snapshots, 1, "a burst causes one snapshot")
+  assert.equal(cursorRecoveries, 0, "a foreign epoch never enters changes.since recovery")
+  assert.equal(refresh.pending(), false)
+
+  assert.equal(refresh.request(), true, "a later foreign patch opens the next window")
+  refresh.dispose()
+  assert.equal(refresh.request(), false)
 })
 
 test("scoped reads negotiate only on protocol 4 with a boot epoch", () => {

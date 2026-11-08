@@ -20,10 +20,11 @@ export type FailureClass =
   | "handoff"
   | "init"
   | "empty-reply"
+  | "restart"
   | "internal"
 
 export type FailureDecision =
-  | { type: "retry"; attempt: number; maxAttempts: number; delayMs: number; retryAt: number }
+  | { type: "retry"; attempt: number; maxAttempts: number; delayMs: number; retryAt: number; reason?: string }
   | { type: "terminal"; reason: string; attempt: number; maxAttempts: number }
   | { type: "park"; reason: string; approvalID?: string }
   | { type: "cancelled"; reason: string }
@@ -45,6 +46,9 @@ export type FailureRecordInput = {
   task: Subtask
   error: unknown
   decision: FailureDecision
+  /** Restart/lease recovery evidence (ticket #149). */
+  previousClaim?: string
+  leaseExpiredAt?: number
   runID?: string
   sessionID?: string
   providerID?: string
@@ -119,7 +123,7 @@ function messageMetadata(messages: Message[], content: boolean): Array<Record<st
   }))
 }
 
-export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "ts" | "pid" | "role"> & { ts?: string } {
+export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "ts" | "pid" | "role" | "instanceID" | "threadID"> & { ts?: string } {
   const { task } = input
   return {
     level: input.level as LogLevel,
@@ -171,6 +175,10 @@ export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "t
     toolOutcomes: input.toolOutcomes,
     lastMessages: input.lastMessages ? messageMetadata(input.lastMessages, input.content === true) : undefined,
     decision: input.decision,
+    previousClaim: input.previousClaim,
+    leaseExpiredAt: input.leaseExpiredAt,
+    // The decision is the single source of truth for the retry/terminal cause.
+    reason: input.decision.reason,
     version: input.version,
     epoch: input.epoch,
     ...(input.content
