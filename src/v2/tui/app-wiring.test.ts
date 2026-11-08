@@ -380,3 +380,35 @@ test("ticket171: rail collapse state persists through durable UI state", () => {
   assert.ok(source.includes('"ui.save"'))
   assert.ok(source.includes("state()?.ui.collapsedRailGroups"))
 })
+
+test("ticket174: every native key routes through one surface-aware decision", () => {
+  // Behavior: picker.test.ts native routing by surface and focus.
+  const source = app()
+  assert.ok(source.includes("nativeSessionRoute({"))
+  assert.ok(source.includes('"chat.native": () => openNative()'))
+  assert.ok(source.includes('"work.native": () => openNative()'))
+  assert.ok(source.includes('"leader.native": () => openNative()'))
+})
+
+test("ticket174: group-chat chat focus opens the workspace-member picker", () => {
+  // Behavior: picker.test.ts native candidates, filtering, and selection.
+  const source = app()
+  assert.ok(source.includes('openPicker("native")'))
+  assert.ok(source.includes("nativePickerCandidates("))
+  assert.ok(source.includes("pickerCandidateRows("))
+})
+
+test("ticket174: a missing native binding toasts instead of returning silently", () => {
+  // Behavior: picker.test.ts missing-binding routes and messages.
+  const source = app()
+  assert.ok(source.includes('route.kind === "missing"'))
+  assert.ok(source.includes("missingNativeSessionMessage(agentName(state(), agentID))"))
+})
+
+test("ticket174: label/detail list rows share the aligned column helper", () => {
+  // Behavior: format.test.ts aligned rows across widths, separators, and long names.
+  const source = app()
+  assert.ok(source.includes("alignedDetailRows("))
+  assert.ok(source.includes("wizardRowLabels()"), "wizard rows render the aligned labels")
+  assert.ok(source.includes("maxWidth: pickerDetailWidth()"), "picker rows keep one name column")
+})
