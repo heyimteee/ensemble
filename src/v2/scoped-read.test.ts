@@ -5,12 +5,15 @@ import {
   TIER3_MESSAGE_THRESHOLD,
   TIER3_SNAPSHOT_BYTES,
   TIER3_TASK_THRESHOLD,
+  mergeRetainedWork,
+  projectRetainedWork,
   projectVisibleWork,
   scopesToResync,
   tier3Gate,
   transcriptWindow,
   workspaceCounts,
 } from "./scoped-read.ts"
+import { FINISHED_RETENTION_MS } from "./queue.ts"
 import type { Message, Subtask, Workspace } from "./types.ts"
 
 const workspace = (patch: Partial<Workspace> = {}): Workspace => ({
@@ -205,4 +208,44 @@ test("a gap names only the scopes whose durable state changed after the cursor",
   assert.deepEqual(scopesToResync(8, { shell: 4, work: 8, transcript: 5 }), [])
   assert.deepEqual(scopesToResync(undefined, { shell: 4, work: 8, transcript: 5 }), ["shell", "work", "transcript"])
   assert.deepEqual(scopesToResync(4, undefined), ["shell", "work", "transcript"])
+})
+
+/**
+ * Ticket #172: the Work pane's HISTORY reads retained finished rows. The
+ * scoped Work projection stays bounded, but the client keeps terminal rows
+ * for the same 24 h the durable store already retains, so a patch or a Work
+ * resync cannot erase history.
+ */
+test("ticket172: retained work keeps finished rows inside the existing retention", () => {
+  const now = 10_000_000
+  const state = createInitialState()
+  state.workspaces.w = workspace()
+  state.subtasks.live = working({ id: "live", dispatchGroupID: "dispatch_live", leaseUntil: now + 90_000 })
+  state.subtasks.recent = replied({
+    id: "recent",
+    dispatchGroupID: "dispatch_recent",
+    finishedAt: now - 5_000,
+    repliedAt: now - 5_000,
+  })
+  state.subtasks.old = replied({
+    id: "old",
+    dispatchGroupID: "dispatch_old",
+    finishedAt: now - FINISHED_RETENTION_MS - 1,
+    repliedAt: now - FINISHED_RETENTION_MS - 1,
+  })
+  const retained = projectRetainedWork(state, now)
+  assert.deepEqual(Object.keys(retained).sort(), ["live", "recent"])
+  assert.deepEqual(Object.keys(projectVisibleWork(state, now)), ["live"], "the scoped payload stays bounded")
+})
+
+test("ticket172: a Work resync merges retained history instead of replacing it", () => {
+  const now = 10_000_000
+  const previous = {
+    recent: replied({ id: "recent", finishedAt: now - 10, repliedAt: now - 10 }),
+    old: replied({ id: "old", finishedAt: now - FINISHED_RETENTION_MS - 1, repliedAt: now - FINISHED_RETENTION_MS - 1 }),
+    stale: task({ id: "stale" }),
+  }
+  const projected = { fresh: working({ id: "fresh" }) }
+  const merged = mergeRetainedWork(projected, previous, now)
+  assert.deepEqual(Object.keys(merged).sort(), ["fresh", "recent"], "a non-terminal row from the old projection is not resurrected")
 })

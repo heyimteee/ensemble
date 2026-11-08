@@ -196,7 +196,18 @@ import {
   type WorkCard,
   type WorkCardOptions,
 } from "./workrows.ts"
-import { nextWorkInvalidation, workGroupCounts, workGroupLayout, workGroupsForTasks, workSummaryCounts, type WorkGroupSection } from "./workgroups.ts"
+import { nextWorkInvalidation, workGroupCounts } from "./workgroups.ts"
+import {
+  paginateWorkGroups,
+  settleWorkFocus,
+  workPaneBodyHeight,
+  workPaneHeader,
+  workTaskPage,
+  workViewGroups,
+  workspacePaneWidths,
+  type WorkPaneSection as WorkLayoutSection,
+  type WorkView,
+} from "./workpane.ts"
 import {
   accumulateCompletions,
   BUBBLE_CHROME,
@@ -413,7 +424,15 @@ export function EnsembleV2App() {
   // suppresses the hydration echo after an optimistic local toggle.
   const [collapsedRailGroups, setCollapsedRailGroups] = createSignal<string[]>([])
   let railCollapsedKey = ""
-  const [taskCursor, setTaskCursor] = createSignal(0)
+  // Ticket #172: Work is a dedicated pane. Focus is task identity, the view
+  // owns ACTIVE/HISTORY, and the pane pages its own body instead of sharing
+  // the chat column. The drawer only exists below the 96-column breakpoint.
+  const [workView, setWorkView] = createSignal<WorkView>("active")
+  const [workPage, setWorkPage] = createSignal(1)
+  const [workFocusID, setWorkFocusID] = createSignal<string | undefined>(undefined)
+  const [workDrawerOpen, setWorkDrawerOpen] = createSignal(false)
+  let lastWorkFocusIndex = 0
+  let workFocusIntent: "first" | "nearest" = "nearest"
   const [chatContext, setChatContext] = createSignal<ChatContext | null>(null)
   const [settingsAgentID, setSettingsAgentID] = createSignal<string | null>(null)
   const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("general")
@@ -821,16 +840,24 @@ export function EnsembleV2App() {
   // The rail stays transparent; the inline LEADER label uses the leader
   // color, so there is no badge box or opaque cutout to paint.
   const viewWidth = () => Math.max(60, renderSize().width - 2)
-  const railWidth = () => Math.max(26, Math.min(34, Math.floor(viewWidth() * 0.26)))
-  // Two-column layout (ticket #56): the task board is gone and the chat
-  // reclaims its width. Only the rail is subtracted now.
-  const messageWidth = () => Math.max(20, viewWidth() - railWidth() - 10)
   const viewHeight = () => renderSize().height
   const messageHeight = () => Math.max(6, viewHeight() - 14)
-  // Ticket #115/#117: Work cards. The grid uses the full chat content width
-  // minus the section padding. The layout decides the column count, card
-  // width, and row capacity; card content width sits inside border/accent.
-  const workContentWidth = () => Math.max(20, messageWidth() - 2)
+  // Ticket #172: one pane-width source of truth consumed by the chat
+  // transcript, the Work pane, and hit-testing. The rail keeps #171's width;
+  // the Work pane is a sibling column or a right drawer below 96 columns.
+  const panes = createMemo(() => workspacePaneWidths(renderSize().width))
+  // Ticket #172: the Work pane is a sibling of the chat only on a workspace
+  // surface, and only when the drawer is open below 96 columns. A DM (or a
+  // closed drawer) lets the transcript use the full two-column width.
+  const showWorkPane = createMemo(
+    () => surface()?.kind === "workspace" && (panes().mode !== "drawer" || workDrawerOpen()),
+  )
+  const railWidth = () => panes().railWidth
+  const messageWidth = () => showWorkPane() ? panes().chatContentWidth : panes().chatOnlyContentWidth
+  const workWidth = () => panes().workWidth
+  const workContentWidth = () => panes().workContentWidth
+  const workPaneMode = () => panes().mode
+  const workBodyHeight = () => workPaneBodyHeight(viewHeight())
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
   // Ticket #118: the System Agent init row is a live, staged row. It belongs
   // to the workspace surface, survives navigation through snapshot state, and
@@ -905,41 +932,62 @@ export function EnsembleV2App() {
   // A blocked card also keeps the tide frame it had when it started waiting.
   const tideAssignments = createTideAssignments()
   const tideFreezes = createTideFreezeState()
-  // Ticket #136: the Work pane is dispatch groups, not active cards plus
-  // per-task recent cards. Group visibility and layout are pure; this memo
-  // joins them to the static card mapping, activity detail, and tide
-  // assignment. Ticket #142: it reads no animation clock. Only the glyph and
-  // tide cells are rebuilt per frame, and value-equal cards keep their
+  // Ticket #136/#172: the Work pane is dispatch groups, not active cards plus
+  // per-task recent cards. Grouping, view filtering, and page layout are pure;
+  // these memos join them to the static card mapping, activity detail, and
+  // tide assignment. Ticket #142: they read no animation clock. Only the glyph
+  // and tide cells are rebuilt per frame, and value-equal cards keep their
   // previous reference across unrelated snapshot polls.
   const workCardCache = createWorkCardCache()
-  type WorkPaneSection = WorkGroupSection & { cards: WorkCard[] }
-  const workPane = createMemo(() => {
+  type WorkPaneSection = WorkLayoutSection & { cards: WorkCard[] }
+  const workViews = createMemo(() => {
     // Track the dedicated expiry revision; a durable state change re-runs the
     // memo through activeTasks/state/approvals below.
     workRevision()
+    const now = Date.now()
+    const active = activeTasks()
+    const grouped = workViewGroups(active, state()?.subtasks ?? {}, {
+      now,
+      pendingApprovalIDs: pendingApprovalIDs(),
+      nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
+      resolvedAtForTask: approvalResolutionAt(state()?.approvals ?? {}),
+      dispatchGroups: state()?.dispatchGroups ?? {},
+    })
+    const width = workContentWidth()
+    const body = workBodyHeight()
+    return {
+      active: {
+        groups: grouped.active,
+        layout: paginateWorkGroups(grouped.active, width, body, now),
+        counts: workGroupCounts(grouped.active),
+      },
+      history: {
+        groups: grouped.history,
+        layout: paginateWorkGroups(grouped.history, width, body, now),
+        counts: workGroupCounts(grouped.history),
+      },
+    }
+  })
+  const workPane = createMemo(() => {
+    const views = workViews()
+    const view = workView()
+    const data = views[view]
+    const pageCount = Math.max(1, data.layout.pages.length)
+    const page = Math.max(1, Math.min(pageCount, workPage()))
+    const current = data.layout.pages[page - 1] ?? { number: 1, sections: [], tasks: [], height: 0 }
     const now = Date.now()
     // Ticket #155: track live native activity so a tool event updates the
     // affected card detail without a snapshot or a full Work rebuild.
     const activities = workActivities()
     const active = activeTasks()
-    const ledger = state()?.dispatchGroups ?? {}
-    const budgetFor = dispatchBudgetForTask
-    const groups = workGroupsForTasks(active, state()?.subtasks ?? {}, {
-      now,
-      pendingApprovalIDs: pendingApprovalIDs(),
-      nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
-      resolvedAtForTask: approvalResolutionAt(state()?.approvals ?? {}),
-      dispatchGroups: ledger,
-    })
-    const layout = workGroupLayout(groups, workContentWidth(), viewHeight(), now)
     const pendingApprovalSet = pendingApprovalIDs()
     const nativeBlockedSet = nativeBlockedSubtaskIDs()
     const options: WorkCardOptions = {
       now,
-      width: Math.max(12, layout.cardContentWidth),
+      width: Math.max(12, data.layout.cardContentWidth),
       pendingApprovalIDs: pendingApprovalSet,
       nativeBlockedSubtaskIDs: nativeBlockedSet,
-      budgetFor,
+      budgetFor: dispatchBudgetForTask,
       pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
       variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
       detailFor: (item) => workActivityLabel(activities, item.id, now) ?? activityStateForTask(item, {
@@ -950,7 +998,7 @@ export function EnsembleV2App() {
         agentNameFor: (agentID) => agentName(state(), agentID),
       }).verb,
     }
-    const sections: WorkPaneSection[] = layout.sections.map((section) => ({
+    const sections: WorkPaneSection[] = current.sections.map((section) => ({
       ...section,
       cards: section.mode === "cards"
         ? section.tasks.map((task) =>
@@ -976,7 +1024,21 @@ export function EnsembleV2App() {
       now,
     )
     pruneTideFreezes(tideFreezes, now)
-    return { groups, layout, sections, counts: workGroupCounts(groups) }
+    return {
+      view,
+      groups: data.groups,
+      counts: data.counts,
+      page,
+      pages: pageCount,
+      layout: { ...data.layout, sections, selectableTasks: current.tasks },
+      sections,
+    }
+  })
+  createEffect(() => {
+    const pageCount = workPane().pages
+    const page = workPage()
+    if (page < 1) setWorkPage(1)
+    else if (page > pageCount) setWorkPage(pageCount)
   })
   // Ticket #142: status deadlines, lease expiry, and the shared group hold
   // are wall-clock transitions, not animation. One one-shot timer invalidates
@@ -986,7 +1048,8 @@ export function EnsembleV2App() {
   createEffect(() => {
     workRevision()
     const now = Date.now()
-    const next = nextWorkInvalidation(activeTasks(), workPane().groups, now)
+    const views = workViews()
+    const next = nextWorkInvalidation(activeTasks(), [...views.active.groups, ...views.history.groups], now)
     if (workExpiryTimer !== undefined) {
       clearTimeout(workExpiryTimer)
       workExpiryTimer = undefined
@@ -1014,37 +1077,37 @@ export function EnsembleV2App() {
         .flatMap((section) => section.cards.map((card) => card.id)),
     )
   })
-  // Ticket #136: the cursor and every work action target only visible
-  // non-terminal cards. Terminal cards remain display-only until their group
-  // completes; overflow and summarized tasks are never selectable.
+  // Ticket #172: the cursor and every work action target the visible page.
+  // HISTORY cards are selectable so their result can be inspected; the
+  // action handlers below still refuse terminal tasks until #173 owns the
+  // full action surface.
   const visibleTasks = createMemo(() => workPane().layout.selectableTasks)
   const taskCursorClamped = () => {
-    const length = visibleTasks().length
-    if (length <= 0) return 0
-    return Math.max(0, Math.min(length - 1, taskCursor()))
+    const tasks = visibleTasks()
+    const focused = workFocusID()
+    const index = focused ? tasks.findIndex((task) => task.id === focused) : -1
+    return index >= 0 ? index : 0
   }
   const selectedTask = createMemo(() => visibleTasks()[taskCursorClamped()])
+  const selectedActionTask = () => {
+    const task = selectedTask()
+    if (!task) return undefined
+    return isTerminalWorkStatus(deriveWorkStatus(task, Date.now())) ? undefined : task
+  }
+  // Focus is stored by task ID and reconciled after every layout/page update:
+  // a still-visible task keeps focus, a filter switch falls back to the first
+  // card, and a finished card moves to the nearest remaining index.
   createEffect(() => {
-    const length = visibleTasks().length
-    if (length <= 0) {
-      if (taskCursor() !== 0) setTaskCursor(0)
-      return
-    }
-    if (taskCursor() >= length) setTaskCursor(length - 1)
+    const tasks = visibleTasks()
+    const settlement = settleWorkFocus(tasks, workFocusID(), lastWorkFocusIndex, workFocusIntent)
+    workFocusIntent = "nearest"
+    lastWorkFocusIndex = settlement.index
+    if (settlement.id !== workFocusID()) setWorkFocusID(settlement.id)
   })
   const workHeader = () => {
     const pane = workPane()
-    const summary = workSummaryCounts(pane.counts.groups, pane.counts.active, pane.counts.done, pane.groups.filter((group) => group.exhausted === true).length)
-    const extras: string[] = []
-    if (pane.layout.hiddenGroups > 0) {
-      extras.push(`+${pane.layout.hiddenGroups} ${pane.layout.hiddenGroups === 1 ? "group" : "groups"}`)
-    }
-    if (pane.layout.mode === "compact" && pane.layout.overflow > 0) extras.push(`+${pane.layout.overflow} more`)
-    return extras.length > 0 ? `${summary} ${chromeSeparator()} ${extras.join(` ${chromeSeparator()} `)}` : summary
+    return workPaneHeader(pane.view, pane.counts.groups, pane.counts.active, pane.counts.done, pane.page, pane.pages)
   }
-  // Compact/card-mode gap between card sections, matching the layout budget.
-  const workSectionMarginTop = (index: number) =>
-    workPane().sections.slice(0, index).some((section) => section.mode === "cards") ? 1 : 0
   const selectedApproval = createMemo(() => pendingApprovals()[approvalCursor()])
   // Ticket #171: one rail model for the split Agents / Workspaces panes. The
   // app supplies recency-ordered workspaces and server-derived counts; the
@@ -1283,9 +1346,14 @@ export function EnsembleV2App() {
   // dump: no streamed body text anywhere. The motion tick keeps the hold
   // closing reactive while the work clock owns the repaint.
   const hasActiveWorkNow = () => hasActiveWork(activeTasks(), Date.now())
-  const showWorkBlock = createMemo(
-    () => surface()?.kind === "workspace" && workPane().groups.length > 0,
-  )
+  const workOwnsFocus = () => interaction().focus === "work" && !composerActive() && !overlayOpen()
+  // A resize into the drawer breakpoint must not leave keyboard focus on a
+  // hidden pane. Opening the drawer is explicit (Tab/F3); closing it returns
+  // focus to the chat.
+  createEffect(() => {
+    if (workPaneMode() !== "drawer" || workDrawerOpen()) return
+    if (interaction().focus === "work") setFocusArea("chat")
+  })
   // Slice C stop affordance (brief §2.5): while active work runs on the group
   // surface a run is abortable, so the composer names `Ctrl+C stop`; the hint
   // and the binding stay hidden otherwise. Terminal cards are display-only.
@@ -1477,7 +1545,6 @@ export function EnsembleV2App() {
       liveInitJobs().length > 0 ||
       liveMessages().length > 0 ||
       completionMap().size > 0 ||
-      (showWorkBlock() ?? false) ||
       liveActivity().shown.length > 0 ||
       liveActivity().queued.length > 0,
   )
@@ -2055,11 +2122,18 @@ export function EnsembleV2App() {
     switch (interaction().focus) {
       case "rail": return "roster"
       case "chat": return "chat"
-      case "work": return "work"
+      // Ticket #172: a DM has no Work pane; a hidden drawer has no keys.
+      case "work": return showWorkPane() ? "work" : null
       default: return null
     }
   }
-  const hasWorkZone = () => visibleTasks().length > 0
+  // Ticket #172: Work is reachable whenever either view holds work, even when
+  // the current page is empty; `f` can then switch to HISTORY.
+  const hasWorkZone = () => {
+    if (surface()?.kind !== "workspace") return false
+    const views = workViews()
+    return views.active.groups.length > 0 || views.history.groups.length > 0
+  }
 
   const run = async (label: string, action: () => Promise<void>): Promise<boolean> => {
     if (busy()) return false
@@ -2162,10 +2236,7 @@ export function EnsembleV2App() {
         // inline work rows.
         if (history?.column) setFocusArea(history.column === ("tasks" as string) ? "chat" : history.column)
         const taskID = history?.taskID ?? uiState.taskID
-        if (taskID) {
-          const index = visibleTasks().findIndex((task) => task.id === taskID)
-          if (index >= 0) setTaskCursor(index)
-        }
+        if (taskID) restoreWorkFocus(taskID)
       }
     } else {
       if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(null)
@@ -2498,7 +2569,12 @@ export function EnsembleV2App() {
     setFocusArea("chat")
     dmStream.clear()
     setLiveDm(null)
-    setTaskCursor(0)
+    // Ticket #172: a different workspace starts on its own ACTIVE page with
+    // no carried-over Work focus.
+    setWorkView("active")
+    setWorkPage(1)
+    workFocusIntent = "first"
+    setWorkFocusID(undefined)
     setTranscriptSearch(null)
     await run("Activate workspace", async () => { await invoke(context, "workspace.activate", { id: workspace.id }) })
   }
@@ -2551,13 +2627,84 @@ export function EnsembleV2App() {
     railCursorMoved = true
     setRailCursor((cursor) => halfPageCursor(cursor, railVisibleRows().length, direction, listPage()))
   }
+  /** Focus one visible Work card by ID; the settlement effect owns fallbacks. */
+  const focusWorkTask = (id: string | undefined) => {
+    workFocusIntent = "nearest"
+    lastWorkFocusIndex = id ? Math.max(0, visibleTasks().findIndex((task) => task.id === id)) : 0
+    setWorkFocusID(id)
+  }
+  const focusWorkIndex = (index: number) => {
+    const tasks = visibleTasks()
+    if (tasks.length === 0) return
+    focusWorkTask(tasks[Math.max(0, Math.min(tasks.length - 1, index))]?.id)
+  }
+  /** Restore a persisted task ID into whichever view and page holds it. */
+  const restoreWorkFocus = (taskID: string) => {
+    const views = workViews()
+    const activePage = workTaskPage(views.active.layout, taskID)
+    if (activePage !== undefined) {
+      setWorkView("active")
+      setWorkPage(activePage)
+      focusWorkTask(taskID)
+      return
+    }
+    const historyPage = workTaskPage(views.history.layout, taskID)
+    if (historyPage !== undefined) {
+      setWorkView("history")
+      setWorkPage(historyPage)
+      focusWorkTask(taskID)
+      return
+    }
+    workFocusIntent = "first"
+    setWorkFocusID(undefined)
+  }
+  /**
+   * Ticket #172: `f` toggles ACTIVE/HISTORY. Keeping the task ID across the
+   * switch means a card that exists in both views (an active card whose group
+   * moved to history) keeps focus; otherwise the first card wins.
+   */
+  const toggleWorkView = () => {
+    const target: WorkView = workView() === "active" ? "history" : "active"
+    const focused = workFocusID()
+    const layout = workViews()[target].layout
+    const page = focused ? workTaskPage(layout, focused) : undefined
+    workFocusIntent = page === undefined ? "first" : "nearest"
+    setWorkView(target)
+    setWorkPage(page ?? 1)
+    if (page === undefined) setWorkFocusID(undefined)
+  }
+  /** Ticket #172 basic mouse selection: focus a card, never act on it. */
+  const selectWorkCard = (id: string) => {
+    dispatchInteraction({ type: "focus.set", focus: "work" })
+    focusWorkTask(id)
+  }
+  const selectWorkPage = (page: number) => {
+    const pages = Math.max(1, workPane().pages)
+    const next = Math.max(1, Math.min(pages, Math.floor(page)))
+    dispatchInteraction({ type: "focus.set", focus: "work" })
+    if (next === workPage()) return
+    setWorkPage(next)
+    workFocusIntent = "first"
+    setWorkFocusID(undefined)
+  }
+  const moveWorkPage = (delta: number) => selectWorkPage(workPage() + delta)
+  const toggleWorkDrawer = () => {
+    if (workPaneMode() !== "drawer") return
+    if (workDrawerOpen()) {
+      setWorkDrawerOpen(false)
+      if (interaction().focus === "work") setFocusArea("chat")
+    } else {
+      setWorkDrawerOpen(true)
+      dispatchInteraction({ type: "focus.set", focus: "work" })
+    }
+  }
   const moveTask = (delta: number) => {
     const length = visibleTasks().length
     if (length === 0) return
     const columns = Math.max(1, workPane().layout.columns)
     const cursor = taskCursorClamped()
     const next = cursor + delta * columns
-    setTaskCursor(Math.max(0, Math.min(length - 1, next < 0 ? cursor % columns : next)))
+    focusWorkIndex(next < 0 ? cursor % columns : next)
   }
   const moveTaskColumn = (delta: number) => {
     const length = visibleTasks().length
@@ -2566,14 +2713,14 @@ export function EnsembleV2App() {
     const cursor = taskCursorClamped()
     const rowStart = Math.floor(cursor / columns) * columns
     const rowEnd = Math.min(length - 1, rowStart + columns - 1)
-    setTaskCursor(Math.max(rowStart, Math.min(rowEnd, cursor + delta)))
+    focusWorkIndex(Math.max(rowStart, Math.min(rowEnd, cursor + delta)))
   }
   const moveTaskHalf = (direction: 1 | -1) => {
     const length = visibleTasks().length
     if (length === 0) return
     const columns = Math.max(1, workPane().layout.columns)
     const delta = direction * columns * Math.max(1, Math.floor(listPage() / 2))
-    setTaskCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
+    focusWorkIndex(Math.max(0, Math.min(length - 1, taskCursorClamped() + delta)))
   }
   /**
    * Tab/Shift+Tab move focus zones. Forward: roster -> chat -> work list ->
@@ -2587,6 +2734,12 @@ export function EnsembleV2App() {
     const focus = interaction().focus
     if (focus !== "rail" && focus !== "chat" && focus !== "work") return
     const next: FocusZone = nextFocusZone(focus, direction, hasWorkZone())
+    // Below 96 columns the Work pane is a drawer: entering it opens the
+    // drawer, and leaving it releases the chat width again.
+    if (workPaneMode() === "drawer") {
+      if (next === "work") setWorkDrawerOpen(true)
+      else if (next === "chat") setWorkDrawerOpen(false)
+    }
     dispatchInteraction({ type: "focus.set", focus: next })
   }
 
@@ -2940,7 +3093,10 @@ export function EnsembleV2App() {
   const surfaceEscape = () => {
     clearPendingChord()
     if (clearSearchAndFilter()) return
-    if (interaction().focus === "work") dispatchInteraction({ type: "escape" })
+    if (interaction().focus === "work") {
+      if (workPaneMode() === "drawer") setWorkDrawerOpen(false)
+      dispatchInteraction({ type: "escape" })
+    }
   }
 
   const startCompose = () => {
@@ -3440,7 +3596,7 @@ export function EnsembleV2App() {
   }
 
   const delegateSelected = async () => {
-    const task = selectedTask(); const workspace = activeWorkspace()
+    const task = selectedActionTask(); const workspace = activeWorkspace()
     if (!task || !workspace) return
     const target = await openChoice("Delegate subtask", activeAgents().map((agent) => ({ title: agent.name, value: agent.id })))
     if (!target) return
@@ -3452,7 +3608,7 @@ export function EnsembleV2App() {
   }
 
   const reassignSelected = async () => {
-    const task = selectedTask(); if (!task) return
+    const task = selectedActionTask(); if (!task) return
     const target = await openChoice("Reassign subtask", activeAgents().map((agent) => ({ title: agent.name, value: agent.id })))
     if (target) await run("Reassign subtask", async () => { await invoke(context, "task.reassign", { id: task.id, assigneeID: target }) })
   }
@@ -3477,13 +3633,13 @@ export function EnsembleV2App() {
   }
 
   const retrySelected = async () => {
-    const task = selectedTask(); if (!task) return
+    const task = selectedActionTask(); if (!task) return
     setPendingWork({ id: task.id, action: "retry" })
     try { await run("Retry subtask", async () => { await invoke(context, "task.retry", { id: task.id }) }) }
     finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
   }
   const restartSelected = async () => {
-    const task = selectedTask(); if (!task) return
+    const task = selectedActionTask(); if (!task) return
     setPendingWork({ id: task.id, action: "restart" })
     try { await run("Restart subtask", async () => { await invoke(context, "task.restart", { id: task.id }) }) }
     finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
@@ -3493,7 +3649,7 @@ export function EnsembleV2App() {
   // state arrives. The finally clears it on completion AND error, so no row
   // can stick on the interim label.
   const cancelSelected = async (action: PendingWorkAction = "cancel") => {
-    const task = selectedTask(); if (!task) return
+    const task = selectedActionTask(); if (!task) return
     setPendingWork({ id: task.id, action })
     try { await run(action === "stop" ? "Stop subtask" : "Cancel subtask", async () => { await invoke(context, "task.cancel", { id: task.id }) }) }
     finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
@@ -4014,7 +4170,9 @@ export function EnsembleV2App() {
     shouldRunMotion(
       {
         busy: isBusy() || resolvingApprovalID() !== null,
-        live: liveInitJobs().length > 0 || liveMessages().length > 0 || (showWorkBlock() ?? false) || liveActivity().shown.length > 0,
+        // Ticket #172: an empty Work pane must not keep the chrome clock
+        // alive. Only actual work in either view is live chrome.
+        live: liveInitJobs().length > 0 || liveMessages().length > 0 || hasWorkZone() || liveActivity().shown.length > 0,
         composerActive: composerActive() || composerValidation() !== null,
       },
       process.env,
@@ -4172,10 +4330,13 @@ export function EnsembleV2App() {
     "work.up": () => moveTask(-1),
     "work.left": () => moveTaskColumn(-1),
     "work.right": () => moveTaskColumn(1),
-    "work.top": () => setTaskCursor(0),
-    "work.bottom": () => setTaskCursor(Math.max(0, visibleTasks().length - 1)),
+    "work.top": () => focusWorkIndex(0),
+    "work.bottom": () => focusWorkIndex(Math.max(0, visibleTasks().length - 1)),
     "work.half.down": () => moveTaskHalf(1),
     "work.half.up": () => moveTaskHalf(-1),
+    "work.filter": () => toggleWorkView(),
+    "work.page.down": () => moveWorkPage(1),
+    "work.page.up": () => moveWorkPage(-1),
     "work.open": () => openResult(),
     "work.delegate": () => delegateSelected(),
     "work.reassign": () => reassignSelected(),
@@ -4183,6 +4344,8 @@ export function EnsembleV2App() {
     "work.restart": () => restartSelected(),
     "work.cancel": () => cancelSelected(),
     "work.native": () => openNative(),
+    // Ticket #172: Work focus keeps the existing modal until #173.
+    "work.approvals": () => openApprovals(),
     // Settings grammar (#83): the keys live in the catalog; these handlers
     // only mutate the cursor or dispatch the row action.
     "settings.tab.prev": () => setSettingsTabTo(settingsTabStep(settingsTab(), -1)),
@@ -4483,6 +4646,13 @@ export function EnsembleV2App() {
         if (globalHelp && token === globalHelp.keys[0]) {
           event?.preventDefault?.(); event?.stopPropagation?.()
           openHelp()
+          return
+        }
+        // Ticket #172: F3 toggles the Work drawer below 96 columns.
+        const globalWork = globalEntries().find((entry) => entry.id === "global.work")
+        if (globalWork && token === globalWork.keys[0] && workPaneMode() === "drawer") {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          toggleWorkDrawer()
           return
         }
       }
@@ -6210,10 +6380,10 @@ export function EnsembleV2App() {
           <ChromeText colors={colors} fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={leaderMode() ? chromeJoin(["LEADER", "which-key", "esc cancel"]) : `${isBusy() ? `${chromeJoin(["BUSY", status()])}` : status()}`} />
         </box>
       </box>
-        <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
+        <box flexDirection="row" flexGrow={1} minHeight={0} gap={1} position="relative" opacity={overlayOpen() ? 0.35 : 1}>
           <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
-          <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
-            <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
+          <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") && interaction().focus !== "work" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
+            <ChromeText colors={colors} fg={(chromeFocus() === "chat" && interaction().focus !== "work") || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={limitsOpen()} fallback={
               <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
@@ -6348,92 +6518,6 @@ export function EnsembleV2App() {
                               )}</For>
                             </box>
                           </Show>
-                          <Show when={showWorkBlock()}>
-                            <box flexShrink={0} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} flexDirection="column">
-                              <ChromeText colors={colors} fg={colors.muted} bg={colors.bg} width="100%" truncate text={workHeader()} />
-                              <Show when={workPane().layout.mode === "cards"} fallback={
-                                <For each={workPane().sections}>{(section) => (
-                                  <box flexDirection="column" width="100%">
-                                    <Show when={section.label}>
-                                      <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
-                                    </Show>
-                                    <For each={section.tasks}>{(task) => {
-                                      // Ticket #142: compact rows are not Work
-                                      // cards, but the fallback still needs its
-                                      // own reactive view. A local memo keeps
-                                      // the cursor and glyph live without
-                                      // rebuilding static card data.
-                                      const view = createMemo(() => {
-                                        const now = Date.now()
-                                        const rowStatus = deriveWorkStatus(task, now)
-                                        const terminal = isTerminalWorkStatus(rowStatus)
-                                        const needsYou = !terminal && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
-                                        const pending = !terminal && pendingWork()?.id === task.id ? pendingWork()!.action : null
-                                        const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
-                                        return {
-                                          terminal,
-                                          selected: !terminal && interaction().focus === "work" && selectedTask()?.id === task.id,
-                                          row: workCompactRow(
-                                            agentName(state(), task.assigneeID),
-                                            task.title || "(untitled)",
-                                            glyph,
-                                            pending ? pendingWorkLabel(pending) : workCardStateWord(rowStatus, needsYou),
-                                            Math.max(1, workContentWidth() - 2),
-                                            dispatchBudgetForTask(task),
-                                          ),
-                                          tones: workCardTones(rowStatus, needsYou),
-                                        }
-                                      })
-                                      return (
-                                        <WorkCompactRowView
-                                          colors={colors}
-                                          row={view().row}
-                                          tones={view().tones}
-                                          selected={view().selected}
-                                          terminal={view().terminal}
-                                        />
-                                      )
-                                    }}</For>
-                                  </box>
-                                )}</For>
-                              }>
-                                <For each={workPane().sections}>{(section, sectionIndex) => (
-                                  <Show when={section.mode === "cards"} fallback={
-                                    <Show when={section.label}>
-                                      <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
-                                    </Show>
-                                  }>
-                                    <box flexDirection="column" width="100%" marginTop={workSectionMarginTop(sectionIndex())}>
-                                      <Show when={section.label}>
-                                        <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
-                                      </Show>
-                                      <box flexDirection="row" width="100%" gap={1}>
-                                        <For each={section.cards}>{(card) => (
-                                          <WorkCardView
-                                            colors={colors}
-                                            card={card}
-                                            glyph={workCardGlyph(card, motionFrame(), process.env)}
-                                            tide={workCardTide(card, {
-                                              tideTick: workFrame(),
-                                              env: process.env,
-                                              freezeState: tideFreezes,
-                                              now: Date.now(),
-                                            })}
-                                            width={workPane().layout.cardWidth}
-                                            selected={interaction().focus === "work" && selectedTask()?.id === card.id}
-                                          />
-                                        )}</For>
-                                      </box>
-                                      <Show when={section.overflow > 0}>
-                                        <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{section.overflow} more</text>
-                                      </Show>
-                                    </box>
-                                  </Show>
-                                )}</For>
-                                <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{chromeJoin(["d delegate", "t reassign", "↵ result", "r retry", "R restart", "x cancel", "o native"])}</text>
-                              </Show>
-                            </box>
-                          </Show>
                           <Show when={!atBottom()}>
                             <box position="absolute" bottom={2} right={4} zIndex={40} onMouseDown={() => jumpToBottom()} border borderStyle="rounded" borderColor={colors.focus} backgroundColor={colors.panel} paddingLeft={1} paddingRight={1} paddingTop={0} paddingBottom={0}>
                               <text fg={colors.focus} bg={colors.panel}>↓</text>
@@ -6493,6 +6577,145 @@ export function EnsembleV2App() {
               <LimitsView colors={colors} workspaceName={activeWorkspace()?.name} limits={limitsDraft()} cursor={limitsCursor()} error={limitsError()} />
             </Show>
           </box>
+          {/* Ticket #172: the Work pane is a sibling of the chat, not part of
+              the transcript column. Below 96 columns it becomes a right
+              drawer over the chat; approvals keep their existing surface. */}
+          <Show when={showWorkPane()}>
+            <box
+              id={MOUSE_PANE_IDS.work}
+              width={workWidth()}
+              flexShrink={0}
+              minHeight={0}
+              height={workPaneMode() === "drawer" ? "100%" : undefined}
+              position={workPaneMode() === "drawer" ? "absolute" : undefined}
+              right={workPaneMode() === "drawer" ? 0 : undefined}
+              top={workPaneMode() === "drawer" ? 0 : undefined}
+              zIndex={workPaneMode() === "drawer" ? 60 : undefined}
+              border
+              borderStyle="single"
+              borderColor={workOwnsFocus() ? colors.focus : colors.border}
+              backgroundColor={colors.bg}
+              flexDirection="column"
+              paddingLeft={1}
+              paddingRight={1}
+            >
+              <box
+                flexShrink={0}
+                width="100%"
+                onMouseDown={(event: any) => {
+                  if (Number(event?.button) !== 0) return
+                  event?.preventDefault?.()
+                  dispatchInteraction({ type: "focus.set", focus: "work" })
+                }}
+              >
+                <ChromeText colors={colors} fg={workOwnsFocus() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate text={workHeader()} />
+              </box>
+              <box flexGrow={1} minHeight={0} width="100%" flexDirection="column" overflow="hidden">
+                <Show when={workPane().sections.length === 0}>
+                  <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{workPane().view === "active" ? "No active work." : "No finished work yet."}</text>
+                </Show>
+                <Show when={workPane().layout.mode === "cards"} fallback={
+                  <For each={workPane().sections}>{(section) => (
+                    <box flexDirection="column" width="100%" marginTop={section.gapBefore ? 1 : 0}>
+                      <Show when={section.label}>
+                        <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                      </Show>
+                      <For each={section.tasks}>{(task) => {
+                        // Ticket #142: compact rows are not Work cards, but the
+                        // fallback still needs its own reactive view. A local
+                        // memo keeps selection and glyph live without
+                        // rebuilding static card data.
+                        const view = createMemo(() => {
+                          const now = Date.now()
+                          const rowStatus = deriveWorkStatus(task, now)
+                          const terminal = isTerminalWorkStatus(rowStatus)
+                          const needsYou = !terminal && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
+                          const pending = !terminal && pendingWork()?.id === task.id ? pendingWork()!.action : null
+                          const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
+                          return {
+                            terminal,
+                            selected: workOwnsFocus() && selectedTask()?.id === task.id,
+                            row: workCompactRow(
+                              agentName(state(), task.assigneeID),
+                              task.title || "(untitled)",
+                              glyph,
+                              pending ? pendingWorkLabel(pending) : workCardStateWord(rowStatus, needsYou),
+                              Math.max(1, workContentWidth() - 2),
+                              dispatchBudgetForTask(task),
+                            ),
+                            tones: workCardTones(rowStatus, needsYou),
+                          }
+                        })
+                        return (
+                          <WorkCompactRowView
+                            colors={colors}
+                            row={view().row}
+                            tones={view().tones}
+                            selected={view().selected}
+                            terminal={view().terminal}
+                            onSelect={() => selectWorkCard(task.id)}
+                          />
+                        )
+                      }}</For>
+                    </box>
+                  )}</For>
+                }>
+                  <For each={workPane().sections}>{(section) => (
+                    <Show when={section.mode === "cards"} fallback={
+                      <Show when={section.label}>
+                        <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                      </Show>
+                    }>
+                      <box flexDirection="column" width="100%" marginTop={section.gapBefore ? 1 : 0}>
+                        <Show when={section.label}>
+                          <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                        </Show>
+                        <box flexDirection="row" width="100%" gap={1}>
+                          <For each={section.cards}>{(card) => (
+                            <WorkCardView
+                              colors={colors}
+                              card={card}
+                              glyph={workCardGlyph(card, motionFrame(), process.env)}
+                              tide={workCardTide(card, {
+                                tideTick: workFrame(),
+                                env: process.env,
+                                freezeState: tideFreezes,
+                                now: Date.now(),
+                              })}
+                              width={workPane().layout.cardWidth}
+                              selected={workOwnsFocus() && selectedTask()?.id === card.id}
+                              onSelect={() => selectWorkCard(card.id)}
+                            />
+                          )}</For>
+                        </box>
+                      </box>
+                    </Show>
+                  )}</For>
+                </Show>
+              </box>
+              <box flexShrink={0} width="100%" flexDirection="row" justifyContent="space-between">
+                <box
+                  onMouseDown={(event: any) => {
+                    if (Number(event?.button) !== 0) return
+                    event?.preventDefault?.()
+                    selectWorkPage(workPane().page - 1)
+                  }}
+                >
+                  <text fg={workPane().page > 1 ? colors.focus : colors.faint} bg={colors.bg}>‹</text>
+                </box>
+                <ChromeText colors={colors} fg={colors.faint} bg={colors.bg} truncate text={`page ${workPane().page}/${workPane().pages}`} />
+                <box
+                  onMouseDown={(event: any) => {
+                    if (Number(event?.button) !== 0) return
+                    event?.preventDefault?.()
+                    selectWorkPage(workPane().page + 1)
+                  }}
+                >
+                  <text fg={workPane().page < workPane().pages ? colors.focus : colors.faint} bg={colors.bg}>›</text>
+                </box>
+              </box>
+            </box>
+          </Show>
         </box>
       <Show when={logsOpen()}>
         <box id={MOUSE_PANE_IDS.dialog} position="absolute" top={logsGeometry().top} left={logsGeometry().left} width={logsGeometry().width} height={logsHeight} zIndex={100} border borderStyle="double" borderColor={colors.focus} backgroundColor={colors.panel} padding={1} flexDirection="column" opacity={overlayOpacity()}>

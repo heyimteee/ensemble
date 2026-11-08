@@ -102,6 +102,10 @@ test("the work zone is reachable with Tab and keeps list navigation", () => {
   for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "escape"]) {
     assert.ok(keys.includes(sequence), `work keeps ${sequence}`)
   }
+  assert.equal(entryId("work", "f"), "work.filter", "ticket172: f toggles ACTIVE/HISTORY")
+  assert.equal(entryId("work", "pageup"), "work.page.up")
+  assert.equal(entryId("work", "pagedown"), "work.page.down")
+  assert.equal(entryId("work", "v"), "work.approvals", "ticket172: Work focus keeps approvals reachable")
 })
 
 test("the work list carries the shared task actions on their Normal keys", () => {
@@ -324,7 +328,7 @@ test("statusline hints come from the same catalog and adapt to the work zone", (
 
   const work = statuslineHints("work")
   assert.ok(work.includes("enter result"), work)
-  for (const hint of ["x cancel", "r retry", "R restart", "d delegate", "t reassign", "o native"]) {
+  for (const hint of ["x cancel", "r retry", "R restart", "d delegate", "t reassign", "o native", "f history"]) {
     assert.ok(work.includes(hint), `work hints name ${hint} (${work})`)
   }
 })
@@ -405,6 +409,7 @@ test("raw keypresses normalize to catalog tokens", () => {
   assert.equal(normalizeKeyToken({ name: "return", shift: true }), "shift+enter")
   assert.equal(normalizeKeyToken({ name: "escape" }), "escape")
   assert.equal(normalizeKeyToken({ name: "tab" }), "tab")
+  assert.equal(normalizeKeyToken({ name: "F3", sequence: "\u001bOR" }), "f3", "ticket172: function keys normalize for the drawer")
   assert.equal(normalizeKeyToken({ name: "g", shift: true }), "shift+g")
   assert.equal(normalizeKeyToken({ name: "G", sequence: "G" }), "shift+g")
   assert.equal(normalizeKeyToken({ name: "d", ctrl: true }), "ctrl+d")
@@ -432,6 +437,10 @@ test("the catalog covers every app-level key the handlers consume", () => {
     ["work", "shift+tab", "focus.shift.tab"],
     ["work", "ctrl+d", "work.half.down"],
     ["work", "ctrl+u", "work.half.up"],
+    ["work", "f", "work.filter"],
+    ["work", "v", "work.approvals"],
+    ["work", "pageup", "work.page.up"],
+    ["work", "pagedown", "work.page.down"],
     ["settings", "shift+tab", "settings.tab.cycle.prev"],
     ["settings", "ctrl+d", "settings.half.down"],
     ["settings", "ctrl+u", "settings.half.up"],
@@ -491,6 +500,7 @@ test("the catalog covers every app-level key the handlers consume", () => {
   for (const [context, token, id] of required) {
     assert.equal(singleKeyEntry(context, token)?.id, id, `${context} resolves ${token} to ${id}`)
   }
+  assert.equal(KEYMAP_CATALOG.find((entry) => entry.id === "global.work")?.keys.join(" "), "f3", "ticket172: F3 owns the drawer toggle")
   // Multi-key chords resolve through the same pending machine.
   assert.equal(actionId(resolveNormalKey("wizardText", ["g"], "g")), "wizardText.motion.gg")
   assert.equal(actionId(resolveNormalKey("wizardText", ["y"], "y")), "wizardText.yy")

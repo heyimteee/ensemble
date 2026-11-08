@@ -2,7 +2,7 @@ import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
 import { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
-import { CLIENT_MESSAGE_LIMIT, projectVisibleWork, trimMessages } from "../scoped-read.ts"
+import { CLIENT_MESSAGE_LIMIT, mergeRetainedWork, projectRetainedWork, trimMessages } from "../scoped-read.ts"
 import { configMetadataApplies } from "./refresh-coordinator.ts"
 import type { DispatchGroup, EntityChange, FeedMeta, Id, Message, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, TranscriptWindow, WorkspaceCounts } from "../types.ts"
 
@@ -329,7 +329,10 @@ export function boundClientState(
     transcripts[key] = list.slice(-CLIENT_MESSAGE_LIMIT)
   }
   if (transcripts) next = { ...next, dmTranscripts: transcripts }
-  const visible = projectVisibleWork(state, now, WORK_GROUP_HOLD_MS)
+  // Ticket #172: keep retained finished rows for HISTORY, on the same 24 h
+  // retention as the durable store. The visible projection still bounds the
+  // active Work payload.
+  const visible = projectRetainedWork(state, now, WORK_GROUP_HOLD_MS)
   const currentKeys = Object.keys(state.subtasks)
   const visibleKeys = Object.keys(visible)
   if (visibleKeys.length !== currentKeys.length || visibleKeys.some((id) => !(id in state.subtasks))) {
@@ -573,7 +576,9 @@ export function createClientStore(): ClientStore {
       batch(() => {
         apply({
           type: "work.snapshot",
-          subtasks: snapshot.state.subtasks,
+          // Ticket #172: a scoped Work snapshot carries only visible rows;
+          // merge retained finished rows so HISTORY survives the resync.
+          subtasks: mergeRetainedWork(snapshot.state.subtasks, data.state.subtasks),
           version: snapshot.state.version,
           updatedAt: snapshot.state.updatedAt,
         })
@@ -582,7 +587,12 @@ export function createClientStore(): ClientStore {
       })
     },
     applyWorkProjection: (tasks, version, groups) => {
-      apply({ type: "work.snapshot", subtasks: tasks, version, ...(groups ? { groups } : {}) })
+      apply({
+        type: "work.snapshot",
+        subtasks: mergeRetainedWork(tasks, data.state.subtasks),
+        version,
+        ...(groups ? { groups } : {}),
+      })
       clearTombstones()
     },
     applyShellSnapshot: (state) => {

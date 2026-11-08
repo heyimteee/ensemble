@@ -277,6 +277,23 @@ test("ticket160: a Work projection resync merges its ledger groups", () => {
   assert.equal(store.state()!.dispatchGroups.dispatch_1?.id, "dispatch_1", "unnamed historical groups stay cached")
 })
 
+test("ticket172: a Work projection resync keeps retained HISTORY", () => {
+  const store = createClientStore()
+  const now = Date.now()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.subtasks.done = task("done", {
+      state: "replied",
+      outcome: "succeeded",
+      finishedAt: now - 1_000,
+      repliedAt: now - 1_000,
+    })
+  })))
+  store.applyWorkProjection({ live: task("live", { state: "working", claimedBy: "run", leaseUntil: now + 90_000, attempts: 1 }) }, 8)
+  assert.equal(store.state()!.subtasks.live?.id, "live")
+  assert.equal(store.state()!.subtasks.done?.id, "done", "the finished row stays available to HISTORY")
+})
+
 test("shell entity changes apply incrementally without replacing unrelated state", () => {
   const store = createClientStore()
   store.applySnapshot(snapshot(stateWith((state) => {
