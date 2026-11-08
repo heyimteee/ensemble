@@ -7,7 +7,7 @@ import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, writeAg
 import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
-import { anyToolCall, assistantResult, availabilityFailure, contextForTask, promptForTask, skillPermissions } from "./execution.ts"
+import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey } from "./queue.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
@@ -2076,7 +2076,7 @@ export class EnsembleV2Service {
       const message = foundMessage ? this.store.cloneMessage(claimed.workspaceID, foundMessage.id) : undefined
       const registration = registerLiveSlot(this.liveBySession, sessionID, now())
       if (registration.orphaned) {
-        await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || "Reply interrupted.", true, globalEpoch, workspaceEpoch, workspace.id)
+        await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || REPLY_INTERRUPTED, true, globalEpoch, workspaceEpoch, workspace.id)
       }
       const progress = initPhaseText("running")
       if (message) {
@@ -4538,6 +4538,10 @@ export class EnsembleV2Service {
       if (candidate.attempts >= MAX_ATTEMPTS || (candidate.deadlineAt !== undefined && at >= candidate.deadlineAt)) {
         const task = this.store.cloneSubtask(candidate.id)
         if (!task) continue
+        // Ticket #149: a recovery retire is a real terminal event and must
+        // reach the failure sink. Attempt exhaustion and a dead lease are
+        // distinct reasons; the row's short error keeps the user-facing text.
+        const reason = candidate.attempts >= MAX_ATTEMPTS ? "attempts-exhausted" : "lease-expired"
         task.state = "replied"
         task.outcome = "failed"
         task.error ??= task.attempts >= MAX_ATTEMPTS
@@ -4551,6 +4555,17 @@ export class EnsembleV2Service {
         task.repliedAt = at
         task.finishedAt = at
         await this.store.saveSubtask(task)
+        this.recordTaskFailure({
+          event: "failure.terminal",
+          level: "error",
+          failureClass: "restart",
+          task,
+          error: task.error,
+          decision: { type: "terminal", reason, attempt: task.attempts, maxAttempts: MAX_ATTEMPTS },
+          previousClaim: candidate.claimedBy,
+          leaseExpiredAt: candidate.leaseUntil,
+          reason,
+        })
         this.noteWorkChanged(task)
         await this.settlePendingApprovals(task.id, task.error)
         const workspace = this.store.workspace(task.workspaceID)
@@ -4586,13 +4601,35 @@ export class EnsembleV2Service {
         continue
       }
       const previousClaim = candidate.claimedBy
+      const leaseExpiredAt = candidate.leaseUntil
       const task = this.store.cloneSubtask(candidate.id)
       if (!task) continue
       task.claimedBy = undefined
       task.leaseUntil = undefined
       task.activeRunID = undefined
       if (task.state === "working") task.state = "pending"
+      // Ticket #149: recovery is a failed attempt with its own truth. The row
+      // keeps a short transient reason until a successful run clears it.
+      task.error = "Recovered after an expired lease; retrying."
       await this.store.saveSubtask(task)
+      this.recordTaskFailure({
+        event: "failure.attempt",
+        level: "warn",
+        failureClass: "restart",
+        task,
+        error: "The work lease expired before the run finished.",
+        decision: {
+          type: "retry",
+          attempt: nextRetryAttempt(task.attempts, MAX_ATTEMPTS),
+          maxAttempts: MAX_ATTEMPTS,
+          delayMs: 0,
+          retryAt: at,
+          reason: "lease-expired",
+        },
+        previousClaim,
+        leaseExpiredAt,
+        reason: "lease-expired",
+      })
       this.logger?.event("warn", "task", "task.recovery.requeued", {
         workspaceID: task.workspaceID,
         taskID: task.id,
@@ -4647,7 +4684,11 @@ export class EnsembleV2Service {
       }
       const message = this.store.cloneMessage(workspaceID, candidate.id)
       if (!message) continue
-      settleStreamMessage(message, message.text || (interrupted ? "Reply interrupted." : "Reply completed."), interrupted)
+      // Ticket #149: an empty terminal stream has no answer, and an internal
+      // fallback is not one either. Settle both as interrupted even when the
+      // task outcome was success; a fallback must never look like a result.
+      if (!message.text.trim() || isFallbackReply(message.text)) interrupted = true
+      settleStreamMessage(message, message.text || REPLY_INTERRUPTED, interrupted)
       await this.store.saveMessage(message)
     }
   }
@@ -4866,6 +4907,12 @@ export class EnsembleV2Service {
 
   private async finalizeStream(message: Message | undefined, text: string, interrupted = false, epoch = 0, workspaceEpoch = 0, workspaceID = ""): Promise<Message | undefined> {
     if (!message) return undefined
+    // Ticket #149: an internal fallback (or a blank reply) is never a
+    // successful answer. Force it interrupted and hand back no message so a
+    // caller can never stamp `resultMessageID` onto placeholder text.
+    const fallback = isFallbackReply(text)
+    const hasText = text.trim().length > 0
+    const settledInterrupted = interrupted || fallback || !hasText
     // Ticket #74: the epoch guard rejects stale content, but the row must
     // still settle — returning before clearing `streaming` left orphaned
     // live rows until the 120 s age filter. Settle and persist on both
@@ -4874,9 +4921,10 @@ export class EnsembleV2Service {
     // Drop queued live text before the durable final upsert so a late
     // ephemeral event can never chase the exact final row.
     this.dropStream(message)
-    settleStreamMessage(message, text, interrupted)
+    const settledText = !hasText || (fallback && !interrupted) ? REPLY_INTERRUPTED : text
+    settleStreamMessage(message, settledText, settledInterrupted)
     await this.store.saveMessage(message)
-    return current ? message : undefined
+    return current && !settledInterrupted ? message : undefined
   }
 
   private async runTask(taskID: string): Promise<void> {
@@ -4987,7 +5035,7 @@ export class EnsembleV2Service {
     // instead of leaking a stuck streaming row.
     const registration = registerLiveSlot(this.liveBySession, binding.sessionID, now())
     if (registration.orphaned) {
-      await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || registration.orphaned.message.text || "Reply interrupted.", true, globalEpoch, workspaceEpoch, task.workspaceID)
+      await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || registration.orphaned.message.text || REPLY_INTERRUPTED, true, globalEpoch, workspaceEpoch, task.workspaceID)
     }
     await this.store.saveAgent(agent)
     let live: Message | undefined
@@ -5126,8 +5174,9 @@ export class EnsembleV2Service {
       const mention = normalizeAgentMentions(result?.text ?? "", workspace.memberIDs.map((id) => current.agents[id]).filter((item): item is Agent => Boolean(item)))
       // An empty/whitespace assistant turn is not an answer. It must never
       // finalize as success or be handed off as completed work; retry inside
-      // the budget, then fail visibly.
-      const reply = mention.text.trim()
+      // the budget, then fail visibly. Ticket #149: an internal fallback
+      // string is not an answer either.
+      const reply = isFallbackReply(mention.text) ? "" : mention.text.trim()
       if (mention.changed) await this.appendMessage(workspace, { author: "system", text: `Mention syntax normalized: ${mention.names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; leaders assign with ensemble_delegate, peers with ensemble_handoff.`, kind: "system", taskID: task.id })
       if (currentTask.approvalID) {
         const linked = current.approvals[currentTask.approvalID]
@@ -5181,6 +5230,7 @@ export class EnsembleV2Service {
       if (children.length > 0 && currentTask.stage === "initial") {
         currentTask.awaitingChildren = true
         currentTask.state = "working"
+        currentTask.error = undefined
         await this.store.saveSubtask(currentTask)
         await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
         await this.maybeSynthesize(currentTask.id)
@@ -5189,6 +5239,9 @@ export class EnsembleV2Service {
       const finishedAt = now()
       currentTask.state = "replied"
       currentTask.outcome = "succeeded"
+      // Ticket #149: success clears any transient/restart reason before the
+      // terminal save, so a recovered task never keeps its recovery error.
+      currentTask.error = undefined
       currentTask.runSummary = result?.tools.length ? `${result.tools.length} tool call${result.tools.length === 1 ? "" : "s"}` : "no tool calls"
       currentTask.repliedAt = finishedAt
       currentTask.finishedAt = finishedAt
@@ -5202,7 +5255,7 @@ export class EnsembleV2Service {
         currentTask.turn.answeredByID = currentTask.assigneeID
       }
       const message = await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
-      currentTask.resultMessageID = message?.id
+      currentTask.resultMessageID = message && !isFallbackReply(message.text) ? message.id : undefined
       await this.store.saveSubtask(currentTask)
       this.noteWorkChanged(currentTask)
       // Dependent product decisions that outlived the work are superseded —
@@ -5246,7 +5299,7 @@ export class EnsembleV2Service {
       }
       clearInterval(heartbeat)
       this.liveBySession.delete(binding.sessionID)
-      if (live?.streaming) await this.finalizeStream(live, live.text || "Reply interrupted.", true, globalEpoch, workspaceEpoch, task.workspaceID)
+      if (live?.streaming) await this.finalizeStream(live, live.text || REPLY_INTERRUPTED, true, globalEpoch, workspaceEpoch, task.workspaceID)
       await this.releaseClaim(task.id, runID)
       run.status = "completed"
       this.activeRuns.delete(runID)
@@ -5348,6 +5401,10 @@ export class EnsembleV2Service {
     error: unknown
     decision: FailureDecision
     context?: TaskFailureContext
+    /** Restart/lease recovery evidence (ticket #149). */
+    previousClaim?: string
+    leaseExpiredAt?: number
+    reason?: string
   }): void {
     const logger = this.logger
     if (!logger) return
@@ -5365,6 +5422,9 @@ export class EnsembleV2Service {
         task: input.task,
         error: context?.cause ?? input.error,
         decision: input.decision,
+        previousClaim: input.previousClaim,
+        leaseExpiredAt: input.leaseExpiredAt,
+        reason: input.reason,
         runID: context?.runID,
         sessionID: context?.sessionID,
         providerID: context?.providerID ?? agent?.mainModel.providerID,

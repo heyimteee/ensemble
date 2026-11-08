@@ -9,6 +9,7 @@ import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
 import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
+import { FALLBACK_REPLIES } from "./execution.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -3086,6 +3087,285 @@ test("ticket148: an expired lease is requeued once and attempts rise only on the
     const after = await handlers.snapshot({ directory })
     assert.equal((after.state.subtasks.t as any).attempts, 3)
     assert.equal((after.state.subtasks.t as any).outcome, "succeeded")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: restart requeue writes a failure attempt with the previous claim and lease", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-requeue-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: true, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Recovered", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 2, claimedBy: "run_dead", activeRunID: "run_dead", leaseUntil: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "pending")
+    assert.equal(row.attempts, 2, "requeue never consumes an attempt")
+    assert.equal(row.claimedBy, undefined)
+    const logs = await handlers["logs.recent"]({ directory, event: "failure.attempt", taskID: "t", limit: 50 })
+    const record = logs.entries.at(-1) as any
+    assert.ok(record, "the requeue reaches the failure sink")
+    assert.equal(record.failureClass, "restart")
+    assert.equal(record.previousClaim, "run_dead")
+    assert.equal(record.leaseExpiredAt, 1)
+    assert.equal(record.reason, "lease-expired")
+    assert.equal(record.decision.type, "retry")
+    assert.equal(record.decision.reason, "lease-expired")
+    assert.equal(record.decision.attempt, 3)
+    assert.equal(record.decision.maxAttempts, 5)
+    assert.equal(record.decision.delayMs, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: restart retirement writes a terminal failure record", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-retire-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: true, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t_exhausted", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Exhausted", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 5, claimedBy: "run_dead", leaseUntil: 1, createdAt: 1,
+  })
+  await seed.saveSubtask({
+    id: "t_expired", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Expired", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 2, claimedBy: "run_dead", leaseUntil: 1, deadlineAt: 1, createdAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal((snapshot.state.subtasks.t_exhausted as any).state, "replied")
+    assert.equal((snapshot.state.subtasks.t_exhausted as any).outcome, "failed")
+    assert.equal((snapshot.state.subtasks.t_expired as any).state, "replied")
+    assert.equal((snapshot.state.subtasks.t_expired as any).outcome, "failed")
+
+    const logs = await handlers["logs.recent"]({ directory, event: "failure.terminal", limit: 50 })
+    const exhausted = logs.entries.find((entry: any) => entry.taskID === "t_exhausted") as any
+    assert.ok(exhausted, "attempt exhaustion is never silent")
+    assert.equal(exhausted.failureClass, "restart")
+    assert.equal(exhausted.previousClaim, "run_dead")
+    assert.equal(exhausted.leaseExpiredAt, 1)
+    assert.equal(exhausted.reason, "attempts-exhausted")
+    assert.equal(exhausted.decision.type, "terminal")
+    assert.equal(exhausted.decision.reason, "attempts-exhausted")
+    assert.equal(exhausted.decision.attempt, 5)
+    assert.equal(exhausted.decision.maxAttempts, 5)
+
+    const expired = logs.entries.find((entry: any) => entry.taskID === "t_expired") as any
+    assert.ok(expired, "an expired lease that cannot be recovered is never silent")
+    assert.equal(expired.failureClass, "restart")
+    assert.equal(expired.previousClaim, "run_dead")
+    assert.equal(expired.leaseExpiredAt, 1)
+    assert.equal(expired.reason, "lease-expired")
+    assert.equal(expired.decision.type, "terminal")
+    assert.equal(expired.decision.reason, "lease-expired")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: a recovered then successful task clears its restart error", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-clear-error-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Recovered", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, claimedBy: "run_dead", activeRunID: "run_dead", leaseUntil: 1,
+    error: "Ensemble restarted while this subtask was working.", createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.outcome, "succeeded")
+    assert.equal(task.attempts, 2)
+    assert.equal(task.error, undefined, "a success never retains a restart reason")
+    const result = after.state.messages.w.find((message: any) => message.id === task.resultMessageID) as any
+    assert.ok(result)
+    assert.equal(result.text, "OK")
+    assert.equal(FALLBACK_REPLIES.has(result.text), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: a fallback reply is retried as an empty answer", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-fallback-retry-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).context = async () => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Reply completed." }] }],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 2, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Placeholder", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.error === "The agent produced no answer."
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.state, "pending")
+    assert.equal(task.outcome, "pending")
+    assert.equal(task.attempts, 2)
+    assert.equal(task.resultMessageID, undefined)
+    assert.ok(task.retryAfter > Date.now() - 1_000)
+    const messages = (after.state.messages.w ?? []) as any[]
+    assert.equal(messages.some((message) => message.text === "Reply completed."), false)
+    assert.equal(messages.some((message) => message.taskID === "t" && FALLBACK_REPLIES.has(message.text)), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: an exhausted fallback reply fails visibly without a result", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-fallback-fail-"))
+  const { ctx } = fakeContext()
+  ;(ctx.session as any).context = async () => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Reply interrupted before completion." }] }],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 2, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Placeholder exhausted", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 4, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.outcome, "failed")
+    assert.equal(task.error, "The agent produced no answer.")
+    assert.equal(task.resultMessageID, undefined, "a fallback never becomes the result")
+    const messages = (after.state.messages.w ?? []) as any[]
+    assert.equal(messages.some((message) => message.taskID === "t" && FALLBACK_REPLIES.has(message.text) && message.interrupted !== true), false)
+    assert.equal(messages.some((message) => message.id === task.resultMessageID), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: the request-23 shape never succeeds on a stale fallback", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-request23-"))
+  const { ctx } = fakeContext()
+  // A recovered attempt sees the previous attempt's substantive answer in the
+  // native session and only a stale fallback as "new" assistant text.
+  ;(ctx.session as any).context = async () => ({
+    data: [
+      { type: "assistant", time: { created: 1 }, content: [{ type: "text", text: "Previous answer" }] },
+      { type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Reply completed." }] },
+    ],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 2, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Recovered attempt", instruction: "Do",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 4, claimedBy: "run_dead", activeRunID: "run_dead", leaseUntil: 1,
+    error: "Ensemble restarted while this subtask was working.", createdAt: 1,
+  })
+  await seed.saveMessage({
+    id: "m_previous", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t",
+    text: "Previous answer", kind: "text", interrupted: false, createdAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.outcome, "failed", "no new substantive native text cannot succeed")
+    assert.equal(task.error, "The agent produced no answer.")
+    assert.equal(task.resultMessageID, undefined, "the result never points at a placeholder")
+    assert.equal(task.attempts, 5)
+    const messages = (after.state.messages.w ?? []) as any[]
+    assert.equal(messages.filter((message) => message.text === "Previous answer").length, 1, "the old answer is not duplicated")
+    assert.equal(messages.some((message) => message.taskID === "t" && FALLBACK_REPLIES.has(message.text) && message.interrupted !== true), false)
+    assert.equal(messages.some((message) => message.id === task.resultMessageID), false)
+    assert.equal(Object.values(after.state.subtasks).some((item: any) => item.parentID === "t" && item.handoff?.completion === true), false, "a failed attempt never emits a completion handoff")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket149: an empty terminal stream settles as interrupted, never a completed placeholder", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-149-empty-stream-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({ id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "a", memberIDs: ["a"], synthesis: true, archived: false, paused: false, nextSeq: 2, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Done", instruction: "Do", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1, repliedAt: 2, finishedAt: 2 })
+  await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t", text: "", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const message = (snapshot.state.messages.w as any[]).find((item) => item.id === "m") as any
+    assert.equal(message.streaming, false)
+    assert.equal(message.interrupted, true)
+    assert.equal(message.text, "Reply interrupted.")
+    assert.notEqual(message.text, "Reply completed.", "an empty stream is never a successful answer")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
