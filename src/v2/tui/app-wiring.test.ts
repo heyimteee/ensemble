@@ -40,6 +40,14 @@ test("the composer submits through the shared plan and catalog", () => {
   assert.ok(!source.includes("slashCommands"))
 })
 
+test("file completion opens, filters, and inserts through one token scanner", () => {
+  // Behavior: file-reference.test.ts and composer.test.ts cover the pure seams.
+  const source = app()
+  assert.ok(source.includes("const token = fileReferenceTokenAt(value, cursor)"))
+  assert.ok(source.includes("syncFileCompletion(value, cursor, current)"))
+  assert.ok(source.includes("replaceFileReference(value, item.value, state.start, state.end)"))
+})
+
 test("the Work pane maps active tasks through dispatch groups", () => {
   // Behavior: workgroups.test.ts group visibility and layout.
   assert.ok(app().includes("workGroupsForTasks(active, state()?.subtasks"))

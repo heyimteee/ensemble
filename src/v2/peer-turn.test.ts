@@ -26,15 +26,23 @@ test("peer-turn group states map onto the derived work lifecycle", () => {
   assert.equal(peerTurnStatus(base(), 1000), "queued")
   assert.equal(peerTurnStatus(base({ state: "working", attempts: 1, claimedBy: "run_1", leaseUntil: 2000 }), 1000), "running")
   assert.equal(peerTurnStatus(base({ state: "working", attempts: 1, claimedBy: "run_1", leaseUntil: 500 }), 1000), "waiting")
-  assert.equal(peerTurnStatus(base({ attempts: 1, error: "boom" }), 1000), "waiting")
+  assert.equal(peerTurnStatus(base({ attempts: 1 }), 1000), "queued")
+  assert.equal(peerTurnStatus(base({ retryAfter: 2000 }), 1000), "waiting")
+  assert.equal(peerTurnStatus(base({ awaitingChildren: true }), 1000), "waiting")
+  assert.equal(peerTurnStatus(base({ interrupted: true }), 1000), "waiting")
+  assert.equal(peerTurnStatus(base({ attempts: 5 }), 1000), "stalled")
   assert.equal(peerTurnStatus(base({ state: "replied", outcome: "succeeded", repliedAt: 900 }), 1000), "completed")
   assert.equal(peerTurnStatus(base({ state: "replied", outcome: "failed", error: "boom" }), 1000), "failed")
+  assert.equal(
+    peerTurnStatus(base({ state: "replied", outcome: "failed", failure: { kind: "delivery", reason: "deadline-exceeded" } }), 1000),
+    "stalled",
+  )
 })
 
-test("cancelled peer turns read failed on the group surface", () => {
+test("cancelled peer turns stay cancelled on the group surface", () => {
   const task = base({ state: "replied", outcome: "failed", error: "Cancelled by user.", stoppedAt: 900 })
   assert.equal(deriveWorkStatus(task, 1000), "cancelled")
-  assert.equal(peerTurnStatus(task, 1000), "failed")
+  assert.equal(peerTurnStatus(task, 1000), "cancelled")
 })
 
 test("only workKind turn rows count as peer turns", () => {

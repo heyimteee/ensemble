@@ -90,19 +90,26 @@ function cardWithMotion(
 test("work glyphs are distinct per terminal state", () => {
   assert.equal(workGlyph("pending"), "▫")
   assert.equal(workGlyph("working"), "⠋")
+  assert.equal(workGlyph("waiting"), "◌")
   assert.equal(workGlyph("retrying"), "⠋")
+  assert.equal(workGlyph("needs_you"), "◆")
   assert.equal(workGlyph("replied"), "●")
+  assert.equal(workGlyph("stalled"), "◍")
   assert.notEqual(workGlyph("failed"), workGlyph("replied"))
   assert.notEqual(workGlyph("cancelled"), workGlyph("replied"))
   assert.notEqual(workGlyph("failed"), workGlyph("cancelled"))
+  assert.notEqual(workGlyph("stalled"), workGlyph("failed"), "a stall is not a native failure")
 })
 
 test("work status labels name the visible lifecycle", () => {
   assert.equal(workStatusLabel("pending"), "pending")
   assert.equal(workStatusLabel("working"), "working")
+  assert.equal(workStatusLabel("waiting"), "waiting")
   assert.equal(workStatusLabel("retrying"), "retrying")
+  assert.equal(workStatusLabel("needs_you"), "needs you")
   assert.equal(workStatusLabel("replied"), "replied")
   assert.equal(workStatusLabel("failed"), "failed")
+  assert.equal(workStatusLabel("stalled"), "stalled")
   assert.equal(workStatusLabel("cancelled"), "cancelled")
 })
 
@@ -119,6 +126,19 @@ test("work rows show the assigned agent and derived state", () => {
     workRowText(task({ state: "replied", outcome: "failed", error: "boom" }), "Sage", 1000),
     "✕ Check the build │ Sage │ failed",
   )
+  assert.equal(
+    workRowText(task({ interrupted: true }), "Sage", 1000),
+    "◆ ◆ Check the build │ Sage │ waiting │ needs you │ v to resolve",
+    "an interruption needs the user without a caller-supplied flag",
+  )
+  assert.equal(
+    workRowText(task({ awaitingChildren: true }), "Sage", 1000),
+    "◌ Check the build │ Sage │ waiting",
+  )
+  assert.equal(
+    workRowText(task({ state: "replied", outcome: "failed", failure: { kind: "attempts", reason: "attempts-exhausted" } }), "Sage", 1000),
+    "◍ Check the build │ Sage │ stalled",
+  )
 })
 
 test("work rows keep unassigned work visible", () => {
@@ -134,6 +154,11 @@ test("work block mounts only while active work exists", () => {
   )
   assert.equal(hasActiveWork([task({ state: "replied", outcome: "succeeded" })], 1000), false)
   assert.equal(hasActiveWork([task({ state: "replied", outcome: "failed", error: "boom" })], 1000), false)
+  assert.equal(
+    hasActiveWork([task({ state: "replied", outcome: "failed", failure: { kind: "delivery", reason: "deadline-exceeded" } })], 1000),
+    true,
+    "a stalled card stays mounted until retry, cancel, or dismissal",
+  )
 })
 
 test("ordered work shows active only, never terminal rows", () => {
@@ -169,6 +194,16 @@ test("terminal outcomes announce exactly once as transcript system lines", () =>
   assert.equal(
     terminalAnnouncement(task({ state: "working", claimedBy: "r", leaseUntil: 9999, attempts: 1 }), "Nova", 1000),
     undefined,
+  )
+  assert.equal(
+    terminalAnnouncement(task({ state: "replied", outcome: "failed", failure: { kind: "delivery", reason: "deadline-exceeded" } }), "Nova", 1000),
+    undefined,
+    "a stall is a queue problem, not a completed failure announcement",
+  )
+  assert.equal(
+    terminalAnnouncement(task({ awaitingChildren: true }), "Nova", 1000),
+    undefined,
+    "waiting parents announce nothing",
   )
 })
 
@@ -599,7 +634,10 @@ test("ticket115: card ordering keeps active work only, working first and oldest-
 test("ticket115: card detail defaults stay honest", () => {
   assert.equal(workCardDetail("working"), "working…")
   assert.equal(workCardDetail("pending"), "queued")
+  assert.equal(workCardDetail("waiting"), "waiting for children")
   assert.equal(workCardDetail("retrying"), "retrying…")
+  assert.equal(workCardDetail("needs_you"), "waiting for you…")
+  assert.equal(workCardDetail("stalled"), "stalled · queue problem")
   assert.equal(workCardDetail("working", { activity: "running tests…" }), "running tests…")
   assert.equal(workCardDetail("working", { pending: "stop" }), "Stopping…")
   assert.equal(workCardDetail("pending", { needsYou: true }), "waiting for you…")
@@ -707,10 +745,13 @@ test("ticket116: card mapping keeps one stable variant per subtask across polls"
 
 test("ticket137: work-card tones reserve green for replied and state colors for the bar", () => {
   assert.deepEqual(workCardTones("pending", false), { glyph: "faint", status: "muted", bar: "faint" })
+  assert.deepEqual(workCardTones("waiting", false), { glyph: "muted", status: "muted", bar: "muted" })
   assert.deepEqual(workCardTones("working", false), { glyph: "warn", status: "muted", bar: "warn" })
   assert.deepEqual(workCardTones("retrying", false), { glyph: "warn", status: "muted", bar: "warn" })
+  assert.deepEqual(workCardTones("needs_you", false), { glyph: "warn", status: "warn", bar: "warn" })
   assert.deepEqual(workCardTones("replied", false), { glyph: "good", status: "good", bar: "good" })
   assert.deepEqual(workCardTones("failed", false), { glyph: "bad", status: "bad", bar: "bad" })
+  assert.deepEqual(workCardTones("stalled", false), { glyph: "warn", status: "warn", bar: "warn" })
   assert.deepEqual(workCardTones("cancelled", false), { glyph: "faint", status: "faint", bar: "faint" })
   assert.deepEqual(workCardTones("working", true), { glyph: "warn", status: "warn", bar: "warn" })
   assert.deepEqual(workCardTones("pending", true), { glyph: "warn", status: "warn", bar: "warn" })
@@ -719,9 +760,12 @@ test("ticket137: work-card tones reserve green for replied and state colors for 
 test("ticket137: state words are uppercase and queued never reads as pending", () => {
   assert.equal(workCardStateWord("pending", false), "QUEUED")
   assert.equal(workCardStateWord("working", false), "WORKING")
+  assert.equal(workCardStateWord("waiting", false), "WAITING")
   assert.equal(workCardStateWord("retrying", false), "RETRYING")
+  assert.equal(workCardStateWord("needs_you", false), "NEEDS YOU")
   assert.equal(workCardStateWord("replied", false), "REPLIED")
   assert.equal(workCardStateWord("failed", false), "FAILED")
+  assert.equal(workCardStateWord("stalled", false), "STALLED")
   assert.equal(workCardStateWord("cancelled", false), "CANCELLED")
   assert.equal(workCardStateWord("working", true), "NEEDS YOU")
 })

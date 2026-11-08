@@ -71,7 +71,7 @@ test("hang reproduction: parent awaiting children derives as waiting for the chi
 })
 
 test("hang reproduction: retrying work names retrying instead of checking", () => {
-  const retrying = task({ state: "pending", attempts: 1, error: "boom" })
+  const retrying = task({ state: "pending", attempts: 1, error: "boom", retryAfter: 9_000 })
   const derived = activityStateForTask(retrying, {
     now: 1_000,
     pendingApprovalIDs: new Set(),

@@ -3,6 +3,17 @@
  * execution; the shared skill planner imports it so palette and server
  * validation cannot drift.
  */
+import { fileReferenceTokenAt, replaceFileReference } from "../file-reference.ts"
+
+export {
+  escapeFileReference,
+  fileReferenceTokenAt,
+  fileReferenceTokens,
+  replaceFileReference,
+  unescapeFileReference,
+  type FileReferenceToken,
+} from "../file-reference.ts"
+
 export const COMPOSER_COMMANDS = [
   { name: "workspace", description: "switch workspace" },
   { name: "agent", description: "mention an agent" },
@@ -26,7 +37,7 @@ export type ComposerTrigger = "agent" | "file" | "command"
 export function composerTrigger(value: string): ComposerTrigger | undefined {
   if (value === "/") return "command"
   if (value.endsWith("$") && (value.length === 1 || /\s/.test(value.slice(-2, -1)))) return "agent"
-  if (value.endsWith("@") && (value.length === 1 || /\s/.test(value.slice(-2, -1)))) return "file"
+  if (fileReferenceTokenAt(value, value.length)) return "file"
   return undefined
 }
 
@@ -35,7 +46,8 @@ export function insertAgentMention(value: string, name: string): string {
 }
 
 export function insertFileReference(value: string, path: string): string {
-  return `${value.replace(/@$/, "")}@${path} `
+  const start = value.endsWith("@") ? value.length - 1 : value.length
+  return replaceFileReference(value, path, start, value.length).text
 }
 
 export function parseSlashCommand(value: string): { command: string; args: string[] } | undefined {

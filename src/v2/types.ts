@@ -157,6 +157,20 @@ export type SubtaskState = "pending" | "working" | "replied"
 export type SubtaskOutcome = "succeeded" | "failed" | "pending"
 export type SubtaskStage = "initial" | "synthesis"
 
+/**
+ * Structured terminal cause for a work item (ticket #168). `native` is a real
+ * execution or model error. `delivery`, `lease`, and `attempts` are queue
+ * causes: they derive `stalled`, never `failed`. Only rows that can no longer
+ * run carry this field; user copy is never inspected to classify a cause.
+ */
+export type WorkFailureKind = "native" | "delivery" | "lease" | "attempts"
+
+export type WorkFailure = {
+  kind: WorkFailureKind
+  /** Structured failure-sink reason code, e.g. "deadline-exceeded". */
+  reason?: string
+}
+
 /** Unit of work on the durable coordination queue. Never a free-form string. */
 export type WorkKind = "delegation" | "handoff" | "turn"
 
@@ -273,10 +287,20 @@ export type Subtask = {
   claimedBy?: string
   /** Wall-clock expiry of the current claim; expiry re-queues the work. */
   leaseUntil?: number
-  /** Wall-clock deadline for the work item; expiry fails it with reason. */
+  /**
+   * Queue delivery timestamp for visibility and operator diagnostics. It is
+   * never a retirement authority (ticket #168): a claimed run is governed by
+   * `leaseUntil`, and pending work stays queued however old it is.
+   */
   deadlineAt?: number
   /** Earliest wall-clock time the work may be claimed again after a retry. */
   retryAfter?: number
+  /**
+   * Structured terminal cause. Absent on live/queued rows and on legacy
+   * terminal rows that never recorded one; those stay `failed` so a genuine
+   * native error is never masked.
+   */
+  failure?: WorkFailure
   /** When the work reached a terminal state. */
   finishedAt?: number
   /** When the work was stopped/cancelled. */

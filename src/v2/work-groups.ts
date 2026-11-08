@@ -130,7 +130,7 @@ export function approvalResolutionAt(
   }
 }
 
-/** Active members first (working/retrying, then queued), terminal members by finish time. */
+/** Active members first (working/retrying/waiting/needs-you/stalled, then queued), terminal members by finish time. */
 export function orderedGroupTasks(tasks: Subtask[], now: number): Subtask[] {
   const statusOf = (task: Subtask) => deriveWorkStatus(task, now)
   const active = tasks

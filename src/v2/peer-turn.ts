@@ -8,21 +8,22 @@ import type { Agent, Subtask } from "./types.ts"
  * a projection of the derived work lifecycle, never a stored status.
  */
 
-export type PeerTurnStatus = "queued" | "running" | "waiting" | "completed" | "failed"
+export type PeerTurnStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "stalled" | "cancelled"
 
 /**
  * Group-visible state for one peer turn. Derived from the canonical work
- * lifecycle: pending queues, working runs, retrying waits, replied
- * completes, and both failed and cancelled terminate as failed on the
- * group surface (cancellation detail stays on the work row derivation).
- * Pure: the caller passes `now`.
+ * lifecycle: queued stays queued, working runs, needs-you/waiting/retrying
+ * wait, replied completes, a native error fails, lease/delivery exhaustion
+ * stalls, and an explicit stop cancels. Pure: the caller passes `now`.
  */
 export function peerTurnStatus(task: Subtask, now: number): PeerTurnStatus {
   const status = deriveWorkStatus(task, now)
   if (status === "pending") return "queued"
   if (status === "working") return "running"
-  if (status === "retrying") return "waiting"
+  if (status === "retrying" || status === "waiting" || status === "needs_you") return "waiting"
   if (status === "replied") return "completed"
+  if (status === "stalled") return "stalled"
+  if (status === "cancelled") return "cancelled"
   return "failed"
 }
 

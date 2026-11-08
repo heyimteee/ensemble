@@ -11,7 +11,7 @@ import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
-import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
+import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
@@ -3031,9 +3031,20 @@ export function EnsembleV2App() {
     return true
   }
 
-  const openCompletion = (kind: "agent" | "file", value: string, start: number) => {
-    const source = kind === "agent" ? agentItems() : fileItems()
-    setCompletion({ kind, query: value.slice(start + 1).toLowerCase(), start, end: value.length, cursor: 0, items: source })
+  const openCompletion = (kind: "agent", value: string, start: number) => {
+    setCompletion({ kind, query: value.slice(start + 1).toLowerCase(), start, end: value.length, cursor: 0, items: agentItems() })
+  }
+
+  const openFileCompletion = (token: FileReferenceToken) => {
+    const query = token.path.toLowerCase()
+    const items = fileItems().filter((item) => fuzzyMatch(query, item.title))
+    setCompletion({ kind: "file", query, start: token.start, end: token.end, cursor: 0, items })
+  }
+
+  const syncFileCompletion = (value: string, cursor: number, current: Completion) => {
+    const token = fileReferenceTokenAt(value, cursor)
+    if (!token || token.start !== current.start) { closeCompletion(); return }
+    setCompletion(filterCompletion({ ...current, start: token.start, end: token.end }, token.path.toLowerCase()))
   }
 
   const filterCompletion = (state: Completion, query: string) => {
@@ -3066,7 +3077,15 @@ export function EnsembleV2App() {
       return
     }
     const value = String(composerRef?.plainText ?? "")
-    const token = state.kind === "agent" ? `$${item.value} ` : `@${item.value} `
+    if (state.kind === "file") {
+      const next = replaceFileReference(value, item.value, state.start, state.end)
+      closeCompletion()
+      setComposerValue(next.text, next.cursor)
+      setComposerActive(true)
+      focusComposer()
+      return
+    }
+    const token = `$${item.value} `
     setComposerValue(`${value.slice(0, state.start)}${token}`)
     closeCompletion()
     setComposerActive(true)
@@ -3169,14 +3188,16 @@ export function EnsembleV2App() {
     const current = completion()
     if (current) {
       if (current.kind === "command") { commandPaletteCompletion(value, cursor); return }
-      const trigger = current.kind === "agent" ? "$" : "@"
-      if (value[current.start] !== trigger) { closeCompletion(); return }
+      if (current.kind === "file") { syncFileCompletion(value, cursor, current); return }
+      if (value[current.start] !== "$") { closeCompletion(); return }
       setCompletion(filterCompletion(current, value.slice(current.start + 1).toLowerCase()))
       return
     }
     if (commandPaletteCompletion(value, cursor)) return
+    const token = fileReferenceTokenAt(value, cursor)
+    if (token) { openFileCompletion(token); return }
     const trigger = composerTrigger(value)
-    if (!trigger || trigger === "command") return
+    if (!trigger || trigger === "command" || trigger === "file") return
     openCompletion(trigger, value, value.length - 1)
   }
 
@@ -6327,6 +6348,7 @@ export function EnsembleV2App() {
                             const state = completion()
                             if (!state) return ""
                             const title = state.kind === "agent" ? "$ agents" : state.kind === "file" ? "@ files" : state.scope === "agent" ? chromeJoin([`$${state.ownerName ?? "agent"} /`, "skills"]) : chromeJoin(["/ commands", "skills"])
+                            if (state.items.length === 0) return chromeJoin([title, "no matches"])
                             return state.query ? chromeJoin([title, state.query]) : title
                           })()}</text>
                           <For each={[0, 1, 2, 3, 4, 5]}>{(slot) => (
@@ -6334,6 +6356,7 @@ export function EnsembleV2App() {
                               const state = completion()
                               if (!state) return ""
                               const window = completionWindow(state)
+                              if (window.items.length === 0) return slot === 0 ? pickerEmptyLine() : ""
                               const item = window.items[slot]
                               if (!item) return ""
                               return `${window.start + slot === state.cursor ? "› " : "  "}${item.title}`
@@ -6342,7 +6365,7 @@ export function EnsembleV2App() {
                         </box>
                       </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={composerBorderColor()} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); if (completion()?.kind === "command") commandPaletteCompletion(value, cursor) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
                     </>

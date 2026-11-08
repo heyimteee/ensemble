@@ -41,6 +41,8 @@ _Avoid_: Channel, room, group (when referring to this concept).
 
 **Work**: A queued or running execution of a subtask, with an agent, mode, and status.
 
+**Work status**: The derived lifecycle of Work: pending, working, waiting, retrying, needs_you, replied, failed, stalled, or cancelled. Only failed means a native execution error; stalled covers delivery, lease, or attempt exhaustion. The persisted subtask state stays pending, working, or replied.
+
 **Dispatch group**: The set of Subtasks caused by one dispatch action: one user command plus every descendant handoff, delegation, peer turn, synthesis, completion hop, and group-scoped completion batch it caused. A new command mints a new root group; a continuation group is a linked segment of the same command. A legacy task without a stored group derives one from its root ancestor.
 _Avoid_: Batch (for the whole dispatch), run (a single execution, not the fan-out).
 
