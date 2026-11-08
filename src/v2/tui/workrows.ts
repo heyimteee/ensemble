@@ -40,9 +40,12 @@ export { TRANSCRIPT_WINDOW }
 const GLYPHS: Record<DerivedWorkStatus, string> = {
   pending: "▫",
   working: "⠋",
+  waiting: "◌",
   retrying: "⠋",
+  needs_you: "◆",
   replied: "●",
   failed: "✕",
+  stalled: "◍",
   cancelled: "⊘",
 }
 
@@ -51,7 +54,7 @@ export function workGlyph(status: DerivedWorkStatus): string {
 }
 
 export function workStatusLabel(status: DerivedWorkStatus): string {
-  return status
+  return status === "needs_you" ? "needs you" : status
 }
 
 /** One inline row: `{glyph} {title} │ {agent} │ {status}`. Pure. */
@@ -62,9 +65,13 @@ export function workRowText(
   opts: { pending?: PendingWorkAction | null; needsYou?: boolean } = {},
 ): string {
   const status = deriveWorkStatus(task, now)
-  const segment = opts.pending ? pendingWorkLabel(opts.pending) : status
+  const segment = opts.pending
+    ? pendingWorkLabel(opts.pending)
+    : status === "needs_you"
+      ? "waiting"
+      : workStatusLabel(status)
   const row = chromeJoin([`${workGlyph(status)} ${short(task.title || "(untitled)", 60)}`, agentLabel, segment])
-  if (!opts.needsYou) return row
+  if (!opts.needsYou && status !== "needs_you") return row
   return `${NEEDS_YOU_MARK} ${row}${needsYouSuffix()}`
 }
 
@@ -107,20 +114,23 @@ export function needsYouSuffix(): string {
 export { isNeedsYouTask }
 
 /**
- * Animated liveness suffix for a WORK row at a tick (brief §4). Working and
- * retrying rows cycle the ten-frame Braille set; pending rows alternate the
- * calmer `▫`/`▪` waiting frames; terminal rows are static (they never render
- * in the block — see `orderedWorkItems` — but the helper stays total). Under
- * reduced motion the tick collapses to frame 0, so pending still reads `▫`
- * and working still reads `⠋`. Pure.
+ * Animated liveness suffix for a WORK row at a tick (brief §4). Working,
+ * retrying, and needs-you rows cycle the ten-frame Braille set; pending and
+ * waiting rows alternate the calmer `▫`/`▪` waiting frames; terminal rows are
+ * static (they never render in the block — see `orderedWorkItems` — but the
+ * helper stays total). Stalled rows stay static until acted on. Under reduced
+ * motion the tick collapses to frame 0, so pending still reads `▫` and
+ * working still reads `⠋`. Pure.
  */
 export function workRowFrame(status: DerivedWorkStatus, tick: number, env: NodeJS.ProcessEnv = process.env): string {
   const frame = effectiveTick(tick, env)
   switch (status) {
     case "working":
     case "retrying":
+    case "needs_you":
       return workingFrame(frame)
     case "pending":
+    case "waiting":
       return waitingFrame(frame)
     default:
       return workGlyph(status)
@@ -180,6 +190,8 @@ export function terminalAnnouncement(task: Subtask, agentLabel: string, now: num
   if (status === "replied") return `● ${agentLabel} finished: ${short(task.title || "(untitled)", 60)}`
   if (status === "failed") return `✕ ${agentLabel} failed: ${short(task.error || task.title || "(unknown reason)", 80)}`
   if (status === "cancelled") return `⊘ ${short(task.title || "(untitled)", 60)} cancelled`
+  // A stall is a queue problem, not a finished run: it stays on the Work
+  // surface until the user retries, cancels, or dismisses it (#170).
   return undefined
 }
 
@@ -491,13 +503,19 @@ export function workCardTones(status: DerivedWorkStatus, needsYou: boolean): Wor
   switch (status) {
     case "pending":
       return { glyph: "faint", status: "muted", bar: "faint" }
+    case "waiting":
+      return { glyph: "muted", status: "muted", bar: "muted" }
     case "working":
     case "retrying":
       return { glyph: "warn", status: "muted", bar: "warn" }
+    case "needs_you":
+      return { glyph: "warn", status: "warn", bar: "warn" }
     case "replied":
       return { glyph: "good", status: "good", bar: "good" }
     case "failed":
       return { glyph: "bad", status: "bad", bar: "bad" }
+    case "stalled":
+      return { glyph: "warn", status: "warn", bar: "warn" }
     case "cancelled":
       return { glyph: "faint", status: "faint", bar: "faint" }
   }
@@ -511,12 +529,18 @@ export function workCardStateWord(status: DerivedWorkStatus, needsYou: boolean):
       return "QUEUED"
     case "working":
       return "WORKING"
+    case "waiting":
+      return "WAITING"
     case "retrying":
       return "RETRYING"
+    case "needs_you":
+      return "NEEDS YOU"
     case "replied":
       return "REPLIED"
     case "failed":
       return "FAILED"
+    case "stalled":
+      return "STALLED"
     case "cancelled":
       return "CANCELLED"
   }
@@ -747,10 +771,16 @@ export function workCardDetail(
   switch (status) {
     case "pending":
       return "queued"
+    case "waiting":
+      return "waiting for children"
     case "retrying":
       return retryCardDetail(opts.retryAfter, opts.attempts ?? 0, opts.now ?? Date.now(), opts.width)
+    case "needs_you":
+      return waitingForYouLine()
     case "working":
       return opts.activity?.trim() || workingLine()
+    case "stalled":
+      return "stalled · queue problem"
     default:
       return workStatusLabel(status)
   }

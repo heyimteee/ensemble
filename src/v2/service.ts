@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import type { Plugin } from "@opencode/plugin"
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
@@ -49,7 +49,7 @@ import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWind
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
-import { createLogRateLimiter, createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
+import { createLogRateLimiter, createLogger, defaultLogDirectory, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { createStoreObserver, dispatchGroupEvent, dispatchHopEvent } from "./log-events.ts"
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
@@ -230,6 +230,68 @@ const TRANSIENT_RECOVERY_ERRORS = new Set([
   "Ensemble restarted while this subtask was working.",
 ])
 
+type LegacyFailureCause = {
+  failureClass?: string
+  reason?: string
+  /** Lease evidence only the reaper records; native failures never carry it. */
+  previousClaim?: string
+}
+
+/**
+ * Structured terminal causes for legacy rows (ticket #168). Terminal rows
+ * written before the structured `failure` field only carry visible error copy;
+ * the failure sink is the structured source (class + reason code). Copy is
+ * never matched. Test runs keep the file sink off, so evidence is read only
+ * when a log directory is explicitly configured.
+ */
+function readLegacyFailureCauses(taskIDs: ReadonlySet<string>): Map<string, LegacyFailureCause> {
+  const causes = new Map<string, LegacyFailureCause>()
+  const testRuntime = process.env.NODE_TEST_CONTEXT !== undefined
+    || process.execArgv.includes("--test")
+    || process.argv.includes("--test")
+  if (testRuntime && process.env.ENSEMBLE_LOG_DIR === undefined) return causes
+  const dir = defaultLogDirectory()
+  if (!existsSync(dir)) return causes
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return causes
+  }
+  for (const name of names) {
+    // Rotated failure sinks keep the prefix but end in `.jsonl.N`.
+    if (!name.startsWith("service-failures-")) continue
+    let text: string
+    try {
+      text = readFileSync(join(dir, name), "utf8")
+    } catch {
+      continue
+    }
+    for (const line of text.split("\n")) {
+      if (!line.includes("\"failure.terminal\"")) continue
+      let entry: Record<string, any>
+      try {
+        entry = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const taskID = typeof entry?.taskID === "string" ? entry.taskID : ""
+      if (!taskIDs.has(taskID)) continue
+      const reason = typeof entry.reason === "string"
+        ? entry.reason
+        : typeof entry.decision?.reason === "string"
+          ? entry.decision.reason
+          : undefined
+      causes.set(taskID, {
+        failureClass: typeof entry.failureClass === "string" ? entry.failureClass : undefined,
+        reason,
+        previousClaim: typeof entry.previousClaim === "string" ? entry.previousClaim : undefined,
+      })
+    }
+  }
+  return causes
+}
+
 function unwrap<T>(value: any): T {
   return (value && typeof value === "object" && "data" in value ? value.data : value) as T
 }
@@ -361,6 +423,8 @@ export class EnsembleV2Service {
   private viewDirectory: string | undefined
   private configDirty = true
   private lastConfigPassAt = 0
+  /** Terminal rows already checked for legacy failure evidence (ticket #168). */
+  private readonly legacyTerminalChecked = new Set<string>()
   private readonly running = new Set<Promise<void>>()
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   private readonly runBySession = new Map<string, string>()
@@ -1126,6 +1190,7 @@ export class EnsembleV2Service {
       this.lastConfigPassAt = at
       await this.maintainConfigs()
     }
+    await this.reconcileTerminalWork()
     await this.reapAndRetire()
     await this.reconcileWaitingWork()
     await this.settleTerminalStreams()
@@ -3392,6 +3457,7 @@ export class EnsembleV2Service {
     subtask.repliedAt = undefined
     subtask.finishedAt = undefined
     subtask.stoppedAt = undefined
+    subtask.failure = undefined
     subtask.deadlineAt = now() + DEADLINE_MS
     await this.store.saveSubtask(subtask)
     this.noteWorkChanged(subtask)
@@ -3430,6 +3496,7 @@ export class EnsembleV2Service {
     subtask.repliedAt = at
     subtask.finishedAt = at
     subtask.stoppedAt = at
+    subtask.failure = undefined
     await this.store.saveSubtask(subtask)
     this.noteWorkChanged(subtask)
     return subtask
@@ -3458,6 +3525,7 @@ export class EnsembleV2Service {
     subtask.repliedAt = undefined
     subtask.finishedAt = undefined
     subtask.stoppedAt = undefined
+    subtask.failure = undefined
     subtask.deadlineAt = now() + DEADLINE_MS
     await this.store.saveSubtask(subtask)
     return subtask
@@ -3568,6 +3636,7 @@ export class EnsembleV2Service {
         subtask.retryAfter = undefined
         subtask.finishedAt = undefined
         subtask.stoppedAt = undefined
+        subtask.failure = undefined
         subtask.deadlineAt = now() + DEADLINE_MS
         subtask.instruction += `\n\nUser answer: ${approval.resolution ?? "Approved."}`
         await this.store.saveSubtask(subtask)
@@ -4047,7 +4116,7 @@ export class EnsembleV2Service {
     const workspaceID = found.workspace?.id ?? input.workspaceID
     const at = Date.now()
     const tasks = Object.values(state.subtasks).filter((task) => !workspaceID || task.workspaceID === workspaceID)
-    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, assignee: task.assigneeID, parent: task.parentID, dispatchGroupID: task.dispatchGroupID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
+    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, failure: task.failure, assignee: task.assigneeID, parent: task.parentID, dispatchGroupID: task.dispatchGroupID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
   }
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
@@ -5228,18 +5297,73 @@ export class EnsembleV2Service {
   }
 
   /**
-   * Reap stale leases, retire exhausted or overdue work, and purge
-   * long-finished rows (ticket #134). Runs on the serialized maintenance timer
-   * and before pump work, never on a snapshot read. Never spawns runs — starting
-   * work happens only in pump().
+   * Reconcile terminal rows written before the structured `failure` field
+   * (ticket #168). The failure sink is the structured source of the real
+   * cause; a delivery/lease reason turns the row into `stalled`, while a
+   * native or unknown cause is left `failed`. Copy is never matched, and the
+   * one-time scan is recorded as `task.reconciled`.
+   */
+  private async reconcileTerminalWork(): Promise<void> {
+    const candidates = this.store.subtasks().filter((task) =>
+      task.state === "replied"
+      && task.outcome === "failed"
+      && task.stoppedAt === undefined
+      && task.failure === undefined
+      && !this.legacyTerminalChecked.has(task.id),
+    )
+    if (candidates.length === 0) return
+    const causes = candidates.length > 0 ? readLegacyFailureCauses(new Set(candidates.map((task) => task.id))) : new Map<string, LegacyFailureCause>()
+    for (const candidate of candidates) {
+      // One scan per row: a missing record stays a legacy `failed`, which is
+      // the conservative answer and never masks a genuine native error.
+      this.legacyTerminalChecked.add(candidate.id)
+      const cause = causes.get(candidate.id)
+      if (!cause) continue
+      // Attempt exhaustion is a delivery cause only when the reaper recorded
+      // lease evidence; a native terminal failure never carries previousClaim.
+      const delivery = cause.reason === "deadline-exceeded" || cause.reason === "lease-expired"
+      const exhaustedLease = cause.reason === "attempts-exhausted"
+        && cause.failureClass === "internal"
+        && cause.previousClaim !== undefined
+      if (!delivery && !exhaustedLease) continue
+      const task = this.store.cloneSubtask(candidate.id)
+      if (!task || task.state !== "replied" || task.failure !== undefined) continue
+      task.failure = {
+        kind: cause.reason === "lease-expired" ? "lease" : cause.reason === "attempts-exhausted" ? "attempts" : "delivery",
+        reason: cause.reason,
+      }
+      await this.store.saveSubtask(task)
+      this.noteWorkChanged(task)
+      this.logger?.event("warn", "task", "task.reconciled", {
+        workspaceID: task.workspaceID,
+        taskID: task.id,
+        dispatchGroupID: task.dispatchGroupID,
+        from: "failed",
+        to: "stalled",
+        reason: cause.reason,
+        failureClass: cause.failureClass,
+      })
+    }
+  }
+
+  /**
+   * Reap stale leases, stall exhausted work, and purge long-finished rows
+   * (ticket #134). Runs on the serialized maintenance timer and before pump
+   * work, never on a snapshot read. Never spawns runs — starting work happens
+   * only in pump().
+   *
+   * Ticket #168: queue age is never execution failure. Pending work remains
+   * queued however old it is; a claim is governed only by its heartbeat lease.
+   * A lost lease retries within the attempt budget; exhausted delivery/lease
+   * attempts become `stalled`, never `failed`.
    */
   private async reapAndRetire(): Promise<void> {
     const at = now()
     for (const candidate of this.store.subtasks()) {
       if (candidate.state === "replied") continue
-      // A live lease always wins, even over an exhausted attempt count or a
-      // passed deadline: only the owning run, expiry, or a clean stop may
-      // release it. A foreign live claim is deferred, never stolen.
+      // A live lease always wins, even over an exhausted attempt count or an
+      // old delivery timestamp: only the owning run, expiry, or a clean stop
+      // may release it. A foreign live claim is deferred, never stolen.
       const owner = candidate.claimedBy
       const leaseUntil = candidate.leaseUntil
       const liveLease = owner !== undefined && leaseUntil !== undefined && leaseUntil > at
@@ -5261,10 +5385,9 @@ export class EnsembleV2Service {
         await this.retireTask(candidate, at, "attempts-exhausted")
         continue
       }
-      if (candidate.deadlineAt !== undefined && at >= candidate.deadlineAt) {
-        await this.retireTask(candidate, at, "deadline-exceeded")
-        continue
-      }
+      // Deliberately no deadline retirement here: a pending, unclaimed row is
+      // queued work with an honest age, and a completion handoff is a
+      // delivery, not a timed execution.
       // A claim whose lease expired (or was missing) without a live owner goes
       // back to the queue with its attempt budget intact. Claims held by a live
       // local run are never reaped — the run's heartbeat owns them.
@@ -5275,26 +5398,26 @@ export class EnsembleV2Service {
   }
 
   /**
-   * Terminal retirement for work that cannot run again. The cause decides the
-   * failure class: attempt exhaustion is internal truth, a missed deadline is a
-   * timeout, and only lease recovery is `restart` (ticket #149).
+   * Terminal retirement for work that cannot run again. Attempt and lease
+   * exhaustion are delivery causes (ticket #168): they record a structured
+   * non-native `failure` and derive `stalled`. Only `failTask` records the
+   * native execution errors that derive `failed`.
    */
   private async retireTask(
     candidate: Subtask,
     at: number,
-    cause: "attempts-exhausted" | "deadline-exceeded",
+    cause: "attempts-exhausted",
   ): Promise<void> {
     const task = this.store.cloneSubtask(candidate.id)
     if (!task) return
     // A transient recovery reason written by an older service is not terminal
     // truth; real errors are preserved.
     if (task.error !== undefined && TRANSIENT_RECOVERY_ERRORS.has(task.error)) task.error = undefined
-    const failureClass: FailureClass = cause === "deadline-exceeded" ? "timeout" : "internal"
+    const failureClass: FailureClass = "internal"
     task.state = "replied"
     task.outcome = "failed"
-    task.error ??= cause === "attempts-exhausted"
-      ? `Gave up after ${task.attempts} attempts.`
-      : "The work deadline passed before it could finish."
+    task.error ??= `Gave up after ${task.attempts} attempts.`
+    task.failure = { kind: "attempts", reason: cause }
     task.activeRunID = undefined
     task.approvalID = undefined
     task.claimedBy = undefined
@@ -5338,6 +5461,7 @@ export class EnsembleV2Service {
     task.claimedBy = undefined
     task.leaseUntil = undefined
     task.activeRunID = undefined
+    task.failure = undefined
     if (task.state === "working") task.state = "pending"
     await this.store.saveSubtask(task)
     this.recordRecoveryFailure(candidate, task, {
@@ -5469,6 +5593,7 @@ export class EnsembleV2Service {
           task.outcome = "succeeded"
           task.repliedAt = now()
           task.finishedAt = task.repliedAt
+          task.failure = undefined
           task.activeRunID = undefined
           task.claimedBy = undefined
           task.leaseUntil = undefined
@@ -5830,10 +5955,11 @@ export class EnsembleV2Service {
   private async runTask(taskID: string): Promise<void> {
     const task = this.store.cloneSubtask(taskID)
     if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
-    // Do not run work the queue has retired: the next reapAndRetire pass (or
-    // the current one) records the terminal state with its reason preserved.
+    // Do not run work the queue has retired/stalled: the next reapAndRetire
+    // pass (or the current one) records the terminal state with its reason.
+    // Ticket #168: an old delivery timestamp never blocks a claim; only the
+    // heartbeat lease and attempt budget govern execution.
     if (task.attempts >= MAX_ATTEMPTS) return
-    if (task.deadlineAt !== undefined && now() >= task.deadlineAt) return
     if (task.retryAfter !== undefined && now() < task.retryAfter) return
     const workspace = this.store.workspace(task.workspaceID)
     const agent = this.store.agent(task.assigneeID)
@@ -5852,6 +5978,7 @@ export class EnsembleV2Service {
     task.leaseUntil = at + LEASE_MS
     task.deadlineAt ??= at + DEADLINE_MS
     task.retryAfter = undefined
+    task.failure = undefined
     await this.store.saveSubtask(task)
     // Claim fencing: the claim is only real if the stored row still names
     // this run. A racing writer overwrote it (or the row is gone), so stand
@@ -5905,6 +6032,7 @@ export class EnsembleV2Service {
       task.claimedBy = undefined
       task.leaseUntil = undefined
       task.retryAfter = now() + 10_000
+      task.failure = undefined
       await this.store.saveSubtask(task)
       this.logger?.event("warn", "retry", "retry.scheduled", {
         workspaceID: task.workspaceID,
@@ -6055,7 +6183,7 @@ export class EnsembleV2Service {
           })
           return
         }
-        if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
+        if (currentTask.attempts < MAX_ATTEMPTS) {
           await this.retryLater({
             task: currentTask,
             error: errorText,
@@ -6096,7 +6224,7 @@ export class EnsembleV2Service {
       }
       if (!reply) {
         const errorText = "The agent produced no answer."
-        if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
+        if (currentTask.attempts < MAX_ATTEMPTS) {
           await this.retryLater({
             task: currentTask,
             error: errorText,
@@ -6139,9 +6267,10 @@ export class EnsembleV2Service {
       const finishedAt = now()
       currentTask.state = "replied"
       currentTask.outcome = "succeeded"
-      // Ticket #149: success clears any transient/restart reason before the
-      // terminal save, so a recovered task never keeps its recovery error.
+      // Ticket #149/#168: success clears any transient/restart reason and any
+      // structured terminal cause before the terminal save.
       currentTask.error = undefined
+      currentTask.failure = undefined
       currentTask.runSummary = result?.tools.length ? `${result.tools.length} tool call${result.tools.length === 1 ? "" : "s"}` : "no tool calls"
       currentTask.repliedAt = finishedAt
       currentTask.finishedAt = finishedAt
@@ -6169,10 +6298,10 @@ export class EnsembleV2Service {
       const failureText = error?.message ?? String(error)
       if (currentTask?.activeRunID === runID) {
         failureContext.cause = error
-        // Transient failure: retry inside the attempt budget and deadline
-        // with backoff (fast first retry, slower later ones). Exhausted or
-        // overdue work fails with its reason preserved.
-        if (currentTask.attempts < MAX_ATTEMPTS && (currentTask.deadlineAt === undefined || now() < currentTask.deadlineAt)) {
+        // Transient failure: retry inside the attempt budget with backoff
+        // (fast first retry, slower later ones). Exhausted work fails with its
+        // reason preserved. The delivery timestamp is not an execution gate.
+        if (currentTask.attempts < MAX_ATTEMPTS) {
           await this.retryLater({
             task: currentTask,
             error: failureText,
@@ -6368,6 +6497,7 @@ export class EnsembleV2Service {
     input.task.claimedBy = undefined
     input.task.leaseUntil = undefined
     input.task.retryAfter = now() + delayMs
+    input.task.failure = undefined
     await this.store.saveSubtask(input.task)
     const attempt = nextRetryAttempt(input.task.attempts, MAX_ATTEMPTS)
     this.recordTaskFailure({
@@ -6462,6 +6592,7 @@ export class EnsembleV2Service {
     input.task.claimedBy = undefined
     input.task.leaseUntil = undefined
     input.task.retryAfter = undefined
+    input.task.failure = undefined
     await this.store.saveApproval(approval)
     await this.store.saveSubtask(input.task)
     this.recordTaskFailure({
@@ -6507,6 +6638,8 @@ export class EnsembleV2Service {
     task.state = "replied"
     task.outcome = "failed"
     task.error = error
+    // Ticket #168: only a native execution/model error is `failed`.
+    task.failure = { kind: "native", reason: options.reason ?? "attempts-exhausted" }
     task.activeRunID = undefined
     task.approvalID = undefined
     task.claimedBy = undefined
@@ -6571,6 +6704,7 @@ export class EnsembleV2Service {
       parent.awaitingChildren = false
       parent.outcome = "pending"
       parent.assigneeID = workspace.leaderID
+      parent.failure = undefined
       parent.deadlineAt = now() + DEADLINE_MS
       await this.store.saveSubtask(parent)
     } else {
@@ -6579,6 +6713,7 @@ export class EnsembleV2Service {
       parent.outcome = "succeeded"
       parent.repliedAt = at
       parent.finishedAt = at
+      parent.failure = undefined
       await this.store.saveSubtask(parent)
       await this.appendMessage(workspace, { author: "system", text: "Delegated subtasks completed.", kind: "system", taskID: parent.id })
     }
