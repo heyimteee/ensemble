@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 
 type Handlers = {
@@ -104,7 +105,7 @@ test("non-leader completion auto-handoffs to the leader with finished content", 
   const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -163,7 +164,7 @@ test("explicit handoff satisfies the end-of-turn obligation", async () => {
   const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -223,7 +224,7 @@ test("leader turns terminate without a forced handoff", async () => {
   const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { workspace } = await setupPair(directory, handlers)
@@ -260,7 +261,7 @@ test("two completions produce one batch review with per-item decisions", async (
     await new Promise((resolve) => setTimeout(resolve, String(sessionID).includes("Nova") ? 2_000 : 5))
   }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage } = await setupPair(directory, handlers)
@@ -402,7 +403,7 @@ test("non-leader batch review hands onward to the leader on full disposition", a
     })
   }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     // Delegate is leader-only: the refusal leaves the item undecided and the
@@ -477,7 +478,7 @@ test("onward handoff terminates at the chain depth cap", async () => {
     handoff: { correlationID: "corr_i9", senderID: "nova", recipientID: "sage", depth: 3, parentID: "batch-9", completion: true, chain: ["nova", "kim", "ari"], batchedIn: "batch-9" },
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const done = await tools.get("review").execute(

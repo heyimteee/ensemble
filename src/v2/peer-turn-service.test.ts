@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 
 type Handlers = {
@@ -102,7 +103,7 @@ test("a $mention peer turn runs to completed with asking/answered attribution an
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -156,7 +157,7 @@ test("unmentioned messages still go only to the leader", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -179,7 +180,7 @@ test("an unknown mention beside a valid one refuses loudly without aborting the 
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { sage, workspace } = await setupPair(directory, handlers)
@@ -204,7 +205,7 @@ test("a purely unknown mention fails loudly with a visible refusal and no leader
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { workspace } = await setupPair(directory, handlers)
@@ -226,7 +227,7 @@ test("an archived member mention fails loudly instead of routing to the leader",
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -249,7 +250,7 @@ test("a user mention of an outside-roster agent fails loudly with no leader fall
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)
@@ -279,7 +280,7 @@ test("per-agent serialization holds under parallel user peer turns", async () =>
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { sage, workspace } = await setupPair(directory, handlers)
@@ -321,7 +322,7 @@ test("restart recovery resumes a peer turn without an approval gate", async () =
     turn: { correlationID: "peer_seed", askerKind: "user" },
   } as any)
   const service = new EnsembleV2Service(first.ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const loaded = await handlers.snapshot({ directory })
@@ -349,7 +350,7 @@ test("cancelling a peer turn records a terminal state with correlation intact", 
   const { ctx } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 2000)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { workspace } = await setupPair(directory, handlers)
@@ -383,7 +384,7 @@ test("an agent group-chat $mention creates a peer turn with asker attribution an
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -420,7 +421,7 @@ test("agent mention depth and per-run caps refuse visibly without queueing", asy
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 2000)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -464,7 +465,7 @@ test("an agent self-mention never creates a self turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)
@@ -485,7 +486,7 @@ test("an agent mention of an outside-roster agent needs approval, then runs once
   const directory = mkdtempSync(join(tmpdir(), "ensemble-peer-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)

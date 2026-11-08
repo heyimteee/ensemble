@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 import { activityStateForTask } from "./tui/workrows.ts"
 
@@ -115,7 +116,7 @@ test("parentless handoff anchors to the sender's newest open task", async () => 
     attempts: 0, createdAt: 1, retryAfter: Date.now() + 60_000, workKind: "delegation",
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Summarize the deploy\n---\n# Handoff\n")
@@ -160,7 +161,7 @@ test("sender waits on the handoff with a visible wait and no double-queue", asyn
     await new Promise((resolve) => setTimeout(resolve, waits === 1 ? 500 : 4000))
   }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })

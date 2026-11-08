@@ -26,6 +26,8 @@ OpenCode engine
 
 - **`src/v2/service.ts`** — domain service and orchestrator. Workspaces, agents, messages, subtasks, delegation, approvals, memory, model fallback, scheduling, recovery.
 - **`src/v2/shared-service.ts`** — process-global, versioned `SharedEnsemble` registry on `globalThis`; reference-counts locations so one service starts per host realm.
+- **`src/v2/location-adapter.ts`** — `LocationAttachment` for one plugin `setup(ctx)`: the shared service reference plus that location's RPC, tool, and retry-hook registrations and their disposal.
+- **`src/v2/tool-registrar.ts`** — the reusable `ensemble_*` tool declarations installed on every location's context; behavior stays on the shared service.
 - **`src/v2/catalog.ts`** — model/skill catalog refresh with a timeout guard.
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
 - **`src/v2/skill-invocation.ts`** — the shared pure skill invocation planner used by composer completion and server validation: anchors, assigned/General skills, owner choices, direct-chat rejection, and work titles.
@@ -207,15 +209,25 @@ load joins the same service and store:
   (`typeof registry.acquire === "function"`) and the version matches. The check
   must never use `instanceof`: class identity changes when the module is
   evaluated again for another location.
-- `acquire(ctx)` reference-counts the location. The first location's plugin
-  context owns storage, sessions, events, and tools for the realm; later
-  locations share that service and supply their own RPC registration.
-  `release()` is idempotent, and the service stops only after the last location
-  releases it. An `acquire()` that arrives during that final teardown waits for
-  the in-flight stop, then concurrent acquires coalesce onto one replacement
-  service.
+- `acquire(ctx)` reference-counts the location. The bootstrap location's
+  plugin context owns storage, sessions, and the event stream for the realm;
+  every location shares that service and store. `release()` is idempotent, and
+  the service stops only after the last location releases it. An `acquire()`
+  that arrives during that final teardown waits for the in-flight stop, then
+  concurrent acquires coalesce onto one replacement service.
+- `attach(ctx)` returns a `LocationAttachment` for one plugin `setup(ctx)`.
+  The attachment owns that location's RPC registration, tool transform, retry
+  hook, and realm reference. It installs the same `ensemble_*` toolset on the
+  location's own context, so a non-first channel or agent home is not limited
+  to RPC. Disposing the attachment removes only those registrations, releases
+  the reference, and leaves other locations untouched.
+- Tool handlers read the calling session from `context.sessionID` and the
+  shared service store; they do not treat the first plugin context as the host
+  authority for tool execution. The tool declarations live in
+  `tool-registrar.ts` so every attachment installs one reusable registrar.
 - Every location still registers and disposes its own RPC handlers. The
-  registry shares the service and store, not the transport registration.
+  registry shares the service and store, not the transport registration, tool
+  transform, or retry hook.
 - A version bump creates a new registry while the old one keeps serving its
   existing locations until they release. Lease-safe recovery covers that
   overlap window; do not rely on the global slot to point at the old registry.

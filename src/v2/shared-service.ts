@@ -1,4 +1,5 @@
 import { EnsembleV2Service } from "./service.ts"
+import { LocationAttachment } from "./location-adapter.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 export { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 
@@ -78,6 +79,16 @@ export class SharedEnsemble {
     }
   }
 
+  /**
+   * Attach one plugin location to the realm. The attachment acquires the
+   * shared service reference and installs this context's RPC handlers, tool
+   * transform, and retry hook; `dispose()` removes only those registrations.
+   */
+  async attach(ctx: any): Promise<LocationAttachment> {
+    const { service, release } = await this.acquire(ctx)
+    return new LocationAttachment(service, ctx, release).start()
+  }
+
   private async start(ctx: any): Promise<Entry> {
     const { service, stop } = await this.create(ctx)
     return { service, stop, refs: 0, stopping: false }
@@ -93,7 +104,9 @@ const REGISTRY_KEY = Symbol.for("ensemble.v2.shared-service")
 function isRegistry(value: unknown): value is SharedEnsemble {
   // Structural on purpose: never `instanceof`, because class identity changes
   // when the plugin module is loaded again for another location.
-  return typeof value === "object" && value !== null && typeof (value as SharedEnsemble).acquire === "function"
+  return typeof value === "object" && value !== null
+    && typeof (value as SharedEnsemble).acquire === "function"
+    && typeof (value as SharedEnsemble).attach === "function"
 }
 
 /** The one registry for this host realm. */

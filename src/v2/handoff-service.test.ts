@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 
 type Handlers = {
@@ -108,7 +109,7 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
   const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -182,7 +183,7 @@ test("handoff carries a tailored instruction distinct from the user text", async
   // Slow the native wait so both hops are observable before either replies.
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 2000)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -229,7 +230,7 @@ test("malformed, unknown, and missing-recipient handoffs are refused visibly", a
   const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)
@@ -280,7 +281,7 @@ test("exhausted and overdue handoffs deliver a failure notice where asked", asyn
     handoff: { correlationID: "handoff_overdue", senderID: "nova", recipientID: "sage", depth: 1 },
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -312,7 +313,7 @@ test("a handoff hop that cannot start delivers a failure notice in the asking co
   await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "nova", memberIDs: ["nova", "sage"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
   await seed.saveBinding({ workspaceID: "w", agentID: "nova", sessionID: "sess_nova", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Summarize\n---\n# Handoff\n")
@@ -338,7 +339,7 @@ test("handoff depth and per-run caps are refused visibly", async () => {
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 2000)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -396,7 +397,7 @@ test("cancelling a handoff hop records a terminal cancelled state with correlati
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 2000)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)
@@ -430,7 +431,7 @@ test("direct messages carry an envelope and cross-boundary contact needs approva
   const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)
@@ -476,7 +477,7 @@ test("approved cross-boundary handoffs create a typed hop through the queue", as
   const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)

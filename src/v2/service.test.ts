@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service, streamFinalization } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
@@ -149,7 +150,7 @@ test("service routes group messages, persists sequence, and restores the active 
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", role: "Engineering" } })
@@ -184,7 +185,7 @@ test("unknown mentions fail clearly instead of silently reaching the leader", as
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -256,7 +257,7 @@ test("restart recovery requeues working subtasks without an approval gate", asyn
     createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     // Nothing on startup mints an approval: the snapshot may already show
@@ -280,7 +281,7 @@ test("approval resolution is idempotent for the same decision", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -308,7 +309,7 @@ test("reassigning a working subtask ignores the interrupted run's late result", 
   const { ctx } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 200)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -361,7 +362,7 @@ test("approving interrupted work resumes it exactly once", async () => {
     payload: { subtaskID: "t" }, status: "pending", createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const before = await handlers.snapshot({ directory })
@@ -384,7 +385,7 @@ test("pausing a workspace rejects new work until resumed", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -409,7 +410,7 @@ test("stable recipient ids route without relying on a display name", async () =>
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -433,7 +434,7 @@ test("unknown actions return a structured error", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const response = await handlers.invoke({ directory, action: "nope" })
@@ -449,7 +450,7 @@ test("archiving the leader requires and applies a replacement", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -477,7 +478,7 @@ test("deleting a workspace can remove its native sessions", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx, removedSessions } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -509,7 +510,7 @@ test("maxActiveRuns limits simultaneous work and queues the rest", async () => {
   const { ctx } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 120)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -550,7 +551,7 @@ test("v1 agent profiles merge into an existing v2 roster", async () => {
     },
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -566,7 +567,7 @@ test("edit work in one directory runs one subtask at a time", async () => {
   const { ctx } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 120)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -615,7 +616,7 @@ test("answering a pending question after restart resumes the interrupted task", 
     awaitingChildren: false, attempts: 1, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const answered = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true, resolution: "Use v2" } })
@@ -655,7 +656,7 @@ test("resolved stale approvals do not resurrect cancelled work", async () => {
     awaitingChildren: false, attempts: 1, createdAt: 1, error: "Cancelled by user.",
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true, resolution: "Too late" } })
@@ -673,7 +674,7 @@ test("native-session deletion covers sessions replaced by behavior changes", asy
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx, removedSessions } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -710,7 +711,7 @@ test("archiving a workspace interrupts its active native run", async () => {
   const { ctx, interruptedSessions } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 200)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -733,7 +734,7 @@ test("creating an agent inside a workspace leaves it with no workspace until exp
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const leader = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -766,7 +767,7 @@ test("workspace member edits validate membership and the leader", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -801,7 +802,7 @@ test("agent renames do not bump behavior version but role changes do", async () 
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const created = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", role: "Old" } })
@@ -820,7 +821,7 @@ test("agent and workspace creation reject invalid input", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const blank = await handlers.invoke({ directory, action: "agent.create", payload: { name: "  " } })
@@ -848,7 +849,7 @@ test("memory edit preserves provenance history and updatedAt semantics", async (
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -874,7 +875,7 @@ test("memory delete and global-promotion approvals stay gated", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -918,7 +919,7 @@ test("stale promote_memory approvals resolve as rejected without re-applying", a
   // Deleted memory: there is nothing left to promote.
   await seed.saveApproval({ id: "ap-gone", workspaceID: "w", agentID: "a", kind: "promote_memory", title: "Promote", detail: "Gone", payload: { memoryID: "mem-missing" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const stale = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap-stale", approve: true } })
@@ -939,7 +940,7 @@ test("memory entries can be added, edited, promoted, and deleted", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -971,7 +972,7 @@ test("outside-roster approvals create the delegated child once", async () => {
   await seed.saveSubtask({ id: "parent", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Parent", instruction: "Parent", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1 })
   await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "parent", agentID: "a", kind: "outside_roster", title: "Contact Echo", detail: "Check", payload: { assigneeID: "b", title: "Child", instruction: "Check" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true } })
@@ -1000,7 +1001,7 @@ test("cross-project approval becomes global memory", async () => {
   await seedWorkspace(seed, directory)
   await seed.saveApproval({ id: "ap", workspaceID: "w", agentID: "a", kind: "cross_project", title: "Share", detail: "Shared note", payload: { text: "Shared note" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: true } })
@@ -1021,7 +1022,7 @@ test("discarding interrupted work marks it failed without running", async () => 
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Interrupted", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: true, approvalID: "ap", awaitingChildren: false, attempts: 1, createdAt: 1 })
   await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "interrupted", source: "workspace", title: "Resume interrupted work: Interrupted", detail: "The run stopped before it could reply.", payload: { subtaskID: "t" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const before = await handlers.snapshot({ directory })
@@ -1041,7 +1042,7 @@ test("file references in messages are attached to the task instruction", async (
   writeFileSync(join(directory, "notes.md"), "hello")
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1059,7 +1060,7 @@ test("paused workspaces reject delegation and depth limits are enforced", async 
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1089,7 +1090,7 @@ test("model fallback emits a visible switch message", async () => {
     return { data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Recovered" }] }] }
   }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", backupModels: [{ providerID: "probe", modelID: "probe-model" }] } })
@@ -1111,7 +1112,7 @@ test("agent tools delegate, ask, remember, and share while a run is active", asy
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1177,7 +1178,7 @@ test("deleting an agent replaces the leader, cancels work, and removes sessions"
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx, removedSessions } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1209,7 +1210,7 @@ test("workspace_info refreshes a binding written after startup", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1237,7 +1238,7 @@ test("session creation failures mark a subtask failed with an explanation", asyn
   const { ctx } = fakeContext()
   ;(ctx.session as any).create = async () => ({ data: {} })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1265,7 +1266,7 @@ test("disabling synthesis closes a parent task when children reply", async () =>
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1303,7 +1304,7 @@ test("rejecting a question fails the waiting task", async () => {
   await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "ask_person", title: "Need input", detail: "Which?", status: "pending", createdAt: 1 })
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Waiting", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, approvalID: "ap", awaitingChildren: false, attempts: 1, createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: "ap", approve: false } })
@@ -1321,7 +1322,7 @@ test("agent model, backup, and skillbox updates bump behavior version", async ()
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const created = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1346,7 +1347,7 @@ test("workspace config is authoritative and can register a workspace on discover
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1383,7 +1384,7 @@ test("agent names are unique and config names must resolve uniquely", async () =
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const first = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1416,7 +1417,7 @@ test("direct chat creates a home session and queues messages while busy", async 
   await seedWorkspace(seed, directory)
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 250)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const homeChat = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
@@ -1447,7 +1448,7 @@ test("group replies stream as one growing message and finalize", async () => {
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 220)) }
   ;(ctx.session as any).context = async () => ({ data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Partial reply" }] }] })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1482,7 +1483,7 @@ test("init runs as a visible System Agent job and publishes the full report", as
     data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Native init inspected the repo." }] }],
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1554,7 +1555,7 @@ test("init carries the starting, running, writing, reporting phases in order", a
     data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Native init inspected the repo." }] }],
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1614,7 +1615,7 @@ test("init streams native worker text into the System Agent message before final
   const parked = new Promise<void>((resolve) => { release = resolve })
   ;(ctx.session as any).wait = async () => { await parked }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1653,7 +1654,7 @@ test("reset removes ensemble state, config, and bound sessions but preserves han
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx, removedSessions } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1689,7 +1690,7 @@ test("adding an agent can move its no-workspace direct-chat session into a works
   await seed.load()
   await seedAgent(seed, { homeDirectory: home })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const chat = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
@@ -1713,7 +1714,7 @@ test("reset during a streaming run leaves no resurrected transcript", async () =
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 400)) }
   ;(ctx.session as any).context = async () => ({ data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "SECRET PARTIAL" }] }] })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1740,7 +1741,7 @@ test("a failed direct prompt releases the busy lock", async () => {
   await seed.load()
   await seedAgent(seed, { homeDirectory: home })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
@@ -1760,7 +1761,7 @@ test("the streaming poller cannot write after reset", async () => {
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 1200)) }
   ;(ctx.session as any).context = async () => ({ data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "SECRET PARTIAL" }] }] })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1786,7 +1787,7 @@ test("parallel direct-chat opens create only one no-workspace session", async ()
   await seed.load()
   await seedAgent(seed, { homeDirectory: home })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await Promise.all([
@@ -1806,7 +1807,7 @@ test("editing an agent cannot resurrect an archived workspace config", async () 
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1827,7 +1828,7 @@ test("failed init removes AGENTS.md that did not exist and reports the failure",
   const { ctx } = fakeContext()
   ;(ctx.session as any).wait = async () => { throw new Error("agent failed") }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1864,7 +1865,7 @@ test("init rejects duplicate runs and non-solo or direct requests before appendi
   ;(ctx.session as any).wait = async () => { await parked }
   ;(ctx.session as any).interrupt = async ({ sessionID }: any) => { interruptedSessions.push(sessionID); release?.() }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -1915,7 +1916,7 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
   await seed.saveMessage({ id: "other", workspaceID: "w", seq: 2, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: INIT_START_TEXT, kind: "text", createdAt: 2 })
   await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", phases: ["starting", "running"], previousAgentsMD: previous, startedAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const after = await handlers.snapshot({ directory })
@@ -1952,7 +1953,7 @@ test("workspace archive cancels an active init, restores AGENTS.md, and removes 
   ;(ctx.session as any).wait = async () => { await parked }
   ;(ctx.session as any).interrupt = async ({ sessionID }: any) => { interruptedSessions.push(sessionID); release?.() }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2002,7 +2003,7 @@ test("workspace delete and reset cancel active init jobs and remove their tempor
     ;(ctx.session as any).wait = async () => { await parked }
     ;(ctx.session as any).interrupt = async ({ sessionID }: any) => { interruptedSessions.push(sessionID); release?.() }
     const service = new EnsembleV2Service(ctx)
-    const stop = await service.start()
+    const stop = await startServiceForTest(service, service.ctx)
     const handlers = service.handlers()
     try {
       const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2041,7 +2042,7 @@ test("failed init restores the previous AGENTS.md content", async () => {
   }
   ;(ctx.session as any).wait = async () => { throw new Error("native init failed") }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2067,7 +2068,7 @@ test("streaming deltas accumulate into the live reply and reconcile with the fin
   const { ctx, emitEvent } = fakeContext()
   ctx.session.wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   await new Promise((resolve) => setTimeout(resolve, 20))
   try {
@@ -2113,7 +2114,7 @@ test("workspace streams coalesce ephemeral text and durable message patches fina
   const { ctx, emitEvent, values } = fakeContext()
   ctx.session.wait = async () => { await new Promise((resolve) => setTimeout(resolve, 650)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const emitted: Array<{ name: string; data: any }> = []
   service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
   const handlers = service.handlers()
@@ -2185,7 +2186,7 @@ test("user and system messages publish durable upserts without a snapshot fallba
     return { data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "Recovered" }] }] }
   }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const emitted: Array<{ name: string; data: any }> = []
   service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
   const handlers = service.handlers()
@@ -2238,7 +2239,7 @@ test("config discovery restores a member missing from a stale workspace row", as
   const directory = mkdtempSync(join(tmpdir(), "ensemble-jessy-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const clark = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Clark" } })
@@ -2304,7 +2305,7 @@ test("agent replies normalize @KnownAgent and add a no-dispatch warning", async 
   const { ctx } = fakeContext()
   ;(ctx.session as any).context = async () => ({ data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "@Jessy please introduce yourself." }] }] })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const clark = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Clark" } })
@@ -2327,7 +2328,7 @@ test("agent replies normalize @KnownAgent and add a no-dispatch warning", async 
 
 test("rpc boundary rejects snapshot input without a directory", async () => {  const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await assert.rejects(handlers.snapshot({}), (error: { code?: string }) => error.code === "invalid_input")
@@ -2341,7 +2342,7 @@ test("rpc boundary rejects invoke input without an action or with a malformed pa
   const directory = mkdtempSync(join(tmpdir(), "ensemble-rpc-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const missingAction = await handlers.invoke({ directory })
@@ -2360,7 +2361,7 @@ test("agent skillbox updates reject non-list values without clearing the skillbo
   const directory = mkdtempSync(join(tmpdir(), "ensemble-skillbox-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const created = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2379,7 +2380,7 @@ test("workspace member updates reject non-list values without changing membershi
   const directory = mkdtempSync(join(tmpdir(), "ensemble-members-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2438,7 +2439,7 @@ test("revision reports the coordinated version and catalog metadata without a st
   const directory = mkdtempSync(join(tmpdir(), "ensemble-revision-catalog-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).models.length > 0)
@@ -2469,7 +2470,7 @@ test("revision notices workspace config changes without hydrating the full store
   const directory = mkdtempSync(join(tmpdir(), "ensemble-revision-config-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2511,7 +2512,7 @@ test("direct chat context does not rewrite identity metadata on every poll", asy
     homeDirectory: home, createdAt: 1, updatedAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     for (let poll = 0; poll < 3; poll++) await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
@@ -2533,7 +2534,7 @@ test("a direct message is stored durably and renders exactly once", async () => 
   const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2556,7 +2557,7 @@ test("a direct message survives restart via the load path and never duplicates",
   const values = new Map<string, unknown>()
   const first = fakeContext(values)
   const service = new EnsembleV2Service(first.ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   let agentID = ""
   try {
     const agent = await service.handlers().invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2590,7 +2591,7 @@ test("a new direct message after restart orders after stored lines even when the
   const values = new Map<string, unknown>()
   const first = fakeContext(values)
   const service = new EnsembleV2Service(first.ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   let agentID = ""
   try {
     const agent = await service.handlers().invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2638,7 +2639,7 @@ test("a queued direct message stays visible as queued, then sent", async () => {
   })
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 250)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const first = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "First" } })
@@ -2676,7 +2677,7 @@ test("a sent direct message ignores a stale persisted queued flag", async () => 
     homeDirectory: home, createdAt: 1, updatedAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const sent = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "Sent already" } })
@@ -2708,7 +2709,7 @@ test("a queued direct message can be removed by key before it sends", async () =
   })
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 250)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const first = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "First" } })
@@ -2734,7 +2735,7 @@ test("unmentioned group messages create work only for the workspace leader", asy
   const directory = mkdtempSync(join(tmpdir(), "ensemble-route-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2762,7 +2763,7 @@ test("mentioned group messages go only to the mentioned active members", async (
   const directory = mkdtempSync(join(tmpdir(), "ensemble-route-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2791,7 +2792,7 @@ test("unmentioned routing ignores recent activity and stays with the leader", as
   const directory = mkdtempSync(join(tmpdir(), "ensemble-route-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2827,7 +2828,7 @@ test("agent-created delegation starts work with no further RPC", async () => {
     else await new Promise((resolve) => setTimeout(resolve, 5))
   }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2872,7 +2873,7 @@ test("non-leader delegation refusal is visible in the group chat", async () => {
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2910,7 +2911,7 @@ test("resubmitting the same delegation executes once", async () => {
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -2957,7 +2958,7 @@ test("a repeated user command forms a new dispatch group and task, with retry as
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "n", title: "Coordinate", instruction: "Coordinate", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1, repliedAt: at, finishedAt: at, queueKey: retainedKey, workKind: "delegation" })
   const { ctx } = fakeContext(shared)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     // A repeated identical user command is a new dispatch: the group is part
@@ -3003,7 +3004,7 @@ test("restart recovery re-queues claimed work without duplicating it", async () 
   await seedWorkspace(seed, directory, { leaderID: "n", memberIDs: ["n", "s"], synthesis: false })
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "agent", creatorAgentID: "n", assigneeID: "s", title: "Child", instruction: "Check", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 2, createdAt: 1, claimedBy: "run_old", leaseUntil: 1, queueKey: "work:w:delegation:root:seed", workKind: "delegation" })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -3040,7 +3041,7 @@ test("ticket148: load leaves a live foreign lease working row untouched", async 
   process.env.ENSEMBLE_LOG_LEVEL = "debug"
   let stop = async () => {}
   try {
-    stop = await service.start()
+    stop = await startServiceForTest(service, service.ctx)
   } finally {
     if (previousLevel === undefined) delete process.env.ENSEMBLE_LOG_LEVEL
     else process.env.ENSEMBLE_LOG_LEVEL = previousLevel
@@ -3086,7 +3087,7 @@ test("ticket148: a live lease is never retired for attempts or a passed deadline
     attempts: 5, claimedBy: "run_live", activeRunID: "run_live", leaseUntil, deadlineAt: 1, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -3133,7 +3134,7 @@ test("ticket148: an expired lease is requeued once and attempts rise only on the
     attempts: 2, claimedBy: "run_dead", leaseUntil: 1, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -3182,7 +3183,7 @@ test("ticket149: restart requeue writes a failure attempt with the previous clai
     attempts: 2, claimedBy: "run_dead", activeRunID: "run_dead", leaseUntil: 1, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -3233,7 +3234,7 @@ test("ticket149: restart retirement writes a terminal failure record", async () 
     attempts: 5, claimedBy: "run_dead", leaseUntil: 1, error: "Recovered after an expired lease; retrying.", createdAt: 3,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -3304,7 +3305,7 @@ test("ticket149: a recovered then successful task clears its restart error", asy
     error: "Ensemble restarted while this subtask was working.", createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -3342,7 +3343,7 @@ test("ticket149: a fallback reply is retried as an empty answer", async () => {
     attempts: 1, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -3381,7 +3382,7 @@ test("ticket149: an exhausted fallback reply fails visibly without a result", as
     attempts: 4, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -3428,7 +3429,7 @@ test("ticket149: the request-23 shape never succeeds on a stale fallback", async
     text: "Previous answer", kind: "text", interrupted: false, createdAt: 2,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -3462,7 +3463,7 @@ test("ticket149: an empty terminal stream settles as interrupted, never a comple
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Done", instruction: "Do", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1, repliedAt: 2, finishedAt: 2 })
   await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t", text: "", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -3490,7 +3491,7 @@ test("ticket148: a working row with no claim and no local run is repaired", asyn
     attempts: 1, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -3522,7 +3523,7 @@ test("ticket148: stop releases local claims and preserves foreign claims", async
     attempts: 1, claimedBy: "run_foreign", activeRunID: "run_foreign", leaseUntil, createdAt: 2,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   try {
     // Register the local run identity without starting native work: stop() may
     // only clear claims owned by this service's run set.
@@ -3555,7 +3556,7 @@ test("exhausted attempts fail with the reason preserved", async () => {
   await seedWorkspace(seed, directory)
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Tired", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 5, error: "boom", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -3579,7 +3580,7 @@ test("handoff creates a pending typed hop with correlation and dedupes resubmiss
   const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
   const { ctx, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -3636,7 +3637,7 @@ test("task_status exposes the derived lifecycle facts", async () => {
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -3682,7 +3683,7 @@ test("ticket68: an order with no native block produces no approval and answers",
   const directory = mkdtempSync(join(tmpdir(), "ensemble-68-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -3712,7 +3713,7 @@ test("ticket68: restart recovery requeues dead work without a phantom approval",
   await seedWorkspace(seed, directory)
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Stale", instruction: "Do work", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -3738,7 +3739,7 @@ test("ticket68: a native permission request gates work and resolves through the 
   ;(ctx as any).permission = { reply: async (input: any) => { replies.push(input) } }
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 400)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -3794,7 +3795,7 @@ test("ticket68: resolving a native approval replies on the native session", asyn
   const replies: any[] = []
   ;(ctx as any).permission = { reply: async (input: any) => { replies.push(input) } }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -3833,7 +3834,7 @@ test("ticket68: ask_person parks the run until the user answers", async () => {
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 400)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -3890,7 +3891,7 @@ test("ticket68: settling work rejects stale product approvals of every kind", as
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Work", instruction: "Do", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 1 })
   await seed.saveApproval({ id: "out", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "outside_roster", title: "Contact", detail: "Check", status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const cancelled = await handlers.invoke({ directory, action: "task.cancel", payload: { id: "t" } })
@@ -3914,7 +3915,7 @@ test("ticket75: an empty assistant reply is retried, never a silent success", as
   await seedAgent(seed)
   await seedWorkspace(seed, directory)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "introduce yourself" } })
@@ -3951,7 +3952,7 @@ test("ticket144: maintenance claims a future retry without an unrelated schedule
     attempts: 1, error: "boom", retryAfter: retryAt, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -3983,7 +3984,7 @@ test("ticket144: an uncertain tool outcome parks for review instead of auto-retr
   await seedAgent(seed)
   await seedWorkspace(seed, directory)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "run the risky tool" } })
@@ -4023,7 +4024,7 @@ test("ticket145: a terminal task failure writes a self-contained failure record"
     attempts: 4, dispatchGroupID: "g1", createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -4065,7 +4066,7 @@ test("ticket145: an uncertain park carries tool outcomes and the approval decisi
   await seedAgent(seed)
   await seedWorkspace(seed, directory)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "risky" } })
@@ -4100,7 +4101,7 @@ test("ticket75: a waiting parent with terminal children is reconciled, not stuck
   await seed.saveSubtask({ id: "parent", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Parent", instruction: "Do parent", mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true, attempts: 1, createdAt: 1 })
   await seed.saveSubtask({ id: "child", workspaceID: "w", parentID: "parent", creatorType: "agent", creatorAgentID: "a", assigneeID: "a", title: "Child", instruction: "Do child", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 2, repliedAt: 3, finishedAt: 3 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => {
@@ -4128,7 +4129,7 @@ test("ticket76: snapshot settles a streaming message whose task is terminal", as
   await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Done", instruction: "Do", mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false, attempts: 1, createdAt: 1, repliedAt: 2, finishedAt: 2 })
   await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t", text: "partial reply", kind: "text", streaming: true, createdAt: 2 })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -4160,7 +4161,7 @@ test("ticket148: streaming rows survive load only while their lease is live", as
   await seed.saveMessage({ id: "m_old", workspaceID: "w", seq: 4, author: "agent", agentID: "a", text: "orphan old", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
   await seed.saveMessage({ id: "m_fresh", workspaceID: "w", seq: 5, author: "agent", agentID: "a", text: "orphan fresh", kind: "text", streaming: true, createdAt: Date.now(), updatedAt: Date.now() })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -4184,7 +4185,7 @@ test("ticket76: sequential user tasks settle in order with no stuck work", async
   const directory = mkdtempSync(join(tmpdir(), "ensemble-76-seq-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -4210,7 +4211,7 @@ test("ticket76: a delegated child and a later user task both settle in order", a
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 200)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -4293,7 +4294,7 @@ test("skill.send delivers the exact text to the assigned owner as one peer turn"
     skillAgent("sage", "Sage", ["deploy"]),
   ])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
@@ -4333,7 +4334,7 @@ test("message.send also accepts a leader-owned message-start skill", async () =>
     skillAgent("sage", "Sage", []),
   ])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
@@ -4360,7 +4361,7 @@ test("explicit recipient ids cannot bypass skill ownership or routing", async ()
     skillAgent("sage", "Sage", []),
   ])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
@@ -4391,7 +4392,7 @@ test("skill messages keep file-reference blocks", async () => {
   ctx.skill.list = async () => [{ id: "review", name: "Review", description: "Thorough code review" }]
   await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", ["review"])])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
@@ -4422,7 +4423,7 @@ test("invalid skill references reject atomically before any message or task", as
     skillAgent("retired", "Retired", ["review"], true),
   ])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
@@ -4464,7 +4465,7 @@ test("skill.send creates one exact prompt per unique agent with resolved titles 
     skillAgent("echo", "Echo", []),
   ], { memberIDs: ["nova", "sage", "echo"] })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 3)
@@ -4514,7 +4515,7 @@ test("skill.send groups repeated anchors and separate messages stay separate wor
   ]
   await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", ["review", "notes"])])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
@@ -4550,7 +4551,7 @@ test("the skill batch cap honors settings and rejects the whole message atomical
   ]
   await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", ["review", "notes", "deploy"])])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 3)
@@ -4584,7 +4585,7 @@ test("a General skill routes to the leader with a one-run native grant, then res
     skillAgent("sage", "Sage", []),
   ], { synthesis: false })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
@@ -4644,7 +4645,7 @@ test("a General skill under a non-leader mention is rejected atomically", async 
     skillAgent("sage", "Sage", []),
   ])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
@@ -4672,7 +4673,7 @@ test("message-start assigned skills use the owner picker and keep the exact text
     skillAgent("sage", "Sage", ["deploy"]),
   ])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
@@ -4717,7 +4718,7 @@ test("a delegatee receives leader guidance without a host skill grant", async ()
     skillAgent("sage", "Sage", []),
   ], { synthesis: false })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
@@ -4765,7 +4766,7 @@ test("direct conversations reject General skills and /init before creating a DM 
   ]
   await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", ["review"])])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 2)
@@ -4799,7 +4800,7 @@ test("a leader triage task cannot be reassigned away from the leader", async () 
     skillAgent("sage", "Sage", []),
   ], { synthesis: false })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
@@ -4826,7 +4827,7 @@ test("a leader triage task cannot be delegated from", async () => {
     skillAgent("sage", "Sage", []),
   ], { synthesis: false })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 1)
@@ -4855,7 +4856,7 @@ test("the deliberate skill action never falls through to a native /init turn", a
   const { ctx } = fakeContext()
   await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", [])])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     for (const text of ["/init", "/ensemble-init"]) {
@@ -4877,7 +4878,7 @@ test("prose /init is delivered as ordinary group text", async () => {
   const { ctx, commands } = fakeContext()
   await seedSkillWorkspace(directory, ctx, [skillAgent("nova", "Nova", [])])
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const text = "hello /init, keep going"
@@ -5183,7 +5184,7 @@ test("service routing matrix: skills, explicit recipients, files, and direct con
         skillAgent("echo", "Echo", []),
       ], { memberIDs: ["nova", "sage", "echo"] })
       const service = new EnsembleV2Service(ctx)
-      const stop = await service.start()
+      const stop = await startServiceForTest(service, service.ctx)
       const handlers = service.handlers()
       try {
         await waitFor(async () => (await handlers.snapshot({ directory })).skills.length === 4)
@@ -5240,7 +5241,7 @@ test("delegation publishes the task change before pump work and changes.since re
   const { ctx } = fakeContext()
   const emitted: Array<{ name: string; data: any }> = []
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
   const handlers = service.handlers()
   try {
@@ -5294,7 +5295,7 @@ test("changes.since output stays JSON-safe at the RPC boundary", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-change-json-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   const assertJsonValues = (value: any, path: string): void => {
     if (value === undefined) assert.fail(`${path} is undefined`)
@@ -5489,7 +5490,7 @@ test("shell actions publish incremental patches and an approval resolution reach
   const { ctx } = fakeContext()
   const emitted: Array<{ name: string; data: any }> = []
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
   const handlers = service.handlers()
   try {
@@ -5560,7 +5561,7 @@ test("catalog and config metadata travel on version-neutral patch events", async
   const { ctx } = fakeContext()
   const emitted: Array<{ name: string; data: any }> = []
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
   const handlers = service.handlers()
   try {
@@ -5604,7 +5605,7 @@ test("ticket150: log rows identify the service instance, location, and thread", 
   const { ctx } = fakeContext()
   ctx.location.directory = pluginLocation
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     await handlers.snapshot({ directory })
@@ -5647,7 +5648,7 @@ test("ticket150: feed resets name the reason and identical resets are rate-limit
   const directory = mkdtempSync(join(tmpdir(), "ensemble-150-reset-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const first = await handlers["changes.since"]({ directory, epoch: -1, version: 0 })
