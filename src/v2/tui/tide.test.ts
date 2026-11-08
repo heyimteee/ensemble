@@ -18,6 +18,8 @@ import {
   tideColumns,
   tideLevel,
   tideLevels,
+  tideRowParts,
+  tideRowText,
   tideStrip,
   tideTickForCard,
   tideTone,
@@ -26,7 +28,7 @@ import {
 
 test("ticket115: tide columns follow content width and clamp to the approved range", () => {
   assert.equal(tideColumns(40), 20)
-  assert.equal(tideColumns(41), 20)
+  assert.equal(tideColumns(41), 21, "odd widths take ceil(width / 2) samples")
   assert.equal(tideColumns(12), TIDE_MIN_COLUMNS)
   assert.equal(tideColumns(400), TIDE_MAX_COLUMNS)
   assert.equal(TIDE_MIN_COLUMNS, 8)
@@ -34,14 +36,76 @@ test("ticket115: tide columns follow content width and clamp to the approved ran
 })
 
 test("ticket115: one tide glyph covers two cells and the strip spans the card width", () => {
-  const strip = tideStrip("current", 40, 0)
-  assert.equal(strip.length, 40)
-  for (let index = 0; index < strip.length; index += 2) {
-    assert.ok((TIDE_GLYPHS as readonly string[]).includes(strip[index]), "each tide column starts with one glyph")
-    assert.equal(strip[index + 1], " ", "each tide column keeps one deliberate blank gap")
+  const even = tideStrip("current", 40, 0)
+  assert.equal(even.length, 40)
+  assert.equal(even[0], " ", "an even row starts with the padding blank")
+  for (let index = 1; index < even.length; index++) {
+    assert.equal(even[index] === " ", index % 2 === 0, "cells alternate glyph and the deliberate gap")
   }
-  const cells = [...strip].filter((cell) => cell !== " ")
+  assert.ok((TIDE_GLYPHS as readonly string[]).includes(even.at(-1) as string), "the row ends on its last glyph")
+
+  const odd = tideStrip("current", 41, 0)
+  assert.equal(odd.length, 41)
+  assert.ok((TIDE_GLYPHS as readonly string[]).includes(odd[0] as string), "an odd row starts on its first glyph")
+  for (let index = 0; index < odd.length; index++) {
+    assert.equal(odd[index] === " ", index % 2 === 1, "cells alternate glyph and the deliberate gap")
+  }
+  const cells = [...odd].filter((cell) => cell !== " ")
   assert.ok(cells.every((cell) => (TIDE_GLYPHS as readonly string[]).includes(cell)))
+})
+
+test("ticket156: tide row parts keep the exact content width and end on the last glyph", () => {
+  const even = tideRowParts([1, 2], 4)
+  assert.equal(tideRowText(even), " ▂ ▃", "even widths pad one leading blank and drop the final sample blank")
+  assert.equal(even[0]?.level, undefined, "the padding cell carries no level")
+  assert.equal(even.at(-1)?.text, TIDE_GLYPHS[2], "the final sample is the glyph only")
+
+  const odd = tideRowParts([1, 2, 3], 5)
+  assert.equal(tideRowText(odd), "▂ ▃ ▄", "odd widths need no padding")
+  assert.equal(odd.length, 3)
+  assert.equal(odd.at(-1)?.text, TIDE_GLYPHS[3])
+
+  assert.equal(tideRowText(tideRowParts(flatTideLevels(tideColumns(16)), 16)), " ▁".repeat(8))
+})
+
+test("ticket156: every content width from 16 to 120 keeps the exact row and right edge", () => {
+  const glyphs = TIDE_GLYPHS as readonly string[]
+  for (let width = 16; width <= 120; width++) {
+    for (const variant of TIDE_VARIANTS) {
+      const strip = tideStrip(variant, width, 3, {})
+      assert.equal(strip.length, width, `${variant} at width ${width}`)
+      const offset = width % 2 === 0 ? 1 : 0
+      for (let index = 0; index < width; index++) {
+        if (index < offset) {
+          assert.equal(strip[index], " ", `${variant} at width ${width} pads only the first cell`)
+        } else if ((index - offset) % 2 === 0) {
+          assert.ok(glyphs.includes(strip[index] as string), `${variant} at width ${width} cell ${index} is a glyph`)
+        } else {
+          assert.equal(strip[index], " ", `${variant} at width ${width} cell ${index} is the deliberate gap`)
+        }
+      }
+      assert.ok(glyphs.includes(strip.at(-1) as string), `${variant} at width ${width} ends on a glyph`)
+    }
+
+    assert.equal(flatTideStrip(width).length, width, `flat strip at width ${width}`)
+    assert.ok(glyphs.includes(flatTideStrip(width).at(-1) as string), `flat strip at width ${width} ends on a glyph`)
+
+    const levels = tideLevels("current", tideColumns(width), 0, {})
+    assert.equal(levels.length, Math.ceil(width / 2), `sampled columns at width ${width}`)
+    const parts = tideRowParts(levels, width)
+    assert.equal(tideRowText(parts).length, width)
+    assert.equal(tideRowText(parts), tideStrip("current", width, 0, {}))
+    assert.equal(parts.at(-1)?.text, glyphs[levels.at(-1) as number], "the last part is the glyph-only final sample")
+    assert.equal(parts.at(-1)?.text.length, 1)
+    if (width % 2 === 0) {
+      assert.equal(parts[0]?.text, " ")
+      assert.equal(parts[0]?.level, undefined, "even widths take exactly one padding blank")
+      assert.equal(parts.length, Math.ceil(width / 2) + 1)
+    } else {
+      assert.equal(parts.length, Math.ceil(width / 2), "odd widths need no padding part")
+      assert.notEqual(parts[0]?.level, undefined)
+    }
+  }
 })
 
 test("ticket115: the current tide ramps through eight block levels", () => {
@@ -69,8 +133,9 @@ test("ticket115: tide levels map onto faint, muted, and text theme roles", () =>
 })
 
 test("ticket117: the settled tide stays flat at the shared card width", () => {
-  assert.equal(flatTideStrip(40), `${TIDE_GLYPHS[0]} `.repeat(20))
-  assert.equal(flatTideStrip(12), `${TIDE_GLYPHS[0]} `.repeat(8), "the strip honours the minimum column clamp")
+  assert.equal(flatTideStrip(40), " ▁".repeat(20))
+  assert.equal(flatTideStrip(12), " ▁".repeat(6), "the strip fills the exact requested content width")
+  assert.equal(tideColumns(12), TIDE_MIN_COLUMNS, "the sampling clamp still applies")
   assert.deepEqual(flatTideLevels(20), new Array(20).fill(0))
 })
 
@@ -104,11 +169,12 @@ test("ticket116: all six motions produce distinct fixed-width one-row strips", (
   assert.equal(new Set(strips).size, TIDE_VARIANTS.length)
   for (const strip of strips) {
     assert.equal(strip.length, 48)
+    assert.equal(strip[0], " ", "an even row starts with the padding blank")
+    assert.ok((TIDE_GLYPHS as readonly string[]).includes(strip.at(-1) as string), "the row ends on its last glyph")
     const cells = [...strip]
     assert.ok(cells.filter((cell) => cell !== " ").every((cell) => (TIDE_GLYPHS as readonly string[]).includes(cell)))
-    for (let index = 0; index < strip.length; index += 2) {
-      assert.ok((TIDE_GLYPHS as readonly string[]).includes(strip[index]), "each tide sample starts with a glyph")
-      assert.equal(strip[index + 1], " ", "each tide sample keeps one blank gap")
+    for (let index = 1; index < strip.length; index++) {
+      assert.equal(strip[index] === " ", index % 2 === 0, "glyphs keep one deliberate blank gap")
     }
   }
 })
@@ -120,7 +186,7 @@ test("ticket116: every motion clamps columns to 8-64 and keeps one row", () => {
     const even = tideStrip(variant, 40, 0)
     const odd = tideStrip(variant, 41, 0)
     assert.equal(even.length, 40)
-    assert.equal(odd.length, 40, "odd content widths lose at most one trailing cell")
+    assert.equal(odd.length, 41, "odd content widths keep the exact width too")
     assert.equal([...even].filter((cell) => cell === "\n").length, 0)
   }
 })
@@ -142,7 +208,7 @@ test("ticket116: reduced motion freezes every motion to its deterministic still 
 
 test("ticket116: terminal cards settle to a flat strip", () => {
   assert.deepEqual(flatTideLevels(20), Array.from({ length: 20 }, () => 0))
-  assert.equal(flatTideStrip(40), `${TIDE_GLYPHS[0]} `.repeat(20))
+  assert.equal(flatTideStrip(40), " ▁".repeat(20))
   assert.equal(flatTideStrip(40).length, 40)
 })
 

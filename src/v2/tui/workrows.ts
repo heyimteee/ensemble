@@ -643,7 +643,7 @@ export type WorkCard = {
   tones: WorkCardTones
   /** Stable tide motion for this subtask's active lifetime. */
   tideVariant: TideVariant
-  /** Card content width in terminal cells; the tide sampling derives from it. */
+  /** Card content width in terminal cells; the header and tide each render exactly this many cells. */
   width: number
 }
 
@@ -653,7 +653,7 @@ export type WorkCard = {
  * `WorkCard` above keeps its identity.
  */
 export type WorkCardTide = {
-  /** Rendered one-row strip: one glyph plus one blank per tide column. */
+  /** Exact-width rendered strip; all but the final sample carry the deliberate blank. */
   tide: string
   /** One sampled level per tide column, used for per-cell theme colors. */
   tideLevels: readonly number[]
