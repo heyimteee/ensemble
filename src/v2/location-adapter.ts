@@ -12,6 +12,10 @@ const LOCATION_EVENT_TYPES: string[][] = [
   ["session.text.delta", "session.idle"],
   ["permission.asked", "permission.replied"],
   ["config.updated", "file.edited"],
+  // Ticket #155: native tool activity and execution lifecycle for Work cards.
+  // `input.started` carries the tool name; `called` carries its input head.
+  ["session.tool.input.started", "session.tool.called", "session.tool.progress", "session.tool.success", "session.tool.failed"],
+  ["session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
 ]
 
 /**

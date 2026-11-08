@@ -423,5 +423,26 @@ export const EnsembleV2Rpc = Rpc.define({
         additionalProperties: false,
       },
     },
+    /**
+     * Ticket #155: coalesced, version-neutral native tool activity for one
+     * Work card. Empty `label` with an idle/terminal status clears the card.
+     */
+    "work.activity": {
+      schema: {
+        type: "object",
+        properties: {
+          epoch: { type: "number" },
+          workspaceID: { type: "string" },
+          taskID: { type: "string" },
+          sessionID: { type: "string" },
+          label: { type: "string" },
+          tool: { type: "string" },
+          status: { type: "string" },
+          updatedAt: { type: "number" },
+        },
+        required: ["epoch", "workspaceID", "taskID", "sessionID", "label", "status", "updatedAt"],
+        additionalProperties: false,
+      },
+    },
   },
 })

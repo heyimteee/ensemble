@@ -44,6 +44,19 @@ export function hostEventKey(event: any): string | undefined {
         : undefined
     case "file.edited":
       return created !== undefined ? `${type}:${String(data?.file ?? "")}:${created}` : undefined
+    case "session.tool.input.started":
+    case "session.tool.called":
+    case "session.tool.progress":
+    case "session.tool.success":
+    case "session.tool.failed":
+      return sessionID && data?.id
+        ? `${type}:${sessionID}:${String(data.assistantMessageID ?? "")}:${String(data.id)}:${String(created ?? "")}`
+        : undefined
+    case "session.execution.started":
+    case "session.execution.succeeded":
+    case "session.execution.failed":
+    case "session.execution.interrupted":
+      return sessionID && created !== undefined ? `${type}:${sessionID}:${created}` : undefined
     case "config.updated":
       return created !== undefined ? `${type}:${created}` : undefined
     case "skill.updated":
