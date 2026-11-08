@@ -334,10 +334,6 @@ function dispatchReachability(
   return "missing-parent"
 }
 
-function countedDispatchHops(tasks: readonly DoctorSubtask[]): number {
-  return dispatchHopCount(tasks)
-}
-
 export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
   const pending = new Map<string, PendingMismatch>()
   const add = (indexes: number[], code: string, details: Record<string, unknown>, message: string, scope: DoctorMismatch["scope"] = "config") => {
@@ -515,7 +511,7 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
           "storage",
         )
       }
-      const countedHops = countedDispatchHops(dispatchTasksByGroup.get(group.id) ?? [])
+      const countedHops = dispatchHopCount(dispatchTasksByGroup.get(group.id) ?? [])
       // Purged terminal rows may leave the counter higher; that only tightens
       // the budget. A counter below the visible counted work is the unsafe
       // direction because it would admit extra dispatches.

@@ -1,4 +1,5 @@
 import type { Agent, SnapshotState } from "./types.ts"
+import { validateTaskMaxHops } from "./dispatch-budget.ts"
 import { runPrefixHash, stableHash } from "./queue.ts"
 
 /**
@@ -187,18 +188,8 @@ export function parseReviewDecisions(input: unknown): { ok: true; decisions: Rev
       // Ticket #162: review delegation follows the same required-budget path
       // as ensemble_delegate. A missing value is an explicit validation error,
       // never a silent group-remaining default.
-      if (maxHops === undefined || maxHops === null) {
-        return {
-          ok: false,
-          reason: `Delegating item "${item}" must include maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask.`,
-        }
-      }
-      if (typeof maxHops !== "number" || !Number.isInteger(maxHops) || maxHops < 0) {
-        return {
-          ok: false,
-          reason: `Delegating item "${item}" maxHops must be a non-negative integer. Use maxHops: 0 for a one-shot ask.`,
-        }
-      }
+      const taskBudget = validateTaskMaxHops(`Delegating item "${item}"`, maxHops)
+      if (!taskBudget.ok) return { ok: false, reason: taskBudget.reason }
     }
     const decision: ReviewDecision = { item, action: action as ReviewAction }
     if (typeof assignee === "string" && assignee.trim()) decision.assignee = assignee.trim()

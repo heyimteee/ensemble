@@ -108,6 +108,42 @@ test("ticket160: legacy groups reconcile once, persist, and grant live tasks the
   assert.equal(reloaded.subtask("root-live")?.taskMaxHops, remaining)
 })
 
+test("ticket160: reconciliation fills only live rows that lack a task budget", async () => {
+  const ctx = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.saveWorkspace(workspace())
+  const explicit = subtask({ id: "explicit", dispatchGroupID: "dispatch_legacy", taskMaxHops: 0, createdAt: 1 })
+  const missing = subtask({ id: "missing", dispatchGroupID: "dispatch_legacy", createdAt: 2 })
+  for (const task of [explicit, missing]) await seed.saveSubtask(task)
+
+  const store = new V2Store(ctx)
+  await store.load()
+  const group = store.dispatchGroup("dispatch_legacy")!
+  await store.reconcileDispatchGroups()
+  assert.equal(store.subtask("explicit")?.taskMaxHops, 0, "a stored zero budget is deliberate and never overwritten")
+  assert.equal(store.subtask("missing")?.taskMaxHops, dispatchGroupRemaining(group))
+})
+
+test("ticket159: concurrent identical admissions dedupe by queue key and consume once", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.saveWorkspace(workspace())
+  await store.saveDispatchGroup(rootGroup())
+  const left = subtask({ id: "left", dispatchGroupID: "dispatch_root", queueKey: "work:w:delegation:same" })
+  const right = subtask({ id: "right", dispatchGroupID: "dispatch_root", queueKey: "work:w:delegation:same" })
+  const [one, two] = await Promise.all([
+    store.admitDispatchedSubtask(left, { enforce: true }),
+    store.admitDispatchedSubtask(right, { enforce: true }),
+  ])
+  assert.equal(one.admitted && two.admitted, true)
+  assert.equal([one, two].filter((result) => result.consumed).length, 1, "one serialized admission spends the hop")
+  assert.equal([one, two].filter((result) => result.deduped).length, 1, "the loser reports the existing row")
+  assert.equal(one.task.id, two.task.id, "both callers observe one work item")
+  assert.equal([store.subtask("left"), store.subtask("right")].filter(Boolean).length, 1)
+  assert.equal(store.dispatchGroup("dispatch_root")?.usedHops, 1)
+  assert.equal(store.dispatchGroup("dispatch_root")?.commandUsedHops, 1)
+})
+
 test("ticket160: admitting work spends group and command hops in one mutation, once", async () => {
   const ctx = fakeContext()
   const batches: PatchBatch[] = []

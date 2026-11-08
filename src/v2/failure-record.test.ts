@@ -112,26 +112,27 @@ test("content logging attaches instruction and message text only when enabled", 
   assert.equal(record.lastMessages[1].text, "Working on it")
 })
 
-test("ticket163: a controlled budget stop classifies as budget and carries a reason code without content", () => {
-  const error = new Error("the dispatch group is exhausted (8/8 hops); Return your result to the leader in the group chat.")
-  assert.equal(classifyFailure(error), "budget")
-  assert.equal(classifyFailure({ code: "dispatch_budget_exhausted", layer: "task", used: 0, max: 0, message: "denied" }), "budget")
+test("ticket163: a controlled budget stop needs structured evidence, not refusal copy", () => {
+  const copy = new Error("the dispatch group is exhausted (8/8 hops); Return your result to the leader in the group chat.")
+  assert.equal(classifyFailure(copy), "internal", "refusal copy alone is user-facing text, not a reason code")
+  const structured = { code: "dispatch_budget_exhausted", layer: "task", used: 0, max: 0, message: "denied" }
+  assert.equal(classifyFailure(structured), "budget")
   assert.equal(classifyFailure({ type: "provider.internal", message: "provider down" }), "provider", "ordinary failures keep their class")
 
   const record: any = buildFailureRecord({
     event: "failure.terminal",
     level: "warn",
     incidentID: "failure_budget",
-    failureClass: classifyFailure(error),
+    failureClass: classifyFailure(structured),
     task: task(),
-    error,
+    error: structured,
     decision: { type: "terminal", reason: "budget-exhausted", attempt: 1, maxAttempts: 1 },
     content: false,
   })
 
   assert.equal(record.failureClass, "budget")
   assert.equal(record.reasonCode, "budget-exhausted")
-  assert.deepEqual(record.budget, { layer: "group", used: 8, max: 8 })
+  assert.deepEqual(record.budget, { layer: "task", used: 0, max: 0 })
   assert.equal(record.content, undefined)
   const serialized = JSON.stringify({ reasonCode: record.reasonCode, budget: record.budget })
   assert.equal(serialized.includes("Secret instruction"), false)

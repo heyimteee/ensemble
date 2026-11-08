@@ -21,8 +21,8 @@ export const DISPATCH_DEPTH_MIN = 1
 export const DISPATCH_DEPTH_MAX = 16
 export const DISPATCH_CONTINUATIONS_MIN = 0
 export const DISPATCH_CONTINUATIONS_MAX = 5
-/** Smallest continuation group; the product default and the validation floor. */
-export const DISPATCH_MIN_GROUP_HOPS = 8
+/** Smallest allowed continuation group; the validation floor and default. */
+export const DISPATCH_MIN_GROUP_HOPS = DISPATCH_GROUP_TIERS[0]
 
 export type DispatchLimits = {
   groupMaxHops: number
@@ -30,6 +30,17 @@ export type DispatchLimits = {
   depth: number
   continuations: number
 }
+
+/**
+ * The one product default set (ADR 0004). Settings defaults, limit fallbacks,
+ * tool descriptions, and tests consume this instead of repeating literals.
+ */
+export const DISPATCH_LIMIT_DEFAULTS: DispatchLimits = Object.freeze({
+  groupMaxHops: 8,
+  commandMaxHops: 24,
+  depth: 8,
+  continuations: 2,
+})
 
 export type DispatchLimitField = keyof DispatchLimits
 
@@ -50,10 +61,10 @@ function integer(value: unknown, fallback: number): number {
 /** Read the four limit values from settings, tolerating older persisted rows. */
 export function dispatchLimits(settings: Partial<LimitSettings> | undefined): DispatchLimits {
   return {
-    groupMaxHops: integer(settings?.dispatchGroupMaxHops, 8),
-    commandMaxHops: integer(settings?.dispatchCommandMaxHops, 24),
-    depth: integer(settings?.dispatchDepth, 8),
-    continuations: integer(settings?.dispatchContinuations, 2),
+    groupMaxHops: integer(settings?.dispatchGroupMaxHops, DISPATCH_LIMIT_DEFAULTS.groupMaxHops),
+    commandMaxHops: integer(settings?.dispatchCommandMaxHops, DISPATCH_LIMIT_DEFAULTS.commandMaxHops),
+    depth: integer(settings?.dispatchDepth, DISPATCH_LIMIT_DEFAULTS.depth),
+    continuations: integer(settings?.dispatchContinuations, DISPATCH_LIMIT_DEFAULTS.continuations),
   }
 }
 
@@ -221,12 +232,38 @@ export function dispatchGroupRemaining(group: DispatchGroup): number {
   return Math.max(0, group.maxHops - group.usedHops)
 }
 
+/** Remaining command hops from a resolved root, or undefined without a ledger root. */
+export function dispatchCommandRemainingFromRoot(root: DispatchGroup | undefined): number | undefined {
+  if (!root || root.commandMaxHops === undefined || root.commandUsedHops === undefined) return undefined
+  return Math.max(0, root.commandMaxHops - root.commandUsedHops)
+}
+
 /** Remaining command hops for a group, resolving its root; undefined without a ledger root. */
 export function dispatchCommandRemaining(group: DispatchGroup | undefined, groups: Record<Id, DispatchGroup>): number | undefined {
   if (!group) return undefined
-  const root = isRootGroup(group) ? group : groups[group.rootID]
-  if (!root || root.commandMaxHops === undefined || root.commandUsedHops === undefined) return undefined
-  return Math.max(0, root.commandMaxHops - root.commandUsedHops)
+  return dispatchCommandRemainingFromRoot(isRootGroup(group) ? group : groups[group.rootID])
+}
+
+/** Derived continuation allowance: the single owner of the can-continue rule. */
+export type DispatchContinuationCapacity = {
+  commandRemaining?: number
+  continuationsLeft: number
+  canContinue: boolean
+}
+
+export function dispatchContinuationCapacity(root: DispatchGroup | undefined): DispatchContinuationCapacity {
+  const commandRemaining = dispatchCommandRemainingFromRoot(root)
+  const continuationsLeft = Math.max(0, (root?.maxContinuations ?? 0) - (root?.continuationsUsed ?? 0))
+  return {
+    ...(commandRemaining !== undefined ? { commandRemaining } : {}),
+    continuationsLeft,
+    canContinue: commandRemaining !== undefined && commandRemaining >= DISPATCH_MIN_GROUP_HOPS && continuationsLeft > 0,
+  }
+}
+
+/** True when a group was sealed because a continuation took over its work. */
+export function dispatchGroupContinued(group: Pick<DispatchGroup, "closeReason">): boolean {
+  return group.closeReason === "continued"
 }
 
 export type DispatchBudgetSummary = {
@@ -638,7 +675,8 @@ export function reconcileLegacyDispatchGroup(input: {
 /**
  * Legacy live work receives the group's remaining budget as its task budget
  * so #161 can enforce a truthful local bound without inventing a refusal for
- * work already in flight.
+ * work already in flight. Only rows that still lack a budget are filled; a
+ * stored budget (including zero) is never overwritten.
  */
 export function reconcileLegacyTaskBudgets(group: DispatchGroup, tasks: readonly Subtask[]): Subtask[] {
   const remaining = dispatchGroupRemaining(group)
@@ -665,19 +703,20 @@ export type TaskBudgetValidation =
 /**
  * Validate the required `maxHops` argument. Zero is a deliberate one-shot ask
  * (the recipient may answer and complete, but may not create new work); a
- * missing or malformed value is a validation error that teaches both.
+ * missing or malformed value is a validation error that teaches both. The
+ * subject names the calling tool (or review item) in the error copy.
  */
-export function validateTaskMaxHops(tool: "ensemble_delegate" | "ensemble_handoff", value: unknown): TaskBudgetValidation {
+export function validateTaskMaxHops(subject: string, value: unknown): TaskBudgetValidation {
   if (value === undefined || value === null) {
     return {
       ok: false,
-      reason: `${tool} requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work).`,
+      reason: `${subject} requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work).`,
     }
   }
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
     return {
       ok: false,
-      reason: `${tool} maxHops must be a non-negative integer. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work).`,
+      reason: `${subject} maxHops must be a non-negative integer. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work).`,
     }
   }
   return { ok: true, maxHops: value }
@@ -712,12 +751,32 @@ export function dispatchFanOutCount(parentID: Id, subtasks: Record<Id, Subtask>,
   return count
 }
 
-export type DispatchRefusalLayer = "task" | "group" | "closed" | "depth" | "command" | "fanout"
+export const DISPATCH_REFUSAL_LAYERS = ["task", "group", "closed", "depth", "command", "fanout"] as const
+
+export type DispatchRefusalLayer = (typeof DISPATCH_REFUSAL_LAYERS)[number]
+
+export type DispatchRefusalReason =
+  | "task-exhausted"
+  | "group-exhausted"
+  | "group-closed"
+  | "depth-exhausted"
+  | "command-exhausted"
+  | "fanout-exhausted"
 
 export type DispatchRefusal = {
   layer: DispatchRefusalLayer
   used: number
   max: number
+}
+
+/** Narrow untrusted structured evidence (failure records) to a refusal layer. */
+export function isDispatchRefusalLayer(value: unknown): value is DispatchRefusalLayer {
+  return typeof value === "string" && (DISPATCH_REFUSAL_LAYERS as readonly string[]).includes(value)
+}
+
+/** The one mapping from a structured refusal to its stable log reason code. */
+export function dispatchRefusalReasonCode(refusal: DispatchRefusal): DispatchRefusalReason {
+  return refusal.layer === "closed" ? "group-closed" : `${refusal.layer}-exhausted`
 }
 
 export type DispatchBudgetState = {

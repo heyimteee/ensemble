@@ -6,6 +6,8 @@
  * from both lets the location adapter install the same toolset on every
  * context without treating the first plugin context as the host authority.
  */
+import { DISPATCH_GROUP_TIERS } from "./dispatch-budget.ts"
+
 type Json = Record<string, any>
 
 export type ToolResult = { content: string }
@@ -93,7 +95,7 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
   editor.add({
     name: "delegate",
     options: { namespace: "ensemble", codemode: false },
-    description: "Delegate a typed subtask to another workspace member with the required maxHops budget (0 = one-shot ask) and record it on the board. The workspace leader may pass continuationOf (an exhausted dispatch group id) with a required groupMaxHops tier to open a continuation group; later delegations join it. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
+    description: "Delegate a typed subtask to another workspace member with the required maxHops budget (0 = one-shot ask) and record it on the board. The workspace leader may pass continuationOf (an exhausted dispatch group id) with a required groupMaxHops tier to open a continuation group; later delegations join it automatically. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
     input: {
       type: "object",
       properties: {
@@ -105,7 +107,7 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
         mode: { type: "string", enum: ["research", "edit"] },
         maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
         continuationOf: { type: "string", description: "Workspace leader only: id of the exhausted dispatch group to continue." },
-        groupMaxHops: { type: "integer", enum: [8, 16, 24], description: "Required with continuationOf: hops for the new group tier, bounded by the command remaining." },
+        groupMaxHops: { type: "integer", enum: [...DISPATCH_GROUP_TIERS], description: `Required with continuationOf: hops for the new group tier (${DISPATCH_GROUP_TIERS.join(", ")}), bounded by the command remaining.` },
       },
       required: ["assignee", "title", "instruction", "maxHops"],
       additionalProperties: false,

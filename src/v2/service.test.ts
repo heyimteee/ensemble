@@ -10,6 +10,7 @@ import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
 import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
+import { ENSEMBLE_BLOCK_VERSION } from "./init-block.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import { FALLBACK_REPLIES } from "./execution.ts"
 
@@ -1392,6 +1393,39 @@ test("workspace config is authoritative and can register a workspace on discover
     const current = Object.values(edited.state.workspaces)[0] as any
     assert.equal(current.name, "Edited")
     assert.deepEqual(current.memberIDs, [nova.result.id])
+  } finally {
+    await stop()
+  }
+})
+
+test("ticket159: stale workspace instructions refresh on config reconciliation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    writeFileSync(
+      join(directory, "AGENTS.md"),
+      "<!-- ensemble:start v3 -->\nSTALE CONTRACT\n<!-- ensemble:end -->\n\n# Project\n\nKeep me.\n",
+    )
+    writeFileSync(join(directory, ".ensemble", "init.json"), `${JSON.stringify({ version: 3 }, null, 2)}\n`)
+    await waitFor(async () => {
+      const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+      const metadata = JSON.parse(readFileSync(join(directory, ".ensemble", "init.json"), "utf8"))
+      return content.includes(`<!-- ensemble:start v${ENSEMBLE_BLOCK_VERSION} -->`) && metadata.version === ENSEMBLE_BLOCK_VERSION
+    }, 10_000)
+    const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+    assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1, "one canonical block")
+    assert.ok(content.includes("# Project"), "project-owned guidance is preserved")
+    assert.ok(!content.includes("STALE CONTRACT"))
   } finally {
     await stop()
   }

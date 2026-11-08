@@ -294,10 +294,13 @@ at one remaining hop admit exactly one.
 malformed values are validation errors, never silent defaults. Zero is a
 one-shot ask: the recipient may answer and complete but cannot create work.
 The task budget counts direct dispatches, not a reserved subtree; the group
-and command remain the hard subtree cap. Refusal order is task, closed group,
-group, depth, command, then per-run fan-out. Copy names the layer and the next
-action (return to the leader, continue in a new group, or ask the user for a
-new command).
+and command remain the hard subtree cap. Only agent delegation and handoff
+rows carry one; user-command recipients, peer turns, completion, batch,
+synthesis, retry, restart, and recovery rows carry none, so no row receives a
+silent group-remaining grant. Refusal order is task, closed group, group,
+depth, command, then per-run fan-out. Copy names the layer and the next action
+(return to the leader, continue in a new group, or ask the user for a new
+command).
 
 **Continuations.** A continuation is a leader-only, linked segment of the
 same command. It is allowed only after the referenced group is exhausted, with
@@ -305,10 +308,14 @@ a required `groupMaxHops` tier that fits the command remaining and the
 captured continuation count. Creating it seals the parent with
 `closeReason: "continued"` and spends no hop; the first work item spends one.
 The new group references its parent and root, starts a fresh depth segment,
-and leaves command counters and depth on the root. Later leader dispatches
-join the newest active continuation automatically or by naming `continuationOf`
-again. A closed group admits no new hop; completion, batch, synthesis,
-peer-turn, retry, restart, and recovery rows may still save directly.
+and leaves command counters and depth on the root. Opening one bypasses the
+leader task's spent budget: it is a new segment bounded by the group, command,
+continuation-count, and fan-out caps, so a leader that spent every direct
+delegate can still continue. Later leader dispatches join the newest active
+continuation automatically; naming an active continuation as
+`continuationOf` is refused while it still has hops. A closed group admits no
+new hop; completion, batch, synthesis, peer-turn, retry, restart, and recovery
+rows may still save directly.
 
 **Ledger.** `SnapshotState.dispatchGroups` is a full durable map. Each
 `DispatchGroup` records identity, workspace, root, parent, continuation index,
@@ -317,18 +324,25 @@ continuation maximum/used, creation/close time, close reason, and a
 `reconciled` marker. State (`active`, `exhausted`, `closed`) is derived from
 counters and closure, never stored. The store's `admitDispatchedSubtask`
 performs admission, counter increments, and work creation in one serialized
-mutation. Snapshots, scoped reads, the change feed, and `diagnostic` carry the
-full group entities; protocol-2 clients fall back to a snapshot.
+mutation. Admission deduplicates by task id and by queue key inside that
+serialized mutation, so two concurrent identical dispatches create one work
+item and spend one hop. Snapshots, scoped reads, the change feed, and
+`diagnostic` carry the full group entities; protocol-2 clients fall back to a
+snapshot.
 
 **Upgrade and migration.** The required task budget is enforced immediately.
 Pre-ledger groups are synthesized on first access and persisted in bounded
 maintenance batches (`reconcileDispatchGroups`): used hops equal the existing
 non-completion delegation/handoff count, caps are raised to at least observed
-usage and depth, and live rows without a budget receive the group's remaining
-budget. No in-flight work is retroactively refused. Reconciliation logs
-`dispatch.group.reconciled`; the team contract is bumped and stale workspace
-blocks are rewritten. `settings.maxDepth` is deprecated: it remains readable
-but is ignored for enforcement, and removal is a future settings cleanup.
+usage and depth, and live rows that still lack a budget receive the group's
+remaining budget. A stored budget, including zero, is never overwritten. No
+in-flight work is retroactively refused. Reconciliation logs
+`dispatch.group.reconciled`; the team contract is bumped and config
+reconciliation rewrites a stale `AGENTS.md` block and `.ensemble/init.json`
+from either version marker, preserving project-owned content and never
+downgrading a newer version. `settings.maxDepth` is deprecated: it remains
+readable but is ignored for enforcement, and removal is a future settings
+cleanup.
 
 ## Scheduling and recovery
 
@@ -667,9 +681,11 @@ exhausted, continued, refused, closed, reconciled, and invalid-settings counts;
 `dispatchGroupID` is the group or whose `rootID` is the group).
 
 A dispatch refusal is a controlled stop, not a generic failure. A failure
-record that recognizes the budget layers reports `FailureClass "budget"` with
-reason code `budget-exhausted`, and the Work pane renders exhaustion with the
-warning tone instead of FAILED. The doctor checks every group against its
+record recognizes a budget stop only from structured evidence (the dispatched
+error code/type plus a `DispatchRefusalLayer`); refusal copy is never matched
+as a second vocabulary. It reports `FailureClass "budget"` with reason code
+`budget-exhausted`, and the Work pane renders exhaustion with the warning tone
+instead of FAILED. The doctor checks every group against its
 captured caps, checks a group counter is never below its visible counted work
 (the unsafe direction; a higher counter after terminal retention is allowed),
 checks each root's command counter equals the sum of its groups, checks every

@@ -281,7 +281,7 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
         ...(typeof raw.continuationsUsed === "number" ? { continuationsUsed: raw.continuationsUsed } : {}),
         createdAt: raw.createdAt,
         ...(typeof raw.closedAt === "number" ? { closedAt: raw.closedAt } : {}),
-        ...(typeof raw.closeReason === "string" ? { closeReason: raw.closeReason } : {}),
+        ...(raw.closeReason === "continued" ? { closeReason: "continued" as const } : {}),
         ...(raw.reconciled === true ? { reconciled: true } : {}),
       }
     }

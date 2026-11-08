@@ -1,3 +1,4 @@
+import { DISPATCH_LIMIT_DEFAULTS } from "./dispatch-budget.ts"
 import type { Settings, SnapshotState } from "./types.ts"
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -5,10 +6,10 @@ export const DEFAULT_SETTINGS: Settings = {
   maxDelegations: 10,
   maxDepth: 5,
   synthesis: true,
-  dispatchGroupMaxHops: 8,
-  dispatchCommandMaxHops: 24,
-  dispatchDepth: 8,
-  dispatchContinuations: 2,
+  dispatchGroupMaxHops: DISPATCH_LIMIT_DEFAULTS.groupMaxHops,
+  dispatchCommandMaxHops: DISPATCH_LIMIT_DEFAULTS.commandMaxHops,
+  dispatchDepth: DISPATCH_LIMIT_DEFAULTS.depth,
+  dispatchContinuations: DISPATCH_LIMIT_DEFAULTS.continuations,
 }
 
 export function createInitialState(): SnapshotState {

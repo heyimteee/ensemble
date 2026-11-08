@@ -98,13 +98,6 @@ function marker(chain, consumed, total, next, mode = "handoff") {
   return `fake-budget-relay:chain=${chain};consumed=${consumed};total=${total};next=${next};mode=${mode}`
 }
 
-function consuming(task) {
-  return task.creatorType === "agent" &&
-    (task.workKind === "delegation" || task.workKind === "handoff") &&
-    task.handoff?.completion !== true &&
-    task.handoff?.batch !== true
-}
-
 async function waitForSettings(expected, failures) {
   const deadline = Date.now() + 30_000
   while (Date.now() < deadline) {
@@ -201,7 +194,6 @@ async function runScenario(input) {
   if (!settled) return { name: input.chain, status: "fail", failures, rootID, hops: 0 }
   const groups = settled.groups
   const tasks = settled.tasks
-  const hops = tasks.filter(consuming)
   const root = groups.find((group) => group.id === rootID)
   const continuation = groups.find((group) => group.id !== rootID)
   const groupIDs = new Set(groups.map((group) => group.id))
@@ -211,6 +203,8 @@ async function runScenario(input) {
     row.rootID === rootID
   ))
   const consumed = dispatchRows.filter((row) => row.event === "dispatch.hop.consumed")
+  // Hop evidence comes from the production admission log and the durable
+  // ledger, not a second copy of the `dispatchesHop` predicate.
   const refused = dispatchRows.filter((row) =>
     row.event === "dispatch.hop.refused" || row.event === "dispatch.group.refused"
   )
@@ -223,13 +217,15 @@ async function runScenario(input) {
     if (!condition) fail(`${input.chain}: ${message}`, failures)
   }
   check(groups.length === input.expectedGroups, `expected ${input.expectedGroups} group(s), saw ${groups.length}`)
-  check(hops.length === expectedHops, `expected ${expectedHops} consuming hop(s), saw ${hops.length}`)
-  check(root?.usedHops === expectedHops - (continuation?.usedHops ?? 0), `root usedHops ${root?.usedHops} does not match hop split`)
-  check(root?.commandUsedHops === expectedHops, `command usedHops ${root?.commandUsedHops} does not equal ${expectedHops}`)
   check(consumed.length === expectedHops, `expected ${expectedHops} dispatch.hop.consumed row(s), saw ${consumed.length}`)
   check(new Set(consumed.map((row) => row.taskID)).size === consumed.length, "a work item consumed more than one hop")
-  check(consumed.every((row) => hops.some((task) => task.id === row.taskID)), "a consumed row does not match a hop task")
-  check(hops.every((task) => consumed.some((row) => row.taskID === task.id)), "a hop task has no consumed row")
+  check(consumed.every((row) => tasks.some((task) => task.id === row.taskID)), "a consumed row names no scenario task")
+  for (const group of groups) {
+    const rows = consumed.filter((row) => row.dispatchGroupID === group.id).length
+    check(group.usedHops === rows, `group ${group.id} records ${group.usedHops} hops but ${rows} consumed rows`)
+  }
+  check(root?.usedHops === expectedHops - (continuation?.usedHops ?? 0), `root usedHops ${root?.usedHops} does not match hop split`)
+  check(root?.commandUsedHops === expectedHops, `command usedHops ${root?.commandUsedHops} does not equal ${expectedHops}`)
   check(tasks.every((task) => (task.attempts ?? 0) <= 1), "a scenario task was retried")
   check(tasks.every((task) => task.state === "replied" && task.outcome === "succeeded"), "a scenario task did not succeed")
   const leaked = dispatchRows.filter((row) => {
@@ -288,7 +284,7 @@ async function runScenario(input) {
       exhausted: group.usedHops >= group.maxHops,
     })),
     tasks: tasks.length,
-    hops: hops.length,
+    hops: consumed.length,
     consumedRows: consumed.length,
     distinctConsumedTasks: new Set(consumed.map((row) => row.taskID)).size,
     refusedRows: refused.map((row) => ({ reason: row.reason, usedHops: row.usedHops, maxHops: row.maxHops })),

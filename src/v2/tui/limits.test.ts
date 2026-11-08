@@ -1,9 +1,9 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import { DISPATCH_LIMIT_DEFAULTS, DISPATCH_MIN_GROUP_HOPS, dispatchLimitSettings, dispatchLimits } from "../dispatch-budget.ts"
 import {
   LIMITS_ROW_IDS,
   cycleLimitsValue,
-  limitsFromSettings,
   limitsPanelFooter,
   limitsPanelRows,
   limitsPanelSubtitle,
@@ -14,15 +14,10 @@ import {
   limitsSavedMessage,
 } from "./limits.ts"
 
-const defaults = {
-  dispatchGroupMaxHops: 8,
-  dispatchCommandMaxHops: 24,
-  dispatchDepth: 8,
-  dispatchContinuations: 2,
-}
+const defaults = dispatchLimitSettings(DISPATCH_LIMIT_DEFAULTS)
 
 test("ticket160: the limits panel reads the four settings rows in order", () => {
-  const limits = limitsFromSettings(defaults)
+  const limits = dispatchLimits(defaults)
   const rows = limitsPanelRows(limits, 0)
   assert.deepEqual(rows.map((row) => row.id), [...LIMITS_ROW_IDS])
   assert.deepEqual(rows.map((row) => row.value), ["8", "24", "8", "2"])
@@ -30,14 +25,14 @@ test("ticket160: the limits panel reads the four settings rows in order", () => 
   assert.equal(rows[0]?.text, "› Group hops      8   8 · 16 · 24")
   assert.equal(rows[1]?.text, "  Command hops    24  8 · 16 · 24 · 32 · 40 · 48")
   assert.equal(rows[2]?.text, "  Depth           8   1–16")
-  assert.equal(rows[3]?.text, "  Continuations   2   0–5 · 8-hop groups")
+  assert.equal(rows[3]?.text, `  Continuations   2   0–5 · ${DISPATCH_MIN_GROUP_HOPS}-hop groups`)
   assert.equal(limitsPanelRows(limits, 9)[3]?.selected, true, "the cursor clamps")
   assert.equal(limitsRowField("continuations"), "continuations")
   assert.equal(limitsRowValue(limits, "command"), 24)
 })
 
 test("ticket160: panel rows cycle allowed tiers and numeric bounds", () => {
-  let limits = limitsFromSettings(defaults)
+  let limits = dispatchLimits(defaults)
   limits = cycleLimitsValue(limits, "group", 1)
   assert.equal(limits.groupMaxHops, 16)
   limits = cycleLimitsValue(limits, "group", -1)
@@ -53,11 +48,11 @@ test("ticket160: panel rows cycle allowed tiers and numeric bounds", () => {
 })
 
 test("ticket160: save produces the settings patch or the first actionable error", () => {
-  const ok = limitsSave(limitsFromSettings(defaults))
+  const ok = limitsSave(dispatchLimits(defaults))
   assert.equal(ok.ok, true)
   assert.deepEqual(ok.ok ? ok.patch : undefined, defaults)
   assert.equal(
-    limitsSavedMessage(limitsFromSettings(defaults)),
+    limitsSavedMessage(dispatchLimits(defaults)),
     "Saved dispatch limits: group 8 · command 24 · depth 8 · continuations 2.",
   )
 

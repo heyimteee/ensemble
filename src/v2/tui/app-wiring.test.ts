@@ -125,13 +125,21 @@ test("a feed gap recovers through changes.since", () => {
   assert.ok(app().includes('callRpc<ChangesSince>(context, "changes.since"'))
 })
 
-test("a foreign-epoch patch coalesces one snapshot instead of resetting the feed", () => {
-  // Behavior: refresh-coordinator.test.ts foreign-epoch detection and delayed coalescing.
+test("a foreign-epoch patch is detected before feed reset", () => {
+  // Behavior: refresh-coordinator.test.ts foreign-epoch detection.
+  assert.ok(app().includes("if (isForeignEpochPatch(lastSnapshotMeta, payload?.epoch))"))
+})
+
+test("foreign-epoch recovery debounces through a coalescing coordinator", () => {
+  // Behavior: refresh-coordinator.test.ts delayed coalescing.
   const source = app()
-  assert.ok(source.includes("if (isForeignEpochPatch(lastSnapshotMeta, payload?.epoch))"))
   assert.ok(source.includes("const foreignEpochRefresh = createRefreshCoordinator({"))
   assert.ok(source.includes("delayMs: 200"))
-  assert.ok(source.includes("foreignEpochRefresh.request()"))
+})
+
+test("a foreign-epoch patch requests the coalesced refresh", () => {
+  // Behavior: refresh-coordinator.test.ts coalesced request.
+  assert.ok(app().includes("foreignEpochRefresh.request()"))
 })
 
 test(":logs shows the feed-gap counter from logger stats", () => {
@@ -140,11 +148,19 @@ test(":logs shows the feed-gap counter from logger stats", () => {
   assert.ok(source.includes("feedGaps: (result?.stats?.feedGaps ?? 0) + logger.stats().feedGaps"))
 })
 
-test("gap recovery uses the coalesced reporter and classifies its outcome", () => {
+test("gap recovery is built on the coalesced reporter", () => {
+  // Behavior: feed-gaps.test.ts recovery summaries.
+  assert.ok(app().includes("createFeedGapReporter({"))
+})
+
+test("gap recovery records each outcome", () => {
   // Behavior: feed-gaps.test.ts recovery summaries and fallback warnings.
+  assert.ok(app().includes("feedGapReporter.record({"))
+})
+
+test("gap recovery settles the coalesced reporter with its outcome", () => {
+  // Behavior: feed-gaps.test.ts recovery summaries.
   const source = app()
-  assert.ok(source.includes("createFeedGapReporter({"))
-  assert.ok(source.includes("feedGapReporter.record({"))
   assert.ok(source.includes('void recoverFeed((outcome) => feedGapReporter.settle(outcome))'))
   assert.ok(source.includes('feedGapReporter.settle("full")'))
 })
@@ -249,29 +265,59 @@ test("the System Agent init guard runs before slash-command fallthrough", () => 
   assert.ok(guard >= 0 && command > guard)
 })
 
-test("ticket160: the workspace Limits panel opens from the command line and leader menu", () => {
+test("ticket160: the workspace Limits panel opens from the command line", () => {
   // Behavior: limits.test.ts rows/validation; dispatch-group-service.test.ts settings.update.
-  const source = app()
-  assert.ok(source.includes('case "limits": openLimits()'))
-  assert.ok(source.includes('"leader.limits": () => openLimits()'))
-  assert.ok(source.includes("<LimitsView"))
-  assert.ok(source.includes("await invoke(context, \"settings.update\", result.patch)"))
-  assert.ok(source.includes("if (limitsOpen()) { handleLimitsKey(event); return }"))
+  assert.ok(app().includes('case "limits": openLimits()'))
 })
 
-test("ticket160: Work cards and compact rows read the dispatch ledger budget", () => {
-  // Behavior: workrows.test.ts budget labels; workgroups.test.ts group budgets.
+test("ticket160: the leader menu opens the workspace Limits panel", () => {
+  // Behavior: limits.test.ts rows/validation; dispatch-group-service.test.ts settings.update.
+  assert.ok(app().includes('"leader.limits": () => openLimits()'))
+})
+
+test("ticket160: the app mounts the Limits view", () => {
+  // Behavior: limits.test.ts panel model.
+  assert.ok(app().includes("<LimitsView"))
+})
+
+test("ticket160: saving Limits invokes settings.update with the validated patch", () => {
+  // Behavior: dispatch-group-service.test.ts settings.update; limits.test.ts limitsSave.
+  assert.ok(app().includes("await invoke(context, \"settings.update\", result.patch)"))
+})
+
+test("ticket160: the Limits key trap owns keys before the page handlers", () => {
+  // Behavior: limits.test.ts row cycling; the live Limits panel check.
+  assert.ok(app().includes("if (limitsOpen()) { handleLimitsKey(event); return }"))
+})
+
+test("ticket160: Work cards receive the dispatch ledger", () => {
+  // Behavior: workgroups.test.ts group budgets.
   const source = app()
   assert.ok(source.includes("dispatchGroups: ledger"))
   assert.ok(source.includes("budgetFor,"))
-  assert.ok(source.includes("dispatchBudgetForTask(task)"))
 })
 
-test("native Work activity updates the task map and card detail without a snapshot", () => {
-  // Behavior: work-activity.test.ts mapping, apply/clear, and precedence.
-  const source = app()
-  assert.ok(source.includes('if (type === "rpc.ensemble.v2.work.activity")'))
-  assert.ok(source.includes("applyWorkActivity(current, payload)"))
-  assert.ok(source.includes("workActivityLabel(activities, item.id, now)"))
-  assert.ok(source.includes("clearWorkActivitiesForSession"))
+test("ticket160: Work cards read each task's ledger budget", () => {
+  // Behavior: workrows.test.ts budget labels.
+  assert.ok(app().includes("dispatchBudgetForTask(task)"))
+})
+
+test("native Work activity arrives as a dedicated event", () => {
+  // Behavior: work-activity.test.ts event mapping.
+  assert.ok(app().includes('if (type === "rpc.ensemble.v2.work.activity")'))
+})
+
+test("native Work activity applies to the task map", () => {
+  // Behavior: work-activity.test.ts apply mapping.
+  assert.ok(app().includes("applyWorkActivity(current, payload)"))
+})
+
+test("native Work activity labels card detail", () => {
+  // Behavior: work-activity.test.ts label precedence.
+  assert.ok(app().includes("workActivityLabel(activities, item.id, now)"))
+})
+
+test("native Work activity clears when its session ends", () => {
+  // Behavior: work-activity.test.ts clear behavior.
+  assert.ok(app().includes("clearWorkActivitiesForSession"))
 })

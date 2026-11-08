@@ -5,8 +5,8 @@ import {
   DISPATCH_DEPTH_MAX,
   DISPATCH_DEPTH_MIN,
   DISPATCH_GROUP_TIERS,
+  DISPATCH_MIN_GROUP_HOPS,
   dispatchLimitSettings,
-  dispatchLimits,
   stepDispatchLimit,
   validateDispatchLimits,
   type DispatchLimitField,
@@ -43,14 +43,10 @@ const ROW_DETAIL: Record<LimitsRowID, string> = {
   group: DISPATCH_GROUP_TIERS.join(" · "),
   command: DISPATCH_COMMAND_TIERS.join(" · "),
   depth: `${DISPATCH_DEPTH_MIN}–${DISPATCH_DEPTH_MAX}`,
-  continuations: `${DISPATCH_CONTINUATIONS_MIN}–${DISPATCH_CONTINUATIONS_MAX} · 8-hop groups`,
+  continuations: `${DISPATCH_CONTINUATIONS_MIN}–${DISPATCH_CONTINUATIONS_MAX} · ${DISPATCH_MIN_GROUP_HOPS}-hop groups`,
 }
 
 export const LIMITS_LABEL_WIDTH = 16
-
-export function limitsFromSettings(settings: Partial<Settings> | undefined): DispatchLimits {
-  return dispatchLimits(settings)
-}
 
 export function limitsRowField(row: LimitsRowID): DispatchLimitField {
   return ROW_FIELDS[row]
