@@ -100,6 +100,18 @@ live_active_count_is() {
   [[ "$(active_count)" == "$1" ]]
 }
 
+# Ticket #164: every Work card/compact row carries its dispatch budget. Assert
+# the ledger label on the active surface at every supported geometry; where the
+# geometry has room, also assert the medium/full command remainder.
+assert_budget_label() {
+  local size="$1" want_command="${2:-0}"
+  live_capture_matches "$LIVE_TUI_SESSION" "(hops )?0/8" \
+    || live_fail "dispatch budget label is missing at $size"
+  if [[ "$want_command" == "1" ]]; then
+    live_assert_text "$LIVE_TUI_SESSION" "24 left" "command remainder is missing at $size"
+  fi
+}
+
 wait_active() {
   local expected="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}"
   live_wait_for "$seconds" "$expected active size tasks" live_active_count_is "$expected" \
@@ -248,6 +260,10 @@ check_size() {
   send_group 0 1 2
   wait_active 3
   live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 3 active · 0 done" 20 "Work group header at $size"
+  case "$size" in
+    80x24|160x50) assert_budget_label "$size" 1 ;;
+    *) assert_budget_label "$size" ;;
+  esac
   live_assert_text "$LIVE_TUI_SESSION" "Message…" "composer remains visible at $size"
 
   case "$size" in
@@ -265,15 +281,15 @@ check_size() {
       send_group 0
       wait_active 4
       live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 4 active · 0 done" 20 "two-group Work header at $size"
-      live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 3 active · 0 done" 20 "old group label at $size"
-      live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "new group label at $size"
+      live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · hops 0/8 · cmd 24 left · 3 active · 0 done" 20 "old group label with budget at $size"
+      live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · hops 0/8 · cmd 24 left · 1 active · 0 done" 20 "new group label with budget at $size"
       live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* QUEUED" || live_fail "newest group's pending card is not visible at $size"
       [[ "$(card_header_count)" == "4" ]] || live_fail "old group cards were disturbed at $size, got $(card_header_count)"
       # Remove the old group as one unit after the shared hold; the new group stays.
       cancel_group 1
       live_wait_for 20 "old size group terminal" live_active_count_is "1" || live_fail "old group did not settle at $size"
       live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "group cleared without disturbing the second at $size"
-      live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · 3 active" "old group label cleared at $size"
+      live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · hops 0/8" "old group label cleared at $size"
       live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* (QUEUED|WORKING)" || live_fail "second group disappeared with the first at $size"
       ;;
     100x30)
@@ -285,8 +301,8 @@ check_size() {
       send_group 0
       wait_active 4
       live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 4 active · 0 done" 20 "two-group Work header at $size"
-      live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 3 active · 0 done" 20 "old group summary at $size"
-      live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "new group label at $size"
+      live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · hops 0/8 · cmd 24 left · 3 active · 0 done" 20 "old group summary with budget at $size"
+      live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · hops 0/8 · cmd 24 left · 1 active · 0 done" 20 "new group label with budget at $size"
       live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* QUEUED" || live_fail "newest group did not receive visible capacity at $size"
       if live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* WORKING"; then live_fail "old group tasks are summarized at $size"; fi
       [[ "$(card_header_count)" == "1" ]] || live_fail "expected only the newest group's card row at $size, got $(card_header_count)"
@@ -294,11 +310,14 @@ check_size() {
       cancel_group 1
       live_wait_for 20 "old size group terminal" live_active_count_is "1" || live_fail "old group did not settle at $size"
       live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "group cleared without disturbing the second at $size"
-      live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · 3 active" "old group summary cleared at $size"
+      live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · hops 0/8" "old group summary cleared at $size"
       live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* (QUEUED|WORKING)" || live_fail "second group disappeared with the first at $size"
       ;;
     80x24)
-      live_capture_matches "$LIVE_TUI_SESSION" "SizeAgent1 │ fake-queue-hold .*WORKING" || live_fail "compact active row missing its name, title, or status at $size"
+      # Ticket #164: the budget label owns the compact row after the name and
+      # before the status; the long fixture title yields at this geometry.
+      live_capture_matches "$LIVE_TUI_SESSION" "SizeAgent1 │ .*0/8 · 24 left .*WORKING" \
+        || live_fail "compact active row missing its name, budget, or status at $size"
       [[ "$(card_header_count)" == "0" ]] || live_fail "compact fallback rendered card headers at $size"
       live_assert_text "$LIVE_TUI_SESSION" "WORK 1 group · 3 active · 0 done │ +2 more" "compact header names two hidden rows at $size"
       live_assert_absence "$LIVE_TUI_SESSION" "d delegate" "compact fallback omits card hints at $size"
@@ -308,12 +327,12 @@ check_size() {
 
   focus_work_list
   if [[ "$size" == "80x24" ]]; then
-    live_capture_matches "$LIVE_TUI_SESSION" "› .*fake-queue-hold" || live_fail "compact Work row did not take the cursor at $size"
+    live_capture_matches "$LIVE_TUI_SESSION" "› .*SizeAgent1.*0/8" || live_fail "compact Work row did not take the cursor at $size"
   else
     # Ticket #137: card selection is a focus-colored border, not a text gutter.
     # "NORMAL │ Work list" (focus_work_list) proves focus; re-assert the card
     # survived the focus transition.
-    live_capture_matches "$LIVE_TUI_SESSION" "SIZEAGEN.* (WORKING|QUEUED)" || live_fail "focused Work card disappeared at $size"
+    live_capture_matches "$LIVE_TUI_SESSION" "SIZE.* 0/8 .*(WORKING|QUEUED)" || live_fail "focused Work card disappeared at $size"
   fi
   live_key "$LIVE_TUI_SESSION" Escape
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc leaves the Work list at $size"
@@ -336,8 +355,9 @@ check_no_color_static() {
   start_tui_at 120 40
   send_group 0
   wait_active 1
-  live_wait_for 20 "NO_COLOR frame-0 Work card" live_capture_matches "$LIVE_TUI_SESSION" "SIZEAGEN.*⠋ WORKING"
+  live_wait_for 20 "NO_COLOR frame-0 Work card" live_capture_matches "$LIVE_TUI_SESSION" "SIZE.*⠋ WORKING"
   live_assert_text "$LIVE_TUI_SESSION" "WORKING" "NO_COLOR keeps the state word"
+  assert_budget_label "NO_COLOR=1 120x40"
   live_assert_text "$LIVE_TUI_SESSION" "Message…" "NO_COLOR keeps the composer"
   local pane glyph
   for _ in $(seq 1 8); do

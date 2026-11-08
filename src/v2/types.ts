@@ -167,7 +167,7 @@ export type HandoffInfo = {
   senderID: string
   /** Agent that must do the work (real routing, never cosmetic). */
   recipientID: string
-  /** Chain depth of this hop (asking depth + 1), bounded by maxDepth. */
+  /** Chain depth of this hop (asking depth + 1), bounded by the group's depthMax. */
   depth: number
   /** Id of the asking run's subtask, if the ask came from inside a run. */
   parentID?: string
@@ -424,6 +424,7 @@ export type DispatchGroup = {
 export type Settings = {
   maxActiveRuns: number
   maxDelegations: number
+  /** Deprecated: readable for persisted settings, ignored for enforcement. Use dispatchDepth. */
   maxDepth: number
   synthesis: boolean
   /** Dispatch budget tiers (ticket #160); captured by each new root group. */

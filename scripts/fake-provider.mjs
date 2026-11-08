@@ -9,7 +9,8 @@
 // It is test infrastructure only. The product plugin never loads this file.
 
 import { createServer } from "node:http"
-import { appendFileSync, renameSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 
 const FAKE_RICH_PROMPT = "fake-rich-fixture"
@@ -18,8 +19,17 @@ const FAKE_QUEUE_HOLD_PROMPT = "fake-queue-hold"
 const FAKE_QUEUE_HOLD_LONG_PROMPT = "fake-queue-hold-long"
 const FAKE_ASK_PROMPT = "fake-ask-person"
 const ASK_QUESTION = "Which release channel should this task use?"
+// Ticket #164 dispatch-budget fixture. A marker in the current task
+// instruction makes the fake model emit exactly one handoff or continuation
+// delegation. The marker is authored by the previous fake tool call (or by the
+// driver's initial command), so the chain is deterministic and every hop is a
+// real service admission, not a direct RPC write.
+const BUDGET_MARKER_RE = /fake-budget-relay:chain=([a-z0-9-]+);consumed=(\d+);total=(\d+);next=([A-Za-z][A-Za-z0-9_-]*);mode=(handoff|continue)/g
+const BUDGET_REVIEW_RE = /Before continuing|before continuing/
 const MODEL_ID = "ensemble-fake-model"
 const askedTasks = new Set()
+const budgetToolCalls = new Set()
+const reviewToolCalls = new Set()
 
 const RICH_MARKDOWN = [
   "# Rich Markdown Fixture",
@@ -135,6 +145,10 @@ const urlFile = argValue("--url-file", "")
 const logFile = argValue("--log", "")
 const chunkDelay = Math.max(0, Number(argValue("--chunk-delay-ms", process.env.ENSEMBLE_FAKE_CHUNK_DELAY_MS ?? "35")))
 const initialDelay = Math.max(0, Number(argValue("--initial-delay-ms", process.env.ENSEMBLE_FAKE_INITIAL_DELAY_MS ?? "250")))
+// Required only for the budget fixture: the fake model cannot call
+// ensemble_handoff without a real typed file inside the target workspace.
+const budgetHandoffDir = argValue("--handoff-dir", process.env.ENSEMBLE_FAKE_HANDOFF_DIR ?? "")
+if (budgetHandoffDir) mkdirSync(budgetHandoffDir, { recursive: true })
 
 function log(event, fields = {}) {
   const line = `${JSON.stringify({ time: new Date().toISOString(), event, ...fields })}\n`
@@ -270,6 +284,101 @@ async function streamAskToolCall(response, requestID) {
   log("response_tool_call", { request: requestID, tool: "ensemble_ask_person" })
 }
 
+function parseBudgetMarker(text) {
+  let last
+  for (const match of text.matchAll(BUDGET_MARKER_RE)) last = match
+  if (!last) return undefined
+  return {
+    chain: last[1],
+    consumed: Number(last[2]),
+    total: Number(last[3]),
+    next: last[4],
+    mode: last[5],
+  }
+}
+
+function latestDispatchGroup(prompt) {
+  let last
+  for (const match of prompt.matchAll(/group="(dispatch_[^"]+)"/g)) last = match[1]
+  return last
+}
+
+function latestTaskID(prompt) {
+  let last
+  for (const match of prompt.matchAll(/task_id="(task_[^"]+)"/g)) last = match[1]
+  return last
+}
+
+function budgetNextMarker(marker, next) {
+  const consumed = marker.consumed + 1
+  // Nine-hop scenarios continue at hop eight: the root group is spent and the
+  // recipient is the leader. The command-cap scenario uses the same chain so
+  // the refusal, not the fixture, decides the stop.
+  const mode = marker.total >= 9 && consumed === marker.total - 1 ? "continue" : "handoff"
+  return `fake-budget-relay:chain=${marker.chain};consumed=${consumed};total=${marker.total};next=${next};mode=${mode}`
+}
+
+function writeBudgetHandoff(marker, nextMarker, hop) {
+  const title = `Budget relay ${marker.chain} hop ${hop}`
+  const file = join(
+    budgetHandoffDir,
+    `budget-${marker.chain}-${hop}-${Date.now()}-${Math.random().toString(16).slice(2)}.md`,
+  )
+  const content = [
+    "---",
+    "ensemble: handoff",
+    "version: 1",
+    `task: ${title}`,
+    `summary: Deterministic budget relay fixture hop ${hop}.`,
+    `instruction: ${nextMarker}`,
+    "from: budget-fixture",
+    `to: ${marker.next}`,
+    `created: ${new Date().toISOString()}`,
+    "---",
+    "",
+    "# Handoff",
+    "",
+    `Budget relay fixture hop ${hop}.`,
+    "",
+  ].join("\n")
+  writeFileSync(file, content)
+  return { title, file }
+}
+
+async function streamToolCall(response, requestID, tool, args, event, fields = {}) {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "Connection": "close",
+    "X-Accel-Buffering": "no",
+  })
+  response.flushHeaders?.()
+  response.write(roleFrame())
+  if (initialDelay > 0) await delay(initialDelay)
+  response.write(`data: ${JSON.stringify({
+    id: completionId(),
+    object: "chat.completion.chunk",
+    created: 1790000000,
+    model: MODEL_ID,
+    choices: [{
+      index: 0,
+      delta: {
+        tool_calls: [{
+          index: 0,
+          id: `call_${tool}`,
+          type: "function",
+          function: { name: tool, arguments: JSON.stringify(args) },
+        }],
+      },
+      finish_reason: null,
+    }],
+  })}\n\n`)
+  response.write(chunkFrame("", "tool_calls"))
+  response.write("data: [DONE]\n\n")
+  response.end()
+  log(event, { request: requestID, tool, ...fields })
+}
+
 async function nonStreamingCompletion(response, text, requestID) {
   response.writeHead(200, { "Content-Type": "application/json" })
   response.end(JSON.stringify({
@@ -351,6 +460,16 @@ const server = createServer(async (request, response) => {
           : richAt >= 0
             ? RICH_MARKDOWN
             : SHORT_REPLY
+    const budget = parseBudgetMarker(latestUserText)
+    const reviewItems = [...latestUserText.matchAll(/ref (task_[A-Za-z0-9]+)/g)].map((item) => item[1])
+    // Only close batch reviews created by the budget fixture. The existing
+    // fake TUI scenarios inspect the batch before deciding it and must keep
+    // their normal text reply.
+    const reviewBatch = reviewItems.length > 0 &&
+      BUDGET_REVIEW_RE.test(latestUserText) &&
+      latestUserText.includes("Budget relay")
+      ? latestTaskID(prompt)
+      : undefined
     log("request", {
       request: requestID,
       model: body?.model,
@@ -364,9 +483,86 @@ const server = createServer(async (request, response) => {
       askNew,
       answered,
       toolResult,
+      budget: budget ? `${budget.chain}:${budget.consumed}/${budget.total}:${budget.mode}` : "",
+      budgetGroup: budget ? latestDispatchGroup(prompt) ?? "" : "",
+      reviewItems: reviewItems.length,
       promptTail: prompt.slice(-120),
     })
     try {
+      if (body?.stream !== false && budget && !toolResult) {
+        const key = latestTaskID(prompt) ?? `${budget.chain}:${budget.consumed}`
+        if (!budgetHandoffDir) {
+          log("budget_skip", { request: requestID, reason: "no_handoff_dir", chain: budget.chain, consumed: budget.consumed })
+          await streamCompletion(response, SHORT_REPLY, requestID)
+          return
+        }
+        if (budgetToolCalls.has(key)) {
+          log("budget_skip", { request: requestID, reason: "duplicate_task", chain: budget.chain, consumed: budget.consumed })
+          await streamCompletion(response, SHORT_REPLY, requestID)
+          return
+        }
+        budgetToolCalls.add(key)
+        const hop = budget.consumed + 1
+        if (hop > budget.total) {
+          log("budget_skip", { request: requestID, reason: "chain_complete", chain: budget.chain, consumed: budget.consumed })
+          await streamCompletion(response, SHORT_REPLY, requestID)
+          return
+        }
+        const next = budget.next === "LedgerPeer" ? "LedgerLead" : "LedgerPeer"
+        const nextMarker = budgetNextMarker(budget, next)
+        const maxHops = hop < budget.total ? 1 : 0
+        if (budget.mode === "continue") {
+          const group = latestDispatchGroup(prompt)
+          if (!group) {
+            log("budget_skip", { request: requestID, reason: "missing_group", chain: budget.chain, consumed: budget.consumed })
+            await streamCompletion(response, SHORT_REPLY, requestID)
+            return
+          }
+          await streamToolCall(
+            response,
+            requestID,
+            "ensemble_delegate",
+            {
+              assignee: budget.next,
+              title: `Budget relay ${budget.chain} hop ${hop}`,
+              instruction: nextMarker,
+              maxHops,
+              continuationOf: group,
+              groupMaxHops: 8,
+            },
+            "budget_tool_call",
+            { chain: budget.chain, consumed: budget.consumed, hop, mode: budget.mode, group },
+          )
+          return
+        }
+        const { title, file } = writeBudgetHandoff(budget, nextMarker, hop)
+        await streamToolCall(
+          response,
+          requestID,
+          "ensemble_handoff",
+          { task: title, summary: `Deterministic budget relay fixture hop ${hop}.`, path: file, to: budget.next, maxHops },
+          "budget_tool_call",
+          { chain: budget.chain, consumed: budget.consumed, hop, mode: budget.mode },
+        )
+        return
+      }
+      if (body?.stream !== false && reviewItems.length > 0 && reviewBatch && !toolResult) {
+        if (!reviewToolCalls.has(reviewBatch)) {
+          reviewToolCalls.add(reviewBatch)
+          await streamToolCall(
+            response,
+            requestID,
+            "ensemble_review",
+            { batch: reviewBatch, decisions: reviewItems.map((item) => ({ item, action: "end" })) },
+            "review_tool_call",
+            { batch: reviewBatch, items: reviewItems.length },
+          )
+          return
+        }
+        log("review_skip", { request: requestID, reason: "duplicate_batch", batch: reviewBatch })
+        await streamCompletion(response, SHORT_REPLY, requestID)
+        return
+      }
       if (ask && body?.stream !== false) {
         if (askNew) {
           askedTasks.add(askKey)

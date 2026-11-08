@@ -5,7 +5,7 @@ Read before changing the TUI or host integration, or diagnosing location diverge
 ## Evidence and versions
 
 - **Declared API/source:** the lockfile installs `@opencode/plugin` **2.2.1** and OpenTUI **0.7.0** for checking. Inspect their declarations and shipped implementation using the paths below.
-- **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. CI now pins Node **26.12.1** and OpenCode **2.2.6** for the deterministic fake/empty live job. These are not the same as the pinned type-package version. The [v7 verification](../verification/2026-11-07-v7.md) ran Node **26.12.1** with OpenCode **2.2.6** on Linux/tmux. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
+- **Observed runtime:** the November 1, 2026 probes used Node **26.12.1** and OpenCode **2.2.3**. The [v5.8 integration matrix](../verification/2026-11-05-v58.md) ran Node **26.12.1** with OpenCode **2.2.5** on Linux/tmux. CI now pins Node **26.12.1** and OpenCode **2.2.6** for the deterministic fake/empty live job. These are not the same as the pinned type-package version. The [v7 verification](../verification/2026-11-07-v7.md) and the [dispatch-budget verification](../verification/2026-11-08-dispatch-budgets.md) ran Node **26.12.1** with OpenCode **2.2.6** on Linux/tmux. The [2.2.1 compatibility report](../compatibility/opencode-2.2.1.md) and [October 31 verification](../verification/2026-10-31.md) are historical, version-scoped evidence.
 - **Repository behavior:** links below describe the current implementation. A passing typecheck establishes agreement with installed types, not compatibility with every installed host. Record `node --version` and `opencode --version` with live results; recheck assumptions when upgrading.
 
 Research proposals are not implemented guarantees. In particular, one local service descriptor does not discover every service process, and a snapshot request is not guaranteed to be free of server-side writes from unrelated maintenance.
@@ -74,6 +74,55 @@ npm run doctor -- --server http://127.0.0.1:4096 /path/to/project
 ```
 
 The [doctor reference](../../README.md#runtime-diagnosis) and `npm run doctor -- --help` define options, credential resolution, and exit codes. It queries one selected service sequentially, not atomically; config is read after each snapshot. Absent lazy bindings and retained former-member bindings alone are not defects. Treat differences as diagnostic evidence, not automatic proof of stale processes or a pre-reconciliation view.
+
+## Dispatch budgets and the ledger
+
+**Repository source:** [dispatch-budget.ts](../../src/v2/dispatch-budget.ts) owns
+the pure arithmetic; [store.ts](../../src/v2/store.ts) owns the serialized
+admission mutation; [service.ts](../../src/v2/service.ts) owns the ordered
+preflight, continuation routing, refusal copy, and dispatch log events; and
+[tool-registrar.ts](../../src/v2/tool-registrar.ts) declares the required
+`maxHops`. The trust model is recorded in [ADR 0004](../adr/0004-dispatch-budgets-and-continuation.md).
+
+- Four layers: command (user), group (user root, leader continuation), task
+  (`maxHops` per delegation/handoff), and depth (per group segment). Defaults
+  are 24/8/8 with 8-hop tiers; settings live in `Settings.dispatch*` and are
+  captured by each new root group. `settings.maxDepth` is deprecated and
+  ignored for enforcement.
+- A user command's recipients consume nothing. Each agent-created delegation
+  or explicit handoff spends one hop. Completion handoffs, batch review,
+  synthesis, peer turns, retries, restarts, recovery, and idempotent replays
+  do not spend; cancellation never refunds.
+- Creating work and spending the hop is one serialized store mutation. This is
+  why one service per realm (ADR 0003) is a budget prerequisite: two writers
+  could admit past the same cap.
+- Only the workspace leader may open a continuation, only after the referenced
+  group is exhausted, and only with a `groupMaxHops` tier that fits the
+  command remaining and continuation count. The parent is sealed as
+  `continued`; completion and other exempt rows may still save into it.
+- Snapshot, scoped reads, the change feed, and `diagnostic` carry full
+  dispatch-group entities. `diagnostic.dispatch` adds the compact counts for
+  support. The Work header and compact row show the group/command budget; the
+  Limits panel (`:limits` or the leader menu) edits the four user values for
+  new commands only.
+
+`dispatch` log rows carry IDs, counts, tiers, reason codes, and durations, never
+task titles, instructions, paths, or conversation text. `logs:summary` reports
+dispatch counts and `--group <id>` follows a root's continuation lineage. The
+doctor adds ledger invariants: no group or command over its cap, a counter
+never below its visible counted work (the unsafe direction; a higher counter
+after terminal retention is allowed), command counters equal to the sum of
+their groups, every continuation has a parent and reaches its root, and no
+active continuation is empty. A budget stop is a controlled stop
+(`FailureClass "budget"`, reason `budget-exhausted`), not a generic task
+failure.
+
+On upgrade, pre-ledger groups are synthesized on first access with used hops
+equal to the existing counted work, caps at least at observed usage, and live
+rows granted the group's remaining task budget. Reconciliation is bounded per
+maintenance pass and logged as `dispatch.group.reconciled`; no in-flight work
+is retroactively refused. The team contract is bumped and stale workspace
+blocks are rewritten.
 
 ## Navigate installed package source
 
