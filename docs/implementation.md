@@ -211,7 +211,9 @@ load joins the same service and store:
   context owns storage, sessions, events, and tools for the realm; later
   locations share that service and supply their own RPC registration.
   `release()` is idempotent, and the service stops only after the last location
-  releases it.
+  releases it. An `acquire()` that arrives during that final teardown waits for
+  the in-flight stop, then concurrent acquires coalesce onto one replacement
+  service.
 - Every location still registers and disposes its own RPC handlers. The
   registry shares the service and store, not the transport registration.
 - A version bump creates a new registry while the old one keeps serving its

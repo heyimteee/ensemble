@@ -29,6 +29,8 @@ const createService: CreateService = async (ctx) => {
 export class SharedEnsemble {
   readonly version: number
   private pending: Promise<Entry> | undefined
+  /** In-flight final teardown: new locations wait before starting a replacement. */
+  private stopping: Promise<void> | undefined
   private readonly create: CreateService
 
   constructor(create: CreateService = createService, version = SHARED_SERVICE_VERSION) {
@@ -37,6 +39,9 @@ export class SharedEnsemble {
   }
 
   async acquire(ctx: any): Promise<{ service: EnsembleV2Service; release: () => Promise<void> }> {
+    // A new location must not overlap the old service's teardown. Every waiter
+    // wakes together and coalesces onto the same post-stop creation below.
+    while (this.stopping) await this.stopping
     if (!this.pending) {
       this.pending = this.start(ctx).catch((error) => {
         this.pending = undefined
@@ -54,7 +59,13 @@ export class SharedEnsemble {
         entry.refs -= 1
         if (entry.refs > 0) return
         this.pending = undefined
-        await entry.stop()
+        const stopping = entry.stop()
+        this.stopping = stopping
+        try {
+          await stopping
+        } finally {
+          if (this.stopping === stopping) this.stopping = undefined
+        }
       },
     }
   }

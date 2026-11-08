@@ -108,6 +108,54 @@ test("a module cache-busted import returns the same process-global registry", as
   assert.equal(one.sharedEnsemble(), two.sharedEnsemble(), "both module copies see the same globalThis registry")
 })
 
+test("an acquire during final teardown waits for stop and creates one replacement", async () => {
+  let releaseStop: () => void = () => {}
+  const stopGate = new Promise<void>((resolve) => { releaseStop = resolve })
+  const events: string[] = []
+  let starts = 0
+  const services: FakeService[] = []
+  const registry = new SharedEnsemble(async () => {
+    starts += 1
+    const service = { name: `service-${starts}` }
+    services.push(service)
+    events.push(`start:${service.name}`)
+    return {
+      service: service as any,
+      stop: async () => {
+        events.push(`stop:start:${service.name}`)
+        await stopGate
+        events.push(`stop:end:${service.name}`)
+      },
+    }
+  })
+
+  const first = await registry.acquire({ name: "first" })
+  const stopping = first.release()
+  const secondA = registry.acquire({ name: "second-a" })
+  const secondB = registry.acquire({ name: "second-b" })
+
+  await Promise.resolve()
+  assert.equal(starts, 1, "no replacement starts while the old service is still stopping")
+
+  releaseStop()
+  await stopping
+  const [a, b] = await Promise.all([secondA, secondB])
+
+  assert.equal(starts, 2, "concurrent acquires coalesce onto exactly one replacement")
+  assert.equal(a.service, b.service)
+  assert.equal(a.service, services[services.length - 1])
+  assert.deepEqual(events, [
+    "start:service-1",
+    "stop:start:service-1",
+    "stop:end:service-1",
+    "start:service-2",
+  ], "the old service finishes stopping before the replacement starts")
+
+  await a.release()
+  await b.release()
+})
+
+
 test("every location registers and disposes its own RPC handlers against the one service", async (t) => {
   resetSharedEnsembleForTests()
   t.after(resetSharedEnsembleForTests)
