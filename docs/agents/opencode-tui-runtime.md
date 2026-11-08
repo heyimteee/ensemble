@@ -98,6 +98,35 @@ Start with these installed files (not another developer's temporary probes):
 
 Follow each package's `package.json` exports into shipped JS and source maps when declarations are insufficient. Package layouts can change; confirm paths locally. To inspect the CLI installation, use `command -v opencode` and `npm root -g`, then inspect the resolved installation's package metadata. A wrapper can select a different installation; a compiled CLI binary is not readable source. Neither a strings dump nor 2.2.1 declarations prove 2.2.3 internals. Use supported APIs and isolated live checks to resolve gaps rather than depending on private host implementation.
 
+## TUI module graph and full client restart
+
+The TUI plugin runs in each OpenCode client process, not in the service. A
+service restart or a hot reload of [server.ts](../../src/v2/server.ts) does not
+rebuild that client's module graph. After a TUI module move or export rename,
+the client can keep importing the old location and log the stale export on each
+reconciliation read.
+
+**Observed (November 8, 2026):** after `skillPageItems` moved from
+`src/v2/tui/bubbles.ts` to [skills.ts](../../src/v2/tui/skills.ts), a running
+client logged repeated `plugin operation failed` warnings:
+`Export named 'skillPageItems' not found in module .../tui/bubbles.ts`. The
+server was already on the new module and a hot-reloaded TUI mount was clean; a
+server-only restart would not have changed the client graph.
+
+To clear a stale TUI module graph, **fully restart the client**:
+
+1. Quit every OpenCode TUI client attached to the host (and any other client
+   process that loads the TUI plugin), not only the service or `opencode serve`.
+2. Confirm the client process exits. A new mount in the same process keeps the
+   old module graph.
+3. Start the client again and find the new `tui.mount` event in the Ensemble
+   TUI log: `${XDG_STATE_HOME:-$HOME/.local/state}/ensemble/logs`.
+4. Confirm no `plugin operation failed` warning naming the old module or export
+   appears after that mount in `~/.local/share/opencode/log/opencode.log`.
+
+Do not restart unrelated services or the sharing host as a diagnostic; the
+client restart is the targeted remedy for a stale TUI graph.
+
 ## Verification gates
 
 Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` installs the locked development dependencies. Run from the repository:

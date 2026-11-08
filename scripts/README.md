@@ -56,8 +56,10 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   the isolated fake host and TUI, creates four channels and eight agents, sends
   100 requests, and asserts one `service.start`, zero `task.failed`, zero
   failure records, all related tasks successful, and fewer than five warn-level
-  `feed.gap` lines in the TUI log. This is the regression net for the plugin
-  loading once per location (spec #146).
+  `feed.gap` lines in the TUI log. A fifth channel/agent pair then runs a
+  fake-provider `ensemble_ask_person` tool call from that non-first location:
+  the probe requires the pending approval, resolves it, and requires cleanup
+  (spec #146 and #157).
 - `npm run logs:summary -- --dir <logs>`: read-only JSONL summary by role,
   instance, level, event, task, failures, warnings, `feed.reset`, and
   `feed.gap`. Use `--json` for the machine-readable form and `--since` to scope
