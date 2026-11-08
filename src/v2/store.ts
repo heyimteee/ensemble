@@ -1195,6 +1195,26 @@ export class V2Store {
   }
 
   /**
+   * Remove one durable transcript row (ticket #170). Used only to supersede a
+   * transient retry/failure notice after a real answer arrives; sequence
+   * numbers are not reused. The change feed carries a message remove, so
+   * clients drop the row without losing the agent's answer.
+   */
+  async removeMessage(workspaceID: string, messageID: string): Promise<void> {
+    await this.write(async () => {
+      const list = this.state.messages[workspaceID] ?? []
+      const index = list.findIndex((item) => item.id === messageID)
+      if (index < 0) return
+      const previous = list[index]!
+      list.splice(index, 1)
+      this.trackStreaming(previous)
+      await this.ctx.storage.remove(`v2/message/${workspaceID}/${String(previous.seq).padStart(8, "0")}`)
+      await this.commit([{ entity: "message", op: "remove", workspaceID, id: messageID }])
+      this.notify(() => this.observer?.messageRemoved?.(previous))
+    })
+  }
+
+  /**
    * Persist live streaming text for crash recovery without a coordination
    * version, change-ring entry, or published patch (ticket #139). The durable
    * finalization still goes through `saveMessage`, so a crash loses at most

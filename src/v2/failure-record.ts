@@ -194,6 +194,14 @@ export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "t
     outcome: task.outcome,
     interrupted: task.interrupted,
     attempts: task.attempts,
+    // Ticket #170: preserve the structured work cause alongside the failure
+    // class and decision reason. A queue cause is never rewritten as native.
+    ...(task.failure
+      ? {
+          workFailureKind: task.failure.kind,
+          ...(task.failure.reason !== undefined ? { workFailureReason: task.failure.reason } : {}),
+        }
+      : {}),
     queueKey: task.queueKey,
     assigneeID: task.assigneeID,
     deadlineAt: task.deadlineAt,

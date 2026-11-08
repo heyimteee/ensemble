@@ -147,8 +147,11 @@ function emptyLayout(): WorkGroupLayout {
   }
 }
 
-function sectionTone(group: WorkGroup): "faint" | "warn" {
-  return group.exhausted || group.state === "closed" ? "warn" : "faint"
+function sectionTone(group: WorkGroup, now: number): "faint" | "warn" {
+  if (group.exhausted || group.state === "closed") return "warn"
+  // Ticket #170: a stalled member is a queue warning that stays mounted. It
+  // is never the FAILED tone the card itself reserves for a native error.
+  return group.tasks.some((task) => deriveWorkStatus(task, now) === "stalled") ? "warn" : "faint"
 }
 
 /** A lineage or controlled-stop group always names itself, even when alone. */
@@ -161,13 +164,14 @@ function cardSection(
   ordinal: number,
   columns: number,
   showLabel: boolean,
+  now: number,
 ): WorkGroupSection {
   const tasks = group.tasks.slice(0, columns)
   const overflow = group.tasks.length - tasks.length
   return {
     groupID: group.id,
     label: showLabel ? workGroupLabel(group, ordinal) : null,
-    tone: sectionTone(group),
+    tone: sectionTone(group, now),
     mode: "cards",
     tasks,
     overflow,
@@ -175,11 +179,11 @@ function cardSection(
   }
 }
 
-function summarySection(group: WorkGroup, ordinal: number): WorkGroupSection {
+function summarySection(group: WorkGroup, ordinal: number, now: number): WorkGroupSection {
   return {
     groupID: group.id,
     label: workGroupLabel(group, ordinal),
-    tone: sectionTone(group),
+    tone: sectionTone(group, now),
     mode: "summary",
     tasks: [],
     overflow: 0,
@@ -187,13 +191,13 @@ function summarySection(group: WorkGroup, ordinal: number): WorkGroupSection {
   }
 }
 
-function compactRowsSection(group: WorkGroup, ordinal: number, rows: number, showLabel: boolean): WorkGroupSection {
+function compactRowsSection(group: WorkGroup, ordinal: number, rows: number, showLabel: boolean, now: number): WorkGroupSection {
   const tasks = group.tasks.slice(0, rows)
   const overflow = group.tasks.length - tasks.length
   return {
     groupID: group.id,
     label: showLabel ? workGroupLabel(group, ordinal) : null,
-    tone: sectionTone(group),
+    tone: sectionTone(group, now),
     mode: "rows",
     tasks,
     overflow: group.complete ? 0 : overflow,
@@ -245,8 +249,8 @@ function compactLayout(
     const rows = chosen.get(index) ?? 0
     sections.push(
       rows > 0
-        ? compactRowsSection(group, index + 1, rows, showGroupLabel(group, multi))
-        : summarySection(group, index + 1),
+        ? compactRowsSection(group, index + 1, rows, showGroupLabel(group, multi), now)
+        : summarySection(group, index + 1, now),
     )
   }
   const visible = selectable(sections, now)
@@ -303,8 +307,8 @@ export function workGroupLayout(
     const cardSet = new Set(cardIndices)
     const sections: WorkGroupSection[] = []
     for (let index = 0; index < groups.length; index++) {
-      if (cardSet.has(index)) sections.push(cardSection(groups[index], index + 1, columns, showGroupLabel(groups[index], multi)))
-      else if (summaryIndices.has(index)) sections.push(summarySection(groups[index], index + 1))
+      if (cardSet.has(index)) sections.push(cardSection(groups[index], index + 1, columns, showGroupLabel(groups[index], multi), now))
+      else if (summaryIndices.has(index)) sections.push(summarySection(groups[index], index + 1, now))
     }
     const cardCount = cardIndices.length
     const height =

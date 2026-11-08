@@ -455,3 +455,120 @@ test("ticket162: a just-exhausted group reads as a stop, not a failure", () => {
   assert.equal(layout.sections[0]?.tone, "warn")
   assert.ok((layout.sections[0]?.label ?? "").includes("EXHAUSTED"), "a lone exhausted group still names its controlled stop")
 })
+
+test("ticket170: non-terminal cards never start the completion hold", () => {
+  const stalled = (patch: Partial<Subtask> = {}): Subtask =>
+    task({
+      state: "replied",
+      outcome: "failed",
+      attempts: 5,
+      failure: { kind: "attempts", reason: "attempts-exhausted" },
+      finishedAt: 1_000,
+      repliedAt: 1_000,
+      ...patch,
+    })
+  const items = [
+    task({ id: "queued", dispatchGroupID: "dispatch_1", createdAt: 1 }),
+    working({ id: "live", dispatchGroupID: "dispatch_1", deadlineAt: 1, leaseUntil: 10_000_000 }),
+    task({ id: "waiting", dispatchGroupID: "dispatch_1", state: "working", awaitingChildren: true, attempts: 1 }),
+    task({ id: "retrying", dispatchGroupID: "dispatch_1", state: "pending", attempts: 1, retryAfter: 9_500_000 }),
+    task({ id: "needs-you", dispatchGroupID: "dispatch_1", interrupted: true }),
+    stalled({ id: "stalled", dispatchGroupID: "dispatch_1" }),
+  ]
+  const groups = workGroupsForTasks(items, record(...items), { now: 9_999_999 })
+  assert.equal(groups.length, 1, "the whole group stays mounted")
+  assert.equal(groups[0]?.active, 6)
+  assert.equal(groups[0]?.done, 0)
+  assert.equal(groups[0]?.complete, false, "a non-terminal member never starts the hold")
+  assert.equal(groups[0]?.latestTerminalAt, undefined)
+})
+
+test("ticket170: a live lease stays mounted past the old delivery deadline", () => {
+  const live = working({ id: "live", dispatchGroupID: "dispatch_1", deadlineAt: 1, leaseUntil: 9_000_000 })
+  const items = [live]
+  const subtasks = record(live)
+  const early = workGroupsForTasks(items, subtasks, { now: 100_000 })
+  const late = workGroupsForTasks(items, subtasks, { now: 8_999_999 })
+  assert.equal(early.length, 1)
+  assert.equal(late.length, 1, "a heartbeat lease outlives the delivery window")
+  assert.equal(late[0]?.active, 1)
+  assert.equal(late[0]?.complete, false)
+})
+
+test("ticket170: a stalled card stays mounted until retry, cancel, or dismissal", () => {
+  const stalledTask = task({
+    id: "t",
+    dispatchGroupID: "dispatch_1",
+    state: "replied",
+    outcome: "failed",
+    attempts: 5,
+    failure: { kind: "attempts", reason: "attempts-exhausted" },
+    finishedAt: 1_000,
+    repliedAt: 1_000,
+    createdAt: 1,
+  })
+  const atStall = workGroupsForTasks([stalledTask], record(stalledTask), { now: 1_000_000 })
+  assert.equal(atStall.length, 1, "the stalled card is not discarded by the completion hold")
+  assert.equal(atStall[0]?.active, 1)
+  assert.equal(atStall[0]?.complete, false)
+  const retried = task({ ...stalledTask, state: "pending", outcome: "pending", attempts: 0, failure: undefined, retryAfter: undefined })
+  const afterRetry = workGroupsForTasks([retried], record(retried), { now: 1_000_000 })
+  assert.equal(afterRetry.length, 1)
+  assert.equal(afterRetry[0]?.active, 1, "an explicit retry reopens the same card")
+  const cancelled = task({ ...stalledTask, stoppedAt: 1_000_001, finishedAt: 1_000_001, repliedAt: 1_000_001, error: "Cancelled by user." })
+  const holding = workGroupsForTasks([cancelled], record(cancelled), { now: 1_000_600 })
+  assert.equal(holding.length, 1, "an explicit cancel still holds briefly before history")
+  assert.equal(workGroupsForTasks([cancelled], record(cancelled), { now: 1_002_201 }).length, 0)
+})
+
+test("ticket170: a stalled member keeps an otherwise complete group mounted past the hold", () => {
+  const items = [
+    replied({ id: "done", dispatchGroupID: "dispatch_1", finishedAt: 1_000, repliedAt: 1_000 }),
+    task({
+      id: "stalled",
+      dispatchGroupID: "dispatch_1",
+      state: "replied",
+      outcome: "failed",
+      attempts: 5,
+      failure: { kind: "delivery", reason: "deadline-exceeded" },
+      finishedAt: 1_000,
+      repliedAt: 1_000,
+    }),
+  ]
+  const groups = workGroupsForTasks(items, record(...items), { now: 9_999_999 })
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0]?.active, 1)
+  assert.equal(groups[0]?.done, 1)
+  assert.equal(groups[0]?.complete, false, "a terminal sibling cannot start the hold while a stall is live")
+})
+
+test("ticket170: pending and stalled cards schedule no completion timer", () => {
+  const queued = task({ id: "queued", retryAfter: undefined })
+  const stalled = task({
+    id: "stalled",
+    state: "replied",
+    outcome: "failed",
+    attempts: 5,
+    failure: { kind: "attempts", reason: "attempts-exhausted" },
+  })
+  assert.equal(nextWorkInvalidation([queued, stalled], [], 1_000), undefined)
+  const live = working({ id: "live", leaseUntil: 6_000 })
+  assert.equal(nextWorkInvalidation([live], [], 1_000), 6_000)
+})
+
+test("ticket170: stalled cards are selectable and use the warning tone", () => {
+  const stalled = task({
+    id: "stalled",
+    dispatchGroupID: "dispatch_1",
+    state: "replied",
+    outcome: "failed",
+    attempts: 5,
+    failure: { kind: "lease", reason: "lease-expired" },
+  })
+  const waiting = task({ id: "waiting", dispatchGroupID: "dispatch_2", state: "working", awaitingChildren: true, attempts: 1 })
+  const items = [stalled, waiting]
+  const groups = workGroupsForTasks(items, record(...items), { now: 5_000 })
+  const layout = workGroupLayout(groups, 120, 40, 5_000)
+  assert.deepEqual(layout.selectableTasks.map((item) => item.id).sort(), ["stalled", "waiting"], "retry/cancel targets include stalls")
+  assert.deepEqual(layout.sections.map((section) => section.tone), ["warn", "faint"], "a stall is a queue warning, not FAILED")
+})

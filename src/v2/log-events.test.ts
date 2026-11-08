@@ -73,6 +73,72 @@ test("task observer keeps failure and cancellation distinct", async () => {
   assert.equal((log.recent({ event: "task.cancelled" })[0] as any).reason, "Cancelled by user.")
 })
 
+test("ticket170: a structured queue cause logs task.stalled, not task.failed", async () => {
+  const { log, store } = setup()
+  await store.saveWorkspace(workspace())
+  await store.saveSubtask(subtask({ id: "stalled", state: "working", title: "SECRET_TITLE", instruction: "SECRET_INSTRUCTION" }))
+  await store.saveSubtask(subtask({
+    id: "stalled",
+    state: "replied",
+    outcome: "failed",
+    attempts: 5,
+    title: "SECRET_TITLE",
+    instruction: "SECRET_INSTRUCTION",
+    error: "Gave up after 5 attempts.",
+    failure: { kind: "attempts", reason: "attempts-exhausted" },
+    finishedAt: 5,
+    repliedAt: 5,
+  }))
+  assert.equal(log.recent({ event: "task.failed" }).length, 0, "a stall is never a native failure")
+  const stalled = log.recent({ event: "task.stalled" })[0] as any
+  assert.ok(stalled)
+  assert.equal(stalled.level, "warn")
+  assert.equal(stalled.taskID, "stalled")
+  assert.equal(stalled.failureKind, "attempts")
+  assert.equal(stalled.reason, "attempts-exhausted")
+  assert.equal(stalled.attempts, 5)
+  assert.equal(stalled.error, undefined, "stall logs carry structured codes, not task or error copy")
+  assert.equal(JSON.stringify(stalled).includes("SECRET"), false)
+})
+
+test("ticket170: deadline and lease causes log task.stalled; native causes log task.failed", async () => {
+  const { log, store } = setup()
+  await store.saveWorkspace(workspace())
+  await store.saveSubtask(subtask({ id: "delivery", state: "working" }))
+  await store.saveSubtask(subtask({
+    id: "delivery", state: "replied", outcome: "failed", attempts: 1,
+    failure: { kind: "delivery", reason: "deadline-exceeded" }, finishedAt: 5, repliedAt: 5,
+  }))
+  await store.saveSubtask(subtask({ id: "lease", state: "working" }))
+  await store.saveSubtask(subtask({
+    id: "lease", state: "replied", outcome: "failed", attempts: 1,
+    failure: { kind: "lease", reason: "lease-expired" }, finishedAt: 5, repliedAt: 5,
+  }))
+  await store.saveSubtask(subtask({ id: "native", state: "working" }))
+  await store.saveSubtask(subtask({
+    id: "native", state: "replied", outcome: "failed", attempts: 1,
+    failure: { kind: "native", reason: "provider-error" }, error: "quota exhausted", finishedAt: 5, repliedAt: 5,
+  }))
+  const stalled = log.recent({ event: "task.stalled" })
+  assert.deepEqual(stalled.map((entry) => entry.taskID).sort(), ["delivery", "lease"])
+  assert.deepEqual(stalled.map((entry) => (entry as any).reason).sort(), ["deadline-exceeded", "lease-expired"])
+  const failed = log.recent({ event: "task.failed" })
+  assert.equal(failed.length, 1)
+  assert.equal(failed[0]?.taskID, "native")
+  assert.equal((failed[0] as any).failureKind, "native")
+})
+
+test("ticket170: a legacy terminal failure without structured evidence stays task.failed", async () => {
+  const { log, store } = setup()
+  await store.saveWorkspace(workspace())
+  await store.saveSubtask(subtask({ id: "legacy", state: "working" }))
+  await store.saveSubtask(subtask({
+    id: "legacy", state: "replied", outcome: "failed", error: "boom", finishedAt: 5, repliedAt: 5,
+  }))
+  assert.equal(log.recent({ event: "task.stalled" }).length, 0)
+  assert.equal(log.recent({ event: "task.failed" }).length, 1)
+})
+
 test("message observer logs append and finalize, and skips same-length streaming churn", async () => {
   const { log, store } = setup()
   await store.saveWorkspace(workspace())
@@ -87,6 +153,21 @@ test("message observer logs append and finalize, and skips same-length streaming
   const finalized = log.recent()[1] as any
   assert.equal(finalized.chars, 6)
   assert.equal(finalized.interrupted, false)
+})
+
+test("ticket170: a removed notice logs identity and kind only", async () => {
+  const { log, store } = setup()
+  await store.saveWorkspace(workspace())
+  const notice = await store.appendMessage("w", {
+    id: "m_notice", author: "system", text: "Retrying in 30s: SECRET_REASON", kind: "system",
+    taskID: "t", notice: "retry", createdAt: 1,
+  })
+  await store.removeMessage("w", notice.id)
+  const removed = log.recent({ event: "message.removed" })[0] as any
+  assert.ok(removed)
+  assert.equal(removed.messageID, "m_notice")
+  assert.equal(removed.notice, "retry")
+  assert.equal(JSON.stringify(removed).includes("SECRET_REASON"), false)
 })
 
 test("ticket160: dispatch group creation and reconciliation log IDs, counts, and limits only", async () => {

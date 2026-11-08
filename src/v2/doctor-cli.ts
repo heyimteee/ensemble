@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { canonicalDirectory } from "./paths.ts"
 import { workspaceConfigPath, CONFIG_VERSION, type WorkspaceConfig } from "./workspace-config.ts"
-import { diagnoseLocations, type DoctorConfigRead, type DoctorLocationInput, type DoctorReport, type DoctorSnapshot, type ServiceIdentity } from "./doctor.ts"
+import { diagnoseLocations, type DoctorConfigRead, type DoctorLocationInput, type DoctorReport, type DoctorSnapshot, type DoctorSubtask, type ServiceIdentity } from "./doctor.ts"
 
 export type DoctorOptions = {
   json: boolean
@@ -175,6 +175,18 @@ export function validateServerUrl(value: string): string {
   return value.replace(/\/+$/, "")
 }
 
+const DERIVED_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "working",
+  "waiting",
+  "retrying",
+  "needs_you",
+  "replied",
+  "failed",
+  "stalled",
+  "cancelled",
+])
+
 function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
   const state = (output as any)?.state
   if (!state || typeof state !== "object") throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has no state object.`)
@@ -297,6 +309,16 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
         throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid subtask entry: ${id}`)
       }
       const workKind = raw.workKind === "delegation" || raw.workKind === "handoff" || raw.workKind === "turn" ? raw.workKind : undefined
+      const stateValue = raw.state === "pending" || raw.state === "working" || raw.state === "replied" ? raw.state : undefined
+      const outcomeValue = raw.outcome === "pending" || raw.outcome === "succeeded" || raw.outcome === "failed" ? raw.outcome : undefined
+      const statusValue = typeof raw.status === "string" && DERIVED_STATUSES.has(raw.status) ? raw.status as DoctorSubtask["status"] : undefined
+      const failureKind = raw.failure?.kind === "native" || raw.failure?.kind === "delivery" || raw.failure?.kind === "lease" || raw.failure?.kind === "attempts"
+        ? raw.failure.kind
+        : undefined
+      const failure = failureKind
+        ? { kind: failureKind, ...(typeof raw.failure.reason === "string" ? { reason: raw.failure.reason } : {}) }
+        : undefined
+      const number = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) ? value : undefined
       subtasks[id] = {
         id: raw.id,
         ...(typeof raw.workspaceID === "string" ? { workspaceID: raw.workspaceID } : {}),
@@ -312,7 +334,41 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
               },
             }
           : {}),
+        ...(stateValue ? { state: stateValue } : {}),
+        ...(outcomeValue ? { outcome: outcomeValue } : {}),
+        ...(statusValue ? { status: statusValue } : {}),
+        ...(typeof raw.interrupted === "boolean" ? { interrupted: raw.interrupted } : {}),
+        ...(typeof raw.awaitingChildren === "boolean" ? { awaitingChildren: raw.awaitingChildren } : {}),
+        ...(number(raw.attempts) !== undefined ? { attempts: number(raw.attempts) } : {}),
+        ...(number(raw.createdAt) !== undefined ? { createdAt: number(raw.createdAt) } : {}),
+        ...(number(raw.deadlineAt) !== undefined ? { deadlineAt: number(raw.deadlineAt) } : {}),
+        ...(typeof raw.claimedBy === "string" ? { claimedBy: raw.claimedBy } : {}),
+        ...(number(raw.leaseUntil) !== undefined ? { leaseUntil: number(raw.leaseUntil) } : {}),
+        ...(typeof raw.activeRunID === "string" ? { activeRunID: raw.activeRunID } : {}),
+        ...(number(raw.retryAfter) !== undefined ? { retryAfter: number(raw.retryAfter) } : {}),
+        ...(number(raw.finishedAt) !== undefined ? { finishedAt: number(raw.finishedAt) } : {}),
+        ...(number(raw.repliedAt) !== undefined ? { repliedAt: number(raw.repliedAt) } : {}),
+        ...(number(raw.stoppedAt) !== undefined ? { stoppedAt: number(raw.stoppedAt) } : {}),
+        ...(failure ? { failure } : {}),
       }
+    }
+  }
+  let recoveries: DoctorSnapshot["recoveries"]
+  const rawRecoveries = (output as any)?.recoveries
+  if (rawRecoveries !== undefined) {
+    if (!Array.isArray(rawRecoveries)) {
+      throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid recoveries list.`)
+    }
+    recoveries = []
+    for (const raw of rawRecoveries) {
+      if (!raw || typeof raw.taskID !== "string") continue
+      recoveries.push({
+        taskID: raw.taskID,
+        ...(typeof raw.from === "string" ? { from: raw.from } : {}),
+        ...(typeof raw.to === "string" ? { to: raw.to } : {}),
+        ...(typeof raw.reason === "string" ? { reason: raw.reason } : {}),
+        ...(typeof raw.at === "number" && Number.isFinite(raw.at) ? { at: raw.at } : {}),
+      })
     }
   }
   return {
@@ -321,6 +377,7 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
     bindings,
     ...(dispatchGroups ? { dispatchGroups } : {}),
     ...(subtasks ? { subtasks } : {}),
+    ...(recoveries ? { recoveries } : {}),
   }
 }
 

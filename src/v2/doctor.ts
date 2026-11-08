@@ -1,5 +1,6 @@
 import { dispatchGroupState, dispatchHopCount, dispatchLedgerSummary, isRootGroup, type DispatchLedgerSummary } from "./dispatch-budget.ts"
-import type { DispatchGroup, WorkKind } from "./types.ts"
+import { DEADLINE_MS, deriveWorkStatus, type DerivedWorkStatus } from "./queue.ts"
+import type { DispatchGroup, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
 import type { WorkspaceConfig } from "./workspace-config.ts"
 
 export type ServiceIdentity = {
@@ -45,6 +46,38 @@ export type DoctorSubtask = {
   creatorType: "user" | "agent"
   workKind?: WorkKind
   handoff?: { completion?: boolean; batch?: boolean }
+  /**
+   * Ticket #170 lifecycle facts. The service overlay already derives `status`;
+   * the doctor repeats the canonical derivation when it is absent and uses the
+   * durable queue timestamps for freshness checks. Titles and instructions
+   * never travel through this seam.
+   */
+  state?: SubtaskState
+  outcome?: SubtaskOutcome
+  status?: DerivedWorkStatus
+  interrupted?: boolean
+  awaitingChildren?: boolean
+  attempts?: number
+  createdAt?: number
+  deadlineAt?: number
+  claimedBy?: string
+  leaseUntil?: number
+  activeRunID?: string
+  retryAfter?: number
+  finishedAt?: number
+  repliedAt?: number
+  stoppedAt?: number
+  failure?: { kind: WorkFailureKind; reason?: string }
+}
+
+/** One `task.recovered` audit row projected for the doctor (IDs and codes only). */
+export type DoctorRecovery = {
+  taskID: string
+  from?: string
+  to?: string
+  reason?: string
+  /** Wall-clock time of the recovery event, when the sink supplied it. */
+  at?: number
 }
 
 export type DoctorSnapshot = {
@@ -55,6 +88,8 @@ export type DoctorSnapshot = {
   dispatchGroups?: Record<string, DispatchGroup>
   /** The work rows the ledger counters must agree with. */
   subtasks?: Record<string, DoctorSubtask>
+  /** Recent `task.recovered` audit rows (ticket #170); absent on older services. */
+  recoveries?: DoctorRecovery[]
 }
 
 export type DoctorConfigRead =
@@ -68,6 +103,8 @@ export type DoctorLocationInput = {
   service: ServiceIdentity
   snapshot: DoctorSnapshot
   config: DoctorConfigRead
+  /** Diagnostic clock for deterministic operator checks; defaults to now. */
+  now?: number
 }
 
 export type ConfigMemberStatus = "resolved" | "unknown" | "ambiguous" | "archived"
@@ -248,6 +285,16 @@ const remediation: Record<string, string> = {
     "A dispatch group cannot walk to its declared root (missing parent, cycle, or mismatched root id). Restore the missing ledger records or close the group so support can trust the lineage.",
   dispatch_continuation_empty:
     "An active continuation group holds no work. Dispatch its first work item, close it, or start a new command so an idle segment cannot quietly consume the continuation allowance.",
+  work_pending_overdue:
+    "Queued work has waited past the delivery window. Check the service queue and active-run slots; retry or cancel the row only after confirming no run owns it. Never delete the work row to hide a backlog.",
+  work_lease_expired:
+    "A claimed work row has an expired or missing heartbeat lease. Let the service reaper requeue it, or restart the service if the owner is gone; do not steal or hand-edit a live claim.",
+  work_terminal_contradiction:
+    "A terminal work row carries fields from another lifecycle state. Compare the durable failure, timestamps, and claim fields, then let the service reconcile the row; never rewrite a genuine native failure into a stall.",
+  work_failed_timeout:
+    "A failed row carries a structured delivery, lease, timeout, or queue cause. It should read stalled, not failed; repair the classification from the structured cause and keep a genuine native error failed.",
+  work_recovery_mismatch:
+    "A task.recovered audit row disagrees with the current durable task. Reconcile the card and transcript from the durable answer; keep the recovery event, and never replace a real answer with a failure placeholder.",
   binding_unknown_workspace:
     "A session binding points at a workspace that no longer exists. Remove or repair the orphaned binding by recreating the workspace; do not hand-edit OpenCode storage.",
   binding_unknown_agent:
@@ -307,6 +354,175 @@ type PendingMismatch = {
 
 function locationWorkspace(input: DoctorLocationInput): DoctorWorkspace | undefined {
   return Object.values(input.snapshot.workspaces).find((workspace) => !workspace.archived && workspace.directory === input.directory)
+}
+
+const WORK_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "working",
+  "waiting",
+  "retrying",
+  "needs_you",
+  "replied",
+  "failed",
+  "stalled",
+  "cancelled",
+])
+
+const TIMEOUT_REASON_CODES: ReadonlySet<string> = new Set([
+  "deadline-exceeded",
+  "lease-expired",
+  "timed-out",
+  "timeout",
+])
+
+/** The canonical derived status, falling back to the durable fields when a legacy service omits the overlay. */
+function doctorWorkStatus(task: DoctorSubtask, now: number): DerivedWorkStatus | undefined {
+  if (task.status !== undefined && WORK_STATUSES.has(task.status)) return task.status
+  if (task.state === undefined || task.outcome === undefined) return undefined
+  return deriveWorkStatus({
+    id: task.id,
+    workspaceID: task.workspaceID ?? "",
+    creatorType: task.creatorType,
+    title: "",
+    instruction: "",
+    mode: "research",
+    state: task.state,
+    stage: "initial",
+    outcome: task.outcome,
+    interrupted: task.interrupted === true,
+    awaitingChildren: task.awaitingChildren === true,
+    attempts: task.attempts ?? 0,
+    createdAt: task.createdAt ?? 0,
+    ...(task.deadlineAt !== undefined ? { deadlineAt: task.deadlineAt } : {}),
+    ...(task.claimedBy !== undefined ? { claimedBy: task.claimedBy } : {}),
+    ...(task.leaseUntil !== undefined ? { leaseUntil: task.leaseUntil } : {}),
+    ...(task.activeRunID !== undefined ? { activeRunID: task.activeRunID } : {}),
+    ...(task.retryAfter !== undefined ? { retryAfter: task.retryAfter } : {}),
+    ...(task.failure !== undefined ? { failure: task.failure } : {}),
+  }, now)
+}
+
+/**
+ * Ticket #170 operator invariants over durable work rows. Checks are based on
+ * structured fields only: no title, instruction, error copy, or answer text is
+ * read. Overdue queue wait is skipped for a paused workspace because the queue
+ * is intentionally not draining there.
+ */
+function checkWorkRows(input: DoctorLocationInput, add: (
+  indexes: number[],
+  code: string,
+  details: Record<string, unknown>,
+  message: string,
+  scope?: DoctorMismatch["scope"],
+) => void, index: number): void {
+  const tasks = input.snapshot.subtasks ?? {}
+  const now = input.now ?? Date.now()
+  for (const task of Object.values(tasks).sort((a, b) => a.id.localeCompare(b.id))) {
+    const status = doctorWorkStatus(task, now)
+    if (!status) continue
+    const workspaceID = task.workspaceID
+    const owner = workspaceID ? input.snapshot.workspaces[workspaceID] : undefined
+    const base = { workspaceID, taskID: task.id }
+    if (status === "pending" && owner?.paused !== true) {
+      const dueAt = task.deadlineAt ?? (task.createdAt !== undefined ? task.createdAt + DEADLINE_MS : undefined)
+      if (dueAt !== undefined && now > dueAt && task.createdAt !== undefined) {
+        const ageMs = Math.max(0, now - task.createdAt)
+        add(
+          [index],
+          "work_pending_overdue",
+          { ...base, ageMs },
+          `Task ${task.id} has been queued for ${Math.round(ageMs / 1_000)}s without a claim past its delivery window.`,
+          "storage",
+        )
+      }
+    }
+    if (task.claimedBy !== undefined && task.state !== "replied") {
+      const liveLease = task.leaseUntil !== undefined && task.leaseUntil > now
+      const activeWithoutLease = task.leaseUntil === undefined
+        && task.activeRunID !== undefined
+        && task.activeRunID === task.claimedBy
+      if (!liveLease && !activeWithoutLease) {
+        add(
+          [index],
+          "work_lease_expired",
+          {
+            ...base,
+            claimedBy: task.claimedBy,
+            ...(task.leaseUntil !== undefined ? { leaseUntil: task.leaseUntil } : {}),
+            reason: task.leaseUntil === undefined ? "missing" : "expired",
+          },
+          `Task ${task.id} is claimed by ${task.claimedBy} without a live heartbeat lease.`,
+          "storage",
+        )
+      }
+    }
+    if (task.state !== undefined && task.outcome !== undefined) {
+      const terminal = task.state === "replied"
+      const problems: string[] = []
+      if (terminal && task.outcome === "succeeded" && task.failure !== undefined) problems.push("succeeded-with-failure")
+      if (terminal && task.outcome === "failed" && task.stoppedAt !== undefined && task.failure !== undefined) problems.push("cancelled-with-failure")
+      if (!terminal && (task.repliedAt !== undefined || task.finishedAt !== undefined)) problems.push("non-terminal-with-finish")
+      if (!terminal && task.outcome !== "pending") problems.push("non-terminal-nonpending-outcome")
+      if (terminal && (task.claimedBy !== undefined || task.activeRunID !== undefined || task.retryAfter !== undefined)) problems.push("terminal-with-queue-fields")
+      if (terminal && task.outcome === "pending") problems.push("terminal-pending-outcome")
+      if (problems.length > 0) {
+        add(
+          [index],
+          "work_terminal_contradiction",
+          { ...base, state: task.state, outcome: task.outcome, status, problems },
+          `Task ${task.id} has contradictory terminal fields: ${problems.join(", ")}.`,
+          "storage",
+        )
+      }
+    }
+    if (status === "failed" && task.outcome === "failed" && task.failure !== undefined) {
+      const timeoutReason = task.failure.reason !== undefined && TIMEOUT_REASON_CODES.has(task.failure.reason)
+      if (task.failure.kind !== "native" || timeoutReason) {
+        add(
+          [index],
+          "work_failed_timeout",
+          { ...base, failureKind: task.failure.kind, reason: task.failure.reason, status },
+          `Task ${task.id} derives failed with a ${task.failure.kind}${task.failure.reason ? ` (${task.failure.reason})` : ""} cause.`,
+          "storage",
+        )
+      }
+    }
+  }
+  for (const recovery of input.snapshot.recoveries ?? []) {
+    if (recovery.to !== undefined && recovery.to !== "replied") {
+      add(
+        [index],
+        "work_recovery_mismatch",
+        { workspaceID: tasks[recovery.taskID]?.workspaceID, taskID: recovery.taskID, recoveredTo: recovery.to, problem: "invalid-target" },
+        `Recovery ${recovery.taskID} targets ${recovery.to}, not replied.`,
+        "storage",
+      )
+      continue
+    }
+    const task = tasks[recovery.taskID]
+    if (!task || task.state !== "replied") continue
+    const status = doctorWorkStatus(task, now)
+    if (status === "replied" && task.failure === undefined && task.stoppedAt === undefined) continue
+    const finished = task.finishedAt ?? task.repliedAt
+    // A later terminal event is a new outcome, not a recovery contradiction.
+    if (finished !== undefined && recovery.at !== undefined && finished > recovery.at) continue
+    add(
+      [index],
+      "work_recovery_mismatch",
+      {
+        workspaceID: task.workspaceID,
+        taskID: task.id,
+        recoveredFrom: recovery.from,
+        recoveredTo: recovery.to,
+        status,
+        failureKind: task.failure?.kind,
+        ...(finished !== undefined ? { finishedAt: finished } : {}),
+        ...(recovery.at !== undefined ? { recoveredAt: recovery.at } : {}),
+      },
+      `Task ${task.id} was recovered to replied but its durable row still reads ${status}.`,
+      "storage",
+    )
+  }
 }
 
 /**
@@ -584,6 +800,10 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
       }
     }
 
+    // Ticket #170: work-lifecycle invariants. Durable timestamps, claim
+    // fields, structured failure causes, and recovery audit rows only.
+    checkWorkRows(input, add, index)
+
     for (const item of Object.values(input.snapshot.bindings).sort((a, b) => a.key.localeCompare(b.key))) {
       const expectedKey = `${item.workspaceID}:${item.agentID}`
       if (item.key !== expectedKey) {
@@ -838,6 +1058,7 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
       "Diagnostic reads do not trigger workspace discovery or config reconciliation. Reads are sequential, not atomic. One selected service is queried for every directory; this does not discover separate service processes.",
       "Session bindings are lazy and may be retained for former members; their absence alone is not a defect.",
       "Dispatch counters may exceed visible counted work rows after terminal retention. The doctor flags only a counter below counted delegation/handoff work, a command whose counters disagree with its groups, and lineage or cap violations.",
+      "Work checks read structured lifecycle fields only. An overdue pending row in a paused workspace is not flagged because that queue is intentionally idle; a later terminal event after a recovery is not a contradiction.",
     ],
     locations: reports,
     mismatches,
