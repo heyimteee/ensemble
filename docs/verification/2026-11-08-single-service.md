@@ -1,12 +1,13 @@
 # Single service per host and safe recovery (#151)
 
-Status: **verified locally on Linux/tmux; real post-fix replay skipped by design; review fixes recorded below**
+Status: **verified locally on Linux/tmux; real post-fix 30-run recorded; gap-noise follow-up applied**
 Date: 2026-11-08
 Issue: [#151](https://github.com/heyimteee/ensemble/issues/151)
 Spec: [#146](https://github.com/heyimteee/ensemble/issues/146)
 ADR: [0003](../adr/0003-single-service-and-safe-recovery.md)
-Base: `integration/single-service` at `b6420fd` (includes #147, #148, #149, #150)
+Base: `integration/single-service` at `48263a6` (includes #147, #148, #149, #150 and the #146 review fixes)
 Review fixes: `fix/spec-146-review`
+Gap-noise follow-up: `fix/feed-gap-noise`
 Branch: `verify/single-service`
 Worktree: `/home/tristan/dev/ensemble-151`
 
@@ -17,9 +18,13 @@ log attribution (#150):
 - One `service.start` for a host realm that loads the plugin at 13 locations.
 - Mock 100: 100 clean requests, 137/137 successful task rows, 0
   `task.failed`, 0 failure records, 8 concurrent runs.
+- Real post-fix 30-request run: 30/30 requests, 39/39 task rows succeeded,
+  one service start, no placeholders, no duplicate handoffs.
 - Lease-safe and restart truth tests pass.
-- The pre-fix real 30-request baseline is recorded for contrast; a post-fix
-  real replay was skipped because it would restart the active host.
+- The pre-fix real 30-request baseline is retained for contrast.
+- The real run exposed 180 recoverable `feed.gap` warnings; the follow-up
+  makes recovered gaps debug summaries and keeps warnings only for real
+  fallbacks.
 
 ## Environment
 
@@ -37,10 +42,12 @@ log attribution (#150):
 
 | Command | Result |
 |---|---|
-| `npm run verify` | **Pass** — strict type check; **1014 tests passed, 0 failed, 0 skipped, 0 todo**, 26.9 s. |
-| Mock 100 (`ENSEMBLE_ROOT=/home/tristan/dev/ensemble-review bash /tmp/opencode/mock100-setup-verify.sh`) | **Pass** — driver exit 0; **100 jobs, 137/137 tasks succeeded, 0 failed, 0 `task.failed`, 1 `service.start`, `maxObservedRuns=8`**. |
+| `npm run verify` | **Pass** — strict type check; **1020 tests passed, 0 failed, 0 skipped, 0 todo**, 28.0 s. |
+| Mock 100 (`ENSEMBLE_ROOT=/home/tristan/dev/ensemble-gapfix bash /tmp/opencode/mock100-setup-verify.sh`) | **Pass** — driver exit 0; **100 jobs, 137/137 tasks succeeded, 0 failed, 0 `task.failed`, 1 `service.start`, `maxObservedRuns=8`**. |
 | `npm run test:live:fake:all` | **Pass** — `fake` 194 s, `fake-empty` 9 s; **2 passed, 0 failed, 0 skipped, 0 not run** (203 s total). |
+| Real playground 30-request replay (live host, hot reload only) | **Pass, with gap-noise follow-up** — **30/30 requests, 39/39 tasks, all attempt 1, 0 placeholders, 0 duplicate handoffs, 1 `service.start`, 0 `task.failed`, 0 failure records**; exposed **180 recoverable `feed.gap` warnings**, fixed in `fix/feed-gap-noise`. |
 | Targeted restart/recovery tests (`--test-name-pattern="ticket14[89]"`) | **Pass** — **15 tests passed**, 0 failed, 0 skipped (0.33 s): 7 `ticket148`, 8 `ticket149`. |
+| Targeted feed-gap tests (`src/v2/tui/feed-gaps.test.ts`) | **Pass** — **5 tests passed**, 0 failed, 0 skipped: recovered-gap debug, fallback warn, burst coalescing, repeated hard-gap warn, trailing window close. |
 | `git diff --check` | **Pass** — exit 0, no whitespace errors. |
 | Prototype tree check (`git ls-files \| grep -i prototype`) | **Pass** — no prototype files in the tree. |
 
@@ -93,18 +100,18 @@ Event totals: `task.created` 137, `task.claimed` 137, `task.transition` 137,
 
 | Bucket | n | min | median | mean | p95 | max |
 |---|---|---|---|---|---|---|
-| Easy | 34 | 1.87 | 2.71 | 3.59 | 6.04 | 6.32 |
-| Medium | 33 | 2.59 | 3.36 | 3.91 | 5.46 | 5.52 |
-| Hard | 33 | 3.31 | 4.03 | 4.45 | 5.55 | 5.59 |
-| All | 100 | 1.87 | 3.71 | 3.98 | 5.86 | 6.32 |
+| Easy | 34 | 2.02 | 2.84 | 3.74 | 6.10 | 6.57 |
+| Medium | 33 | 2.83 | 3.45 | 4.05 | 5.70 | 5.78 |
+| Hard | 33 | 3.44 | 4.13 | 4.52 | 5.60 | 5.74 |
+| All | 100 | 2.02 | 3.76 | 4.10 | 6.03 | 6.57 |
 
 ### Artifacts
 
-- Results: `/tmp/opencode/mock100-artifacts-1794117806/mock100-results.json`
-- Harness output: `/tmp/opencode/146-review-mock100.log`
+- Results: `/tmp/opencode/mock100-artifacts-1794118870/mock100-results.json`
+- Harness output: `/tmp/opencode/146-gapfix-mock100.log`
 - Service log and server/fake logs:
-  `/tmp/opencode/mock100-artifacts-1794117806/`
-- Prior verification artifacts: `/tmp/opencode/mock100-artifacts-1794115782/`
+  `/tmp/opencode/mock100-artifacts-1794118870/`
+- Prior review artifacts: `/tmp/opencode/mock100-artifacts-1794117806/`
 
 ## Prototype evidence for #148's 13-instance acceptance
 
@@ -177,7 +184,8 @@ releases only local claims, and a recovered success clears the restart error.
 | Ambiguous stream finalization | `finalizeStream` returns `{ message, eligible, reason }`; callers gate `resultMessageID` explicitly | `ticket149: stream finalization reports settlement and result eligibility separately` |
 | Missing gap counter | Logger stats count `feed.gap`; `:logs` shows `feedGaps` | `the logger counts feed gaps...`, `:logs shows the feed-gap counter...` |
 | 13-instance prototype evidence | Recorded explicitly above | `/tmp/opencode/mock100-artifacts-1794109203/` |
-| Real replay skip | Limitation kept explicit with a manual post-restart procedure above | not run |
+| Real post-fix replay | 30-run recorded above | pass functionally |
+| Recoverable gap noise | Debug summaries; warnings only for full-snapshot/exhausted/hard fallbacks | `feed-gaps.test.ts` |
 
 ## Real playground baseline (pre-fix)
 
@@ -199,17 +207,47 @@ and `Reply interrupted.`, plus a duplicated `Handed to $xedo` message at
 sequence 193. Per the spec, the run had four service instances. The remaining
 29 requests had one attempt each and no placeholder or duplicate messages.
 
-**Post-fix real replay: SKIPPED.** Replaying the 30-request run on the real
-host requires restarting the active OpenCode service that this session is
-running inside. The isolated mock 100 covers the same production code path,
-and `ticket149: the request-23 shape never succeeds on a stale fallback`
-reproduces request 23's stale-placeholder shape against the fixed code.
+## Real post-fix 30-request replay
 
-### Manual replay procedure after a host restart
+Ran on the live playground after the single-service fixes were merged and the
+service module was hot-reloaded by the active host. This session did **not**
+restart the host.
 
-This procedure was **not run** for this record and the host was **not**
-restarted by the verification agent. Run it after the user deliberately
-restarts the playground host:
+| Metric | Result |
+|---|---|
+| Requests | **30/30 completed** |
+| Task rows | **39/39 replied/succeeded** |
+| Attempts | **all at attempt 1** |
+| Placeholder results | **0** |
+| Duplicate completion handoffs | **0** |
+| `service.start` / `service.location` | **1 / 1** |
+| `feed.reset` | **1** (startup, reason `epoch`) |
+| `task.failed` / failure records | **0 / 0** |
+
+### Gap-noise finding and fix
+
+The same run logged **180 TUI `feed.gap` warnings in ~4 minutes** (6 per
+~10 s). The reasons were recoverable `gap` decisions whose `from`/`version`/
+`entries` were served contiguously by `changes.since`; the service had no
+resets. These were successful catch-ups, not failures, so the warning level and
+per-event volume were misleading.
+
+Follow-up `fix/feed-gap-noise`:
+
+- Every observed gap still increments the logger's `feedGaps` counter, so the
+  true rate remains visible in diagnostics and `:logs`.
+- A burst collapses into one trailing summary per 10 s window.
+- A caught-up gap emits debug `feed.gap.recovered` with `gaps`, `reasons`, and
+  `fallbacks`.
+- A full-snapshot fallback or exhausted recovery passes emits warn `feed.gap`.
+- `reset`, `epoch`, `malformed`, and `other` decisions keep their warning and
+  fallback semantics.
+
+### Manual replay procedure (repeatable check)
+
+Run this after the user deliberately restarts the playground host, or when
+checking the warning rate again. It was **not** rerun after the gap-noise fix
+because the active host was not restarted.
 
 1. Confirm one service for the restarted realm: count distinct `instanceID`
    values and `service.start` rows in the service log; expect **one service
@@ -224,12 +262,13 @@ restarts the playground host:
    - **0** placeholder results: no `resultMessageID` or agent result text is in
      `FALLBACK_REPLIES` (`Reply completed.`, `Reply interrupted.`,
      `Reply interrupted before completion.`).
-   - **<5** `feed.gap` warnings, or `feedGaps < 5` in the `logs.recent` stats
-     shown by `:logs`.
+   - **<5 warn-level `feed.gap` lines**. The `feedGaps` counter may be higher:
+     it intentionally counts recovered gaps too. Recovered bursts should appear
+     as debug `feed.gap.recovered` summaries.
    - **1** `service.start` / distinct service `instanceID`.
 4. Record the host version, command, counts, and artifact paths in this file.
-   A skipped replay is not a pass; the mock and targeted tests are the current
-   evidence.
+   The functional 30-run above is already recorded; the warning-rate check must
+   be repeated after the gap-noise fix.
 
 ## Decision evidence
 
@@ -242,14 +281,17 @@ restarts the playground host:
 | Failure truth on restart | `ticket149` failure-attempt/terminal-record/clear-error tests | pass |
 | No placeholder success | `ticket149` fallback and request-23 tests | pass |
 | Mock 100 clean | 100/100 requests, 137/137 tasks, 0 `task.failed`, 0 failure records | pass |
+| Real playground 30-run | 30/30 requests, 39/39 tasks, attempts 1, 0 placeholders, 0 duplicate handoffs | pass |
+| Gap truth | Recovered gaps are debug `feed.gap.recovered`; warnings only for real fallbacks | pass (targeted tests) |
 | Attributable logs | 926/926 rows carry role, instance, and thread | pass |
-| `npm run verify` | 1014/1014 tests | pass |
+| `npm run verify` | 1020/1020 tests | pass |
 | Documentation | `docs/implementation.md` already documents the registry and lease-safe recovery from #147/#148 | pass |
 
 ## Skips and limitations
 
-- **Real post-fix 30-request replay: NOT RUN.** It requires restarting the
-  active host service; see above.
+- **Gap-noise fix live recheck: NOT RUN.** The functional 30-run above used the
+  live host after hot reload; measuring the post-fix warning rate requires the
+  manual replay after a deliberate host restart.
 - **macOS/Herdr: NOT RUN.** No macOS host is available; the existing manual
   checklist remains authoritative there.
 - **Hosted CI: NOT RUN.**
