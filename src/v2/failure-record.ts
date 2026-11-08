@@ -119,7 +119,7 @@ function messageMetadata(messages: Message[], content: boolean): Array<Record<st
   }))
 }
 
-export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "ts" | "pid" | "role"> & { ts?: string } {
+export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "ts" | "pid" | "role" | "instanceID" | "threadID"> & { ts?: string } {
   const { task } = input
   return {
     level: input.level as LogLevel,

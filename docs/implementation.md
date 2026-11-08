@@ -498,14 +498,17 @@ full recovery ladder is:
 3. **Heartbeat.** A cheap revision check runs about every 2 s idle and 1 s
    while Work is live, and immediately on reconnect.
 4. **`changes.since`.** A version gap asks the server for the missing range.
-   The server returns contiguous batched entries or a reset. The response is
+   The server returns contiguous batched entries or a reset that names why
+   (`invalid-cursor`, `epoch`, `future-version`, `ring-gap`). The response is
    JSON-sanitized at the RPC boundary: the host rejects explicit `undefined`
    entity fields, so absent optional fields are omitted exactly as they are at
    the snapshot/bootstrap boundaries.
 5. **Scoped resync.** A reset repairs only the scopes whose recorded version
    moved (`shell`, `work`, `transcript`). A malformed batch that mentions only
    Work entities repairs the Work scope; other malformed input falls back.
-6. **Full snapshot.** An epoch change or an unrecoverable scoped read uses the
+6. **Full snapshot.** A foreign boot epoch on a patch has no comparable
+   cursor, so it never enters `changes.since`; a trailing 200 ms window
+   coalesces one forced snapshot. An unrecoverable scoped read also uses the
    full durable snapshot. It is the last resort, not the steady-state path.
 7. **Legacy fallback.** Protocol-2 clients keep the old changed event and
    snapshot path. They never see a protocol-3-only shape as an authoritative
@@ -545,15 +548,24 @@ counts, sizes, versions, and timings only — never credentials or conversation
 content. `ENSEMBLE_DEBUG_CLONES=1` exposes full-clone counts and timing on the
 `diagnostic` RPC.
 
-### Structured operational logging (ticket #145)
+### Structured operational logging (tickets #145, #150)
 
-The service and TUI each own a small structured logger. The service observes
-store writes and emits task lifecycle (`task.created`, `task.transition`,
-`task.claimed`, `task.completed`, `task.failed`, `task.cancelled`), message
-append/finalize, approval requested/resolved/superseded, init lifecycle,
-retry scheduling/skips, feed batches/resets, and refresh measurements. Lease
-heartbeats and streaming deltas never produce lines; they remain counters or
-trace-only data.
+The service and TUI each own a small structured logger. Every row carries its
+role, a stable instance ID (the service boot epoch or the TUI mount UUID), and
+the `node:worker_threads` thread ID; one service log is kept per role, not per
+instance. The service observes store writes and emits task lifecycle
+(`task.created`, `task.transition`, `task.claimed`, `task.completed`,
+`task.failed`, `task.cancelled`), message append/finalize, approval
+requested/resolved/superseded, init lifecycle, retry scheduling/skips, feed
+batches/resets, and refresh measurements. `service.location` is logged once on
+the first viewed directory, and `logs.recent` accepts an `instanceID` filter.
+Lease heartbeats and streaming deltas never produce lines; they remain counters
+or trace-only data.
+
+`feed.reset` names its reason and identical resets collapse to one warning per
+10 s per instance with a `suppressed` count. The TUI keeps a local `feed.gap`
+counter (included in each gap warning) and coalesces foreign-epoch patches into
+one forced snapshot instead of a reset loop.
 
 A failure is a self-contained JSONL record, not a longer `task.error` string.
 Each failed attempt emits `failure.attempt` at `warn`, an uncertain outcome

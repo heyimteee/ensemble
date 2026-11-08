@@ -586,11 +586,16 @@ export type PatchBatch = {
   scopeVersions?: ScopeVersions
 }
 
+/** Ticket #150: a cursor reset always names why it could not be served. */
+export type FeedResetReason = "invalid-cursor" | "epoch" | "future-version" | "ring-gap"
+
 /** Cursor response for the revision-heartbeat gap recovery path. */
 export type ChangesSince = {
   epoch: number
   version: number
   reset: boolean
+  /** Ticket #150: why a reset was required; absent when the cursor is valid. */
+  reason?: FeedResetReason
   entries: ChangeEntry[]
   meta?: FeedMeta
   /** Ticket #141: identifies the minimal scoped resync after a reset. */

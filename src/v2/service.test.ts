@@ -4933,3 +4933,67 @@ test("catalog and config metadata travel on version-neutral patch events", async
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("ticket150: log rows identify the service instance, location, and thread", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-150-logs-"))
+  const pluginLocation = mkdtempSync(join(tmpdir(), "ensemble-150-location-"))
+  const { ctx } = fakeContext()
+  ;(ctx as any).directory = pluginLocation
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    await handlers.snapshot({ directory })
+    await handlers.snapshot({ directory })
+    const logs = await handlers["logs.recent"]({ directory, limit: 500 })
+    assert.ok(logs.entries.length > 0)
+    const start = logs.entries.find((entry: any) => entry.event === "service.start")
+    assert.ok(start)
+    assert.equal(start.directory, pluginLocation, "the start row names the plugin location, not the process cwd")
+    assert.equal(start.role, "service")
+    assert.equal(start.instanceID, logs.stats.instanceID)
+    assert.equal(start.threadID, 0)
+    for (const entry of logs.entries) {
+      assert.equal(entry.role, "service")
+      assert.equal(entry.instanceID, logs.stats.instanceID)
+      assert.equal(entry.threadID, 0)
+    }
+    const locations = logs.entries.filter((entry: any) => entry.event === "service.location")
+    assert.equal(locations.length, 1, "the first view directory is logged once per instance")
+    assert.equal(locations[0].directory, directory)
+
+    const filtered = await handlers["logs.recent"]({ directory, instanceID: logs.stats.instanceID, limit: 500 })
+    assert.equal(filtered.entries.length, logs.entries.length)
+    const foreign = await handlers["logs.recent"]({ directory, instanceID: "another-instance", limit: 500 })
+    assert.deepEqual(foreign.entries, [])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(pluginLocation, { recursive: true, force: true })
+  }
+})
+
+test("ticket150: feed resets name the reason and identical resets are rate-limited", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-150-reset-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  const handlers = service.handlers()
+  try {
+    const first = await handlers["changes.since"]({ directory, epoch: -1, version: 0 })
+    assert.equal(first.reset, true)
+    assert.equal(first.reason, "epoch")
+    const second = await handlers["changes.since"]({ directory, epoch: -2, version: 0 })
+    assert.equal(second.reset, true)
+    assert.equal(second.reason, "epoch")
+
+    const logs = await handlers["logs.recent"]({ directory, event: "feed.reset", limit: 100 })
+    assert.equal(logs.entries.length, 1, "identical reset warnings collapse inside the window")
+    assert.equal(logs.entries[0].reason, "epoch")
+    assert.equal(logs.entries[0].suppressed, 0)
+    assert.equal(logs.entries[0].instanceID, logs.stats.instanceID)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

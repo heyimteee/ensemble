@@ -3,6 +3,7 @@ import { unwrap } from "solid-js/store"
 import { SyntaxStyle } from "@opentui/core"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
@@ -148,7 +149,7 @@ import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { scopesToResync } from "../scoped-read.ts"
 import { approvalResolutionAt } from "../work-groups.ts"
-import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { configMetadataApplies, createForeignEpochCoalescer, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createClientStore } from "./client-store.ts"
 import { createStreamCoalescer } from "../stream-coalescer.ts"
 import {
@@ -349,7 +350,7 @@ async function invoke(context: any, action: string, payload: any = {}): Promise<
 export function EnsembleV2App() {
   const context = usePlugin()
   const pageToken = {}
-  const logger = createLogger({ role: "tui" })
+  const logger = createLogger({ role: "tui", instanceID: randomUUID() })
   tuiLogger = logger
   logger.event("info", "tui", "tui.mount", {
     directory: directoryOf(context),
@@ -2222,6 +2223,12 @@ export function EnsembleV2App() {
     snapshotRefresh.request()
     await snapshotRefresh.whenIdle()
   }
+  // Ticket #150: a foreign boot epoch has no comparable cursor. Collapse a
+  // burst into one forced snapshot and never enter the changes.since loop.
+  const foreignEpochRefresh = createForeignEpochCoalescer({
+    refresh: () => { void refreshFull().catch(() => undefined) },
+  })
+  let feedGapCount = 0
   /** Review fix: a Work-shaped bad batch repairs only the Work scope. */
   const recoverWorkScope = async (): Promise<void> => {
     if (scopedReads && supportsScopedReads(lastSnapshotMeta)) {
@@ -2296,6 +2303,17 @@ export function EnsembleV2App() {
   }
   const handlePatchEvent = (payload: PatchBatch) => {
     if (!lastSnapshotMeta || !supportsPatchFeed(lastSnapshotMeta)) return
+    // Ticket #150: a foreign-epoch patch must not ask `changes.since` for a
+    // cursor the server can only reset. Coalesce one full snapshot instead.
+    if (isForeignEpochPatch(lastSnapshotMeta, payload?.epoch)) {
+      if (foreignEpochRefresh.request()) {
+        logger.event("info", "feed", "feed.epoch.foreign", {
+          epoch: payload?.epoch,
+          cursorEpoch: lastSnapshotMeta.epoch,
+        })
+      }
+      return
+    }
     const decision = decidePatchApply(lastSnapshotMeta, payload)
     if (decision.action === "apply") {
       applyFeedDecision(decision, payload.counts)
@@ -2303,6 +2321,7 @@ export function EnsembleV2App() {
     }
     if (payload.counts) client.applyCounts(payload.counts)
     if (decision.action === "ignore") return
+    feedGapCount += 1
     logger.event("warn", "feed", "feed.gap", {
       reason: decision.reason,
       epoch: payload.epoch,
@@ -2310,6 +2329,7 @@ export function EnsembleV2App() {
       version: payload.version,
       entries: payload.entries?.length,
       reset: payload.reset === true,
+      count: feedGapCount,
     })
     // A malformed batch that can only have touched Work resyncs just the Work
     // scope; anything else needs the full durable snapshot boundary.
@@ -4004,6 +4024,7 @@ export function EnsembleV2App() {
   onCleanup(() => {
     heartbeatDisposed = true
     stopHeartbeat()
+    foreignEpochRefresh.dispose()
     groupStream.dispose()
     dmStream.dispose()
     snapshotRefresh.dispose()
