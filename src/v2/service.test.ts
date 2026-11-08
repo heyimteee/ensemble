@@ -3144,6 +3144,7 @@ test("ticket148: a live lease is never retired for attempts or a passed deadline
     const snapshot = await handlers.snapshot({ directory })
     const row = snapshot.state.subtasks.t as any
     assert.equal(row.state, "working", "a live lease survives attempt exhaustion and a passed deadline")
+    assert.equal(row.status, "working", "a live lease outranks the old delivery deadline")
     assert.equal(row.claimedBy, "run_live")
     assert.equal(row.leaseUntil, leaseUntil)
     assert.equal(row.attempts, 5)
@@ -3192,6 +3193,7 @@ test("ticket148: an expired lease is requeued once and attempts rise only on the
     const row = snapshot.state.subtasks.t as any
     // The expired claim is requeued without consuming an attempt.
     assert.equal(row.state, "pending")
+    assert.equal(row.status, "pending")
     assert.equal(row.claimedBy, undefined)
     assert.equal(row.leaseUntil, undefined)
     assert.equal(row.attempts, 2)
@@ -3262,7 +3264,7 @@ test("ticket149: restart requeue writes a failure attempt with the previous clai
   }
 })
 
-test("ticket149: restart retirement writes a terminal failure record", async () => {
+test("ticket168: attempt exhaustion stalls while an old delivery deadline only requeues", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-149-retire-"))
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
@@ -3291,9 +3293,14 @@ test("ticket149: restart retirement writes a terminal failure record", async () 
     const snapshot = await handlers.snapshot({ directory })
     assert.equal((snapshot.state.subtasks.t_exhausted as any).state, "replied")
     assert.equal((snapshot.state.subtasks.t_exhausted as any).outcome, "failed")
-    assert.equal((snapshot.state.subtasks.t_expired as any).state, "replied")
-    assert.equal((snapshot.state.subtasks.t_expired as any).outcome, "failed")
+    assert.equal((snapshot.state.subtasks.t_exhausted as any).status, "stalled")
+    assert.deepEqual((snapshot.state.subtasks.t_exhausted as any).failure, { kind: "attempts", reason: "attempts-exhausted" })
+    assert.equal((snapshot.state.subtasks.t_expired as any).state, "pending", "an old delivery timestamp does not retire queued work")
+    assert.equal((snapshot.state.subtasks.t_expired as any).outcome, "pending")
+    assert.equal((snapshot.state.subtasks.t_expired as any).status, "pending")
+    assert.equal((snapshot.state.subtasks.t_expired as any).claimedBy, undefined, "the lost lease is requeued")
     assert.equal((snapshot.state.subtasks.t_transient as any).state, "replied")
+    assert.equal((snapshot.state.subtasks.t_transient as any).status, "stalled")
     assert.equal((snapshot.state.subtasks.t_transient as any).error, "Gave up after 5 attempts.", "a transient recovery string never becomes terminal truth")
 
     const logs = await handlers["logs.recent"]({ directory, event: "failure.terminal", limit: 50 })
@@ -3311,16 +3318,205 @@ test("ticket149: restart retirement writes a terminal failure record", async () 
     assert.equal(exhausted.decision.maxAttempts, 5)
 
     const expired = logs.entries.find((entry: any) => entry.taskID === "t_expired") as any
-    assert.ok(expired, "an expired deadline is never silent")
-    assert.equal(expired.failureClass, "timeout", "a missed deadline is a timeout, not a restart")
-    assert.equal(expired.previousClaim, "run_dead")
-    assert.equal(expired.leaseExpiredAt, 1)
-    assert.equal(expired.reason, "deadline-exceeded")
-    assert.equal(expired.decision.type, "terminal")
-    assert.equal(expired.decision.reason, "deadline-exceeded")
+    assert.equal(expired, undefined, "a delivery deadline never writes a terminal failure")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket168: pending work past the delivery window stays queued and still runs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-168-queue-wait-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  const enqueuedAt = Date.now() - 10 * 60_000
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Queued", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 0, createdAt: enqueuedAt, deadlineAt: enqueuedAt + 5 * 60_000,
+    error: "The work deadline passed before it could finish.",
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "pending", "queue age does not retire unclaimed work")
+    assert.equal(row.status, "pending")
+    assert.equal(row.outcome, "pending")
+    assert.equal(row.failure, undefined)
+    const terminal = await handlers["logs.recent"]({ directory, event: "failure.terminal", taskID: "t", limit: 20 })
+    assert.equal(terminal.entries.length, 0, "a queued wait is never a terminal failure")
+    await handlers.invoke({ directory, action: "workspace.resume", payload: { id: "w" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.state === "replied" && (next.state.subtasks.t as any)?.outcome === "succeeded"
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal((after.state.subtasks.t as any).status, "replied")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket168: a completion handoff is not failed by the delivery window", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-168-completion-handoff-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  await seed.saveSubtask({
+    id: "hop", workspaceID: "w", creatorType: "agent", creatorAgentID: "a", assigneeID: "a", title: "Completion", instruction: "Finish",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 0, createdAt: Date.now() - 10 * 60_000, deadlineAt: Date.now() - 5 * 60_000,
+    workKind: "handoff", queueKey: "completion:w:parent:a", failure: undefined,
+    handoff: { correlationID: "handoff_completion", senderID: "a", recipientID: "a", depth: 1, completion: true },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const queued = await handlers.snapshot({ directory })
+    assert.equal((queued.state.subtasks.hop as any).state, "pending", "a completion delivery stays queued")
+    assert.equal((queued.state.subtasks.hop as any).status, "pending")
+    assert.equal((queued.state.subtasks.hop as any).failure, undefined)
+    const terminal = await handlers["logs.recent"]({ directory, event: "failure.terminal", taskID: "hop", limit: 20 })
+    assert.equal(terminal.entries.length, 0)
+    await handlers.invoke({ directory, action: "workspace.resume", payload: { id: "w" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.hop as any)?.state === "replied" && (next.state.subtasks.hop as any)?.outcome === "succeeded"
+    }, 5_000)
+    assert.equal(((await handlers.snapshot({ directory })).state.subtasks.hop as any).status, "replied")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket168: a parent awaiting children reads waiting, not retrying", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-168-waiting-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  await seed.saveSubtask({
+    id: "parent", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Parent", instruction: "Do parent",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true,
+    attempts: 1, retryAfter: Date.now() + 60_000, createdAt: 1,
+  })
+  await seed.saveSubtask({
+    id: "child", workspaceID: "w", parentID: "parent", creatorType: "agent", creatorAgentID: "a", assigneeID: "a",
+    title: "Child", instruction: "Do child", mode: "research", state: "pending", stage: "initial", outcome: "pending",
+    interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal((snapshot.state.subtasks.parent as any).status, "waiting", "children are a dependency wait, not a retry")
+    assert.equal((snapshot.state.subtasks.child as any).status, "pending")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket168: cancellation is explicit and never a timeout or failure", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-168-cancel-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { paused: true })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Stop me", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, retryAfter: Date.now() + 60_000, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const cancelled = await handlers.invoke({ directory, action: "task.cancel", payload: { id: "t" } })
+    assert.equal(cancelled.ok, true)
+    const snapshot = await handlers.snapshot({ directory })
+    const row = snapshot.state.subtasks.t as any
+    assert.equal(row.state, "replied")
+    assert.equal(row.status, "cancelled")
+    assert.equal(row.stoppedAt !== undefined, true)
+    assert.equal(row.failure, undefined, "a stop is not a native failure")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket168: legacy deadline and lease terminal rows reconcile to stalled from structured causes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-168-reconcile-"))
+  const logDirectory = mkdtempSync(join(tmpdir(), "ensemble-168-reconcile-logs-"))
+  const previousLogDirectory = process.env.ENSEMBLE_LOG_DIR
+  process.env.ENSEMBLE_LOG_DIR = logDirectory
+  const { ctx } = fakeContext()
+  let stop = async () => {}
+  try {
+    const seed = new V2Store(ctx)
+    await seed.load()
+    await seedAgent(seed)
+    await seedWorkspace(seed, directory)
+    const finishedAt = Date.now()
+    const terminal = (id: string, error: string) => ({
+      id, workspaceID: "w", creatorType: "user" as const, assigneeID: "a", title: id, instruction: "Do",
+      mode: "research" as const, state: "replied" as const, stage: "initial" as const, outcome: "failed" as const,
+      interrupted: false, awaitingChildren: false, attempts: 1, createdAt: finishedAt - 10,
+      deadlineAt: finishedAt - 1, finishedAt, repliedAt: finishedAt, error,
+    })
+    await seed.saveSubtask(terminal("legacy_deadline", "The work deadline passed before it could finish."))
+    await seed.saveSubtask(terminal("legacy_lease", "The lease expired before the run finished."))
+    await seed.saveSubtask(terminal("legacy_lease_exhausted", "Gave up after 5 attempts."))
+    await seed.saveSubtask(terminal("legacy_native", "quota exhausted"))
+    writeFileSync(
+      join(logDirectory, "service-failures-20261108-1.jsonl"),
+      [
+        { cat: "failure", event: "failure.terminal", taskID: "legacy_deadline", failureClass: "timeout", reason: "deadline-exceeded", decision: { type: "terminal", reason: "deadline-exceeded" } },
+        { cat: "failure", event: "failure.terminal", taskID: "legacy_lease", failureClass: "timeout", reason: "lease-expired", decision: { type: "terminal", reason: "lease-expired" } },
+        { cat: "failure", event: "failure.terminal", taskID: "legacy_lease_exhausted", failureClass: "internal", reason: "attempts-exhausted", previousClaim: "run_dead", leaseExpiredAt: 1, decision: { type: "terminal", reason: "attempts-exhausted" } },
+        { cat: "failure", event: "failure.terminal", taskID: "legacy_native", failureClass: "provider", reason: "attempts-exhausted", decision: { type: "terminal", reason: "attempts-exhausted" } },
+      ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+    )
+    const service = new EnsembleV2Service(ctx)
+    stop = await startServiceForTest(service, service.ctx)
+    const handlers = service.handlers()
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal((snapshot.state.subtasks.legacy_deadline as any).status, "stalled")
+    assert.deepEqual((snapshot.state.subtasks.legacy_deadline as any).failure, { kind: "delivery", reason: "deadline-exceeded" })
+    assert.equal((snapshot.state.subtasks.legacy_lease as any).status, "stalled")
+    assert.deepEqual((snapshot.state.subtasks.legacy_lease as any).failure, { kind: "lease", reason: "lease-expired" })
+    assert.equal((snapshot.state.subtasks.legacy_lease_exhausted as any).status, "stalled")
+    assert.deepEqual((snapshot.state.subtasks.legacy_lease_exhausted as any).failure, { kind: "attempts", reason: "attempts-exhausted" })
+    assert.equal((snapshot.state.subtasks.legacy_native as any).status, "failed", "a genuine native failure is never masked")
+    assert.equal((snapshot.state.subtasks.legacy_native as any).failure, undefined)
+    const logs = await handlers["logs.recent"]({ directory, event: "task.reconciled", limit: 20 })
+    assert.deepEqual(logs.entries.map((entry: any) => entry.taskID).sort(), ["legacy_deadline", "legacy_lease", "legacy_lease_exhausted"])
+    const reconciled = logs.entries.find((entry: any) => entry.taskID === "legacy_deadline") as any
+    assert.equal(reconciled.from, "failed")
+    assert.equal(reconciled.to, "stalled")
+    assert.equal(reconciled.reason, "deadline-exceeded")
+    assert.equal(reconciled.failureClass, "timeout")
+  } finally {
+    await stop()
+    if (previousLogDirectory === undefined) delete process.env.ENSEMBLE_LOG_DIR
+    else process.env.ENSEMBLE_LOG_DIR = previousLogDirectory
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(logDirectory, { recursive: true, force: true })
   }
 })
 
@@ -3598,7 +3794,7 @@ test("ticket148: stop releases local claims and preserves foreign claims", async
   }
 })
 
-test("exhausted attempts fail with the reason preserved", async () => {
+test("exhausted attempts stall with the reason preserved", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-queue-"))
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
@@ -3616,6 +3812,8 @@ test("exhausted attempts fail with the reason preserved", async () => {
     })
     const after = await handlers.snapshot({ directory })
     assert.equal(after.state.subtasks.t.outcome, "failed")
+    assert.equal((after.state.subtasks.t as any).status, "stalled")
+    assert.equal((after.state.subtasks.t as any).failure.kind, "attempts")
     assert.equal(after.state.subtasks.t.error, "boom")
     assert.ok(
       !((after.state.messages.w ?? []) as any[]).some((message) => message.text.includes("Subtask failed")),
@@ -4084,6 +4282,10 @@ test("ticket145: a terminal task failure writes a self-contained failure record"
       const next = await handlers.snapshot({ directory })
       return next.state.subtasks.t?.state === "replied" && next.state.subtasks.t?.outcome === "failed"
     }, 5_000)
+    const failedRow = (await handlers.snapshot({ directory })).state.subtasks.t as any
+    assert.equal(failedRow.status, "failed", "a real native execution error stays failed")
+    assert.equal(failedRow.failure.kind, "native")
+    assert.equal(failedRow.failure.reason, "attempts-exhausted")
     const logs = await handlers["logs.recent"]({ directory, limit: 100 })
     const terminal = logs.entries.find((entry: any) => entry.event === "failure.terminal" && entry.taskID === "t") as any
     assert.ok(terminal, "the failure sink carries one self-contained terminal record")

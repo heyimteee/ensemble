@@ -258,7 +258,7 @@ test("malformed, unknown, and missing-recipient handoffs are refused visibly", a
   }
 })
 
-test("exhausted and overdue handoffs deliver a failure notice where asked", async () => {
+test("exhausted handoffs stall with a notice; queue age never fails a handoff", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
   const { ctx } = fakeContext()
   const seed = new V2Store(ctx)
@@ -286,15 +286,19 @@ test("exhausted and overdue handoffs deliver a failure notice where asked", asyn
   try {
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      return (next.state.subtasks as any)["hop-tired"]?.state === "replied" && (next.state.subtasks as any)["hop-late"]?.state === "replied"
+      const tired = (next.state.subtasks as any)["hop-tired"]
+      const late = (next.state.subtasks as any)["hop-late"]
+      return tired?.state === "replied" && late?.state === "replied" && late?.outcome === "succeeded"
     })
     const after = await handlers.snapshot({ directory })
     assert.equal(after.state.subtasks["hop-tired"].outcome, "failed")
+    assert.equal((after.state.subtasks["hop-tired"] as any).status, "stalled", "exhausted delivery retries stall, not fail")
     assert.equal(after.state.subtasks["hop-tired"].error, "boom")
-    assert.equal(after.state.subtasks["hop-late"].outcome, "failed")
+    assert.equal(after.state.subtasks["hop-late"].outcome, "succeeded", "an old queue timestamp never fails a handoff")
+    assert.equal((after.state.subtasks["hop-late"] as any).status, "replied")
     const texts = ((after.state.messages.w ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handoff to $Sage failed: boom (ref handoff_exhausted)")))
-    assert.ok(texts.some((text) => text.includes("Handoff to $Sage failed:") && text.includes("handoff_overdue")))
+    assert.ok(!texts.some((text) => text.includes("handoff_overdue")), "the overdue handoff delivered, so it has no failure notice")
     for (const text of texts) assert.ok(!text.includes("@Sage"))
   } finally {
     await stop()
