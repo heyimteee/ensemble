@@ -13,6 +13,8 @@ export type Palette = {
   text: RGBA | string
   leader: RGBA | string
   border: RGBA | string
+  /** Ticket #173: the focused Work card border, distinct from pane focus. */
+  cardFocus: RGBA | string
   panel: RGBA | string
   focus: RGBA | string
   categorical: readonly any[]
@@ -54,12 +56,27 @@ export function palette(theme: {
     border: theme.border.base,
     panel,
     focus: theme.text.base,
+    // Ticket #173: the focused Work card is white (the theme's highest-
+    // contrast action text); the pane's own focus border stays `focus`.
+    cardFocus: (theme.text as any).action?.primary?.focused ?? "#ffffff",
     categorical: (theme as any).categorical ?? [],
     bg: theme.background?.base ?? theme.text.base,
   }
 }
 
 export type ThemeColor = RGBA | string
+
+/**
+ * Ticket #173: the one card-border mapping. A focused Work card is white; an
+ * unfocused card keeps the subdued grey border. Pane focus is a separate
+ * state drawn on the pane border, never on the cards.
+ */
+export function workCardBorderColor(
+  colors: Pick<Palette, "cardFocus" | "border">,
+  focused: boolean,
+): ThemeColor {
+  return focused ? colors.cardFocus : colors.border
+}
 
 function toRgba(color: ThemeColor | null | undefined): RGBA | null {
   if (!color) return null

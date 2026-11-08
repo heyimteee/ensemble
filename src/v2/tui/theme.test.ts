@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { RGBA } from "@opentui/core"
-import { contrastText, palette } from "./theme.ts"
+import { contrastText, palette, workCardBorderColor } from "./theme.ts"
 
 const LIGHT_ACCENT = "#f2e2b0"
 const DARK_ACCENT = "#1b2430"
@@ -41,4 +41,13 @@ test("ticket137: the pale-blue identity token works on dark and light themes", (
   assert.notEqual(dark.paleBlue, light.paleBlue)
   assert.equal(palette(themeWithBackground("#101010"), "light").paleBlue, light.paleBlue, "the host theme mode wins")
   assert.equal(palette(themeWithBackground("#fafafa"), "dark").paleBlue, dark.paleBlue, "the host theme mode wins")
+})
+
+test("ticket173: focused Work cards are white and unfocused cards are grey", () => {
+  const dark = palette(themeWithBackground("#101010"))
+  assert.equal(dark.cardFocus, "#ffffff", "the default theme's card focus border is white")
+  assert.equal(dark.border, "#555555", "unfocused cards keep the subdued border grey")
+  assert.notEqual(dark.cardFocus, dark.border)
+  assert.equal(workCardBorderColor(dark, true), "#ffffff")
+  assert.equal(workCardBorderColor(dark, false), "#555555")
 })

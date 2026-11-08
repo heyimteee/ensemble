@@ -36,6 +36,9 @@ export const MOUSE_GESTURES: readonly MouseGestureSpec[] = [
   { id: "mouse.release", gesture: "Release", title: "Copy the selection to the system clipboard and show a toast" },
   { id: "mouse.double", gesture: "Double-click", title: "Select a word" },
   { id: "mouse.triple", gesture: "Triple-click", title: "Select a line" },
+  { id: "mouse.work-card", gesture: "Click card", title: "Focus that Work card" },
+  { id: "mouse.work-page", gesture: "Click ‹ ›", title: "Page the Work pane" },
+  { id: "mouse.work-approval", gesture: "Click approval", title: "Focus an inline approval; click the focused row again to resolve it" },
 ]
 
 const PANE_ID_PREFIX = "ensemble-pane-"

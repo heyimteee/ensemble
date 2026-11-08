@@ -5,7 +5,7 @@ import { approvalSource } from "../types.ts"
 import type { DispatchLimits } from "../dispatch-budget.ts"
 import { limitsPanelFooter, limitsPanelRows, limitsPanelSubtitle, limitsPanelTitle } from "./limits.ts"
 import type { InteractionMode } from "./interaction.ts"
-import { contrastText, type Palette, type ThemeColor } from "./theme.ts"
+import { contrastText, type Palette, type ThemeColor, workCardBorderColor } from "./theme.ts"
 import { missingSkills, short } from "./format.ts"
 import { settingsTabLine, skillAssigned, skillPageItems, skillPaginationText, skillToggleMark } from "./skills.ts"
 import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
@@ -49,6 +49,7 @@ import type { ToastNotice, ToastTone } from "./toast.ts"
 import { approvalResolvedTone, type ApprovalResolvedSettle } from "./approvals.ts"
 import { tideRowParts, tideTone } from "./tide.ts"
 import type { WorkCard, WorkCardTide, WorkCardTones, WorkCompactRow } from "./workrows.ts"
+import { workApprovalsHeader, type WorkApprovalSection } from "./workapprovals.ts"
 import type { InitRow } from "./initrow.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 
@@ -411,7 +412,7 @@ export function WorkCardView(props: {
   tide: WorkCardTide
   selected: boolean
   width: number
-  /** Ticket #172 basic mouse selection; full card actions belong to #173. */
+  /** Ticket #173: focus is independent of the pane; only the border changes. */
   onSelect?: () => void
 }) {
   const terminal = () => props.card.terminal
@@ -419,6 +420,7 @@ export function WorkCardView(props: {
   // Ticket #137: name left in pale blue, then the right-aligned Braille and
   // uppercase status. Selection is a focus border only; green stays reserved
   // for REPLIED and no state color is painted on the rounded border.
+  // Ticket #173: the focused card border is white, unfocused cards stay grey.
   const header = (): StyledLinePart[] => [
     { text: props.card.header.name, fg: props.colors.paleBlue },
     { text: props.card.header.gap, fg: props.colors.text },
@@ -448,7 +450,7 @@ export function WorkCardView(props: {
       flexDirection="row"
       border
       borderStyle="rounded"
-      borderColor={props.selected ? props.colors.focus : props.colors.border}
+      borderColor={workCardBorderColor(props.colors, props.selected)}
       backgroundColor={props.colors.panel}
       onMouseDown={(event: any) => {
         if (Number(event?.button) !== 0) return
@@ -485,7 +487,7 @@ export function WorkCompactRowView(props: {
 }) {
   const tone = (key: WorkCardTones["glyph"]) => props.colors[key]
   const parts = (): StyledLinePart[] => [
-    { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.focus : props.colors.faint },
+    { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.cardFocus : props.colors.faint },
     { text: props.row.name, fg: props.colors.paleBlue },
     { text: props.row.separator, fg: props.colors.faint },
     { text: props.row.title, fg: props.terminal ? props.colors.muted : props.colors.text },
@@ -513,6 +515,73 @@ export function WorkCompactRowView(props: {
         wrapMode="none"
         flexShrink={0}
       />
+    </box>
+  )
+}
+
+/**
+ * Ticket #173: the sticky approvals section at the bottom of the Work pane.
+ * It keeps the existing inbox grammar in one compact row per approval; the
+ * header carries the overflow count and the V-only full inbox. Clicking a row
+ * focuses it; clicking the focused row resolves it.
+ */
+export function WorkApprovalsView(props: {
+  colors: Palette
+  section: WorkApprovalSection
+  focused: boolean
+  resolvingID: string | null
+  motionTick?: number
+  emphasized: ReadonlySet<string>
+  onFocus: () => void
+  onSelect: (index: number, approval: Approval) => void
+}) {
+  return (
+    <box
+      flexShrink={0}
+      width="100%"
+      flexDirection="column"
+      border={["top"]}
+      borderColor={props.focused ? props.colors.focus : props.colors.border}
+    >
+      <box
+        onMouseDown={(event: any) => {
+          if (Number(event?.button) !== 0) return
+          event?.preventDefault?.()
+          props.onFocus()
+        }}
+      >
+        <ChromeText
+          colors={props.colors}
+          fg={props.focused ? props.colors.focus : props.colors.muted}
+          bg={props.colors.bg}
+          width="100%"
+          truncate
+          text={workApprovalsHeader(props.section, props.focused)}
+        />
+      </box>
+      <For each={props.section.rows}>{(row) => {
+        const selected = () => props.focused && props.section.cursor === row.index
+        const emphasized = () => props.emphasized.has(row.approval.id)
+        return (
+          <box
+            onMouseDown={(event: any) => {
+              if (Number(event?.button) !== 0) return
+              event?.preventDefault?.()
+              props.onSelect(row.index, row.approval)
+            }}
+          >
+            <text
+              fg={selected() ? props.colors.good : emphasized() ? props.colors.accent : props.colors.warn}
+              bg={props.colors.bg}
+              width="100%"
+              truncate
+              attributes={emphasized() ? TextAttributes.BOLD : undefined}
+            >
+              {selected() ? "› " : "  "}[{approvalSourceTag(approvalSource(row.approval))}] {short(row.approval.title, 80)}{approvalResolvingSuffix(props.resolvingID === row.approval.id, props.motionTick ?? 0, process.env)}
+            </text>
+          </box>
+        )
+      }}</For>
     </box>
   )
 }

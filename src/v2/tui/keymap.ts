@@ -17,6 +17,7 @@ export type KeyContext =
   | "roster"
   | "chat"
   | "work"
+  | "workApprovals"
   | "composer"
   | "settings"
   /** Settings text field in Insert mode. */
@@ -176,33 +177,42 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "escape", scope: "normal", contexts: ["chat"], keys: ["escape"], title: "Clear search", group: "Navigation", listed: false },
 
   // Work list zone ---------------------------------------------------------
-  { id: "work.down", scope: "normal", contexts: ["work"], keys: ["j"], title: "Next work row", group: "Navigation", hint: "j/k row" },
-  { id: "work.up", scope: "normal", contexts: ["work"], keys: ["k"], title: "Previous work row", group: "Navigation" },
-  { id: "work.left", scope: "normal", contexts: ["work"], keys: ["h"], title: "Previous work column", group: "Navigation", hint: "h/l col" },
-  { id: "work.right", scope: "normal", contexts: ["work"], keys: ["l"], title: "Next work column", group: "Navigation" },
-  { id: "work.top", scope: "normal", contexts: ["work"], keys: ["g", "g"], title: "First work row", group: "Navigation", listed: false },
-  { id: "work.bottom", scope: "normal", contexts: ["work"], keys: ["shift+g"], title: "Last work row", group: "Navigation", listed: false },
+  { id: "work.down", scope: "normal", contexts: ["work"], keys: ["j"], title: "Next work card", group: "Navigation", hint: "j/k cards" },
+  { id: "work.up", scope: "normal", contexts: ["work"], keys: ["k"], title: "Previous work card", group: "Navigation" },
+  { id: "work.left", scope: "normal", contexts: ["work"], keys: ["h"], title: "Previous card in the row", group: "Navigation", hint: "h/l row" },
+  { id: "work.right", scope: "normal", contexts: ["work"], keys: ["l"], title: "Next card in the row", group: "Navigation" },
+  { id: "work.top", scope: "normal", contexts: ["work"], keys: ["g", "g"], title: "First work card", group: "Navigation", listed: false },
+  { id: "work.bottom", scope: "normal", contexts: ["work"], keys: ["shift+g"], title: "Last work card", group: "Navigation", listed: false },
   { id: "work.half.down", scope: "normal", contexts: ["work"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
   { id: "work.half.up", scope: "normal", contexts: ["work"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
   { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result", group: "Open", hint: "enter result" },
   // `d` is contextual: delegate here, never the text-buffer delete operator.
   { id: "work.delegate", scope: "normal", contexts: ["work"], keys: ["d"], title: "Delegate work", group: "Work", hint: "d delegate" },
   { id: "work.reassign", scope: "normal", contexts: ["work"], keys: ["t"], title: "Reassign work", group: "Work", hint: "t reassign" },
-  { id: "work.retry", scope: "normal", contexts: ["work"], keys: ["r"], title: "Retry work", group: "Work", hint: "r retry" },
+  { id: "work.retry", scope: "normal", contexts: ["work"], keys: ["r"], title: "Retry failed or stalled work", group: "Work", hint: "r retry" },
   { id: "work.restart", scope: "normal", contexts: ["work"], keys: ["shift+r"], title: "Restart work", group: "Work", hint: "R restart" },
   { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work", group: "Work", hint: "x cancel" },
   { id: "work.native", scope: "normal", contexts: ["work"], keys: ["o"], title: "Native session", group: "Navigate", hint: "o native" },
-  // Ticket #172 keeps the existing approval inbox reachable from Work focus;
-  // #173 moves approvals into the pane itself.
-  { id: "work.approvals", scope: "normal", contexts: ["work"], keys: ["v"], title: "Approvals", group: "Navigate" },
+  // Ticket #173: `v` focuses the sticky approvals section; `V` opens the full
+  // inbox only when the inline list overflows. Chat/roster keep the modal.
+  { id: "work.approvals", scope: "normal", contexts: ["work"], keys: ["v"], title: "Focus approvals", group: "Approvals", hint: "v approvals" },
+  { id: "work.inbox", scope: "normal", contexts: ["work", "workApprovals"], keys: ["shift+v"], title: "Open the approvals overflow inbox", group: "Approvals", hint: "V inbox" },
   // Ticket #172: the filter is a Work-pane view switch, not the rail filter.
   { id: "work.filter", scope: "normal", contexts: ["work"], keys: ["f"], title: "Toggle active and history", group: "View", hint: "f history" },
   { id: "work.page.up", scope: "normal", contexts: ["work"], keys: ["pageup"], title: "Previous Work page", group: "Navigation", listed: false },
   { id: "work.page.down", scope: "normal", contexts: ["work"], keys: ["pagedown"], title: "Next Work page", group: "Navigation", listed: false },
-  { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Transcript", group: "Focus", hint: "tab chat" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Transcript", group: "Focus" },
+  { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Next focus zone", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
   { id: "leader", scope: "normal", contexts: ["work"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
   { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Back to transcript", group: "Navigation", listed: false },
+
+  // Inline approvals zone (ticket #173) ------------------------------------
+  { id: "workApprovals.down", scope: "normal", contexts: ["workApprovals"], keys: ["j"], title: "Next approval", group: "Navigation", hint: "j/k approvals" },
+  { id: "workApprovals.up", scope: "normal", contexts: ["workApprovals"], keys: ["k"], title: "Previous approval", group: "Navigation" },
+  { id: "workApprovals.resolve", scope: "normal", contexts: ["workApprovals"], keys: ["enter"], title: "Resolve the focused approval", group: "Approvals", hint: "enter resolve" },
+  { id: "focus.tab", scope: "normal", contexts: ["workApprovals"], keys: ["tab"], title: "Next focus zone", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["workApprovals"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
+  { id: "workApprovals.back", scope: "normal", contexts: ["workApprovals"], keys: ["escape"], title: "Back to work cards", group: "Navigation", hint: "esc work" },
 
   // Settings ---------------------------------------------------------------
   { id: "settings.tab.prev", scope: "normal", contexts: ["settings"], keys: ["h"], title: "Previous tab", group: "Tabs", hint: "h/l tabs" },

@@ -45,16 +45,34 @@ test("a missing ref stays a no-op after its queued retry", () => {
   assert.doesNotThrow(() => queue[0]!())
 })
 
-test("Tab and Shift+Tab traverse rail, chat, and the work zone in both directions", () => {
+test("ticket173: Tab and Shift+Tab traverse rail, chat, work, and approvals in both directions", () => {
   assert.equal(nextFocusZone("rail", 1, true), "chat")
   assert.equal(nextFocusZone("chat", 1, true), "work")
-  assert.equal(nextFocusZone("work", 1, true), "chat")
-  assert.equal(nextFocusZone("chat", 1, false), "rail", "an unmounted work zone is skipped")
+  assert.equal(nextFocusZone("work", 1, true), "rail", "the cycle wraps when no approvals wait")
+  assert.equal(nextFocusZone("chat", 1, false), "rail", "an empty work zone is skipped")
 
   assert.equal(nextFocusZone("rail", -1, true), "work")
   assert.equal(nextFocusZone("work", -1, true), "chat")
   assert.equal(nextFocusZone("chat", -1, true), "rail")
-  assert.equal(nextFocusZone("rail", -1, false), "chat", "reverse skips the unmounted work zone")
+  assert.equal(nextFocusZone("rail", -1, false), "chat", "reverse skips the empty work zone")
+})
+
+test("ticket173: the focus cycle includes approvals only while they wait", () => {
+  assert.equal(nextFocusZone("work", 1, true, true), "approvals")
+  assert.equal(nextFocusZone("approvals", 1, true, true), "rail")
+  assert.equal(nextFocusZone("rail", -1, true, true), "approvals")
+  assert.equal(nextFocusZone("approvals", -1, true, true), "work")
+  assert.equal(nextFocusZone("work", 1, true, false), "rail", "no pending approvals means no approvals zone")
+  assert.equal(nextFocusZone("rail", -1, true, false), "work")
+  // A pane with no cards but pending approvals keeps the approvals zone.
+  assert.equal(nextFocusZone("chat", 1, false, true), "approvals")
+  assert.equal(nextFocusZone("approvals", 1, false, true), "rail")
+  assert.equal(nextFocusZone("approvals", -1, false, true), "chat")
+  // A vanished current zone still moves deterministically.
+  assert.equal(nextFocusZone("work", 1, false, true), "approvals")
+  assert.equal(nextFocusZone("work", -1, false, true), "chat")
+  assert.equal(nextFocusZone("approvals", 1, false, false), "rail")
+  assert.equal(nextFocusZone("approvals", -1, false, false), "chat")
 })
 
 test("half-page movement clamps to the list and uses at least one row", () => {

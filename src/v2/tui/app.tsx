@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
-import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
@@ -199,7 +199,6 @@ import {
 import { nextWorkInvalidation, workGroupCounts } from "./workgroups.ts"
 import {
   paginateWorkGroups,
-  settleWorkFocus,
   workPaneBodyHeight,
   workPaneHeader,
   workTaskPage,
@@ -208,6 +207,21 @@ import {
   type WorkPaneSection as WorkLayoutSection,
   type WorkView,
 } from "./workpane.ts"
+import {
+  findWorkFocus,
+  firstWorkFocus,
+  focusFirstOnPage,
+  halfPageWorkFocus,
+  lastWorkFocus as lastWorkCardFocus,
+  navigateWorkFocus,
+  settleWorkFocusByPosition,
+  workFocusPosition,
+  workLayoutRects,
+  type WorkDirection,
+  type WorkFocusPosition,
+} from "./workfocus.ts"
+import { workApprovalLimit, workApprovalSection } from "./workapprovals.ts"
+import { isWorkActionID, workTaskActions, type WorkActionID } from "./workactions.ts"
 import {
   accumulateCompletions,
   BUBBLE_CHROME,
@@ -431,7 +445,9 @@ export function EnsembleV2App() {
   const [workPage, setWorkPage] = createSignal(1)
   const [workFocusID, setWorkFocusID] = createSignal<string | undefined>(undefined)
   const [workDrawerOpen, setWorkDrawerOpen] = createSignal(false)
-  let lastWorkFocusIndex = 0
+  // Ticket #173: spatial focus remembers the last rendered rectangle so a
+  // disappeared card falls back to its nearest neighbour, not a column index.
+  let lastWorkFocus: WorkFocusPosition | undefined
   let workFocusIntent: "first" | "nearest" = "nearest"
   const [chatContext, setChatContext] = createSignal<ChatContext | null>(null)
   const [settingsAgentID, setSettingsAgentID] = createSignal<string | null>(null)
@@ -857,7 +873,7 @@ export function EnsembleV2App() {
   const workWidth = () => panes().workWidth
   const workContentWidth = () => panes().workContentWidth
   const workPaneMode = () => panes().mode
-  const workBodyHeight = () => workPaneBodyHeight(viewHeight())
+  const workFullBodyHeight = () => workPaneBodyHeight(viewHeight())
   const activeCount = createMemo(() => activeTasks().filter((task) => task.state === "working").length)
   // Ticket #118: the System Agent init row is a live, staged row. It belongs
   // to the workspace surface, survives navigation through snapshot state, and
@@ -872,6 +888,17 @@ export function EnsembleV2App() {
   const initRows = createMemo(() => liveInitJobs().map((job) => initRowForJob(job, motionFrame(), process.env)))
   const initRowMessageIDs = createMemo(() => initJobMessageIDs(state()?.initJobs ?? {}, surface()?.kind === "workspace" ? activeWorkspace()?.id : undefined))
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
+  // Ticket #173: the sticky approvals section reserves rows from the Work
+  // body, so pagination keeps the cards above it visible. The header is one
+  // row and the window is at most three rows.
+  const inlineApprovalLimit = createMemo(() =>
+    pendingApprovals().length > 0 ? workApprovalLimit(workFullBodyHeight()) : 0,
+  )
+  const inlineApprovals = createMemo(() =>
+    workApprovalSection(pendingApprovals(), approvalCursor(), Math.max(1, inlineApprovalLimit())),
+  )
+  const workBodyHeight = () =>
+    Math.max(2, workFullBodyHeight() - (inlineApprovalLimit() > 0 ? inlineApprovalLimit() + 2 : 0))
   // Ticket #126: one-shot inbox transitions. The first snapshot is the
   // baseline; later arrivals emphasize once and resolved rows settle once.
   // A short app-owned cadence repaints only while one of those windows is
@@ -1077,10 +1104,13 @@ export function EnsembleV2App() {
         .flatMap((section) => section.cards.map((card) => card.id)),
     )
   })
+  // Ticket #173: rectangles are the cursor geometry. This memo depends on the
+  // layout only, never on focus or the current page, so moving the cursor can
+  // never rebuild card data.
+  const workFocusPages = createMemo(() => workLayoutRects(workViews()[workView()].layout))
   // Ticket #172: the cursor and every work action target the visible page.
-  // HISTORY cards are selectable so their result can be inspected; the
-  // action handlers below still refuse terminal tasks until #173 owns the
-  // full action surface.
+  // HISTORY cards are selectable so their result can be inspected; ticket
+  // #173 gates each action by status instead of refusing every terminal card.
   const visibleTasks = createMemo(() => workPane().layout.selectableTasks)
   const taskCursorClamped = () => {
     const tasks = visibleTasks()
@@ -1089,26 +1119,76 @@ export function EnsembleV2App() {
     return index >= 0 ? index : 0
   }
   const selectedTask = createMemo(() => visibleTasks()[taskCursorClamped()])
-  const selectedActionTask = () => {
+  const selectedTaskActions = createMemo(() => {
+    // Track the expiry revision so a stalled/retrying card's action set
+    // settles without waiting for an unrelated snapshot.
+    workRevision()
+    return workTaskActions(selectedTask(), Date.now())
+  })
+  const selectedActionTask = (action: WorkActionID) => {
     const task = selectedTask()
-    if (!task) return undefined
-    return isTerminalWorkStatus(deriveWorkStatus(task, Date.now())) ? undefined : task
+    return task && selectedTaskActions().has(action) ? task : undefined
   }
-  // Focus is stored by task ID and reconciled after every layout/page update:
-  // a still-visible task keeps focus, a filter switch falls back to the first
-  // card, and a finished card moves to the nearest remaining index.
+  const rememberWorkFocus = (target: Parameters<typeof workFocusPosition>[0]) => {
+    lastWorkFocus = workFocusPosition(target)
+  }
+  const focusWorkTarget = (target: Parameters<typeof workFocusPosition>[0], intent: "first" | "nearest" = "nearest") => {
+    if (!target) return false
+    workFocusIntent = intent
+    rememberWorkFocus(target)
+    if (target.page !== workPage()) setWorkPage(target.page)
+    if (target.id !== workFocusID()) setWorkFocusID(target.id)
+    return true
+  }
+  // Focus is stored by task ID and reconciled against the rendered
+  // rectangles after every layout/page update: a still-visible task keeps
+  // focus (and follows its page), a filter switch falls back to the first
+  // card, and a disappeared card falls back to the nearest prior position.
   createEffect(() => {
-    const tasks = visibleTasks()
-    const settlement = settleWorkFocus(tasks, workFocusID(), lastWorkFocusIndex, workFocusIntent)
+    const pages = workFocusPages()
+    const settlement = settleWorkFocusByPosition(pages, lastWorkFocus, workFocusIntent)
     workFocusIntent = "nearest"
-    lastWorkFocusIndex = settlement.index
+    if (!settlement) {
+      lastWorkFocus = undefined
+      if (workFocusID() !== undefined) setWorkFocusID(undefined)
+      return
+    }
+    rememberWorkFocus(settlement)
+    if (settlement.page !== workPage()) setWorkPage(settlement.page)
     if (settlement.id !== workFocusID()) setWorkFocusID(settlement.id)
+  })
+  // Ticket #173: a pending-action label stays on its card through the RPC and
+  // clears as soon as the durable row reaches its terminal update.
+  createEffect(() => {
+    const pending = pendingWork()
+    if (!pending) return
+    const task = state()?.subtasks[pending.id]
+    if (!task || isTerminalWorkStatus(deriveWorkStatus(task, Date.now()))) {
+      setPendingWork((current) => (current?.id === pending.id ? null : current))
+    }
   })
   const workHeader = () => {
     const pane = workPane()
     return workPaneHeader(pane.view, pane.counts.groups, pane.counts.active, pane.counts.done, pane.page, pane.pages)
   }
   const selectedApproval = createMemo(() => pendingApprovals()[approvalCursor()])
+  // Ticket #173: inline approvals own a cursor over the pending list. Keep it
+  // in range, and leave the approvals zone when the last row resolves so the
+  // keyboard never stays on an empty section.
+  createEffect(() => {
+    const total = pendingApprovals().length
+    if (total === 0) {
+      if (approvalCursor() !== 0) setApprovalCursor(0)
+      return
+    }
+    if (approvalCursor() > total - 1) setApprovalCursor(total - 1)
+  })
+  createEffect(() => {
+    if (interaction().focus !== "approvals") return
+    if (pendingApprovals().length > 0) return
+    if (interaction().overlay !== "none") return
+    dispatchInteraction({ type: "focus.set", focus: "work" })
+  })
   // Ticket #171: one rail model for the split Agents / Workspaces panes. The
   // app supplies recency-ordered workspaces and server-derived counts; the
   // pure model owns primary-workspace grouping, filtering, labels, and
@@ -1346,13 +1426,15 @@ export function EnsembleV2App() {
   // dump: no streamed body text anywhere. The motion tick keeps the hold
   // closing reactive while the work clock owns the repaint.
   const hasActiveWorkNow = () => hasActiveWork(activeTasks(), Date.now())
-  const workOwnsFocus = () => interaction().focus === "work" && !composerActive() && !overlayOpen()
+  const workOwnsFocus = () => (interaction().focus === "work" || interaction().focus === "approvals") && !composerActive() && !overlayOpen()
+  /** Ticket #173: Work and inline approvals own their own pane border. */
+  const chatOwnsFocus = () => chromeOwnsFocus(chromeFocus(), "chat") && interaction().focus !== "work" && interaction().focus !== "approvals"
   // A resize into the drawer breakpoint must not leave keyboard focus on a
   // hidden pane. Opening the drawer is explicit (Tab/F3); closing it returns
   // focus to the chat.
   createEffect(() => {
     if (workPaneMode() !== "drawer" || workDrawerOpen()) return
-    if (interaction().focus === "work") setFocusArea("chat")
+    if (interaction().focus === "work" || interaction().focus === "approvals") setFocusArea("chat")
   })
   // Slice C stop affordance (brief §2.5): while active work runs on the group
   // surface a run is abortable, so the composer names `Ctrl+C stop`; the hint
@@ -2124,6 +2206,8 @@ export function EnsembleV2App() {
       case "chat": return "chat"
       // Ticket #172: a DM has no Work pane; a hidden drawer has no keys.
       case "work": return showWorkPane() ? "work" : null
+      // Ticket #173: inline approvals are their own keyboard zone.
+      case "approvals": return showWorkPane() ? "workApprovals" : null
       default: return null
     }
   }
@@ -2574,6 +2658,7 @@ export function EnsembleV2App() {
     setWorkView("active")
     setWorkPage(1)
     workFocusIntent = "first"
+    lastWorkFocus = undefined
     setWorkFocusID(undefined)
     setTranscriptSearch(null)
     await run("Activate workspace", async () => { await invoke(context, "workspace.activate", { id: workspace.id }) })
@@ -2629,14 +2714,30 @@ export function EnsembleV2App() {
   }
   /** Focus one visible Work card by ID; the settlement effect owns fallbacks. */
   const focusWorkTask = (id: string | undefined) => {
-    workFocusIntent = "nearest"
-    lastWorkFocusIndex = id ? Math.max(0, visibleTasks().findIndex((task) => task.id === id)) : 0
+    if (id === undefined) {
+      workFocusIntent = "first"
+      lastWorkFocus = undefined
+      setWorkFocusID(undefined)
+      return
+    }
+    const target = findWorkFocus(workFocusPages(), id)
+    if (target) {
+      focusWorkTarget(target)
+      return
+    }
+    workFocusIntent = "first"
+    lastWorkFocus = undefined
     setWorkFocusID(id)
   }
-  const focusWorkIndex = (index: number) => {
-    const tasks = visibleTasks()
-    if (tasks.length === 0) return
-    focusWorkTask(tasks[Math.max(0, Math.min(tasks.length - 1, index))]?.id)
+  const focusFirstWork = () => focusWorkTarget(firstWorkFocus(workFocusPages()), "first")
+  const focusLastWork = () => focusWorkTarget(lastWorkCardFocus(workFocusPages()))
+  const focusWorkDirection = (direction: WorkDirection) => {
+    focusWorkTarget(navigateWorkFocus(workFocusPages(), workFocusID(), direction))
+  }
+  const focusWorkHalf = (direction: 1 | -1) => {
+    focusWorkTarget(
+      halfPageWorkFocus(workFocusPages(), workFocusID(), direction === 1 ? "down" : "up", Math.max(1, Math.floor(workFullBodyHeight() / 2))),
+    )
   }
   /** Restore a persisted task ID into whichever view and page holds it. */
   const restoreWorkFocus = (taskID: string) => {
@@ -2644,36 +2745,43 @@ export function EnsembleV2App() {
     const activePage = workTaskPage(views.active.layout, taskID)
     if (activePage !== undefined) {
       setWorkView("active")
-      setWorkPage(activePage)
-      focusWorkTask(taskID)
+      const target = findWorkFocus(workLayoutRects(views.active.layout), taskID)
+      if (target) focusWorkTarget(target)
+      else { setWorkPage(activePage); setWorkFocusID(taskID) }
       return
     }
     const historyPage = workTaskPage(views.history.layout, taskID)
     if (historyPage !== undefined) {
       setWorkView("history")
-      setWorkPage(historyPage)
-      focusWorkTask(taskID)
+      const target = findWorkFocus(workLayoutRects(views.history.layout), taskID)
+      if (target) focusWorkTarget(target)
+      else { setWorkPage(historyPage); setWorkFocusID(taskID) }
       return
     }
     workFocusIntent = "first"
+    lastWorkFocus = undefined
     setWorkFocusID(undefined)
   }
   /**
-   * Ticket #172: `f` toggles ACTIVE/HISTORY. Keeping the task ID across the
-   * switch means a card that exists in both views (an active card whose group
-   * moved to history) keeps focus; otherwise the first card wins.
+   * Ticket #172: `f` toggles ACTIVE/HISTORY. Ticket #173 keeps the task ID
+   * across the switch whenever the target view still holds it; otherwise the
+   * first card wins.
    */
   const toggleWorkView = () => {
     const target: WorkView = workView() === "active" ? "history" : "active"
-    const focused = workFocusID()
-    const layout = workViews()[target].layout
-    const page = focused ? workTaskPage(layout, focused) : undefined
-    workFocusIntent = page === undefined ? "first" : "nearest"
+    const pages = workLayoutRects(workViews()[target].layout)
+    const kept = findWorkFocus(pages, workFocusID())
     setWorkView(target)
-    setWorkPage(page ?? 1)
-    if (page === undefined) setWorkFocusID(undefined)
+    if (kept) {
+      focusWorkTarget(kept)
+      return
+    }
+    workFocusIntent = "first"
+    lastWorkFocus = undefined
+    setWorkFocusID(undefined)
+    setWorkPage(1)
   }
-  /** Ticket #172 basic mouse selection: focus a card, never act on it. */
+  /** Mouse selection: focus a card, never act on it. */
   const selectWorkCard = (id: string) => {
     dispatchInteraction({ type: "focus.set", focus: "work" })
     focusWorkTask(id)
@@ -2682,9 +2790,14 @@ export function EnsembleV2App() {
     const pages = Math.max(1, workPane().pages)
     const next = Math.max(1, Math.min(pages, Math.floor(page)))
     dispatchInteraction({ type: "focus.set", focus: "work" })
-    if (next === workPage()) return
-    setWorkPage(next)
+    const target = focusFirstOnPage(workFocusPages(), next)
+    if (next !== workPage()) setWorkPage(next)
+    if (target) {
+      focusWorkTarget(target)
+      return
+    }
     workFocusIntent = "first"
+    lastWorkFocus = undefined
     setWorkFocusID(undefined)
   }
   const moveWorkPage = (delta: number) => selectWorkPage(workPage() + delta)
@@ -2692,54 +2805,74 @@ export function EnsembleV2App() {
     if (workPaneMode() !== "drawer") return
     if (workDrawerOpen()) {
       setWorkDrawerOpen(false)
-      if (interaction().focus === "work") setFocusArea("chat")
+      if (interaction().focus === "work" || interaction().focus === "approvals") setFocusArea("chat")
     } else {
       setWorkDrawerOpen(true)
       dispatchInteraction({ type: "focus.set", focus: "work" })
     }
   }
-  const moveTask = (delta: number) => {
-    const length = visibleTasks().length
-    if (length === 0) return
-    const columns = Math.max(1, workPane().layout.columns)
-    const cursor = taskCursorClamped()
-    const next = cursor + delta * columns
-    focusWorkIndex(next < 0 ? cursor % columns : next)
+  const moveTask = (delta: number) => focusWorkDirection(delta < 0 ? "up" : "down")
+  const moveTaskColumn = (delta: number) => focusWorkDirection(delta < 0 ? "left" : "right")
+  const moveTaskHalf = (direction: 1 | -1) => focusWorkHalf(direction)
+  /** `v`: enter the sticky approvals zone without opening the modal inbox. */
+  const focusWorkApprovals = () => {
+    const total = pendingApprovals().length
+    if (total === 0) {
+      showToast({ title: "Approvals", message: "Nothing waits for you.", tone: "info" })
+      return
+    }
+    dispatchInteraction({ type: "focus.set", focus: "approvals" })
+    setApprovalCursor((cursor) => Math.max(0, Math.min(total - 1, cursor)))
   }
-  const moveTaskColumn = (delta: number) => {
-    const length = visibleTasks().length
-    if (length === 0) return
-    const columns = Math.max(1, workPane().layout.columns)
-    const cursor = taskCursorClamped()
-    const rowStart = Math.floor(cursor / columns) * columns
-    const rowEnd = Math.min(length - 1, rowStart + columns - 1)
-    focusWorkIndex(Math.max(rowStart, Math.min(rowEnd, cursor + delta)))
+  const moveInlineApproval = (delta: number) => {
+    const total = pendingApprovals().length
+    if (total === 0) return
+    setApprovalCursor((cursor) => Math.max(0, Math.min(total - 1, cursor + delta)))
   }
-  const moveTaskHalf = (direction: 1 | -1) => {
-    const length = visibleTasks().length
-    if (length === 0) return
-    const columns = Math.max(1, workPane().layout.columns)
-    const delta = direction * columns * Math.max(1, Math.floor(listPage() / 2))
-    focusWorkIndex(Math.max(0, Math.min(length - 1, taskCursorClamped() + delta)))
+  const resolveInlineApproval = () => {
+    const approval = pendingApprovals()[approvalCursor()]
+    if (approval) void resolveApproval(approval).catch(showError)
+  }
+  /** `V`: the full inbox is an overflow affordance, never the common path. */
+  const openApprovalsOverflow = () => {
+    if (inlineApprovals().overflow === 0) {
+      showToast({ title: "Approvals", message: "No inline overflow — resolve approvals in the Work pane.", tone: "info" })
+      return
+    }
+    openApprovals()
   }
   /**
-   * Tab/Shift+Tab move focus zones. Forward: roster -> chat -> work list ->
-   * chat; reverse mirrors it, and the rail reaches the work zone directly.
-   * A group chat with no inline work falls back to the rail; Direct
-   * conversations have no work list. The composer is entered with i/Enter,
-   * never Tab.
+   * Mouse: the first click focuses an approval row; clicking the already
+   * focused row resolves it, matching Enter.
+   */
+  const selectInlineApproval = (index: number, approval: Approval) => {
+    if (interaction().focus === "approvals" && approvalCursor() === index) {
+      void resolveApproval(approval).catch(showError)
+      return
+    }
+    dispatchInteraction({ type: "focus.set", focus: "approvals" })
+    setApprovalCursor(index)
+  }
+  /**
+   * Tab/Shift+Tab move focus zones: rail -> chat -> work -> approvals,
+   * skipping empty zones and wrapping to the rail. A group chat with no work
+   * or approvals still moves rail <-> chat. Direct conversations have no Work
+   * pane. The composer is entered with i/Enter, never Tab.
    */
   const cycleFocusZone = (direction: 1 | -1 = 1) => {
     clearPendingChord()
     const focus = interaction().focus
-    if (focus !== "rail" && focus !== "chat" && focus !== "work") return
-    const next: FocusZone = nextFocusZone(focus, direction, hasWorkZone())
+    if (focus !== "rail" && focus !== "chat" && focus !== "work" && focus !== "approvals") return
+    const approvals = pendingApprovals().length > 0
+    const next: FocusZone = nextFocusZone(focus, direction, hasWorkZone(), approvals)
     // Below 96 columns the Work pane is a drawer: entering it opens the
     // drawer, and leaving it releases the chat width again.
     if (workPaneMode() === "drawer") {
-      if (next === "work") setWorkDrawerOpen(true)
-      else if (next === "chat") setWorkDrawerOpen(false)
+      if (next === "work" || next === "approvals") setWorkDrawerOpen(true)
+      else setWorkDrawerOpen(false)
     }
+    if (next === "work" && !selectedTask()) focusFirstWork()
+    if (next === "approvals" && approvals) setApprovalCursor((cursor) => Math.max(0, Math.min(pendingApprovals().length - 1, cursor)))
     dispatchInteraction({ type: "focus.set", focus: next })
   }
 
@@ -3596,7 +3729,7 @@ export function EnsembleV2App() {
   }
 
   const delegateSelected = async () => {
-    const task = selectedActionTask(); const workspace = activeWorkspace()
+    const task = selectedActionTask("work.delegate"); const workspace = activeWorkspace()
     if (!task || !workspace) return
     const target = await openChoice("Delegate subtask", activeAgents().map((agent) => ({ title: agent.name, value: agent.id })))
     if (!target) return
@@ -3608,7 +3741,7 @@ export function EnsembleV2App() {
   }
 
   const reassignSelected = async () => {
-    const task = selectedActionTask(); if (!task) return
+    const task = selectedActionTask("work.reassign"); if (!task) return
     const target = await openChoice("Reassign subtask", activeAgents().map((agent) => ({ title: agent.name, value: agent.id })))
     if (target) await run("Reassign subtask", async () => { await invoke(context, "task.reassign", { id: task.id, assigneeID: target }) })
   }
@@ -3633,13 +3766,13 @@ export function EnsembleV2App() {
   }
 
   const retrySelected = async () => {
-    const task = selectedActionTask(); if (!task) return
+    const task = selectedActionTask("work.retry"); if (!task) return
     setPendingWork({ id: task.id, action: "retry" })
     try { await run("Retry subtask", async () => { await invoke(context, "task.retry", { id: task.id }) }) }
     finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
   }
   const restartSelected = async () => {
-    const task = selectedActionTask(); if (!task) return
+    const task = selectedActionTask("work.restart"); if (!task) return
     setPendingWork({ id: task.id, action: "restart" })
     try { await run("Restart subtask", async () => { await invoke(context, "task.restart", { id: task.id }) }) }
     finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
@@ -3649,7 +3782,7 @@ export function EnsembleV2App() {
   // state arrives. The finally clears it on completion AND error, so no row
   // can stick on the interim label.
   const cancelSelected = async (action: PendingWorkAction = "cancel") => {
-    const task = selectedActionTask(); if (!task) return
+    const task = selectedActionTask("work.cancel"); if (!task) return
     setPendingWork({ id: task.id, action })
     try { await run(action === "stop" ? "Stop subtask" : "Cancel subtask", async () => { await invoke(context, "task.cancel", { id: task.id }) }) }
     finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
@@ -4330,8 +4463,8 @@ export function EnsembleV2App() {
     "work.up": () => moveTask(-1),
     "work.left": () => moveTaskColumn(-1),
     "work.right": () => moveTaskColumn(1),
-    "work.top": () => focusWorkIndex(0),
-    "work.bottom": () => focusWorkIndex(Math.max(0, visibleTasks().length - 1)),
+    "work.top": () => focusFirstWork(),
+    "work.bottom": () => focusLastWork(),
     "work.half.down": () => moveTaskHalf(1),
     "work.half.up": () => moveTaskHalf(-1),
     "work.filter": () => toggleWorkView(),
@@ -4344,8 +4477,13 @@ export function EnsembleV2App() {
     "work.restart": () => restartSelected(),
     "work.cancel": () => cancelSelected(),
     "work.native": () => openNative(),
-    // Ticket #172: Work focus keeps the existing modal until #173.
-    "work.approvals": () => openApprovals(),
+    // Ticket #173: inline approvals stay in the pane; V is the overflow inbox.
+    "work.approvals": () => focusWorkApprovals(),
+    "work.inbox": () => openApprovalsOverflow(),
+    "workApprovals.down": () => moveInlineApproval(1),
+    "workApprovals.up": () => moveInlineApproval(-1),
+    "workApprovals.resolve": () => resolveInlineApproval(),
+    "workApprovals.back": () => dispatchInteraction({ type: "focus.set", focus: "work" }),
     // Settings grammar (#83): the keys live in the catalog; these handlers
     // only mutate the cursor or dispatch the row action.
     "settings.tab.prev": () => setSettingsTabTo(settingsTabStep(settingsTab(), -1)),
@@ -4732,7 +4870,7 @@ export function EnsembleV2App() {
         runKeyAction(entry.id)
       },
     })
-    const surfaceLayer = (keyContext: "roster" | "chat" | "work") => {
+    const surfaceLayer = (keyContext: "roster" | "chat" | "work" | "workApprovals") => {
       const entries = layerEntries(keyContext)
       if (entries.length === 0) return
       const commands = entries.map((entry) => catalogCommand(entry, `ensemble.v2.key.${keyContext}.${entry.id}`))
@@ -4745,7 +4883,7 @@ export function EnsembleV2App() {
       })
       context.keymap.layer(factory)
     }
-    for (const keyContext of ["roster", "chat", "work"] as const) {
+    for (const keyContext of ["roster", "chat", "work", "workApprovals"] as const) {
       surfaceLayer(keyContext)
     }
     // Ticket #83: settings is generated from its own catalog context. The
@@ -6211,6 +6349,7 @@ export function EnsembleV2App() {
     if (prompt) return composerPosition(String(textPromptRef?.plainText ?? prompt.value), Number(textPromptRef?.cursorOffset ?? 0))
     if (interaction().focus === "rail") return listPosition(railCursor(), railVisibleRows().length)
     if (interaction().focus === "work") return listPosition(taskCursorClamped(), visibleTasks().length)
+    if (interaction().focus === "approvals") return listPosition(approvalCursor(), pendingApprovals().length)
     const metrics = transcriptScroll()
     return transcriptPosition(metrics.top, metrics.height, metrics.viewport)
   }
@@ -6308,7 +6447,18 @@ export function EnsembleV2App() {
         filter: (entry) => entry.id !== "composerInsert.stop" || stoppable(),
       })
     }
-    if (interaction().focus === "work") return statuslineHints("work", { hasWork: hasWorkZone() })
+    // Ticket #173: advertise only the focused card's valid actions, and the
+    // approvals keys only while they can do something.
+    const workHintFilter = (entry: KeyEntry) => {
+      if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)
+      if (entry.id === "work.approvals") return pendingApprovals().length > 0
+      if (entry.id === "work.inbox") return inlineApprovals().overflow > 0
+      return true
+    }
+    if (interaction().focus === "work") return statuslineHints("work", { hasWork: hasWorkZone(), filter: workHintFilter })
+    if (interaction().focus === "approvals") {
+      return statuslineHints("workApprovals", { filter: (entry) => entry.id !== "work.inbox" || inlineApprovals().overflow > 0 })
+    }
     const keyContext = surfaceKeyContext()
     if (keyContext) return statuslineHints(keyContext, { hasWork: hasWorkZone() })
     return footerLine1({ focus: chromeFocus(), hasWork: hasWorkZone() })
@@ -6382,8 +6532,8 @@ export function EnsembleV2App() {
       </box>
         <box flexDirection="row" flexGrow={1} minHeight={0} gap={1} position="relative" opacity={overlayOpen() ? 0.35 : 1}>
           <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
-          <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") && interaction().focus !== "work" ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
-            <ChromeText colors={colors} fg={(chromeFocus() === "chat" && interaction().focus !== "work") || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
+          <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chatOwnsFocus() ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
+            <ChromeText colors={colors} fg={(chromeFocus() === "chat" && interaction().focus !== "work" && interaction().focus !== "approvals") || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={limitsOpen()} fallback={
               <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
@@ -6634,7 +6784,7 @@ export function EnsembleV2App() {
                           const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
                           return {
                             terminal,
-                            selected: workOwnsFocus() && selectedTask()?.id === task.id,
+                            selected: selectedTask()?.id === task.id,
                             row: workCompactRow(
                               agentName(state(), task.assigneeID),
                               task.title || "(untitled)",
@@ -6683,7 +6833,7 @@ export function EnsembleV2App() {
                                 now: Date.now(),
                               })}
                               width={workPane().layout.cardWidth}
-                              selected={workOwnsFocus() && selectedTask()?.id === card.id}
+                              selected={selectedTask()?.id === card.id}
                               onSelect={() => selectWorkCard(card.id)}
                             />
                           )}</For>
@@ -6693,6 +6843,20 @@ export function EnsembleV2App() {
                   )}</For>
                 </Show>
               </box>
+              {/* Ticket #173: approvals stay stuck to the pane bottom, above
+                  the pager, in both ACTIVE and HISTORY. */}
+              <Show when={pendingApprovals().length > 0}>
+                <WorkApprovalsView
+                  colors={colors}
+                  section={inlineApprovals()}
+                  focused={interaction().focus === "approvals" && !overlayOpen()}
+                  resolvingID={resolvingApprovalID()}
+                  motionTick={motionFrame()}
+                  emphasized={approvalMotion().emphasized}
+                  onFocus={focusWorkApprovals}
+                  onSelect={selectInlineApproval}
+                />
+              </Show>
               <box flexShrink={0} width="100%" flexDirection="row" justifyContent="space-between">
                 <box
                   onMouseDown={(event: any) => {

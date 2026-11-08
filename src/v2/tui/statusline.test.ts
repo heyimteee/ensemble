@@ -40,6 +40,7 @@ test("context names the active surface and overlay precedence", () => {
   assert.equal(contextLabel({ focus: "rail", overlay: "none", surface: "none" }), "Roster")
   assert.equal(contextLabel({ focus: "chat", overlay: "none", surface: "workspace" }), "Group chat")
   assert.equal(contextLabel({ focus: "work", overlay: "none", surface: "workspace" }), "Work list")
+  assert.equal(contextLabel({ focus: "approvals", overlay: "none", surface: "workspace" }), "Work approvals", "inline approvals are their own Work zone")
   assert.equal(contextLabel({ focus: "chat", overlay: "none", surface: "agent" }), "Direct conversation")
   assert.equal(contextLabel({ focus: "composer", overlay: "none", surface: "workspace" }), "COMPOSER │ Group chat")
   assert.equal(contextLabel({ focus: "composer", overlay: "none", surface: "agent" }), "COMPOSER │ Direct conversation")

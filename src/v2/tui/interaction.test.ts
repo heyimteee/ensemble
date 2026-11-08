@@ -114,6 +114,14 @@ test("Esc returns from the work-list zone to the transcript", () => {
   assert.equal(chat.state.mode, "normal")
 })
 
+test("ticket173: Esc returns from inline approvals to the work cards", () => {
+  const approvals = reduce(initialInteractionState(), { type: "focus.set", focus: "approvals" })
+  assert.equal(approvals.state.focus, "approvals")
+  const work = reduce(approvals.state, { type: "escape" })
+  assert.equal(work.state.focus, "work")
+  assert.equal(work.state.mode, "normal")
+})
+
 test("an open dialog owns Esc first and closes via a typed intent", () => {
   const overlay = reduce(initialInteractionState(), { type: "overlay.set", overlay: "dialog" })
   assert.equal(overlay.state.overlay, "dialog")
