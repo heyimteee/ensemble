@@ -2,7 +2,6 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import {
   configMetadataApplies,
-  createForeignEpochCoalescer,
   createRefreshCoordinator,
   decideSnapshotApply,
   heartbeatDelay,
@@ -162,30 +161,30 @@ test("a foreign epoch is detected only against a known differing cursor epoch", 
   assert.equal(isForeignEpochPatch(meta({ version: 1, epoch: 1 }), "2"), false, "a malformed epoch is not a foreign epoch")
 })
 
-test("foreign-epoch patches coalesce one snapshot window and never request cursor recovery", async () => {
+test("foreign-epoch patches coalesce one delayed snapshot and never request cursor recovery", async () => {
   const cursor = meta({ version: 7, epoch: 1 })
   let snapshots = 0
   let cursorRecoveries = 0
-  const coalescer = createForeignEpochCoalescer({ refresh: () => { snapshots++ }, delayMs: 5 })
+  const refresh = createRefreshCoordinator({ run: () => { snapshots++ }, delayMs: 5 })
 
   for (let index = 0; index < 25; index++) {
     if (isForeignEpochPatch(cursor, 2)) {
-      coalescer.request()
+      refresh.request()
       continue
     }
     cursorRecoveries++
   }
-  assert.equal(coalescer.request(), false, "a request inside the window is coalesced")
+  assert.equal(refresh.request(), false, "a request inside the window is coalesced")
   assert.equal(snapshots, 0, "the snapshot waits for the coalescing window")
   await new Promise<void>((resolve) => setTimeout(resolve, 20))
 
   assert.equal(snapshots, 1, "a burst causes one snapshot")
   assert.equal(cursorRecoveries, 0, "a foreign epoch never enters changes.since recovery")
-  assert.equal(coalescer.pending(), false)
+  assert.equal(refresh.pending(), false)
 
-  assert.equal(coalescer.request(), true, "a later foreign patch opens the next window")
-  coalescer.dispose()
-  assert.equal(coalescer.request(), false)
+  assert.equal(refresh.request(), true, "a later foreign patch opens the next window")
+  refresh.dispose()
+  assert.equal(refresh.request(), false)
 })
 
 test("scoped reads negotiate only on protocol 4 with a boot epoch", () => {

@@ -126,12 +126,18 @@ test("a feed gap recovers through changes.since", () => {
 })
 
 test("a foreign-epoch patch coalesces one snapshot instead of resetting the feed", () => {
-  // Behavior: refresh-coordinator.test.ts foreign-epoch detection and coalescing.
+  // Behavior: refresh-coordinator.test.ts foreign-epoch detection and delayed coalescing.
   const source = app()
   assert.ok(source.includes("if (isForeignEpochPatch(lastSnapshotMeta, payload?.epoch))"))
-  assert.ok(source.includes("createForeignEpochCoalescer({"))
+  assert.ok(source.includes("const foreignEpochRefresh = createRefreshCoordinator({"))
+  assert.ok(source.includes("delayMs: 200"))
   assert.ok(source.includes("foreignEpochRefresh.request()"))
-  assert.ok(source.includes("count: feedGapCount"))
+})
+
+test(":logs shows the feed-gap counter from logger stats", () => {
+  // Behavior: logging.test.ts gap counting and logs.test.ts formatting.
+  const source = app()
+  assert.ok(source.includes("feedGaps: (result?.stats?.feedGaps ?? 0) + logger.stats().feedGaps"))
 })
 
 test("the TUI log rows carry a per-mount identity", () => {

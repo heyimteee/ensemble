@@ -149,7 +149,7 @@ import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { scopesToResync } from "../scoped-read.ts"
 import { approvalResolutionAt } from "../work-groups.ts"
-import { configMetadataApplies, createForeignEpochCoalescer, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createClientStore } from "./client-store.ts"
 import { createStreamCoalescer } from "../stream-coalescer.ts"
 import {
@@ -2224,11 +2224,12 @@ export function EnsembleV2App() {
     await snapshotRefresh.whenIdle()
   }
   // Ticket #150: a foreign boot epoch has no comparable cursor. Collapse a
-  // burst into one forced snapshot and never enter the changes.since loop.
-  const foreignEpochRefresh = createForeignEpochCoalescer({
-    refresh: () => { void refreshFull().catch(() => undefined) },
+  // burst into one forced snapshot after a 200 ms window and never enter the
+  // changes.since loop.
+  const foreignEpochRefresh = createRefreshCoordinator({
+    run: () => { void refreshFull().catch(() => undefined) },
+    delayMs: 200,
   })
-  let feedGapCount = 0
   /** Review fix: a Work-shaped bad batch repairs only the Work scope. */
   const recoverWorkScope = async (): Promise<void> => {
     if (scopedReads && supportsScopedReads(lastSnapshotMeta)) {
@@ -2321,7 +2322,6 @@ export function EnsembleV2App() {
     }
     if (payload.counts) client.applyCounts(payload.counts)
     if (decision.action === "ignore") return
-    feedGapCount += 1
     logger.event("warn", "feed", "feed.gap", {
       reason: decision.reason,
       epoch: payload.epoch,
@@ -2329,7 +2329,6 @@ export function EnsembleV2App() {
       version: payload.version,
       entries: payload.entries?.length,
       reset: payload.reset === true,
-      count: feedGapCount,
     })
     // A malformed batch that can only have touched Work resyncs just the Work
     // scope; anything else needs the full durable snapshot boundary.
@@ -4621,7 +4620,12 @@ export function EnsembleV2App() {
         ...logsRpcInput(logsFilter()),
       })
       setLogsEntries(sortLogEntries(Array.isArray(result?.entries) ? result.entries : []))
-      setLogsStats(result?.stats ?? null)
+      // The service logger does not see TUI gaps; show the TUI logger's count
+      // alongside the service stats in `:logs`.
+      setLogsStats({
+        ...(result?.stats ?? {}),
+        feedGaps: (result?.stats?.feedGaps ?? 0) + logger.stats().feedGaps,
+      })
       logger.event("debug", "tui", "tui.logs.open", {
         filter: logsFilter().kind,
         entries: Array.isArray(result?.entries) ? result.entries.length : 0,

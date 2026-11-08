@@ -80,7 +80,6 @@ test("a restart recovery record carries the previous claim and lease expiry", ()
     decision: { type: "retry", attempt: 3, maxAttempts: 5, delayMs: 0, retryAt: 40, reason: "lease-expired" },
     previousClaim: "run_dead",
     leaseExpiredAt: 30,
-    reason: "lease-expired",
   })
 
   assert.equal(record.failureClass, "restart")

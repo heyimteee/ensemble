@@ -166,6 +166,15 @@ const MAINTENANCE_INTERVAL_MS = 1_000
 const CONFIG_DISCOVERY_MS = 1_000
 /** Live-text crash checkpoints; no coordination version or patch is written. */
 const STREAM_CHECKPOINT_MS = 250
+/**
+ * Requeue text written by pre-review services. It is never terminal truth and
+ * must not survive a retirement or a successful recovery (ticket #149).
+ */
+const LEGACY_RECOVERY_RETRY_ERROR = "Recovered after an expired lease; retrying."
+const TRANSIENT_RECOVERY_ERRORS = new Set([
+  LEGACY_RECOVERY_RETRY_ERROR,
+  "Ensemble restarted while this subtask was working.",
+])
 
 function unwrap<T>(value: any): T {
   return (value && typeof value === "object" && "data" in value ? value.data : value) as T
@@ -217,6 +226,39 @@ export function settleStreamMessage(message: Message, text: string, interrupted:
   message.interrupted = interrupted
   message.updatedAt = now()
   return message
+}
+
+/**
+ * Result of finalizing a live stream. Settlement and result eligibility are
+ * separate facts: the row always settles, but only a current, substantive,
+ * non-interrupted answer may become `resultMessageID` (ticket #149).
+ */
+export type StreamFinalization = {
+  /** The settled row; absent only when no live row existed. */
+  message?: Message
+  /** True only for a current, substantive, non-interrupted answer. */
+  eligible: boolean
+  /** Why the row cannot be the task result. */
+  reason?: "no-message" | "stale" | "interrupted" | "fallback" | "empty"
+}
+
+export function streamFinalization(
+  message: Message | undefined,
+  current: boolean,
+  interrupted: boolean,
+  text: string,
+): StreamFinalization {
+  if (!message) return { eligible: false, reason: "no-message" }
+  const reason = !current
+    ? "stale"
+    : interrupted
+      ? "interrupted"
+      : isFallbackReply(text)
+        ? "fallback"
+        : !text.trim()
+          ? "empty"
+          : undefined
+  return { message, eligible: reason === undefined, ...(reason ? { reason } : {}) }
 }
 
 /**
@@ -294,7 +336,14 @@ export class EnsembleV2Service {
    */
   private epochValue = Date.now() * 1000 + (bootEpochSeq++ % 1000)
   private readonly instanceID = String(this.epochValue)
-  private readonly feedResetLimiter = createLogRateLimiter({ windowMs: 10_000 })
+  private readonly feedResetLimiter = createLogRateLimiter({
+    windowMs: 10_000,
+    // A burst that stops must still report its suppressed total when the
+    // window closes; the viewer also flushes before reading.
+    report: (reason, suppressed) => {
+      this.logger?.event("warn", "feed", "feed.reset", { reason, suppressed, trailing: true })
+    },
+  })
   private locationLogged = false
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
@@ -321,10 +370,12 @@ export class EnsembleV2Service {
     this.startedAtMs = now()
     this.logger = createLogger({ role: "service", instanceID: this.instanceID })
     setGlobalLogger(this.logger)
-    // Ticket #150: prefer the plugin location when the host exposes it; the
-    // process cwd is only a fallback and can differ from every loaded location.
-    const locationDirectory = typeof this.ctx?.directory === "string" && this.ctx.directory.length > 0
-      ? this.ctx.directory
+    // Ticket #150: prefer the plugin location exposed by the declared Context
+    // API; the process cwd is only a fallback and can differ from every loaded
+    // location.
+    const pluginDirectory = this.ctx?.location?.directory
+    const locationDirectory = typeof pluginDirectory === "string" && pluginDirectory.length > 0
+      ? pluginDirectory
       : undefined
     this.logger.event("info", "service", "service.start", {
       protocol: ENSEMBLE_PROTOCOL_VERSION,
@@ -422,6 +473,8 @@ export class EnsembleV2Service {
       await this.retryRegistration?.dispose?.().catch(() => undefined)
       await Promise.allSettled([...this.running])
       await this.releaseLocalClaims(localRunIDs).catch(() => undefined)
+      // Emit any pending rate-limit summary while the logger is still open.
+      this.feedResetLimiter.flush()
       this.logger?.event("info", "service", "service.stop", {
         uptimeMs: now() - this.startedAtMs,
         activeRuns: this.activeRuns.size,
@@ -492,6 +545,16 @@ export class EnsembleV2Service {
 
   detach(registration: any): void {
     if (registration) this.registrations.delete(registration)
+  }
+
+  /**
+   * Narrow test seam (ticket #148): register a local run identity without
+   * starting native work, so clean-shutdown claim release is observable at the
+   * service boundary. Production runs register themselves in `runTask()`; this
+   * is not exposed over RPC.
+   */
+  registerLocalRunForTest(run: Run): void {
+    this.activeRuns.set(run.id, run)
   }
 
   private emitChanged(
@@ -643,8 +706,9 @@ export class EnsembleV2Service {
     const result = this.store.changesSince(input.epoch ?? -1, input.version ?? -1)
     if (result.reset) {
       // Ticket #150: identical resets collapse to one warning per window; the
-      // next emitted warning reports how many were suppressed.
-      const admission = this.feedResetLimiter.admit(result.reason ?? "unknown")
+      // next emitted warning (or the trailing window summary) reports how many
+      // were suppressed. A reset always carries its reason.
+      const admission = this.feedResetLimiter.admit(result.reason)
       if (admission.allowed) {
         this.logger?.event("warn", "feed", "feed.reset", {
           reason: result.reason,
@@ -661,7 +725,7 @@ export class EnsembleV2Service {
       version: result.version,
       entries: result.entries.length,
       reset: result.reset === true,
-      ...(result.reason ? { reason: result.reason } : {}),
+      ...(result.reset ? { reason: result.reason } : {}),
     })
     return jsonSafe({
       ...result,
@@ -1293,6 +1357,9 @@ export class EnsembleV2Service {
   private logsRecent(input: RpcInput): { entries: LogEntry[]; stats: unknown } {
     const logger = this.logger
     if (!logger) return { entries: [], stats: { enabled: false } }
+    // Flush a rate-limit window before reading so a burst that already stopped
+    // reports its suppressed total to the viewer instead of losing it.
+    this.feedResetLimiter.flush()
     const levels = ["error", "warn", "info", "debug", "trace"]
     const categories = ["service", "task", "retry", "approval", "message", "feed", "refresh", "tui", "host", "failure"]
     if (input.level && !levels.includes(input.level)) throw invalidInput(`level must be one of ${levels.join(", ")}.`)
@@ -4552,121 +4619,161 @@ export class EnsembleV2Service {
   }
 
   /**
-   * Reap stale leases, retire exhausted work, and purge long-finished rows
-   * (ticket #134). Runs on the serialized maintenance timer and before pump
-   * work, never on a snapshot read. Never spawns runs — starting work happens
-   * only in pump().
+   * Reap stale leases, retire exhausted or overdue work, and purge
+   * long-finished rows (ticket #134). Runs on the serialized maintenance timer
+   * and before pump work, never on a snapshot read. Never spawns runs — starting
+   * work happens only in pump().
    */
   private async reapAndRetire(): Promise<void> {
     const at = now()
     for (const candidate of this.store.subtasks()) {
       if (candidate.state === "replied") continue
-      if (candidate.attempts >= MAX_ATTEMPTS || (candidate.deadlineAt !== undefined && at >= candidate.deadlineAt)) {
-        const task = this.store.cloneSubtask(candidate.id)
-        if (!task) continue
-        // Ticket #149: a recovery retire is a real terminal event and must
-        // reach the failure sink. Attempt exhaustion and a dead lease are
-        // distinct reasons; the row's short error keeps the user-facing text.
-        const reason = candidate.attempts >= MAX_ATTEMPTS ? "attempts-exhausted" : "lease-expired"
-        task.state = "replied"
-        task.outcome = "failed"
-        task.error ??= task.attempts >= MAX_ATTEMPTS
-          ? `Gave up after ${task.attempts} attempts.`
-          : "The work deadline passed before it could finish."
-        task.activeRunID = undefined
-        task.approvalID = undefined
-        task.claimedBy = undefined
-        task.leaseUntil = undefined
-        task.retryAfter = undefined
-        task.repliedAt = at
-        task.finishedAt = at
-        await this.store.saveSubtask(task)
-        this.recordTaskFailure({
-          event: "failure.terminal",
-          level: "error",
-          failureClass: "restart",
-          task,
-          error: task.error,
-          decision: { type: "terminal", reason, attempt: task.attempts, maxAttempts: MAX_ATTEMPTS },
-          previousClaim: candidate.claimedBy,
-          leaseExpiredAt: candidate.leaseUntil,
-          reason,
-        })
-        this.noteWorkChanged(task)
-        await this.settlePendingApprovals(task.id, task.error)
-        const workspace = this.store.workspace(task.workspaceID)
-        if (workspace && task.workKind === "handoff" && task.handoff) {
-          const recipientName = this.store.agent(task.handoff.recipientID)?.name ?? "Unknown agent"
-          await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, task.error ?? "the work could not be delivered.", task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
-        } else if (workspace && task.workKind === "turn" && task.turn) {
-          const recipientName = this.store.agent(task.assigneeID ?? "")?.name ?? "Unknown agent"
-          await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${task.error ?? "the work could not be delivered."} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
+      // A live lease always wins, even over an exhausted attempt count or a
+      // passed deadline: only the owning run, expiry, or a clean stop may
+      // release it. A foreign live claim is deferred, never stolen.
+      const owner = candidate.claimedBy
+      const leaseUntil = candidate.leaseUntil
+      const liveLease = owner !== undefined && leaseUntil !== undefined && leaseUntil > at
+      if (liveLease && owner !== undefined && leaseUntil !== undefined) {
+        if (!this.activeRuns.has(owner)) {
+          this.logger?.event("debug", "task", "task.recovery.deferred", {
+            workspaceID: candidate.workspaceID,
+            taskID: candidate.id,
+            dispatchGroupID: candidate.dispatchGroupID,
+            claimedBy: owner,
+            leaseUntil,
+            remainingMs: leaseUntil - at,
+            attempts: candidate.attempts,
+          })
         }
-        // Ticket #136: plain failed work has one canonical terminal event,
-        // symmetric with success (the TUI derives it from the task row). The
-        // old generic "Subtask failed" line was a duplicate. Correlation-
-        // specific handoff/turn notices above remain their own leg.
         continue
       }
-      // A claim whose lease expired without a live owner goes back to the
-      // queue with its attempt budget intact. Claims held by a live run in
-      // this process are never reaped — the run's heartbeat owns them.
-      // Ticket #148: a foreign claim with a live lease is deferred, never
-      // stolen; only expiry (or a missing lease) proves the owner is gone.
+      if (candidate.attempts >= MAX_ATTEMPTS) {
+        await this.retireTask(candidate, at, "attempts-exhausted")
+        continue
+      }
+      if (candidate.deadlineAt !== undefined && at >= candidate.deadlineAt) {
+        await this.retireTask(candidate, at, "deadline-exceeded")
+        continue
+      }
+      // A claim whose lease expired (or was missing) without a live owner goes
+      // back to the queue with its attempt budget intact. Claims held by a live
+      // local run are never reaped — the run's heartbeat owns them.
       if (!candidate.claimedBy || this.activeRuns.has(candidate.claimedBy)) continue
-      if (candidate.leaseUntil !== undefined && candidate.leaseUntil > at) {
-        this.logger?.event("debug", "task", "task.recovery.deferred", {
-          workspaceID: candidate.workspaceID,
-          taskID: candidate.id,
-          dispatchGroupID: candidate.dispatchGroupID,
-          claimedBy: candidate.claimedBy,
-          leaseUntil: candidate.leaseUntil,
-          remainingMs: candidate.leaseUntil - at,
-          attempts: candidate.attempts,
-        })
-        continue
-      }
-      const previousClaim = candidate.claimedBy
-      const leaseExpiredAt = candidate.leaseUntil
-      const task = this.store.cloneSubtask(candidate.id)
-      if (!task) continue
-      task.claimedBy = undefined
-      task.leaseUntil = undefined
-      task.activeRunID = undefined
-      if (task.state === "working") task.state = "pending"
-      // Ticket #149: recovery is a failed attempt with its own truth. The row
-      // keeps a short transient reason until a successful run clears it.
-      task.error = "Recovered after an expired lease; retrying."
-      await this.store.saveSubtask(task)
-      this.recordTaskFailure({
-        event: "failure.attempt",
-        level: "warn",
-        failureClass: "restart",
-        task,
-        error: "The work lease expired before the run finished.",
-        decision: {
-          type: "retry",
-          attempt: nextRetryAttempt(task.attempts, MAX_ATTEMPTS),
-          maxAttempts: MAX_ATTEMPTS,
-          delayMs: 0,
-          retryAt: at,
-          reason: "lease-expired",
-        },
-        previousClaim,
-        leaseExpiredAt,
-        reason: "lease-expired",
-      })
-      this.logger?.event("warn", "task", "task.recovery.requeued", {
-        workspaceID: task.workspaceID,
-        taskID: task.id,
-        dispatchGroupID: task.dispatchGroupID,
-        claimedBy: previousClaim,
-        leaseUntil: candidate.leaseUntil,
-        attempts: task.attempts,
-        state: task.state,
-      })
+      await this.requeueRecoveredTask(candidate, at)
     }
     await this.purgeFinishedWork(at)
+  }
+
+  /**
+   * Terminal retirement for work that cannot run again. The cause decides the
+   * failure class: attempt exhaustion is internal truth, a missed deadline is a
+   * timeout, and only lease recovery is `restart` (ticket #149).
+   */
+  private async retireTask(
+    candidate: Subtask,
+    at: number,
+    cause: "attempts-exhausted" | "deadline-exceeded",
+  ): Promise<void> {
+    const task = this.store.cloneSubtask(candidate.id)
+    if (!task) return
+    // A transient recovery reason written by an older service is not terminal
+    // truth; real errors are preserved.
+    if (task.error !== undefined && TRANSIENT_RECOVERY_ERRORS.has(task.error)) task.error = undefined
+    const failureClass: FailureClass = cause === "deadline-exceeded" ? "timeout" : "internal"
+    task.state = "replied"
+    task.outcome = "failed"
+    task.error ??= cause === "attempts-exhausted"
+      ? `Gave up after ${task.attempts} attempts.`
+      : "The work deadline passed before it could finish."
+    task.activeRunID = undefined
+    task.approvalID = undefined
+    task.claimedBy = undefined
+    task.leaseUntil = undefined
+    task.retryAfter = undefined
+    task.repliedAt = at
+    task.finishedAt = at
+    await this.store.saveSubtask(task)
+    this.recordRecoveryFailure(candidate, task, {
+      event: "failure.terminal",
+      level: "error",
+      failureClass,
+      error: task.error,
+      decision: { type: "terminal", reason: cause, attempt: task.attempts, maxAttempts: MAX_ATTEMPTS },
+    })
+    this.noteWorkChanged(task)
+    await this.settlePendingApprovals(task.id, task.error)
+    const workspace = this.store.workspace(task.workspaceID)
+    if (workspace && task.workKind === "handoff" && task.handoff) {
+      const recipientName = this.store.agent(task.handoff.recipientID)?.name ?? "Unknown agent"
+      await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, task.error ?? "the work could not be delivered.", task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
+    } else if (workspace && task.workKind === "turn" && task.turn) {
+      const recipientName = this.store.agent(task.assigneeID ?? "")?.name ?? "Unknown agent"
+      await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${task.error ?? "the work could not be delivered."} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
+    }
+    // Ticket #136: plain failed work has one canonical terminal event,
+    // symmetric with success (the TUI derives it from the task row). The old
+    // generic "Subtask failed" line was a duplicate. Correlation-specific
+    // handoff/turn notices above remain their own leg.
+  }
+
+  /**
+   * Requeue an expired claim. Recovery is a failed attempt with its own
+   * evidence in the failure sink; the row itself keeps only real errors so a
+   * later success never inherits a recovery string (ticket #149).
+   */
+  private async requeueRecoveredTask(candidate: Subtask, at: number): Promise<void> {
+    const previousClaim = candidate.claimedBy
+    const task = this.store.cloneSubtask(candidate.id)
+    if (!task) return
+    task.claimedBy = undefined
+    task.leaseUntil = undefined
+    task.activeRunID = undefined
+    if (task.state === "working") task.state = "pending"
+    await this.store.saveSubtask(task)
+    this.recordRecoveryFailure(candidate, task, {
+      event: "failure.attempt",
+      level: "warn",
+      failureClass: "restart",
+      error: "The work lease expired before the run finished.",
+      decision: {
+        type: "retry",
+        attempt: nextRetryAttempt(task.attempts, MAX_ATTEMPTS),
+        maxAttempts: MAX_ATTEMPTS,
+        delayMs: 0,
+        retryAt: at,
+        reason: "lease-expired",
+      },
+    })
+    this.logger?.event("warn", "task", "task.recovery.requeued", {
+      workspaceID: task.workspaceID,
+      taskID: task.id,
+      dispatchGroupID: task.dispatchGroupID,
+      claimedBy: previousClaim,
+      leaseUntil: candidate.leaseUntil,
+      attempts: task.attempts,
+      state: task.state,
+    })
+  }
+
+  /** Shared recovery evidence: previous owner and the lease that expired. */
+  private recordRecoveryFailure(
+    candidate: Subtask,
+    task: Subtask,
+    input: {
+      event: "failure.attempt" | "failure.terminal"
+      level: "warn" | "error"
+      failureClass: FailureClass
+      error: unknown
+      decision: FailureDecision
+    },
+  ): void {
+    this.recordTaskFailure({
+      ...input,
+      task,
+      previousClaim: candidate.claimedBy,
+      leaseExpiredAt: candidate.leaseUntil,
+    })
   }
 
   private async purgeFinishedWork(at: number): Promise<void> {
@@ -4931,18 +5038,18 @@ export class EnsembleV2Service {
     }
   }
 
-  private async finalizeStream(message: Message | undefined, text: string, interrupted = false, epoch = 0, workspaceEpoch = 0, workspaceID = ""): Promise<Message | undefined> {
-    if (!message) return undefined
+  private async finalizeStream(message: Message | undefined, text: string, interrupted = false, epoch = 0, workspaceEpoch = 0, workspaceID = ""): Promise<StreamFinalization> {
+    if (!message) return streamFinalization(undefined, false, interrupted, text)
     // Ticket #149: an internal fallback (or a blank reply) is never a
-    // successful answer. Force it interrupted and hand back no message so a
-    // caller can never stamp `resultMessageID` onto placeholder text.
+    // successful answer. Force it interrupted, and report eligibility
+    // separately so callers never stamp a result onto placeholder text.
     const fallback = isFallbackReply(text)
     const hasText = text.trim().length > 0
     const settledInterrupted = interrupted || fallback || !hasText
     // Ticket #74: the epoch guard rejects stale content, but the row must
     // still settle — returning before clearing `streaming` left orphaned
     // live rows until the 120 s age filter. Settle and persist on both
-    // paths; only the return value signals staleness.
+    // paths; only the result contract signals staleness.
     const current = this.globalEpoch === epoch && (!workspaceID || (this.workspaceEpoch.get(workspaceID) ?? 0) === workspaceEpoch)
     // Drop queued live text before the durable final upsert so a late
     // ephemeral event can never chase the exact final row.
@@ -4950,7 +5057,7 @@ export class EnsembleV2Service {
     const settledText = !hasText || (fallback && !interrupted) ? REPLY_INTERRUPTED : text
     settleStreamMessage(message, settledText, settledInterrupted)
     await this.store.saveMessage(message)
-    return current && !settledInterrupted ? message : undefined
+    return streamFinalization(message, current, interrupted, text)
   }
 
   private async runTask(taskID: string): Promise<void> {
@@ -5280,8 +5387,8 @@ export class EnsembleV2Service {
       if (currentTask.workKind === "turn" && currentTask.turn) {
         currentTask.turn.answeredByID = currentTask.assigneeID
       }
-      const message = await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
-      currentTask.resultMessageID = message && !isFallbackReply(message.text) ? message.id : undefined
+      const finalized = await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
+      currentTask.resultMessageID = finalized.eligible ? finalized.message?.id : undefined
       await this.store.saveSubtask(currentTask)
       this.noteWorkChanged(currentTask)
       // Dependent product decisions that outlived the work are superseded —
@@ -5430,7 +5537,6 @@ export class EnsembleV2Service {
     /** Restart/lease recovery evidence (ticket #149). */
     previousClaim?: string
     leaseExpiredAt?: number
-    reason?: string
   }): void {
     const logger = this.logger
     if (!logger) return
@@ -5450,7 +5556,6 @@ export class EnsembleV2Service {
         decision: input.decision,
         previousClaim: input.previousClaim,
         leaseExpiredAt: input.leaseExpiredAt,
-        reason: input.reason,
         runID: context?.runID,
         sessionID: context?.sessionID,
         providerID: context?.providerID ?? agent?.mainModel.providerID,

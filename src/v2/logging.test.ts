@@ -70,6 +70,45 @@ test("identical warnings stay rate-limited and carry the suppressed count", () =
   assert.deepEqual(limiter.admit("epoch"), { allowed: false, suppressed: 1 })
 })
 
+test("a suppressed burst reports its total when the window closes", async () => {
+  const reports: Array<[string, number]> = []
+  const limiter = createLogRateLimiter({
+    windowMs: 20,
+    report: (key, suppressed) => reports.push([key, suppressed]),
+  })
+
+  assert.equal(limiter.admit("epoch").allowed, true)
+  assert.equal(limiter.admit("epoch").allowed, false)
+  assert.equal(limiter.admit("epoch").allowed, false)
+  assert.deepEqual(reports, [], "the summary waits for the window to close")
+  await new Promise<void>((resolve) => setTimeout(resolve, 80))
+
+  assert.deepEqual(reports, [["epoch", 2]], "a burst that stops still reports its suppressed total")
+})
+
+test("flush reports pending suppressions for the viewer or shutdown", () => {
+  let clock = 1_000
+  const reports: Array<[string, number]> = []
+  const limiter = createLogRateLimiter({ windowMs: 10_000, now: () => clock, report: (key, suppressed) => reports.push([key, suppressed]) })
+
+  limiter.admit("epoch")
+  clock = 2_000
+  limiter.admit("epoch")
+  limiter.admit("epoch")
+  limiter.flush()
+
+  assert.deepEqual(reports, [["epoch", 2]])
+  assert.deepEqual(limiter.admit("epoch"), { allowed: false, suppressed: 1 }, "flush restarts the window without losing the next count")
+})
+
+test("the logger counts feed gaps for diagnostics and :logs", () => {
+  const log = createLogger({ role: "tui", dir: null, level: "warn", now })
+  log.event("warn", "feed", "feed.gap", { reason: "gap" })
+  log.event("warn", "feed", "feed.gap", { reason: "epoch" })
+  log.event("warn", "feed", "feed.reset", { reason: "epoch" })
+  assert.equal(log.stats().feedGaps, 2)
+})
+
 test("logging redacts credentials and keeps errors structured", () => {
   const log = createLogger({ role: "service", dir: null, level: "trace", now })
   log.event("error", "failure", "failure.terminal", {

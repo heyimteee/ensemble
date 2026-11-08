@@ -156,6 +156,44 @@ test("an acquire during final teardown waits for stop and creates one replacemen
 })
 
 
+test("an acquire already awaiting the entry never joins its teardown", async () => {
+  let releaseStop: () => void = () => {}
+  const stopGate = new Promise<void>((resolve) => { releaseStop = resolve })
+  let starts = 0
+  const services: FakeService[] = []
+  const registry = new SharedEnsemble(async () => {
+    starts += 1
+    const service = { name: `service-${starts}` }
+    services.push(service)
+    return {
+      service: service as any,
+      stop: async () => {
+        await stopGate
+      },
+    }
+  })
+
+  const first = await registry.acquire({ name: "first" })
+  // This acquire is already parked on the resolved pending entry when the
+  // last release clears it and begins teardown.
+  let secondSettled = false
+  const secondPromise = registry.acquire({ name: "second" }).finally(() => { secondSettled = true })
+  const stopping = first.release()
+
+  await Promise.resolve()
+  assert.equal(secondSettled, false, "the parked acquire waits for the old service to finish stopping")
+  assert.equal(starts, 1, "it must not join the stopping entry")
+
+  releaseStop()
+  await stopping
+  const second = await secondPromise
+
+  assert.equal(starts, 2, "the parked acquire starts one replacement after teardown")
+  assert.notEqual(second.service, first.service)
+  assert.equal(second.service, services[services.length - 1])
+  await second.release()
+})
+
 test("every location registers and disposes its own RPC handlers against the one service", async (t) => {
   resetSharedEnsembleForTests()
   t.after(resetSharedEnsembleForTests)

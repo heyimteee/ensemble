@@ -49,7 +49,6 @@ export type FailureRecordInput = {
   /** Restart/lease recovery evidence (ticket #149). */
   previousClaim?: string
   leaseExpiredAt?: number
-  reason?: string
   runID?: string
   sessionID?: string
   providerID?: string
@@ -178,7 +177,8 @@ export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "t
     decision: input.decision,
     previousClaim: input.previousClaim,
     leaseExpiredAt: input.leaseExpiredAt,
-    reason: input.reason,
+    // The decision is the single source of truth for the retry/terminal cause.
+    reason: input.decision.reason,
     version: input.version,
     epoch: input.epoch,
     ...(input.content

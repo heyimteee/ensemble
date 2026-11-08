@@ -563,9 +563,11 @@ Lease heartbeats and streaming deltas never produce lines; they remain counters
 or trace-only data.
 
 `feed.reset` names its reason and identical resets collapse to one warning per
-10 s per instance with a `suppressed` count. The TUI keeps a local `feed.gap`
-counter (included in each gap warning) and coalesces foreign-epoch patches into
-one forced snapshot instead of a reset loop.
+10 s per instance with a `suppressed` count; a burst that stops also reports a
+trailing summary when the window closes (and `logs.recent`/shutdown flush any
+pending count). The logger counts `feed.gap` events in its stats, `:logs` shows
+`feedGaps`, and the TUI coalesces foreign-epoch patches into one forced snapshot
+instead of a reset loop.
 
 A failure is a self-contained JSONL record, not a longer `task.error` string.
 Each failed attempt emits `failure.attempt` at `warn`, an uncertain outcome
