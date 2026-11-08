@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import type { Plugin } from "@opencode/plugin"
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
@@ -23,6 +24,7 @@ import { STREAM_COALESCE_MS } from "./stream-coalescer.ts"
 import { createLogRateLimiter, createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { createStoreObserver } from "./log-events.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
+import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import type {
   Agent,
   Approval,
@@ -51,7 +53,25 @@ import type {
   Workspace,
 } from "./types.ts"
 
-type Ctx = any
+/**
+ * The service uses a narrow slice of the plugin context. Typing the top-level
+ * fields catches undeclared host properties (such as `ctx.directory`) while
+ * leaving the session surface structurally open for the test doubles.
+ */
+type Ctx = {
+  location?: { directory?: string }
+  permission?: Plugin.Context["permission"]
+  onboarding?: boolean
+  session: any
+  storage: {
+    get: (key: string) => Promise<any>
+    set: (key: string, value: any) => Promise<void>
+    remove: (key: string) => Promise<void>
+    scan: (options: any) => Promise<any>
+  }
+  event: { subscribe: (options?: any) => AsyncIterable<any> }
+  tool: { transform: (factory: any) => Promise<any> }
+}
 type Json = Record<string, any>
 
 /**
@@ -496,7 +516,7 @@ export class EnsembleV2Service {
     "message.get": (input: unknown) => Promise<any>
     "logs.recent": (input: unknown) => Promise<any>
     resync: (input: unknown) => Promise<ScopedResync>
-    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string; logs?: unknown }>
+    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string; logs?: unknown; service?: unknown }>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
@@ -887,7 +907,7 @@ export class EnsembleV2Service {
   private async replyNativePermission(sessionID: string, requestID: string, decision: "once" | "reject", message?: string): Promise<void> {
     const reply = this.ctx?.permission?.reply
     if (typeof reply !== "function") return
-    await reply.call(this.ctx.permission, { sessionID, requestID, decision, ...(message ? { message } : {}) })
+    await reply.call(this.ctx.permission!, { sessionID, requestID, decision, ...(message ? { message } : {}) })
   }
 
   private defer(ms: number, fn: () => void): void {
@@ -1336,7 +1356,7 @@ export class EnsembleV2Service {
     return jsonSafe(payload)
   }
 
-  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; clones?: ReturnType<typeof cloneStats>; logs?: unknown }> {
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
     await this.store.sync()
     this.refreshDmClock()
     this.noteViewDirectory(directory)
@@ -1350,6 +1370,12 @@ export class EnsembleV2Service {
       directory,
       ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
       ...(this.logger ? { logs: this.logger.stats() } : {}),
+      service: {
+        instanceID: this.instanceID,
+        threadID: this.logger?.stats().threadID,
+        registryVersion: SHARED_SERVICE_VERSION,
+        startedAt: this.startedAtMs,
+      },
     })
   }
 

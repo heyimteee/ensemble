@@ -1,0 +1,502 @@
+[
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 1: Reply with exactly YES."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 2: What is 7 \u00d7 8? One number."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 3: Name the largest planet in our solar system. One word."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 4: What is the opposite of 'hot'? One word."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 5: How many days are in a leap year? One number."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 6: Translate 'thank you' into French. Two words max."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 7: List the first three prime numbers, comma separated."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 8: What color do you get by mixing blue and yellow? One word."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 9: What is the square root of 81? One number."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 10: Reply with the word 'pineapple' spelled backwards."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 11: Which month has 28 or 29 days? One word."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 12: Name one mammal that can fly. One word."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 13: Remember the number 17. Reply with 'noted'."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 14: What number did I ask you to remember? Reply with just the number."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 15: What is 100 - 37? One number."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 16: Give one synonym for 'happy'. One word."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 17: Sort these words alphabetically: apple, cherry, banana. One line."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 18: What is the chemical symbol for water? One formula."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 19: How many continents are there? One number."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 20: Reply with exactly 'PONG'."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 21: What is 15% of 200? One number."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 22: Name the capital of Japan. One word."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 23: List three primary colors, comma separated."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 24: Of those three, which is warmest? One word."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 25: What is the plural of 'mouse'? One word."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 26: Give one word that rhymes with 'cat'."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 27: What is 9 squared? One number."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo $meow",
+    "text": "$xedo $meow Easy 28: Each reply with one word: xedo says 'tick', meow says 'tock'."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 29: What is the boiling point of water in Celsius at sea level? One number."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 30: Reply with a single emoji that represents a cat."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 31: What is 3 + 4 \u00d7 2? One number, standard order of operations."
+  },
+  {
+    "category": "easy",
+    "target": "$meow",
+    "text": "$meow Easy 32: Name one ocean. One word."
+  },
+  {
+    "category": "easy",
+    "target": "group",
+    "text": "Easy 33: How many minutes are in two hours? One number."
+  },
+  {
+    "category": "easy",
+    "target": "$xedo",
+    "text": "$xedo Easy 34: Reply with the word 'done' in lowercase."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 1: Explain the difference between HTTP and HTTPS in two sentences."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 2: Write a four-line poem about rain."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 3: Give three tips for writing a clear commit message. Bullets."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 4: Compare a list and a tuple in Python in three bullets."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 5: Summarize the water cycle in three sentences."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 6: Explain what an API rate limit is in two sentences."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 7: Write a SQL query that selects the 10 newest users by created_at."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 8: Give a three-step plan to debug a failing unit test."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 9: Name three differences between a process and a thread."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 10: Rewrite this sentence more concisely: 'Due to the fact that the server was down, we were unable to process requests.'"
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 11: Write a short JavaScript function that checks if a string is a palindrome."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 12: Explain the difference between authentication and authorization in two sentences."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 13: List three causes of memory leaks in long-running applications."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 14: Give a five-line summary of the book 'The Little Prince'."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 15: Write a regex that matches a simple email address. Explain it briefly."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 16: What is the time complexity of binary search, and why? Two sentences."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 17: Propose three metrics for measuring API reliability."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 18: Explain what idempotency means with one example."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 19: Write a short shell command that lists files sorted by size, largest first."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 20: Give three pros and three cons of microservices. Bullets."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 21: Explain the difference between TCP and UDP ports in two sentences."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 22: Write a short Python function that returns the factorial of n iteratively."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 23: Summarize the main idea of 'separation of concerns' in three sentences."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 24: Name three ways to prevent SQL injection."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 25: Explain what a race condition is in two sentences with a one-line example."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 26: Write a four-line haiku about the ocean."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 27: Give a three-step plan for onboarding a new teammate."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 28: Compare JSON and YAML in three bullets."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 29: Explain the difference between a stack and a queue with one example each."
+  },
+  {
+    "category": "medium",
+    "target": "$meow",
+    "text": "$meow Medium 30: Write a short function in any language that removes duplicates from a list."
+  },
+  {
+    "category": "medium",
+    "target": "group",
+    "text": "Medium 31: What is a deadlock, and name one way to avoid it? Two sentences."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo",
+    "text": "$xedo Medium 32: Give three examples of good error messages. One line each."
+  },
+  {
+    "category": "medium",
+    "target": "$xedo $meow",
+    "text": "$xedo $meow Medium 33: Split this task: xedo names two benefits of code reviews; meow names two risks. One line each."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 1: Design a URL shortener. Give the data model, API endpoints, and one scaling concern. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 2: Write a 250-word incident review for a cache outage. Include timeline, root cause, and three action items."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 3: Compare event-driven and request-response architectures for a payment system. Give a recommendation. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 4: Design a rate limiter for a multi-tenant API. Include algorithm, storage, and failure behavior. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 5: Write a test strategy for a distributed job scheduler. Include five test categories and one example each."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 6: Explain how you would migrate a monolith to services incrementally. Give three phases and two risks. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 7: Design an idempotent order-creation endpoint. Include the key, storage, retries, and one failure mode. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 8: Analyze the tradeoffs of optimistic vs pessimistic locking for a ticketing system. Give a recommendation."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 9: Propose an observability plan for a 20-service system. Cover metrics, logs, traces, and alerting. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 10: Design a feature flag system. Include data model, evaluation, rollout, and one safety mechanism. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 11: Write a 200-word postmortem for a database failover that took 12 minutes. Include root cause and action items."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 12: Explain CAP and PACELC with one example each, then recommend a database for a global chat app. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 13: Design a multi-tenant audit log. Include schema, retention, access control, and one query example. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 14: Write a checklist for reviewing a production readiness plan. Include ten items."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 15: Analyze the tradeoffs of server-side vs client-side rendering for a dashboard. Give a recommendation."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 16: Design a job queue with at-least-once delivery. Cover retries, deduplication, and poison messages. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 17: Write a 250-word design doc outline for a notification service. Include goals, non-goals, API, and risks."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 18: Compare three caching eviction policies (LRU, LFU, FIFO) with one workload each. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 19: Design a schema for a multi-tenant SaaS with row-level isolation. Include tables, keys, and one indexing decision."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 20: Write a rollback plan for a failed schema migration. Include detection, steps, and communication. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 21: Explain how to implement distributed tracing across async workers. Include context propagation and sampling. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 22: Design an API pagination strategy for a large, changing dataset. Compare cursor vs offset and recommend one."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 23: Write a threat model for a file-upload service. Include assets, threats, and mitigations. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 24: Propose a disaster recovery plan for a single-region SaaS. Include RPO/RTO targets and three drills."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 25: Design a search autocomplete service. Cover data structures, ranking, and freshness. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 26: Write a 250-word proposal for reducing cloud costs by 30%. Include three initiatives and risks."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 27: Explain how to test a consensus algorithm like Raft. Include fault injection and invariants. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "group",
+    "text": "Hard 28: Design a webhook delivery system. Cover signing, retries, ordering, and dead-letter handling. Under 350 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 29: Write a decision record comparing Kafka and SQS for an event-driven system. Include context, options, and decision."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 30: Analyze the failure modes of a cache-aside pattern and propose mitigations. Under 300 words."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo $meow",
+    "text": "$xedo $meow Hard 31: Split this task: xedo lists three risks of a blue-green deploy; meow lists three benefits. One line per item."
+  },
+  {
+    "category": "hard",
+    "target": "$xedo",
+    "text": "$xedo Hard 32: Write a 200-word summary of the biggest operational risks in a high-traffic API."
+  },
+  {
+    "category": "hard",
+    "target": "$meow",
+    "text": "$meow Hard 33: Propose a canary release strategy with metrics, thresholds, and rollback criteria. Under 300 words."
+  }
+]

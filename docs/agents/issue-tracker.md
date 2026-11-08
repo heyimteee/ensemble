@@ -39,6 +39,16 @@ Use GitHub's REST sub-issue endpoint to attach children when the installed CLI l
 
 Use `POST repos/heyimteee/ensemble/issues/<child>/dependencies/blocked_by` with `issue_id` set to the blocker's numeric database ID to add dependencies. Database IDs are not issue numbers or GraphQL node IDs. Verify the resulting relationships; if unsupported, use explicit issue links instead.
 
+The database ID is an integer. `gh api -f` sends a string and the endpoint rejects it; use the typed form:
+
+```sh
+child_id=$(gh api repos/heyimteee/ensemble/issues/123 --jq .id)
+gh api -X POST repos/heyimteee/ensemble/issues/100/sub_issues -F sub_issue_id=$child_id
+
+blocker_id=$(gh api repos/heyimteee/ensemble/issues/101 --jq .id)
+gh api -X POST repos/heyimteee/ensemble/issues/123/dependencies/blocked_by -F issue_id=$blocker_id
+```
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.**

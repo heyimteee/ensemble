@@ -9,7 +9,7 @@ permissions:
 
 env:
   NODE_VERSION: "26.12.1"
-  OPENCODE_VERSION: "2.2.5"
+  OPENCODE_VERSION: "2.2.6"
   FD_VERSION: "10.2.0"
 
 jobs:
@@ -54,3 +54,7 @@ jobs:
         env:
           ENSEMBLE_LIVE_REQUIRE: "1"
         run: npm run test:live:fake:all
+      - name: Multi-location single-service check
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+        run: npm run test:live:multilocation
