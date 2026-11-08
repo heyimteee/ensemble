@@ -70,7 +70,7 @@ derived from source and covered by the init unit/service tests.
 |---|---|
 | `npm run verify` (fix pass) | **Pass** — strict type check; **1156 tests passed, 0 failed, 0 skipped, 0 todo**, 40.5 s. |
 | `npm run verify` (pre-fix #164 pass) | **Pass** — 1136 tests passed. Superseded by the fix-pass run above. |
-| `npm run test:live:multilocation` | **Pass** — **100/100 requests, 137/137 tasks succeeded, all at attempt 1, 0 `task.failed`, 0 failure records, 1 `service.start`, 1 warn-level `feed.gap`; tool probe and all three budget scenarios pass**. |
+| `npm run test:live:multilocation` (fix pass) | **Pass** — **100/100 requests, 137/137 tasks succeeded, all at attempt 1, 0 `task.failed`, 0 failure records, 1 `service.start`, 1 warn-level `feed.gap`; tool probe and all three budget scenarios pass** (five, nine with one continuation, cap with `command-exhausted`). Doctor reports `0 mismatches`. |
 | `npm run test:live:sizes` | **Pass** — 80×24, 100×30, 120×40, 160×50, and `NO_COLOR=1` with dispatch budget labels. |
 | Doctor in the same harness | **Pass** — `0 mismatches`, `Result: all requested locations agree`, dispatch counters consistent. |
 | Log summary in the same harness | **Pass** — 1269 rows, 0 malformed, 0 failures, 105 groups, 22 hops, 1 continued, 2 exhausted, 1 refused, 1 closed. |
@@ -254,6 +254,7 @@ is loaded into the live host:
 - Size matrix log: `/tmp/opencode/164-sizes-final.log`
 - Verify log: `/tmp/opencode/164-verify-final2.log`
 - Fix-pass verify log: `/tmp/opencode/159-fix-verify.log`
+- Fix-pass multi-location log: `/tmp/opencode/159-fix-multilocation.log`
 - Fix-pass fake-suite log: `/tmp/opencode/159-fix-fake.log`
 - Live-host skip evidence: `/tmp/opencode/164-live-host-state.txt`
 
