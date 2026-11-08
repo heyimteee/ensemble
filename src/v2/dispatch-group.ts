@@ -3,13 +3,14 @@ import { stableHash } from "./queue.ts"
 import type { Id, Subtask } from "./types.ts"
 
 /**
- * Durable dispatch-group identity (ticket #135).
+ * Durable dispatch-group identity (ticket #135), extended by the budget ledger
+ * in ticket #160.
  *
  * A dispatch group is the set of Subtasks caused by one dispatch action: a
  * user command plus every descendant handoff, delegation, peer turn,
  * synthesis, completion hop, approval-created task, and group-scoped
- * completion batch it caused. The group id lives on the Subtask row itself;
- * there is no separate group table.
+ * completion batch it caused. The group id lives on each Subtask row; the
+ * ticket #160 ledger stores caps and counters under the same id.
  *
  * Legacy rows have no stored id and resolve one deterministically from their
  * root ancestor, so in-flight work keeps a coherent group across the

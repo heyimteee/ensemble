@@ -27,6 +27,7 @@ export type LogCategory =
   | "refresh"
   | "tui"
   | "host"
+  | "dispatch"
   | "failure"
 
 export type LogFields = Record<string, unknown>

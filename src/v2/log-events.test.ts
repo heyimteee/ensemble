@@ -3,7 +3,8 @@ import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
 import { createLogger } from "./logging.ts"
 import { createStoreObserver } from "./log-events.ts"
-import type { Approval, Subtask, Workspace } from "./types.ts"
+import { newRootDispatchGroup } from "./dispatch-budget.ts"
+import type { Approval, DispatchGroup, Subtask, Workspace } from "./types.ts"
 
 function fakeContext() {
   const values = new Map<string, unknown>()
@@ -86,6 +87,44 @@ test("message observer logs append and finalize, and skips same-length streaming
   const finalized = log.recent()[1] as any
   assert.equal(finalized.chars, 6)
   assert.equal(finalized.interrupted, false)
+})
+
+test("ticket160: dispatch group creation and reconciliation log IDs, counts, and limits only", async () => {
+  const { log, store } = setup()
+  await store.saveWorkspace(workspace())
+  await store.saveSubtask(subtask({ id: "t1", dispatchGroupID: "dispatch_a", title: "secret title", instruction: "secret instruction" }))
+  const created: DispatchGroup = newRootDispatchGroup({ id: "dispatch_a", workspaceID: "w", settings: undefined, now: 10 })
+  await store.saveDispatchGroup(created)
+  const reconciled: DispatchGroup = {
+    ...newRootDispatchGroup({ id: "dispatch_legacy", workspaceID: "w", settings: undefined, now: 20 }),
+    rootID: "dispatch_legacy",
+    usedHops: 2,
+    commandUsedHops: 2,
+    reconciled: true,
+  }
+  await store.saveDispatchGroup({ ...reconciled, id: "dispatch_legacy" })
+  await store.saveDispatchGroup({ ...reconciled, id: "dispatch_legacy", usedHops: 3, commandUsedHops: 3 })
+
+  const events = log.recent({ cat: "dispatch" })
+  assert.deepEqual(events.map((entry) => entry.event), ["dispatch.group.created", "dispatch.group.reconciled", "dispatch.group.updated"])
+  assert.equal(events[0]?.level, "info")
+  assert.equal(events[0]?.dispatchGroupID, "dispatch_a")
+  assert.equal(events[0]?.workspaceID, "w")
+  assert.equal(events[0]?.usedHops, 0)
+  assert.equal(events[0]?.maxHops, 8)
+  assert.equal(events[0]?.commandMaxHops, 24)
+  assert.equal(events[0]?.depthMax, 8)
+  assert.equal(events[0]?.reconciled, false)
+  assert.equal(events[1]?.reconciled, true)
+  assert.equal(events[2]?.fromUsedHops, 2)
+  assert.equal(events[2]?.usedHops, 3)
+
+  const serialized = JSON.stringify(events)
+  assert.ok(!serialized.includes("secret title"), "task titles never enter dispatch events")
+  assert.ok(!serialized.includes("secret instruction"), "instructions never enter dispatch events")
+  for (const forbidden of ["title", "instruction", "path", "content", "text"] as const) {
+    assert.equal(forbidden in (events[0] as any), false, `dispatch events carry no ${forbidden}`)
+  }
 })
 
 test("approval observer logs request and resolution", async () => {

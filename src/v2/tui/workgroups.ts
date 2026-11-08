@@ -1,3 +1,4 @@
+import { dispatchBudgetLabel } from "../dispatch-budget.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import type { Subtask } from "../types.ts"
 import {
@@ -39,9 +40,14 @@ export function workSummaryCounts(groupCount: number, activeCount: number, doneC
   return `WORK ${groups} ${groups === 1 ? "group" : "groups"} · ${active} active · ${done} done`
 }
 
-/** A subtle label shown only when more than one group is visible. */
-export function workGroupLabel(group: Pick<WorkGroup, "active" | "done">, ordinal: number): string {
-  return `GROUP ${Math.max(1, Math.floor(ordinal))} · ${group.active} active · ${group.done} done`
+/**
+ * A subtle label shown only when more than one group is visible. Ticket #160
+ * adds the ledger budget; the renderer truncates the line, and the status
+ * counts stay after it so a narrow width still names the group's work.
+ */
+export function workGroupLabel(group: Pick<WorkGroup, "active" | "done" | "budget">, ordinal: number): string {
+  const budget = group.budget ? ` · ${dispatchBudgetLabel(group.budget, "full")}` : ""
+  return `GROUP ${Math.max(1, Math.floor(ordinal))}${budget} · ${group.active} active · ${group.done} done`
 }
 
 /** Two card groups fit one card row each; older groups become compact group rows. */

@@ -7,6 +7,7 @@ export const COMPOSER_COMMANDS = [
   { name: "workspace", description: "switch workspace" },
   { name: "agent", description: "mention an agent" },
   { name: "settings", description: "agent settings" },
+  { name: "limits", description: "dispatch hop limits" },
   { name: "approvals", description: "approval inbox" },
   { name: "pause", description: "pause workspace" },
   { name: "resume", description: "resume workspace" },

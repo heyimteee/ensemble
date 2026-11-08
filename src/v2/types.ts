@@ -242,10 +242,22 @@ export type Subtask = {
    * by one dispatch action. One user command mints one group; every descendant
    * handoff, delegation, peer turn, synthesis, completion hop,
    * approval-created task, and group-scoped completion batch inherits it.
-   * Legacy rows omit it and resolve a deterministic group from their root
-   * ancestor; retry, restart, reassign, and cancel never change it.
+   * The ticket #160 ledger (`DispatchGroup`) carries this id's caps and
+   * counters. Legacy rows omit it and resolve a deterministic group from
+   * their root ancestor; retry, restart, reassign, and cancel never change it.
    */
   dispatchGroupID?: Id
+  /**
+   * Unified dispatch depth within the group (ticket #160 ledger seam). The
+   * dispatch tools populate it when #161 makes task budgets required; legacy
+   * rows derive depth from the parent chain.
+   */
+  dispatchDepth?: number
+  /**
+   * Direct dispatches the recipient may make (ticket #160 ledger seam).
+   * Zero is valid and means a one-shot ask; #161 enforces the value.
+   */
+  taskMaxHops?: number
   /**
    * Durable coordination queue fields (v5.3, ticket #54). The subtask row is
    * the work item: no parallel table, one source of truth. `error` doubles
@@ -369,11 +381,56 @@ export type DmQueueEntry = {
   correlationID?: string
 }
 
+/**
+ * Durable dispatch-budget ledger for one dispatch group (ticket #160).
+ *
+ * A root group is the command ledger: it owns the command maximum, command
+ * usage, continuation allowance, and continuation usage. Continuation groups
+ * reference the root and carry group-local hops plus depth. Budget state
+ * (`active`, `exhausted`, `closed`) is derived from these counters and the
+ * group's tasks by `dispatchGroupState`, never stored separately.
+ */
+export type DispatchGroup = {
+  id: Id
+  workspaceID: Id
+  /** The root command-ledger group id. A root group names itself. */
+  rootID: Id
+  /** Continuation parent group; absent on a root group. */
+  parentID?: Id
+  /** 0 for the root group, then 1..N for continuations in creation order. */
+  continuationIndex: number
+  /** Hops allowed in this group. */
+  maxHops: number
+  /** Hops consumed in this group. */
+  usedHops: number
+  /** Longest allowed ancestor chain within this group. */
+  depthMax: number
+  /** Root only: total hops allowed for the whole command. */
+  commandMaxHops?: number
+  /** Root only: hops consumed across every group of the command. */
+  commandUsedHops?: number
+  /** Root only: continuation groups this command may open. */
+  maxContinuations?: number
+  /** Root only: continuation groups opened so far. */
+  continuationsUsed?: number
+  createdAt: number
+  closedAt?: number
+  /** Why the group closed; a reason code, never task content. */
+  closeReason?: string
+  /** Synthesized from pre-ledger rows during upgrade reconciliation. */
+  reconciled?: boolean
+}
+
 export type Settings = {
   maxActiveRuns: number
   maxDelegations: number
   maxDepth: number
   synthesis: boolean
+  /** Dispatch budget tiers (ticket #160); captured by each new root group. */
+  dispatchGroupMaxHops: number
+  dispatchCommandMaxHops: number
+  dispatchDepth: number
+  dispatchContinuations: number
 }
 
 export type ChatMessage = {
@@ -435,6 +492,8 @@ export type ScopedResync = {
   scopeVersions: ScopeVersions
   shell?: SnapshotState
   work?: Record<Id, Subtask>
+  /** Dispatch groups for the projected Work scope (ticket #160). */
+  dispatchGroups?: Record<Id, DispatchGroup>
   transcript?: TranscriptWindow
   counts: Record<Id, WorkspaceCounts>
   gate?: Tier3Gate
@@ -450,6 +509,7 @@ export type Snapshot = {
     workspaces: Record<Id, Workspace>
     messages: Record<Id, Message[]>
     subtasks: Record<Id, Subtask>
+    dispatchGroups: Record<Id, DispatchGroup>
     initJobs: Record<Id, InitJob>
     bindings: Record<string, SessionBinding>
     memories: Record<Id, Memory>
@@ -519,6 +579,8 @@ export type Revision = {
 export type EntityChange =
   | { entity: "subtask"; op: "upsert"; task: Subtask }
   | { entity: "subtask"; op: "remove"; id: Id }
+  | { entity: "dispatchGroup"; op: "upsert"; group: DispatchGroup }
+  | { entity: "dispatchGroup"; op: "remove"; id: Id }
   | { entity: "message"; op: "upsert"; message: Message }
   | { entity: "message"; op: "remove"; workspaceID: Id; id: Id }
   | { entity: "agent"; op: "upsert"; agent: Agent }

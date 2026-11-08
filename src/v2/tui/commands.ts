@@ -8,6 +8,7 @@
 
 export type CommandName =
   | "settings"
+  | "limits"
   | "approvals"
   | "workspace"
   | "agent"
@@ -29,6 +30,7 @@ export type CommandSpec = {
 
 export const COMMANDS: readonly CommandSpec[] = [
   { name: "settings", description: "open agent settings" },
+  { name: "limits", description: "edit dispatch hop limits" },
   { name: "approvals", description: "open the approval inbox" },
   { name: "workspace", description: "switch workspace" },
   { name: "agent", description: "open a direct conversation" },

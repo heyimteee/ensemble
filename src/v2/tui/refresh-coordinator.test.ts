@@ -218,6 +218,12 @@ test("a malformed or unknown batch is Work-only only when it mentions Work entit
     epoch: 1,
     from: 1,
     version: 2,
+    entries: [{ version: 2, entities: [{ entity: "dispatchGroup", op: "upsert", group: { id: "dispatch_1" } }] }],
+  } as any), true, "a dispatch-group ledger batch is Work-shaped too")
+  assert.equal(isWorkOnlyPatch({
+    epoch: 1,
+    from: 1,
+    version: 2,
     entries: [{ version: 2, changes: [{ entity: "message", op: "remove" }] }],
   } as any), false, "a shell/transcript batch needs the full snapshot path")
   assert.equal(isWorkOnlyPatch({

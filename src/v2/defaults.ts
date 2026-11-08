@@ -5,6 +5,10 @@ export const DEFAULT_SETTINGS: Settings = {
   maxDelegations: 10,
   maxDepth: 5,
   synthesis: true,
+  dispatchGroupMaxHops: 8,
+  dispatchCommandMaxHops: 24,
+  dispatchDepth: 8,
+  dispatchContinuations: 2,
 }
 
 export function createInitialState(): SnapshotState {
@@ -15,6 +19,7 @@ export function createInitialState(): SnapshotState {
     workspaces: {},
     messages: {},
     subtasks: {},
+    dispatchGroups: {},
     initJobs: {},
     bindings: {},
     memories: {},

@@ -1,3 +1,4 @@
+import { dispatchBudgetLabel, type DispatchBudgetSummary } from "../dispatch-budget.ts"
 import { MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
 import { nextRetryAttempt } from "../retry.ts"
 import { isNeedsYouTask, orderedGroupTasks, taskNeedsYou } from "../work-groups.ts"
@@ -537,6 +538,12 @@ export type WorkCardHeaderLayout = {
   name: string
   /** Padding that pins the glyph and status to the right edge. */
   gap: string
+  /**
+   * Budget label (ticket #160), placed just left of the glyph and always
+   * including its trailing separator space. Empty when the width cannot fit
+   * it; the status word and right edge never yield to it.
+   */
+  budget: string
   /** Uppercase state word; never truncated. */
   status: string
 }
@@ -546,28 +553,42 @@ export type WorkCardHeader = WorkCardHeaderLayout & {
   glyph: string
 }
 
-function headerLayout(agentLabel: string, glyphWidth: number, status: string, width: number): WorkCardHeaderLayout {
+/**
+ * Pick the richest budget label that leaves a readable name/title. Widths
+ * 16–120 keep the status word and right edge exact; the label yields first.
+ */
+function fitWorkBudget(budget: DispatchBudgetSummary | undefined, cells: number, blockWidth: number, minLeft: number): string {
+  if (!budget) return ""
+  for (const style of ["full", "medium", "short"] as const) {
+    const label = dispatchBudgetLabel(budget, style)
+    if (cells >= minLeft + 1 + label.length + 1 + blockWidth) return `${label} `
+  }
+  return ""
+}
+
+function headerLayout(agentLabel: string, glyphWidth: number, status: string, width: number, budget?: DispatchBudgetSummary): WorkCardHeaderLayout {
   const cells = Math.max(1, Math.floor(width))
   const blockWidth = glyphWidth + 1 + status.length
-  const nameBudget = cells - blockWidth - 1
+  const label = fitWorkBudget(budget, cells, blockWidth, Math.min(4, Math.max(1, agentLabel.length)))
+  const nameBudget = cells - blockWidth - label.length - 1
   const name = nameBudget > 0 ? short(agentLabel, nameBudget) : ""
-  const gap = " ".repeat(Math.max(1, cells - name.length - blockWidth))
-  return { name, gap, status }
+  const gap = " ".repeat(Math.max(1, cells - name.length - label.length - blockWidth))
+  return { name, gap, budget: label, status }
 }
 
 /** Static header layout; the glyph is animated separately (ticket #142). */
-export function workCardHeaderLayout(agentLabel: string, status: string, width: number): WorkCardHeaderLayout {
-  return headerLayout(agentLabel, WORK_CARD_GLYPH_WIDTH, status, width)
+export function workCardHeaderLayout(agentLabel: string, status: string, width: number, budget?: DispatchBudgetSummary): WorkCardHeaderLayout {
+  return headerLayout(agentLabel, WORK_CARD_GLYPH_WIDTH, status, width, budget)
 }
 
 /** Full header including a concrete glyph, for pure layout assertions. */
-export function workCardHeader(agentLabel: string, glyph: string, status: string, width: number): WorkCardHeader {
-  return { ...headerLayout(agentLabel, glyph.length, status, width), glyph }
+export function workCardHeader(agentLabel: string, glyph: string, status: string, width: number, budget?: DispatchBudgetSummary): WorkCardHeader {
+  return { ...headerLayout(agentLabel, glyph.length, status, width, budget), glyph }
 }
 
 /** The full header line, used by pure layout tests and live-visible order. */
 export function workCardHeaderText(header: WorkCardHeader): string {
-  return `${header.name}${header.gap}${header.glyph} ${header.status}`
+  return `${header.name}${header.gap}${header.budget}${header.glyph} ${header.status}`
 }
 
 /**
@@ -581,6 +602,8 @@ export type WorkCompactRow = {
   separator: string
   title: string
   gap: string
+  /** Budget label including its trailing separator space; empty when too narrow. */
+  budget: string
   glyph: string
   status: string
 }
@@ -591,10 +614,12 @@ export function workCompactRow(
   glyph: string,
   status: string,
   width: number,
+  budget?: DispatchBudgetSummary,
 ): WorkCompactRow {
   const cells = Math.max(1, Math.floor(width))
   const blockWidth = glyph.length + 1 + status.length
-  const leftBudget = Math.max(0, cells - blockWidth - 1)
+  const label = fitWorkBudget(budget, cells, blockWidth, 6)
+  const leftBudget = Math.max(0, cells - blockWidth - 1 - label.length)
   let name = ""
   let separator = ""
   let rowTitle = ""
@@ -611,13 +636,13 @@ export function workCompactRow(
       }
     }
   }
-  const gap = " ".repeat(Math.max(1, cells - name.length - separator.length - rowTitle.length - blockWidth))
-  return { name, separator, title: rowTitle, gap, glyph, status }
+  const gap = " ".repeat(Math.max(1, cells - name.length - separator.length - rowTitle.length - label.length - blockWidth))
+  return { name, separator, title: rowTitle, gap, budget: label, glyph, status }
 }
 
 /** The full compact row line, used by pure layout tests and live-visible order. */
 export function workCompactRowText(row: WorkCompactRow): string {
-  return `${row.name}${row.separator}${row.title}${row.gap}${row.glyph} ${row.status}`
+  return `${row.name}${row.separator}${row.title}${row.gap}${row.budget}${row.glyph} ${row.status}`
 }
 
 /**
@@ -676,6 +701,8 @@ export type WorkCardOptions = {
   variant?: TideVariant
   /** Stable per-subtask assignment, resolved once on first sight. */
   variantFor?: (task: Subtask) => TideVariant
+  /** Ticket #160: group/command budget summary for this task's group. */
+  budgetFor?: (task: Subtask) => DispatchBudgetSummary | undefined
 }
 
 export type WorkCardTideOptions = {
@@ -774,7 +801,7 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
   const state = workCardStateWord(status, needsYou)
   return {
     id: task.id,
-    header: workCardHeaderLayout(agentLabel.toUpperCase(), state, width),
+    header: workCardHeaderLayout(agentLabel.toUpperCase(), state, width, options.budgetFor?.(task)),
     title: short(task.title || "(untitled)", textWidth),
     detail: short(workCardDetail(status, {
       pending,
@@ -858,6 +885,7 @@ function sameWorkCard(a: WorkCard, b: WorkCard): boolean {
     a.id === b.id &&
     a.header.name === b.header.name &&
     a.header.gap === b.header.gap &&
+    a.header.budget === b.header.budget &&
     a.header.status === b.header.status &&
     a.title === b.title &&
     a.detail === b.detail &&

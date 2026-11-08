@@ -1,6 +1,7 @@
 import { deriveWorkStatus, isTerminalWorkStatus } from "./queue.ts"
+import { dispatchBudgetSummary, type DispatchBudgetSummary } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
-import type { Approval, Id, Subtask } from "./types.ts"
+import type { Approval, DispatchGroup, Id, Subtask } from "./types.ts"
 
 /**
  * Ticket #136 dispatch-group Work lifecycle, shared by the TUI pane #141's
@@ -51,6 +52,8 @@ export type WorkGroup = {
   latestTerminalAt?: number
   /** Oldest member creation time; the group's chronological position. */
   createdAt: number
+  /** Ticket #160: used/max hops plus command remaining, when a ledger exists. */
+  budget?: DispatchBudgetSummary
 }
 
 export type WorkGroupOptions = {
@@ -60,6 +63,8 @@ export type WorkGroupOptions = {
   holdMs?: number
   /** Latest approval resolution time for a member, so the hold starts after the last decision. */
   resolvedAtForTask?: (task: Subtask) => number | undefined
+  /** Ticket #160: the dispatch ledger keyed by group id. */
+  dispatchGroups?: Record<Id, DispatchGroup>
 }
 
 const NO_IDS: ReadonlySet<string> = new Set<string>()
@@ -183,6 +188,7 @@ export function workGroupsForTasks(
       latestTerminalAt !== undefined &&
       now < latestTerminalAt + Math.max(0, holdMs)
     if (active === 0 && !needsYou && !holding) continue
+    const ledger = options.dispatchGroups?.[id]
     groups.push({
       id,
       tasks: ordered,
@@ -192,6 +198,9 @@ export function workGroupsForTasks(
       complete,
       latestTerminalAt,
       createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+      ...(ledger && options.dispatchGroups
+        ? { budget: dispatchBudgetSummary(ledger, options.dispatchGroups) }
+        : {}),
     })
   }
   return groups.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))

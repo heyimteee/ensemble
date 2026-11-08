@@ -249,6 +249,24 @@ test("the System Agent init guard runs before slash-command fallthrough", () => 
   assert.ok(guard >= 0 && command > guard)
 })
 
+test("ticket160: the workspace Limits panel opens from the command line and leader menu", () => {
+  // Behavior: limits.test.ts rows/validation; dispatch-group-service.test.ts settings.update.
+  const source = app()
+  assert.ok(source.includes('case "limits": openLimits()'))
+  assert.ok(source.includes('"leader.limits": () => openLimits()'))
+  assert.ok(source.includes("<LimitsView"))
+  assert.ok(source.includes("await invoke(context, \"settings.update\", result.patch)"))
+  assert.ok(source.includes("if (limitsOpen()) { handleLimitsKey(event); return }"))
+})
+
+test("ticket160: Work cards and compact rows read the dispatch ledger budget", () => {
+  // Behavior: workrows.test.ts budget labels; workgroups.test.ts group budgets.
+  const source = app()
+  assert.ok(source.includes("dispatchGroups: ledger"))
+  assert.ok(source.includes("budgetFor,"))
+  assert.ok(source.includes("dispatchBudgetForTask(task)"))
+})
+
 test("native Work activity updates the task map and card detail without a snapshot", () => {
   // Behavior: work-activity.test.ts mapping, apply/clear, and precedence.
   const source = app()

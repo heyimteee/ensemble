@@ -11,6 +11,13 @@ import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey } from "./queue.ts"
+import {
+  dispatchesHop,
+  dispatchLimitSettings,
+  dispatchLimits,
+  newRootDispatchGroup,
+  validateDispatchLimits,
+} from "./dispatch-budget.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
@@ -32,8 +39,10 @@ import type {
   Agent,
   Approval,
   ChangesSince,
+  DispatchGroup,
   DmQueueEntry,
   FeedMeta,
+  Id,
   InitJob,
   InitPhase,
   Memory,
@@ -1088,6 +1097,9 @@ export class EnsembleV2Service {
 
   private async performMaintenance(): Promise<void> {
     await this.store.sync().catch(() => false)
+    // Ticket #160: persist and log any legacy group synthesized by load or a
+    // foreign sync. Idempotent when nothing is pending.
+    await this.store.reconcileDispatchGroups().catch(() => [])
     this.refreshDmClock()
     const at = now()
     if (this.configDirty || at - this.lastConfigPassAt >= CONFIG_DISCOVERY_MS) {
@@ -1301,6 +1313,22 @@ export class EnsembleV2Service {
     return tasks
   }
 
+  /**
+   * Ticket #160: ledger records for the projected Work rows, plus each
+   * continuation's root so command remaining resolves without a second read.
+   */
+  private dispatchGroupsFor(tasks: Record<string, Subtask>, all: Record<Id, DispatchGroup>): Record<Id, DispatchGroup> {
+    const groups: Record<Id, DispatchGroup> = {}
+    for (const task of Object.values(tasks)) {
+      const group = task.dispatchGroupID ? all[task.dispatchGroupID] : undefined
+      if (!group) continue
+      groups[group.id] = group
+      const root = group.rootID !== group.id ? all[group.rootID] : undefined
+      if (root) groups[root.id] = root
+    }
+    return groups
+  }
+
   /** Shell entities with Work/transcript branches supplied by the caller. */
   private shellState(state: SnapshotState, subtasks: Record<string, Subtask>): SnapshotState {
     return {
@@ -1318,11 +1346,13 @@ export class EnsembleV2Service {
     await this.beginRead(directory)
     const state = this.store.read()
     const at = Date.now()
+    const tasks = this.projectedTasks(state, at)
     return jsonSafe({
       version: state.version,
       epoch: this.epochValue,
       counts: workspaceCounts(state),
-      tasks: this.projectedTasks(state, at),
+      tasks,
+      groups: this.dispatchGroupsFor(tasks, state.dispatchGroups),
     })
   }
 
@@ -1393,6 +1423,9 @@ export class EnsembleV2Service {
     const scopedState: SnapshotState = {
       ...this.shellState(state, subtasks),
       messages: target && window ? { [target]: window.messages } : {},
+      // Only the ledger records for visible Work rows travel with a scoped
+      // bootstrap; historical command groups stay on the full snapshot path.
+      dispatchGroups: this.dispatchGroupsFor(subtasks, state.dispatchGroups),
     }
     const payload: Snapshot = {
       state: scopedState,
@@ -1444,7 +1477,11 @@ export class EnsembleV2Service {
     // Review fix: a disabled gate means the caller keeps the snapshot path.
     if (!gate.enabled) return jsonSafe(payload)
     const target = this.readWorkspaceID(state, directory, workspaceID)
-    if (scopes.includes("work")) payload.work = this.projectedTasks(state, Date.now())
+    if (scopes.includes("work")) {
+      const tasks = this.projectedTasks(state, Date.now())
+      payload.work = tasks
+      payload.dispatchGroups = this.dispatchGroupsFor(tasks, state.dispatchGroups)
+    }
     if (scopes.includes("shell")) payload.shell = this.shellState(state, {})
     if (scopes.includes("transcript") && target) {
       payload.transcript = { ...deriveTranscriptWindow(state.messages[target] ?? [], {}), workspaceID: target }
@@ -2820,6 +2857,36 @@ export class EnsembleV2Service {
     )
   }
 
+  /**
+   * Ticket #160: every group referenced by work has a ledger record. A new
+   * root captures the current settings, so a live group keeps the caps it was
+   * created with even when the user edits the limits later.
+   */
+  private async ensureDispatchGroupLedger(groupID: string | undefined, workspaceID: string): Promise<void> {
+    if (!groupID || this.store.dispatchGroup(groupID)) return
+    await this.store.saveDispatchGroup(newRootDispatchGroup({
+      id: groupID,
+      workspaceID,
+      settings: this.store.read().settings,
+    }))
+  }
+
+  /**
+   * Persist one newly created work item. Agent-created delegation and explicit
+   * handoff hops spend one group and command hop in the same serialized store
+   * mutation (#160 records usage; #161 turns the refusal on). Completion
+   * handoffs, peer turns, batch review, retries, recovery, and user command
+   * recipients never consume.
+   */
+  private async persistNewWork(task: Subtask): Promise<void> {
+    await this.ensureDispatchGroupLedger(task.dispatchGroupID, task.workspaceID)
+    if (dispatchesHop(task)) {
+      await this.store.admitDispatchedSubtask(task)
+      return
+    }
+    await this.store.saveSubtask(task)
+  }
+
   private async createWorkItem(input: {
     workspace: Workspace
     parentID?: string
@@ -2900,7 +2967,7 @@ export class EnsembleV2Service {
       const correlationID = input.turn.correlationID ?? correlationIDForKey("turn", key)
       subtask.turn = { correlationID, askerKind: input.turn.askerKind, askerID: input.turn.askerID }
     }
-    await this.store.saveSubtask(subtask)
+    await this.persistNewWork(subtask)
     this.noteWorkChanged(subtask)
     await this.appendMessage(input.workspace, {
       author: "system",
@@ -3315,7 +3382,7 @@ export class EnsembleV2Service {
               deadlineAt: at + DEADLINE_MS,
               turn: { correlationID, askerKind: "agent", askerID: approval.agentID },
             }
-            await this.store.saveSubtask(turn)
+            await this.persistNewWork(turn)
             this.noteWorkChanged(turn)
             await this.appendMessage(workspace, {
               author: "system",
@@ -3379,7 +3446,7 @@ export class EnsembleV2Service {
                 path: typeof approval.payload.path === "string" ? String(approval.payload.path) : undefined,
               },
             }
-            await this.store.saveSubtask(hop)
+            await this.persistNewWork(hop)
             this.noteWorkChanged(hop)
             const recipientName = this.store.agent(recipientID)?.name ?? recipientID
             // Ticket #73: concise system ack — no policy sentence, no ref, no agent bubble.
@@ -3512,6 +3579,28 @@ export class EnsembleV2Service {
     if (payload.maxDelegations !== undefined) patch.maxDelegations = Math.max(1, Number(payload.maxDelegations))
     if (payload.maxDepth !== undefined) patch.maxDepth = Math.max(1, Number(payload.maxDepth))
     if (payload.synthesis !== undefined) patch.synthesis = Boolean(payload.synthesis)
+    // Ticket #160: the four dispatch limits are one validated set. A rejected
+    // edit changes nothing; existing groups keep the caps they captured, so
+    // only new commands observe the new values.
+    const touchedLimits = ["dispatchGroupMaxHops", "dispatchCommandMaxHops", "dispatchDepth", "dispatchContinuations"]
+      .some((field) => payload[field] !== undefined)
+    if (touchedLimits) {
+      const current = dispatchLimits(this.store.settings())
+      const validation = validateDispatchLimits({
+        groupMaxHops: payload.dispatchGroupMaxHops !== undefined ? Number(payload.dispatchGroupMaxHops) : current.groupMaxHops,
+        commandMaxHops: payload.dispatchCommandMaxHops !== undefined ? Number(payload.dispatchCommandMaxHops) : current.commandMaxHops,
+        depth: payload.dispatchDepth !== undefined ? Number(payload.dispatchDepth) : current.depth,
+        continuations: payload.dispatchContinuations !== undefined ? Number(payload.dispatchContinuations) : current.continuations,
+      })
+      if (!validation.ok) {
+        this.logger?.event("warn", "dispatch", "dispatch.settings.invalid", {
+          fields: Object.keys(payload).filter((field) => field.startsWith("dispatch")),
+          errors: validation.errors,
+        })
+        throw Object.assign(new Error(validation.errors[0]!), { code: "invalid_settings" })
+      }
+      Object.assign(patch, dispatchLimitSettings(validation.limits))
+    }
     return this.store.updateSettings(patch)
   }
 
@@ -3964,7 +4053,7 @@ export class EnsembleV2Service {
         path,
       },
     }
-    await this.store.saveSubtask(hop)
+    await this.persistNewWork(hop)
     this.noteWorkChanged(hop)
     // Ticket #73: the group sees only a concise system line. The policy
     // sentence and correlation ref stay in the tool result below, which is

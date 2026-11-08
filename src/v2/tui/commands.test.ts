@@ -7,6 +7,7 @@ test("the command set is navigation and state only, never destructive or selecta
     COMMANDS.map((command) => command.name),
     [
       "settings",
+      "limits",
       "approvals",
       "workspace",
       "agent",
