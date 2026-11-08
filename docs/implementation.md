@@ -26,7 +26,8 @@ OpenCode engine
 
 - **`src/v2/service.ts`** — domain service and orchestrator. Workspaces, agents, messages, subtasks, delegation, approvals, memory, model fallback, scheduling, recovery.
 - **`src/v2/shared-service.ts`** — process-global, versioned `SharedEnsemble` registry on `globalThis`; reference-counts locations so one service starts per host realm.
-- **`src/v2/location-adapter.ts`** — `LocationAttachment` for one plugin `setup(ctx)`: the shared service reference plus that location's RPC, tool, and retry-hook registrations and their disposal.
+- **`src/v2/location-adapter.ts`** — `LocationAttachment` for one plugin `setup(ctx)`: the shared service reference plus that location's RPC, tool, retry-hook, and event-stream registrations and their disposal. Host events are claimed once by the realm before handling.
+- **`src/v2/host-events.ts`** — event identity for realm-wide dedupe: the host event id, with documented stable fallbacks for id-less stream, permission, config, and catalog events.
 - **`src/v2/tool-registrar.ts`** — the reusable `ensemble_*` tool declarations installed on every location's context; behavior stays on the shared service.
 - **`src/v2/catalog.ts`** — model/skill catalog refresh with a timeout guard.
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.

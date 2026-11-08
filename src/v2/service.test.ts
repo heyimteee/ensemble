@@ -146,6 +146,23 @@ async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<v
   throw new Error("Timed out waiting for condition")
 }
 
+test("service.start installs no event subscriptions on the bootstrap context", async () => {
+  const { ctx } = fakeContext()
+  let subscriptions = 0
+  const original = ctx.event.subscribe
+  ;(ctx.event as any).subscribe = (options?: any) => {
+    subscriptions += 1
+    return original.call(ctx.event, options)
+  }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await service.start()
+  try {
+    assert.equal(subscriptions, 0, "location adapters own the event streams")
+  } finally {
+    await stop()
+  }
+})
+
 test("service routes group messages, persists sequence, and restores the active workspace", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()

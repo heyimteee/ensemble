@@ -17,6 +17,7 @@ import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HA
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
+import { RecentHostEvents, retryEventKey } from "./host-events.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
@@ -312,6 +313,12 @@ export class EnsembleV2Service {
   private readonly toolRegistrations = new Map<any, HostRegistration>()
   /** Per-location retry hooks, keyed by the plugin context that owns them. */
   private readonly retryHooks = new Map<any, HostRegistration>()
+  /** Attached plugin locations, keyed by the context that owns their surfaces. */
+  private readonly locations = new Map<any, string | undefined>()
+  /** Session -> the location whose host permission API owns its request. */
+  private readonly permissionLocations = new Map<string, any>()
+  private readonly recentHostEvents = new RecentHostEvents()
+  private readonly recentRetryEvents = new RecentHostEvents()
   private stopped = false
   private pumping = false
   private repump = false
@@ -372,7 +379,6 @@ export class EnsembleV2Service {
   private locationLogged = false
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
-  private catalogAbort: AbortController | undefined
   /** Last catalog/config metadata published as a version-neutral batch. */
   private lastPublishedCatalogRevision = -1
   private lastPublishedConfig: { directory?: string; revision?: number; error?: string } = {}
@@ -424,49 +430,11 @@ export class EnsembleV2Service {
     // no live local run, and reconcileWaitingWork() repairs a working row
     // with no claim at all. Attempts are preserved until the next claim and
     // no approval is ever synthesized for dead work.
-    // Ticket #153: tools and retry hooks are location-scoped surfaces. They are
-    // installed by each LocationAdapter on its own plugin context, never here
-    // on the first context as a proxy for every other location.
+    // Ticket #153/#154: tools, retry hooks, and event streams are
+    // location-scoped surfaces. Each LocationAdapter installs them on its own
+    // plugin context; the first context is never a proxy for every location.
     await this.migrateV1()
     void this.catalog.refresh()
-    this.catalogAbort = new AbortController()
-    void (async () => {
-      try {
-        for await (const event of this.ctx.event.subscribe({ types: ["skill.updated", "model.updated", "provider.updated"], signal: this.catalogAbort!.signal })) {
-          if (event.type) void this.catalog.refresh()
-        }
-      } catch {}
-    })()
-    void (async () => {
-      try {
-        for await (const event of this.ctx.event.subscribe({ types: ["session.text.delta", "session.idle"], signal: this.catalogAbort!.signal })) {
-          await this.handleStreamEvent(event as any)
-        }
-      } catch {}
-    })()
-    // Native permission mirror (ticket #68): project `permission.asked`
-    // blocks on Ensemble-bound sessions into `native` approvals and resolve
-    // `permission.replied` outcomes locally. User resolution replies on the
-    // host so the run is genuinely gated. Unknown sessions fail open.
-    void (async () => {
-      try {
-        for await (const event of this.ctx.event.subscribe({ types: ["permission.asked", "permission.replied"], signal: this.catalogAbort!.signal })) {
-          await this.handlePermissionEvent(event as any)
-        }
-      } catch {}
-    })()
-    // Ticket #134: react to host-exposed config changes instead of polling
-    // `.ensemble/config.json` on every read. `config.updated` covers host
-    // config; `file.edited` covers a direct edit of the workspace config.
-    void (async () => {
-      try {
-        for await (const event of this.ctx.event.subscribe({ types: ["config.updated", "file.edited"], signal: this.catalogAbort!.signal })) {
-          if (!this.isConfigEvent(event as any)) continue
-          this.configDirty = true
-          void this.maintain()
-        }
-      } catch {}
-    })()
     await this.maintain()
     this.maintenanceTimer = setInterval(() => {
       // Repairs are not enough: a repaired claim or a due retry must be
@@ -484,7 +452,6 @@ export class EnsembleV2Service {
       // own claim, and any claim still held by these ids after settle is a
       // clean-shutdown release. Foreign claims must survive.
       const localRunIDs = new Set(this.activeRuns.keys())
-      this.catalogAbort?.abort()
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer)
       this.maintenanceTimer = undefined
       if (this.streamTimer) clearTimeout(this.streamTimer)
@@ -571,6 +538,61 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Track one plugin location's context so session-owned host surfaces (the
+   * native permission reply API) resolve to the location that owns the session
+   * instead of the first bootstrap context (ticket #154).
+   */
+  trackLocation(ctx: any, directory?: string): void {
+    if (ctx) this.locations.set(ctx, directory)
+  }
+
+  untrackLocation(ctx: any): void {
+    if (!this.locations.delete(ctx)) return
+    for (const [sessionID, owner] of this.permissionLocations) {
+      if (owner === ctx) this.permissionLocations.delete(sessionID)
+    }
+  }
+
+  /**
+   * Handle one host event forwarded by a location adapter (ticket #154).
+   *
+   * Event identity is claimed before dispatch, so a global bus that delivers
+   * the same event to every location processes it once. Catalog, stream,
+   * permission, and config events are the location-scoped surfaces the service
+   * consumes; idle is forwarded for activity consumers but has no durable
+   * effect in this ticket.
+   */
+  async handleHostEvent(event: any, location?: any): Promise<void> {
+    if (this.stopped) return
+    if (!this.recentHostEvents.claim(event)) return
+    const type = String(event?.type ?? "")
+    if (type === "skill.updated" || type === "model.updated" || type === "provider.updated") {
+      void this.catalog.refresh(location)
+      return
+    }
+    if (type === "session.text.delta" || type === "session.idle") {
+      await this.handleStreamEvent(event)
+      return
+    }
+    // Native permission mirror (ticket #68): project `permission.asked`
+    // blocks on Ensemble-bound sessions into `native` approvals and resolve
+    // `permission.replied` outcomes locally. User resolution replies on the
+    // owning location's host API so the run is genuinely gated.
+    if (type === "permission.asked" || type === "permission.replied") {
+      await this.handlePermissionEvent(event, location)
+      return
+    }
+    // Ticket #134: react to host-exposed config changes instead of polling
+    // `.ensemble/config.json` on every read. `config.updated` covers host
+    // config; `file.edited` covers a direct edit of the workspace config.
+    if (type === "config.updated" || type === "file.edited") {
+      if (!this.isConfigEvent(event)) return
+      this.configDirty = true
+      void this.maintain()
+    }
+  }
+
+  /**
    * Narrow test seam (ticket #148): register a local run identity without
    * starting native work, so clean-shutdown claim release is observable at the
    * service boundary. Production runs register themselves in `runTask()`; this
@@ -578,6 +600,7 @@ export class EnsembleV2Service {
    */
   registerLocalRunForTest(run: Run): void {
     this.activeRuns.set(run.id, run)
+    this.runBySession.set(run.sessionID, run.id)
   }
 
   private emitChanged(
@@ -819,7 +842,7 @@ export class EnsembleV2Service {
    * event-driven, so a restart never resurrects an already-answered host
    * request as a phantom approval.
    */
-  private async handlePermissionEvent(event: any): Promise<void> {
+  private async handlePermissionEvent(event: any, source?: any): Promise<void> {
     const data = event?.data ?? event
     if (event?.type === "permission.asked") {
       const sessionID = String(data?.sessionID ?? "")
@@ -828,6 +851,8 @@ export class EnsembleV2Service {
       if (!sessionID || !permissionID) return
       const owner = this.ownerForSession(sessionID)
       if (!owner) return
+      const ownerLocation = this.locationForSession(sessionID, source)
+      if (ownerLocation) this.permissionLocations.set(sessionID, ownerLocation)
       const state = this.store.read()
       const duplicate = Object.values(state.approvals).some(
         (approval) => approval.status === "pending" && approval.kind === "native" && approval.payload?.permissionID === permissionID,
@@ -906,11 +931,51 @@ export class EnsembleV2Service {
     }
   }
 
-  /** Reply on the host permission request. Fail-open: a gone request still resolves locally. */
+  /**
+   * Resolve the attached location that owns a native session. The stored
+   * binding directory is authoritative when it matches a location; the
+   * location that observed the event is the next best source; any attached
+   * location is the last resort because the host permission API is keyed by
+   * session. The bootstrap context is never used as a proxy.
+   */
+  private locationForSession(sessionID: string, source?: any): any {
+    const binding = this.store?.bindingForSession(sessionID)
+    const target = typeof binding?.directory === "string" && binding.directory.length > 0
+      ? canonicalDirectory(binding.directory)
+      : undefined
+    if (target) {
+      for (const [ctx, directory] of this.locations) {
+        if (!directory) continue
+        try {
+          if (canonicalDirectory(directory) === target) return ctx
+        } catch {
+          // A stale location directory must not block the ownership fallback.
+        }
+      }
+    }
+    if (source && this.locations.has(source)) return source
+    for (const ctx of this.locations.keys()) {
+      if (typeof ctx?.permission?.reply === "function") return ctx
+    }
+    for (const ctx of this.locations.keys()) return ctx
+    return undefined
+  }
+
+  private permissionContextForSession(sessionID: string): any {
+    const known = this.permissionLocations.get(sessionID)
+    if (known && this.locations.has(known)) return known
+    if (known) this.permissionLocations.delete(sessionID)
+    const location = this.locationForSession(sessionID)
+    if (location) this.permissionLocations.set(sessionID, location)
+    return location
+  }
+
+  /** Reply on the host permission request through the location that owns it. Fail-open locally. */
   private async replyNativePermission(sessionID: string, requestID: string, decision: "once" | "reject", message?: string): Promise<void> {
-    const reply = this.ctx?.permission?.reply
+    const location = this.permissionContextForSession(sessionID)
+    const reply = location?.permission?.reply
     if (typeof reply !== "function") return
-    await reply.call(this.ctx.permission!, { sessionID, requestID, decision, ...(message ? { message } : {}) })
+    await reply.call(location.permission, { sessionID, requestID, decision, ...(message ? { message } : {}) })
   }
 
   private defer(ms: number, fn: () => void): void {
@@ -3450,6 +3515,9 @@ export class EnsembleV2Service {
     if (existing) return existing
     const registration = await ctx.session.hook("retry", (event: any) => {
       if (!this.profileForSession(event.sessionID)) return
+      // A global hook bus can deliver one retry decision through every
+      // location's callback. Claim it in the realm so the policy applies once.
+      if (!this.recentRetryEvents.claimKey(retryEventKey(event))) return
       if (availabilityFailure(event.error)) event.decision = { retry: false }
     })
     const handle = this.hostRegistration(registration, this.retryHooks, ctx)
@@ -3501,6 +3569,10 @@ export class EnsembleV2Service {
     }
     this.toolRegistrations.clear()
     this.retryHooks.clear()
+    this.locations.clear()
+    this.permissionLocations.clear()
+    this.recentHostEvents.clear()
+    this.recentRetryEvents.clear()
   }
 
   private async toolWorkspaceInfo(context: any): Promise<{ content: string }> {
@@ -4980,6 +5052,9 @@ export class EnsembleV2Service {
   }
 
   private async handleStreamEvent(event: any): Promise<void> {
+    // Idle is forwarded by the location adapter for activity consumers; ticket
+    // #155 owns that surface, so it has no durable effect here.
+    if (event?.type === "session.idle") return
     if (event?.type !== "session.text.delta") return
     const data = event.data ?? event
     const live = this.liveBySession.get(String(data.sessionID ?? ""))
