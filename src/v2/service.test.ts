@@ -1037,7 +1037,7 @@ test("discarding interrupted work marks it failed without running", async () => 
   await seed.load()
   await seedAgent(seed)
   await seedWorkspace(seed, directory)
-  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Interrupted", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: true, approvalID: "ap", awaitingChildren: false, attempts: 1, createdAt: 1 })
+  await seed.saveSubtask({ id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Interrupted", instruction: "Do", mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: true, approvalID: "ap", awaitingChildren: false, attempts: 1, activeRunID: "run", claimedBy: "run", leaseUntil: Date.now() + 60_000, createdAt: 1 })
   await seed.saveApproval({ id: "ap", workspaceID: "w", subtaskID: "t", agentID: "a", kind: "interrupted", source: "workspace", title: "Resume interrupted work: Interrupted", detail: "The run stopped before it could reply.", payload: { subtaskID: "t" }, status: "pending", createdAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
@@ -1050,6 +1050,7 @@ test("discarding interrupted work marks it failed without running", async () => 
     assert.equal(after.state.subtasks.t.state, "replied")
     assert.equal(after.state.subtasks.t.outcome, "failed")
     assert.equal(after.state.subtasks.t.attempts, 1)
+    assert.equal(after.state.subtasks.t.activeRunID, undefined, "discarding interrupted work clears the active run id")
   } finally {
     await stop()
   }
@@ -3281,7 +3282,7 @@ test("ticket170: a rejected ask is a controlled stop, not a native failure", asy
   await seed.saveSubtask({
     id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Question", instruction: "Do work",
     mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: true, approvalID: "ap",
-    awaitingChildren: false, attempts: 1, createdAt: 1,
+    awaitingChildren: false, attempts: 1, activeRunID: "run", claimedBy: "run", leaseUntil: Date.now() + 60_000, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
@@ -3292,6 +3293,8 @@ test("ticket170: a rejected ask is a controlled stop, not a native failure", asy
     const task = after.state.subtasks.t as any
     assert.equal(task.status, "cancelled")
     assert.equal(task.stoppedAt !== undefined, true)
+    assert.equal(task.activeRunID, undefined, "a controlled stop clears the active run id")
+    assert.equal(task.claimedBy, undefined, "a controlled stop clears the claim")
     const failed = await handlers["logs.recent"]({ directory, event: "task.failed", taskID: "t", limit: 20 })
     assert.equal(failed.entries.length, 0, "a user rejection is never logged as a native failure")
     const cancelled = await handlers["logs.recent"]({ directory, event: "task.cancelled", taskID: "t", limit: 20 })

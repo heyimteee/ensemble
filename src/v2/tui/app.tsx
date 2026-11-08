@@ -10,7 +10,7 @@ import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
-import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
+import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, paletteRowTitle, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
@@ -3347,7 +3347,7 @@ export function EnsembleV2App() {
     const previous = completion()
     const sameToken = previous?.kind === "command" && previous.start === palette.tokenStart && previous.scope === palette.scope
     const items = palette.rows.map((row) => ({
-      title: chromeJoin([row.label, row.flag]),
+      title: paletteRowTitle(row.label, row.flag),
       value: row.executor === "init" ? "init" : row.kind === "command" ? row.command! : row.skillID!,
       action: row.executor === "init" ? "command" as const : row.kind,
       insert: row.insert,
@@ -6681,7 +6681,7 @@ export function EnsembleV2App() {
                       </Show>
                       <Show when={completion()}>
                         <box border borderStyle="single" borderColor={colors.leader} backgroundColor={colors.bg} flexDirection="column" height={9} minHeight={9} flexShrink={0}>
-                          <text fg={colors.leader} bg={colors.bg} width="100%" truncate>{(() => {
+                          <text fg={colors.leader} bg={colors.bg} width="100%" truncate wrapMode="none">{(() => {
                             const state = completion()
                             if (!state) return ""
                             const title = state.kind === "agent" ? "$ agents" : state.kind === "file" ? "@ files" : state.scope === "agent" ? chromeJoin([`$${state.ownerName ?? "agent"} /`, "skills"]) : chromeJoin(["/ commands", "skills"])
@@ -6689,7 +6689,7 @@ export function EnsembleV2App() {
                             return state.query ? chromeJoin([title, state.query]) : title
                           })()}</text>
                           <For each={[0, 1, 2, 3, 4, 5]}>{(slot) => (
-                            <text fg={colors.text} bg={colors.bg} width="100%" truncate>{(() => {
+                            <text fg={colors.text} bg={colors.bg} width="100%" truncate wrapMode="none">{(() => {
                               const state = completion()
                               if (!state) return ""
                               const window = completionWindow(state)

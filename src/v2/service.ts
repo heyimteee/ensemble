@@ -3638,6 +3638,7 @@ export class EnsembleV2Service {
           subtask.error = "Interrupted work discarded by the user."
           subtask.interrupted = false
           subtask.approvalID = undefined
+          subtask.activeRunID = undefined
           subtask.claimedBy = undefined
           subtask.leaseUntil = undefined
           subtask.retryAfter = undefined
@@ -3655,6 +3656,7 @@ export class EnsembleV2Service {
           subtask.outcome = "failed"
           subtask.error = "User rejected the request."
           subtask.approvalID = undefined
+          subtask.activeRunID = undefined
           subtask.claimedBy = undefined
           subtask.leaseUntil = undefined
           subtask.retryAfter = undefined
