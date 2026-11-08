@@ -37,7 +37,9 @@ live_require_active_work() {
 # reserved for REPLIED and the name may truncate before the status word.
 live_capture_work_card() {
   local session="$1" agent="$2" status="$3"
-  live_capture "$session" | grep -Eq "${agent} +[^ ]+ ${status}"
+  # The header may carry a dispatch-budget label between the agent name and
+  # the glyph/status block (#160). Allow any number of budget tokens there.
+  live_capture "$session" | grep -Eq "${agent} +([^ ]+ +)*[^ ]+ ${status}"
 }
 
 live_require_work_card() {
@@ -54,7 +56,7 @@ live_assert_absence_work_card() {
 
 live_count_work_card() {
   local session="$1" agent="$2" status="$3"
-  live_capture "$session" | { grep -oE "${agent} +[^ ]+ ${status}" || true; } | wc -l | tr -d ' '
+  live_capture "$session" | { grep -oE "${agent} +([^ ]+ +)*[^ ]+ ${status}" || true; } | wc -l | tr -d ' '
 }
 
 # v5.8 T2/T3: deterministic project skills give the composer palette real
@@ -688,7 +690,7 @@ collect_work_frames() {
     work_sample=$(grep -n -A 4 -E 'FAKEAGENT.*WORKING' <<<"$pane" | head -n 12 || true)
     [[ -n "$work_sample" ]] && seen_work_sample="$work_sample"
     for frame in "⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"; do
-      if grep -qE "FAKEAGENT +${frame} WORKING" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
+      if grep -qE "FAKEAGENT.*${frame} WORKING" <<<"$pane" && [[ "$seen_which" != *"$frame"* ]]; then
         seen_which="${seen_which}${frame}"
         seen_frames=$((seen_frames + 1))
       fi
@@ -1742,7 +1744,7 @@ live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced moti
 live_type "$LIVE_TUI_SESSION" "fake-motion-static"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" 15 "frame-0 Work card under reduced motion"
-live_capture_matches "$LIVE_TUI_SESSION" "FAKEAGENT +⠋ WORKING" || live_fail "reduced-motion Work card is not on frame 0"
+live_capture_matches "$LIVE_TUI_SESSION" "FAKEAGENT.*⠋ WORKING" || live_fail "reduced-motion Work card is not on frame 0"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 for _ in $(seq 1 8); do

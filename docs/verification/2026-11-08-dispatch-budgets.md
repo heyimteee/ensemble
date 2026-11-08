@@ -1,6 +1,6 @@
 # Dispatch budgets, continuation groups, and live evidence (#164)
 
-Status: **verified locally on Linux/tmux; fake-provider five/nine/cap and size matrix pass; review fix pass green on `npm run verify`; real playground continuation smoke remains a post-merge step because the live host was not restarted or reconfigured**
+Status: **verified locally on Linux/tmux; fake-provider five/nine/cap, full fake suite, multi-location, and size matrix pass; review fix pass and post-merge hardening are green; a live budgeted delegation probe passed on the restarted host; full live continuation remains a controlled follow-up**
 Date: 2026-11-08
 Issue: [#164](https://github.com/heyimteee/ensemble/issues/164)
 Spec: [#159](https://github.com/heyimteee/ensemble/issues/159)
@@ -263,22 +263,43 @@ copied artifacts above are the retained evidence.
 
 ## Skips and limitations
 
-- **Real playground continuation: POST-MERGE STEP.** The live path still runs
-  pre-#160 `main`; reloading/reconfiguring it was explicitly out of bounds for
-  this fix pass. See the post-merge steps above.
+- **Full live continuation: NOT RUN.** A live budgeted delegation probe passed
+  on the restarted host (task `task_f3e2636af9404c0c90b4`, `taskMaxHops: 0`,
+  `dispatchDepth: 1`, succeeded, 0 non-terminal tasks, 0 pending approvals).
+  Exercising a full 8-hop root exhaustion plus continuation requires a
+  controlled multi-hop live scenario; the fake-provider nine-hop run covers
+  the continuation path.
 - **macOS/Herdr: NOT RUN.** No macOS host is available.
 - **Hosted CI: NOT RUN.**
 - **Full real `test:live:all`: NOT RUN.** This pass used the isolated fake
   multi-location and size matrices; the model-dependent full matrix stays
   local.
-- **Full `test:live:fake`: FAIL outside this diff.** The fix pass updated the
-  stale init assertions to read the current contract version from source, but
-  the suite stops earlier at the known `fake-queue-alpha` Work card race: the
-  15 s WAITING card wait can miss the active window and observe the terminal
-  hold instead. That race predates #159 and is unrelated to the budget diff.
-  Attempt log: `/tmp/opencode/159-fix-fake.log`.
+- **Full `test:live:fake`: PASS after post-merge hardening.** The review fix
+  pass had left the suite red at `fake-queue-alpha` because the budget label
+  truncated the agent name and because snapshot helpers passed large JSON on
+  the command line. The post-merge hardening now passes the full fake suite
+  (`exit 0`), and the live harness uses stdin for snapshot evaluation.
 - Multi-process budget coordination remains unsupported by design (ADR 0003,
   ADR 0004). The ledger is single-service.
+
+## Post-merge hardening
+
+- **Card identity wins over budget detail.** The card header now preserves a
+  normal-length agent name before choosing a richer budget label; `FAKEAGENT`
+  no longer truncates to `FAKEAG…`.
+- **Group budget is last.** The Work group label stays
+  `GROUP n · X active · Y done · hops …`, preserving the old status prefix.
+- **Fake suite green.** `ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:fake`
+  passes after updating the work-card/header assertions and allowing an
+  optional budget token.
+- **Snapshot helpers use stdin.** `live_snapshot_has_model`,
+  `live_snapshot_has_agent_named`, `live_snapshot_has_workspace_named`, and
+  `live_snapshot_value` no longer pass the full snapshot JSON as a command
+  argument, avoiding `ARG_MAX` failures as the fixture grows.
+- **Live budget probe.** After a deliberate service restart, the playground
+  leader delegated with `maxHops: 0`; the ledger recorded `taskMaxHops: 0`,
+  `dispatchDepth: 1`, and group `dispatch_c9c8017d583f4626a45d`; the task
+  succeeded and left no pending work.
 
 ## Anomalies
 

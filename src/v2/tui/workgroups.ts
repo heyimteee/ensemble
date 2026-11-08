@@ -63,8 +63,10 @@ export function workGroupLabel(
   }
   if (group.exhausted) parts.push("EXHAUSTED")
   if (dispatchGroupContinued(group)) parts.push("CONTINUED")
-  if (group.budget) parts.push(dispatchBudgetLabel(group.budget, "full"))
+  // Status first, budget detail last: the old `GROUP n · X active · Y done`
+  // prefix stays stable for readers and live anchors.
   parts.push(`${group.active} active`, `${group.done} done`)
+  if (group.budget) parts.push(dispatchBudgetLabel(group.budget, "full"))
   return parts.join(" · ")
 }
 

@@ -182,7 +182,7 @@ test("ticket160: a group carries its ledger budget into the label", () => {
   }
   const groups = workGroupsForTasks(items, record(...items), { now: 5_000, dispatchGroups: ledger })
   assert.deepEqual(groups[0].budget, { usedHops: 3, maxHops: 8, commandRemaining: 21, commandMaxHops: 24 })
-  assert.equal(workGroupLabel(groups[0], 1), "GROUP 1 · hops 3/8 · cmd 21 left · 1 active · 1 done")
+  assert.equal(workGroupLabel(groups[0], 1), "GROUP 1 · 1 active · 1 done · hops 3/8 · cmd 21 left")
   const without = workGroupsForTasks(items, record(...items), { now: 5_000 })
   assert.equal(without[0].budget, undefined)
   assert.equal(workGroupLabel(without[0], 1), "GROUP 1 · 1 active · 1 done")
@@ -404,11 +404,11 @@ test("ticket162: Work shows continuation lineage and exhausted groups as a contr
   assert.equal(groups[1].rootID, "dispatch_root")
   assert.equal(
     workGroupLabel(groups[0]!, 1),
-    "GROUP 1 · EXHAUSTED · CONTINUED · hops 8/8 · cmd 16 left · 1 active · 0 done",
+    "GROUP 1 · EXHAUSTED · CONTINUED · 1 active · 0 done · hops 8/8 · cmd 16 left",
   )
   assert.equal(
     workGroupLabel(groups[1]!, 2),
-    "GROUP 2 · CONT 1 · from root · hops 3/8 · cmd 16 left · 1 active · 0 done",
+    "GROUP 2 · CONT 1 · from root · 1 active · 0 done · hops 3/8 · cmd 16 left",
   )
   assert.equal(workSummaryCounts(2, 2, 0, 1), "WORK 2 groups · 2 active · 0 done · 1 exhausted")
 

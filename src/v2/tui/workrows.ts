@@ -569,7 +569,10 @@ function fitWorkBudget(budget: DispatchBudgetSummary | undefined, cells: number,
 function headerLayout(agentLabel: string, glyphWidth: number, status: string, width: number, budget?: DispatchBudgetSummary): WorkCardHeaderLayout {
   const cells = Math.max(1, Math.floor(width))
   const blockWidth = glyphWidth + 1 + status.length
-  const label = fitWorkBudget(budget, cells, blockWidth, Math.min(4, Math.max(1, agentLabel.length)))
+  // Agent identity wins over budget detail: never pick a budget label that
+  // would truncate a normal-length name. Longer names still truncate, but only
+  // after every budget style has yielded.
+  const label = fitWorkBudget(budget, cells, blockWidth, Math.min(12, Math.max(4, agentLabel.length)))
   const nameBudget = cells - blockWidth - label.length - 1
   const name = nameBudget > 0 ? short(agentLabel, nameBudget) : ""
   const gap = " ".repeat(Math.max(1, cells - name.length - label.length - blockWidth))
@@ -618,7 +621,7 @@ export function workCompactRow(
 ): WorkCompactRow {
   const cells = Math.max(1, Math.floor(width))
   const blockWidth = glyph.length + 1 + status.length
-  const label = fitWorkBudget(budget, cells, blockWidth, 6)
+  const label = fitWorkBudget(budget, cells, blockWidth, Math.min(12, Math.max(6, agentLabel.length)))
   const leftBudget = Math.max(0, cells - blockWidth - 1 - label.length)
   let name = ""
   let separator = ""

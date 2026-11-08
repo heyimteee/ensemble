@@ -615,11 +615,11 @@ live_snapshot_has_model() {
   local provider="$1" model="$2" output
   output=$(live_snapshot 2>/dev/null | live_snapshot_output 2>/dev/null) || return 1
   [[ -n "$output" ]] || return 1
-  "$LIVE_NODE_BIN" -e '
-    const output = JSON.parse(process.argv[1]);
+  printf '%s' "$output" | "$LIVE_NODE_BIN" -e '
+    const output = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
     const models = Array.isArray(output.models) ? output.models : [];
-    process.exit(models.some((item) => item.providerID === process.argv[2] && item.modelID === process.argv[3]) ? 0 : 1);
-  ' "$output" "$provider" "$model" >/dev/null 2>&1
+    process.exit(models.some((item) => item.providerID === process.argv[1] && item.modelID === process.argv[2]) ? 0 : 1);
+  ' "$provider" "$model" >/dev/null 2>&1
 }
 
 live_wait_for_model() {
@@ -649,34 +649,34 @@ live_snapshot_has_agent_named() {
   local name="$1" output
   output=$(live_snapshot 2>/dev/null | live_snapshot_output 2>/dev/null) || return 1
   [[ -n "$output" ]] || return 1
-  "$LIVE_NODE_BIN" -e '
-    const output = JSON.parse(process.argv[1]);
+  printf '%s' "$output" | "$LIVE_NODE_BIN" -e '
+    const output = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
     const agents = Object.values(output.state?.agents ?? {});
-    process.exit(agents.some((agent) => agent.name === process.argv[2] && !agent.archived) ? 0 : 1);
-  ' "$output" "$name" >/dev/null 2>&1
+    process.exit(agents.some((agent) => agent.name === process.argv[1] && !agent.archived) ? 0 : 1);
+  ' "$name" >/dev/null 2>&1
 }
 
 live_snapshot_has_workspace_named() {
   local name="$1" output
   output=$(live_snapshot 2>/dev/null | live_snapshot_output 2>/dev/null) || return 1
   [[ -n "$output" ]] || return 1
-  "$LIVE_NODE_BIN" -e '
-    const output = JSON.parse(process.argv[1]);
+  printf '%s' "$output" | "$LIVE_NODE_BIN" -e '
+    const output = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
     const workspaces = Object.values(output.state?.workspaces ?? {});
-    process.exit(workspaces.some((workspace) => workspace.name === process.argv[2] && !workspace.archived) ? 0 : 1);
-  ' "$output" "$name" >/dev/null 2>&1
+    process.exit(workspaces.some((workspace) => workspace.name === process.argv[1] && !workspace.archived) ? 0 : 1);
+  ' "$name" >/dev/null 2>&1
 }
 
 live_snapshot_value() {
   local expression="$1" output
   output=$(live_snapshot | live_snapshot_output)
-  "$LIVE_NODE_BIN" -e '
-    const output = JSON.parse(process.argv[1]);
-    const raw = process.argv[2];
+  printf '%s' "$output" | "$LIVE_NODE_BIN" -e '
+    const output = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    const raw = process.argv[1];
     const expression = raw.startsWith(".") ? `output${raw}` : raw;
     const value = Function("output", `return (${expression})`)(output);
     process.stdout.write(JSON.stringify(value === undefined ? null : value));
-  ' "$output" "$expression"
+  ' "$expression"
 }
 
 # --- subtask waits and diagnostics ----------------------------------------
