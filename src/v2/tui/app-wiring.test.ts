@@ -125,6 +125,20 @@ test("a feed gap recovers through changes.since", () => {
   assert.ok(app().includes('callRpc<ChangesSince>(context, "changes.since"'))
 })
 
+test("a foreign-epoch patch coalesces one snapshot instead of resetting the feed", () => {
+  // Behavior: refresh-coordinator.test.ts foreign-epoch detection and coalescing.
+  const source = app()
+  assert.ok(source.includes("if (isForeignEpochPatch(lastSnapshotMeta, payload?.epoch))"))
+  assert.ok(source.includes("createForeignEpochCoalescer({"))
+  assert.ok(source.includes("foreignEpochRefresh.request()"))
+  assert.ok(source.includes("count: feedGapCount"))
+})
+
+test("the TUI log rows carry a per-mount identity", () => {
+  // Behavior: logging.test.ts base attribution fields.
+  assert.ok(app().includes('createLogger({ role: "tui", instanceID: randomUUID() })'))
+})
+
 test("the legacy changed event keeps the snapshot fallback", () => {
   // Behavior: app.tsx loadData falls back to loadSnapshot when scoped reads fail.
   assert.ok(app().includes('if (type === "rpc.ensemble.v2.changed")'))

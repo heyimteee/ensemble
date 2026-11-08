@@ -298,6 +298,61 @@ export function revisionChanged(previous: SnapshotMeta | undefined, next: Revisi
     || previous.epoch !== next.epoch
 }
 
+/**
+ * Ticket #150: a patch from another server boot epoch has no comparable
+ * cursor. It must take the snapshot path, never `changes.since`, because the
+ * old epoch can only answer with a reset. Unknown epochs are not foreign.
+ */
+export function isForeignEpochPatch(previous: SnapshotMeta | undefined, epoch: unknown): boolean {
+  return previous !== undefined
+    && typeof previous.epoch === "number"
+    && typeof epoch === "number"
+    && epoch !== previous.epoch
+}
+
+export type ForeignEpochCoalescerOptions = {
+  /** Force one full snapshot; called at most once per window. */
+  refresh: () => void
+  /** Trailing window that collapses a foreign-epoch burst; default 200 ms. */
+  delayMs?: number
+}
+
+export type ForeignEpochCoalescer = {
+  /** Queue the window's single refresh; true when this call scheduled it. */
+  request: () => boolean
+  pending: () => boolean
+  dispose: () => void
+}
+
+/**
+ * Trailing-edge coalescer for foreign-epoch patches. A burst schedules one
+ * snapshot after the window; later patches open the next window only after the
+ * previous refresh ran. This is the reset-loop guard, not a heartbeat.
+ */
+export function createForeignEpochCoalescer(options: ForeignEpochCoalescerOptions): ForeignEpochCoalescer {
+  const delayMs = Math.max(1, options.delayMs ?? 200)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
+
+  return {
+    request: (): boolean => {
+      if (disposed || timer !== undefined) return false
+      timer = setTimeout(() => {
+        timer = undefined
+        if (!disposed) options.refresh()
+      }, delayMs)
+      timer.unref?.()
+      return true
+    },
+    pending: () => timer !== undefined,
+    dispose: () => {
+      disposed = true
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+    },
+  }
+}
+
 /** Idle heartbeats are cheap; live work checks twice as often. */
 export function heartbeatDelay(active: boolean): number {
   return active ? 1_000 : 2_000

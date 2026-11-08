@@ -20,7 +20,7 @@ import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-i
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
 import { STREAM_COALESCE_MS } from "./stream-coalescer.ts"
-import { createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
+import { createLogRateLimiter, createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { createStoreObserver } from "./log-events.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import type {
@@ -95,6 +95,7 @@ type RpcInput = {
   cat?: string
   event?: string
   taskID?: string
+  instanceID?: string
 }
 
 function rpcInput(value: unknown): RpcInput {
@@ -112,7 +113,7 @@ function rpcInput(value: unknown): RpcInput {
   if (input.beforeSeq !== undefined && typeof input.beforeSeq !== "number") throw invalidInput("beforeSeq must be a number.")
   if (input.limit !== undefined && typeof input.limit !== "number") throw invalidInput("limit must be a number.")
   if (input.scopes !== undefined && !Array.isArray(input.scopes)) throw invalidInput("scopes must be a list.")
-  for (const field of ["level", "cat", "event", "taskID"] as const) {
+  for (const field of ["level", "cat", "event", "taskID", "instanceID"] as const) {
     if (input[field] !== undefined && typeof input[field] !== "string") throw invalidInput(`${field} must be a string.`)
   }
   return {
@@ -130,6 +131,7 @@ function rpcInput(value: unknown): RpcInput {
     cat: input.cat as string | undefined,
     event: input.event as string | undefined,
     taskID: input.taskID as string | undefined,
+    instanceID: input.instanceID as string | undefined,
   }
 }
 
@@ -286,9 +288,14 @@ export class EnsembleV2Service {
   private globalEpoch = 0
   /**
    * Boot identity for the versioned feed. The sub-millisecond counter keeps
-   * two in-process restarts distinct even when `Date.now()` ties.
+   * two in-process restarts distinct even when `Date.now()` ties. Ticket #150:
+   * the boot value is also the stable log instance ID; a feed reset advances
+   * `epochValue` but never the instance identity.
    */
   private epochValue = Date.now() * 1000 + (bootEpochSeq++ % 1000)
+  private readonly instanceID = String(this.epochValue)
+  private readonly feedResetLimiter = createLogRateLimiter({ windowMs: 10_000 })
+  private locationLogged = false
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
   private catalogAbort: AbortController | undefined
@@ -312,11 +319,16 @@ export class EnsembleV2Service {
 
   async start(): Promise<() => Promise<void>> {
     this.startedAtMs = now()
-    this.logger = createLogger({ role: "service" })
+    this.logger = createLogger({ role: "service", instanceID: this.instanceID })
     setGlobalLogger(this.logger)
+    // Ticket #150: prefer the plugin location when the host exposes it; the
+    // process cwd is only a fallback and can differ from every loaded location.
+    const locationDirectory = typeof this.ctx?.directory === "string" && this.ctx.directory.length > 0
+      ? this.ctx.directory
+      : undefined
     this.logger.event("info", "service", "service.start", {
       protocol: ENSEMBLE_PROTOCOL_VERSION,
-      directory: process.cwd(),
+      directory: locationDirectory ?? process.cwd(),
       epoch: this.epochValue,
       pid: process.pid,
       logFiles: this.logger.stats(),
@@ -630,18 +642,26 @@ export class EnsembleV2Service {
     // recovery request fails with a 500 and falls back to a full snapshot.
     const result = this.store.changesSince(input.epoch ?? -1, input.version ?? -1)
     if (result.reset) {
-      this.logger?.event("warn", "feed", "feed.reset", {
-        requestedEpoch: input.epoch,
-        requestedVersion: input.version,
-        epoch: result.epoch,
-        version: result.version,
-      })
+      // Ticket #150: identical resets collapse to one warning per window; the
+      // next emitted warning reports how many were suppressed.
+      const admission = this.feedResetLimiter.admit(result.reason ?? "unknown")
+      if (admission.allowed) {
+        this.logger?.event("warn", "feed", "feed.reset", {
+          reason: result.reason,
+          requestedEpoch: input.epoch,
+          requestedVersion: input.version,
+          epoch: result.epoch,
+          version: result.version,
+          suppressed: admission.suppressed,
+        })
+      }
     }
     this.logger?.event("debug", "feed", "feed.changes", {
       requestedVersion: input.version,
       version: result.version,
       entries: result.entries.length,
       reset: result.reset === true,
+      ...(result.reason ? { reason: result.reason } : {}),
     })
     return jsonSafe({
       ...result,
@@ -827,6 +847,11 @@ export class EnsembleV2Service {
 
   /** Remember the location a client is viewing; a change forces discovery. */
   private noteViewDirectory(directory: string): void {
+    // Ticket #150: one attribution row per service instance, not per read.
+    if (!this.locationLogged) {
+      this.locationLogged = true
+      this.logger?.event("info", "service", "service.location", { directory })
+    }
     if (this.viewDirectory === directory) return
     this.viewDirectory = directory
     this.configDirty = true
@@ -1278,6 +1303,7 @@ export class EnsembleV2Service {
       cat: input.cat as any,
       event: input.event,
       taskID: input.taskID,
+      instanceID: input.instanceID,
     })
     return jsonSafe({ entries, stats: logger.stats() })
   }

@@ -7,6 +7,7 @@ import type {
   ChangeEntry,
   ChatMessage,
   EntityChange,
+  FeedResetReason,
   InitJob,
   Memory,
   Message,
@@ -1056,18 +1057,19 @@ export class V2Store {
    * Cursor recovery for the revision heartbeat. A cursor outside the ring, an
    * unknown epoch, a cursor ahead of the store, or a gapped ring all reset to
    * the snapshot path; a fresh cursor gets contiguous full-entity entries.
+   * Ticket #150: every reset names its reason so `feed.reset` is attributable.
    */
-  changesSince(epoch: number, version: number): { epoch: number; version: number; reset: boolean; entries: ChangeEntry[] } {
+  changesSince(epoch: number, version: number): { epoch: number; version: number; reset: boolean; reason?: FeedResetReason; entries: ChangeEntry[] } {
     const current = this.state.version
-    const reset = () => ({ epoch: this.epochValue, version: current, reset: true, entries: [] as ChangeEntry[] })
-    if (!Number.isFinite(epoch) || !Number.isFinite(version)) return reset()
-    if (epoch !== this.epochValue) return reset()
-    if (version > current) return reset()
+    const reset = (reason: FeedResetReason) => ({ epoch: this.epochValue, version: current, reset: true, reason, entries: [] as ChangeEntry[] })
+    if (!Number.isFinite(epoch) || !Number.isFinite(version) || version < 0) return reset("invalid-cursor")
+    if (epoch !== this.epochValue) return reset("epoch")
+    if (version > current) return reset("future-version")
     if (version === current) return { epoch: this.epochValue, version: current, reset: false, entries: [] }
     const entries = this.changeRing.filter((entry) => entry.version > version)
-    if (entries.length === 0 || entries[0]!.version !== version + 1) return reset()
+    if (entries.length === 0 || entries[0]!.version !== version + 1) return reset("ring-gap")
     for (let index = 1; index < entries.length; index++) {
-      if (entries[index]!.version !== entries[index - 1]!.version + 1) return reset()
+      if (entries[index]!.version !== entries[index - 1]!.version + 1) return reset("ring-gap")
     }
     return { epoch: this.epochValue, version: current, reset: false, entries: structuredClone(entries) }
   }

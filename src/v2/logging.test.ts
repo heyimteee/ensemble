@@ -3,7 +3,8 @@ import assert from "node:assert/strict"
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { createLogger } from "./logging.ts"
+import { threadId } from "node:worker_threads"
+import { createLogRateLimiter, createLogger } from "./logging.ts"
 
 const now = () => 1_700_000_000_000
 
@@ -30,6 +31,43 @@ test("logging filters by task, category, event prefix, and level", () => {
   assert.equal(log.recent({ cat: "retry" }).length, 1)
   assert.equal(log.recent({ event: "failure" }).length, 1)
   assert.equal(log.recent({ level: "warn" }).length, 2)
+})
+
+test("every row identifies its role, instance, and thread", () => {
+  const log = createLogger({ role: "tui", instanceID: "mount-1", dir: null, level: "trace", now })
+  log.event("info", "tui", "tui.mount", {})
+  log.event("warn", "feed", "feed.reset", { reason: "epoch" })
+  log.failure({ cat: "failure", event: "failure.terminal", level: "error", taskID: "t1" })
+
+  for (const entry of log.recent()) {
+    assert.equal(entry.role, "tui")
+    assert.equal(entry.instanceID, "mount-1")
+    assert.equal(entry.threadID, threadId)
+  }
+  assert.deepEqual(log.recent({ instanceID: "mount-1" }).map((entry) => entry.event), [
+    "tui.mount",
+    "feed.reset",
+    "failure.terminal",
+  ])
+  assert.deepEqual(log.recent({ instanceID: "another-mount" }), [])
+  assert.equal(log.stats().instanceID, "mount-1")
+  assert.equal(log.stats().threadID, threadId)
+})
+
+test("identical warnings stay rate-limited and carry the suppressed count", () => {
+  let clock = 1_000
+  const limiter = createLogRateLimiter({ windowMs: 10_000, now: () => clock })
+
+  assert.deepEqual(limiter.admit("epoch"), { allowed: true, suppressed: 0 })
+  clock = 2_000
+  assert.deepEqual(limiter.admit("epoch"), { allowed: false, suppressed: 1 })
+  clock = 5_000
+  assert.deepEqual(limiter.admit("epoch"), { allowed: false, suppressed: 2 })
+  assert.deepEqual(limiter.admit("ring-gap"), { allowed: true, suppressed: 0 }, "a different reason is independent")
+  clock = 11_000
+  assert.deepEqual(limiter.admit("epoch"), { allowed: true, suppressed: 2 }, "the next window reports what it suppressed")
+  clock = 11_500
+  assert.deepEqual(limiter.admit("epoch"), { allowed: false, suppressed: 1 })
 })
 
 test("logging redacts credentials and keeps errors structured", () => {

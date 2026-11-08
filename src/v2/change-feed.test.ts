@@ -361,6 +361,20 @@ test("the change ring is bounded and an old cursor resets instead of returning a
   assert.equal(store.changesSince(5, 99).reset, true, "a cursor ahead of the server resets")
 })
 
+test("a reset names why the cursor cannot be served", async () => {
+  const store = new V2Store(fakeContext(), undefined, { epoch: 5, ringLimit: 3 })
+  for (let index = 1; index <= 5; index++) await store.saveSubtask(task({ id: `t${index}` }))
+
+  assert.equal(store.changesSince(5, 5).reason, undefined, "a current cursor is not a reset")
+  assert.equal(store.changesSince(5, 4).reason, undefined, "a contiguous cursor is not a reset")
+  assert.equal(store.changesSince(5, 0).reason, "ring-gap", "an evicted cursor names the ring gap")
+  assert.equal(store.changesSince(6, 4).reason, "epoch", "a foreign boot epoch names the epoch")
+  assert.equal(store.changesSince(5, 99).reason, "future-version", "a cursor ahead of the store names the future version")
+  assert.equal(store.changesSince(NaN, 4).reason, "invalid-cursor")
+  assert.equal(store.changesSince(5, NaN).reason, "invalid-cursor")
+  assert.equal(store.changesSince(5, -1).reason, "invalid-cursor")
+})
+
 test("a foreign write makes the change feed reset and the synced store keeps the foreign task", async () => {
   const values = new Map<string, unknown>()
   const readerCtx = fakeContext(values)
