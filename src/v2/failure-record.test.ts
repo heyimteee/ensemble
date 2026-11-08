@@ -93,6 +93,50 @@ test("a restart recovery record carries the previous claim and lease expiry", ()
   assert.equal(record.decision.delayMs, 0)
 })
 
+test("ticket170: failure records preserve the structured work cause and real class/reason", () => {
+  const stalled = task({
+    state: "replied",
+    outcome: "failed",
+    attempts: 5,
+    failure: { kind: "attempts", reason: "attempts-exhausted" },
+  })
+  const queueRecord: any = buildFailureRecord({
+    event: "failure.terminal",
+    level: "error",
+    incidentID: "failure_stalled",
+    failureClass: "internal",
+    task: stalled,
+    error: "Gave up after 5 attempts.",
+    decision: { type: "terminal", reason: "attempts-exhausted", attempt: 5, maxAttempts: 5 },
+  })
+  assert.equal(queueRecord.failureClass, "internal", "delivery exhaustion keeps its real class")
+  assert.equal(queueRecord.reason, "attempts-exhausted")
+  assert.equal(queueRecord.decision.reason, "attempts-exhausted")
+  assert.equal(queueRecord.workFailureKind, "attempts")
+  assert.equal(queueRecord.workFailureReason, "attempts-exhausted")
+  assert.equal(queueRecord.title, stalled.title, "the failure sink is the diagnostic record, not the log projection")
+
+  const native = task({
+    state: "replied",
+    outcome: "failed",
+    attempts: 2,
+    failure: { kind: "native", reason: "provider-error" },
+  })
+  const nativeRecord: any = buildFailureRecord({
+    event: "failure.terminal",
+    level: "error",
+    incidentID: "failure_native",
+    failureClass: "provider",
+    task: native,
+    error: "quota exhausted",
+    decision: { type: "terminal", reason: "provider-error", attempt: 2, maxAttempts: 5 },
+  })
+  assert.equal(nativeRecord.failureClass, "provider")
+  assert.equal(nativeRecord.reason, "provider-error")
+  assert.equal(nativeRecord.workFailureKind, "native")
+  assert.equal(nativeRecord.workFailureReason, "provider-error")
+})
+
 test("content logging attaches instruction and message text only when enabled", () => {
   const record: any = buildFailureRecord({
     event: "failure.attempt",

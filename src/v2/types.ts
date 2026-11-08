@@ -131,6 +131,13 @@ export type Message = {
   taskID?: Id
   streaming?: boolean
   interrupted?: boolean
+  /**
+   * A transient retry/failure notice that an explicit success supersedes
+   * (ticket #170). The recovery path removes only these structured notices, so
+   * a stale `Retrying…` or false failure line cannot outlive the real answer.
+   * Free-form copy is never inspected.
+   */
+  notice?: "retry" | "failure"
   createdAt: number
   /** Last wall-clock write (delta or finalize). Drives stream staleness so
     * long live streams stay visible while fresh and orphaned rows expire. */

@@ -594,7 +594,7 @@ export class EnsembleV2Service {
     "message.get": (input: unknown) => Promise<any>
     "logs.recent": (input: unknown) => Promise<any>
     resync: (input: unknown) => Promise<ScopedResync>
-    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string; logs?: unknown; service?: unknown }>
+    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string; recoveries?: unknown[]; logs?: unknown; service?: unknown }>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
@@ -1582,13 +1582,26 @@ export class EnsembleV2Service {
     return jsonSafe(payload)
   }
 
-  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; recoveries: Array<{ taskID: string; from?: string; to?: string; reason?: string; at?: number }>; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
     await this.store.sync()
     this.refreshDmClock()
     this.noteViewDirectory(directory)
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
+    // Ticket #170: recovery audit rows for the doctor's consistency check.
+    // IDs, states, reason codes, and timestamps only; never answer content.
+    const recoveries = (this.logger?.recent({ event: "task.recovered", limit: 200 }) ?? []).flatMap((entry) => {
+      if (typeof entry.taskID !== "string" || !entry.taskID) return []
+      const at = Date.parse(entry.ts)
+      return [{
+        taskID: entry.taskID,
+        ...(typeof entry.from === "string" ? { from: entry.from } : {}),
+        ...(typeof entry.to === "string" ? { to: entry.to } : {}),
+        ...(typeof entry.reason === "string" ? { reason: entry.reason } : {}),
+        ...(Number.isFinite(at) ? { at } : {}),
+      }]
+    })
     // Same host RPC output constraint as snapshot(); diagnostic is also an
     // explicit full-state boundary, never a hot path.
     return jsonSafe({
@@ -1600,6 +1613,7 @@ export class EnsembleV2Service {
         summary: dispatchLedgerSummary(state.dispatchGroups),
         groups: Object.values(state.dispatchGroups).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)),
       },
+      recoveries,
       ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
       ...(this.logger ? { logs: this.logger.stats() } : {}),
       service: {
@@ -3351,7 +3365,7 @@ export class EnsembleV2Service {
     return (await this.createWorkItem(input)).subtask
   }
 
-  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; correlationID?: string; updatedAt?: number }): Promise<Message> {
+  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; notice?: Message["notice"]; correlationID?: string; updatedAt?: number }): Promise<Message> {
     return this.store.appendMessage(workspace.id, {
       id: id("msg"),
       author: input.author,
@@ -3362,6 +3376,7 @@ export class EnsembleV2Service {
       taskID: input.taskID,
       streaming: input.streaming,
       interrupted: input.interrupted,
+      notice: input.notice,
       correlationID: input.correlationID,
       createdAt: now(),
       ...(input.updatedAt !== undefined ? { updatedAt: input.updatedAt } : {}),
@@ -3443,7 +3458,18 @@ export class EnsembleV2Service {
     subtask.activeRunID = undefined
   }
 
-  private async claimForRetry(subtask: Subtask): Promise<void> {
+  /**
+   * Requeue one row for an explicit retry, restart, or approved resume
+   * (ticket #170). When the automatic attempt budget is spent
+   * (`attempts >= MAX_ATTEMPTS`), the explicit action opens a fresh budget;
+   * without the reset the row would be requeued but `runTask` would refuse it,
+   * so the card could never recover. Automatic retries never pass through here
+   * and stay bounded by `MAX_ATTEMPTS`. Below the cap the cumulative attempt
+   * count is preserved for operators and existing lifecycle expectations.
+   */
+  private async claimForRetry(subtask: Subtask, reason: "manual-retry" | "manual-restart" | "approval-approved" = "manual-retry"): Promise<void> {
+    const from = deriveWorkStatus(subtask, now())
+    const previousAttempts = subtask.attempts
     await this.stopSubtaskRun(subtask)
     await this.settlePendingApprovals(subtask.id, "Subtask retried by the user.")
     subtask.state = "pending"
@@ -3459,22 +3485,38 @@ export class EnsembleV2Service {
     subtask.finishedAt = undefined
     subtask.stoppedAt = undefined
     subtask.failure = undefined
+    // A fresh explicit budget is only needed when the automatic one is spent;
+    // otherwise keep the visible attempt history (existing lifecycle tests and
+    // operator expectations count cumulative attempts).
+    const attemptsReset = previousAttempts >= MAX_ATTEMPTS
+    if (attemptsReset) subtask.attempts = 0
     subtask.deadlineAt = now() + DEADLINE_MS
     await this.store.saveSubtask(subtask)
     this.noteWorkChanged(subtask)
+    this.logger?.event("info", "task", "task.retry.requested", {
+      workspaceID: subtask.workspaceID,
+      taskID: subtask.id,
+      dispatchGroupID: subtask.dispatchGroupID,
+      from,
+      reason,
+      previousAttempts,
+      attemptsReset,
+      attempts: previousAttempts,
+      maxAttempts: MAX_ATTEMPTS,
+    })
   }
 
   private async retryTask(subtaskID: string): Promise<Subtask> {
     const subtask = this.store.cloneSubtask(subtaskID)
     if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
-    await this.claimForRetry(subtask)
+    await this.claimForRetry(subtask, "manual-retry")
     return subtask
   }
 
   private async restartTask(subtaskID: string): Promise<Subtask> {
     const subtask = this.store.cloneSubtask(subtaskID)
     if (!subtask) throw Object.assign(new Error("Subtask not found."), { code: "not_found" })
-    await this.claimForRetry(subtask)
+    await this.claimForRetry(subtask, "manual-restart")
     const workspace = this.store.workspace(subtask.workspaceID)
     if (workspace) await this.appendMessage(workspace, { author: "system", text: `Restarting work: ${subtask.title}`, kind: "system", taskID: subtask.id })
     return subtask
@@ -3615,6 +3657,10 @@ export class EnsembleV2Service {
           subtask.retryAfter = undefined
           subtask.repliedAt = at
           subtask.finishedAt = at
+          // Ticket #170: a user rejection is an explicit controlled stop, not
+          // a native execution failure. The structural marker keeps the card
+          // and log honest (`cancelled`, never `failed`).
+          subtask.stoppedAt = at
           await this.store.saveSubtask(subtask)
         }
       }
@@ -3622,7 +3668,7 @@ export class EnsembleV2Service {
     }
     if (approval.kind === "interrupted" && approval.subtaskID) {
       const subtask = this.store.cloneSubtask(approval.subtaskID)
-      if (subtask) await this.claimForRetry(subtask)
+      if (subtask) await this.claimForRetry(subtask, "approval-approved")
     }
     if (approval.kind === "ask_person" && approval.subtaskID) {
       const subtask = this.store.cloneSubtask(approval.subtaskID)
@@ -5439,10 +5485,10 @@ export class EnsembleV2Service {
     const workspace = this.store.workspace(task.workspaceID)
     if (workspace && task.workKind === "handoff" && task.handoff) {
       const recipientName = this.store.agent(task.handoff.recipientID)?.name ?? "Unknown agent"
-      await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, task.error ?? "the work could not be delivered.", task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
+      await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, task.error ?? "the work could not be delivered.", task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID, notice: "failure" })
     } else if (workspace && task.workKind === "turn" && task.turn) {
       const recipientName = this.store.agent(task.assigneeID ?? "")?.name ?? "Unknown agent"
-      await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${task.error ?? "the work could not be delivered."} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
+      await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${task.error ?? "the work could not be delivered."} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID, notice: "failure" })
     }
     // Ticket #136: plain failed work has one canonical terminal event,
     // symmetric with success (the TUI derives it from the task row). The old
@@ -6014,6 +6060,20 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Ticket #170: a real answer supersedes the transient retry/failure notices
+   * that preceded it. Only rows carrying the structured `notice` marker are
+   * removed; the agent's answer, task rows, and unrelated system history are
+   * never touched. A late recovery and a normally retried success share this
+   * cleanup, so a stale `Retrying…` or false failure line cannot contradict a
+   * succeeded card.
+   */
+  private async clearSupersededNotices(task: Subtask): Promise<void> {
+    const rows = this.store.messages(task.workspaceID)
+      .filter((message) => message.taskID === task.id && message.notice !== undefined && message.streaming !== true)
+    for (const row of rows) await this.store.removeMessage(task.workspaceID, row.id)
+  }
+
+  /**
    * Structured recovery audit (ticket #169). IDs, states, and reason codes
    * only: the answer, task title, and instructions never enter the log.
    */
@@ -6150,6 +6210,7 @@ export class EnsembleV2Service {
     task.runSummary ??= "late success"
     await this.store.saveSubtask(task)
     this.noteWorkChanged(task)
+    await this.clearSupersededNotices(task)
     this.logTaskRecovered(task, previousStatus, "late-success", resultMessageID, previousFailure)
     await this.settleLinkedApprovals(task.id, "Superseded: the linked work finished.", new Set(["native"]))
     if (task.parentID) await this.maybeSynthesize(task.parentID)
@@ -6375,7 +6436,8 @@ export class EnsembleV2Service {
             dispatchGroupID: currentTask.dispatchGroupID,
             approvalID: linked.id,
             attempt: currentTask.attempts,
-            reason: errorText,
+            failureClass: "approval",
+            reason: "decision-pending",
           })
           await this.finalizeStream(live, "Paused — waiting for your answer in the approvals inbox.", true, globalEpoch, workspaceEpoch, task.workspaceID)
           await this.store.saveSubtask(currentTask)
@@ -6513,6 +6575,7 @@ export class EnsembleV2Service {
       currentTask.resultMessageID = finalized.eligible ? finalized.message?.id : undefined
       await this.store.saveSubtask(currentTask)
       this.noteWorkChanged(currentTask)
+      await this.clearSupersededNotices(currentTask)
       // Ticket #169: a success that follows a retry/stall/terminal-failed
       // state is a recovery. The card ends replied and the repair is audited
       // with structured state only; the answer itself never enters the log.
@@ -6779,7 +6842,9 @@ export class EnsembleV2Service {
       maxAttempts: MAX_ATTEMPTS,
       delayMs,
       retryAfter: input.task.retryAfter,
-      reason: input.error,
+      // A reason code, not user-visible error copy (ticket #170).
+      reason: input.failureClass === "empty-reply" ? "empty-reply" : "native-failure",
+      failureClass: input.failureClass ?? classifyFailure(input.context?.cause ?? input.error, "internal"),
     })
     const seconds = Math.max(1, Math.round(delayMs / 1_000))
     const workspace = this.store.workspace(input.task.workspaceID)
@@ -6789,6 +6854,7 @@ export class EnsembleV2Service {
         text: `Retrying in ${seconds}s (attempt ${attempt}/${MAX_ATTEMPTS}): ${input.error}`,
         kind: "system",
         taskID: input.task.id,
+        notice: "retry",
       })
     }
     if (input.live) {
@@ -6865,7 +6931,8 @@ export class EnsembleV2Service {
       taskID: input.task.id,
       dispatchGroupID: input.task.dispatchGroupID,
       approvalID: approval.id,
-      reason: input.error,
+      failureClass: "uncertain",
+      reason: "uncertain-tool-outcome",
     })
     await this.appendMessage(workspace, {
       author: "system",
@@ -6928,10 +6995,10 @@ export class EnsembleV2Service {
     // conversation that asked, attributed to the intended recipient.
     if (workspace && task.workKind === "handoff" && task.handoff) {
       const recipientName = this.store.agent(task.handoff.recipientID)?.name ?? "Unknown agent"
-      await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, error, task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID })
+      await this.appendMessage(workspace, { author: "system", text: handoffFailureText(recipientName, error, task.handoff.correlationID), kind: "system", taskID: task.id, correlationID: task.handoff.correlationID, notice: "failure" })
     } else if (workspace && task.workKind === "turn" && task.turn) {
       const recipientName = this.store.agent(task.assigneeID ?? "")?.name ?? "Unknown agent"
-      await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${error} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID })
+      await this.appendMessage(workspace, { author: "system", text: `Peer turn for $${recipientName} failed: ${error} (ref ${task.turn.correlationID}).`, kind: "system", taskID: task.id, correlationID: task.turn.correlationID, notice: "failure" })
     }
     // Ticket #136: one canonical terminal event per task. A plain failure is
     // announced from the terminal task row like success; a generic duplicate

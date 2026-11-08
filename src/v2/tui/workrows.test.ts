@@ -770,6 +770,50 @@ test("ticket137: state words are uppercase and queued never reads as pending", (
   assert.equal(workCardStateWord("working", true), "NEEDS YOU")
 })
 
+test("ticket170: every non-terminal status keeps the Work block mounted", () => {
+  assert.equal(hasActiveWork([task({ state: "pending" })], 1000), true)
+  assert.equal(hasActiveWork([task({ state: "working", claimedBy: "r", leaseUntil: 9_999, attempts: 1 })], 1000), true)
+  assert.equal(hasActiveWork([task({ state: "working", awaitingChildren: true, attempts: 1 })], 1000), true)
+  assert.equal(hasActiveWork([task({ state: "pending", attempts: 1, retryAfter: 5_000 })], 1000), true)
+  assert.equal(hasActiveWork([task({ interrupted: true })], 1000), true)
+  assert.equal(
+    hasActiveWork([task({ state: "replied", outcome: "failed", failure: { kind: "lease", reason: "lease-expired" } })], 1000),
+    true,
+  )
+  assert.equal(hasActiveWork([task({ state: "replied", outcome: "succeeded" })], 1000), false)
+  assert.equal(hasActiveWork([task({ state: "replied", outcome: "failed", error: "boom" })], 1000), false)
+})
+
+test("ticket170: stalled and waiting cards use canonical labels and tones, never FAILED", () => {
+  const stalled = workCardForTask(
+    task({
+      state: "replied",
+      outcome: "failed",
+      attempts: 5,
+      failure: { kind: "delivery", reason: "deadline-exceeded" },
+      error: "The work deadline passed before it could finish.",
+    }),
+    "Sage",
+    { now: 1_000, width: 60, pendingApprovalIDs: new Set() },
+  )
+  assert.equal(stalled.status, "stalled")
+  assert.equal(stalled.header.status, "STALLED")
+  assert.equal(stalled.detail, "stalled · queue problem")
+  assert.deepEqual(stalled.tones, { glyph: "warn", status: "warn", bar: "warn" })
+  assert.notEqual(stalled.header.status, "FAILED")
+
+  const waiting = workCardForTask(
+    task({ state: "working", awaitingChildren: true, attempts: 1 }),
+    "Nova",
+    { now: 1_000, width: 60, pendingApprovalIDs: new Set() },
+  )
+  assert.equal(waiting.status, "waiting")
+  assert.equal(waiting.header.status, "WAITING")
+  assert.equal(waiting.detail, "waiting for children")
+  assert.deepEqual(waiting.tones, { glyph: "muted", status: "muted", bar: "muted" })
+  assert.notEqual(waiting.header.status, "FAILED")
+})
+
 test("ticket137: the header is name, spacer, glyph, then the right-aligned status", () => {
   const header = workCardHeader("NOVA", "⠋", "WORKING", 19)
   assert.equal(header.name, "NOVA")

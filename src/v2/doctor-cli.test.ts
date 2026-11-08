@@ -199,6 +199,7 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
   writeConfig(directoryA, ["Clark"])
   let includeJessy = false
   let brokenLedger = false
+  let brokenWork = false
   const server = createServer((request, response) => {
     request.resume()
     if (request.headers.authorization !== `Basic ${Buffer.from(`opencode:${PASSWORD}`).toString("base64")}`) {
@@ -209,6 +210,19 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
     response.writeHead(200, { "content-type": "application/json" })
     const body = snapshotFor(directoryA, includeJessy) as any
     if (brokenLedger) body.output.state.dispatchGroups.dispatch_root.usedHops = 9
+    if (brokenWork) {
+      body.output.state.subtasks.task_root = {
+        ...body.output.state.subtasks.task_root,
+        state: "replied",
+        outcome: "failed",
+        status: "failed",
+        attempts: 5,
+        failure: { kind: "delivery", reason: "deadline-exceeded" },
+        finishedAt: 10,
+        repliedAt: 10,
+      }
+      body.output.recoveries = [{ taskID: "task_root", from: "stalled", to: "replied", reason: "late-success", at: 20 }]
+    }
     response.end(JSON.stringify(body))
   })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
@@ -285,6 +299,23 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
     assert.equal(broken, 1)
     const brokenReport = JSON.parse(output)
     assert.ok(brokenReport.mismatches.some((mismatch: any) => mismatch.code === "dispatch_group_over_budget"))
+    assert.equal(output.includes("PRIVATE-TASK-TITLE"), false)
+
+    // Ticket #170: structured work fields and recovery audit rows travel
+    // through the diagnostic RPC without titles, instructions, or answer text.
+    brokenLedger = false
+    brokenWork = true
+    output = ""
+    const workBroken = await runDoctor(["--json", "--service-file", descriptor, "--server", serverUrl, directoryA], {
+      env: {},
+      home: root,
+      stdout: (text) => { output += text },
+      stderr: () => undefined,
+    })
+    assert.equal(workBroken, 1)
+    const workReport = JSON.parse(output)
+    assert.ok(workReport.mismatches.some((mismatch: any) => mismatch.code === "work_failed_timeout"))
+    assert.ok(workReport.mismatches.some((mismatch: any) => mismatch.code === "work_recovery_mismatch"))
     assert.equal(output.includes("PRIVATE-TASK-TITLE"), false)
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))

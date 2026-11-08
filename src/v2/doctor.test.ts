@@ -365,6 +365,157 @@ function dispatchSnapshot(groups: DispatchGroup[], tasks: DoctorSubtask[] = []):
 const dispatchCodes = (groups: DispatchGroup[], tasks: DoctorSubtask[] = []) =>
   diagnoseLocations([location(site.directory, dispatchSnapshot(groups, tasks), validConfig())])
 
+const workTask = (id: string, patch: Partial<DoctorSubtask> = {}): DoctorSubtask => ({
+  id,
+  workspaceID: site.id,
+  creatorType: "agent",
+  workKind: "delegation",
+  state: "pending",
+  outcome: "pending",
+  createdAt: 1,
+  attempts: 0,
+  ...patch,
+})
+
+const workReport = (tasks: DoctorSubtask[], now = 1_000_000, recoveries?: DoctorSnapshot["recoveries"]) => {
+  const snap = dispatchSnapshot([], tasks)
+  if (recoveries) snap.recoveries = recoveries
+  return diagnoseLocations([{ ...location(site.directory, snap, validConfig()), now }])
+}
+
+test("ticket170: the doctor detects overdue pending work and ignores a paused queue", () => {
+  const report = workReport([
+    workTask("overdue", { createdAt: 1 }),
+    workTask("fresh", { createdAt: 999_000 }),
+    workTask("retried", { createdAt: 1, deadlineAt: 2_000_000 }),
+  ])
+  const overdue = report.mismatches.filter((mismatch) => mismatch.code === "work_pending_overdue")
+  assert.equal(overdue.length, 1)
+  assert.deepEqual(overdue[0]?.details, { workspaceID: site.id, taskID: "overdue", ageMs: 999_999 })
+  assert.equal(overdue[0]?.scope, "storage")
+  assert.ok(overdue[0]?.remediation)
+
+  const paused = workspace({ ...site, paused: true })
+  const pausedSnapshot = snapshot({
+    agents: [clark, jessy],
+    workspaces: [paused],
+    bindings: [binding(paused.id, clark.id), binding(paused.id, jessy.id)],
+    subtasks: [workTask("paused-work", { createdAt: 1 })],
+  })
+  const pausedReport = diagnoseLocations([{ ...location(paused.directory, pausedSnapshot, validConfig()), now: 1_000_000 }])
+  assert.equal(pausedReport.mismatches.some((mismatch) => mismatch.code === "work_pending_overdue"), false)
+})
+
+test("ticket170: the doctor detects an expired or missing lease", () => {
+  const report = workReport([
+    workTask("expired", { state: "working", status: "working", attempts: 1, claimedBy: "run_dead", leaseUntil: 500 }),
+    workTask("missing", { state: "working", status: "working", attempts: 1, claimedBy: "run_dead" }),
+  ])
+  const expired = report.mismatches.filter((mismatch) => mismatch.code === "work_lease_expired")
+  assert.equal(expired.length, 2)
+  assert.deepEqual(expired.find((mismatch) => mismatch.details.taskID === "expired")?.details, {
+    workspaceID: site.id,
+    taskID: "expired",
+    claimedBy: "run_dead",
+    leaseUntil: 500,
+    reason: "expired",
+  })
+  assert.deepEqual(expired.find((mismatch) => mismatch.details.taskID === "missing")?.details, {
+    workspaceID: site.id,
+    taskID: "missing",
+    claimedBy: "run_dead",
+    reason: "missing",
+  })
+})
+
+test("ticket170: the doctor detects contradictory terminal rows", () => {
+  const report = workReport([
+    workTask("success-with-failure", {
+      state: "replied", outcome: "succeeded", status: "replied", finishedAt: 10, repliedAt: 10,
+      failure: { kind: "delivery", reason: "deadline-exceeded" },
+    }),
+    workTask("nonterminal-with-finish", {
+      state: "working", outcome: "pending", status: "working", finishedAt: 20, repliedAt: 20, attempts: 1,
+    }),
+    workTask("terminal-with-claim", {
+      state: "replied", outcome: "succeeded", status: "replied", finishedAt: 30, repliedAt: 30,
+      claimedBy: "run_live", leaseUntil: 9_999_999,
+    }),
+  ])
+  const contradictions = report.mismatches.filter((mismatch) => mismatch.code === "work_terminal_contradiction")
+  assert.equal(contradictions.length, 3)
+  assert.deepEqual(contradictions.find((mismatch) => mismatch.details.taskID === "success-with-failure")?.details.problems, ["succeeded-with-failure"])
+  assert.deepEqual(contradictions.find((mismatch) => mismatch.details.taskID === "nonterminal-with-finish")?.details.problems, ["non-terminal-with-finish"])
+  assert.deepEqual(contradictions.find((mismatch) => mismatch.details.taskID === "terminal-with-claim")?.details.problems, ["terminal-with-queue-fields"])
+})
+
+test("ticket170: the doctor flags a queue or timeout cause persisted as failed", () => {
+  const report = workReport([
+    workTask("delivery-failed", {
+      state: "replied", outcome: "failed", status: "failed", finishedAt: 10, repliedAt: 10,
+      failure: { kind: "delivery", reason: "deadline-exceeded" },
+    }),
+    workTask("native-timeout", {
+      state: "replied", outcome: "failed", status: "failed", finishedAt: 20, repliedAt: 20,
+      failure: { kind: "native", reason: "lease-expired" },
+    }),
+    workTask("native-real", {
+      state: "replied", outcome: "failed", status: "failed", finishedAt: 30, repliedAt: 30,
+      failure: { kind: "native", reason: "provider-error" },
+    }),
+    workTask("correctly-stalled", {
+      state: "replied", outcome: "failed", status: "stalled", finishedAt: 40, repliedAt: 40,
+      failure: { kind: "attempts", reason: "attempts-exhausted" },
+    }),
+  ])
+  const mislabeled = report.mismatches.filter((mismatch) => mismatch.code === "work_failed_timeout")
+  assert.equal(mislabeled.length, 2)
+  assert.equal(mislabeled.find((mismatch) => mismatch.details.taskID === "delivery-failed")?.details.reason, "deadline-exceeded")
+  assert.equal(mislabeled.find((mismatch) => mismatch.details.taskID === "native-timeout")?.details.reason, "lease-expired")
+  assert.equal(report.mismatches.some((mismatch) => mismatch.details.taskID === "native-real"), false, "a real native failure is never flagged")
+  assert.equal(report.mismatches.some((mismatch) => mismatch.details.taskID === "correctly-stalled"), false, "a correctly derived stall is not mislabeled")
+})
+
+test("ticket170: the doctor checks task.recovered consistency without flagging later work", () => {
+  const consistent = workReport(
+    [workTask("recovered", { state: "replied", outcome: "succeeded", status: "replied", finishedAt: 500, repliedAt: 500 })],
+    1_000_000,
+    [{ taskID: "recovered", from: "stalled", to: "replied", reason: "late-success", at: 500 }],
+  )
+  assert.equal(consistent.mismatches.some((mismatch) => mismatch.code.startsWith("work_")), false)
+
+  const contradictory = workReport(
+    [workTask("stale", {
+      state: "replied", outcome: "failed", status: "stalled", finishedAt: 500, repliedAt: 500,
+      failure: { kind: "delivery", reason: "deadline-exceeded" },
+    })],
+    1_000_000,
+    [{ taskID: "stale", from: "stalled", to: "replied", reason: "late-success", at: 600 }],
+  )
+  const recovery = contradictory.mismatches.find((mismatch) => mismatch.code === "work_recovery_mismatch")
+  assert.ok(recovery)
+  assert.equal(recovery?.details.taskID, "stale")
+  assert.equal(recovery?.details.recoveredTo, "replied")
+  assert.equal(recovery?.details.status, "stalled")
+
+  const laterFailure = workReport(
+    [workTask("later", {
+      state: "replied", outcome: "failed", status: "failed", finishedAt: 900, repliedAt: 900,
+      failure: { kind: "native", reason: "provider-error" },
+    })],
+    1_000_000,
+    [{ taskID: "later", from: "retrying", to: "replied", reason: "late-success", at: 500 }],
+  )
+  assert.equal(laterFailure.mismatches.some((mismatch) => mismatch.code === "work_recovery_mismatch"), false, "a later native failure is real")
+
+  const invalid = workReport(
+    [workTask("invalid", { state: "replied", outcome: "succeeded", status: "replied", finishedAt: 500, repliedAt: 500 })],
+    1_000_000,
+    [{ taskID: "invalid", from: "stalled", to: "failed", reason: "late-success", at: 500 }],
+  )
+  assert.ok(invalid.mismatches.some((mismatch) => mismatch.code === "work_recovery_mismatch"))
+})
+
 test("ticket163: a consistent ledger, closed parent, and exempt completion rows produce no dispatch mismatch", () => {
   const report = dispatchCodes(
     [

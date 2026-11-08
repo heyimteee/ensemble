@@ -234,8 +234,27 @@ export function createStoreObserver(logger: EnsembleLogger): StoreObserver {
         if (next.outcome === "failed" && previous.outcome !== "failed") {
           if (next.stoppedAt && next.stoppedAt !== previous.stoppedAt) {
             logger.event("info", "task", "task.cancelled", { ...fields, reason: next.error })
+          } else if (next.failure !== undefined && next.failure.kind !== "native") {
+            // Ticket #170: delivery, lease, and attempt exhaustion are queue
+            // causes. They derive `stalled`, stay mounted, and are never a
+            // native failure. Emit structured codes only; error copy can carry
+            // task or provider content and belongs in the failure sink.
+            logger.event("warn", "task", "task.stalled", {
+              ...fields,
+              failureKind: next.failure.kind,
+              reason: next.failure.reason,
+              leaseUntil: next.leaseUntil,
+              claimedBy: next.claimedBy,
+            })
           } else {
-            logger.event("error", "task", "task.failed", { ...fields, error: next.error })
+            // `task.failed` is native-only. A legacy terminal row without the
+            // structured field stays conservatively failed (#168).
+            logger.event("error", "task", "task.failed", {
+              ...fields,
+              error: next.error,
+              failureKind: next.failure?.kind,
+              reason: next.failure?.reason,
+            })
           }
           return
         }
@@ -302,6 +321,16 @@ export function createStoreObserver(logger: EnsembleLogger): StoreObserver {
           previousChars: previous.text.length,
         })
       }
+    },
+
+    messageRemoved(previous) {
+      // Ticket #170: a superseded retry/failure notice is removed by its
+      // structured field, never by copy matching. Only identity, counts, and
+      // the notice kind enter the log.
+      logger.event("info", "message", "message.removed", {
+        ...messageFields(previous),
+        notice: previous.notice,
+      })
     },
 
     approval(next, previous) {
