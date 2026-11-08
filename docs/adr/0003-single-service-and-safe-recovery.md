@@ -46,9 +46,12 @@ Two prototypes resolved the design:
      `instanceof`, because the class identity changes across module reloads.
    - The registry is reference-counted per location; the service stops only
      when the last location releases it.
-   - The first location's plugin context owns storage, sessions, events, and
-     tools for the whole realm. The mock proved this works across four
-     channels and eight agent home directories.
+   - The first location's plugin context owns storage and sessions for the
+     realm. Ticket #153 moved location-scoped tools, retry hooks, and RPC
+     registrations onto a per-location `LocationAttachment`; ticket #154 moved
+     text, permission, config, and catalog event subscriptions there as well and
+     deduplicates host events by identity in the realm. The bootstrap context is
+     no longer the host authority for those surfaces.
    - If the registry version changes, a new registry may coexist with the old
      one until the old refs release. Recovery safety in decision 2 covers that
      window.

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 import { legacyDispatchGroupID } from "./dispatch-group.ts"
 
@@ -111,7 +112,7 @@ test("one user command fan-out shares one dispatch group and a second command mi
   // Keep the first dispatch active while the second command lands.
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 150)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
@@ -174,7 +175,7 @@ test("delegation, handoff, completion batch, and synthesis inherit the command g
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)
@@ -232,7 +233,7 @@ test("approval-created handoffs and delegations carry the parent dispatch group"
   const { ctx, tools } = fakeContext()
   ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 1000)) }
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, workspace } = await setupPair(directory, handlers)
@@ -295,7 +296,7 @@ test("retry, restart, reassign, and cancel preserve dispatch group identity", as
   }
   for (const id of ["retry-me", "restart-me", "reassign-me", "cancel-me"]) await seedTask(id)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const actions: Array<[string, any]> = [
@@ -332,7 +333,7 @@ test("legacy rows resolve one deterministic root group after service load", asyn
   await seed.saveSubtask({ ...base, id: "legacy-root", assigneeID: "nova", title: "Root", instruction: "Root", queueKey: "work:w:delegation:user:root" })
   await seed.saveSubtask({ ...base, id: "legacy-child", parentID: "legacy-root", assigneeID: "nova", title: "Child", instruction: "Child", queueKey: "work:w:delegation:user:child" })
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const snapshot = await handlers.snapshot({ directory })
@@ -349,7 +350,7 @@ test("completion batches consolidate only within one dispatch group", async () =
   const directory = mkdtempSync(join(tmpdir(), "ensemble-group-"))
   const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)

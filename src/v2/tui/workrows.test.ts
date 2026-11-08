@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
-import { createTideFreezeState, type TideFreezeState } from "./tide.ts"
+import { TIDE_GLYPHS, createTideFreezeState, type TideFreezeState } from "./tide.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -439,6 +439,54 @@ test("ticket115: work cards map agent, glyph, state, title, detail, and a full-w
   assert.ok(!JSON.stringify(card).includes("%"), "cards never invent a percentage")
 })
 
+test("ticket156: card headers and tide rows share the exact width and right edge", () => {
+  const glyphs = TIDE_GLYPHS as readonly string[]
+  for (let width = 16; width <= 120; width++) {
+    const card = cardWithMotion(
+      task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
+      "Nova",
+      { now: 1000, tick: 2, tideTick: 3, width, variant: "current", env: {} },
+    )
+    const header = workCardHeaderText(card.header)
+    assert.equal(header.length, width, `header width ${width}`)
+    assert.equal(card.tide.length, width, `tide width ${width}`)
+    assert.equal(card.tideLevels.length, Math.ceil(width / 2), `sampled columns ${width}`)
+    assert.ok(header.endsWith(`${card.header.glyph} ${card.header.status}`), "the status word owns the right edge")
+    assert.equal(header.lastIndexOf(card.header.status) + card.header.status.length, width)
+    assert.equal(header.trimEnd().length, width, "the header never trails a blank")
+    assert.equal(card.tide.at(-1), glyphs[card.tideLevels.at(-1) as number], "the last tide cell is its final glyph")
+    assert.equal(card.tide.trimEnd().length, width, "the tide never trails a blank")
+  }
+})
+
+test("ticket156: terminal flat strips and compact rows keep the same exact right edge", () => {
+  const glyphs = TIDE_GLYPHS as readonly string[]
+  for (let width = 16; width <= 120; width++) {
+    const terminal = cardWithMotion(
+      task({ state: "replied", outcome: "succeeded", repliedAt: 10, finishedAt: 10 }),
+      "Nova",
+      { now: 2000, tick: 5, tideTick: 7, width, variant: "inbound", env: {} },
+    )
+    const header = workCardHeaderText(terminal.header)
+    assert.equal(header.length, width, `terminal header width ${width}`)
+    assert.equal(terminal.tide.length, width, `flat tide width ${width}`)
+    assert.equal(terminal.tideLevels.length, Math.ceil(width / 2), `flat sampled columns ${width}`)
+    assert.ok(terminal.tideLevels.every((level) => level === 0))
+    assert.equal(terminal.tide.at(-1), glyphs[0], "the flat strip ends on a block glyph")
+    assert.equal(terminal.tide.trimEnd().length, width, "the flat strip never trails a blank")
+
+    const row = workCompactRow("Nova", "Check the build", "⠋", "WORKING", width)
+    const rowText = workCompactRowText(row)
+    assert.equal(rowText.length, width, `compact width ${width}`)
+    assert.equal(rowText.lastIndexOf(row.status) + row.status.length, width)
+    assert.equal(rowText.trimEnd().length, width, "the compact row never trails a blank")
+  }
+
+  const minHeader = workCardHeader("SIZEAGENT1", "◆", "NEEDS YOU", 16)
+  assert.equal(workCardHeaderText(minHeader).length, 16, "the minimum card width still fits the widest status")
+  assert.equal(workCompactRowText(workCompactRow("SIZEAGENT1", "a very long title", "◆", "NEEDS YOU", 16)).length, 16)
+})
+
 test("ticket115: contract details are honest for queued, retrying, and stopped work", () => {
   const pend = cardWithMotion(task({ state: "pending" }), "Nova", { now: 1000, tick: 0, width: 40 })
   assert.equal(pend.header.status, "QUEUED")
@@ -539,7 +587,7 @@ test("ticket136: terminal cards keep their final glyph, state word, and a flat s
     assert.equal(card.header.status, state.toUpperCase())
     assert.equal(card.tideVariant, "travel", "the active assignment carries into the terminal card")
     assert.ok(card.tideLevels.every((level) => level === 0), "terminal cards stay settled flat")
-    assert.equal(card.tide, "▁ ".repeat(20))
+    assert.equal(card.tide, " ▁".repeat(20))
   }
   assert.equal(cardWithMotion(task({ state: "pending" }), "Nova", { now: 1_000, tick: 0, width: 40 }).terminal, false)
 })
@@ -723,7 +771,7 @@ test("ticket116: queued cards stay still and terminal cards settle flat", () => 
   ]) {
     const card = cardWithMotion(task(patch), "Nova", { now: 2000, tick: 5, width: 40, variant: "inbound" })
     assert.ok(card.tideLevels.every((level) => level === 0), `${card.status} settles flat`)
-    assert.equal(card.tide, "▁ ".repeat(20))
+    assert.equal(card.tide, " ▁".repeat(20))
   }
 })
 
@@ -822,4 +870,30 @@ test("ticket142: reduced motion pins the glyph and tide to frame zero", () => {
   assert.equal(reduced.glyph, "⠋")
   assert.equal(reduced.tide, still.tide)
   assert.deepEqual(reduced.tideLevels, still.tideLevels)
+})
+
+test("ticket155: native activity wins over the generic working verb but never over a blocked or terminal card", () => {
+  assert.equal(workCardDetail("working"), "working…")
+  assert.equal(workCardDetail("working", { activity: "reading auth.ts…" }), "reading auth.ts…")
+  assert.equal(workCardDetail("working", { activity: "reading auth.ts…", needsYou: true }), "waiting for you…")
+  assert.equal(workCardDetail("working", { activity: "reading auth.ts…", pending: "stop" }), "Stopping…")
+  assert.equal(workCardDetail("retrying", { activity: "reading auth.ts…" }), "retrying…")
+  assert.equal(workCardDetail("replied", { activity: "reading auth.ts…" }), "replied")
+})
+
+test("ticket155: activity detail truncates to the card width and rebuilds the cached card", () => {
+  const cache = createWorkCardCache()
+  const working = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  const base = { now: 1000, width: 30, variant: "current" as const }
+  const first = workCardForTaskCached(cache, working, "Nova", {
+    ...base,
+    detailFor: () => "running a very long command that exceeds the card width…",
+  })
+  assert.ok(first.detail.length <= 28, "the detail never exceeds the card content width")
+  const next = workCardForTaskCached(cache, working, "Nova", {
+    ...base,
+    detailFor: () => "reading auth.ts…",
+  })
+  assert.notEqual(next, first, "a new activity label rebuilds the cached detail")
+  assert.equal(next.detail, "reading auth.ts…")
 })

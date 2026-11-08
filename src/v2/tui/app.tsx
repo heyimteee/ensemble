@@ -153,6 +153,7 @@ import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, de
 import { createFeedGapReporter } from "./feed-gaps.ts"
 import { createClientStore } from "./client-store.ts"
 import { createStreamCoalescer } from "../stream-coalescer.ts"
+import { applyWorkActivity, clearWorkActivitiesForSession, isWorkActivity, pruneWorkActivities, workActivityLabel, type WorkActivity } from "../work-activity.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -487,6 +488,10 @@ export function EnsembleV2App() {
   // next such instant; it is not an animation clock and never rebuilds the
   // animated glyph or tide cells.
   const [workRevision, setWorkRevision] = createSignal(0)
+  // Ticket #155: the last coalesced native activity per task. The Work-pane
+  // memo reads this signal, so a tool event rebuilds only the affected card
+  // detail (the identity cache keeps every unchanged card).
+  const [workActivities, setWorkActivities] = createSignal<Map<string, WorkActivity>>(new Map())
   // Ticket #119: one visible app toast and a bounded queue. The effect below
   // schedules exactly one timeout for the visible toast's deadline.
   const [toasts, setToasts] = createSignal(createToastState())
@@ -847,6 +852,24 @@ export function EnsembleV2App() {
   // Native mirrors block their linked subtask's session without setting
   // approvalID, so the needs-you marker needs the subtask set too.
   const nativeBlockedSubtaskIDs = createMemo(() => new Set(pendingApprovals().filter((approval) => approval.kind === "native" && approval.subtaskID).map((approval) => approval.subtaskID!)))
+  // Ticket #155: terminal and needs-you cards never keep claiming live tool
+  // activity. Clear the map entry when the durable state says the card is no
+  // longer working, not merely hide it in the detail line.
+  createEffect(() => {
+    const tasks = state()?.subtasks
+    if (!tasks) return
+    const approvals = pendingApprovalIDs()
+    const nativeBlocked = nativeBlockedSubtaskIDs()
+    const at = Date.now()
+    const known = new Set(Object.keys(tasks))
+    const clear = new Set<string>()
+    for (const task of Object.values(tasks)) {
+      if (isTerminalWorkStatus(deriveWorkStatus(task, at)) || isNeedsYouTask(task, approvals, nativeBlocked)) {
+        clear.add(task.id)
+      }
+    }
+    setWorkActivities((current) => pruneWorkActivities(current, (entry) => !known.has(entry.taskID) || clear.has(entry.taskID)))
+  })
   // Ticket #116: one shuffled-deck assignment state for the session. Variants
   // are resolved by subtask id and survive every snapshot refresh. Ticket #136
   // gives presentation retention its own clock, independent of Work visibility.
@@ -866,6 +889,9 @@ export function EnsembleV2App() {
     // memo through activeTasks/state/approvals below.
     workRevision()
     const now = Date.now()
+    // Ticket #155: track live native activity so a tool event updates the
+    // affected card detail without a snapshot or a full Work rebuild.
+    const activities = workActivities()
     const active = activeTasks()
     const groups = workGroupsForTasks(active, state()?.subtasks ?? {}, {
       now,
@@ -883,7 +909,7 @@ export function EnsembleV2App() {
       nativeBlockedSubtaskIDs: nativeBlockedSet,
       pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
       variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
-      detailFor: (item) => activityStateForTask(item, {
+      detailFor: (item) => workActivityLabel(activities, item.id, now) ?? activityStateForTask(item, {
         now,
         pendingApprovalIDs: pendingApprovalSet,
         nativeBlockedIDs: nativeBlockedSet,
@@ -2735,6 +2761,10 @@ export function EnsembleV2App() {
       }
     }
     if ((event?.type === "session.idle" || event?.type === "session.execution.succeeded" || event?.type === "session.execution.failed" || event?.type === "session.execution.interrupted") && session) {
+      // Ticket #155: idle/terminal clears the card immediately, even if the
+      // coalesced clear event is still in transit. A terminal/needs-you card
+      // also ignores any entry that remains.
+      setWorkActivities((current) => clearWorkActivitiesForSession(current, session))
       if (chatContext()?.sessionID === session) { dmStream.clear(); setLiveDm(null); void refreshChat() }
       void refresh()
     }
@@ -4072,6 +4102,16 @@ export function EnsembleV2App() {
       // from repainting newer state.
       if (type === "server.connected") {
         void checkRevision(true)
+        return
+      }
+      // Ticket #155: coalesced native tool activity is version-neutral. It
+      // updates only the per-task detail map and never advances the patch
+      // cursor or requests a snapshot.
+      if (type === "rpc.ensemble.v2.work.activity") {
+        const payload = details?.data && typeof details.data === "object" ? details.data : details
+        if (!isWorkActivity(payload)) return
+        if (lastSnapshotMeta && payload.epoch !== lastSnapshotMeta.epoch) return
+        setWorkActivities((current) => applyWorkActivity(current, payload))
         return
       }
       // Ticket #138: batched full-entity patches drive the client store

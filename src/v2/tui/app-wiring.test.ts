@@ -248,3 +248,12 @@ test("the System Agent init guard runs before slash-command fallthrough", () => 
   const command = source.indexOf("parseSlashCommand(text)", guard)
   assert.ok(guard >= 0 && command > guard)
 })
+
+test("native Work activity updates the task map and card detail without a snapshot", () => {
+  // Behavior: work-activity.test.ts mapping, apply/clear, and precedence.
+  const source = app()
+  assert.ok(source.includes('if (type === "rpc.ensemble.v2.work.activity")'))
+  assert.ok(source.includes("applyWorkActivity(current, payload)"))
+  assert.ok(source.includes("workActivityLabel(activities, item.id, now)"))
+  assert.ok(source.includes("clearWorkActivitiesForSession"))
+})

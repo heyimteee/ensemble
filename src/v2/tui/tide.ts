@@ -8,7 +8,9 @@
  *
  * The strip is one row of block glyphs. Each sample is one glyph plus one
  * deliberate blank cell, so the approved Sub-Cell Tide gap is visible across
- * the card. `tideColumns` derives the sampled column count from the card
+ * the card. The final sample is the glyph alone: the strip always fills the
+ * exact content width, and an even width takes one leading blank instead of a
+ * trailing one. `tideColumns` derives the sampled column count from the card
  * content width (clamped 8–64). Reduced motion pins every motion to its tick-0
  * frame, needs-you freezes the assigned variant, and terminal cards settle to
  * a flat strip.
@@ -23,7 +25,7 @@ export const TIDE_GLYPHS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "�
 export const TIDE_MIN_COLUMNS = 8
 export const TIDE_MAX_COLUMNS = 64
 
-/** One tide sample covers two terminal cells. */
+/** Tide samples advance two terminal cells; the final glyph closes the row. */
 export const TIDE_CELLS_PER_GLYPH = 2
 
 /** The six approved motions, in deck order. */
@@ -40,10 +42,10 @@ function clampedColumns(columns: number): number {
   return Math.max(TIDE_MIN_COLUMNS, Math.min(TIDE_MAX_COLUMNS, Math.floor(columns)))
 }
 
-/** Card content width → sampled tide columns, clamped to the approved range. */
+/** Card content width → ceil(width / 2) sampled tide columns, clamped to the approved range. */
 export function tideColumns(contentWidth: number): number {
   if (!Number.isFinite(contentWidth)) return TIDE_MIN_COLUMNS
-  return clampedColumns(Math.max(0, contentWidth) / TIDE_CELLS_PER_GLYPH)
+  return clampedColumns(Math.max(0, Math.ceil(contentWidth / TIDE_CELLS_PER_GLYPH)))
 }
 
 function modulo(value: number, divisor: number): number {
@@ -116,6 +118,40 @@ function levelsForWidth(variant: TideVariant, width: number, frame: number): num
   return Array.from({ length: width }, (_, column) => tideLevel(variant, column, width, frame))
 }
 
+/**
+ * One rendered chunk of a tide row. Every sample but the last is a glyph plus
+ * its deliberate blank; the last sample is the glyph alone. The optional
+ * leading blank is padding and carries no level.
+ */
+export type TideRowPart = { text: string; level?: number }
+
+/**
+ * Ticket #156: render levels as an exact-width tide row. Uses ceil(width / 2)
+ * samples, drops the trailing blank on the last sample, and prepends one
+ * blank when an even width leaves the row one cell short. Sampling stays
+ * capped at the approved 64 columns. Pure; callers paint each part by level.
+ */
+export function tideRowParts(levels: readonly number[], width: number): TideRowPart[] {
+  const cells = Math.max(1, Math.floor(width))
+  const samples = Math.min(TIDE_MAX_COLUMNS, Math.ceil(cells / TIDE_CELLS_PER_GLYPH))
+  const parts: TideRowPart[] = []
+  for (let index = 0; index < samples; index++) {
+    const level = Math.max(0, Math.min(TIDE_GLYPHS.length - 1, levels[index] ?? 0))
+    parts.push({
+      text: index === samples - 1 ? TIDE_GLYPHS[level] : `${TIDE_GLYPHS[level]} `,
+      level,
+    })
+  }
+  const missing = cells - parts.reduce((total, part) => total + part.text.length, 0)
+  if (missing > 0) parts.unshift({ text: " ".repeat(missing) })
+  return parts
+}
+
+/** Flatten rendered tide parts into the exact-width strip. */
+export function tideRowText(parts: readonly TideRowPart[]): string {
+  return parts.map((part) => part.text).join("")
+}
+
 /** One level per sampled column, clamped to the approved 8–64 column range. */
 export function tideLevels(
   variant: TideVariant,
@@ -126,25 +162,24 @@ export function tideLevels(
   return levelsForWidth(variant, clampedColumns(columns), effectiveTick(tick, env))
 }
 
-/** The rendered one-row strip: each sampled level becomes two identical cells. */
+/** The rendered one-row strip: exact content width, glyph-only final sample. */
 export function tideStrip(
   variant: TideVariant,
   contentWidth: number,
   tick: number,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return levelsForWidth(variant, tideColumns(contentWidth), effectiveTick(tick, env))
-    .map((level) => `${TIDE_GLYPHS[level]} `)
-    .join("")
+  const levels = levelsForWidth(variant, tideColumns(contentWidth), effectiveTick(tick, env))
+  return tideRowText(tideRowParts(levels, contentWidth))
 }
 
-/** Terminal cards settle to the lowest block, one glyph plus one blank per cell. */
+/** Terminal cards settle to the lowest block with the same exact-width row. */
 export function flatTideLevels(columns: number): number[] {
   return Array.from({ length: clampedColumns(columns) }, () => 0)
 }
 
 export function flatTideStrip(contentWidth: number): string {
-  return `${TIDE_GLYPHS[0]} `.repeat(tideColumns(contentWidth))
+  return tideRowText(tideRowParts(flatTideLevels(tideColumns(contentWidth)), contentWidth))
 }
 
 /**

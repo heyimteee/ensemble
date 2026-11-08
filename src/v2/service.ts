@@ -17,12 +17,15 @@ import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HA
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
+import { RecentHostEvents, retryEventKey } from "./host-events.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
-import { STREAM_COALESCE_MS } from "./stream-coalescer.ts"
+import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
+import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
 import { createLogRateLimiter, createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { createStoreObserver } from "./log-events.ts"
+import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import type {
@@ -73,6 +76,7 @@ type Ctx = {
   tool: { transform: (factory: any) => Promise<any> }
 }
 type Json = Record<string, any>
+type HostRegistration = { dispose?: () => Promise<void> | void }
 
 /**
  * Protocol version advertised by the snapshot and the revision heartbeat.
@@ -186,6 +190,8 @@ const MAINTENANCE_INTERVAL_MS = 1_000
 const CONFIG_DISCOVERY_MS = 1_000
 /** Live-text crash checkpoints; no coordination version or patch is written. */
 const STREAM_CHECKPOINT_MS = 250
+/** Bounded in-flight tool-name/input head registry for activity labels. */
+const TRACKED_TOOL_CALLS = 256
 /**
  * Requeue text written by pre-review services. It is never terminal truth and
  * must not survive a retirement or a successful recovery (ticket #149).
@@ -306,7 +312,16 @@ export class EnsembleV2Service {
   readonly ctx: Ctx
   private store!: V2Store
   private readonly registrations = new Set<any>()
-  private retryRegistration: any
+  /** Per-location tool transforms, keyed by the plugin context that owns them. */
+  private readonly toolRegistrations = new Map<any, HostRegistration>()
+  /** Per-location retry hooks, keyed by the plugin context that owns them. */
+  private readonly retryHooks = new Map<any, HostRegistration>()
+  /** Attached plugin locations, keyed by the context that owns their surfaces. */
+  private readonly locations = new Map<any, string | undefined>()
+  /** Session -> the location whose host permission API owns its request. */
+  private readonly permissionLocations = new Map<string, any>()
+  private readonly recentHostEvents = new RecentHostEvents()
+  private readonly recentRetryEvents = new RecentHostEvents()
   private stopped = false
   private pumping = false
   private repump = false
@@ -346,6 +361,16 @@ export class EnsembleV2Service {
   /** Coalesced ephemeral live text, keyed by workspace + message id. */
   private readonly pendingStreams = new Map<string, MessageStream>()
   private streamTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Ticket #155: in-flight tool names and input heads, keyed by
+   * session/message/call. `session.tool.called` carries the input but not the
+   * name; the host's `session.tool.input.started` event supplies it.
+   */
+  private readonly toolCalls = new Map<string, { name?: string; input?: Json }>()
+  /** Ticket #155: one bounded, version-neutral activity update per task/window. */
+  private readonly workActivity = createStreamCoalescer<WorkActivity>((updates) => {
+    for (const activity of updates.values()) this.emitWorkActivity(activity)
+  }, WORK_ACTIVITY_COALESCE_MS)
   private readonly initRuns = new Map<string, { jobID: string; sessionID?: string; cancelled: boolean; promise: Promise<void> }>()
   private globalEpoch = 0
   /**
@@ -367,7 +392,6 @@ export class EnsembleV2Service {
   private locationLogged = false
   private lastConfigError: string | undefined
   private readonly catalog: Catalog
-  private catalogAbort: AbortController | undefined
   /** Last catalog/config metadata published as a version-neutral batch. */
   private lastPublishedCatalogRevision = -1
   private lastPublishedConfig: { directory?: string; revision?: number; error?: string } = {}
@@ -419,51 +443,11 @@ export class EnsembleV2Service {
     // no live local run, and reconcileWaitingWork() repairs a working row
     // with no claim at all. Attempts are preserved until the next claim and
     // no approval is ever synthesized for dead work.
-    this.retryRegistration = await this.ctx.session.hook("retry", (event: any) => {
-      if (!this.profileForSession(event.sessionID)) return
-      if (availabilityFailure(event.error)) event.decision = { retry: false }
-    })
-    await this.installTools()
+    // Ticket #153/#154: tools, retry hooks, and event streams are
+    // location-scoped surfaces. Each LocationAdapter installs them on its own
+    // plugin context; the first context is never a proxy for every location.
     await this.migrateV1()
     void this.catalog.refresh()
-    this.catalogAbort = new AbortController()
-    void (async () => {
-      try {
-        for await (const event of this.ctx.event.subscribe({ types: ["skill.updated", "model.updated", "provider.updated"], signal: this.catalogAbort!.signal })) {
-          if (event.type) void this.catalog.refresh()
-        }
-      } catch {}
-    })()
-    void (async () => {
-      try {
-        for await (const event of this.ctx.event.subscribe({ types: ["session.text.delta", "session.idle"], signal: this.catalogAbort!.signal })) {
-          await this.handleStreamEvent(event as any)
-        }
-      } catch {}
-    })()
-    // Native permission mirror (ticket #68): project `permission.asked`
-    // blocks on Ensemble-bound sessions into `native` approvals and resolve
-    // `permission.replied` outcomes locally. User resolution replies on the
-    // host so the run is genuinely gated. Unknown sessions fail open.
-    void (async () => {
-      try {
-        for await (const event of this.ctx.event.subscribe({ types: ["permission.asked", "permission.replied"], signal: this.catalogAbort!.signal })) {
-          await this.handlePermissionEvent(event as any)
-        }
-      } catch {}
-    })()
-    // Ticket #134: react to host-exposed config changes instead of polling
-    // `.ensemble/config.json` on every read. `config.updated` covers host
-    // config; `file.edited` covers a direct edit of the workspace config.
-    void (async () => {
-      try {
-        for await (const event of this.ctx.event.subscribe({ types: ["config.updated", "file.edited"], signal: this.catalogAbort!.signal })) {
-          if (!this.isConfigEvent(event as any)) continue
-          this.configDirty = true
-          void this.maintain()
-        }
-      } catch {}
-    })()
     await this.maintain()
     this.maintenanceTimer = setInterval(() => {
       // Repairs are not enough: a repaired claim or a due retry must be
@@ -481,16 +465,17 @@ export class EnsembleV2Service {
       // own claim, and any claim still held by these ids after settle is a
       // clean-shutdown release. Foreign claims must survive.
       const localRunIDs = new Set(this.activeRuns.keys())
-      this.catalogAbort?.abort()
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer)
       this.maintenanceTimer = undefined
       if (this.streamTimer) clearTimeout(this.streamTimer)
       this.streamTimer = undefined
       this.pendingStreams.clear()
+      this.workActivity.dispose()
+      this.toolCalls.clear()
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
       await this.maintenanceRun?.catch(() => undefined)
-      await this.retryRegistration?.dispose?.().catch(() => undefined)
+      await this.disposeHostRegistrations()
       await Promise.allSettled([...this.running])
       await this.releaseLocalClaims(localRunIDs).catch(() => undefined)
       // Emit any pending rate-limit summary while the logger is still open.
@@ -568,6 +553,82 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Track one plugin location's context so session-owned host surfaces (the
+   * native permission reply API) resolve to the location that owns the session
+   * instead of the first bootstrap context (ticket #154).
+   */
+  trackLocation(ctx: any, directory?: string): void {
+    if (ctx) this.locations.set(ctx, directory)
+  }
+
+  untrackLocation(ctx: any): void {
+    if (!this.locations.delete(ctx)) return
+    for (const [sessionID, owner] of this.permissionLocations) {
+      if (owner === ctx) this.permissionLocations.delete(sessionID)
+    }
+  }
+
+  /**
+   * Handle one host event forwarded by a location adapter (ticket #154).
+   *
+   * Event identity is claimed before dispatch, so a global bus that delivers
+   * the same event to every location processes it once. Catalog, stream,
+   * permission, config, and native activity events are the location-scoped
+   * surfaces the service consumes; idle also clears the task's live activity.
+   */
+  async handleHostEvent(event: any, location?: any): Promise<void> {
+    if (this.stopped) return
+    if (!this.recentHostEvents.claim(event)) return
+    const type = String(event?.type ?? "")
+    if (type === "skill.updated" || type === "model.updated" || type === "provider.updated") {
+      void this.catalog.refresh(location)
+      return
+    }
+    if (type === "session.text.delta" || type === "session.idle") {
+      await this.handleStreamEvent(event)
+      return
+    }
+    // Ticket #155: native tool and execution lifecycle feed the Work-card
+    // activity bridge. These events are ephemeral to the client: no durable
+    // task write, no coordination version, no patch-feed entry.
+    if (
+      type === "session.tool.input.started" ||
+      type === "session.tool.called" ||
+      type === "session.tool.progress" ||
+      type === "session.tool.success" ||
+      type === "session.tool.failed"
+    ) {
+      this.handleToolActivityEvent(event)
+      return
+    }
+    if (
+      type === "session.execution.started" ||
+      type === "session.execution.succeeded" ||
+      type === "session.execution.failed" ||
+      type === "session.execution.interrupted"
+    ) {
+      this.handleExecutionActivityEvent(event)
+      return
+    }
+    // Native permission mirror (ticket #68): project `permission.asked`
+    // blocks on Ensemble-bound sessions into `native` approvals and resolve
+    // `permission.replied` outcomes locally. User resolution replies on the
+    // owning location's host API so the run is genuinely gated.
+    if (type === "permission.asked" || type === "permission.replied") {
+      await this.handlePermissionEvent(event, location)
+      return
+    }
+    // Ticket #134: react to host-exposed config changes instead of polling
+    // `.ensemble/config.json` on every read. `config.updated` covers host
+    // config; `file.edited` covers a direct edit of the workspace config.
+    if (type === "config.updated" || type === "file.edited") {
+      if (!this.isConfigEvent(event)) return
+      this.configDirty = true
+      void this.maintain()
+    }
+  }
+
+  /**
    * Narrow test seam (ticket #148): register a local run identity without
    * starting native work, so clean-shutdown claim release is observable at the
    * service boundary. Production runs register themselves in `runTask()`; this
@@ -575,6 +636,7 @@ export class EnsembleV2Service {
    */
   registerLocalRunForTest(run: Run): void {
     this.activeRuns.set(run.id, run)
+    this.runBySession.set(run.sessionID, run.id)
   }
 
   private emitChanged(
@@ -816,7 +878,7 @@ export class EnsembleV2Service {
    * event-driven, so a restart never resurrects an already-answered host
    * request as a phantom approval.
    */
-  private async handlePermissionEvent(event: any): Promise<void> {
+  private async handlePermissionEvent(event: any, source?: any): Promise<void> {
     const data = event?.data ?? event
     if (event?.type === "permission.asked") {
       const sessionID = String(data?.sessionID ?? "")
@@ -825,6 +887,8 @@ export class EnsembleV2Service {
       if (!sessionID || !permissionID) return
       const owner = this.ownerForSession(sessionID)
       if (!owner) return
+      const ownerLocation = this.locationForSession(sessionID, source)
+      if (ownerLocation) this.permissionLocations.set(sessionID, ownerLocation)
       const state = this.store.read()
       const duplicate = Object.values(state.approvals).some(
         (approval) => approval.status === "pending" && approval.kind === "native" && approval.payload?.permissionID === permissionID,
@@ -903,11 +967,51 @@ export class EnsembleV2Service {
     }
   }
 
-  /** Reply on the host permission request. Fail-open: a gone request still resolves locally. */
+  /**
+   * Resolve the attached location that owns a native session. The stored
+   * binding directory is authoritative when it matches a location; the
+   * location that observed the event is the next best source; any attached
+   * location is the last resort because the host permission API is keyed by
+   * session. The bootstrap context is never used as a proxy.
+   */
+  private locationForSession(sessionID: string, source?: any): any {
+    const binding = this.store?.bindingForSession(sessionID)
+    const target = typeof binding?.directory === "string" && binding.directory.length > 0
+      ? canonicalDirectory(binding.directory)
+      : undefined
+    if (target) {
+      for (const [ctx, directory] of this.locations) {
+        if (!directory) continue
+        try {
+          if (canonicalDirectory(directory) === target) return ctx
+        } catch {
+          // A stale location directory must not block the ownership fallback.
+        }
+      }
+    }
+    if (source && this.locations.has(source)) return source
+    for (const ctx of this.locations.keys()) {
+      if (typeof ctx?.permission?.reply === "function") return ctx
+    }
+    for (const ctx of this.locations.keys()) return ctx
+    return undefined
+  }
+
+  private permissionContextForSession(sessionID: string): any {
+    const known = this.permissionLocations.get(sessionID)
+    if (known && this.locations.has(known)) return known
+    if (known) this.permissionLocations.delete(sessionID)
+    const location = this.locationForSession(sessionID)
+    if (location) this.permissionLocations.set(sessionID, location)
+    return location
+  }
+
+  /** Reply on the host permission request through the location that owns it. Fail-open locally. */
   private async replyNativePermission(sessionID: string, requestID: string, decision: "once" | "reject", message?: string): Promise<void> {
-    const reply = this.ctx?.permission?.reply
+    const location = this.permissionContextForSession(sessionID)
+    const reply = location?.permission?.reply
     if (typeof reply !== "function") return
-    await reply.call(this.ctx.permission!, { sessionID, requestID, decision, ...(message ? { message } : {}) })
+    await reply.call(location.permission, { sessionID, requestID, decision, ...(message ? { message } : {}) })
   }
 
   private defer(ms: number, fn: () => void): void {
@@ -3427,136 +3531,84 @@ export class EnsembleV2Service {
     return found.workspace && found.agent ? { workspace: found.workspace, agent: found.agent } : undefined
   }
 
-  private async installTools(): Promise<void> {
-    await this.ctx.tool.transform((editor: any) => {
-      editor.namespace({ name: "ensemble", description: "Ensemble workspace collaboration." })
-      editor.add({
-        name: "workspace_info",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Show the current Ensemble workspace, directory, leader, members, and paused state.",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        execute: async (_input: Json, context: any) => this.toolWorkspaceInfo(context),
-      })
-      editor.add({
-        name: "list_workspaces",
-        options: { namespace: "ensemble", codemode: false },
-        description: "List Ensemble workspaces and their directories, leaders, and members.",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        execute: async () => this.toolListWorkspaces(),
-      })
-      editor.add({
-        name: "list_agents",
-        options: { namespace: "ensemble", codemode: false },
-        description: "List the Ensemble roster, workspace membership, and busy state.",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        execute: async () => this.toolListAgents(),
-      })
-      editor.add({
-        name: "task_status",
-        options: { namespace: "ensemble", codemode: false },
-        description: "List pending, working, and replied Ensemble subtasks.",
-        input: { type: "object", properties: { workspaceID: { type: "string" } }, additionalProperties: false },
-        execute: async (input: Json, context: any) => this.toolTaskStatus(input, context),
-      })
-      editor.add({
-        name: "send_message",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Post a message to the group chat or queue a direct message to an agent.",
-        input: {
-          type: "object",
-          properties: { kind: { type: "string", enum: ["workspace", "agent"] }, id: { type: "string" }, text: { type: "string" } },
-          required: ["kind", "text"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolSendMessage(input, context),
-      })
-      editor.add({
-        name: "handoff",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Queue a typed hop to a teammate; the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate. Write a self-authored instruction for the recipient (what to do, context, expected output) — never paste the user's message verbatim; task stays the short display title.",
-        input: {
-          type: "object",
-          properties: { task: { type: "string" }, instruction: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" }, constraints: { type: "string" }, expected: { type: "string" } },
-          required: ["task", "summary", "path"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolHandoff(input, context),
-      })
-      editor.add({
-        name: "delegate",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Delegate a typed subtask to another workspace member and record it on the board. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
-        input: {
-          type: "object",
-          properties: {
-            assignee: { type: "string" },
-            title: { type: "string" },
-            instruction: { type: "string" },
-            constraints: { type: "string" },
-            expected: { type: "string" },
-            mode: { type: "string", enum: ["research", "edit"] },
-          },
-          required: ["assignee", "title", "instruction"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolDelegate(input, context),
-      })
-      editor.add({
-        name: "review",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Decide each item in a batch review turn (delegate, start, end, or dismiss). The batch closes only when every item is decided; non-leader reviewers hand it onward to the leader.",
-        input: {
-          type: "object",
-          properties: {
-            batch: { type: "string" },
-            decisions: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: { item: { type: "string" }, action: { type: "string" }, assignee: { type: "string" }, note: { type: "string" } },
-                required: ["item", "action"],
-                additionalProperties: false,
-              },
-            },
-            hand_to: { type: "string" },
-          },
-          required: ["batch", "decisions"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolReview(input, context),
-      })
-      editor.add({
-        name: "ask_person",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Ask the user for a judgment call and pause this subtask until they answer.",
-        input: { type: "object", properties: { question: { type: "string" } }, required: ["question"], additionalProperties: false },
-        execute: async (input: Json, context: any) => this.toolAsk(input, context),
-      })
-      editor.add({
-        name: "remember",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Save durable project, workspace, or cross-project knowledge. Cross-project knowledge needs approval.",
-        input: {
-          type: "object",
-          properties: { text: { type: "string" }, scope: { type: "string", enum: ["project", "workspace", "global"] } },
-          required: ["text", "scope"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolRemember(input, context),
-      })
-      editor.add({
-        name: "share",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Request authorization before cross-project or private-transcript disclosure.",
-        input: {
-          type: "object",
-          properties: { text: { type: "string" }, scope: { type: "string", enum: ["cross_project", "private_transcript"] } },
-          required: ["text", "scope"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolShare(input, context),
-      })
+  /**
+   * Install the Ensemble toolset on one host location. The returned handle is
+   * idempotent and removes only this context's registration; the location
+   * adapter stores it and disposes it when that location unloads (ticket #153).
+   */
+  async installToolsFor(ctx: any): Promise<HostRegistration> {
+    const existing = this.toolRegistrations.get(ctx)
+    if (existing) return existing
+    const registration = await ctx.tool.transform((editor: any) => registerEnsembleTools(editor, this.toolHandlers()))
+    const handle = this.hostRegistration(registration, this.toolRegistrations, ctx)
+    this.toolRegistrations.set(ctx, handle)
+    return handle
+  }
+
+  /** Install this location's retry hook; disposal is owned by its attachment. */
+  async installRetryHook(ctx: any): Promise<HostRegistration> {
+    const existing = this.retryHooks.get(ctx)
+    if (existing) return existing
+    const registration = await ctx.session.hook("retry", (event: any) => {
+      if (!this.profileForSession(event.sessionID)) return
+      // A global hook bus can deliver one retry decision through every
+      // location's callback. Claim it in the realm so the policy applies once.
+      if (!this.recentRetryEvents.claimKey(retryEventKey(event))) return
+      if (availabilityFailure(event.error)) event.decision = { retry: false }
     })
+    const handle = this.hostRegistration(registration, this.retryHooks, ctx)
+    this.retryHooks.set(ctx, handle)
+    return handle
+  }
+
+  private toolHandlers(): EnsembleToolHandlers {
+    return {
+      workspaceInfo: (context) => this.toolWorkspaceInfo(context),
+      listWorkspaces: () => this.toolListWorkspaces(),
+      listAgents: () => this.toolListAgents(),
+      taskStatus: (input, context) => this.toolTaskStatus(input, context),
+      sendMessage: (input, context) => this.toolSendMessage(input, context),
+      handoff: (input, context) => this.toolHandoff(input, context),
+      delegate: (input, context) => this.toolDelegate(input, context),
+      review: (input, context) => this.toolReview(input, context),
+      askPerson: (input, context) => this.toolAsk(input, context),
+      remember: (input, context) => this.toolRemember(input, context),
+      share: (input, context) => this.toolShare(input, context),
+    }
+  }
+
+  /**
+   * Wrap a host registration so disposal is idempotent and removes it from the
+   * owning per-context map. A context can be installed again after disposal.
+   */
+  private hostRegistration(registration: any, owner: Map<any, HostRegistration>, ctx: any): HostRegistration {
+    let disposed = false
+    const handle: HostRegistration = {
+      dispose: async () => {
+        if (disposed) return
+        disposed = true
+        if (owner.get(ctx) === handle) owner.delete(ctx)
+        await registration?.dispose?.()
+      },
+    }
+    return handle
+  }
+
+  /** Stop-time cleanup for a service used without location attachments (tests). */
+  private async disposeHostRegistrations(): Promise<void> {
+    for (const registration of [...this.toolRegistrations.values(), ...this.retryHooks.values()]) {
+      try {
+        await registration.dispose?.()
+      } catch {
+        // Best-effort: one host registration must not block service teardown.
+      }
+    }
+    this.toolRegistrations.clear()
+    this.retryHooks.clear()
+    this.locations.clear()
+    this.permissionLocations.clear()
+    this.recentHostEvents.clear()
+    this.recentRetryEvents.clear()
   }
 
   private async toolWorkspaceInfo(context: any): Promise<{ content: string }> {
@@ -5035,14 +5087,172 @@ export class EnsembleV2Service {
     })()
   }
 
+  /**
+   * Ticket #155: the one live run that owns a native session. Only
+   * Ensemble-bound task runs carry a Work card; direct chats and the System
+   * Agent have no activity target and emit nothing.
+   */
+  private activityTarget(sessionID: string): Run | undefined {
+    if (!sessionID) return undefined
+    const runID = this.runBySession.get(sessionID)
+    return runID ? this.activeRuns.get(runID) : undefined
+  }
+
+  private toolCallKey(data: any): string {
+    return [
+      String(data?.sessionID ?? ""),
+      String(data?.assistantMessageID ?? ""),
+      String(data?.id ?? ""),
+    ].join("\u0000")
+  }
+
+  /** Host versions place the tool name on different fields; accept the safe ones. */
+  private toolEventName(data: any): string | undefined {
+    for (const candidate of [data?.name, data?.tool, data?.metadata?.name]) {
+      if (typeof candidate === "string" && candidate.length > 0) return candidate
+    }
+    return undefined
+  }
+
+  /**
+   * Remember one tool name/input head. The host splits these across events:
+   * `session.tool.input.started` names the tool, `session.tool.called` carries
+   * its input, and progress/success/failed carry neither. The map is bounded
+   * because a lost terminal event must not grow an unbounded registry.
+   */
+  private rememberToolCall(event: any): { name?: string; input?: Json } | undefined {
+    const data = event?.data ?? event
+    if (!data || typeof data !== "object") return undefined
+    if (typeof data.sessionID !== "string" || typeof data.id !== "string") return undefined
+    const key = this.toolCallKey(data)
+    const existing = this.toolCalls.get(key)
+    const name = this.toolEventName(data) ?? existing?.name
+    const input = data.input && typeof data.input === "object" && !Array.isArray(data.input)
+      ? limitToolInput(data.input)
+      : existing?.input
+    const entry = { name, input }
+    this.toolCalls.delete(key)
+    this.toolCalls.set(key, entry)
+    while (this.toolCalls.size > TRACKED_TOOL_CALLS) {
+      const oldest = this.toolCalls.keys().next().value
+      if (oldest === undefined) break
+      this.toolCalls.delete(oldest)
+    }
+    return entry
+  }
+
+  private forgetToolCall(event: any): void {
+    const data = event?.data ?? event
+    if (!data || typeof data !== "object") return
+    this.toolCalls.delete(this.toolCallKey(data))
+  }
+
+  private forgetToolCallsForSession(sessionID: string): void {
+    if (!sessionID) return
+    const prefix = `${sessionID}\u0000`
+    for (const key of this.toolCalls.keys()) {
+      if (key.startsWith(prefix)) this.toolCalls.delete(key)
+    }
+  }
+
+  /** Queue one bounded activity label for the run that owns this session. */
+  private queueWorkActivity(sessionID: string, label: string, status: WorkActivity["status"], tool?: string): void {
+    const run = this.activityTarget(sessionID)
+    if (!run) return
+    const boundedTool = boundedToolName(tool)
+    const activity: WorkActivity = {
+      epoch: this.epochValue,
+      workspaceID: run.workspaceID,
+      taskID: run.subtaskID,
+      sessionID,
+      label,
+      ...(boundedTool ? { tool: boundedTool } : {}),
+      status,
+      updatedAt: now(),
+    }
+    this.workActivity.push(run.subtaskID, () => activity)
+  }
+
+  private emitWorkActivity(activity: WorkActivity): void {
+    for (const registration of this.registrations) {
+      void registration?.events?.emit?.("work.activity", activity)?.catch?.(() => undefined)
+    }
+  }
+
+  /** Clear one session's card activity; a clear is still a coalesced event. */
+  private clearWorkActivity(sessionID: string, status: "idle" | "terminal"): void {
+    this.forgetToolCallsForSession(sessionID)
+    const run = this.activityTarget(sessionID)
+    if (!run) return
+    this.workActivity.push(run.subtaskID, () => ({
+      epoch: this.epochValue,
+      workspaceID: run.workspaceID,
+      taskID: run.subtaskID,
+      sessionID,
+      label: "",
+      status,
+      updatedAt: now(),
+    }))
+  }
+
+  private handleToolActivityEvent(event: any): void {
+    const type = String(event?.type ?? "")
+    const data = event?.data ?? event
+    const sessionID = String(data?.sessionID ?? "")
+    // Only an active Ensemble task run has a Work card. Direct chats and the
+    // System Agent never enter the bounded tool registry.
+    if (!this.activityTarget(sessionID)) {
+      this.forgetToolCall(event)
+      return
+    }
+    if (type === "session.tool.input.started") {
+      this.rememberToolCall(event)
+      return
+    }
+    const call = this.rememberToolCall(event)
+    if (type === "session.tool.success" || type === "session.tool.failed") {
+      this.forgetToolCall(event)
+      // The call settled; the next visible step is model thinking until text
+      // or another tool arrives. This replaces the old tool label rather than
+      // leaving it stuck as if the command were still running.
+      this.queueWorkActivity(sessionID, thinkingActivityLabel(), "thinking")
+      return
+    }
+    const tool = call?.name ?? this.toolEventName(data)
+    const label = toolActivityLabel(tool, call?.input)
+    this.queueWorkActivity(sessionID, label, type === "session.tool.progress" ? "progress" : "called", tool)
+  }
+
+  private handleExecutionActivityEvent(event: any): void {
+    const data = event?.data ?? event
+    const sessionID = String(data?.sessionID ?? "")
+    if (!sessionID) return
+    if (event?.type === "session.execution.started") {
+      this.queueWorkActivity(sessionID, thinkingActivityLabel(), "thinking")
+      return
+    }
+    this.clearWorkActivity(sessionID, "terminal")
+  }
+
   private async handleStreamEvent(event: any): Promise<void> {
-    if (event?.type !== "session.text.delta") return
     const data = event.data ?? event
-    const live = this.liveBySession.get(String(data.sessionID ?? ""))
-    if (!live) return
+    const sessionID = String(data?.sessionID ?? "")
+    // Idle means no tool and no text are in flight; a terminal patch may
+    // arrive just after, but the card must stop claiming live activity now.
+    if (event?.type === "session.idle") {
+      this.clearWorkActivity(sessionID, "idle")
+      return
+    }
+    if (event?.type !== "session.text.delta") return
     const delta = String(data.delta ?? "")
     if (!delta) return
+    // Text-only turns still need an honest verb. This path never requires the
+    // opening durable row; it emits only for an active task run.
+    this.queueWorkActivity(sessionID, writingReplyLabel(), "writing")
+    const live = this.liveBySession.get(sessionID)
+    if (!live) return
     live.buffer += delta
+
     // The opening row is persisted just after registration; a delta that
     // lands in between stays buffered and is flushed below, never dropped.
     if (!live.message) return
@@ -5457,6 +5667,10 @@ export class EnsembleV2Service {
         }).catch(() => undefined)
       }
       clearInterval(heartbeat)
+      // Ticket #155: a finalized task must not leave a live tool label behind.
+      // Clear before the session→run identity disappears; the card's terminal
+      // patch may land just after this event.
+      this.clearWorkActivity(binding.sessionID, "terminal")
       this.liveBySession.delete(binding.sessionID)
       if (live?.streaming) await this.finalizeStream(live, live.text || REPLY_INTERRUPTED, true, globalEpoch, workspaceEpoch, task.workspaceID)
       await this.releaseClaim(task.id, runID)

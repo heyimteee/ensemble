@@ -4,6 +4,7 @@ import { mkdtempSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { scopesToResync } from "./scoped-read.ts"
 import type { Agent, Message, Subtask, Workspace } from "./types.ts"
 
@@ -164,7 +165,7 @@ test("a large-history workspace bootstraps shell, visible Work, and one bounded 
   seed(values, { messages: 10_000, oldTasks: 600 })
   const { ctx } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers() as any
   const directory = mkdtempSync(join(tmpdir(), "ensemble-scoped-"))
   try {
@@ -194,7 +195,7 @@ test("a small workspace keeps the full snapshot path and records the disabled ga
   seed(values, { messages: 10, live: false })
   const { ctx } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers() as any
   const directory = mkdtempSync(join(tmpdir(), "ensemble-scoped-"))
   try {
@@ -224,7 +225,7 @@ test("a measured full snapshot can enable the gate for the next scoped read", as
   seed(values, { messages: 950, live: false })
   const { ctx } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers() as any
   const directory = mkdtempSync(join(tmpdir(), "ensemble-scoped-"))
   try {
@@ -254,7 +255,7 @@ test("transcript windows page older rows and a result outside the window is fetc
   }))
   const { ctx } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers() as any
   const directory = mkdtempSync(join(tmpdir(), "ensemble-scoped-"))
   try {
@@ -283,7 +284,7 @@ test("a gap resync returns only the scopes whose durable state changed after the
   seed(values, { messages: 10, oldTasks: 600, version: 100, live: false })
   const { ctx } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers() as any
   const directory = mkdtempSync(join(tmpdir(), "ensemble-scoped-"))
   try {
