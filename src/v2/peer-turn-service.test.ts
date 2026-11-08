@@ -425,7 +425,7 @@ test("agent mention depth and per-run caps refuse visibly without queueing", asy
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
-    await handlers.invoke({ directory, action: "settings.update", payload: { maxDepth: 1, maxDelegations: 1 } })
+    await handlers.invoke({ directory, action: "settings.update", payload: { dispatchDepth: 1, maxDelegations: 1 } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
     await waitFor(async () => {
@@ -434,7 +434,7 @@ test("agent mention depth and per-run caps refuse visibly without queueing", asy
       if (!parent) return false
       return Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === parent.id && run.status === "running")
     })
-    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID: novaSession })
+    const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID: novaSession })
     assert.match(delegated.content, /Delegated to Sage/)
     const sageSession = await bindingSessionID(handlers, directory, sage.id)
     let childID = ""
@@ -445,9 +445,9 @@ test("agent mention depth and per-run caps refuse visibly without queueing", asy
       childID = child.id
       return Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === childID && run.status === "running")
     })
-    // Sage asks from depth 1 with maxDepth 1: refused, never queued.
+    // Sage asks from depth 1 with dispatch depth 1: refused, never queued.
     const deep = await tools.get("send_message").execute({ kind: "workspace", text: "$Nova go deeper" }, { sessionID: sageSession })
-    assert.match(deep.content, /delegation depth limit/)
+    assert.match(deep.content, /dispatch depth limit/)
     // Nova already has one child: the per-run cap refuses a second peer.
     const capped = await tools.get("send_message").execute({ kind: "workspace", text: "$Sage another job" }, { sessionID: novaSession })
     assert.match(capped.content, /delegation limit is 1/)

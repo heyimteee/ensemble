@@ -1,5 +1,5 @@
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
-import { dispatchGroupRemaining, reconcileLegacyDispatchGroup } from "./dispatch-budget.ts"
+import { dispatchAdmissionRefusal, dispatchBudgetState, dispatchDepthFor, dispatchGroupRemaining, reconcileLegacyDispatchGroup, type DispatchRefusal } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
@@ -23,6 +23,7 @@ import type {
   Settings,
   SnapshotState,
   Subtask,
+  WorkKind,
   Workspace,
 } from "./types.ts"
 
@@ -845,13 +846,14 @@ export class V2Store {
    */
   async admitDispatchedSubtask(
     subtask: Subtask,
-    options: { enforce?: boolean } = {},
+    options: { enforce?: boolean; maxPerRun?: number; perRunKind?: WorkKind } = {},
   ): Promise<{
     admitted: boolean
     task: Subtask
     group?: DispatchGroup
     consumed: boolean
-    reason?: "group-exhausted" | "command-exhausted"
+    reason?: "task-exhausted" | "group-exhausted" | "depth-exhausted" | "command-exhausted" | "fanout-exhausted"
+    refusal?: DispatchRefusal
   }> {
     return this.write(async () => {
       const existing = this.state.subtasks[subtask.id]
@@ -863,6 +865,9 @@ export class V2Store {
           consumed: false,
         }
       }
+      const parent = subtask.parentID ? this.state.subtasks[subtask.parentID] : undefined
+      const depth = parent ? dispatchDepthFor(parent, this.state.subtasks) + 1 : 0
+      subtask.dispatchDepth = depth
       const groupID = subtask.dispatchGroupID
       const group = groupID ? this.state.dispatchGroups[groupID] : undefined
       if (!group) {
@@ -874,11 +879,28 @@ export class V2Store {
       }
       const root = group.id === group.rootID ? group : this.state.dispatchGroups[group.rootID]
       if (options.enforce) {
-        if (group.usedHops >= group.maxHops) {
-          return { admitted: false, task: subtask, group, consumed: false, reason: "group-exhausted" }
-        }
-        if (root && root.commandUsedHops !== undefined && root.commandMaxHops !== undefined && root.commandUsedHops >= root.commandMaxHops) {
-          return { admitted: false, task: subtask, group, consumed: false, reason: "command-exhausted" }
+        const budget = dispatchBudgetState({
+          group,
+          groups: this.state.dispatchGroups,
+          task: parent,
+          subtasks: this.state.subtasks,
+          nextDepth: depth,
+        })
+        const fanOutUsed = parent
+          ? Object.values(this.state.subtasks).filter(
+              (task) => task.parentID === parent.id && (!options.perRunKind || task.workKind === options.perRunKind),
+            ).length
+          : 0
+        const refusal = dispatchAdmissionRefusal({ state: budget, maxPerRun: options.maxPerRun, fanOutUsed })
+        if (refusal) {
+          return {
+            admitted: false,
+            task: subtask,
+            group,
+            consumed: false,
+            reason: `${refusal.layer}-exhausted` as const,
+            refusal,
+          }
         }
       }
       const nextGroup: DispatchGroup = { ...group, usedHops: group.usedHops + 1 }

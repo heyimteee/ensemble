@@ -157,6 +157,80 @@ test("ticket160: concurrent admissions at the last hop admit exactly one when en
   assert.equal([store.subtask("left"), store.subtask("right")].filter(Boolean).length, 1)
 })
 
+test("ticket161: admission enforces task, group, depth, command, and fan-out in order", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.saveWorkspace(workspace())
+  await store.saveDispatchGroup(rootGroup({ usedHops: 0, commandUsedHops: 0, depthMax: 2 }))
+  const asking = subtask({ id: "ask", creatorType: "user", dispatchGroupID: "dispatch_root", taskMaxHops: 1, dispatchDepth: 0 })
+  await store.saveSubtask(asking)
+  const child = subtask({ id: "child", parentID: "ask", dispatchGroupID: "dispatch_root", dispatchDepth: 1 })
+  await store.saveSubtask(child)
+  const candidate = (id: string, patch: Partial<Subtask> = {}) => subtask({ id, parentID: "ask", dispatchGroupID: "dispatch_root", ...patch })
+
+  // The sender's task budget wins the order even when the group is also full.
+  await store.saveDispatchGroup(rootGroup({ usedHops: 8, commandUsedHops: 24, depthMax: 2 }))
+  const taskLimited = await store.admitDispatchedSubtask(candidate("task-limited"), { enforce: true, maxPerRun: 0 })
+  assert.equal(taskLimited.admitted, false)
+  assert.equal(taskLimited.reason, "task-exhausted")
+  assert.equal(taskLimited.consumed, false)
+  assert.equal(store.subtask("task-limited"), undefined)
+
+  // Release the task-local cap so the lower layers can be proven in order.
+  const unboundedQuestion = store.cloneSubtask("ask")!
+  unboundedQuestion.taskMaxHops = undefined
+  await store.saveSubtask(unboundedQuestion)
+
+  // Group before depth and command.
+  await store.saveDispatchGroup(rootGroup({ usedHops: 8, commandUsedHops: 24, depthMax: 0 }))
+  const groupLimited = await store.admitDispatchedSubtask(candidate("group-limited"), { enforce: true })
+  assert.equal(groupLimited.reason, "group-exhausted")
+
+  // Depth before command.
+  const deep = store.cloneSubtask("child")!
+  deep.dispatchDepth = 2
+  deep.taskMaxHops = undefined
+  await store.saveSubtask(deep)
+  await store.saveDispatchGroup(rootGroup({ usedHops: 1, commandUsedHops: 24, depthMax: 2 }))
+  const depthLimited = await store.admitDispatchedSubtask(subtask({ id: "depth-limited", parentID: "child", dispatchGroupID: "dispatch_root" }), { enforce: true })
+  assert.equal(depthLimited.reason, "depth-exhausted")
+
+  // Command before fan-out.
+  await store.saveDispatchGroup(rootGroup({ usedHops: 1, commandUsedHops: 24, depthMax: 8 }))
+  const commandLimited = await store.admitDispatchedSubtask(candidate("command-limited"), { enforce: true, maxPerRun: 0 })
+  assert.equal(commandLimited.reason, "command-exhausted")
+
+  // Fan-out is the last guard and never spends a hop.
+  await store.saveDispatchGroup(rootGroup({ usedHops: 1, commandUsedHops: 1, depthMax: 8 }))
+  const fanOutLimited = await store.admitDispatchedSubtask(candidate("fanout-limited"), { enforce: true, maxPerRun: 1 })
+  assert.equal(fanOutLimited.reason, "fanout-exhausted")
+  assert.equal(store.dispatchGroup("dispatch_root")?.usedHops, 1)
+  assert.equal(store.subtask("fanout-limited"), undefined)
+
+  // The next admitted child records its unified depth and spends one hop.
+  await store.saveDispatchGroup(rootGroup({ usedHops: 1, commandUsedHops: 1, depthMax: 8 }))
+  const admitted = await store.admitDispatchedSubtask(candidate("ok"), { enforce: true, maxPerRun: 3 })
+  assert.equal(admitted.admitted, true)
+  assert.equal(admitted.consumed, true)
+  assert.equal(store.subtask("ok")?.dispatchDepth, 1)
+  assert.equal(store.dispatchGroup("dispatch_root")?.usedHops, 2)
+})
+
+test("ticket161: a rejected admission leaves the existing group and tasks untouched", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.saveWorkspace(workspace())
+  await store.saveDispatchGroup(rootGroup({ usedHops: 8, commandUsedHops: 8 }))
+  const rejected = subtask({ id: "rejected", dispatchGroupID: "dispatch_root", title: "Secret work", instruction: "Secret instruction" })
+  const result = await store.admitDispatchedSubtask(rejected, { enforce: true })
+  assert.equal(result.admitted, false)
+  assert.equal(result.refusal?.layer, "group")
+  assert.equal(store.subtask("rejected"), undefined)
+  assert.equal(store.dispatchGroup("dispatch_root")?.usedHops, 8)
+  assert.equal(store.dispatchGroup("dispatch_root")?.commandUsedHops, 8)
+  assert.equal(ctx.values.has("v2/subtask/rejected"), false)
+})
+
 function commandUsed(store: V2Store, groupID: string): number | undefined {
   return store.dispatchGroup(groupID)?.commandUsedHops
 }

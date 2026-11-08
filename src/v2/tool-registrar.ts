@@ -81,11 +81,11 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
   editor.add({
     name: "handoff",
     options: { namespace: "ensemble", codemode: false },
-    description: "Queue a typed hop to a teammate; the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate. Write a self-authored instruction for the recipient (what to do, context, expected output) — never paste the user's message verbatim; task stays the short display title.",
+    description: "Queue a typed hop to a teammate with the required maxHops budget (0 = one-shot ask); the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate. Write a self-authored instruction for the recipient (what to do, context, expected output) — never paste the user's message verbatim; task stays the short display title.",
     input: {
       type: "object",
-      properties: { task: { type: "string" }, instruction: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" }, constraints: { type: "string" }, expected: { type: "string" } },
-      required: ["task", "summary", "path"],
+      properties: { task: { type: "string" }, instruction: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" }, constraints: { type: "string" }, expected: { type: "string" }, maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." } },
+      required: ["task", "summary", "path", "maxHops"],
       additionalProperties: false,
     },
     execute: async (input, context) => handlers.handoff(input, context),
@@ -93,7 +93,7 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
   editor.add({
     name: "delegate",
     options: { namespace: "ensemble", codemode: false },
-    description: "Delegate a typed subtask to another workspace member and record it on the board. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
+    description: "Delegate a typed subtask to another workspace member with the required maxHops budget (0 = one-shot ask) and record it on the board. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
     input: {
       type: "object",
       properties: {
@@ -103,8 +103,9 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
         constraints: { type: "string" },
         expected: { type: "string" },
         mode: { type: "string", enum: ["research", "edit"] },
+        maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
       },
-      required: ["assignee", "title", "instruction"],
+      required: ["assignee", "title", "instruction", "maxHops"],
       additionalProperties: false,
     },
     execute: async (input, context) => handlers.delegate(input, context),

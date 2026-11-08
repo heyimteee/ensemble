@@ -1,4 +1,4 @@
-export const ENSEMBLE_BLOCK_VERSION = 2
+export const ENSEMBLE_BLOCK_VERSION = 3
 
 export function ensembleBlock(): string {
   return `<!-- ensemble:start v${ENSEMBLE_BLOCK_VERSION} -->
@@ -46,12 +46,35 @@ user's message verbatim. \`task\` stays the short display title.
    \`instruction\`, \`from\`, \`to\`, \`created\`.
 3. Use Markdown sections: \`# Handoff\`, \`## Task\`, \`## Instruction\`,
    \`## Constraints\`, \`## Expected\`, \`## Details\`.
-4. Call \`ensemble_handoff\` with the task, instruction, summary, path, and recipient.
+4. Call \`ensemble_handoff\` with the task, instruction, summary, path, recipient, and a required \`maxHops\` budget.
 5. Mention the handoff path in the group reply.
 6. \`ensemble_handoff\` already queues the hop — do not call \`ensemble_delegate\` after it (leader-only; would double-queue). Your turn stays open until the recipient's answer arrives; do not treat the ack as delivery.
 
 Never claim a handoff path that does not exist. Use native file tools to
 write the file; do not paste a full report into the group chat.
+
+## Dispatch budgets
+
+Every \`ensemble_delegate\` and \`ensemble_handoff\` call requires \`maxHops\`:
+the number of direct dispatches the recipient may make. Use \`maxHops: 0\`
+for a one-shot ask: the recipient may answer and complete but must not
+create new work. A missing value is a validation error.
+
+Four layers bound work, and your turn context shows each used and remaining
+value:
+
+- **Task** — what you granted the recipient of this work item.
+- **Group** — one dispatch group inside one user command.
+- **Command** — all groups for one user command; the user owns this ceiling.
+- **Depth** — the ancestor chain inside the group (default 8).
+
+Successful tool results show what is left. Completion handoffs, batch
+review, synthesis, group-chat peer turns, retries, restarts, recovery, and
+idempotent replays never consume hops; cancellation never refunds them.
+
+You cannot raise a ceiling. If a budget is exhausted, return your result to
+the leader: only the leader may continue work in a new group, and only the
+user can start a new command.
 
 ## End-of-turn handoff (mandatory)
 
@@ -71,11 +94,12 @@ each item with \`ensemble_review\` (\`delegate\`, \`start\`, \`end\`, or
 Non-leader recipients hand the batch onward (default leader); the leader
 may end it.
 
-Loop guards: handoff chains stop at the depth cap, immediate back-and-forth
-to the previous sender is rejected, repeated recipients reroute to the
-leader, and the cap forces a leader or termination fallback. Mandatory
-handoff never calls \`ensemble_delegate\` after a handoff and never queues
-duplicate work.
+Loop guards: chains stop at the group's dispatch depth limit, immediate
+back-and-forth to the previous sender is rejected, repeated recipients
+reroute to the leader, and each run fans out at most three handoffs. Use
+\`maxHops: 0\` when the recipient should answer and stop. Mandatory handoff
+never calls \`ensemble_delegate\` after a handoff and never queues duplicate
+work.
 
 ## Tools
 
@@ -86,9 +110,9 @@ duplicate work.
 | \`ensemble_list_workspaces\` | All workspaces and directories | read-only, any session |
 | \`ensemble_task_status\` | Pending, working, replied subtasks | read-only, any session |
 | \`ensemble_send_message\` | Post to the group or queue an agent DM | Ensemble-bound sessions |
-| \`ensemble_handoff\` | Queue a typed hop to a teammate; the answer is relayed here (no delegate needed afterwards) | Ensemble-bound sessions |
+| \`ensemble_handoff\` | Queue a typed hop to a teammate with the required \`maxHops\` budget; the answer is relayed here (no delegate needed afterwards) | Ensemble-bound sessions |
 | \`ensemble_review\` | Decide each item in a batch review (delegate, start, end, dismiss); the batch closes only when every item is decided | Batch recipient |
-| \`ensemble_delegate\` | Create a typed subtask for a teammate | Ensemble leader only (peers use handoff) |
+| \`ensemble_delegate\` | Create a typed subtask for a teammate with the required \`maxHops\` budget | Ensemble leader only (peers use handoff) |
 | \`ensemble_ask_person\` | Pause for a user decision | Ensemble-bound sessions |
 | \`ensemble_remember\` | Save project/workspace/global memory | Ensemble-bound sessions |
 | \`ensemble_share\` | Request approval for cross-project sharing | Ensemble-bound sessions |

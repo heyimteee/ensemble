@@ -4,11 +4,19 @@ import {
   DISPATCH_COMMAND_TIERS,
   DISPATCH_DEPTH_MAX,
   DISPATCH_GROUP_TIERS,
+  dispatchAdmissionRefusal,
+  dispatchBudgetContext,
+  dispatchBudgetLine,
+  dispatchBudgetState,
   dispatchBudgetSummary,
   dispatchCommandRemaining,
+  dispatchDepthFor,
+  dispatchFanOutCount,
   dispatchGroupRemaining,
   dispatchGroupState,
   dispatchHopCount,
+  dispatchRefusalText,
+  dispatchTaskHopCount,
   dispatchesHop,
   dispatchLimitSettings,
   dispatchLimits,
@@ -18,6 +26,7 @@ import {
   reconcileLegacyTaskBudgets,
   stepDispatchLimit,
   validateDispatchLimits,
+  validateTaskMaxHops,
 } from "./dispatch-budget.ts"
 import type { Settings, Subtask } from "./types.ts"
 
@@ -228,4 +237,120 @@ test("ticket160: reconciliation grants live legacy tasks the remaining group bud
   })
   const granted = reconcileLegacyTaskBudgets(group, tasks)
   assert.deepEqual(granted.map((item) => [item.id, item.taskMaxHops]), [["live", group.maxHops - group.usedHops]])
+})
+
+test("ticket161: maxHops is required, non-negative, and zero is a valid one-shot ask", () => {
+  const missing = validateTaskMaxHops("ensemble_delegate", undefined)
+  assert.equal(missing.ok, false)
+  assert.match(missing.ok ? "" : missing.reason, /ensemble_delegate requires maxHops/)
+  assert.match(missing.ok ? "" : missing.reason, /maxHops: 0/)
+  assert.match(missing.ok ? "" : missing.reason, /one-shot ask/)
+
+  for (const invalid of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "2"]) {
+    const result = validateTaskMaxHops("ensemble_handoff", invalid)
+    assert.equal(result.ok, false, `${String(invalid)} must fail`)
+    assert.match(result.ok ? "" : result.reason, /ensemble_handoff maxHops must be a non-negative integer/)
+    assert.match(result.ok ? "" : result.reason, /maxHops: 0/)
+  }
+  assert.deepEqual(validateTaskMaxHops("ensemble_delegate", 0), { ok: true, maxHops: 0 })
+  assert.deepEqual(validateTaskMaxHops("ensemble_delegate", 5), { ok: true, maxHops: 5 })
+})
+
+test("ticket161: task usage counts only consuming direct dispatches", () => {
+  const asking = task({ id: "ask", taskMaxHops: 2 })
+  const tasks = [
+    asking,
+    task({ id: "hop-1", parentID: "ask" }),
+    task({ id: "hop-2", parentID: "ask", workKind: "handoff", handoff: { correlationID: "c", senderID: "a", recipientID: "b", depth: 1 } }),
+    task({ id: "turn", parentID: "ask", workKind: "turn" }),
+    task({ id: "completion", parentID: "ask", workKind: "handoff", handoff: { correlationID: "c", senderID: "a", recipientID: "b", depth: 1, completion: true } }),
+    task({ id: "batch", parentID: "ask", workKind: "handoff", handoff: { correlationID: "c", senderID: "a", recipientID: "b", depth: 1, batch: true } }),
+    task({ id: "grand", parentID: "hop-1" }),
+  ]
+  const byID = Object.fromEntries(tasks.map((item) => [item.id, item]))
+  assert.equal(dispatchTaskHopCount("ask", byID), 2, "user/turn/completion/batch work never spends the task budget")
+  assert.equal(dispatchFanOutCount("ask", byID), 5)
+  assert.equal(dispatchFanOutCount("ask", byID, "handoff"), 3)
+  assert.equal(dispatchDepthFor(asking, byID), 0, "a user-command recipient starts at depth 0")
+  assert.equal(dispatchDepthFor(byID["hop-1"]!, byID), 1, "the parent chain derives legacy depth")
+  assert.equal(dispatchDepthFor({ ...byID["hop-1"]!, dispatchDepth: 4 }, byID), 4, "a stored unified depth wins")
+})
+
+test("ticket161: refusal order is task, group, depth, command, then per-run fan-out", () => {
+  const group = { ...newRootDispatchGroup({ id: "dispatch_root", workspaceID: "w", settings: settings(), now: 1 }), usedHops: 8, commandUsedHops: 24 }
+  const asking = task({ id: "ask", taskMaxHops: 0 })
+  const budget = dispatchBudgetState({ group, groups: { [group.id]: group }, task: asking, subtasks: { ask: asking }, nextDepth: 99 })
+  assert.deepEqual(dispatchAdmissionRefusal({ state: budget, maxPerRun: 0, fanOutUsed: 9 }), { layer: "task", used: 0, max: 0 })
+
+  const halfway = { ...group, usedHops: 8, commandUsedHops: 8 }
+  const noTaskBudget = { ...asking, taskMaxHops: undefined }
+  const overDepth = dispatchBudgetState({ group: halfway, groups: { [halfway.id]: halfway }, task: noTaskBudget, subtasks: { ask: noTaskBudget }, nextDepth: 9 })
+  assert.equal(dispatchAdmissionRefusal({ state: overDepth, maxPerRun: 0, fanOutUsed: 9 })?.layer, "group")
+
+  const depthGroup = { ...group, usedHops: 1, commandUsedHops: 24 }
+  const depthState = dispatchBudgetState({ group: depthGroup, groups: { [depthGroup.id]: depthGroup }, task: noTaskBudget, subtasks: { ask: noTaskBudget }, nextDepth: 9 })
+  assert.deepEqual(dispatchAdmissionRefusal({ state: depthState, maxPerRun: 0, fanOutUsed: 9 }), { layer: "depth", used: 9, max: 8 })
+
+  const commandGroup = { ...group, usedHops: 1, commandUsedHops: 24 }
+  const commandState = dispatchBudgetState({ group: commandGroup, groups: { [commandGroup.id]: commandGroup }, task: noTaskBudget, subtasks: { ask: noTaskBudget }, nextDepth: 2 })
+  assert.deepEqual(dispatchAdmissionRefusal({ state: commandState, maxPerRun: 0, fanOutUsed: 9 }), { layer: "command", used: 24, max: 24 })
+
+  const fanOutState = dispatchBudgetState({ group: { ...group, usedHops: 1, commandUsedHops: 1 }, groups: { [group.id]: { ...group, usedHops: 1, commandUsedHops: 1 } }, task: noTaskBudget, subtasks: { ask: noTaskBudget }, nextDepth: 2 })
+  assert.deepEqual(dispatchAdmissionRefusal({ state: fanOutState, maxPerRun: 3, fanOutUsed: 3 }), { layer: "fanout", used: 3, max: 3 })
+  assert.equal(dispatchAdmissionRefusal({ state: fanOutState, maxPerRun: 3, fanOutUsed: 2 }), undefined)
+})
+
+test("ticket161: budget boundaries allow the last hop and the exact depth", () => {
+  const group = { ...newRootDispatchGroup({ id: "dispatch_root", workspaceID: "w", settings: settings(), now: 1 }), usedHops: 7, commandUsedHops: 23 }
+  const asking = task({ id: "ask", taskMaxHops: 2 })
+  const atEdge = dispatchBudgetState({ group, groups: { [group.id]: group }, task: asking, subtasks: { ask: asking }, nextDepth: 8 })
+  assert.equal(atEdge.groupRemaining, 1)
+  assert.equal(atEdge.commandRemaining, 1)
+  assert.equal(atEdge.taskRemaining, 2)
+  assert.equal(atEdge.depth, 8)
+  assert.equal(dispatchAdmissionRefusal({ state: atEdge, maxPerRun: 3, fanOutUsed: 0 }), undefined, "the last hop and exact depth are allowed")
+
+  const past = { ...atEdge, depth: 9 }
+  assert.equal(dispatchAdmissionRefusal({ state: past })?.layer, "depth")
+})
+
+test("ticket161: refusal copy names the layer and the next action", () => {
+  assert.match(dispatchRefusalText("delegation", { layer: "task", used: 1, max: 1 }), /task budget is exhausted .*Return your result to the leader/)
+  assert.match(dispatchRefusalText("handoff", { layer: "group", used: 8, max: 8 }), /dispatch group is exhausted .*Return your result to the leader/)
+  assert.match(dispatchRefusalText("handoff", { layer: "depth", used: 9, max: 8 }), /dispatch depth limit is 8 .*Return your result to the leader/)
+  assert.match(dispatchRefusalText("delegation", { layer: "command", used: 24, max: 24 }), /command budget is exhausted .*Ask the user to start a new command/)
+  assert.match(dispatchRefusalText("handoff", { layer: "fanout", used: 3, max: 3 }), /the handoff limit is 3 per run/)
+  assert.doesNotMatch(dispatchRefusalText("handoff", { layer: "group", used: 8, max: 8 }), /task budget/)
+})
+
+test("ticket161: turn context and tool results show used and remaining budgets", () => {
+  const group = { ...newRootDispatchGroup({ id: "dispatch_root", workspaceID: "w", settings: settings(), now: 1 }), usedHops: 3, commandUsedHops: 5 }
+  const asking = task({ id: "ask", taskMaxHops: 4 })
+  const children = [
+    task({ id: "hop-1", parentID: "ask" }),
+    task({ id: "hop-2", parentID: "ask" }),
+  ]
+  const subtasks = Object.fromEntries([asking, ...children].map((item) => [item.id, item]))
+  const budget = dispatchBudgetState({ group, groups: { [group.id]: group }, task: asking, subtasks, nextDepth: 2 })
+  const line = dispatchBudgetLine(budget)
+  assert.match(line, /task 2 of 4 dispatches/)
+  assert.match(line, /group 5 of 8 hops/)
+  assert.match(line, /command 19 of 24 hops/)
+  assert.match(line, /depth 2 of 8/)
+  assert.match(line, /cannot raise these ceilings/i)
+
+  const context = dispatchBudgetContext(budget, { id: "ask" })
+  assert.match(context, /<ensemble_dispatch_budget /)
+  assert.match(context, /group_used="3"/)
+  assert.match(context, /group_remaining="5"/)
+  assert.match(context, /command_remaining="19"/)
+  assert.match(context, /task_used="2"/)
+  assert.match(context, /task_remaining="2"/)
+  assert.match(context, /depth="2"/)
+  assert.match(context, /continuation="0"/)
+  assert.match(context, /ensemble_delegate and ensemble_handoff call requires maxHops/)
+  assert.match(context, /maxHops: 0/)
+  assert.match(context, /do not consume/)
+  assert.match(context, /cannot raise these ceilings/i)
+  assert.ok(!context.includes("secret"), "context carries numbers, never task content")
 })

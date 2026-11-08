@@ -120,7 +120,7 @@ test("parentless handoff anchors to the sender's newest open task", async () => 
   const handlers = service.handlers()
   try {
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Summarize the deploy\n---\n# Handoff\n")
-    const asked = await tools.get("handoff").execute({ task: "Summarize the deploy", summary: "Short version", path, to: "Sage" }, { sessionID: "sess_nova" })
+    const asked = await tools.get("handoff").execute({ maxHops: 1, task: "Summarize the deploy", summary: "Short version", path, to: "Sage" }, { sessionID: "sess_nova" })
     assert.match(asked.content, /Handed to \$Sage/)
     // The waiting contract is stated on the tool result: no second delegate.
     assert.match(asked.content, /stays open/)
@@ -180,7 +180,7 @@ test("sender waits on the handoff with a visible wait and no double-queue", asyn
       return Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === parent.id && run.status === "running")
     })
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Summarize the deploy\n---\n# Handoff\n")
-    const asked = await tools.get("handoff").execute({ task: "Summarize the deploy", summary: "", path, to: "Sage" }, { sessionID: novaSession })
+    const asked = await tools.get("handoff").execute({ maxHops: 1, task: "Summarize the deploy", summary: "", path, to: "Sage" }, { sessionID: novaSession })
     assert.match(asked.content, /Handed to \$Sage/)
     // The sender's turn holds in awaitingChildren while the hop is in flight.
     await waitFor(async () => {
@@ -205,7 +205,7 @@ test("sender waits on the handoff with a visible wait and no double-queue", asyn
     // A peer delegate after the handoff is refused (leader-only) — the hop
     // is the single queued effect, never double-queued under a second key.
     const sageSession = await bindingSessionID(handlers, directory, sage.result.id)
-    const refused = await tools.get("delegate").execute({ assignee: "Nova", title: "Same work", instruction: "Check" }, { sessionID: sageSession })
+    const refused = await tools.get("delegate").execute({ maxHops: 1, assignee: "Nova", title: "Same work", instruction: "Check" }, { sessionID: sageSession })
     assert.match(refused.content, /Only the workspace leader/)
     // Both legs run to replied with exactly one explicit hop row and one
     // relay. Ticket #71 completion handoffs are separate terminal
