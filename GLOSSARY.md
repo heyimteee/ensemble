@@ -41,9 +41,15 @@ _Avoid_: Channel, room, group (when referring to this concept).
 
 **Work**: A queued or running execution of a subtask, with an agent, mode, and status.
 
-**Work status**: The derived lifecycle of Work: pending, working, waiting, retrying, needs_you, replied, failed, stalled, or cancelled. Only failed means a native execution error; stalled covers delivery, lease, or attempt exhaustion. The persisted subtask state stays pending, working, or replied. Non-terminal cards stay mounted; completed groups clear after the shared hold.
+**Work status**: The observed lifecycle of Work: pending, working, waiting, retrying, needs you, replied, failed, stalled, or cancelled. Failed names a native execution error; stalled names a delivery, lease, or attempt-exhaustion problem. Work status is derived from the durable delivery and execution facts, not read from a stored label.
+_Avoid_: Task state (when referring to the derived lifecycle), timeout error (for a stall).
 
-**Recovered work**: Work whose real answer arrives after a retry or a false stalled/terminal state. The answer supersedes transient retry and failure notices, the card ends replied, and a structured `task.recovered` audit row records the previous state. A completed group's retained history is a separate Work-pane concern.
+**Recovered work**: Work whose real answer arrives after a retry or a false stalled or terminal state. The answer supersedes transient retry and failure notices.
+
+**Rail**: The left navigation surface, split into Agents grouped by primary workspace and a separate Workspaces section. It is navigation over the roster and workspace list, not a second store.
+
+**Work pane**: The right surface that shows dispatch groups of Work in ACTIVE and HISTORY views. It is a view over the task graph, not a separate task store or scheduler.
+_Avoid_: Task board (for the pane), subtask list (when referring to the grouped surface).
 
 **Dispatch group**: The set of Subtasks caused by one dispatch action: one user command plus every descendant handoff, delegation, peer turn, synthesis, completion hop, and group-scoped completion batch it caused. A new command mints a new root group; a continuation group is a linked segment of the same command. A legacy task without a stored group derives one from its root ancestor.
 _Avoid_: Batch (for the whole dispatch), run (a single execution, not the fan-out).

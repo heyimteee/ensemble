@@ -1,4 +1,4 @@
-import { deriveWorkStatus, isTerminalWorkStatus } from "./queue.ts"
+import { deriveWorkStatus, isTerminalWorkStatus, workNeedsYou } from "./queue.ts"
 import { dispatchBudgetSummary, dispatchGroupExhausted, dispatchGroupState, type DispatchBudgetSummary, type DispatchGroupState } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import type { Approval, DispatchCloseReason, DispatchGroup, Id, Subtask } from "./types.ts"
@@ -30,10 +30,7 @@ export function isNeedsYouTask(
   pendingApprovalIDs: ReadonlySet<string>,
   nativeBlockedSubtaskIDs: ReadonlySet<string> = new Set(),
 ): boolean {
-  if (task.interrupted) return true
-  if (task.approvalID && pendingApprovalIDs.has(task.approvalID)) return true
-  if (nativeBlockedSubtaskIDs.has(task.id)) return true
-  return false
+  return workNeedsYou(task, pendingApprovalIDs, nativeBlockedSubtaskIDs)
 }
 
 export type WorkGroup = {

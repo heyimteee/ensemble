@@ -1,5 +1,5 @@
 import { dispatchGroupState, dispatchHopCount, dispatchLedgerSummary, isRootGroup, type DispatchLedgerSummary } from "./dispatch-budget.ts"
-import { DEADLINE_MS, deriveWorkStatus, type DerivedWorkStatus } from "./queue.ts"
+import { DEADLINE_MS, deriveWorkStatus, isDerivedWorkStatus, type DerivedWorkStatus } from "./queue.ts"
 import type { DispatchGroup, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
 import type { WorkspaceConfig } from "./workspace-config.ts"
 
@@ -56,6 +56,7 @@ export type DoctorSubtask = {
   outcome?: SubtaskOutcome
   status?: DerivedWorkStatus
   interrupted?: boolean
+  approvalID?: string
   awaitingChildren?: boolean
   attempts?: number
   createdAt?: number
@@ -356,18 +357,6 @@ function locationWorkspace(input: DoctorLocationInput): DoctorWorkspace | undefi
   return Object.values(input.snapshot.workspaces).find((workspace) => !workspace.archived && workspace.directory === input.directory)
 }
 
-const WORK_STATUSES: ReadonlySet<string> = new Set([
-  "pending",
-  "working",
-  "waiting",
-  "retrying",
-  "needs_you",
-  "replied",
-  "failed",
-  "stalled",
-  "cancelled",
-])
-
 const TIMEOUT_REASON_CODES: ReadonlySet<string> = new Set([
   "deadline-exceeded",
   "lease-expired",
@@ -377,23 +366,16 @@ const TIMEOUT_REASON_CODES: ReadonlySet<string> = new Set([
 
 /** The canonical derived status, falling back to the durable fields when a legacy service omits the overlay. */
 function doctorWorkStatus(task: DoctorSubtask, now: number): DerivedWorkStatus | undefined {
-  if (task.status !== undefined && WORK_STATUSES.has(task.status)) return task.status
+  if (task.status !== undefined && isDerivedWorkStatus(task.status)) return task.status
   if (task.state === undefined || task.outcome === undefined) return undefined
   return deriveWorkStatus({
     id: task.id,
-    workspaceID: task.workspaceID ?? "",
-    creatorType: task.creatorType,
-    title: "",
-    instruction: "",
-    mode: "research",
     state: task.state,
-    stage: "initial",
     outcome: task.outcome,
     interrupted: task.interrupted === true,
     awaitingChildren: task.awaitingChildren === true,
     attempts: task.attempts ?? 0,
-    createdAt: task.createdAt ?? 0,
-    ...(task.deadlineAt !== undefined ? { deadlineAt: task.deadlineAt } : {}),
+    ...(task.approvalID !== undefined ? { approvalID: task.approvalID } : {}),
     ...(task.claimedBy !== undefined ? { claimedBy: task.claimedBy } : {}),
     ...(task.leaseUntil !== undefined ? { leaseUntil: task.leaseUntil } : {}),
     ...(task.activeRunID !== undefined ? { activeRunID: task.activeRunID } : {}),

@@ -4,6 +4,7 @@ import {
   claimWon,
   correlationIDForKey,
   deriveWorkStatus,
+  isDerivedWorkStatus,
   isTerminalWorkStatus,
   parseWorkKind,
   runPrefixHash,
@@ -250,4 +251,21 @@ test("stalled, waiting, and needs-you stay mounted: only replied, failed, and ca
   const active: DerivedWorkStatus[] = ["pending", "working", "retrying", "needs_you", "waiting", "stalled"]
   for (const status of terminal) assert.equal(isTerminalWorkStatus(status), true)
   for (const status of active) assert.equal(isTerminalWorkStatus(status), false)
+})
+
+test("needs-you uses one rule with the caller's pending approval context", () => {
+  const linked = base({ approvalID: "ap" })
+  assert.equal(deriveWorkStatus(linked, 1000), "needs_you", "without context the durable link counts")
+  assert.equal(deriveWorkStatus(linked, 1000, { pendingApprovalIDs: new Set(["other"]) }), "pending", "a resolved or foreign approval is not needs-you")
+  assert.equal(deriveWorkStatus(linked, 1000, { pendingApprovalIDs: new Set(["ap"]) }), "needs_you")
+  assert.equal(deriveWorkStatus(base({ interrupted: true }), 1000, { pendingApprovalIDs: new Set() }), "needs_you")
+  assert.equal(deriveWorkStatus(base(), 1000, { nativeBlockedSubtaskIDs: new Set(["t"]) }), "needs_you")
+  assert.equal(deriveWorkStatus(base(), 1000, { nativeBlockedSubtaskIDs: new Set(["other"]) }), "pending")
+})
+
+test("the runtime status collection validates boundary values", () => {
+  assert.equal(isDerivedWorkStatus("stalled"), true)
+  assert.equal(isDerivedWorkStatus("replied"), true)
+  assert.equal(isDerivedWorkStatus("retry"), false)
+  assert.equal(isDerivedWorkStatus(undefined), false)
 })

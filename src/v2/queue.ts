@@ -56,6 +56,23 @@ export type DerivedWorkStatus =
   | "stalled"
   | "cancelled"
 
+/** The canonical lifecycle union as a runtime collection, for boundary validation. */
+export const DERIVED_WORK_STATUSES = [
+  "pending",
+  "working",
+  "waiting",
+  "retrying",
+  "needs_you",
+  "replied",
+  "failed",
+  "stalled",
+  "cancelled",
+] as const satisfies readonly DerivedWorkStatus[]
+
+export function isDerivedWorkStatus(value: unknown): value is DerivedWorkStatus {
+  return typeof value === "string" && (DERIVED_WORK_STATUSES as readonly string[]).includes(value)
+}
+
 /**
  * Statuses that end the active lifecycle. `stalled` is deliberately not
  * terminal: no run will start, but the card stays mounted until the user
@@ -64,6 +81,34 @@ export type DerivedWorkStatus =
 export function isTerminalWorkStatus(status: DerivedWorkStatus): boolean {
   return status === "replied" || status === "failed" || status === "cancelled"
 }
+
+/**
+ * One needs-you rule shared by the service, grouping, and the TUI. A task
+ * needs the user when its run was interrupted, when its linked approval is
+ * still pending, or when a native permission mirror blocks its session. The
+ * pending sets are optional: without them the durable link alone counts, which
+ * keeps service-side derivation conservative.
+ */
+export function workNeedsYou(
+  task: Pick<Subtask, "id" | "interrupted" | "approvalID">,
+  pendingApprovalIDs?: ReadonlySet<string>,
+  nativeBlockedSubtaskIDs?: ReadonlySet<string>,
+): boolean {
+  if (task.interrupted) return true
+  if (task.approvalID !== undefined && (pendingApprovalIDs === undefined || pendingApprovalIDs.has(task.approvalID))) return true
+  return nativeBlockedSubtaskIDs?.has(task.id) === true
+}
+
+export type WorkNeedsYouContext = {
+  pendingApprovalIDs?: ReadonlySet<string>
+  nativeBlockedSubtaskIDs?: ReadonlySet<string>
+}
+
+/** The durable lifecycle fields the canonical derivation reads. */
+export type WorkLifecycle = Pick<
+  Subtask,
+  "id" | "state" | "outcome" | "interrupted" | "approvalID" | "awaitingChildren" | "attempts" | "claimedBy" | "leaseUntil" | "activeRunID" | "retryAfter" | "failure" | "stoppedAt"
+>
 
 /**
  * The single canonical derivation of a work item's visible lifecycle.
@@ -80,8 +125,11 @@ export function isTerminalWorkStatus(status: DerivedWorkStatus): boolean {
  * failures without a structured cause stay `failed` so the migration can never
  * mask a genuine native error. Cancellation is structural: only `stoppedAt`
  * reads cancelled; free-form error text is never substring-matched.
+ *
+ * Pass `context` when the caller already knows which approvals are still
+ * pending; otherwise a durable approval link alone reads needs-you.
  */
-export function deriveWorkStatus(task: Subtask, now: number): DerivedWorkStatus {
+export function deriveWorkStatus(task: WorkLifecycle, now: number, context?: WorkNeedsYouContext): DerivedWorkStatus {
   if (task.state === "replied") {
     if (task.stoppedAt !== undefined) return "cancelled"
     if (task.outcome === "succeeded") return "replied"
@@ -93,7 +141,7 @@ export function deriveWorkStatus(task: Subtask, now: number): DerivedWorkStatus 
     && task.claimedBy === task.activeRunID
     && (task.leaseUntil === undefined || task.leaseUntil > now)
   if (liveLease || activeRun) return "working"
-  if (task.interrupted || task.approvalID !== undefined) return "needs_you"
+  if (workNeedsYou(task, context?.pendingApprovalIDs, context?.nativeBlockedSubtaskIDs)) return "needs_you"
   if (task.awaitingChildren) return "waiting"
   const lostLease = task.claimedBy !== undefined && task.attempts > 0 && task.attempts < MAX_ATTEMPTS
   // A retry time that has arrived is still a scheduled retry until the pump

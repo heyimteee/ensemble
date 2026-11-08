@@ -75,6 +75,49 @@ npm run doctor -- --server http://127.0.0.1:4096 /path/to/project
 
 The [doctor reference](../../README.md#runtime-diagnosis) and `npm run doctor -- --help` define options, credential resolution, and exit codes. It queries one selected service sequentially, not atomically; config is read after each snapshot. Absent lazy bindings and retained former-member bindings alone are not defects. Treat differences as diagnostic evidence, not automatic proof of stale processes or a pre-reconciliation view.
 
+## Three-pane workspace shell
+
+**Repository source:** [workpane.ts](../../src/v2/tui/workpane.ts) owns
+`workspacePaneWidths`, `workPaneBodyHeight`, ACTIVE/HISTORY filtering, and
+pagination; [railmodel.ts](../../src/v2/tui/railmodel.ts) owns rail grouping;
+[workfocus.ts](../../src/v2/tui/workfocus.ts) owns spatial navigation;
+[workapprovals.ts](../../src/v2/tui/workapprovals.ts) owns the inline window;
+[picker.ts](../../src/v2/tui/picker.ts) owns native-session routing; and
+[format.ts](../../src/v2/tui/format.ts) owns `alignedDetailRows`. The decision
+and trade-offs are recorded in [ADR 0006](../adr/0006-three-pane-workspace-shell.md).
+
+- The root row is Rail | Chat | Work. `workspacePaneWidths` is the only width
+  function: the rail clamps to 26–34, Work takes a responsive share, and chat
+  receives the remainder with a readable minimum. Breakpoints are ≥118
+  (three panes), 96–117 (three panes, compact Work), and <96 (right drawer).
+  `workPaneBodyHeight` is the matching body-height helper. Do not recompute
+  either number in a consumer or test; the size matrix reads these helpers.
+- Rail agents group by primary workspace (active, most recent membership,
+  Homeless), each appears once, the subline is role only, and `z` or a header
+  click toggles a durable collapse group. The Workspaces section is a separate
+  pane. One cursor traverses the visible rows.
+- Work starts in ACTIVE and hides terminal cards. HISTORY contains only
+  all-terminal groups, ordered by latest finish descending with tasks
+  chronological inside a group; a page-split group repeats its header with
+  `cont.`. The card design is unchanged; only container width/height and the
+  focus border adapt.
+- `workfocus.ts` emits card rectangles from the rendered sections and picks
+  the nearest card in a direction with perpendicular tie-breaking. `j`/`k`
+  at a page edge auto-page and preserve the horizontal column. Focus is keyed
+  by task id; updates, pagination, and filter changes keep it until the card
+  disappears, then settle to the nearest prior position.
+- A focused card uses the white `cardFocus` token; unfocused cards use the
+  grey border token. Pane focus is a separate border state.
+- Approvals are sticky at the bottom of the Work pane. `v` focuses, `j`/`k`
+  moves, `Enter` resolves, `Esc` returns, and `V` opens the full inbox only
+  when rows overflow. Approvals join the Tab cycle only while pending.
+- Group-chat `o` opens the workspace-member native picker; Work `o` opens the
+  focused card's assignee; DM `o` keeps the current agent. A missing binding
+  toasts instead of doing nothing.
+- Keep layout pure. Do not add timers, rebuild cards on focus, or introduce a
+  second width/height helper. The existing one-shot Work invalidation timer
+  remains the only clock for status, lease, retry, and hold transitions.
+
 ## Dispatch budgets and the ledger
 
 **Repository source:** [dispatch-budget.ts](../../src/v2/dispatch-budget.ts) owns

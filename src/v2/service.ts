@@ -11,7 +11,7 @@ import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
 import { isSubstantiveReply, planLateSuccessRepair, settlementText, shouldInterruptSettledReply } from "./stream-settlement.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
-import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey, type DerivedWorkStatus } from "./queue.ts"
+import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, isTerminalWorkStatus, parseWorkKind, stableHash, workKey, type DerivedWorkStatus } from "./queue.ts"
 import {
   activeContinuationGroup,
   continuationRefusalText,
@@ -495,9 +495,12 @@ export class EnsembleV2Service {
   /** Ticket #145: operational logger; owns the service log files. */
   private logger: EnsembleLogger | undefined
   private startedAtMs = now()
+  /** Heartbeat cadence; overridable only to exercise multi-heartbeat leases quickly. */
+  private readonly heartbeatMs: number
 
-  constructor(ctx: Ctx) {
+  constructor(ctx: Ctx, options: { heartbeatMs?: number } = {}) {
     this.ctx = ctx
+    this.heartbeatMs = Math.max(10, Math.floor(options.heartbeatMs ?? HEARTBEAT_MS))
     this.catalog = new Catalog(ctx, () => {
       this.publishFeedMetaIfChanged()
     })
@@ -5365,13 +5368,19 @@ export class EnsembleV2Service {
       // the conservative answer and never masks a genuine native error.
       this.legacyTerminalChecked.add(candidate.id)
       const cause = causes.get(candidate.id)
-      if (!cause) continue
       // Attempt exhaustion is a delivery cause only when the reaper recorded
       // lease evidence; a native terminal failure never carries previousClaim.
-      const delivery = cause.reason === "deadline-exceeded" || cause.reason === "lease-expired"
-      const exhaustedLease = cause.reason === "attempts-exhausted"
+      const delivery = cause?.reason === "deadline-exceeded" || cause?.reason === "lease-expired"
+      const exhaustedLease = cause?.reason === "attempts-exhausted"
         && cause.failureClass === "internal"
         && cause.previousClaim !== undefined
+      // Ticket #165 migration: a terminal row with a real answer already in
+      // the transcript is a late success, not a failure. Repair the message
+      // (including a placeholder) and end `replied` unless the sink records a
+      // genuine native failure.
+      const recoverable = cause === undefined || delivery || exhaustedLease
+      if (recoverable && await this.repairLegacyLateResult(candidate)) continue
+      if (!cause) continue
       if (!delivery && !exhaustedLease) continue
       const task = this.store.cloneSubtask(candidate.id)
       if (!task || task.state !== "replied" || task.failure !== undefined) continue
@@ -5391,6 +5400,61 @@ export class EnsembleV2Service {
         failureClass: cause.failureClass,
       })
     }
+  }
+
+  /**
+   * Ticket #165 migration: repair a legacy terminal row whose answer already
+   * exists in the transcript. The substantive settled agent row is the durable
+   * result; a placeholder is rewritten with it, interruption cleared, and the
+   * row ends `replied`. If only a placeholder exists, no success is invented.
+   */
+  private async repairLegacyLateResult(candidate: Subtask): Promise<boolean> {
+    const task = this.store.cloneSubtask(candidate.id)
+    if (!task) return false
+    const plan = planLateSuccessRepair({
+      messages: this.store.messages(task.workspaceID).filter(
+        (message) => message.author !== "agent" || message.agentID === task.assigneeID,
+      ),
+      taskID: task.id,
+      lateText: "",
+    })
+    // `none` means no substantive answer exists. `create` is impossible with
+    // empty late text, but guard it so migration never invents a result.
+    if (plan.action === "none" || plan.action === "create") return false
+    if (plan.action === "repair") {
+      const row = this.store.cloneMessage(task.workspaceID, plan.messageID)
+      if (!row) return false
+      this.dropStream(row)
+      settleStreamMessage(row, plan.text, false)
+      await this.store.saveMessage(row)
+    }
+    const at = now()
+    task.state = "replied"
+    task.outcome = "succeeded"
+    task.error = undefined
+    task.failure = undefined
+    task.interrupted = false
+    task.approvalID = undefined
+    task.claimedBy = undefined
+    task.leaseUntil = undefined
+    task.activeRunID = undefined
+    task.retryAfter = undefined
+    task.repliedAt ??= at
+    task.finishedAt = at
+    task.resultMessageID = plan.messageID
+    await this.store.saveSubtask(task)
+    this.noteWorkChanged(task)
+    await this.clearSupersededNotices(task)
+    this.logger?.event("warn", "task", "task.reconciled", {
+      workspaceID: task.workspaceID,
+      taskID: task.id,
+      dispatchGroupID: task.dispatchGroupID,
+      from: "failed",
+      to: "replied",
+      reason: "late-result",
+      messageID: plan.messageID,
+    })
+    return true
   }
 
   /**
@@ -5510,6 +5574,11 @@ export class EnsembleV2Service {
     task.activeRunID = undefined
     task.failure = undefined
     if (task.state === "working") task.state = "pending"
+    // Ticket #169: keep the requeue itself in the structured row. A lost lease
+    // is a due retry, so the row reads `retrying` rather than a fresh unclaimed
+    // `pending` row, and a late success from the expired run still has durable
+    // evidence to recover from instead of being rejected as a fresh queue row.
+    task.retryAfter = at
     await this.store.saveSubtask(task)
     this.recordRecoveryFailure(candidate, task, {
       event: "failure.attempt",
@@ -5558,7 +5627,10 @@ export class EnsembleV2Service {
 
   private async purgeFinishedWork(at: number): Promise<void> {
     for (const task of this.store.subtasks()) {
-      if (task.state !== "replied") continue
+      // Ticket #170: `stalled` persists `state: "replied"` for storage
+      // compatibility but is not terminal. Only the canonical lifecycle may
+      // retire a row; a stalled card stays until retry, cancel, or dismissal.
+      if (!isTerminalWorkStatus(deriveWorkStatus(task, at))) continue
       // Only rows with a known terminal timestamp are eligible. Legacy rows
       // without one are never purged on age suspicion alone.
       const finished = task.finishedAt ?? task.repliedAt
@@ -5629,6 +5701,7 @@ export class EnsembleV2Service {
    */
   private async reconcileWaitingWork(): Promise<void> {
     const tasks = this.store.subtasks()
+    const at = now()
     const childrenByParent = new Map<string, Subtask[]>()
     for (const task of tasks) {
       if (!task.parentID || task.handoff?.completion === true) continue
@@ -5641,7 +5714,10 @@ export class EnsembleV2Service {
       // Batch reviews close only through ensemble_review.
       if (candidate.handoff?.batch === true) continue
       const children = childrenByParent.get(candidate.id) ?? []
-      if (candidate.awaitingChildren && !children.some((child) => child.state !== "replied")) {
+      // Ticket #170: a stalled child still persists `state: "replied"` but is
+      // non-terminal. Only the canonical derived lifecycle may release a
+      // parent; otherwise a lease problem would close the parent's turn.
+      if (candidate.awaitingChildren && !children.some((child) => !isTerminalWorkStatus(deriveWorkStatus(child, at)))) {
         const task = this.store.cloneSubtask(candidate.id)
         if (!task) continue
         task.awaitingChildren = false
@@ -6277,7 +6353,7 @@ export class EnsembleV2Service {
       if (!current) return
       current.leaseUntil = now() + LEASE_MS
       void this.store.saveSubtask(current)
-    }, HEARTBEAT_MS)
+    }, this.heartbeatMs)
     if (typeof (heartbeat as unknown as { unref?: () => void }).unref === "function") {
       ;(heartbeat as unknown as { unref: () => void }).unref()
     }
@@ -7016,7 +7092,11 @@ export class EnsembleV2Service {
     // Completion deliveries are post-turn hops, not synthesis inputs; counting
     // them here would let an auto-handoff keep its finisher waiting forever.
     const children = this.store.subtasks().filter((item) => item.parentID === parentID && item.handoff?.completion !== true)
-    if (children.length === 0 || children.some((child) => child.state !== "replied")) return
+    // Ticket #170: stalled children persist `state: "replied"` yet remain
+    // active until retry/cancel/dismissal. Parent completion follows the
+    // canonical derived status, never the storage cache.
+    const at = now()
+    if (children.length === 0 || children.some((child) => !isTerminalWorkStatus(deriveWorkStatus(child, at)))) return
     const workspace = this.store.workspace(stored.workspaceID)
     if (!workspace) return
     const parent = this.store.cloneSubtask(parentID)

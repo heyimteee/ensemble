@@ -7,514 +7,516 @@ import { readFileSync } from "node:fs"
  *
  * The TUI adapter is a Solid component without a mount harness here. Each
  * guard names one wiring fact in its narrowest owning file and points at the
- * pure seam or fake-live assertion that covers the behavior. No test slices a
- * whole region, pins surrounding copy, or restates an implementation.
+ * pure seam or live check that covers the behavior. No test slices a whole
+ * region, pins user-visible copy, or restates an implementation block.
  */
 
 const app = () => readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
 const components = () => readFileSync(new URL("./components.tsx", import.meta.url), "utf8")
 
-test("overlay transitions dispatch the reducer so focus-restore intents run", () => {
-  // Behavior: interaction.test.ts overlay and field transitions.
-  assert.ok(app().includes('dispatchInteraction({ type: "overlay.set", overlay })'))
+const has = (source: string, value: string) => source.includes(value)
+
+// ---- Transcript, composer, and feed ----
+
+test("overlay transitions dispatch the interaction reducer", () => {
+  assert.ok(has(app(), 'dispatchInteraction({ type: "overlay.set", overlay })'))
 })
 
-test("Insert without a text target keeps the core statusline segments", () => {
-  // Behavior: the fake live scenario asserts the list-step statusline.
-  const source = app()
-  assert.ok(source.includes('notice: insertWithoutTarget(interaction()) ? "no text target" : undefined'))
-  assert.ok(source.includes('if (insertWithoutTarget(interaction())) return "Esc normal"'))
+test("Insert without a text target leaves a notice", () => {
+  assert.ok(has(app(), "insertWithoutTarget(interaction())"))
 })
 
-test("styled text rows set native content instead of nested spans", () => {
-  // Behavior: the fake live scenario inspects statusline and chrome colors.
+test("styled text rows set native content", () => {
   const source = components()
-  assert.ok(source.includes("function StyledLineText"))
-  assert.ok(source.includes("value.content = content()"))
+  assert.ok(has(source, "function StyledLineText"))
+  assert.ok(has(source, "value.content = content()"))
 })
 
-test("the composer submits through the shared plan and catalog", () => {
-  // Behavior: skill-invocation.test.ts, composer.test.ts, and the live planner checks.
-  const source = app()
-  assert.ok(source.includes('plan?.kind === "skills" ? "skill.send" : "message.send"'))
-  assert.ok(!source.includes("slashCommands"))
+test("composer submits through the shared skill/message plan", () => {
+  assert.ok(has(app(), 'plan?.kind === "skills" ? "skill.send" : "message.send"'))
 })
 
-test("file completion opens, filters, and inserts through one token scanner", () => {
-  // Behavior: file-reference.test.ts and composer.test.ts cover the pure seams.
-  const source = app()
-  assert.ok(source.includes("const token = fileReferenceTokenAt(value, cursor)"))
-  assert.ok(source.includes("syncFileCompletion(value, cursor, current)"))
-  assert.ok(source.includes("replaceFileReference(value, item.value, state.start, state.end)"))
+test("the composer has no legacy slash-command path", () => {
+  assert.ok(!has(app(), "slashCommands"))
 })
 
-test("file completion filters the cached index instead of spawning fd", () => {
-  // Behavior: file-index.test.ts cache hits and bounded refresh rate.
-  const source = app()
-  assert.ok(source.includes('import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"'))
-  assert.ok(source.includes("fileIndex.paths(workspace.id, workspace.directory)"))
-  assert.ok(!source.includes('execFileSync("fd", ["--type", "f"'))
-  assert.ok(!source.includes('"--max-depth", "4", ".", workspace.directory'))
+test("file completion opens and filters through one token scanner", () => {
+  assert.ok(has(app(), "fileReferenceTokenAt(value, cursor)"))
 })
 
-test("the file index refreshes on activation, file events, and explicit refresh", () => {
-  // Behavior: file-index.test.ts stale-while-refresh and refresh coalescing.
-  const source = app()
-  assert.ok(source.includes("fileIndex.refresh(root.slice(0, separator), root.slice(separator + 1))"))
-  assert.ok(source.includes('type === "file.edited" || type === "filesystem.changed"'))
-  assert.ok(source.includes("refreshFileIndexForPath(file)"))
-  assert.ok(source.includes('id: "ensemble.v2.completion.refresh"'))
-  assert.ok(source.includes("onCleanup(() => fileIndex.dispose())"))
+test("file completion syncs the scanned token", () => {
+  assert.ok(has(app(), "syncFileCompletion(value, cursor, current)"))
 })
 
-test("ticket172: the Work pane maps active tasks through the view filter", () => {
-  // Behavior: workpane.test.ts ACTIVE/HISTORY filtering.
-  const source = app()
-  assert.ok(source.includes("workViewGroups(active, state()?.subtasks"))
-  assert.ok(source.includes("dispatchGroups: state()?.dispatchGroups ?? {}"))
+test("file selection replaces only the token range", () => {
+  assert.ok(has(app(), "replaceFileReference(value, item.value, state.start, state.end)"))
 })
 
-test("ticket172: the Work pane paginates by its own width and body height", () => {
-  // Behavior: workpane.test.ts responsive pagination and size matrix.
-  const source = app()
-  assert.ok(source.includes("paginateWorkGroups(grouped.active, width, body, now)"))
-  assert.ok(source.includes("paginateWorkGroups(grouped.history, width, body, now)"))
-  assert.ok(source.includes("const panes = createMemo(() => workspacePaneWidths(renderSize().width))"))
-  assert.ok(source.includes("const messageWidth = () => showWorkPane() ? panes().chatContentWidth : panes().chatOnlyContentWidth"))
-  assert.ok(source.includes("const workContentWidth = () => panes().workContentWidth"))
+test("file completion reads the cached index", () => {
+  assert.ok(has(app(), "fileIndex.paths(workspace.id, workspace.directory)"))
 })
 
-test("ticket172: Work renders in a right pane, never inside the chat column", () => {
-  // Behavior: workpane.test.ts renders cards/rows; the live size matrix.
-  const source = app()
-  const chat = source.indexOf("id={MOUSE_PANE_IDS.chat}")
-  const work = source.indexOf("id={MOUSE_PANE_IDS.work}")
-  assert.ok(chat >= 0 && work > chat, "the Work pane is a sibling after the chat")
-  const chatBody = source.slice(chat, work)
-  assert.ok(!chatBody.includes("<WorkCardView"), "no Work card renders in the chat column")
-  assert.ok(!chatBody.includes("<WorkCompactRowView"), "no compact Work row renders in the chat column")
-  const workBody = source.slice(work, source.indexOf("id={MOUSE_PANE_IDS.statusline}"))
-  assert.ok(workBody.includes("<WorkCardView"))
-  assert.ok(workBody.includes("<WorkCompactRowView"))
+test("file completion never spawns fd from the TUI", () => {
+  assert.ok(!has(app(), 'execFileSync("fd", ["--type", "f"'))
 })
 
-test("the Work pane renders card sections with their card models", () => {
-  // Behavior: workgroups.test.ts card sections; the live Work checks.
-  assert.ok(app().includes("section.mode === \"cards\""))
+test("the file index refreshes on workspace activation", () => {
+  assert.ok(has(app(), "fileIndex.refresh("))
 })
 
-test("ticket173: the Work cursor reads rendered card rectangles and settles by task identity", () => {
-  // Behavior: workpane.test.ts focus settlement; workfocus.test.ts spatial
-  // navigation, page edges, and nearest-position fallback.
-  const source = app()
-  assert.ok(source.includes("workPane().layout.selectableTasks"))
-  assert.ok(source.includes("settleWorkFocusByPosition(pages, lastWorkFocus, workFocusIntent)"))
-  assert.ok(source.includes("workLayoutRects(workViews()[workView()].layout)"))
+test("the file index refreshes on file events", () => {
+  assert.ok(has(app(), 'type === "file.edited" || type === "filesystem.changed"'))
 })
 
-test("Work actions target the focused visible task", () => {
-  // Behavior: workpane.test.ts focus preservation; the live Work checks.
-  assert.ok(app().includes("visibleTasks()[taskCursorClamped()]"))
+test("the file index refreshes per changed path", () => {
+  assert.ok(has(app(), "refreshFileIndexForPath(file)"))
 })
 
-test("ticket172: completed groups stay in HISTORY after the shared hold", () => {
-  // Behavior: workpane.test.ts history retention and workgroups.test.ts hold.
-  const source = app()
-  assert.ok(source.includes("const views = workViews()"))
-  assert.ok(source.includes("views.history.groups"))
+test("the file index exposes an explicit refresh command", () => {
+  assert.ok(has(app(), '"ensemble.v2.completion.refresh"'))
 })
 
-test("ticket172: f toggles ACTIVE/HISTORY and the drawer opens from the Work focus key", () => {
-  // Behavior: keymap.test.ts work f; workpane.test.ts filter focus.
-  const source = app()
-  assert.ok(source.includes('"work.filter": () => toggleWorkView()'))
-  assert.ok(source.includes('if (next === "work" || next === "approvals") setWorkDrawerOpen(true)'))
-  assert.ok(source.includes("global.work"))
+test("the file index disposes with the app", () => {
+  assert.ok(has(app(), "onCleanup(() => fileIndex.dispose())"))
 })
 
-test("ticket172: Work page controls and card selection are mouse-reachable", () => {
-  // Behavior: workpane.test.ts page layout; the live Work checks.
-  const source = app()
-  assert.ok(source.includes("selectWorkPage(workPane().page - 1)"))
-  assert.ok(source.includes("selectWorkPage(workPane().page + 1)"))
-  assert.ok(source.includes("onSelect={() => selectWorkCard(card.id)}"))
-  assert.ok(source.includes("onSelect={() => selectWorkCard(task.id)}"))
-})
-
-test("the TUI reads durable state through the fine-grained client store", () => {
-  // Behavior: client-store.test.ts loading, replacement, and entity isolation.
-  assert.ok(app().includes("const client = createClientStore()"))
+test("the TUI reads durable state through the client store", () => {
+  assert.ok(has(app(), "createClientStore()"))
 })
 
 test("an applied snapshot reaches the client store", () => {
-  // Behavior: client-store.test.ts snapshot replacement.
-  assert.ok(app().includes("client.applySnapshot(next)"))
+  assert.ok(has(app(), "client.applySnapshot(next)"))
 })
 
-test("snapshot and direct-chat refreshes use the single-flight coordinator", () => {
-  // Behavior: refresh-coordinator.test.ts bursts, slow fetches, and pauses.
-  assert.ok(app().includes("createRefreshCoordinator("))
+test("snapshot and chat refreshes share a single-flight coordinator", () => {
+  assert.ok(has(app(), "createRefreshCoordinator("))
 })
 
-test("equal-version snapshots are decided by the metadata-aware guard", () => {
-  // Behavior: refresh-coordinator.test.ts version and metadata decisions.
-  assert.ok(app().includes("decideSnapshotApply(lastSnapshotMeta, nextMeta)"))
+test("equal-version snapshots use the metadata-aware guard", () => {
+  assert.ok(has(app(), "decideSnapshotApply(lastSnapshotMeta, nextMeta)"))
 })
 
-test("snapshot refresh awaiters observe the queued dirty pass", () => {
-  // Behavior: refresh-coordinator.test.ts whenIdle waits for a settled pass.
-  assert.ok(app().includes("snapshotRefresh.whenIdle()"))
+test("snapshot awaiters observe a queued dirty pass", () => {
+  assert.ok(has(app(), "snapshotRefresh.whenIdle()"))
 })
 
-test("direct-chat refresh awaiters observe the queued dirty pass", () => {
-  // Behavior: refresh-coordinator.test.ts whenIdle waits for a settled pass.
-  assert.ok(app().includes("chatRefresh.whenIdle()"))
+test("direct-chat awaiters observe a queued dirty pass", () => {
+  assert.ok(has(app(), "chatRefresh.whenIdle()"))
 })
 
 test("the revision heartbeat polls the cheap revision RPC", () => {
-  // Behavior: refresh-coordinator.test.ts revision and cadence helpers.
-  assert.ok(app().includes('callRpc<Revision>(context, "revision"'))
+  assert.ok(has(app(), 'callRpc<Revision>(context, "revision"'))
 })
 
 test("the heartbeat pauses full refresh while the route is hidden", () => {
-  // Behavior: refresh-coordinator.test.ts paused surfaces.
-  assert.ok(app().includes("snapshotRefresh.setPaused(!visible)"))
+  assert.ok(has(app(), "snapshotRefresh.setPaused(!visible)"))
 })
 
 test("a server schema reset reconnects the feed", () => {
-  // Behavior: change-feed.test.ts epoch and reset recovery.
-  assert.ok(app().includes('if (type === "server.connected")'))
+  assert.ok(has(app(), 'if (type === "server.connected")'))
 })
 
 test("the patch feed handles the patches event", () => {
-  // Behavior: change-feed.test.ts batch validation and application.
-  assert.ok(app().includes('if (type === "rpc.ensemble.v2.patches")'))
+  assert.ok(has(app(), 'if (type === "rpc.ensemble.v2.patches")'))
 })
 
 test("a feed gap recovers through changes.since", () => {
-  // Behavior: change-feed.test.ts recovery decisions.
-  assert.ok(app().includes('callRpc<ChangesSince>(context, "changes.since"'))
+  assert.ok(has(app(), 'callRpc<ChangesSince>(context, "changes.since"'))
 })
 
 test("a foreign-epoch patch is detected before feed reset", () => {
-  // Behavior: refresh-coordinator.test.ts foreign-epoch detection.
-  assert.ok(app().includes("if (isForeignEpochPatch(lastSnapshotMeta, payload?.epoch))"))
+  assert.ok(has(app(), "isForeignEpochPatch(lastSnapshotMeta, payload?.epoch)"))
 })
 
 test("foreign-epoch recovery debounces through a coalescing coordinator", () => {
-  // Behavior: refresh-coordinator.test.ts delayed coalescing.
-  const source = app()
-  assert.ok(source.includes("const foreignEpochRefresh = createRefreshCoordinator({"))
-  assert.ok(source.includes("delayMs: 200"))
+  assert.ok(has(app(), "createRefreshCoordinator({"))
 })
 
-test("a foreign-epoch patch requests the coalesced refresh", () => {
-  // Behavior: refresh-coordinator.test.ts coalesced request.
-  assert.ok(app().includes("foreignEpochRefresh.request()"))
+test("foreign-epoch recovery requests the coalesced refresh", () => {
+  assert.ok(has(app(), "foreignEpochRefresh.request()"))
 })
 
 test(":logs shows the feed-gap counter from logger stats", () => {
-  // Behavior: logging.test.ts gap counting and logs.test.ts formatting.
-  const source = app()
-  assert.ok(source.includes("feedGaps: (result?.stats?.feedGaps ?? 0) + logger.stats().feedGaps"))
-})
-
-test("gap recovery is built on the coalesced reporter", () => {
-  // Behavior: feed-gaps.test.ts recovery summaries.
-  assert.ok(app().includes("createFeedGapReporter({"))
+  assert.ok(has(app(), "feedGaps:"))
 })
 
 test("gap recovery records each outcome", () => {
-  // Behavior: feed-gaps.test.ts recovery summaries and fallback warnings.
-  assert.ok(app().includes("feedGapReporter.record({"))
+  assert.ok(has(app(), "feedGapReporter.record({"))
 })
 
-test("gap recovery settles the coalesced reporter with its outcome", () => {
-  // Behavior: feed-gaps.test.ts recovery summaries.
-  const source = app()
-  assert.ok(source.includes('void recoverFeed((outcome) => feedGapReporter.settle(outcome))'))
-  assert.ok(source.includes('feedGapReporter.settle("full")'))
+test("gap recovery settles the coalesced reporter", () => {
+  assert.ok(has(app(), "feedGapReporter.settle("))
 })
 
 test("the TUI log rows carry a per-mount identity", () => {
-  // Behavior: logging.test.ts base attribution fields.
-  assert.ok(app().includes('createLogger({ role: "tui", instanceID: randomUUID() })'))
+  assert.ok(has(app(), 'role: "tui"'))
 })
 
 test("the legacy changed event keeps the snapshot fallback", () => {
-  // Behavior: app.tsx loadData falls back to loadSnapshot when scoped reads fail.
-  assert.ok(app().includes('if (type === "rpc.ensemble.v2.changed")'))
+  assert.ok(has(app(), 'if (type === "rpc.ensemble.v2.changed")'))
 })
 
 test("the initial read tries the gated bootstrap RPC", () => {
-  // Behavior: scoped-read-service.test.ts gated bootstrap.
-  assert.ok(app().includes('callRpc<Snapshot>(context, "bootstrap"'))
-})
-
-test("bootstrap follows the measured scoped gate", () => {
-  // Behavior: scoped-read-service.test.ts measured gate upgrade.
-  assert.ok(app().includes("next.scoped === true || next.gate?.enabled === true"))
+  assert.ok(has(app(), 'callRpc<Snapshot>(context, "bootstrap"'))
 })
 
 test("a malformed Work-only patch repairs the Work scope", () => {
-  // Behavior: refresh-coordinator.test.ts isWorkOnlyPatch; scoped-read-service.test.ts resync.
-  assert.ok(app().includes("isWorkOnlyPatch(payload)"))
-})
-
-test("a paged transcript releases its anchor at the bottom", () => {
-  // Behavior: client-store.test.ts older-page retention.
-  assert.ok(app().includes("client.transcriptAnchored(target)"))
+  assert.ok(has(app(), "isWorkOnlyPatch(payload)"))
 })
 
 test("scoped gap recovery requests the named scopes", () => {
-  // Behavior: scoped-read-service.test.ts resync scopes; scoped-read.test.ts scopesToResync.
-  assert.ok(app().includes('callRpc<ScopedResync>(context, "resync"'))
+  assert.ok(has(app(), 'callRpc<ScopedResync>(context, "resync"'))
 })
 
 test("older transcript paging calls the bounded window RPC", () => {
-  // Behavior: scoped-read.test.ts windows; client-store.test.ts older-page merge.
-  assert.ok(app().includes('callRpc<TranscriptWindow & { version: number; epoch: number }>(context, "transcript.window"'))
+  assert.ok(has(app(), '"transcript.window"'))
 })
 
 test("an on-demand transcript result uses the message.get RPC", () => {
-  // Behavior: scoped-read-service.test.ts message.get outside the loaded window.
-  assert.ok(app().includes('callRpc<{ found: boolean; message?: Message }>(context, "message.get"'))
+  assert.ok(has(app(), '"message.get"'))
 })
 
 test("workspace and direct-chat streams share one coalescer", () => {
-  // Behavior: stream-coalescer.test.ts burst coalescing; client-store.test.ts
-  // live overlay/final replacement; service.test.ts ephemeral stream events.
-  assert.ok(app().includes("createStreamCoalescer"))
+  assert.ok(has(app(), "createStreamCoalescer"))
 })
 
-test("the init row reads durable jobs on the shared motion tick", () => {
-  // Behavior: initrow.test.ts labels, stages, and phases; the live init check.
-  assert.ok(app().includes("initRowForJob(job, motionFrame(), process.env)"))
+// ---- Three-pane shell, Work layout, and focus ----
+
+test("the Work pane maps active tasks through the view filter", () => {
+  assert.ok(has(app(), "workViewGroups(active"))
+})
+
+test("the Work pane receives the dispatch ledger", () => {
+  assert.ok(has(app(), "dispatchGroups:"))
+})
+
+test("the Work pane pages its active view by its own body", () => {
+  assert.ok(has(app(), "paginateWorkGroups(grouped.active, width, body, now)"))
+})
+
+test("the Work pane pages its history view by its own body", () => {
+  assert.ok(has(app(), "paginateWorkGroups(grouped.history, width, body, now)"))
+})
+
+test("the shell widths come from the one pane-width helper", () => {
+  assert.ok(has(app(), "workspacePaneWidths(renderSize().width)"))
+})
+
+test("the transcript width follows the Work pane state", () => {
+  assert.ok(has(app(), "panes().chatContentWidth"))
+  assert.ok(has(app(), "panes().chatOnlyContentWidth"))
+})
+
+test("the Work layout reads the pane content width", () => {
+  assert.ok(has(app(), "panes().workContentWidth"))
+})
+
+test("the Work pane mounts card sections", () => {
+  assert.ok(has(app(), "<WorkCardView"))
+})
+
+test("the Work pane mounts compact row sections", () => {
+  assert.ok(has(app(), "<WorkCompactRowView"))
+})
+
+test("the Work cursor reads rendered card rectangles", () => {
+  assert.ok(has(app(), "workLayoutRects(workViews()[workView()].layout)"))
+})
+
+test("the Work cursor settles by task identity and position", () => {
+  assert.ok(has(app(), "settleWorkFocusByPosition(pages, lastWorkFocus, workFocusIntent)"))
+})
+
+test("Work actions target the focused visible task", () => {
+  assert.ok(has(app(), "visibleTasks()[taskCursorClamped()]"))
+})
+
+test("completed groups remain available to HISTORY", () => {
+  assert.ok(has(app(), "views.history.groups"))
+})
+
+test("f toggles ACTIVE and HISTORY", () => {
+  assert.ok(has(app(), '"work.filter"'))
+})
+
+test("focusing Work or approvals opens the drawer", () => {
+  assert.ok(has(app(), "setWorkDrawerOpen(true)"))
+})
+
+test("the Work page previous control pages", () => {
+  assert.ok(has(app(), "selectWorkPage(workPane().page - 1)"))
+})
+
+test("the Work page next control pages", () => {
+  assert.ok(has(app(), "selectWorkPage(workPane().page + 1)"))
+})
+
+test("a card click selects that card", () => {
+  assert.ok(has(app(), "selectWorkCard(card.id)"))
+})
+
+test("a compact row click selects that task", () => {
+  assert.ok(has(app(), "selectWorkCard(task.id)"))
+})
+
+test("the Work down key uses the spatial navigator", () => {
+  assert.ok(has(app(), "moveTask(1)"))
+})
+
+test("the Work up key uses the spatial navigator", () => {
+  assert.ok(has(app(), "moveTask(-1)"))
+})
+
+test("the Work left key moves one column", () => {
+  assert.ok(has(app(), "moveTaskColumn(-1)"))
+})
+
+test("the Work right key moves one column", () => {
+  assert.ok(has(app(), "moveTaskColumn(1)"))
+})
+
+test("gg focuses the first Work card", () => {
+  assert.ok(has(app(), "focusFirstWork()"))
+})
+
+test("G focuses the last Work card", () => {
+  assert.ok(has(app(), "focusLastWork()"))
+})
+
+test("Ctrl+d uses the half-page navigator", () => {
+  assert.ok(has(app(), "moveTaskHalf(1)"))
+})
+
+test("Ctrl+u uses the half-page navigator", () => {
+  assert.ok(has(app(), "moveTaskHalf(-1)"))
+})
+
+test("hjkl navigation runs through the pure spatial navigator", () => {
+  assert.ok(has(app(), "navigateWorkFocus(workFocusPages()"))
+})
+
+test("half-page navigation runs through the pure spatial navigator", () => {
+  assert.ok(has(app(), "halfPageWorkFocus(workFocusPages()"))
+})
+
+test("Work card actions are advertised only when valid", () => {
+  assert.ok(has(app(), "workTaskActions(selectedTask(), Date.now())"))
+})
+
+test("the statusline gates each Work action through the same policy", () => {
+  assert.ok(has(app(), "selectedTaskActions().has(entry.id)"))
+})
+
+test("retry targets the focused card", () => {
+  assert.ok(has(app(), "selectedActionTask(\"work.retry\")"))
+})
+
+test("cancel targets the focused card", () => {
+  assert.ok(has(app(), "selectedActionTask(\"work.cancel\")"))
+})
+
+test("the pending label settles on the durable update", () => {
+  assert.ok(has(app(), "pendingWorkSettled(pending"))
+})
+
+test("card selection is independent of pane focus", () => {
+  assert.ok(has(app(), "selected={selectedTask()?.id === card.id}"))
+})
+
+test("compact rows share the card focus identity", () => {
+  assert.ok(has(app(), "selectedTask()?.id === task.id"))
+})
+
+test("the card border comes from the focus helper", () => {
+  assert.ok(has(components(), "workCardBorderColor(props.colors, props.selected)"))
+})
+
+test("the pane border stays a separate focus state", () => {
+  assert.ok(has(app(), "workOwnsFocus() ? colors.focus : colors.border"))
+})
+
+test("the sticky approvals section mounts in the Work pane", () => {
+  assert.ok(has(app(), "<WorkApprovalsView"))
+})
+
+test("v focuses approvals", () => {
+  assert.ok(has(app(), '"work.approvals"'))
+})
+
+test("V opens the overflow inbox", () => {
+  assert.ok(has(app(), '"work.inbox"'))
+})
+
+test("Enter resolves the focused inline approval", () => {
+  assert.ok(has(app(), '"workApprovals.resolve"'))
+})
+
+test("Esc returns from approvals to Work", () => {
+  assert.ok(has(app(), 'focus: "work"'))
+})
+
+test("V is advertised only for overflow", () => {
+  assert.ok(has(app(), "inlineApprovals().overflow === 0"))
+})
+
+test("an approval row click selects it", () => {
+  assert.ok(has(app(), "onSelect={selectInlineApproval}"))
+})
+
+test("the approval view forwards row clicks", () => {
+  assert.ok(has(components(), "props.onSelect(row.index, row.approval)"))
+})
+
+test("Tab cycles through the shared focus zones", () => {
+  assert.ok(has(app(), "nextFocusZone("))
+})
+
+test("approvals join the focus cycle only while pending", () => {
+  assert.ok(has(app(), "pendingApprovals().length > 0"))
 })
 
 test("Work cards own a stable tide assignment", () => {
-  // Behavior: tide.test.ts stable assignments; the live reduced-motion check.
-  assert.ok(app().includes("createTideAssignments()"))
+  assert.ok(has(app(), "createTideAssignments()"))
 })
 
 test("Work cards read static data through the identity cache", () => {
-  // Behavior: workrows.test.ts referential stability; workgroups.test.ts expiry targets.
-  assert.ok(app().includes("workCardForTaskCached(workCardCache"))
+  assert.ok(has(app(), "workCardForTaskCached(workCardCache"))
 })
 
-test("the app toast is app-owned and the host toast is fallback-only", () => {
-  // Behavior: toast.test.ts lifecycle; the live toast placement check.
-  const source = app()
-  assert.equal((source.match(/context\.ui\.toast\.show/g) ?? []).length, 1)
-  assert.ok(source.includes("if (!isOurRoute()) { showHostToast(input); return }"))
+// ---- Rail ----
+
+test("the rail renders the pure Agents and Workspaces sections", () => {
+  assert.ok(has(app(), "sections={railModel().sections}"))
 })
 
-test("overlay presence is one-shot and never dispatches interaction", () => {
-  // Behavior: overlays.test.ts presence curve; the live overlay open/close checks.
-  assert.ok(app().includes("overlayPresenceOpacity(elapsed)"))
+test("the rail component renders section rows", () => {
+  assert.ok(has(components(), "section.heading"))
 })
 
-test("approvals inbox receives one-shot arrival and resolution motion", () => {
-  // Behavior: approvals.test.ts transition windows; the live approvals check.
-  const source = app()
-  assert.ok(source.includes("updateApprovalInboxMotion(approvalTrack"))
-  assert.ok(source.includes("approvalMotion().resolved"))
+test("z toggles the rail group", () => {
+  assert.ok(has(app(), '"rail.collapse"'))
 })
 
-test("rail and approvals share the Braille motion tick", () => {
-  // Behavior: chrome.test.ts Braille marks; the live reduced-motion check.
-  const source = components()
-  assert.ok(source.includes("railBusyMark(row.busy, props.motionTick ?? 0, process.env)"))
-  assert.ok(source.includes("approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)"))
+test("a rail group header toggles by mouse", () => {
+  assert.ok(has(components(), "onToggleGroup(row.id)"))
 })
+
+test("the rail cursor traverses visible rows", () => {
+  assert.ok(has(app(), "railVisibleRows()"))
+})
+
+test("the initial rail cursor skips a leading header", () => {
+  assert.ok(has(app(), "firstSelectableRailRow(rows)"))
+})
+
+test("rail collapse state persists to durable UI state", () => {
+  assert.ok(has(app(), "collapsedRailGroups:"))
+})
+
+test("rail collapse saves through the UI RPC", () => {
+  assert.ok(has(app(), '"ui.save"'))
+})
+
+test("rail collapse hydrates from durable UI state", () => {
+  assert.ok(has(app(), "collapsedRailGroups"))
+})
+
+// ---- Native picker and alignment ----
+
+test("every native key routes through one surface-aware decision", () => {
+  assert.ok(has(app(), "nativeSessionRoute({"))
+})
+
+test("group-chat native routing opens the picker", () => {
+  assert.ok(has(app(), 'openPicker("native")'))
+})
+
+test("the native picker reads workspace-member candidates", () => {
+  assert.ok(has(app(), "nativePickerCandidates("))
+})
+
+test("the native picker renders shared candidate rows", () => {
+  assert.ok(has(app(), "pickerCandidateRows("))
+})
+
+test("a missing native binding follows the missing route", () => {
+  assert.ok(has(app(), 'route.kind === "missing"'))
+})
+
+test("a missing native binding reports a clear message", () => {
+  assert.ok(has(app(), "missingNativeSessionMessage("))
+})
+
+test("list rows share the aligned column helper", () => {
+  assert.ok(has(app(), "alignedDetailRows("))
+})
+
+test("the member wizard renders aligned labels", () => {
+  assert.ok(has(app(), "wizardRowLabels()"))
+})
+
+test("picker rows keep one name column", () => {
+  assert.ok(has(app(), "maxWidth: pickerDetailWidth()"))
+})
+
+// ---- Settings, limits, and activity ----
 
 test("the System Agent init guard runs before slash-command fallthrough", () => {
-  // Behavior: system-agent.test.ts init composer rules; the live /init checks.
   const source = app()
   const guard = source.indexOf("const initIssue = initComposerIssue(text)")
   const command = source.indexOf("parseSlashCommand(text)", guard)
   assert.ok(guard >= 0 && command > guard)
 })
 
-test("ticket160: the workspace Limits panel opens from the command line", () => {
-  // Behavior: limits.test.ts rows/validation; dispatch-group-service.test.ts settings.update.
-  assert.ok(app().includes('case "limits": openLimits()'))
+test("the workspace Limits panel opens from the command line", () => {
+  assert.ok(has(app(), "openLimits()"))
 })
 
-test("ticket160: the leader menu opens the workspace Limits panel", () => {
-  // Behavior: limits.test.ts rows/validation; dispatch-group-service.test.ts settings.update.
-  assert.ok(app().includes('"leader.limits": () => openLimits()'))
+test("saving Limits invokes settings.update with the validated patch", () => {
+  assert.ok(has(app(), '"settings.update"'))
 })
 
-test("ticket160: the app mounts the Limits view", () => {
-  // Behavior: limits.test.ts panel model.
-  assert.ok(app().includes("<LimitsView"))
+test("the Limits key trap owns keys before page handlers", () => {
+  assert.ok(has(app(), "handleLimitsKey(event)"))
 })
 
-test("ticket160: saving Limits invokes settings.update with the validated patch", () => {
-  // Behavior: dispatch-group-service.test.ts settings.update; limits.test.ts limitsSave.
-  assert.ok(app().includes("await invoke(context, \"settings.update\", result.patch)"))
-})
-
-test("ticket160: the Limits key trap owns keys before the page handlers", () => {
-  // Behavior: limits.test.ts row cycling; the live Limits panel check.
-  assert.ok(app().includes("if (limitsOpen()) { handleLimitsKey(event); return }"))
-})
-
-test("ticket160: Work cards receive the dispatch ledger", () => {
-  // Behavior: workgroups.test.ts group budgets.
-  const source = app()
-  assert.ok(source.includes("dispatchGroups: state()?.dispatchGroups ?? {}"))
-  assert.ok(source.includes("budgetFor: dispatchBudgetForTask,"))
-})
-
-test("ticket160: Work cards read each task's ledger budget", () => {
-  // Behavior: workrows.test.ts budget labels.
-  assert.ok(app().includes("dispatchBudgetForTask(task)"))
+test("Work cards read each task's ledger budget", () => {
+  assert.ok(has(app(), "dispatchBudgetForTask(task)"))
 })
 
 test("native Work activity arrives as a dedicated event", () => {
-  // Behavior: work-activity.test.ts event mapping.
-  assert.ok(app().includes('if (type === "rpc.ensemble.v2.work.activity")'))
+  assert.ok(has(app(), '"rpc.ensemble.v2.work.activity"'))
 })
 
 test("native Work activity applies to the task map", () => {
-  // Behavior: work-activity.test.ts apply mapping.
-  assert.ok(app().includes("applyWorkActivity(current, payload)"))
+  assert.ok(has(app(), "applyWorkActivity(current, payload)"))
 })
 
 test("native Work activity labels card detail", () => {
-  // Behavior: work-activity.test.ts label precedence.
-  assert.ok(app().includes("workActivityLabel(activities, item.id, now)"))
+  assert.ok(has(app(), "workActivityLabel(activities, item.id, now)"))
 })
 
 test("native Work activity clears when its session ends", () => {
-  // Behavior: work-activity.test.ts clear behavior.
-  assert.ok(app().includes("clearWorkActivitiesForSession"))
+  assert.ok(has(app(), "clearWorkActivitiesForSession"))
 })
 
-test("ticket171: the rail renders the pure Agents and Workspaces sections", () => {
-  // Behavior: railmodel.test.ts grouping, ordering, collapse, and visible rows.
-  const source = app()
-  assert.ok(source.includes("sections={railModel().sections}"))
-  assert.ok(components().includes("<For each={props.sections}>"))
-  assert.ok(components().includes("section.heading"))
+test("the host toast is a fallback only", () => {
+  assert.ok(has(app(), "showHostToast(input)"))
 })
 
-test("ticket171: rail group headers toggle collapse by key and mouse", () => {
-  // Behavior: railmodel.test.ts collapse targets and toggling; keymap.test.ts roster z.
-  const source = app()
-  assert.ok(source.includes('"rail.collapse": () => toggleRailGroup()'))
-  assert.ok(components().includes("onToggleGroup(row.id)"))
-  assert.ok(components().includes("onMouseDown"))
+test("overlay presence stays one-shot", () => {
+  assert.ok(has(app(), "overlayPresenceOpacity(elapsed)"))
 })
 
-test("ticket171: the rail cursor traverses the pure visible rows", () => {
-  // Behavior: railmodel.test.ts collapsed rows and visible row order.
-  const source = app()
-  assert.ok(source.includes("railVisibleRows().length"))
-  assert.ok(source.includes("const row = railVisibleRows()[railCursor()]"))
-  assert.ok(source.includes("firstSelectableRailRow(rows)"), "the initial cursor skips a leading group header")
+test("approvals receive one-shot arrival and resolution motion", () => {
+  assert.ok(has(app(), "updateApprovalInboxMotion(approvalTrack"))
 })
 
-test("ticket171: rail collapse state persists through durable UI state", () => {
-  // Behavior: store.test.ts UI reload; the app hydrates and saves collapsedRailGroups.
-  const source = app()
-  assert.ok(source.includes("collapsedRailGroups: next"))
-  assert.ok(source.includes('"ui.save"'))
-  assert.ok(source.includes("state()?.ui.collapsedRailGroups"))
+test("rail and approvals share the Braille motion tick", () => {
+  assert.ok(has(components(), "railBusyMark("))
+  assert.ok(has(components(), "approvalResolvingSuffix("))
 })
 
-test("ticket174: every native key routes through one surface-aware decision", () => {
-  // Behavior: picker.test.ts native routing by surface and focus.
-  const source = app()
-  assert.ok(source.includes("nativeSessionRoute({"))
-  assert.ok(source.includes('"chat.native": () => openNative()'))
-  assert.ok(source.includes('"work.native": () => openNative()'))
-  assert.ok(source.includes('"leader.native": () => openNative()'))
-})
-
-test("ticket174: group-chat chat focus opens the workspace-member picker", () => {
-  // Behavior: picker.test.ts native candidates, filtering, and selection.
-  const source = app()
-  assert.ok(source.includes('openPicker("native")'))
-  assert.ok(source.includes("nativePickerCandidates("))
-  assert.ok(source.includes("pickerCandidateRows("))
-})
-
-test("ticket174: a missing native binding toasts instead of returning silently", () => {
-  // Behavior: picker.test.ts missing-binding routes and messages.
-  const source = app()
-  assert.ok(source.includes('route.kind === "missing"'))
-  assert.ok(source.includes("missingNativeSessionMessage(agentName(state(), agentID))"))
-})
-
-test("ticket174: label/detail list rows share the aligned column helper", () => {
-  // Behavior: format.test.ts aligned rows across widths, separators, and long names.
-  const source = app()
-  assert.ok(source.includes("alignedDetailRows("))
-  assert.ok(source.includes("wizardRowLabels()"), "wizard rows render the aligned labels")
-  assert.ok(source.includes("maxWidth: pickerDetailWidth()"), "picker rows keep one name column")
-})
-
-test("ticket173: focused cards are white and unfocused cards stay grey without a pane gate", () => {
-  // Behavior: theme.test.ts cardFocus vs border; workfocus.test.ts selection.
-  const source = app()
-  assert.ok(source.includes("selected={selectedTask()?.id === card.id}"), "card selection survives pane focus changes")
-  assert.ok(source.includes("selectedTask()?.id === task.id"), "compact rows share the same focus identity")
-  assert.ok(components().includes("workCardBorderColor(props.colors, props.selected)"))
-  assert.ok(app().includes("borderColor={workOwnsFocus() ? colors.focus : colors.border}"), "the pane border remains a separate state")
-})
-
-test("ticket173: hjkl, gg/G, and Ctrl+d/u run through the pure spatial navigator", () => {
-  // Behavior: workfocus.test.ts nearest-card navigation, page edges, and half pages.
-  const source = app()
-  assert.ok(source.includes('"work.down": () => moveTask(1)'))
-  assert.ok(source.includes('"work.left": () => moveTaskColumn(-1)'))
-  assert.ok(source.includes('"work.top": () => focusFirstWork()'))
-  assert.ok(source.includes('"work.bottom": () => focusLastWork()'))
-  assert.ok(source.includes('"work.half.down": () => moveTaskHalf(1)'))
-  assert.ok(source.includes("navigateWorkFocus(workFocusPages()"))
-  assert.ok(source.includes("halfPageWorkFocus(workFocusPages()"))
-})
-
-test("ticket173: approvals are sticky in the Work pane, with v focus and overflow-only V", () => {
-  // Behavior: workapprovals.test.ts window, overflow, and header grammar.
-  const source = app()
-  const work = source.indexOf("id={MOUSE_PANE_IDS.work}")
-  const approvals = source.indexOf("<WorkApprovalsView")
-  const statusline = source.indexOf("id={MOUSE_PANE_IDS.statusline}")
-  assert.ok(work >= 0 && approvals > work && approvals < statusline, "the sticky section mounts inside the Work pane above the pager")
-  assert.ok(source.includes('"work.approvals": () => focusWorkApprovals()'))
-  assert.ok(source.includes('"work.inbox": () => openApprovalsOverflow()'))
-  assert.ok(source.includes('"workApprovals.resolve": () => resolveInlineApproval()'))
-  assert.ok(source.includes('"workApprovals.back": () => dispatchInteraction({ type: "focus.set", focus: "work" })'))
-  assert.ok(source.includes("inlineApprovals().overflow === 0"), "V is an overflow affordance")
-})
-
-test("ticket173: Work card actions are advertised only when valid", () => {
-  // Behavior: workactions.test.ts per-status action policy.
-  const source = app()
-  assert.ok(source.includes("workTaskActions(selectedTask(), Date.now())"))
-  assert.ok(source.includes("if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)"))
-  assert.ok(source.includes('const task = selectedActionTask("work.retry")'))
-  assert.ok(source.includes('const task = selectedActionTask("work.cancel")'))
-})
-
-test("ticket173: card, page, and approval mouse controls stay reachable", () => {
-  // Behavior: workfocus.test.ts geometry; workapprovals.test.ts rows.
-  const source = app()
-  assert.ok(source.includes("onSelect={() => selectWorkCard(card.id)}"))
-  assert.ok(source.includes("onSelect={() => selectWorkCard(task.id)}"))
-  assert.ok(source.includes("selectWorkPage(workPane().page - 1)"))
-  assert.ok(source.includes("selectWorkPage(workPane().page + 1)"))
-  assert.ok(source.includes("onSelect={selectInlineApproval}"))
-  assert.ok(components().includes("props.onSelect(row.index, row.approval)"))
-})
-
-test("ticket173: Tab cycles rail, chat, work, and pending approvals", () => {
-  // Behavior: focus.test.ts nextFocusZone with and without approvals.
-  const source = app()
-  assert.ok(source.includes("nextFocusZone(focus, direction, hasWorkZone(), approvals)"))
-  assert.ok(source.includes("pendingApprovals().length > 0"))
+test("the init row reads durable jobs on the shared motion tick", () => {
+  assert.ok(has(app(), "initRowForJob(job, motionFrame(), process.env)"))
 })

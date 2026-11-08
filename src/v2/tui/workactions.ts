@@ -1,5 +1,6 @@
 import { deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
 import type { Subtask } from "../types.ts"
+import type { PendingWorkAction } from "./workrows.ts"
 
 /**
  * Ticket #173: one action policy for the focused Work card. The statusline
@@ -10,16 +11,7 @@ import type { Subtask } from "../types.ts"
  * without one has nothing to open. Retry and restart reach the history rows
  * they can recover; replied work stays read-only.
  */
-export type WorkActionID =
-  | "work.open"
-  | "work.delegate"
-  | "work.reassign"
-  | "work.retry"
-  | "work.restart"
-  | "work.cancel"
-  | "work.native"
-
-export const WORK_CARD_ACTIONS: readonly WorkActionID[] = [
+export const WORK_CARD_ACTIONS = [
   "work.open",
   "work.delegate",
   "work.reassign",
@@ -27,7 +19,10 @@ export const WORK_CARD_ACTIONS: readonly WorkActionID[] = [
   "work.restart",
   "work.cancel",
   "work.native",
-]
+] as const
+
+/** The canonical Work action ids; the type is derived from this one list. */
+export type WorkActionID = (typeof WORK_CARD_ACTIONS)[number]
 
 const WORK_ACTION_SET: ReadonlySet<string> = new Set(WORK_CARD_ACTIONS)
 
@@ -60,4 +55,36 @@ export function workTaskActions(task: Subtask | undefined, now: number): Readonl
   if (restartable(status)) actions.add("work.restart")
   if (task.assigneeID !== undefined) actions.add("work.native")
   return actions
+}
+
+/**
+ * The durable lifecycle fields a pending action changes. A pending label is
+ * cleared by the update that carries the action's outcome, not by the RPC
+ * return: compare the row before dispatch with the row after the terminal
+ * snapshot lands. Content fields never participate.
+ */
+export type WorkPendingAction = {
+  id: string
+  action: PendingWorkAction
+  before: string
+}
+
+export function workLifecycleSignature(task: Subtask): string {
+  return [
+    task.state,
+    task.outcome,
+    task.attempts,
+    task.retryAfter,
+    task.stoppedAt,
+    task.finishedAt,
+    task.claimedBy,
+    task.activeRunID,
+    task.failure?.kind,
+    task.failure?.reason,
+  ].join("|")
+}
+
+/** True when the durable row moved past the state the action was dispatched from, or disappeared. */
+export function pendingWorkSettled(pending: Pick<WorkPendingAction, "before">, task: Subtask | undefined): boolean {
+  return task === undefined || workLifecycleSignature(task) !== pending.before
 }

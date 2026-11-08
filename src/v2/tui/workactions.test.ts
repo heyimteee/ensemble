@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
-import { WORK_CARD_ACTIONS, isWorkActionID, workTaskActions } from "./workactions.ts"
+import { WORK_CARD_ACTIONS, isWorkActionID, pendingWorkSettled, workLifecycleSignature, workTaskActions } from "./workactions.ts"
 
 const task = (patch: Partial<Subtask> = {}): Subtask => ({
   id: "t",
@@ -75,4 +75,13 @@ test("ticket173: the advertised action ids are one closed set shared with the ke
   ])
   assert.equal(isWorkActionID("work.open"), true)
   assert.equal(isWorkActionID("work.filter"), false)
+})
+
+test("ticket173: a pending action settles on the durable update, never the RPC return", () => {
+  const stalled = task({ id: "stalled", state: "replied", outcome: "failed", attempts: 5, failure: { kind: "attempts", reason: "attempts-exhausted" } })
+  const pending = { id: stalled.id, action: "retry" as const, before: workLifecycleSignature(stalled) }
+  assert.equal(pendingWorkSettled(pending, stalled), false, "the pre-action row keeps the label visible")
+  const requeued = task({ ...stalled, state: "pending", outcome: "pending", attempts: 0, failure: undefined })
+  assert.equal(pendingWorkSettled(pending, requeued), true, "the requeued row settles the label")
+  assert.equal(pendingWorkSettled(pending, undefined), true, "a disappeared row never sticks")
 })
