@@ -9,8 +9,9 @@ import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstructions, onboardingProm
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
+import { isSubstantiveReply, planLateSuccessRepair, settlementText, shouldInterruptSettledReply } from "./stream-settlement.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
-import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey } from "./queue.ts"
+import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey, type DerivedWorkStatus } from "./queue.ts"
 import {
   activeContinuationGroup,
   continuationRefusalText,
@@ -5531,6 +5532,12 @@ export class EnsembleV2Service {
    * path. A row survives only while its task holds a live lease; a missing or
    * expired lease means no run is producing text for it. A row with no task
    * link settles once it is older than a full lease window.
+   *
+   * Ticket #169: interruption is a verdict about the stream, not the queue.
+   * A deadline, lease, retry, or stalled state never interrupts a substantive
+   * reply; only a structured native failure, an explicit stop, or a waiting
+   * approval does. Empty and internal-fallback streams still settle as
+   * interrupted (#149).
    */
   private async settleTerminalStreams(): Promise<void> {
     const at = now()
@@ -5540,10 +5547,15 @@ export class EnsembleV2Service {
       const task = candidate.taskID ? this.store.subtask(candidate.taskID) : undefined
       let interrupted: boolean
       if (task) {
-        const terminal = task.state === "replied"
-        const liveLease = task.leaseUntil !== undefined && task.leaseUntil > at
-        if (!terminal && liveLease) continue
-        interrupted = terminal ? task.outcome !== "succeeded" : true
+        const status = deriveWorkStatus(task, at)
+        // A live lease or active run owns the text; never settle under it.
+        if (status === "working") continue
+        interrupted = shouldInterruptSettledReply({
+          text: candidate.text,
+          status,
+          failureKind: task.failure?.kind,
+          stopped: task.stoppedAt !== undefined,
+        })
       } else {
         if (at - (candidate.updatedAt ?? candidate.createdAt) < LEASE_MS) continue
         interrupted = true
@@ -5551,10 +5563,9 @@ export class EnsembleV2Service {
       const message = this.store.cloneMessage(workspaceID, candidate.id)
       if (!message) continue
       // Ticket #149: an empty terminal stream has no answer, and an internal
-      // fallback is not one either. Settle both as interrupted even when the
-      // task outcome was success; a fallback must never look like a result.
-      if (!message.text.trim() || isFallbackReply(message.text)) interrupted = true
-      settleStreamMessage(message, message.text || REPLY_INTERRUPTED, interrupted)
+      // fallback is not one either. Both remain interrupted; a substantive
+      // reply is preserved exactly.
+      settleStreamMessage(message, settlementText(message.text), interrupted)
       await this.store.saveMessage(message)
     }
   }
@@ -5907,14 +5918,17 @@ export class EnsembleV2Service {
     this.queueWorkActivity(sessionID, writingReplyLabel(), "writing")
     const live = this.liveBySession.get(sessionID)
     if (!live) return
+    // A late native delta after finalization must never resurrect a settled
+    // row or overwrite the exact final text (ticket #169). Reject it before it
+    // can even enter the buffer; only a row still streaming may absorb text.
+    // The opening row is persisted just after registration, so a delta that
+    // lands in between stays buffered below, never dropped.
+    if (live.message) {
+      if (!live.message.streaming || !this.store.isStreaming(live.message.workspaceID, live.message.id)) return
+    }
     live.buffer += delta
 
-    // The opening row is persisted just after registration; a delta that
-    // lands in between stays buffered and is flushed below, never dropped.
     if (!live.message) return
-    // A late native delta after finalization must never resurrect a settled
-    // row or overwrite the exact final text.
-    if (!live.message.streaming || !this.store.isStreaming(live.message.workspaceID, live.message.id)) return
     live.message.text = live.buffer
     live.message.streaming = true
     live.message.updatedAt = now()
@@ -5952,6 +5966,196 @@ export class EnsembleV2Service {
     return streamFinalization(message, current, interrupted, text)
   }
 
+  /**
+   * A retried task reuses its interrupted placeholder instead of opening a
+   * second agent row (ticket #169). The late answer repairs the placeholder
+   * in place, so the transcript never leaves a false failure line above the
+   * real reply. Only settled placeholder rows are reusable; a substantive
+   * answer or a current result is never erased.
+   */
+  private reusableStreamRow(task: Subtask): Message | undefined {
+    const messages = this.store.read().messages[task.workspaceID] ?? []
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index]
+      if (message.taskID !== task.id || message.author !== "agent" || message.kind !== "text") continue
+      // A placeholder from another assignee's interrupted run is not this
+      // run's answer: reassignment starts a fresh attributed row.
+      if (!task.assigneeID || message.agentID !== task.assigneeID) continue
+      if (message.streaming) continue
+      if (message.interrupted === true || !isSubstantiveReply(message.text)) return message
+    }
+    return undefined
+  }
+
+  private async openLiveReply(workspace: Workspace, task: Subtask, agent: Agent): Promise<Message> {
+    const placeholder = this.reusableStreamRow(task)
+    if (placeholder) {
+      const row = this.store.cloneMessage(workspace.id, placeholder.id)
+      if (row) {
+        this.dropStream(row)
+        row.text = ""
+        row.streaming = true
+        row.interrupted = false
+        row.updatedAt = now()
+        await this.store.saveMessage(row)
+        return row
+      }
+    }
+    return this.appendMessage(workspace, {
+      author: "agent",
+      agentID: agent.id,
+      text: "",
+      kind: "text",
+      taskID: task.id,
+      streaming: true,
+      correlationID: task.handoff?.correlationID ?? task.turn?.correlationID,
+      updatedAt: now(),
+    })
+  }
+
+  /**
+   * Structured recovery audit (ticket #169). IDs, states, and reason codes
+   * only: the answer, task title, and instructions never enter the log.
+   */
+  private logTaskRecovered(
+    task: Subtask,
+    from: DerivedWorkStatus,
+    reason: string,
+    messageID: string | undefined,
+    failure: Subtask["failure"],
+  ): void {
+    this.logger?.event("info", "task", "task.recovered", {
+      workspaceID: task.workspaceID,
+      taskID: task.id,
+      dispatchGroupID: task.dispatchGroupID,
+      parentID: task.parentID,
+      from,
+      to: "replied",
+      reason,
+      attempts: task.attempts,
+      failureKind: failure?.kind,
+      failureReason: failure?.reason,
+      messageID,
+    })
+  }
+
+  /**
+   * Repair a late success (ticket #169). A run can finish after its row was
+   * falsely settled as stalled, retried, or terminal-failed. When the run
+   * carries a substantive answer — or a real answer already exists in the
+   * transcript — the placeholder is replaced, interruption cleared, the
+   * durable message upserted, and the card ends `replied`.
+   *
+   * Never repairs a stopped task or a structured native failure, and never
+   * invents success from empty or fallback text.
+   */
+  private async recoverLateSuccess(input: {
+    task: Subtask
+    reply: string
+    live?: Message
+    runID: string
+    agentID: string
+    globalEpoch: number
+    workspaceEpoch: number
+  }): Promise<boolean> {
+    const task = this.store.cloneSubtask(input.task.id)
+    if (!task) return false
+    // A reset in this process must not resurrect a row from the old epoch.
+    if (this.globalEpoch !== input.globalEpoch) return false
+    if ((this.workspaceEpoch.get(task.workspaceID) ?? 0) !== input.workspaceEpoch) return false
+    if (task.stoppedAt !== undefined) return false
+    if (task.failure?.kind === "native") return false
+    if (task.approvalID !== undefined) {
+      const approval = this.store.read().approvals[task.approvalID]
+      if (approval?.status === "pending") return false
+    }
+    const at = now()
+    const derived = deriveWorkStatus(task, at)
+    // A different live run owns the row; its own result is the answer.
+    if (derived === "working") {
+      if (task.claimedBy !== undefined && task.claimedBy !== input.runID) return false
+      if (task.activeRunID !== undefined && task.activeRunID !== input.runID) return false
+    }
+    // A waiting parent still needs its children and synthesis.
+    if (derived === "waiting") return false
+    // A pending row with no scheduled retry and no structured failure was
+    // moved by an explicit user action (retry, restart, reassign) or is
+    // freshly queued. The interrupted run's leftover result must not clobber
+    // it (ticket #169). A service-scheduled retry still carries `retryAfter`;
+    // a false terminal carries `failure`; both are recoverable below.
+    if (derived === "pending" && task.retryAfter === undefined && task.failure === undefined) return false
+    // Waiting for a user decision is not a late success.
+    if (derived === "needs_you") return false
+    const workspace = this.store.workspace(task.workspaceID)
+    if (!workspace) return false
+    const changedState = !(task.state === "replied" && task.outcome === "succeeded")
+    // Only a substantive late result may end a stalled/retried/failed task as
+    // success. An empty or fallback native turn never promotes a live partial
+    // (or a preserved stall row) to success; it may still repair a placeholder
+    // on an already-succeeded task from an answer recorded there.
+    if (changedState && !isSubstantiveReply(input.reply)) return false
+    // A succeeded row with a non-native failure still came from a stall; the
+    // audit should name that origin, not echo the already-replied cache.
+    const previousStatus: DerivedWorkStatus = derived === "replied" && task.failure ? "stalled" : derived
+    const plan = planLateSuccessRepair({
+      messages: (this.store.read().messages[task.workspaceID] ?? []).filter(
+        (message) => message.author !== "agent" || message.agentID === input.agentID,
+      ),
+      taskID: task.id,
+      lateText: input.reply,
+    })
+    if (plan.action === "none") return false
+    let resultMessageID: string
+    let repaired = false
+    if (plan.action === "create") {
+      const created = await this.appendMessage(workspace, {
+        author: "agent",
+        agentID: input.agentID,
+        text: plan.text,
+        kind: "text",
+        taskID: task.id,
+        correlationID: task.handoff?.correlationID ?? task.turn?.correlationID,
+      })
+      resultMessageID = created.id
+      repaired = true
+    } else if (plan.action === "repair") {
+      const row = this.store.cloneMessage(task.workspaceID, plan.messageID)
+      if (!row) return false
+      this.dropStream(row)
+      settleStreamMessage(row, plan.text, false)
+      await this.store.saveMessage(row)
+      // The live slot may still point at an earlier clone. Mark it settled so
+      // the run's finally block cannot finalize it again as interrupted.
+      if (input.live && input.live.id === row.id) settleStreamMessage(input.live, plan.text, false)
+      resultMessageID = row.id
+      repaired = true
+    } else {
+      resultMessageID = plan.messageID
+    }
+    if (!changedState && !repaired) return false
+    const previousFailure = task.failure
+    task.state = "replied"
+    task.outcome = "succeeded"
+    task.error = undefined
+    task.failure = undefined
+    task.interrupted = false
+    task.approvalID = undefined
+    task.claimedBy = undefined
+    task.leaseUntil = undefined
+    task.activeRunID = undefined
+    task.retryAfter = undefined
+    task.repliedAt ??= at
+    task.finishedAt = at
+    task.resultMessageID = resultMessageID
+    task.runSummary ??= "late success"
+    await this.store.saveSubtask(task)
+    this.noteWorkChanged(task)
+    this.logTaskRecovered(task, previousStatus, "late-success", resultMessageID, previousFailure)
+    await this.settleLinkedApprovals(task.id, "Superseded: the linked work finished.", new Set(["native"]))
+    if (task.parentID) await this.maybeSynthesize(task.parentID)
+    return true
+  }
+
   private async runTask(taskID: string): Promise<void> {
     const task = this.store.cloneSubtask(taskID)
     if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
@@ -5968,6 +6172,10 @@ export class EnsembleV2Service {
     const globalEpoch = this.globalEpoch
     const workspaceEpoch = this.workspaceEpoch.get(task.workspaceID) ?? 0
     const at = now()
+    // Ticket #169: the state the run is recovering from. A claim clears the
+    // retry marker, so this must be read before the row is mutated.
+    const previousStatus = deriveWorkStatus(task, at)
+    const previousFailure = task.failure
     task.state = "working"
     task.outcome = "pending"
     task.attempts++
@@ -6071,7 +6279,7 @@ export class EnsembleV2Service {
     let granted = false
     try {
       await this.ctx.session.instructions.entry.put({ sessionID: binding.sessionID, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-      live = await this.appendMessage(workspace, { author: "agent", agentID: agent.id, text: "", kind: "text", taskID: task.id, streaming: true, correlationID: task.handoff?.correlationID ?? task.turn?.correlationID, updatedAt: now() })
+      live = await this.openLiveReply(workspace, task, agent)
       const slot = this.liveBySession.get(binding.sessionID)
       if (slot) {
         slot.message = live
@@ -6134,11 +6342,13 @@ export class EnsembleV2Service {
       }
       const current = this.store.read()
       const currentTask = this.store.cloneSubtask(task.id)
-      // A terminal state always wins over a late run result: a rejection (or
-      // any other settle) that landed while the native session was finishing
-      // must not be clobbered by the leftover reply.
-      if (!currentTask || currentTask.activeRunID !== runID || currentTask.state === "replied") return
+      if (!currentTask) return
+      const ownsRun = currentTask.activeRunID === runID
       if (result?.failure) {
+        // A failure from a run that no longer owns the row must not rewrite
+        // the queue: another attempt (or an explicit stop) settled it while
+        // this native session was finishing (ticket #169).
+        if (!ownsRun) return
         // No shadow approvals: a failed native run is retried inside its
         // attempt budget (backoff, no approval) or fails terminally. Only a
         // proven host block — the native permission mirror — ever gates.
@@ -6205,6 +6415,22 @@ export class EnsembleV2Service {
       // the budget, then fail visibly. Ticket #149: an internal fallback
       // string is not an answer either.
       const reply = isFallbackReply(mention.text) ? "" : mention.text.trim()
+      // A terminal state (or a lost claim) always wins over a late run result,
+      // but a substantive late answer repairs the false placeholder it left
+      // behind (ticket #169). Nothing below may resurrect a settled row by
+      // rewriting the task from scratch.
+      if (!ownsRun || currentTask.state === "replied") {
+        await this.recoverLateSuccess({
+          task: currentTask,
+          reply,
+          live,
+          runID,
+          agentID: agent.id,
+          globalEpoch,
+          workspaceEpoch,
+        })
+        return
+      }
       if (mention.changed) await this.appendMessage(workspace, { author: "system", text: `Mention syntax normalized: ${mention.names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; leaders assign with ensemble_delegate, peers with ensemble_handoff.`, kind: "system", taskID: task.id })
       if (currentTask.approvalID) {
         const linked = current.approvals[currentTask.approvalID]
@@ -6287,6 +6513,12 @@ export class EnsembleV2Service {
       currentTask.resultMessageID = finalized.eligible ? finalized.message?.id : undefined
       await this.store.saveSubtask(currentTask)
       this.noteWorkChanged(currentTask)
+      // Ticket #169: a success that follows a retry/stall/terminal-failed
+      // state is a recovery. The card ends replied and the repair is audited
+      // with structured state only; the answer itself never enters the log.
+      if (previousStatus === "retrying" || previousStatus === "stalled" || previousStatus === "failed") {
+        this.logTaskRecovered(currentTask, previousStatus, "late-success", currentTask.resultMessageID, previousFailure)
+      }
       // Dependent product decisions that outlived the work are superseded —
       // nothing may linger while an answer is already visible. Native
       // mirrors are excluded: only the host or an explicit resolve settles
@@ -6332,7 +6564,31 @@ export class EnsembleV2Service {
       // patch may land just after this event.
       this.clearWorkActivity(binding.sessionID, "terminal")
       this.liveBySession.delete(binding.sessionID)
-      if (live?.streaming) await this.finalizeStream(live, live.text || REPLY_INTERRUPTED, true, globalEpoch, workspaceEpoch, task.workspaceID)
+      // Ticket #169: the fallback settlement uses the canonical task state.
+      // A stalled/retried/succeeded row preserves substantive live text; only
+      // a native failure, explicit stop, waiting approval, or an empty stream
+      // settles as interrupted.
+      if (live?.streaming) {
+        const settled = this.store.subtask(task.id)
+        const status = settled ? deriveWorkStatus(settled, now()) : undefined
+        // A run that ends while it still owns an unsettled stream, or after
+        // being superseded by a user action, is an internal fallback: it never
+        // produced a result. Queue/stall states still preserve substantive
+        // text per #169.
+        const superseded = status === "working"
+          || (status === "pending" && settled?.retryAfter === undefined && settled?.failure === undefined)
+        const interrupted = !settled || !status
+          ? true
+          : superseded
+            ? true
+            : shouldInterruptSettledReply({
+                text: live.text,
+                status,
+                failureKind: settled.failure?.kind,
+                stopped: settled.stoppedAt !== undefined,
+              })
+        await this.finalizeStream(live, settlementText(live.text), interrupted, globalEpoch, workspaceEpoch, task.workspaceID)
+      }
       await this.releaseClaim(task.id, runID)
       run.status = "completed"
       this.activeRuns.delete(runID)

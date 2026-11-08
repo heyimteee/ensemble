@@ -176,7 +176,9 @@ test("the maintenance timer reaps stale work and settles terminal streams", asyn
     const message = snapshot.state.messages.w.find((item: Message) => item.id === "m") as Message
     assert.ok(message)
     assert.equal(message.text, "partial reply")
-    assert.equal(message.interrupted, true)
+    // Ticket #169: attempt exhaustion is a queue cause (stalled), not a
+    // native interruption; a substantive partial reply is preserved as-is.
+    assert.equal(message.interrupted, false)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
