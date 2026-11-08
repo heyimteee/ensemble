@@ -905,10 +905,15 @@ export class V2Store {
       const root = group.id === group.rootID ? group : this.state.dispatchGroups[group.rootID]
       const exhaustedBefore = dispatchGroupExhausted(group, this.state.dispatchGroups)
       if (options.enforce) {
+        // The first hop of a continuation is the continuation's opening
+        // dispatch: it bypasses the caller's spent task budget just as the
+        // service preflight does, while the group, command, depth, and fan-out
+        // caps still apply. Later hops in the segment use the normal task rule.
+        const openingContinuation = group.continuationIndex > 0 && group.usedHops === 0
         const budget = dispatchBudgetState({
           group,
           groups: this.state.dispatchGroups,
-          task: parent,
+          task: openingContinuation ? undefined : parent,
           subtasks: this.state.subtasks,
           nextDepth: depth,
         })

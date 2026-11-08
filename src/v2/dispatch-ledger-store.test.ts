@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
-import { dispatchGroupState, dispatchGroupRemaining, newRootDispatchGroup } from "./dispatch-budget.ts"
+import { dispatchGroupState, dispatchGroupRemaining, newContinuationDispatchGroup, newRootDispatchGroup } from "./dispatch-budget.ts"
 import type { DispatchGroup, PatchBatch, Subtask, Workspace } from "./types.ts"
 
 function fakeContext() {
@@ -142,6 +142,34 @@ test("ticket159: concurrent identical admissions dedupe by queue key and consume
   assert.equal([store.subtask("left"), store.subtask("right")].filter(Boolean).length, 1)
   assert.equal(store.dispatchGroup("dispatch_root")?.usedHops, 1)
   assert.equal(store.dispatchGroup("dispatch_root")?.commandUsedHops, 1)
+})
+
+test("ticket159: the first hop of a continuation bypasses the caller's spent task budget", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.saveWorkspace(workspace())
+  const root = rootGroup({ commandUsedHops: 1 })
+  await store.saveDispatchGroup(root)
+  const continuation = newContinuationDispatchGroup({ id: "dispatch_cont", root, parentID: root.id, maxHops: 8, now: 2 })
+  await store.saveDispatchGroup(continuation)
+  await store.saveSubtask(subtask({ id: "ask", creatorType: "user", dispatchGroupID: root.id, taskMaxHops: 0, dispatchDepth: 0 }))
+
+  const opening = await store.admitDispatchedSubtask(
+    subtask({ id: "opening", parentID: "ask", dispatchGroupID: continuation.id }),
+    { enforce: true },
+  )
+  assert.equal(opening.admitted, true, "opening a continuation is not blocked by the caller's task budget")
+  assert.equal(opening.consumed, true)
+  assert.equal(store.dispatchGroup(continuation.id)?.usedHops, 1)
+  assert.equal(store.dispatchGroup(root.id)?.commandUsedHops, 2)
+
+  const later = await store.admitDispatchedSubtask(
+    subtask({ id: "later", parentID: "ask", dispatchGroupID: continuation.id }),
+    { enforce: true },
+  )
+  assert.equal(later.admitted, false, "only the opening hop bypasses the task budget")
+  assert.equal(later.reason, "task-exhausted")
+  assert.equal(store.dispatchGroup(continuation.id)?.usedHops, 1)
 })
 
 test("ticket160: admitting work spends group and command hops in one mutation, once", async () => {

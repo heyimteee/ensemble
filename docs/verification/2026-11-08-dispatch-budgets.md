@@ -33,7 +33,7 @@ pass addressed them on `fix/dispatch-review`:
 
 | Finding | Resolution and evidence |
 |---|---|
-| Leader continuation blocked by the root task's implicit budget | User-command recipients no longer receive a task budget; opening a continuation bypasses the caller's spent task budget while group/command/continuation/fan-out caps still apply. `ticket159: a leader opens a continuation after spending every direct delegate` spends eight direct delegates, then opens one. |
+| Leader continuation blocked by the root task's implicit budget | User-command recipients no longer receive a task budget; opening a continuation bypasses the caller's spent task budget at both service preflight and serialized admission, while group/command/continuation/fan-out caps still apply. `ticket159: a leader opens a continuation after spending every direct delegate` spends eight direct delegates, then opens one. |
 | Command-cap refusal could name the task | The same regression pair proves the command stop copy says `command budget` and contains no `task budget` text (`ticket159: a command-cap continuation refusal names the command, not the task`). |
 | Concurrent duplicate submissions consumed twice | Queue-key dedupe moved inside the serialized store admission; the service returns the winner without a second assignment line. `ticket159: concurrent identical admissions dedupe by queue key and consume once` and `ticket159: concurrent identical delegates create one work item and consume one hop`. |
 | Stale workspace instruction blocks | `reconcileEnsembleInstructions` refreshes `AGENTS.md` and `.ensemble/init.json` from either version marker during config reconciliation, preserving project content and never downgrading a newer version. Unit tests plus `ticket159: stale workspace instructions refresh on config reconciliation`. |
@@ -68,7 +68,7 @@ derived from source and covered by the init unit/service tests.
 
 | Command | Result |
 |---|---|
-| `npm run verify` (fix pass) | **Pass** — strict type check; **1156 tests passed, 0 failed, 0 skipped, 0 todo**, 40.5 s. |
+| `npm run verify` (fix pass) | **Pass** — strict type check; **1157 tests passed, 0 failed, 0 skipped, 0 todo**, 40.4 s. |
 | `npm run verify` (pre-fix #164 pass) | **Pass** — 1136 tests passed. Superseded by the fix-pass run above. |
 | `npm run test:live:multilocation` (fix pass) | **Pass** — **100/100 requests, 137/137 tasks succeeded, all at attempt 1, 0 `task.failed`, 0 failure records, 1 `service.start`, 1 warn-level `feed.gap`; tool probe and all three budget scenarios pass** (five, nine with one continuation, cap with `command-exhausted`). Doctor reports `0 mismatches`. |
 | `npm run test:live:sizes` | **Pass** — 80×24, 100×30, 120×40, 160×50, and `NO_COLOR=1` with dispatch budget labels. |
@@ -253,7 +253,7 @@ is loaded into the live host:
   `log-summary-dispatch_*.json`, `fake.log`, `service-logs/`)
 - Size matrix log: `/tmp/opencode/164-sizes-final.log`
 - Verify log: `/tmp/opencode/164-verify-final2.log`
-- Fix-pass verify log: `/tmp/opencode/159-fix-verify.log`
+- Fix-pass verify log: `/tmp/opencode/159-fix-verify-final2.log`
 - Fix-pass multi-location log: `/tmp/opencode/159-fix-multilocation.log`
 - Fix-pass fake-suite log: `/tmp/opencode/159-fix-fake.log`
 - Live-host skip evidence: `/tmp/opencode/164-live-host-state.txt`
