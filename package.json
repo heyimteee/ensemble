@@ -26,6 +26,7 @@
     "test:live:all": "bash scripts/live-matrix.sh all",
     "test:live:latency": "bash scripts/live-latency-probe.sh",
     "test:live:sizes": "bash scripts/live-size-matrix.sh",
+    "test:live:lifecycle": "bash scripts/live-lifecycle-fake.sh",
     "test:live:multilocation": "bash scripts/live-multilocation.sh",
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
     "logs:summary": "node scripts/log-summary.mjs"

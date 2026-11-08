@@ -378,6 +378,111 @@ live_assert_text() {
   live_capture_contains "$session" "$text" || live_fail "TUI does not show: $description"
 }
 
+# Joined chat text: group-chat wraps long system/assignment lines over several
+# terminal rows, and tmux cannot rejoin them because the app draws each row
+# itself. Slice the chat pane's content cells (the same `workspacePaneWidths`
+# model the app uses), trim each row, and join with single spaces. Content
+# assertions that span a visual wrap still prove the full message reached the
+# transcript. Only use this on a group surface wide enough for the right Work
+# pane; the bounds are intentionally derived from the shared pane helper.
+LIVE_CHAT_COLUMNS=""
+live_chat_columns() {
+  if [[ -n "$LIVE_CHAT_COLUMNS" ]]; then
+    printf '%s\n' "$LIVE_CHAT_COLUMNS"
+    return 0
+  fi
+  local width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}" start end
+  read -r start end < <(
+    "$LIVE_NODE_BIN" --experimental-strip-types -e '
+      const { pathToFileURL } = require("node:url");
+      import(pathToFileURL(process.argv[1]).href).then((module) => {
+        const panes = module.workspacePaneWidths(Number(process.argv[2]));
+        const start = 2 + panes.railWidth + 3;
+        const end = start + (panes.chatWidth - 4) - 1;
+        process.stdout.write(`${start} ${end}\n`);
+      });
+    ' "$LIVE_ROOT/src/v2/tui/workpane.ts" "$width"
+  )
+  [[ -n "$start" && -n "$end" ]] || live_fail "could not resolve the chat column bounds"
+  LIVE_CHAT_COLUMNS="$start $end"
+  printf '%s\n' "$LIVE_CHAT_COLUMNS"
+}
+
+live_capture_chat_joined() {
+  local start end
+  read -r start end <<<"$(live_chat_columns)"
+  # Node slices UTF-16 code units, which match terminal cells for the BMP
+  # glyphs the chat uses. `cut -c` counts bytes and would drift after a border.
+  live_capture "$1" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const start = Number(process.argv[1]) - 1;
+      const end = Number(process.argv[2]);
+      const rows = value.split("\n")
+        // The transcript scrollbar is a full-cell block inside the chat cell.
+        .map((line) => line.slice(start, end).replace(/[▁▂▃▄▅▆▇█]+\s*$/, "").trim())
+        .filter((line) => line.length > 0);
+      process.stdout.write(rows.join(" "));
+    });
+  ' "$start" "$end"
+}
+
+live_capture_contains_joined() {
+  live_capture_chat_joined "$1" | grep -qF -- "$2"
+}
+
+live_capture_all_joined() {
+  local session="$1"
+  shift
+  local joined text
+  joined=$(live_capture_chat_joined "$session")
+  for text in "$@"; do
+    grep -qF -- "$text" <<<"$joined" || return 1
+  done
+  return 0
+}
+
+live_require_joined_all_text() {
+  local session="$1" seconds="$2" description="$3"
+  shift 3
+  live_wait_for "$seconds" "$description" live_capture_all_joined "$session" "$@" \
+    || live_fail "TUI did not settle: $description"
+}
+
+live_wait_for_joined_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  live_wait_for "$seconds" "$description" live_capture_contains_joined "$session" "$text"
+}
+
+live_require_joined_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  live_wait_for_joined_text "$session" "$text" "$seconds" "$description" \
+    || live_fail "TUI did not show: $description"
+}
+
+live_assert_joined_text() {
+  local session="$1" text="$2" description="${3:-$text}"
+  live_capture_contains_joined "$session" "$text" || live_fail "TUI does not show: $description"
+}
+
+live_count_joined_text() {
+  local session="$1" text="$2"
+  live_capture_chat_joined "$session" | { grep -oF -- "$text" || true; } | wc -l | tr -d ' '
+}
+
+# The guarded grep form above is required under `set -o pipefail`: an absent
+# match must count zero, not abort the scenario.
+
+live_assert_joined_count() {
+  local session="$1" text="$2" expected="$3" description="${4:-$text}"
+  local actual
+  actual=$(live_count_joined_text "$session" "$text")
+  [[ "$actual" == "$expected" ]] \
+    || live_fail "expected $expected occurrence(s) of '$description' in the TUI, found $actual"
+}
+
 live_assert_absence() {
   local session="$1" text="$2" description="${3:-absence of $text}"
   live_capture_absence "$session" "$text" || live_fail "TUI unexpectedly shows: $description"
@@ -395,6 +500,25 @@ live_assert_count() {
   actual=$(live_count_text "$session" "$text")
   [[ "$actual" == "$expected" ]] \
     || live_fail "expected $expected occurrence(s) of '$description' in the TUI, found $actual"
+}
+
+# Bounded wait for a transient label that must appear exactly once in the SAME
+# frame. A follow-up count would race the next state; this polls and counts one
+# capture, so a fast streaming transition cannot hide or double the label.
+live_require_single_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  local end pane count
+  end=$(( $(date +%s%N) + seconds * 1000000000 ))
+  while true; do
+    pane=$(live_capture "$session")
+    count=$({ grep -oF -- "$text" <<<"$pane" || true; } | wc -l | tr -d ' ')
+    if [[ "$count" == "1" ]]; then return 0; fi
+    if [[ "$count" != "0" ]]; then live_fail "expected one '$description', found $count in one frame"; fi
+    if (( $(date +%s%N) >= end )); then
+      live_fail "TUI did not show exactly one '$description' within ${seconds}s"
+    fi
+    sleep "$LIVE_WAIT_INTERVAL"
+  done
 }
 
 live_wait_for_file_text() {

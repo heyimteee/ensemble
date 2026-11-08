@@ -9,6 +9,7 @@ import {
   insertAgentMention,
   insertFileReference,
   fileReferenceTokenAt,
+  paletteRowTitle,
   parseSlashCommand,
   replaceFileReference,
 } from "./composer.ts"
@@ -122,6 +123,13 @@ test("a space closes file completion and cursor moves outside close it", () => {
   assert.equal(fileReferenceTokenAt("read @hand ", "read @hand ".length), undefined)
   assert.equal(fileReferenceTokenAt("read @hand the git log", "read @hand the git log".length), undefined)
   assert.ok(fileReferenceTokenAt("read @hand the git log", "read @hand".length))
+})
+
+test("palette rows lead with their flag so a narrow chat cell keeps the owner", () => {
+  const title = paletteRowTitle("ensemble-live-skill — Deterministic Ensemble live skill for multi-anchor routing.", "Skill | FakeAgent")
+  assert.ok(title.startsWith("Skill | FakeAgent"), title)
+  assert.match(title, /ensemble-live-skill/, "the skill name follows the flag")
+  assert.equal(paletteRowTitle("restart", "Command"), "Command │ restart")
 })
 
 test("escaped-space paths complete and reinsert without losing the suffix", () => {

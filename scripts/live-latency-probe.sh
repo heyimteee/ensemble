@@ -206,7 +206,7 @@ measure_card() {
   task_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$title\" })[0]?.id" | tr -d '"')
   [[ -n "$task_id" && "$task_id" != "null" ]] || live_fail "card probe task '$title' is missing from the snapshot"
   live_invoke "task.cancel" "{\"id\":\"$task_id\"}" >/dev/null
-  live_wait_for 15 "card probe group cleared" live_capture_absence "$LIVE_TUI_SESSION" "WORK 1 group" \
+  live_wait_for 15 "card probe group cleared" live_capture_absence "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group" \
     || live_fail "card probe group did not clear after cancellation"
 }
 

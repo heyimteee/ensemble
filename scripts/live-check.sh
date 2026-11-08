@@ -30,6 +30,17 @@ live_require_text "$LIVE_TUI_SESSION" "git:(" 10 "git metadata"
 live_check_help
 
 printf 'live fixture\n' >"$LIVE_PROJECT/notes.md"
+printf 'handover fixture\n' >"$LIVE_PROJECT/handover.md"
+mkdir -p "$LIVE_PROJECT/docs"
+printf 'spaced path fixture\n' >"$LIVE_PROJECT/docs/my notes.md"
+clear_composer_text() {
+  live_key "$LIVE_TUI_SESSION" C-g
+  live_key "$LIVE_TUI_SESSION" "i"
+  sleep 0.2
+  live_key "$LIVE_TUI_SESSION" End
+  live_key_repeat "$LIVE_TUI_SESSION" BSpace 160
+  sleep 0.4
+}
 MODELS=$(live_snapshot_value '.models.length')
 if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" "a"
@@ -161,17 +172,46 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_require_text "$LIVE_TUI_SESSION" '$ agents' 10 "inline agent completion"
   live_key "$LIVE_TUI_SESSION" Enter
   live_type "$LIVE_TUI_SESSION" " review "
-  live_type "$LIVE_TUI_SESSION" '@'
+  # Ticket #175: the token stops at unescaped whitespace, so the query is only
+  # the path and a sentence after it stays untouched.
+  live_type "$LIVE_TUI_SESSION" "@handover"
   live_require_text "$LIVE_TUI_SESSION" '@ files' 10 "inline file completion"
-  live_type "$LIVE_TUI_SESSION" "notes"
-  live_require_text "$LIVE_TUI_SESSION" "notes.md" 10 "file completion results"
+  live_require_text "$LIVE_TUI_SESSION" "handover.md" 10 "untracked file completion result"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_text "$LIVE_TUI_SESSION" '$LiveAgent' 10 "agent mention inserted"
-  live_require_text "$LIVE_TUI_SESSION" '@notes.md' 10 "file mention inserted"
-  live_key "$LIVE_TUI_SESSION" C-u
-  live_type "$LIVE_TUI_SESSION" "ping"
+  live_type "$LIVE_TUI_SESSION" "the git log"
+  live_require_text "$LIVE_TUI_SESSION" "@handover.md the git log" 10 "the sentence after @file is preserved"
+  live_require_absence "$LIVE_TUI_SESSION" '@ files' 10 "the file palette closed on selection"
+  # Escaped-space paths use the same grammar on the client and server.
+  clear_composer_text
+  live_type "$LIVE_TUI_SESSION" "@docs/my\\ notes"
+  live_require_text "$LIVE_TUI_SESSION" "docs/my notes" 10 "escaped space is part of the query"
+  live_require_text "$LIVE_TUI_SESSION" "docs/my notes.md" 10 "spaced file completion result"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$LiveAgent: ping" 15 "group message sent"
+  live_require_text "$LIVE_TUI_SESSION" '@docs/my\ notes.md' 10 "escaped spaced path inserted"
+  # A cursor inside the token edits the query and selection preserves the
+  # suffix after the token.
+  clear_composer_text
+  live_type "$LIVE_TUI_SESSION" "before @hand after"
+  for _ in $(seq 1 6); do live_key "$LIVE_TUI_SESSION" Left; done
+  live_key "$LIVE_TUI_SESSION" "o"
+  live_require_text "$LIVE_TUI_SESSION" "@ files │ hando" 10 "typing inside the token keeps the bounded query"
+  live_key "$LIVE_TUI_SESSION" BSpace
+  live_require_text "$LIVE_TUI_SESSION" "@ files │ hand" 10 "the mid-token query follows the edit"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "before @handover.md after" 10 "selection preserves the suffix"
+  # The same escaped path reaches the server parser.
+  clear_composer_text
+  live_type "$LIVE_TUI_SESSION" '@docs/my\ notes.md real-parser-check'
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_joined_text "$LIVE_TUI_SESSION" '→ Assigned to $LiveAgent: @docs/my\ notes.md real-parser-check' 20 "escaped spaced reference reaches the server parser"
+  # Agent mention plus the send path.
+  clear_composer_text
+  live_type "$LIVE_TUI_SESSION" '$'
+  live_require_text "$LIVE_TUI_SESSION" '$ agents' 10 "inline agent completion reused"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_type "$LIVE_TUI_SESSION" " review ping"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$LiveAgent: \$LiveAgent review ping" 20 "group message with agent mention sent"
   live_key "$LIVE_TUI_SESSION" C-g
   live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer left after send"
 

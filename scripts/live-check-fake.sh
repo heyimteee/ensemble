@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${ENSEMBLE_LIVE_TRACE_ERR:-0}" == "1" ]]; then
+  trap 'printf "live: command failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+fi
 
 # Deterministic live TUI check. Starts a dependency-free OpenAI-compatible fake
 # provider, points an isolated OpenCode configuration at it, then verifies rich
@@ -18,19 +21,82 @@ live_require_runtime
 live_require_node
 live_setup "fake"
 
-# Ticket #136: the Work header names groups, active work, and done work, so a
-# "work is active" wait must assert a non-zero active count instead of the
-# header's mere presence — a complete dispatch group keeps the header mounted
-# for its shared 1.2 s hold after the last task finishes.
+# Ticket #167/#176: composer file references resolve untracked and spaced
+# paths, and the cached index must not spawn `fd` on every keystroke. A counting
+# wrapper on PATH records discoveries without changing the search semantics.
+FD_REAL=$(command -v fd 2>/dev/null || true)
+FD_AVAILABLE=0
+if [[ -n "$FD_REAL" ]]; then
+  FD_AVAILABLE=1
+  mkdir -p "$LIVE_BASE/bin"
+  cat >"$LIVE_BASE/bin/fd" <<EOF
+#!/usr/bin/env bash
+printf 'x\n' >>"$LIVE_BASE/fd-invocations"
+exec "$FD_REAL" "\$@"
+EOF
+  chmod +x "$LIVE_BASE/bin/fd"
+  live_tmux_env_add "PATH=$LIVE_BASE/bin:$PATH"
+fi
+printf 'handover fixture\n' >"$LIVE_PROJECT/handover.md"
+mkdir -p "$LIVE_PROJECT/docs"
+printf 'spaced path fixture\n' >"$LIVE_PROJECT/docs/my notes.md"
+
+# Ticket #172/#177: Work is the right pane (or the 80x24 drawer), with its own
+# ACTIVE/HISTORY header. A "work is active" wait must assert a non-zero active
+# count in that header; a complete group leaves ACTIVE immediately and remains
+# in HISTORY.
 live_capture_active_work() {
   local session="$1"
-  live_capture "$session" | grep -Eq 'WORK [0-9]+ groups? · [1-9][0-9]* active'
+  live_capture "$session" | grep -Eq 'WORK (ACTIVE|HISTORY) │ [0-9]+ groups? · [1-9][0-9]* active'
 }
 
 live_require_active_work() {
   local session="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}" description="${3:-active work}"
   live_wait_for "$seconds" "$description" live_capture_active_work "$session" \
     || live_fail "TUI did not show: $description"
+}
+
+live_capture_no_active_work() {
+  local session="$1"
+  live_capture "$session" | grep -Eq 'WORK ACTIVE │ none yet|WORK ACTIVE │ 0 groups'
+}
+
+live_require_no_active_work() {
+  local session="$1" seconds="${2:-$LIVE_STEP_TIMEOUT}" description="${3:-no active work}"
+  live_wait_for "$seconds" "$description" live_capture_no_active_work "$session" \
+    || live_fail "TUI still shows: $description"
+}
+
+# Focus the Work pane from any Normal surface. The rail is the starting zone on
+# a fresh page, so Tab may cross roster -> chat -> work; a dialog must be closed
+# first. Panes that are absent (DM, closed drawer) keep cycling.
+live_focus_work() {
+  local attempt pane
+  for attempt in 1 2 3 4 5 6; do
+    pane=$(live_capture "$LIVE_TUI_SESSION")
+    if grep -qF "NORMAL  │ Work list" <<<"$pane"; then return 0; fi
+    # An approval/prompt can leave the Work zone in Insert with no text target;
+    # Esc restores Normal without leaving the zone, and the next Tab/Esc reaches
+    # the cards.
+    if grep -qF "│ Work list" <<<"$pane" || grep -qF "│ Work approvals" <<<"$pane"; then
+      live_key "$LIVE_TUI_SESSION" Escape
+      sleep 0.35
+      continue
+    fi
+    live_key "$LIVE_TUI_SESSION" Tab
+    sleep 0.35
+  done
+  live_fail "could not focus the Work list"
+}
+
+live_assert_history_has() {
+  local session="$1" text="$2" description="${3:-history contains $text}"
+  live_focus_work
+  live_key "$session" "f"
+  live_require_text "$session" "WORK HISTORY │" 10 "$description"
+  live_require_text "$session" "$text" 10 "$description"
+  live_key "$session" "f"
+  live_require_text "$session" "WORK ACTIVE │" 10 "history toggled back to ACTIVE"
 }
 
 # Ticket #137: a Work card header reads `NAME<pad>GLYPH STATUS`; green is
@@ -615,11 +681,14 @@ wait_for_init_successes() {
 }
 live_key "$LIVE_TUI_SESSION" "I"
 live_require_text "$LIVE_TUI_SESSION" "System Agent" 20 "I starts a visible System Agent init"
-# Ticket #118: the live row names the current stage and shows four discrete
-# stage marks. Running is explicitly indeterminate because native /init is
-# opaque; there is no fabricated percentage.
-live_require_text "$LIVE_TUI_SESSION" "System Agent │ running · indeterminate" 20 "init row labels the opaque native run"
-live_require_text "$LIVE_TUI_SESSION" "● ● ○ ○" 20 "init row shows the staged indicator"
+# Ticket #118: the live row names the current stage. Running is explicitly
+# indeterminate because native /init is opaque; there is no fabricated
+# percentage. The right Work pane narrows the chat column, so the one-line row
+# middle-elides the stage marks at 160 columns; the exact stage indicator is
+# pinned by initrow.test.ts, and the live check asserts the honest running
+# label plus its indeterminate detail.
+live_require_text "$LIVE_TUI_SESSION" "System Agent │ running" 20 "init row labels the opaque native run"
+live_require_text "$LIVE_TUI_SESSION" "progress is indeterminate" 20 "init row explains the indeterminate stage"
 wait_for_init_successes 1
 init_first_phases=$(live_snapshot_value 'Object.values(output.state.initJobs)[0].phases.join(">")')
 [[ "$init_first_phases" == '"starting>running>writing>reporting"' ]] || live_fail "I init did not carry the four phases in order (got $init_first_phases)"
@@ -684,7 +753,7 @@ seen_tides=0
 seen_tide_rows=""
 seen_work_sample=""
 collect_work_frames() {
-  local rounds="${1:-16}" _ pane frame tide_row work_sample
+  local rounds="${1:-40}" _ pane frame tide_row work_sample
   for _ in $(seq 1 "$rounds"); do
     pane=$(live_capture "$LIVE_TUI_SESSION")
     work_sample=$(grep -n -A 4 -E 'FAKEAGENT.*WORKING' <<<"$pane" | head -n 12 || true)
@@ -707,11 +776,11 @@ collect_work_frames() {
       seen_tides=$((seen_tides + 1))
     fi
     [[ "$seen_frames" -ge 2 && "$seen_tides" -ge 2 ]] && return 0
-    sleep 0.15
+    sleep 0.04
   done
   return 1
 }
-collect_work_frames 16 || true
+collect_work_frames 40 || true
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph while work is live"
 # Slice C: the assignment event is a durable transcript line, so it is
 # asserted after the timing-sensitive animation observation, not before it.
@@ -724,7 +793,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "fake-queue-beta" 15 "second group message posted"
 # Second burst, same collector: combined frames across both bursts must show
 # the clock ticking; a single static frame in both fails below.
-collect_work_frames 16 || true
+collect_work_frames 40 || true
 [[ "$seen_frames" -ge 2 ]] || live_fail "activity line did not animate across working frames (saw: $seen_which)"
 if [[ "$seen_tides" -lt 2 ]]; then
   printf 'live: tide diagnostics (work sample: %q)\n' "$seen_work_sample" >&2
@@ -742,9 +811,21 @@ done
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-alpha" 15 "terminal announcement for first work"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-queue-beta" 15 "terminal announcement for second work"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 2 "each terminal outcome announced exactly once"
-live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the shared group hold"
-live_assert_absence_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" "no active cards remain in the block"
-live_assert_absence_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "REPLIED" "no finished cards remain after the group hold"
+live_require_no_active_work "$LIVE_TUI_SESSION" 15 "ACTIVE clears completed group work"
+live_assert_absence_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" "no active cards remain in ACTIVE"
+live_assert_absence_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "REPLIED" "finished cards stay out of ACTIVE"
+# Ticket #172: completed groups are retained in HISTORY, not discarded.
+live_key "$LIVE_TUI_SESSION" C-g
+live_focus_work
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │" 10 "f toggles HISTORY"
+live_assert_text "$LIVE_TUI_SESSION" "fake-queue-alpha" "first completed card is retained in HISTORY"
+live_assert_text "$LIVE_TUI_SESSION" "fake-queue-beta" "second completed card is retained in HISTORY"
+live_assert_text "$LIVE_TUI_SESSION" "REPLIED" "HISTORY renders the completed card state"
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 10 "f toggles back to ACTIVE"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc leaves the Work pane after the history probe"
 live_assert_absence "$LIVE_TUI_SESSION" "│ working…" "no activity lines when idle"
 # Review fixes (findings 2–3): no interim label can stick after completion,
 # and no needs-you marker appears without user-blocked work in this flow.
@@ -784,14 +865,14 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_absence "$LIVE_TUI_SESSION" "\$ agents" 10 "completion accepted"
 live_type "$LIVE_TUI_SESSION" "peer-check"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
 # Slice C: the assignment event names the owner; while the peer turn is in
-# flight the live row reads `Asking $Name…` instead of the generic verb.
+# flight the live row reads `Asking $Name…` instead of the generic verb. Read
+# the transient label before the assignment wait can consume its window.
+live_require_single_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking verb renders once on the Work card"
+live_require_text "$LIVE_TUI_SESSION" "peer-check" 15 "peer mention posted"
 live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 15 "assignment line for the peer turn"
 live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-check" 1 "peer assignment emitted exactly once"
 live_require_active_work "$LIVE_TUI_SESSION" 15 "work block mounts fresh for the new burst"
-live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the peer turn is in flight"
-live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "asking verb renders once, on the Work card only"
 [[ "$(live_count_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING")" == "1" ]] || live_fail "fresh burst lists only its own active card"
 live_assert_absence "$LIVE_TUI_SESSION" "streaming…" "raw streaming dump removed for peer turn"
 # Review fix (finding 1): queued rows are DM-only by construction, so the
@@ -806,7 +887,7 @@ done
 [[ "$peer_replied" == "1" ]] || live_fail "peer turn did not run to replied with no further action (got $peer_replied replied)"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished:" 15 "peer turn announced once"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished:" 3 "two delegation rows plus one peer row, no duplicates"
-live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the peer burst"
+live_require_no_active_work "$LIVE_TUI_SESSION" 15 "ACTIVE clears the peer burst"
 live_assert_absence_work_card "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" "no active cards remain after the peer burst"
 live_assert_text "$LIVE_TUI_SESSION" "peer-check" "peer ask visible"
 # Slice C: the relayed answer lands headed `Answer from $Name` (correlation
@@ -866,15 +947,29 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_absence "$LIVE_TUI_SESSION" "\$ agents" 10 "attribution completion accepted"
 live_type "$LIVE_TUI_SESSION" "peer-asking-probe fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 15 "assignment line for the attribution probe"
-live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 1 "probe assignment emitted exactly once"
-live_require_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "asking live row while the probe turn is in flight"
-live_assert_count "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 1 "probe asking verb renders once, on the Work card only"
-# v5.6 T3: the long fixture keeps the work zone live while Tab focuses it.
+# The asking label is the pre-stream activity window; observe it before the
+# slower joined transcript assertion so a fast first delta cannot hide it.
+live_require_single_text "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" 15 "probe asking verb renders once on the Work card"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 15 "assignment line for the attribution probe"
+live_assert_joined_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: \$FakeAgent peer-asking-probe fake-rich-fixture" 1 "probe assignment emitted exactly once"
+# v5.6 T3: a fresh long-running turn keeps the work zone live while Tab
+# focuses it. This turn has no durable result yet, so Ticket #173 hides Enter
+# and advertises the live-card actions instead.
 live_key "$LIVE_TUI_SESSION" C-g
-live_key "$LIVE_TUI_SESSION" Tab
+tab_ws=$(live_snapshot_value 'Object.keys(output.state.workspaces)[0]' | tr -d '"')
+[[ -n "$tab_ws" && "$tab_ws" != "null" ]] || live_fail "active workspace id is missing for the Work focus probe"
+tab_agent=$(live_snapshot_value 'Object.values(output.state.agents).find(function (agent) { return agent.name === "FakeAgent" }).id' | tr -d '"')
+[[ -n "$tab_agent" && "$tab_agent" != "null" ]] || live_fail "FakeAgent id is missing for the Work focus probe"
+live_invoke "message.send" "{\"workspaceID\":\"$tab_ws\",\"text\":\"tab-focus-hold fake-queue-hold-long\",\"recipientIDs\":[\"$tab_agent\"]}" >/dev/null
+live_require_active_work "$LIVE_TUI_SESSION" 15 "fresh live turn for the Work focus probe"
+live_focus_work
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Tab focuses the work list"
-live_require_text "$LIVE_TUI_SESSION" "enter result" 10 "work list names its open action"
+live_require_text "$LIVE_TUI_SESSION" "d delegate" 10 "work list names its live-card actions"
+live_assert_absence "$LIVE_TUI_SESSION" "enter result" "a card without a durable result hides Enter"
+tab_hold_id=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "tab-focus-hold fake-queue-hold-long" })[0]?.id' | tr -d '"')
+[[ -n "$tab_hold_id" && "$tab_hold_id" != "null" ]] || live_fail "tab-focus hold task id is missing"
+live_invoke "task.cancel" "{\"id\":\"$tab_hold_id\"}" >/dev/null
+live_require_no_active_work "$LIVE_TUI_SESSION" 15 "tab-focus hold cleaned up"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to the transcript"
 # Slice C third probe (direct surface): the `!Name` alias needs no completion
@@ -886,8 +981,8 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for direct-surface probe"
 live_type "$LIVE_TUI_SESSION" "!FakeAgent peer-direct-probe fake-rich-fixture"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 20 "assignment line for the direct-surface probe"
-live_assert_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 1 "direct probe assignment emitted exactly once"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 20 "assignment line for the direct-surface probe"
+live_assert_joined_count "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: !FakeAgent peer-direct-probe fake-rich-fixture" 1 "direct probe assignment emitted exactly once"
 # Esc can be swallowed by the host while a native run is active; Ctrl+G is
 # the reliable leave-composer chord and is asserted here.
 live_key "$LIVE_TUI_SESSION" C-g
@@ -919,7 +1014,7 @@ live_assert_absence "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" "asking row unmo
 # fails), and the snapshot terminal total matches all five outcomes (a
 # missing outcome fails). One capture feeds every count below, so the
 # asserts cannot race each other.
-live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: !FakeAgent peer-direct-probe fake-rich-fixture" 15 "latest outcome announced inline at the tail"
+live_require_joined_text "$LIVE_TUI_SESSION" "● FakeAgent finished: !FakeAgent peer-direct-probe fake-rich-fixture" 15 "latest outcome announced inline at the tail"
 pane_done=$(live_capture "$LIVE_TUI_SESSION")
 visible_done=$(grep -oF "● FakeAgent finished:" <<<"$pane_done" | wc -l | tr -d ' ')
 [[ "$visible_done" -ge 1 ]] || live_fail "expected at least one visible completion line (got $visible_done)"
@@ -930,7 +1025,9 @@ while IFS= read -r done_line; do
 done <<<"$(grep -F "● FakeAgent finished:" <<<"$pane_done" | sort -u)"
 live_log "$visible_done visible completion line(s), each exactly once in the pane"
 terminal_total=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.state === "replied" }).length')
-[[ "$terminal_total" == "6" ]] || live_fail "expected six terminal subtasks including the prose /init probe (got $terminal_total)"
+subtask_total=$(live_snapshot_value 'Object.values(output.state.subtasks).length')
+[[ "$subtask_total" -ge 6 ]] || live_fail "expected at least six subtasks in this block (got $subtask_total)"
+[[ "$terminal_total" == "$subtask_total" ]] || live_fail "not every subtask is terminal (got $terminal_total/$subtask_total)"
 live_log "probes repeated assignment, asking, and answer exactly once each ($relay_answers)"
 
 # Ticket #67: the floating back-to-bottom control is a bare ↓ glyph — no
@@ -988,15 +1085,15 @@ live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for bubble f
 live_type "$LIVE_TUI_SESSION" "fake-bubble-fixture"
 sleep 0.6
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_all_text "$LIVE_TUI_SESSION" 20 "settled bubble reply" \
-  "Bubble Long Heading Marker" "bubble list alpha" "BUBBLE_CODE_MARKER" "bubble table marker"
-live_assert_text "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" "long wrapping heading"
-live_assert_text "$LIVE_TUI_SESSION" "bubble list alpha" "bubble list"
-live_assert_text "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" "bubble fenced code"
-live_assert_text "$LIVE_TUI_SESSION" "bubble table marker" "bubble table cell"
-live_assert_count "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" 1 "long heading exactly once, no overlap duplication"
-live_assert_count "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" 1 "fenced code marker exactly once"
-live_assert_count "$LIVE_TUI_SESSION" "bubble table marker" 1 "table cell exactly once"
+live_require_joined_all_text "$LIVE_TUI_SESSION" 20 "settled bubble reply" \
+  "Bubble Long Heading Marker" "bubble list alpha" "BUBBLE_CODE_MARKER" "bubble wrap ok"
+live_assert_joined_text "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" "long wrapping heading"
+live_assert_joined_text "$LIVE_TUI_SESSION" "bubble list alpha" "bubble list"
+live_assert_joined_text "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" "bubble fenced code"
+live_assert_joined_text "$LIVE_TUI_SESSION" "bubble wrap ok" "bubble table cell"
+live_assert_joined_count "$LIVE_TUI_SESSION" "Bubble Long Heading Marker" 1 "long heading exactly once, no overlap duplication"
+live_assert_joined_count "$LIVE_TUI_SESSION" "BUBBLE_CODE_MARKER" 1 "fenced code marker exactly once"
+live_assert_joined_count "$LIVE_TUI_SESSION" "bubble wrap ok" 1 "table cell exactly once"
 live_require_absence "$LIVE_TUI_SESSION" "streaming…" 20 "bubble reply finalized in place"
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after the bubble fixture"
 live_log "long multi-element bubble reply verified with no clipped markers"
@@ -1023,10 +1120,21 @@ live_require_text "$LIVE_TUI_SESSION" "INSERT  │ COMPOSER" 10 "composer focus 
 # Deterministic queue window: the hold fixture streams for several seconds
 # (fake-queue-hold), so the second message stays parked while the harness
 # observes the queued row and removes it. It is one-shot and never leaks into
-# later replies through session history.
+# later replies through session history. Wait until the fake provider has
+# actually received the hold request; only then is the native session busy and
+# the next send parks instead of racing the run start.
+hold_requests_before=$(grep -c '"hold":true' "$LIVE_LOGS/fake.log" 2>/dev/null || true)
+hold_requests_before=${hold_requests_before:-0}
+hold_request_started() {
+  local count
+  count=$(grep -c '"hold":true' "$LIVE_LOGS/fake.log" 2>/dev/null || true)
+  (( ${count:-0} > hold_requests_before ))
+}
 live_type "$LIVE_TUI_SESSION" "fake-queue-hold"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "│ working…" 10 "DM live line while streaming"
+live_wait_for 15 "hold stream request started" hold_request_started \
+  || live_fail "the fake provider never started the hold stream"
 live_require_text "$LIVE_TUI_SESSION" "Message…" 10 "composer cleared after the live DM send"
 live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
@@ -1075,11 +1183,15 @@ fi
 t4_id=$(t4_id_for "T4 work action probe")
 live_invoke task.retry "{\"id\":\"$t4_id\"}" >/dev/null
 live_require_active_work "$LIVE_TUI_SESSION" 15 "retried T4 work row mounts"
-live_key "$LIVE_TUI_SESSION" Tab
-live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Tab reaches the work list"
+live_focus_work
 live_require_text "$LIVE_TUI_SESSION" "enter result" 10 "work list names its open action"
 live_assert_text "$LIVE_TUI_SESSION" "d delegate │ t reassign" "work footer names delegate and reassign"
-live_assert_text "$LIVE_TUI_SESSION" "r retry │ R restart │ x cancel │ o native" "work footer names the remaining task actions"
+live_assert_text "$LIVE_TUI_SESSION" "R restart │ x cancel │ o native" "work footer names the remaining task actions"
+# The 160-column statusline drops hints from the right before core segments;
+# the History toggle is exercised by key instead of asserted in the truncated
+# footer.
+# Ticket #173: retry is hidden while the card is actively running.
+live_assert_absence "$LIVE_TUI_SESSION" "r retry" "an actively running card does not advertise retry"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "enter/esc close" 10 "Enter opens the selected work result"
 live_key "$LIVE_TUI_SESSION" Escape
@@ -1093,35 +1205,48 @@ live_key "$LIVE_TUI_SESSION" "t"
 live_require_text "$LIVE_TUI_SESSION" "Reassign${NBSP}subtask" 10 "t opens the reassign picker"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Reassign${NBSP}subtask" 10 "reassign picker cancels"
-# Clean this row up out of band; its terminal outcome was already announced.
+# Cancel the row out of band; its terminal outcome was already announced.
 live_invoke task.cancel "{\"id\":\"$t4_id\"}" >/dev/null
-live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "T4 result probe cleaned up"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to the transcript"
-
-# Retry, restart, and cancel on a fresh row so the cancelled outcome announces.
-t4_delegate "T4 retry probe"
-live_require_active_work "$LIVE_TUI_SESSION" 15 "retry-probe work row mounts"
-live_key "$LIVE_TUI_SESSION" Tab
-live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Tab reaches the work list for retry"
-t4_attempts_before=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 retry probe" })[0]?.attempts')
+live_require_no_active_work "$LIVE_TUI_SESSION" 15 "T4 result probe cleaned up"
+# Ticket #173: retry is offered on a terminal history card. Toggle HISTORY,
+# focus the newest finished group (the cancelled probe), and retry it.
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │" 10 "cancelled probe is retained in HISTORY"
+live_require_text "$LIVE_TUI_SESSION" "T4 work action probe" 10 "cancelled probe card is visible in HISTORY"
+live_require_text "$LIVE_TUI_SESSION" "CANCELLED" 10 "cancelled probe keeps its explicit state"
+live_key "$LIVE_TUI_SESSION" "g"
+live_key "$LIVE_TUI_SESSION" "g"
+live_require_text "$LIVE_TUI_SESSION" "r retry" 10 "a cancelled history card advertises retry"
 live_key "$LIVE_TUI_SESSION" "r"
-t4_retried=0
-for _ in $(seq 1 40); do
-  t4_attempts_after=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "T4 retry probe" })[0]?.attempts')
-  if (( t4_attempts_after > t4_attempts_before )); then t4_retried=1; break; fi
-  sleep 0.25
-done
-[[ "$t4_retried" == "1" ]] || live_fail "r did not retry the selected work"
-sleep 0.75
+sleep 0.5
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 10 "requeued work returns to ACTIVE"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "r requeues the cancelled history card"
+live_require_text "$LIVE_TUI_SESSION" "T4 work action probe" 10 "requeued card is visible in ACTIVE"
+# The retry/RESTART labels were proved above. Settle this previously-terminal
+# row out of band: its completion announcement is deduped per task and would
+# not provide a fresh cancel event.
+t4_retried_id=$(t4_id_for "T4 work action probe")
+live_invoke "task.cancel" "{\"id\":\"$t4_retried_id\"}" >/dev/null
+live_require_no_active_work "$LIVE_TUI_SESSION" 15 "requeued probe settled"
+# Restart then cancel a fresh long-running row. Both actions produce one
+# canonical terminal event because this task never finished before.
+t4_delegate "T4 cancel probe"
+live_require_active_work "$LIVE_TUI_SESSION" 15 "cancel-probe work row mounts"
+live_key "$LIVE_TUI_SESSION" "g"
+live_key "$LIVE_TUI_SESSION" "g"
 live_key "$LIVE_TUI_SESSION" "R"
-live_require_text "$LIVE_TUI_SESSION" "Restarting work: T4 retry probe" 10 "R restarts the selected work"
-# Let the restart RPC clear the busy gate; x is dropped while an action runs.
+live_require_text "$LIVE_TUI_SESSION" "Restarting work: T4 cancel probe" 10 "R restarts the selected work"
 sleep 1
 live_require_active_work "$LIVE_TUI_SESSION" 5 "restarted work row stays live"
+# A restart repaints the row; re-establish card focus before the cancel key.
+live_key "$LIVE_TUI_SESSION" "g"
+live_key "$LIVE_TUI_SESSION" "g"
+sleep 0.3
 live_key "$LIVE_TUI_SESSION" "x"
-live_require_text "$LIVE_TUI_SESSION" "T4 retry probe cancelled" 15 "x cancels the selected work"
-live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts after the cancel"
+live_require_text "$LIVE_TUI_SESSION" "⊘ T4 cancel probe cancelled" 15 "x cancels the selected work"
+live_assert_count "$LIVE_TUI_SESSION" "⊘ T4 cancel probe cancelled" 1 "cancelled probe emits exactly one terminal event"
+live_require_no_active_work "$LIVE_TUI_SESSION" 15 "x removes the restarted work from ACTIVE"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to the transcript after cancel"
 
@@ -1276,7 +1401,9 @@ live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "New memory │ NORMAL" 10 "a opens a new memory field in Normal"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "New memory │ INSERT" 10 "i enters the new memory field"
 live_type "$LIVE_TUI_SESSION" "fake-live-memory"
+live_require_text "$LIVE_TUI_SESSION" "fake-live-memory" 10 "the memory text reached the field"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "New memory │ INSERT" 10 "Enter saves the memory and keeps the add field in Insert"
 live_assert_text "$LIVE_TUI_SESSION" "enter save │ esc field normal" "the persistent memory field teaches Enter and Esc"
@@ -1467,7 +1594,9 @@ live_assert_text "$LIVE_TUI_SESSION" "s save" "general statusline teaches save"
 live_key "$LIVE_TUI_SESSION" "Tab"
 live_require_text "$LIVE_TUI_SESSION" "Main + backups — main + 0 backups" 10 "models section header with counts"
 live_assert_text "$LIVE_TUI_SESSION" "(•)" "main slot fill mark"
-live_assert_text "$LIVE_TUI_SESSION" "Main       ensemble-fake/ensemble-fake-model" "main row aligns and names provider/model"
+# The narrowed chat cell truncates the model id after the aligned label; the
+# full id is asserted on the General tab and by the model picker below.
+live_assert_text "$LIVE_TUI_SESSION" "Main       ensemble-fake/" "main row aligns and names provider/model"
 live_assert_text "$LIVE_TUI_SESSION" "No backups yet. a adds one." "models empty state names the add key"
 live_assert_text "$LIVE_TUI_SESSION" "a add" "models statusline teaches add"
 # Model picker from the models tab: provider grouping, variant info, search
@@ -1698,7 +1827,7 @@ live_require_text "$LIVE_TUI_SESSION" "Ask anything" 15 "native TUI after F2 rou
 live_assert_absence "$LIVE_TUI_SESSION" "Rich Markdown Fixture" "stale heading after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "RICH_CODE_MARKER" "stale code after leaving Ensemble"
 live_assert_absence "$LIVE_TUI_SESSION" "fake-queue-beta" "stale work row after leaving Ensemble"
-live_assert_absence "$LIVE_TUI_SESSION" "active · " "stale work section after leaving Ensemble"
+live_assert_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" "stale Work pane after leaving Ensemble"
 
 # v5.6 T11: `:` and `/` still open Command mode after the native F2
 # round-trip; the visible page owns the key, not a stale stacked page.
@@ -1714,9 +1843,7 @@ live_key "$LIVE_TUI_SESSION" Escape
 # v5.6 T4: `o` opens the selected work's native session.
 t4_delegate "T4 native probe"
 live_require_active_work "$LIVE_TUI_SESSION" 15 "native-probe work row mounts"
-live_key "$LIVE_TUI_SESSION" "h"
-live_key "$LIVE_TUI_SESSION" Tab
-live_key "$LIVE_TUI_SESSION" Tab
+live_focus_work
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Tab reaches the work list for the native probe"
 live_key "$LIVE_TUI_SESSION" "o"
 # The host native TUI footer is the stable marker here; its `ctrl+p commands`
@@ -1738,6 +1865,15 @@ live_wait_for_native_tui
 live_open_ensemble
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page under reduced motion"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "group surface restored under reduced motion"
+# Persisted focus can restore a completed History card, which opens HISTORY.
+# Normalize to ACTIVE before composing; the new turn must appear in ACTIVE.
+live_focus_work
+if live_capture "$LIVE_TUI_SESSION" | grep -qF "WORK HISTORY │"; then
+  live_key "$LIVE_TUI_SESSION" "f"
+fi
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 10 "ACTIVE view before the reduced-motion turn"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to the transcript from restored Work focus"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "enter send │ esc normal │ ctrl+g leave" 10 "static composer hint under reduced motion"
 live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph under reduced motion"
@@ -1757,7 +1893,7 @@ done
 live_log "reduced-motion run stayed on frame-0 glyphs while live"
 live_require_text "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 30 "reduced-motion work announced once"
 live_assert_count "$LIVE_TUI_SESSION" "● FakeAgent finished: fake-motion-static" 1 "reduced-motion completion exactly once, no duplicate inline line"
-live_require_absence "$LIVE_TUI_SESSION" "active · " 15 "work block unmounts under reduced motion"
+live_require_no_active_work "$LIVE_TUI_SESSION" 15 "ACTIVE clears under reduced motion"
 # Let the 3 s "Message sent" transient expire before sampling quiescence.
 sleep 3.2
 reduced_idle_first=$(live_capture "$LIVE_TUI_SESSION")
@@ -1789,8 +1925,8 @@ live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for completion probes"
 live_type "$LIVE_TUI_SESSION" "!Helper !Scout joint-task"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: !Helper !Scout joint-task" 15 "assignment line for the Helper turn"
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Scout: !Helper !Scout joint-task" 15 "assignment line for the Scout turn"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: !Helper !Scout joint-task" 15 "assignment line for the Helper turn"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$Scout: !Helper !Scout joint-task" 15 "assignment line for the Scout turn"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 # Each finished non-leader turn hands to the leader automatically.
@@ -1808,7 +1944,7 @@ live_log "both non-leader turns handed to the leader"
 live_require_text "$LIVE_TUI_SESSION" "Handed to \$FakeAgent ·" 15 "concise handoff ack without policy text"
 live_assert_absence "$LIVE_TUI_SESSION" "do not call ensemble_delegate" "no policy text in the transcript"
 # Both pending completions coalesce into a single batch review turn.
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: Review 2 completions" 30 "batch review assigned to the leader"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: Review 2 completions" 30 "batch review assigned to the leader"
 batch_items=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks); var batch = tasks.find(function (t) { return t.handoff && t.handoff.batch === true; }); return batch ? batch.handoff.itemIDs.length : 0 })()')
 [[ "$batch_items" == "2" ]] || live_fail "batch review did not consolidate both completions (got $batch_items)"
 batch_listing=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks); var batch = tasks.find(function (t) { return t.handoff && t.handoff.batch === true; }); return batch ? batch.instruction : "" })()')
@@ -1857,6 +1993,9 @@ clear_composer_text() {
   live_key "$LIVE_TUI_SESSION" C-g
   live_key "$LIVE_TUI_SESSION" "i"
   sleep 0.2
+  # The cursor can sit inside an earlier draft (for example before a preserved
+  # suffix); clear from the end so no trailing text survives.
+  live_key "$LIVE_TUI_SESSION" End
   live_key_repeat "$LIVE_TUI_SESSION" BSpace 160
   sleep 0.5
 }
@@ -1884,7 +2023,7 @@ live_require_absence "$LIVE_TUI_SESSION" "Skill | FakeAgent" 10 "skill selection
 live_assert_text "$LIVE_TUI_SESSION" "/ensemble-live-skill" "leader-owned skill inserts the bare template"
 live_type "$LIVE_TUI_SESSION" "palette-check"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill — /ensemble-live-skill palette-check" 20 "skill turn assigned to its owner"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill — /ensemble-live-skill palette-check" 20 "skill turn assigned to its owner"
 skill_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.creatorType === "user" && t.instruction === "/ensemble-live-skill palette-check" }).pop(); return task ? task.instruction : "missing" })()')
 [[ "$skill_exact" == '"/ensemble-live-skill palette-check"' ]] || live_fail "skill turn did not keep the exact user text (got $skill_exact)"
 
@@ -1918,7 +2057,7 @@ live_assert_text "$LIVE_TUI_SESSION" "\$FakeAgent /ensemble-live-skill" "anchore
 sleep 0.4
 live_type "$LIVE_TUI_SESSION" "anchored-check"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill — \$FakeAgent /ensemble-live-skill anchored-check" 20 "anchored skill turn assigned to the owner"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill — \$FakeAgent /ensemble-live-skill anchored-check" 20 "anchored skill turn assigned to the owner"
 anchored_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.creatorType === "user" && t.instruction === "$FakeAgent /ensemble-live-skill anchored-check" }).pop(); return task ? task.instruction : "missing" })()')
 [[ "$anchored_exact" == '"$FakeAgent /ensemble-live-skill anchored-check"' ]] || live_fail "anchored skill turn did not keep the exact user text (got $anchored_exact)"
 
@@ -1934,7 +2073,7 @@ live_type "$LIVE_TUI_SESSION" "$multi_text"
 live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill /ensemble-live-skill-two —" 20 "grouped skills share one assignment row"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill /ensemble-live-skill-two —" 20 "grouped skills share one assignment row"
 multi_state=""
 for _ in $(seq 1 40); do
   multi_state=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("multi-skill-check") >= 0 }); return tasks.length + ":" + (tasks[0] ? tasks[0].state : "missing") })()')
@@ -1958,8 +2097,8 @@ live_type "$LIVE_TUI_SESSION" "$anchor_text"
 live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill —" 20 "first anchor assigned to its owner"
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: /ensemble-live-skill-two —" 20 "second anchor assigned to its owner"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill —" 20 "first anchor assigned to its owner"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: /ensemble-live-skill-two —" 20 "second anchor assigned to its owner"
 anchor_state=""
 for _ in $(seq 1 40); do
   anchor_state=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("multi-anchor") >= 0 }); var replied = tasks.filter(function (t) { return t.state === "replied" }).length; return tasks.length + ":" + replied })()')
@@ -1984,8 +2123,8 @@ live_type "$LIVE_TUI_SESSION" "$mixed_text"
 live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill —" 20 "mixed skill anchor keeps its resolved skill"
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: $mixed_text" 20 "normal anchor keeps a normal peer turn"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill —" 20 "mixed skill anchor keeps its resolved skill"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: $mixed_text" 20 "normal anchor keeps a normal peer turn"
 mixed_state=""
 for _ in $(seq 1 40); do
   mixed_state=$(live_snapshot_value '(function () { var tasks = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "turn" && t.instruction.indexOf("mixed-anchor") >= 0 }); var replied = tasks.filter(function (t) { return t.state === "replied" }).length; return tasks.length + ":" + replied })()')
@@ -2064,7 +2203,7 @@ live_type "$LIVE_TUI_SESSION" "$general_text"
 live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill-general" 20 "General skill triage is assigned to the leader"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$FakeAgent: /ensemble-live-skill-general" 20 "General skill triage is assigned to the leader"
 general_state=""
 for _ in $(seq 1 40); do
   general_state=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("general-triage-check") >= 0 }).pop(); return task ? task.state + ":" + ((task.skillGrants || []).length > 0) + ":" + (task.skillGrants || []).join(",") : "missing" })()')
@@ -2130,7 +2269,7 @@ sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "║ Owner" 30 "the owner picker opens for the message-start skill"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: /ensemble-live-skill-helper" 30 "the chosen owner receives the message-start skill"
+live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$Helper: /ensemble-live-skill-helper" 30 "the chosen owner receives the message-start skill"
 owner_exact=""
 for _ in $(seq 1 40); do
   owner_exact=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("owner-picker-check") >= 0 }).pop(); return task ? task.instruction + "|" + task.assigneeID : "missing" })()')
@@ -2149,7 +2288,8 @@ live_key "$LIVE_TUI_SESSION" Escape
 sleep 0.3
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Skill /ensemble-live-skill-general is General, so it routes to \$FakeAgent for leader triage." 10 "the General rejection names the leader and the fix"
-live_assert_text "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill-general nonleader-general-check" "the General rejection keeps the draft"
+live_require_text "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill-general nonleader-" 10 "the General rejection keeps the draft prefix"
+live_require_text "$LIVE_TUI_SESSION" "general-check" 10 "the General rejection keeps the wrapped draft suffix"
 clear_composer_text
 nonleader_tasks=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("nonleader-general-check") >= 0 }).length')
 [[ "$nonleader_tasks" == "0" ]] || live_fail "General under a non-leader mention created work (got $nonleader_tasks rows)"
@@ -2187,7 +2327,7 @@ live_log "ticket #103 init General row remains solo-only with single-channel val
 # Earlier probes leave a completion batch and queued turns active. Settle
 # them first so the header assertions observe only this block's groups.
 no_work_header() {
-  ! live_capture "$LIVE_TUI_SESSION" | grep -Eq 'WORK [0-9]+ groups?'
+  ! live_capture "$LIVE_TUI_SESSION" | grep -Eq 'WORK ACTIVE │ [0-9]+ groups?'
 }
 settle_previous_work() {
   local ids id
@@ -2209,30 +2349,41 @@ live_wait_for 20 "earlier scenario work cleared" no_work_header \
 v7_one_title="v7-group-one fake-queue-hold-long"
 v7_two_title="v7-group-two fake-queue-hold-long"
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"$v7_one_title\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "first v7 group is visible"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "first v7 group is visible"
 live_require_text "$LIVE_TUI_SESSION" "v7-group-one" 20 "first v7 group card is visible"
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"$v7_two_title\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK 2 groups · 2 active · 0 done" 20 "second v7 group appends without replacing the first"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active · 0 done" 20 "second v7 group appends without replacing the first"
 live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 1 active · 0 done" 20 "first v7 group label"
 live_require_text "$LIVE_TUI_SESSION" "GROUP 2 · 1 active · 0 done" 20 "second v7 group label"
 live_require_text "$LIVE_TUI_SESSION" "v7-group-two" 20 "second v7 group card is visible"
 v7_first_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$v7_one_title\" })[0]?.id" | tr -d '"')
 [[ -n "$v7_first_id" && "$v7_first_id" != "null" ]] || live_fail "first v7 group task id is missing"
 live_invoke "task.cancel" "{\"id\":\"$v7_first_id\"}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "cancelled v7 group clears after the shared hold"
-live_assert_absence "$LIVE_TUI_SESSION" "GROUP 1 · 1 active" "cancelled v7 group label is gone"
+# Ticket #172: a terminal group leaves ACTIVE immediately (no hold) and is
+# retained in HISTORY. The surviving active group renumbers to GROUP 1.
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "cancelled v7 group leaves ACTIVE"
+live_assert_absence "$LIVE_TUI_SESSION" "GROUP 2 · 1 active" "the surviving active group renumbers to GROUP 1"
 live_require_text "$LIVE_TUI_SESSION" "v7-group-two" 20 "second v7 group survives the first group's removal"
 live_require_text "$LIVE_TUI_SESSION" "⊘ $v7_one_title cancelled" 15 "cancelled v7 task emits one terminal event"
 live_assert_count "$LIVE_TUI_SESSION" "⊘ $v7_one_title cancelled" 1 "cancelled v7 terminal event appears exactly once"
 live_assert_absence "$LIVE_TUI_SESSION" "Subtask failed" "no duplicate generic failure line for cancelled work"
+live_focus_work
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │" 10 "cancelled group moves to HISTORY"
+live_require_text "$LIVE_TUI_SESSION" "v7-group-one" 10 "cancelled group card is retained in HISTORY"
+live_require_text "$LIVE_TUI_SESSION" "CANCELLED" 10 "cancelled card keeps its explicit state"
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 10 "history toggled back to ACTIVE for the next group"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to the transcript after the history check"
 v7_second_id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$v7_two_title\" })[0]?.id" | tr -d '"')
 [[ -n "$v7_second_id" && "$v7_second_id" != "null" ]] || live_fail "second v7 group task id is missing"
 live_invoke "task.cancel" "{\"id\":\"$v7_second_id\"}" >/dev/null
 live_wait_for 20 "v7 groups cleared" no_work_header \
-  || live_fail "second v7 group did not clear after the shared hold"
+  || live_fail "second v7 group did not leave ACTIVE"
 live_require_text "$LIVE_TUI_SESSION" "⊘ $v7_two_title cancelled" 15 "second cancelled v7 task emits its terminal event"
 live_assert_count "$LIVE_TUI_SESSION" "⊘ $v7_two_title cancelled" 1 "second cancelled v7 terminal event appears exactly once"
-live_log "v7 two-group append, independent removal, and canonical cancellation events verified"
+live_log "v7 two-group append, ACTIVE/HISTORY split, and canonical cancellation events verified"
 
 # v7 needs-you (ticket #136/#143): the fake provider emits one native
 # ask_person tool call, so the approval is real, durable, and linked to the
@@ -2240,15 +2391,31 @@ live_log "v7 two-group append, independent removal, and canonical cancellation e
 # window; resolving the approval releases the task and the group then clears
 # normally.
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-person\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "ask_person reaches the approvals surface"
+live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "ask_person reaches the approvals surface"
 live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 30 "needs-you card treatment"
-live_require_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" 20 "needs-you group is visible"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "needs-you group is visible"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ v focus" 20 "approvals are sticky in the Work pane"
 sleep 2.2
 live_assert_text "$LIVE_TUI_SESSION" "NEEDS YOU" "needs-you persists beyond the shared hold window"
-live_assert_text "$LIVE_TUI_SESSION" "WORK 1 group · 1 active · 0 done" "needs-you group stays mounted"
-v7_ask_id=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (a) { return a.status === "pending" && a.kind === "ask_person" }).pop()?.id' | tr -d '"')
-[[ -n "$v7_ask_id" && "$v7_ask_id" != "null" ]] || live_fail "pending ask_person approval is missing"
-live_invoke "approval.resolve" "{\"id\":\"$v7_ask_id\",\"approve\":true,\"resolution\":\"Use the stable channel.\"}" >/dev/null
+live_assert_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" "needs-you group stays mounted"
+# Ticket #173: resolve from the sticky section, not the modal inbox. v focuses
+# approvals; Enter opens the decision; the ask answer prompt then resolves.
+live_focus_work
+live_key "$LIVE_TUI_SESSION" "v"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work approvals" 10 "v focuses the sticky approvals"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ j/k select │ enter resolve │ esc work" 10 "inline approvals name their grammar"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent needs your input" 10 "Enter opens the approval decision"
+live_require_text "$LIVE_TUI_SESSION" "Answer" 10 "the ask_person decision offers Answer"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Your answer" 10 "Answer opens the answer prompt"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Dialog" 10 "the answer prompt opens in field Normal"
+live_key "$LIVE_TUI_SESSION" "i"
+live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Dialog" 10 "i enters the answer prompt field"
+sleep 0.3
+live_type "$LIVE_TUI_SESSION" "Use the stable channel."
+live_require_text "$LIVE_TUI_SESSION" "Use the stable channel." 10 "the answer reached the prompt field"
+live_key "$LIVE_TUI_SESSION" Enter
 v7_ask_replied=""
 for _ in $(seq 1 80); do
   v7_ask_replied=$(live_snapshot_value "(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.title === \"fake-ask-person\" })[0]; return task ? task.state + \":\" + (task.approvalID || \"cleared\") : \"missing\" })()")
@@ -2257,26 +2424,290 @@ for _ in $(seq 1 80); do
 done
 [[ "$v7_ask_replied" == '"replied:cleared"' ]] || live_fail "needs-you task did not reply after its approval resolved (got $v7_ask_replied)"
 live_require_absence "$LIVE_TUI_SESSION" "NEEDS YOU" 20 "needs-you marker clears after the decision"
+live_require_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 10 "inline approval leaves after the decision"
 live_wait_for 20 "needs-you group cleared" no_work_header \
-  || live_fail "needs-you group did not clear after resolution"
-live_log "v7 needs-you approval persisted, resolved, and cleared live"
+  || live_fail "needs-you group did not leave ACTIVE after resolution"
+live_assert_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" "sticky approvals disappear with the last decision"
+live_focus_work
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │" 10 "resolved needs-you work moves to HISTORY"
+live_require_text "$LIVE_TUI_SESSION" "fake-ask-person" 10 "resolved work card is retained"
+live_require_text "$LIVE_TUI_SESSION" "REPLIED" 10 "resolved work ends REPLIED"
+live_key "$LIVE_TUI_SESSION" "f"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to chat after the inline approval"
+live_log "v7 needs-you approval persisted and resolved through the sticky Work section"
 
 # v7 failure event (ticket #136/#143): rejecting the ask fails the linked task
 # with one canonical failure row. This proves the live failed transition, the
 # FAILED card treatment, and the absence of the old duplicate generic line.
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-person-reject\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "rejected ask reaches the approvals surface"
+live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "rejected ask reaches the approvals surface"
 live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 30 "rejected ask starts as needs-you"
-v7_reject_id=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (a) { return a.status === "pending" && a.kind === "ask_person" }).pop()?.id' | tr -d '"')
-[[ -n "$v7_reject_id" && "$v7_reject_id" != "null" ]] || live_fail "pending rejected ask approval is missing"
-live_invoke "approval.resolve" "{\"id\":\"$v7_reject_id\",\"approve\":false}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "✕ FakeAgent failed: User rejected the request." 20 "rejected ask emits one failure event"
-live_assert_count "$LIVE_TUI_SESSION" "✕ FakeAgent failed: User rejected the request." 1 "failure event appears exactly once"
-live_require_text "$LIVE_TUI_SESSION" "FAILED" 10 "failed card treatment"
-live_assert_absence "$LIVE_TUI_SESSION" "Subtask failed" "no duplicate generic failure line for failed work"
+live_focus_work
+live_key "$LIVE_TUI_SESSION" "v"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ j/k select │ enter resolve │ esc work" 10 "rejected ask is in the sticky section"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent needs your input" 10 "rejecting ask opens its decision"
+live_key "$LIVE_TUI_SESSION" Down
+live_key "$LIVE_TUI_SESSION" Enter
+# Ticket #170: rejecting an ask is an explicit controlled stop, not a native
+# execution error; the card and event read CANCELLED, never FAILED.
+live_require_text "$LIVE_TUI_SESSION" "⊘ fake-ask-person-reject cancelled" 20 "rejected ask emits one controlled-stop event"
+live_assert_count "$LIVE_TUI_SESSION" "⊘ fake-ask-person-reject cancelled" 1 "controlled-stop event appears exactly once"
+live_assert_absence "$LIVE_TUI_SESSION" "✕ FakeAgent failed: User rejected the request." "user rejection is not reported as a native failure"
+live_assert_absence "$LIVE_TUI_SESSION" "Subtask failed" "no duplicate generic failure line for controlled work"
 live_require_absence "$LIVE_TUI_SESSION" "NEEDS YOU" 10 "rejected ask clears its needs-you state"
-live_wait_for 20 "failed group cleared" no_work_header \
-  || live_fail "failed group did not clear after its hold"
-live_log "v7 failed transition, FAILED card, and single terminal event verified live"
+live_wait_for 20 "controlled-stop group left ACTIVE" no_work_header \
+  || live_fail "controlled-stop group did not leave ACTIVE"
+live_focus_work
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │" 10 "controlled-stop work moves to HISTORY"
+live_require_text "$LIVE_TUI_SESSION" "fake-ask-person-reject" 10 "controlled-stop card is retained in HISTORY"
+live_require_text "$LIVE_TUI_SESSION" "CANCELLED" 10 "controlled-stop card treatment"
+live_key "$LIVE_TUI_SESSION" "f"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns to chat after the controlled-stop check"
+live_log "v7 controlled-stop transition, CANCELLED history card, and single terminal event verified live"
+
+# Genuine native failure: the fake provider returns a 500 before any text. This
+# is the only path that may mark FAILED; a controlled stop above stays
+# CANCELLED.
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-native-error\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
+# Native failures retry inside MAX_ATTEMPTS with 5/15/30/60 s backoff, so a
+# genuine terminal FAILED can take about two minutes.
+live_require_text "$LIVE_TUI_SESSION" "✕ FakeAgent failed:" 180 "native provider error emits a failure event"
+live_assert_count "$LIVE_TUI_SESSION" "✕ FakeAgent failed:" 1 "the native failure is the only failure event"
+live_require_no_active_work "$LIVE_TUI_SESSION" 30 "native failure leaves ACTIVE"
+live_focus_work
+live_key "$LIVE_TUI_SESSION" "f"
+live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │" 10 "native failure moves to HISTORY"
+live_require_text "$LIVE_TUI_SESSION" "fake-native-error" 10 "native failure card is retained"
+live_require_text "$LIVE_TUI_SESSION" "FAILED" 10 "native failure card treatment"
+live_key "$LIVE_TUI_SESSION" "f"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "Esc returns after the native failure check"
+live_log "genuine native failure emits FAILED while a controlled stop stays CANCELLED"
+
+# ---------------------------------------------------------------------------
+# Ticket #171/#174/#166: split rail, durable collapse, native picker, member
+# alignment. Quiet is a workspace member with no native binding, so the picker
+# can prove the explicit missing-session message.
+# ---------------------------------------------------------------------------
+live_invoke "agent.create" '{"name":"Quiet","title":"Unbound"}' >/dev/null
+live_wait_for "$LIVE_STEP_TIMEOUT" "Quiet in the snapshot" live_snapshot_has_agent_named "Quiet" \
+  || live_fail "Quiet fixture agent was not created"
+quiet_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (agent) { return agent.name === "Quiet" }).id' | tr -d '"')
+[[ -n "$quiet_id" ]] || live_fail "Quiet fixture agent id is missing"
+live_invoke "workspace.update" "{\"id\":\"$ws_id\",\"memberIDs\":[\"$fake_id\",\"$helper_id\",\"$scout_id\",\"$quiet_id\"]}" >/dev/null
+for _ in $(seq 1 40); do
+  member_count=$(live_snapshot_value "Object.values(output.state.workspaces)[0].memberIDs.length")
+  [[ "$member_count" == "4" ]] && break
+  sleep 0.25
+done
+[[ "$member_count" == "4" ]] || live_fail "Quiet was not added to the workspace (got $member_count members)"
+
+live_key "$LIVE_TUI_SESSION" "h"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Roster" 10 "rail focus for the split-pane check"
+live_require_text "$LIVE_TUI_SESSION" "AGENTS (4)" 10 "Agents pane counts the roster"
+live_require_text "$LIVE_TUI_SESSION" "WORKSPACES (1)" 10 "Workspaces pane is a separate section"
+live_require_text "$LIVE_TUI_SESSION" "▾ #LiveSite (4)" 10 "agent group header names the workspace and count"
+live_require_text "$LIVE_TUI_SESSION" "FakeAgent │ LEADER" 10 "leader label stays on the agent name row"
+# The agent subline is the role title only; the workspace name lives on the
+# group header, not under every member.
+rail_pane=$(live_capture "$LIVE_TUI_SESSION")
+awk '/FakeAgent/ && /LEADER/ { getline; if ($0 ~ /├ Engineering/ && $0 !~ /#LiveSite/) ok = 1 } END { exit !ok }' <<<"$rail_pane" \
+  || live_fail "agent subline is not role-only under the group header"
+if grep -qE '├ .*#LiveSite' <<<"$rail_pane"; then
+  live_fail "workspace name is repeated on an agent subline"
+fi
+# z on the group header collapses the group; a collapsed header keeps its count.
+live_key "$LIVE_TUI_SESSION" "g"
+live_key "$LIVE_TUI_SESSION" "g"
+sleep 0.2
+live_key "$LIVE_TUI_SESSION" "z"
+live_require_text "$LIVE_TUI_SESSION" "▸ #LiveSite (4)" 10 "z collapses the workspace group"
+live_assert_absence "$LIVE_TUI_SESSION" "├ Engineering" "collapsed group hides agent sublines"
+sleep 1.2
+
+# Durability: collapse state survives a TUI restart.
+"$LIVE_TMUX_BIN" kill-session -t "$LIVE_TUI_SESSION" 2>/dev/null || true
+live_start_tui
+live_wait_for_native_tui
+live_open_ensemble
+live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page after the collapse restart"
+live_require_text "$LIVE_TUI_SESSION" "▸ #LiveSite (4)" 20 "collapsed rail group persisted across restart"
+live_key "$LIVE_TUI_SESSION" "l"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "l focuses the restored transcript"
+live_key "$LIVE_TUI_SESSION" "h"
+live_key "$LIVE_TUI_SESSION" "g"
+live_key "$LIVE_TUI_SESSION" "g"
+sleep 0.2
+live_key "$LIVE_TUI_SESSION" "z"
+live_require_text "$LIVE_TUI_SESSION" "▾ #LiveSite (4)" 10 "z expands the persisted group"
+live_require_text "$LIVE_TUI_SESSION" "├ Engineering" 10 "expanded group restores the role subline"
+
+# Native-session picker: group chat `o` asks which member. Quiet has no
+# binding, so Enter shows the explicit message instead of navigating.
+live_key "$LIVE_TUI_SESSION" "l"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "chat focus before the native picker"
+live_key "$LIVE_TUI_SESSION" "o"
+live_require_text "$LIVE_TUI_SESSION" "Native${NBSP}session" 10 "group chat o opens the native picker"
+live_require_text "$LIVE_TUI_SESSION" "Engineering" 10 "picker rows name the member role"
+live_require_text "$LIVE_TUI_SESSION" "leader" 10 "picker rows name the leader"
+live_require_text "$LIVE_TUI_SESSION" "idle" 10 "picker rows name the busy state"
+live_key "$LIVE_TUI_SESSION" "/"
+live_require_text "$LIVE_TUI_SESSION" "type to filter" 10 "picker filter grammar is available"
+live_type "$LIVE_TUI_SESSION" "Quiet"
+live_require_text "$LIVE_TUI_SESSION" "1${NBSP}matches" 10 "picker filter narrows to one member"
+live_require_text "$LIVE_TUI_SESSION" "Unbound" 10 "picker filter shows the unbound member detail"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "j/k move" 10 "Enter commits the picker filter"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "No native session for Quiet yet" 10 "missing native binding is explicit"
+# A bound member routes to its native session; F2 returns to Ensemble.
+live_key "$LIVE_TUI_SESSION" "o"
+live_require_text "$LIVE_TUI_SESSION" "Native${NBSP}session" 10 "picker reopens for the bound member"
+live_key "$LIVE_TUI_SESSION" "/"
+live_type "$LIVE_TUI_SESSION" "FakeAgent"
+live_require_text "$LIVE_TUI_SESSION" "1${NBSP}matches" 10 "picker filter narrows to the bound member"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "j/k move" 10 "Enter commits the bound-member filter"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "ctrl+p commands" 15 "picker Enter routes to the member native session"
+live_key "$LIVE_TUI_SESSION" F2
+live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "F2 returns from the member native session"
+live_key "$LIVE_TUI_SESSION" "l"
+live_key "$LIVE_TUI_SESSION" "w"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "group surface restored after the native picker"
+
+# Member-column alignment: every wizard row puts its `│` separator in the same
+# column, even though the member names have different lengths.
+live_key "$LIVE_TUI_SESSION" "n"
+live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "workspace wizard for alignment"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Workspace name" 10 "workspace name step for alignment"
+live_key "$LIVE_TUI_SESSION" "i"
+live_type "$LIVE_TUI_SESSION" "AlignProbe"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "Workspace members" 10 "members step for alignment"
+live_require_text "$LIVE_TUI_SESSION" "Engineering" 10 "member rows carry the role cell"
+wizard_pane=$(live_capture "$LIVE_TUI_SESSION")
+awk '
+  /\[[ x]\]/ {
+    line = $0
+    sub(/^.*\] /, "", line)
+    pos = index(line, "│")
+    if (pos == 0) next
+    rows++
+    if (first == 0) first = pos
+    else if (pos != first) bad = 1
+  }
+  END { exit !(rows >= 2 && !bad) }
+' <<<"$wizard_pane" || live_fail "member wizard separators do not align in one column"
+# The list step keeps the Insert arrival mode; the first Esc returns to field
+# Normal, the second asks before discarding the typed name.
+live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "alignment member step keeps the arrival mode"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Wizard" 10 "first Esc returns the alignment wizard to Normal"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "discard draft?" 10 "alignment wizard cancels through the dirty confirm"
+live_key "$LIVE_TUI_SESSION" "y"
+live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "alignment wizard dismissed"
+live_log "split rail, durable collapse, native picker, and member alignment verified live"
+
+# ---------------------------------------------------------------------------
+# Ticket #167/#175/#176: bounded composer file references and the cached index.
+# ---------------------------------------------------------------------------
+if [[ "$FD_AVAILABLE" == "1" ]]; then
+  [[ "$(git -C "$LIVE_PROJECT" status --porcelain handover.md)" == "?? handover.md" ]] \
+    || live_fail "handover.md is not untracked before the file-reference probe"
+  live_key "$LIVE_TUI_SESSION" "i"
+  live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for file references"
+  live_type "$LIVE_TUI_SESSION" "@handover"
+  live_require_text "$LIVE_TUI_SESSION" "@ files" 10 "file palette opens on the bounded token"
+  live_require_text "$LIVE_TUI_SESSION" "handover.md" 10 "untracked file appears in the palette"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_absence "$LIVE_TUI_SESSION" "@ files" 10 "selection closes the file palette"
+  live_type "$LIVE_TUI_SESSION" "the git log"
+  live_require_text "$LIVE_TUI_SESSION" "@handover.md the git log" 10 "sentence after @file is preserved"
+
+  clear_composer_text
+  live_type "$LIVE_TUI_SESSION" "@docs/my\\ notes"
+  live_require_text "$LIVE_TUI_SESSION" "docs/my notes" 10 "escaped space is part of the path query"
+  live_require_text "$LIVE_TUI_SESSION" "docs/my notes.md" 10 "spaced file appears in the palette"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" '@docs/my\ notes.md' 10 "selection inserts the escaped spaced path"
+
+  clear_composer_text
+  live_type "$LIVE_TUI_SESSION" "before @hand after"
+  for _ in $(seq 1 6); do live_key "$LIVE_TUI_SESSION" Left; done
+  # Typing at the mid-token cursor proves the token is bounded by the cursor,
+  # not the end of the line; Backspace restores the query without moving the
+  # cursor outside the token.
+  live_key "$LIVE_TUI_SESSION" "o"
+  live_require_text "$LIVE_TUI_SESSION" "@ files │ hando" 10 "typing inside the token keeps the bounded query"
+  live_key "$LIVE_TUI_SESSION" BSpace
+  live_require_text "$LIVE_TUI_SESSION" "@ files │ hand" 10 "the mid-token query follows the edit"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "before @handover.md after" 10 "selection preserves the suffix"
+
+  # Cached index: filter keystrokes read the cache; no new fd discovery per key.
+  clear_composer_text
+  live_type "$LIVE_TUI_SESSION" "@"
+  live_require_text "$LIVE_TUI_SESSION" "@ files" 10 "palette warmed for the index probe"
+  sleep 0.8
+  fd_before=$(wc -l <"$LIVE_BASE/fd-invocations" 2>/dev/null || echo 0)
+  live_type "$LIVE_TUI_SESSION" "hand"
+  live_type "$LIVE_TUI_SESSION" "over"
+  live_require_text "$LIVE_TUI_SESSION" "handover.md" 10 "cache-backed filter still finds the file"
+  sleep 0.8
+  fd_after=$(wc -l <"$LIVE_BASE/fd-invocations" 2>/dev/null || echo 0)
+  [[ "$fd_before" == "$fd_after" ]] \
+    || live_fail "filtering spawned fd per keystroke ($fd_before -> $fd_after)"
+  live_key "$LIVE_TUI_SESSION" Escape
+
+  # The same escaped path reaches the server parser and the assignment line.
+  clear_composer_text
+  live_type "$LIVE_TUI_SESSION" '@docs/my\ notes.md file-reference-check'
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_joined_text "$LIVE_TUI_SESSION" '→ Assigned to $FakeAgent: @docs/my\ notes.md file-reference-check' 20 "escaped spaced reference survives the server parser"
+  # The group session still carries the long hold fixture in history, so this
+  # final turn streams the 400-line fixture before it settles.
+  live_require_no_active_work "$LIVE_TUI_SESSION" 60 "file-reference turn completes without a false failure"
+  live_log "composer file references, suffix preservation, spaced paths, and cached index verified live"
+else
+  live_log "fd is unavailable; composer file-reference live checks skipped explicitly (unit tests cover the grammar)"
+fi
+
+# Operator evidence: the doctor and the structured log summary are artifacts
+# for the verification record. A genuine native rejection is the only failure.
+OPENCODE_PASSWORD="$LIVE_SERVER_PASSWORD" "$LIVE_NODE_BIN" --experimental-strip-types \
+  "$LIVE_ROOT/src/v2/doctor-cli.ts" --server "$LIVE_SERVER_URL" "$LIVE_PROJECT" \
+  >"$LIVE_LOGS/doctor.txt" 2>&1 || true
+grep -q "Mismatches: none" "$LIVE_LOGS/doctor.txt" \
+  || live_fail "doctor reported a work mismatch: $(grep -A3 'Mismatches:' "$LIVE_LOGS/doctor.txt" | tail -n +2 | head -n 2)"
+"$LIVE_NODE_BIN" "$LIVE_ROOT/scripts/log-summary.mjs" --dir "$LIVE_STATE/ensemble/logs" --json \
+  >"$LIVE_LOGS/log-summary.json"
+failed_tasks=$("$LIVE_NODE_BIN" -e '
+  const summary = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  process.stdout.write(String((summary.failedTasks ?? []).length));
+' "$LIVE_LOGS/log-summary.json")
+[[ "$failed_tasks" == "1" ]] \
+  || live_fail "expected exactly one native failed task in the log summary, found $failed_tasks"
+sqlite_free_failures=$("$LIVE_NODE_BIN" -e '
+  const summary = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  const events = summary.events ?? {};
+  process.stdout.write(String(events["task.stalled"] ?? 0));
+' "$LIVE_LOGS/log-summary.json")
+[[ "$sqlite_free_failures" == "0" ]] || live_fail "unexpected task.stalled events in the live run"
+if [[ -n "${ENSEMBLE_LIVE_ARTIFACTS:-}" ]]; then
+  mkdir -p "$ENSEMBLE_LIVE_ARTIFACTS"
+  cp -R "$LIVE_LOGS/." "$ENSEMBLE_LIVE_ARTIFACTS/"
+  mkdir -p "$ENSEMBLE_LIVE_ARTIFACTS/service-logs"
+  cp -R "$LIVE_STATE/ensemble/logs/." "$ENSEMBLE_LIVE_ARTIFACTS/service-logs/"
+  live_log "artifacts copied to $ENSEMBLE_LIVE_ARTIFACTS"
+fi
+live_log "doctor and log summary captured under $LIVE_LOGS"
 
 live_log "fake live-check passed ($LIVE_SERVER_URL)"

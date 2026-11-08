@@ -18,6 +18,24 @@ const FAKE_BUBBLE_PROMPT = "fake-bubble-fixture"
 const FAKE_QUEUE_HOLD_PROMPT = "fake-queue-hold"
 const FAKE_QUEUE_HOLD_LONG_PROMPT = "fake-queue-hold-long"
 const FAKE_ASK_PROMPT = "fake-ask-person"
+// One-shot reduced-motion fixture: a normal 5 s stream so the Work card is
+// observable on frame 0 without making the trigger sticky in session history.
+const FAKE_MOTION_PROMPT = "fake-motion-static"
+const FAKE_NATIVE_ERROR_PROMPT = "fake-native-error"
+// Ticket #165/#177: a stream that deliberately outlives the old five-minute
+// delivery deadline while the service heartbeat keeps its lease alive. The
+// provider splits text into 24-character chunks, so 170 lines at 700 ms is a
+// little over five and a half minutes of streaming.
+const FAKE_LEASE_PROMPT = "fake-lease-hold"
+const LEASE_HOLD_CHUNKS = 170
+const LEASE_HOLD_DELAY_MS = 700
+const motionReplies = new Set()
+// The host's native /init instruction. A short pause keeps the live init row's
+// indeterminate stage observable without slowing any other turn.
+const INIT_PROMPT_MARKER = "Preserve verified useful guidance"
+// A peer/skill turn carries this instruction. A short pre-stream pause keeps
+// the transient `Asking $Name…` work-card window observable on a narrow chat.
+const TURN_PROMPT_MARKER = "Answer in this conversation as yourself"
 const ASK_QUESTION = "Which release channel should this task use?"
 // Ticket #164 dispatch-budget fixture. A marker in the current task
 // instruction makes the fake model emit exactly one handoff or continuation
@@ -102,6 +120,16 @@ const QUEUE_HOLD_LONG_MARKDOWN = [
   "",
 ].join("\n")
 
+// Ticket #165/#177: 170 lines at 700 ms per provider chunk keeps a run active
+// for about 5m40s, past the old five-minute delivery deadline.
+const LEASE_HOLD_MARKDOWN = [
+  "# Lease Hold Fixture",
+  "",
+  "LEASE_HOLD_MARKER",
+  ...Array.from({ length: LEASE_HOLD_CHUNKS }, (_, index) => `lease line ${index + 1} stays active while the heartbeat renews the lease.`),
+  "",
+].join("\n")
+
 // Ticket #72 long/multi-element bubble fixture: a long wrapping heading,
 // a wrapping paragraph, a list, fenced code, and a table inside one bubble.
 // Markers are unique greppable literals; the reply never echoes the trigger
@@ -145,6 +173,8 @@ const urlFile = argValue("--url-file", "")
 const logFile = argValue("--log", "")
 const chunkDelay = Math.max(0, Number(argValue("--chunk-delay-ms", process.env.ENSEMBLE_FAKE_CHUNK_DELAY_MS ?? "35")))
 const initialDelay = Math.max(0, Number(argValue("--initial-delay-ms", process.env.ENSEMBLE_FAKE_INITIAL_DELAY_MS ?? "250")))
+const initDelay = Math.max(0, Number(argValue("--init-delay-ms", process.env.ENSEMBLE_FAKE_INIT_DELAY_MS ?? "1200")))
+const turnStartDelay = Math.max(0, Number(argValue("--turn-start-delay-ms", process.env.ENSEMBLE_FAKE_TURN_START_DELAY_MS ?? "800")))
 // Required only for the budget fixture: the fake model cannot call
 // ensemble_handoff without a real typed file inside the target workspace.
 const budgetHandoffDir = argValue("--handoff-dir", process.env.ENSEMBLE_FAKE_HANDOFF_DIR ?? "")
@@ -221,7 +251,7 @@ function splitContent(text, size = 24) {
   return chunks
 }
 
-async function streamCompletion(response, text, requestID) {
+async function streamCompletion(response, text, requestID, stepDelay = chunkDelay) {
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache",
@@ -238,7 +268,7 @@ async function streamCompletion(response, text, requestID) {
       return
     }
     response.write(chunkFrame(chunk))
-    if (chunkDelay > 0) await delay(chunkDelay)
+    if (stepDelay > 0) await delay(stepDelay)
   }
   response.write(chunkFrame("", "stop"))
   response.write("data: [DONE]\n\n")
@@ -430,18 +460,21 @@ const server = createServer(async (request, response) => {
     // enough: only a tool result after the latest user message belongs to the
     // current turn. An approved re-run carries "User answer:" and must not ask
     // again.
-    const ask = prompt.includes(FAKE_ASK_PROMPT)
+    const init = prompt.includes(INIT_PROMPT_MARKER)
+    const turnStart = prompt.includes(TURN_PROMPT_MARKER)
     let lastUser = -1
     for (let index = 0; index < messages.length; index++) {
       if (messages[index]?.role === "user") lastUser = index
     }
     const latestUserText = lastUser >= 0 ? textOf(messages[lastUser]?.content) : ""
+    const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
+    const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
     const answered = /User answer:/i.test(latestUserText)
     const toolResult = lastUser >= 0 && messages.slice(lastUser + 1).some((message) => message?.role === "tool")
     const taskTitles = [...prompt.matchAll(/title="([^"]+)"/g)]
     const taskTitle = taskTitles.at(-1)?.[1] ?? ""
     const askKey = taskTitle || latestUserText || prompt.slice(-200)
-    const askNew = ask && !answered && !askedTasks.has(askKey)
+    const askNew = askedThisTurn && !answered && !askedTasks.has(askKey)
     // Ticket #74 fix-up: the DM session accumulates every earlier trigger,
     // so precedence must follow the LATEST trigger, not a fixed order —
     // otherwise the earlier rich trigger lingering in history shadows the
@@ -450,16 +483,22 @@ const server = createServer(async (request, response) => {
     const bubbleAt = prompt.lastIndexOf(FAKE_BUBBLE_PROMPT)
     const holdAt = prompt.lastIndexOf(FAKE_QUEUE_HOLD_PROMPT)
     const holdLongAt = prompt.lastIndexOf(FAKE_QUEUE_HOLD_LONG_PROMPT)
+    const motion = latestUserText.includes(FAKE_MOTION_PROMPT) && !motionReplies.has(latestUserText)
+    if (motion) motionReplies.add(latestUserText)
     const latest = Math.max(richAt, bubbleAt, holdAt, holdLongAt)
-    const text = latest === holdLongAt && holdLongAt >= 0
-      ? QUEUE_HOLD_LONG_MARKDOWN
-      : latest === holdAt && holdAt >= 0
-        ? QUEUE_HOLD_MARKDOWN
-        : bubbleAt > richAt
-          ? BUBBLE_MARKDOWN
-          : richAt >= 0
-            ? RICH_MARKDOWN
-            : SHORT_REPLY
+    const text = leaseHold
+      ? LEASE_HOLD_MARKDOWN
+      : motion
+      ? QUEUE_HOLD_MARKDOWN
+      : latest === holdLongAt && holdLongAt >= 0
+        ? QUEUE_HOLD_LONG_MARKDOWN
+        : latest === holdAt && holdAt >= 0
+          ? QUEUE_HOLD_MARKDOWN
+          : bubbleAt > richAt
+            ? BUBBLE_MARKDOWN
+            : richAt >= 0
+              ? RICH_MARKDOWN
+              : SHORT_REPLY
     const budget = parseBudgetMarker(latestUserText)
     const reviewItems = [...latestUserText.matchAll(/ref (task_[A-Za-z0-9]+)/g)].map((item) => item[1])
     // Only close batch reviews created by the budget fixture. The existing
@@ -479,8 +518,12 @@ const server = createServer(async (request, response) => {
       bubble,
       hold,
       holdLong,
-      ask,
+      ask: askedThisTurn,
       askNew,
+      init,
+      turnStart,
+      leaseHold,
+      motion,
       answered,
       toolResult,
       budget: budget ? `${budget.chain}:${budget.consumed}/${budget.total}:${budget.mode}` : "",
@@ -488,6 +531,16 @@ const server = createServer(async (request, response) => {
       reviewItems: reviewItems.length,
       promptTail: prompt.slice(-120),
     })
+    // A real native error fixture: the host turn fails before any text stream.
+    if (body?.stream !== false && latestUserText.includes(FAKE_NATIVE_ERROR_PROMPT)) {
+      log("native_error", { request: requestID })
+      // A 4xx model error is a real native execution failure the host does not
+      // retry internally, so the service reaches its terminal `failed` row
+      // without a long provider backoff.
+      response.writeHead(400, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "fake native execution failure", type: "invalid_request_error" } }))
+      return
+    }
     try {
       if (body?.stream !== false && budget && !toolResult) {
         const key = latestTaskID(prompt) ?? `${budget.chain}:${budget.consumed}`
@@ -563,13 +616,15 @@ const server = createServer(async (request, response) => {
         await streamCompletion(response, SHORT_REPLY, requestID)
         return
       }
-      if (ask && body?.stream !== false) {
+      if (init && body?.stream !== false && initDelay > 0) await delay(initDelay)
+      if (turnStart && body?.stream !== false && turnStartDelay > 0) await delay(turnStartDelay)
+      if (askedThisTurn && body?.stream !== false) {
         if (askNew) {
           askedTasks.add(askKey)
           await streamAskToolCall(response, requestID)
         } else await streamCompletion(response, QUEUE_HOLD_MARKDOWN, requestID)
       } else if (body?.stream === false) await nonStreamingCompletion(response, text, requestID)
-      else await streamCompletion(response, text, requestID)
+      else await streamCompletion(response, text, requestID, leaseHold ? LEASE_HOLD_DELAY_MS : chunkDelay)
     } catch (error) {
       log("response_error", { request: requestID, message: String(error) })
       if (!response.headersSent) response.writeHead(500, { "Content-Type": "application/json" })

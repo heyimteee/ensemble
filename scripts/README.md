@@ -25,7 +25,33 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   reports for `I`/`:init`/`/init`, the visible `/init` audit line, `|` palette
   flags, assigned-skill invocation with exact text, multi-skill grouping,
   multi-agent and mixed anchors, one-run General-skill leader triage, the owner
-  picker, and atomic validation errors that preserve the draft.
+  picker, and atomic validation errors that preserve the draft. Ticket #177
+  adds the three-pane shell: split rail grouping with durable collapse across a
+  TUI restart, ACTIVE/HISTORY movement and retention, the native-session
+  picker and its missing-binding message, aligned member columns, sticky
+  inline approvals resolved with `v`/Enter/Esc, Work-card action validity and
+  focus borders, untracked/spaced/suffixed composer file references with a
+  cached index (a counting `fd` wrapper proves filtering spawns no discovery),
+  a genuine native FAILED card next to a controlled-stop CANCELLED card, and
+  doctor plus `logs:summary` artifacts. The long-run lifecycle case lives in
+  `test:live:lifecycle`.
+- `npm run test:live:lifecycle`: a full wall-clock fake run that streams for
+  about 5m40s across the old five-minute delivery deadline while the service
+  heartbeat renews its 60-second lease. A second delivery sent immediately
+  stays pending past its own delivery timestamp, then runs when the first turn
+  finishes. Checks the card stays mounted, no false `failed`/`interrupted`
+  state appears, both groups finish `replied`, and the doctor/log summary carry
+  no false failure or stall. Late-success repair, genuine interruption, and
+  stalled/retrying labels remain service/TUI-seam tests because no public live
+  RPC can inject those durable states; the script logs those skips. Expect
+  about six minutes.
+- `npm run test:live:latency`: a reproducible keypress-to-repaint probe on the
+  isolated fake host. It reports min/p50/p95/max/mean and raw samples for the
+  grouped rail `j`/`k` navigation and for delegation-card appearance
+  (`task.delegate` RPC to the first capture showing the right-pane Work card
+  title); it is a measurement, not a pass/fail threshold. Set
+  `ENSEMBLE_LATENCY_SAMPLES` (default 10) for rail samples and
+  `ENSEMBLE_LATENCY_CARD_SAMPLES` (default 5) for card samples.
 - `npm run test:live:fake:empty`: same isolated fake provider, but configured
   with no models. Walks the New-agent wizard through the empty one-by-one
   memory list to the Main model step and asserts the explained empty state
@@ -41,12 +67,6 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
 - `npm run test:live:all`: the same runner, adding the real host-catalog
   scenario last. Use it for the full local matrix; the real scenario is not
   deterministic and is not the CI guardrail.
-- `npm run test:live:latency`: a reproducible keypress-to-repaint probe on the
-  isolated fake host. It reports min/p50/p95/max/mean and raw samples for rail
-  `j`/`k` navigation and for v7 delegation-card appearance (task.delegate RPC
-  to the first capture showing the Work card title); it is a measurement, not
-  a pass/fail threshold. Set `ENSEMBLE_LATENCY_SAMPLES` (default 10) for rail
-  samples and `ENSEMBLE_LATENCY_CARD_SAMPLES` (default 5) for card samples.
 - `npm run test:live:preflight`: resolves the harness binaries and prints the
   Node, OpenCode, and tmux versions. The default fake scope does not require
   `fd`; `npm run test:live:preflight -- all` also requires and prints it for the
@@ -117,9 +137,10 @@ ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:preflight
 ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:fake:all
 ```
 
-The deterministic suite took about 3 minutes on the v5.9 local Linux/tmux host
-(fake scenario ~2m50s, empty catalog ~10s). GitHub Actions adds `npm ci` and
-tool-install time; the live job timeout is 30 minutes.
+The deterministic suite takes about 7 minutes on the v5.9 local Linux/tmux
+host (fake scenario ~6m45s including the native-failure retry fixture, empty
+catalog ~10s). GitHub Actions adds `npm ci` and tool-install time; the live
+job timeout is 30 minutes.
 
 All scenarios and the latency probe source `scripts/lib/live-harness.sh`.
 Each run owns a temporary project and HOME, plus isolated XDG
@@ -184,29 +205,42 @@ dispatch-budget fixture: the provider writes the typed handoff file under
 `--handoff-dir` and emits one `ensemble_handoff` or `ensemble_delegate` tool
 call, then answers normally after the tool result. It also closes a completion
 batch with `ensemble_review`. The multi-location harness passes the isolated
-workspace's handoff directory.
+workspace's handoff directory. `fake-lease-hold` streams for about 5m40s for
+the lifecycle check; `fake-motion-static` streams once for the reduced-motion
+Work-card probe; `fake-native-error` returns a non-retried 4xx model error for
+the genuine FAILED card. A one-shot init pre-stream pause keeps the
+indeterminate System Agent row observable, and a pre-stream turn pause keeps
+the transient `Asking $Name…` window observable on the narrower chat cell.
 
 ## Size matrix
 
-`npm run test:live:sizes` (ticket #127, group lifecycle ticket #136, budget
-labels ticket #164) is the targeted Work-card geometry check. It starts the isolated fake host once,
-creates three agents and one workspace through the RPC surface, then restarts
-the TUI at 80×24, 100×30, 120×40, and 160×50. At each size it starts one
-long-running fake dispatch-group fan-out and checks the group header, the
-dispatch budget label, the visible card count, the overflow line, compact
-fallback, focus ownership, and the composer. At 120×40 and 100×30 it appends a
-second command mid-group to prove newest-group capacity priority, group labels
-with hop/command remaining, and independent group removal after the shared
-1.2 s hold. At 80×24 the compact row keeps the name, budget, and status while
-the long fixture title ellipsizes. Override the set with
-`ENSEMBLE_V6_SIZES="120x40 160x50"`.
+`npm run test:live:sizes` (ticket #127, three-pane shell #166/#172/#173,
+verification #177) is the targeted shell geometry check. It starts the isolated
+fake host once, creates three agents and one workspace through the RPC surface,
+then restarts the TUI at 80×24, 100×30, 120×40, and 160×50. At each size it
+starts a fresh five-group fixture (one two-task group and four single-task
+groups), then checks:
+
+- 160×50: three panes, six tasks in two-column cards across two pages, the
+  Work header and group labels, spatial `hjkl`, `gg`/`G`, page-edge `j`/`k`,
+  the exact right edge, and the focused white / unfocused grey card borders
+  read from `tmux capture-pane -e`.
+- 120×40 and 100×30: three panes with compact Work rows, group labels, the
+  dispatch budget label, focus movement, the page indicator, and the exact
+  right edge.
+- 80×24: the Work drawer starts closed, `F3` opens and focuses it, compact rows
+  and the drawer page indicator are checked, the page edge advances by
+  keyboard, and `F3` closes it back to the chat.
+- `NO_COLOR=1` restarts at 120×40 and proves frame-0 motion plus the state
+  word while work is live.
 
 The same run records the idle TUI process CPU at 160×50, then the TUI process
 CPU and tmux pane updates for one, two, and three working cards. These numbers
-are observations, not thresholds. It also restarts once with `NO_COLOR=1` and checks frame-0
-motion plus the state word. It is Linux/tmux only, like the rest of the live
-harness, and is not a substitute for the full `test:live:fake` scenario or the
-macOS/Herdr checklist.
+are observations, not thresholds. Override the set with
+`ENSEMBLE_V6_SIZES="120x40 160x50"`; `ENSEMBLE_V6_SKIP_LOAD=1` skips the CPU
+load probe for a faster layout-only pass. It is Linux/tmux only, like the rest
+of the live harness, and is not a substitute for the full `test:live:fake`
+scenario or the macOS/Herdr checklist.
 
 The full `test:live:fake` scenario keeps its 160×80 default and contains
 viewport-sensitive transcript assertions. Use the size matrix for other

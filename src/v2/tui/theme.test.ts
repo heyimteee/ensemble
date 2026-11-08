@@ -51,3 +51,18 @@ test("ticket173: focused Work cards are white and unfocused cards are grey", () 
   assert.equal(workCardBorderColor(dark, true), "#ffffff")
   assert.equal(workCardBorderColor(dark, false), "#555555")
 })
+
+test("ticket173: card focus is the highest-contrast tone, not the host action fill", () => {
+  // The live default theme's `text.action.primary.focused` is the dark fill of
+  // a filled action chip, not readable text. The card border must stay the
+  // high-contrast focus tone on both sides of the theme mode.
+  const darkTheme = themeWithBackground("#101010")
+  darkTheme.text.action.primary.focused = "#080808"
+  const dark = palette(darkTheme)
+  assert.equal(dark.cardFocus, "#ffffff", "a dark host surface keeps the white focus border")
+  const lightTheme = themeWithBackground("#fafafa")
+  lightTheme.text.action.primary.focused = "#080808"
+  const light = palette(lightTheme)
+  assert.equal(light.cardFocus, "#000000", "a light host surface uses the highest-contrast dark tone")
+  assert.equal(workCardBorderColor(light, false), "#555555", "unfocused cards keep the grey border")
+})

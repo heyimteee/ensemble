@@ -56,9 +56,11 @@ export function palette(theme: {
     border: theme.border.base,
     panel,
     focus: theme.text.base,
-    // Ticket #173: the focused Work card is white (the theme's highest-
-    // contrast action text); the pane's own focus border stays `focus`.
-    cardFocus: (theme.text as any).action?.primary?.focused ?? "#ffffff",
+    // Ticket #173: the focused Work card uses the highest-contrast tone against
+    // the host surface. The host's `text.action.primary.focused` is the fill of
+    // a filled action chip (dark in the default theme), so it cannot be the
+    // border tone. The pane's own focus border stays `focus`.
+    cardFocus: contrastText(panel),
     categorical: (theme as any).categorical ?? [],
     bg: theme.background?.base ?? theme.text.base,
   }

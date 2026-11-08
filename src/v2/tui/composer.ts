@@ -4,6 +4,7 @@
  * validation cannot drift.
  */
 import { fileReferenceTokenAt, replaceFileReference } from "../file-reference.ts"
+import { chromeJoin } from "./separators.ts"
 
 export {
   escapeFileReference,
@@ -31,6 +32,15 @@ export const COMPOSER_COMMANDS = [
   { name: "cancel", description: "cancel selected subtask" },
   { name: "reset-ensemble", description: "delete all Ensemble data" },
 ] as const
+
+/**
+ * Command/skill palette row text. The flag leads so a narrow chat cell always
+ * shows Command, Skill | General, or Skill | <Owner> before the description is
+ * truncated; the label keeps the readable skill name and summary.
+ */
+export function paletteRowTitle(label: string, flag: string | undefined): string {
+  return flag ? chromeJoin([flag, label]) : label
+}
 
 export type ComposerTrigger = "agent" | "file" | "command"
 
