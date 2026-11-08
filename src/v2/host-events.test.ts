@@ -46,3 +46,15 @@ test("retry hook deliveries derive identity from session, attempt, and error", (
   assert.notEqual(retryEventKey(one), retryEventKey(two))
   assert.equal(retryEventKey({}), undefined)
 })
+
+test("ticket155: tool and execution events derive identity without exposing content", () => {
+  const called = {
+    type: "session.tool.called",
+    created: 4,
+    data: { sessionID: "s1", assistantMessageID: "m1", id: "call_1", input: { command: "npm test" } },
+  }
+  assert.equal(hostEventKey(called), "session.tool.called:s1:m1:call_1:4")
+  assert.equal(hostEventKey({ ...called, id: "evt_tool_1" }), "id:evt_tool_1")
+  assert.equal(hostEventKey({ type: "session.execution.started", created: 9, data: { sessionID: "s1" } }), "session.execution.started:s1:9")
+  assert.equal(hostEventKey({ type: "session.tool.failed", data: { sessionID: "s1" } }), undefined)
+})

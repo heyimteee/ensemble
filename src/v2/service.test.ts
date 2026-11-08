@@ -5689,3 +5689,154 @@ test("ticket150: feed resets name the reason and identical resets are rate-limit
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("ticket155: native tool events bridge to one coalesced work.activity without durable writes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-155-activity-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const emitted: Array<{ name: string; data: any }> = []
+  service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
+  service.registerLocalRunForTest({
+    id: "run_activity",
+    subtaskID: "task_activity",
+    workspaceID: "workspace_activity",
+    agentID: "a",
+    sessionID: "session_activity",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  const handlers = service.handlers()
+  try {
+    const before = await handlers.revision({ directory })
+    emitEvent({
+      id: "evt_activity_input",
+      created: 10,
+      type: "session.tool.input.started",
+      data: { sessionID: "session_activity", assistantMessageID: "message_activity", id: "call_activity", name: "bash" },
+    })
+    emitEvent({
+      id: "evt_activity_called",
+      created: 11,
+      type: "session.tool.called",
+      data: { sessionID: "session_activity", assistantMessageID: "message_activity", id: "call_activity", input: { command: "npm test -- --watch" }, executed: true },
+    })
+    emitEvent({
+      id: "evt_activity_progress",
+      created: 12,
+      type: "session.tool.progress",
+      data: { sessionID: "session_activity", assistantMessageID: "message_activity", id: "call_activity", metadata: { output: "secret partial output" } },
+    })
+
+    await waitFor(async () => emitted.some((event) => event.name === "work.activity"))
+    const activities = emitted.filter((event) => event.name === "work.activity")
+    assert.equal(activities.length, 1, "a synchronous tool-event burst coalesces into one activity event")
+    const activity = activities[0]!.data
+    assert.deepEqual(Object.keys(activity).sort(), ["epoch", "label", "sessionID", "status", "taskID", "tool", "updatedAt", "workspaceID"])
+    assert.equal(activity.workspaceID, "workspace_activity")
+    assert.equal(activity.taskID, "task_activity")
+    assert.equal(activity.sessionID, "session_activity")
+    assert.equal(activity.tool, "bash")
+    assert.equal(activity.status, "progress")
+    assert.equal(activity.label, "running npm test -- --watch…")
+    assert.equal(activity.epoch, before.epoch)
+    assert.equal(activity.updatedAt >= 1, true)
+    assert.ok(!JSON.stringify(activity).includes("secret partial output"), "tool progress metadata never reaches the client")
+
+    const after = await handlers.revision({ directory })
+    assert.equal(after.version, before.version, "tool activity never writes durable work")
+    assert.equal(emitted.some((event) => event.name === "patches" || event.name === "changed"), false, "tool activity never enters the durable feed")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket155: activity suppresses duplicate deliveries and falls back for text and unknown tools", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-155-activity-dup-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const emitted: Array<{ name: string; data: any }> = []
+  service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
+  service.registerLocalRunForTest({
+    id: "run_dup",
+    subtaskID: "task_dup",
+    workspaceID: "workspace_dup",
+    agentID: "a",
+    sessionID: "session_dup",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  try {
+    const called = {
+      id: "evt_dup_called",
+      created: 20,
+      type: "session.tool.called",
+      data: { sessionID: "session_dup", assistantMessageID: "message_dup", id: "call_dup", input: { command: "first command" }, executed: true },
+    }
+    emitEvent({ id: "evt_dup_input", created: 19, type: "session.tool.input.started", data: { sessionID: "session_dup", assistantMessageID: "message_dup", id: "call_dup", name: "bash" } })
+    emitEvent(called)
+    await waitFor(async () => emitted.some((event) => event.name === "work.activity" && event.data.label === "running first command…"))
+    const duplicate = { ...called, data: { ...called.data, input: { command: "second command" } } }
+    emitEvent(duplicate)
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    const labels = emitted.filter((event) => event.name === "work.activity").map((event) => event.data.label)
+    assert.deepEqual(labels, ["running first command…"], "the realm claims the host event id before dispatch")
+
+    emitEvent({ id: "evt_dup_text", created: 21, type: "session.text.delta", data: { sessionID: "session_dup", delta: "A partial answer" } })
+    await waitFor(async () => emitted.some((event) => event.name === "work.activity" && event.data.label === "writing reply…"))
+    const textActivity = emitted.filter((event) => event.name === "work.activity").at(-1)!
+    assert.equal(textActivity.data.status, "writing")
+    assert.equal(textActivity.data.tool, undefined, "text-only activity names no tool")
+
+    emitEvent({ id: "evt_dup_unknown", created: 22, type: "session.tool.called", data: { sessionID: "session_dup", assistantMessageID: "message_dup", id: "call_unknown", input: {}, executed: true } })
+    await waitFor(async () => emitted.some((event) => event.name === "work.activity" && event.data.label === "thinking…"))
+    const unknownActivity = emitted.filter((event) => event.name === "work.activity").at(-1)!
+    assert.equal(unknownActivity.data.status, "called")
+    assert.equal(unknownActivity.data.tool, undefined, "a tool call with no known name stays honest")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket155: idle and terminal host events clear the task activity", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-155-activity-clear-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const emitted: Array<{ name: string; data: any }> = []
+  service.attach({ events: { emit: async (name: string, data: any) => { emitted.push({ name, data }) } } })
+  service.registerLocalRunForTest({
+    id: "run_clear",
+    subtaskID: "task_clear",
+    workspaceID: "workspace_clear",
+    agentID: "a",
+    sessionID: "session_clear",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  try {
+    emitEvent({ id: "evt_clear_called", created: 30, type: "session.tool.called", data: { sessionID: "session_clear", assistantMessageID: "message_clear", id: "call_clear", input: { filePath: "/tmp/auth.ts" }, executed: true } })
+    // The tool name is supplied by the host's input.started event; without it
+    // the label stays honest thinking, which is still an activity event.
+    await waitFor(async () => emitted.some((event) => event.name === "work.activity"))
+
+    emitEvent({ id: "evt_clear_idle", created: 31, type: "session.idle", data: { sessionID: "session_clear" } })
+    await waitFor(async () => emitted.some((event) => event.name === "work.activity" && event.data.status === "idle"))
+    const idle = emitted.filter((event) => event.name === "work.activity").at(-1)!
+    assert.equal(idle.data.label, "")
+    assert.equal(idle.data.taskID, "task_clear")
+
+    emitEvent({ id: "evt_clear_started", created: 32, type: "session.execution.started", data: { sessionID: "session_clear" } })
+    await waitFor(async () => emitted.some((event) => event.name === "work.activity" && event.data.status === "thinking"))
+    emitEvent({ id: "evt_clear_terminal", created: 33, type: "session.execution.succeeded", data: { sessionID: "session_clear" } })
+    await waitFor(async () => emitted.some((event) => event.name === "work.activity" && event.data.status === "terminal"))
+    const terminal = emitted.filter((event) => event.name === "work.activity").at(-1)!
+    assert.equal(terminal.data.label, "")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

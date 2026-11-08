@@ -561,3 +561,29 @@ test("the second location's retry hook applies the realm policy once", async () 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test("ticket155: each location subscribes to native tool and execution activity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-155-location-events-"))
+  const host = fakeHost("activity", join(root, "activity"))
+  const { registry } = serviceRegistry()
+  const attachment = await registry.attach(host.ctx)
+  try {
+    const types = [...host.events.subscriptions].flatMap((subscription) => subscription.types)
+    for (const type of [
+      "session.tool.input.started",
+      "session.tool.called",
+      "session.tool.progress",
+      "session.tool.success",
+      "session.tool.failed",
+      "session.execution.started",
+      "session.execution.succeeded",
+      "session.execution.failed",
+      "session.execution.interrupted",
+    ]) {
+      assert.ok(types.includes(type), `${type} is subscribed per location`)
+    }
+  } finally {
+    await attachment.dispose()
+    rmSync(root, { recursive: true, force: true })
+  }
+})

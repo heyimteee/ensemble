@@ -871,3 +871,29 @@ test("ticket142: reduced motion pins the glyph and tide to frame zero", () => {
   assert.equal(reduced.tide, still.tide)
   assert.deepEqual(reduced.tideLevels, still.tideLevels)
 })
+
+test("ticket155: native activity wins over the generic working verb but never over a blocked or terminal card", () => {
+  assert.equal(workCardDetail("working"), "working…")
+  assert.equal(workCardDetail("working", { activity: "reading auth.ts…" }), "reading auth.ts…")
+  assert.equal(workCardDetail("working", { activity: "reading auth.ts…", needsYou: true }), "waiting for you…")
+  assert.equal(workCardDetail("working", { activity: "reading auth.ts…", pending: "stop" }), "Stopping…")
+  assert.equal(workCardDetail("retrying", { activity: "reading auth.ts…" }), "retrying…")
+  assert.equal(workCardDetail("replied", { activity: "reading auth.ts…" }), "replied")
+})
+
+test("ticket155: activity detail truncates to the card width and rebuilds the cached card", () => {
+  const cache = createWorkCardCache()
+  const working = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
+  const base = { now: 1000, width: 30, variant: "current" as const }
+  const first = workCardForTaskCached(cache, working, "Nova", {
+    ...base,
+    detailFor: () => "running a very long command that exceeds the card width…",
+  })
+  assert.ok(first.detail.length <= 28, "the detail never exceeds the card content width")
+  const next = workCardForTaskCached(cache, working, "Nova", {
+    ...base,
+    detailFor: () => "reading auth.ts…",
+  })
+  assert.notEqual(next, first, "a new activity label rebuilds the cached detail")
+  assert.equal(next.detail, "reading auth.ts…")
+})

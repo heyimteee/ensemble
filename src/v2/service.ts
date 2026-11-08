@@ -21,7 +21,8 @@ import { RecentHostEvents, retryEventKey } from "./host-events.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
-import { STREAM_COALESCE_MS } from "./stream-coalescer.ts"
+import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
+import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
 import { createLogRateLimiter, createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { createStoreObserver } from "./log-events.ts"
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
@@ -189,6 +190,8 @@ const MAINTENANCE_INTERVAL_MS = 1_000
 const CONFIG_DISCOVERY_MS = 1_000
 /** Live-text crash checkpoints; no coordination version or patch is written. */
 const STREAM_CHECKPOINT_MS = 250
+/** Bounded in-flight tool-name/input head registry for activity labels. */
+const TRACKED_TOOL_CALLS = 256
 /**
  * Requeue text written by pre-review services. It is never terminal truth and
  * must not survive a retirement or a successful recovery (ticket #149).
@@ -358,6 +361,16 @@ export class EnsembleV2Service {
   /** Coalesced ephemeral live text, keyed by workspace + message id. */
   private readonly pendingStreams = new Map<string, MessageStream>()
   private streamTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Ticket #155: in-flight tool names and input heads, keyed by
+   * session/message/call. `session.tool.called` carries the input but not the
+   * name; the host's `session.tool.input.started` event supplies it.
+   */
+  private readonly toolCalls = new Map<string, { name?: string; input?: Json }>()
+  /** Ticket #155: one bounded, version-neutral activity update per task/window. */
+  private readonly workActivity = createStreamCoalescer<WorkActivity>((updates) => {
+    for (const activity of updates.values()) this.emitWorkActivity(activity)
+  }, WORK_ACTIVITY_COALESCE_MS)
   private readonly initRuns = new Map<string, { jobID: string; sessionID?: string; cancelled: boolean; promise: Promise<void> }>()
   private globalEpoch = 0
   /**
@@ -457,6 +470,8 @@ export class EnsembleV2Service {
       if (this.streamTimer) clearTimeout(this.streamTimer)
       this.streamTimer = undefined
       this.pendingStreams.clear()
+      this.workActivity.dispose()
+      this.toolCalls.clear()
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
       await this.maintenanceRun?.catch(() => undefined)
@@ -558,9 +573,8 @@ export class EnsembleV2Service {
    *
    * Event identity is claimed before dispatch, so a global bus that delivers
    * the same event to every location processes it once. Catalog, stream,
-   * permission, and config events are the location-scoped surfaces the service
-   * consumes; idle is forwarded for activity consumers but has no durable
-   * effect in this ticket.
+   * permission, config, and native activity events are the location-scoped
+   * surfaces the service consumes; idle also clears the task's live activity.
    */
   async handleHostEvent(event: any, location?: any): Promise<void> {
     if (this.stopped) return
@@ -572,6 +586,28 @@ export class EnsembleV2Service {
     }
     if (type === "session.text.delta" || type === "session.idle") {
       await this.handleStreamEvent(event)
+      return
+    }
+    // Ticket #155: native tool and execution lifecycle feed the Work-card
+    // activity bridge. These events are ephemeral to the client: no durable
+    // task write, no coordination version, no patch-feed entry.
+    if (
+      type === "session.tool.input.started" ||
+      type === "session.tool.called" ||
+      type === "session.tool.progress" ||
+      type === "session.tool.success" ||
+      type === "session.tool.failed"
+    ) {
+      this.handleToolActivityEvent(event)
+      return
+    }
+    if (
+      type === "session.execution.started" ||
+      type === "session.execution.succeeded" ||
+      type === "session.execution.failed" ||
+      type === "session.execution.interrupted"
+    ) {
+      this.handleExecutionActivityEvent(event)
       return
     }
     // Native permission mirror (ticket #68): project `permission.asked`
@@ -5051,17 +5087,172 @@ export class EnsembleV2Service {
     })()
   }
 
+  /**
+   * Ticket #155: the one live run that owns a native session. Only
+   * Ensemble-bound task runs carry a Work card; direct chats and the System
+   * Agent have no activity target and emit nothing.
+   */
+  private activityTarget(sessionID: string): Run | undefined {
+    if (!sessionID) return undefined
+    const runID = this.runBySession.get(sessionID)
+    return runID ? this.activeRuns.get(runID) : undefined
+  }
+
+  private toolCallKey(data: any): string {
+    return [
+      String(data?.sessionID ?? ""),
+      String(data?.assistantMessageID ?? ""),
+      String(data?.id ?? ""),
+    ].join("\u0000")
+  }
+
+  /** Host versions place the tool name on different fields; accept the safe ones. */
+  private toolEventName(data: any): string | undefined {
+    for (const candidate of [data?.name, data?.tool, data?.metadata?.name]) {
+      if (typeof candidate === "string" && candidate.length > 0) return candidate
+    }
+    return undefined
+  }
+
+  /**
+   * Remember one tool name/input head. The host splits these across events:
+   * `session.tool.input.started` names the tool, `session.tool.called` carries
+   * its input, and progress/success/failed carry neither. The map is bounded
+   * because a lost terminal event must not grow an unbounded registry.
+   */
+  private rememberToolCall(event: any): { name?: string; input?: Json } | undefined {
+    const data = event?.data ?? event
+    if (!data || typeof data !== "object") return undefined
+    if (typeof data.sessionID !== "string" || typeof data.id !== "string") return undefined
+    const key = this.toolCallKey(data)
+    const existing = this.toolCalls.get(key)
+    const name = this.toolEventName(data) ?? existing?.name
+    const input = data.input && typeof data.input === "object" && !Array.isArray(data.input)
+      ? limitToolInput(data.input)
+      : existing?.input
+    const entry = { name, input }
+    this.toolCalls.delete(key)
+    this.toolCalls.set(key, entry)
+    while (this.toolCalls.size > TRACKED_TOOL_CALLS) {
+      const oldest = this.toolCalls.keys().next().value
+      if (oldest === undefined) break
+      this.toolCalls.delete(oldest)
+    }
+    return entry
+  }
+
+  private forgetToolCall(event: any): void {
+    const data = event?.data ?? event
+    if (!data || typeof data !== "object") return
+    this.toolCalls.delete(this.toolCallKey(data))
+  }
+
+  private forgetToolCallsForSession(sessionID: string): void {
+    if (!sessionID) return
+    const prefix = `${sessionID}\u0000`
+    for (const key of this.toolCalls.keys()) {
+      if (key.startsWith(prefix)) this.toolCalls.delete(key)
+    }
+  }
+
+  /** Queue one bounded activity label for the run that owns this session. */
+  private queueWorkActivity(sessionID: string, label: string, status: WorkActivity["status"], tool?: string): void {
+    const run = this.activityTarget(sessionID)
+    if (!run) return
+    const boundedTool = boundedToolName(tool)
+    const activity: WorkActivity = {
+      epoch: this.epochValue,
+      workspaceID: run.workspaceID,
+      taskID: run.subtaskID,
+      sessionID,
+      label,
+      ...(boundedTool ? { tool: boundedTool } : {}),
+      status,
+      updatedAt: now(),
+    }
+    this.workActivity.push(run.subtaskID, () => activity)
+  }
+
+  private emitWorkActivity(activity: WorkActivity): void {
+    for (const registration of this.registrations) {
+      void registration?.events?.emit?.("work.activity", activity)?.catch?.(() => undefined)
+    }
+  }
+
+  /** Clear one session's card activity; a clear is still a coalesced event. */
+  private clearWorkActivity(sessionID: string, status: "idle" | "terminal"): void {
+    this.forgetToolCallsForSession(sessionID)
+    const run = this.activityTarget(sessionID)
+    if (!run) return
+    this.workActivity.push(run.subtaskID, () => ({
+      epoch: this.epochValue,
+      workspaceID: run.workspaceID,
+      taskID: run.subtaskID,
+      sessionID,
+      label: "",
+      status,
+      updatedAt: now(),
+    }))
+  }
+
+  private handleToolActivityEvent(event: any): void {
+    const type = String(event?.type ?? "")
+    const data = event?.data ?? event
+    const sessionID = String(data?.sessionID ?? "")
+    // Only an active Ensemble task run has a Work card. Direct chats and the
+    // System Agent never enter the bounded tool registry.
+    if (!this.activityTarget(sessionID)) {
+      this.forgetToolCall(event)
+      return
+    }
+    if (type === "session.tool.input.started") {
+      this.rememberToolCall(event)
+      return
+    }
+    const call = this.rememberToolCall(event)
+    if (type === "session.tool.success" || type === "session.tool.failed") {
+      this.forgetToolCall(event)
+      // The call settled; the next visible step is model thinking until text
+      // or another tool arrives. This replaces the old tool label rather than
+      // leaving it stuck as if the command were still running.
+      this.queueWorkActivity(sessionID, thinkingActivityLabel(), "thinking")
+      return
+    }
+    const tool = call?.name ?? this.toolEventName(data)
+    const label = toolActivityLabel(tool, call?.input)
+    this.queueWorkActivity(sessionID, label, type === "session.tool.progress" ? "progress" : "called", tool)
+  }
+
+  private handleExecutionActivityEvent(event: any): void {
+    const data = event?.data ?? event
+    const sessionID = String(data?.sessionID ?? "")
+    if (!sessionID) return
+    if (event?.type === "session.execution.started") {
+      this.queueWorkActivity(sessionID, thinkingActivityLabel(), "thinking")
+      return
+    }
+    this.clearWorkActivity(sessionID, "terminal")
+  }
+
   private async handleStreamEvent(event: any): Promise<void> {
-    // Idle is forwarded by the location adapter for activity consumers; ticket
-    // #155 owns that surface, so it has no durable effect here.
-    if (event?.type === "session.idle") return
-    if (event?.type !== "session.text.delta") return
     const data = event.data ?? event
-    const live = this.liveBySession.get(String(data.sessionID ?? ""))
-    if (!live) return
+    const sessionID = String(data?.sessionID ?? "")
+    // Idle means no tool and no text are in flight; a terminal patch may
+    // arrive just after, but the card must stop claiming live activity now.
+    if (event?.type === "session.idle") {
+      this.clearWorkActivity(sessionID, "idle")
+      return
+    }
+    if (event?.type !== "session.text.delta") return
     const delta = String(data.delta ?? "")
     if (!delta) return
+    // Text-only turns still need an honest verb. This path never requires the
+    // opening durable row; it emits only for an active task run.
+    this.queueWorkActivity(sessionID, writingReplyLabel(), "writing")
+    const live = this.liveBySession.get(sessionID)
+    if (!live) return
     live.buffer += delta
+
     // The opening row is persisted just after registration; a delta that
     // lands in between stays buffered and is flushed below, never dropped.
     if (!live.message) return
@@ -5476,6 +5667,10 @@ export class EnsembleV2Service {
         }).catch(() => undefined)
       }
       clearInterval(heartbeat)
+      // Ticket #155: a finalized task must not leave a live tool label behind.
+      // Clear before the session→run identity disappears; the card's terminal
+      // patch may land just after this event.
+      this.clearWorkActivity(binding.sessionID, "terminal")
       this.liveBySession.delete(binding.sessionID)
       if (live?.streaming) await this.finalizeStream(live, live.text || REPLY_INTERRUPTED, true, globalEpoch, workspaceEpoch, task.workspaceID)
       await this.releaseClaim(task.id, runID)
