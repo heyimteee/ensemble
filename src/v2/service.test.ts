@@ -4020,6 +4020,86 @@ test("ticket169: incident replay — a pending deadline, existing reply, late su
   }
 })
 
+test("ticket169: an empty native result never promotes a stalled live partial to success", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-169-empty-late-"))
+  const { ctx, emitEvent } = fakeContext()
+  let releaseWait: () => void = () => {}
+  const waitGate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ;(ctx.session as any).wait = async () => { await waitGate }
+  ;(ctx.session as any).context = async () => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "" }] }],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory, { nextSeq: 10 })
+  await seed.saveSubtask({
+    id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Empty late", instruction: "Do",
+    mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 0, createdAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    let sessionID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const run = Object.values(next.state.runs).find((item: any) => item.status === "running") as any
+      sessionID = run?.sessionID ?? ""
+      return Boolean(sessionID)
+    }, 5_000)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.messages.w as any[]).some((message) => message.taskID === "t" && message.streaming)
+    }, 5_000)
+    emitEvent({ id: "evt_empty_late_delta", type: "session.text.delta", data: { sessionID, delta: "A live partial answer." } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.messages.w as any[]).some((message) => message.taskID === "t" && message.text === "A live partial answer.")
+    }, 5_000)
+    const foreign = new V2Store(ctx)
+    await foreign.load()
+    const stale = foreign.cloneSubtask("t")!
+    stale.state = "replied"
+    stale.outcome = "failed"
+    stale.error = "The work deadline passed before it could finish."
+    stale.failure = { kind: "delivery", reason: "deadline-exceeded" }
+    stale.activeRunID = undefined
+    stale.claimedBy = undefined
+    stale.leaseUntil = undefined
+    stale.repliedAt = Date.now()
+    stale.finishedAt = Date.now()
+    await foreign.saveSubtask(stale)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.t as any)?.status === "stalled"
+    }, 5_000)
+    releaseWait()
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.messages.w as any[]).some((message) => message.taskID === "t" && message.streaming === false && message.text === "A live partial answer.")
+    }, 5_000)
+    const after = await handlers.snapshot({ directory })
+    const task = after.state.subtasks.t as any
+    assert.equal(task.state, "replied")
+    assert.equal(task.outcome, "failed", "an empty native result never becomes success")
+    assert.equal(task.status, "stalled")
+    assert.equal(task.failure.kind, "delivery", "the queue cause is preserved, never rewritten as a false success")
+    assert.equal(task.resultMessageID, undefined)
+    const message = (after.state.messages.w as any[]).find((item) => item.taskID === "t") as any
+    assert.equal(message.text, "A live partial answer.")
+    assert.equal(message.streaming, false)
+    assert.equal(message.interrupted, false, "a substantive partial is preserved, not interrupted")
+    const recovered = await handlers["logs.recent"]({ directory, event: "task.recovered", limit: 20 })
+    assert.equal(recovered.entries.length, 0, "an empty late result is not a recovery")
+  } finally {
+    releaseWait()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket169: a late delta cannot resurrect a settled row", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-169-late-delta-"))
   const { ctx, emitEvent } = fakeContext()

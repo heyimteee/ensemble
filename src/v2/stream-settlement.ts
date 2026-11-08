@@ -65,13 +65,16 @@ function isPlaceholderRow(message: Message): boolean {
  * Plan the transcript half of a late-success repair (ticket #169). Pure: it
  * reads only the task's agent text rows and the late text.
  *
- * - A streaming row is the natural target; it was the live answer.
+ * - A streaming row is the natural target when the late result carries text;
+ *   it was the live answer. With no new text, only a settled placeholder is
+ *   repaired, and a live partial is left for normal settlement.
  * - Otherwise the newest settled placeholder (interrupted, empty, or an
  *   internal fallback) is repaired in place, so the placeholder never
  *   survives as a false failure line.
- * - The final text is the late substantive text, or the newest substantive
- *   answer already recorded for the task. A late result may carry no new
- *   text while the real answer was already persisted.
+ * - The final text is the late substantive text, or the newest settled
+ *   substantive answer already recorded for the task. A late result may carry
+ *   no new text while the real answer was already persisted. A still-streaming
+ *   partial is never treated as a recorded answer.
  * - A substantive row is never overwritten and never demoted to a
  *   placeholder; with no target it is reused as the result.
  * - With no target and no substantive text the plan does nothing: an empty
@@ -84,10 +87,19 @@ export function planLateSuccessRepair(input: {
 }): LateSuccessPlan {
   const rows = taskTextRows(input.messages, input.taskID)
   const late = isSubstantiveReply(input.lateText) ? input.lateText.trim() : undefined
-  const substantive = rows.filter((message) => isSubstantiveReply(message.text)).sort((a, b) => b.seq - a.seq)
+  // Only a settled substantive row is an already-recorded answer. A still
+  // streaming row is this attempt's partial text, never proof of success on
+  // its own: an empty native result must not promote it (ticket #169/#149).
+  const substantive = rows
+    .filter((message) => message.streaming !== true && isSubstantiveReply(message.text))
+    .sort((a, b) => b.seq - a.seq)
   const streaming = rows.filter((message) => message.streaming === true).sort((a, b) => b.seq - a.seq)[0]
-  const placeholder = rows.filter(isPlaceholderRow).sort((a, b) => b.seq - a.seq)[0]
-  const target = streaming ?? placeholder
+  const settledPlaceholder = rows
+    .filter((message) => message.streaming !== true && isPlaceholderRow(message))
+    .sort((a, b) => b.seq - a.seq)[0]
+  // With no new text, only a settled placeholder is repaired with the answer
+  // that was already recorded. A live partial is never overwritten.
+  const target = late ? streaming ?? settledPlaceholder : settledPlaceholder
   const finalText = late ?? substantive[0]?.text
   if (target && finalText) return { action: "repair", messageID: target.id, text: finalText }
   if (substantive[0]) return { action: "reuse", messageID: substantive[0].id, text: substantive[0].text }

@@ -6088,6 +6088,12 @@ export class EnsembleV2Service {
     if (derived === "needs_you") return false
     const workspace = this.store.workspace(task.workspaceID)
     if (!workspace) return false
+    const changedState = !(task.state === "replied" && task.outcome === "succeeded")
+    // Only a substantive late result may end a stalled/retried/failed task as
+    // success. An empty or fallback native turn never promotes a live partial
+    // (or a preserved stall row) to success; it may still repair a placeholder
+    // on an already-succeeded task from an answer recorded there.
+    if (changedState && !isSubstantiveReply(input.reply)) return false
     // A succeeded row with a non-native failure still came from a stall; the
     // audit should name that origin, not echo the already-replied cache.
     const previousStatus: DerivedWorkStatus = derived === "replied" && task.failure ? "stalled" : derived
@@ -6126,7 +6132,6 @@ export class EnsembleV2Service {
     } else {
       resultMessageID = plan.messageID
     }
-    const changedState = !(task.state === "replied" && task.outcome === "succeeded")
     if (!changedState && !repaired) return false
     const previousFailure = task.failure
     task.state = "replied"

@@ -113,6 +113,15 @@ test("ticket169: a settled substantive row is reused when no placeholder exists"
   assert.deepEqual(plan, { action: "reuse", messageID: "answer", text: "The recorded answer." })
 })
 
+test("ticket169: an empty late result never promotes a live partial to success", () => {
+  const plan = planLateSuccessRepair({
+    messages: [message({ id: "live", taskID: "t", text: "partial text", streaming: true })],
+    taskID: "t",
+    lateText: "",
+  })
+  assert.deepEqual(plan, { action: "none", reason: "no-substantive-text" })
+})
+
 test("ticket169: a late substantive answer with no row creates a durable message", () => {
   const plan = planLateSuccessRepair({ messages: [], taskID: "t", lateText: "A late answer." })
   assert.deepEqual(plan, { action: "create", text: "A late answer." })
