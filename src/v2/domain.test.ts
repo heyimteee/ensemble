@@ -121,7 +121,7 @@ test("store allocates message sequence numbers without overwriting concurrent ap
   assert.equal(loaded.snapshot().workspaces.w.nextSeq, 4)
 })
 
-test("startup requeues working subtasks without minting an approval", async () => {
+test("startup leaves working subtasks for lease-safe recovery without rewriting them", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.saveWorkspace(workspace("w", "a", ["a"]))
@@ -143,7 +143,9 @@ test("startup requeues working subtasks without minting an approval", async () =
   const loaded = new V2Store(ctx)
   await loaded.load()
   const task = loaded.snapshot().subtasks.t1
-  assert.equal(task.state, "pending")
+  // Ticket #148: a claimless row is repaired by the service's waiting-work
+  // pass, not by load. Load itself must not rewrite working rows.
+  assert.equal(task.state, "working")
   assert.equal(task.interrupted, false)
   assert.equal(task.activeRunID, undefined)
 })
