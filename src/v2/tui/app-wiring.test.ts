@@ -48,6 +48,25 @@ test("file completion opens, filters, and inserts through one token scanner", ()
   assert.ok(source.includes("replaceFileReference(value, item.value, state.start, state.end)"))
 })
 
+test("file completion filters the cached index instead of spawning fd", () => {
+  // Behavior: file-index.test.ts cache hits and bounded refresh rate.
+  const source = app()
+  assert.ok(source.includes('import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"'))
+  assert.ok(source.includes("fileIndex.paths(workspace.id, workspace.directory)"))
+  assert.ok(!source.includes('execFileSync("fd", ["--type", "f"'))
+  assert.ok(!source.includes('"--max-depth", "4", ".", workspace.directory'))
+})
+
+test("the file index refreshes on activation, file events, and explicit refresh", () => {
+  // Behavior: file-index.test.ts stale-while-refresh and refresh coalescing.
+  const source = app()
+  assert.ok(source.includes("fileIndex.refresh(root.slice(0, separator), root.slice(separator + 1))"))
+  assert.ok(source.includes('type === "file.edited" || type === "filesystem.changed"'))
+  assert.ok(source.includes("refreshFileIndexForPath(file)"))
+  assert.ok(source.includes('id: "ensemble.v2.completion.refresh"'))
+  assert.ok(source.includes("onCleanup(() => fileIndex.dispose())"))
+})
+
 test("the Work pane maps active tasks through dispatch groups", () => {
   // Behavior: workgroups.test.ts group visibility and layout.
   assert.ok(app().includes("workGroupsForTasks(active, state()?.subtasks"))
@@ -360,4 +379,36 @@ test("ticket171: rail collapse state persists through durable UI state", () => {
   assert.ok(source.includes("collapsedRailGroups: next"))
   assert.ok(source.includes('"ui.save"'))
   assert.ok(source.includes("state()?.ui.collapsedRailGroups"))
+})
+
+test("ticket174: every native key routes through one surface-aware decision", () => {
+  // Behavior: picker.test.ts native routing by surface and focus.
+  const source = app()
+  assert.ok(source.includes("nativeSessionRoute({"))
+  assert.ok(source.includes('"chat.native": () => openNative()'))
+  assert.ok(source.includes('"work.native": () => openNative()'))
+  assert.ok(source.includes('"leader.native": () => openNative()'))
+})
+
+test("ticket174: group-chat chat focus opens the workspace-member picker", () => {
+  // Behavior: picker.test.ts native candidates, filtering, and selection.
+  const source = app()
+  assert.ok(source.includes('openPicker("native")'))
+  assert.ok(source.includes("nativePickerCandidates("))
+  assert.ok(source.includes("pickerCandidateRows("))
+})
+
+test("ticket174: a missing native binding toasts instead of returning silently", () => {
+  // Behavior: picker.test.ts missing-binding routes and messages.
+  const source = app()
+  assert.ok(source.includes('route.kind === "missing"'))
+  assert.ok(source.includes("missingNativeSessionMessage(agentName(state(), agentID))"))
+})
+
+test("ticket174: label/detail list rows share the aligned column helper", () => {
+  // Behavior: format.test.ts aligned rows across widths, separators, and long names.
+  const source = app()
+  assert.ok(source.includes("alignedDetailRows("))
+  assert.ok(source.includes("wizardRowLabels()"), "wizard rows render the aligned labels")
+  assert.ok(source.includes("maxWidth: pickerDetailWidth()"), "picker rows keep one name column")
 })

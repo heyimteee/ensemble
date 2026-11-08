@@ -1,9 +1,48 @@
 import { homedir } from "node:os"
 import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
+import { chromeSeparator } from "./separators.ts"
 
 export function short(value: string, width = 60): string {
   const single = value.replaceAll("\n", " ")
   return single.length > width ? `${single.slice(0, width - 1).trimEnd()}…` : single
+}
+
+/** One label/detail row for the aligned table grammar (ticket #174). */
+export type AlignedDetailRow = { label: string; detail?: string }
+
+export type AlignedDetailOptions = {
+  /** Maximum label column; longer labels truncate with an ellipsis. */
+  maxWidth?: number
+  /** Separator between the padded label and the detail; chrome bar by default. */
+  separator?: string
+}
+
+/**
+ * Ticket #174: pad one label column across the visible rows and render
+ * `label │ detail`. The separator therefore sits at exactly one column for
+ * every visible row, regardless of label length. Labels longer than the
+ * column truncate consistently; rows without a detail keep their label
+ * unpadded. Pure, so the wizard and every other list row share one grammar.
+ */
+export function alignedDetailRows(rows: readonly AlignedDetailRow[], options: AlignedDetailOptions = {}): string[] {
+  const separator = options.separator ?? chromeSeparator()
+  const cap = options.maxWidth === undefined ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(options.maxWidth))
+  // Only label/detail rows define the table. A plain row (a custom directory,
+  // a manual step) is not part of the column and never widens or truncates it.
+  const width = Math.min(cap, rows.reduce((longest, row) => (row.detail ?? "").trim() ? Math.max(longest, row.label.length) : longest, 0))
+  return rows.map((row) => {
+    const detail = (row.detail ?? "").trim()
+    if (!detail) return row.label
+    const label = truncateAlignedLabel(row.label, width)
+    return `${label.padEnd(width)} ${separator} ${detail}`
+  })
+}
+
+function truncateAlignedLabel(label: string, width: number): string {
+  if (label.length <= width) return label
+  if (width <= 0) return ""
+  if (width === 1) return "…"
+  return `${label.slice(0, width - 1)}…`
 }
 
 export function agentName(state: SnapshotState | null, agentID?: string): string {

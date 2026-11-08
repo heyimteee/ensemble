@@ -4,7 +4,6 @@ import { SyntaxStyle } from "@opentui/core"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
@@ -15,7 +14,7 @@ import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeCom
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
-import { agentName, busyCount, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
+import { agentName, alignedDetailRows, busyCount, fuzzyMatch, headerQueuedSuffix, isWorkingTask, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import {
   RAIL_PULSE_STEP_MS,
@@ -39,7 +38,7 @@ import {
   railSelectableCount,
   toggleCollapsedRailGroup,
 } from "./railmodel.ts"
-import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
+import { boundSessionID, missingNativeSessionMessage, nativePickerCandidates, nativeSessionRoute, pickerCandidateRows, pickerWindow, stablePickerItems, toggleSelected, type PickerCandidate } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import {
   addWizardMemory,
@@ -163,6 +162,7 @@ import { approvalResolutionAt } from "../work-groups.ts"
 import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createFeedGapReporter } from "./feed-gaps.ts"
 import { createClientStore } from "./client-store.ts"
+import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"
 import { createStreamCoalescer } from "../stream-coalescer.ts"
 import { applyWorkActivity, clearWorkActivitiesForSession, isWorkActivity, pruneWorkActivities, workActivityLabel, type WorkActivity } from "../work-activity.ts"
 import {
@@ -214,9 +214,9 @@ import {
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat"
 type PickerState = {
-  mode: "members" | "leader" | "workspace" | "choice" | "agent"
+  mode: "members" | "leader" | "workspace" | "choice" | "agent" | "native"
   title: string
-  candidates: Array<{ id: string; label: string }>
+  candidates: PickerCandidate[]
   selected: Set<string>
   cursor: number
   query: string
@@ -2979,17 +2979,58 @@ export function EnsembleV2App() {
     if (composerActive()) dispatchInteraction({ type: "focus.set", focus: "chat" })
   }
 
+  // Ticket #176: file completion reads one cached per-workspace list. A cold
+  // or stale cache paints immediately and refreshes in the background; a
+  // filter keystroke never spawns `fd`.
+  const fileIndex = createFileIndex({
+    discover: discoverWorkspaceFiles,
+    onUpdate: (updatedWorkspaceID) => {
+      if (workspaceID() !== updatedWorkspaceID) return
+      const current = completion()
+      if (current?.kind !== "file" || !composerRef) return
+      const value = String(composerRef.plainText ?? "")
+      const cursor = Number(composerRef.cursorOffset ?? value.length)
+      syncFileCompletion(value, cursor, current)
+    },
+  })
+  onCleanup(() => fileIndex.dispose())
+  // The root key changes only when the active workspace or its directory
+  // changes, so snapshot repaints do not re-prime discovery.
+  const activeFileRoot = createMemo(() => {
+    const workspace = activeWorkspace()
+    return workspace ? `${workspace.id}\u0000${workspace.directory}` : ""
+  })
+  createEffect(() => {
+    const root = activeFileRoot()
+    if (!root) return
+    const separator = root.indexOf("\u0000")
+    void fileIndex.refresh(root.slice(0, separator), root.slice(separator + 1)).catch(() => undefined)
+  })
+  const refreshActiveFileIndex = () => {
+    const workspace = activeWorkspace()
+    if (!workspace) return
+    void fileIndex.refresh(workspace.id, workspace.directory).catch(() => undefined)
+  }
+  /** A host file event names one path; refresh every workspace it belongs to. */
+  const refreshFileIndexForPath = (file: string) => {
+    const normalized = file.replaceAll("\\", "/")
+    let matched = false
+    for (const workspace of workspaces()) {
+      const directory = workspace.directory.replaceAll("\\", "/").replace(/\/+$/, "")
+      if (normalized && (normalized === directory || normalized.startsWith(`${directory}/`))) {
+        matched = true
+        void fileIndex.refresh(workspace.id, workspace.directory).catch(() => undefined)
+      }
+    }
+    if (!matched) refreshActiveFileIndex()
+  }
+
   const agentItems = () => activeAgents().map((agent) => ({ title: activeWorkspace()?.leaderID === agent.id ? chromeJoin([agent.name, "leader"]) : agent.name, value: agent.name }))
 
   const fileItems = () => {
     const workspace = activeWorkspace()
     if (!workspace) return []
-    try {
-      const output = execFileSync("fd", ["--type", "f", "--hidden", "--exclude", ".git", "--exclude", ".ensemble", "--exclude", "node_modules", "--max-depth", "4", ".", workspace.directory], { encoding: "utf8", timeout: 5000 })
-      return output.split("\n").filter(Boolean).slice(0, 500).map((file) => relative(workspace.directory, file)).map((file) => ({ title: file, value: file }))
-    } catch {
-      return []
-    }
+    return fileIndex.paths(workspace.id, workspace.directory).map((file) => ({ title: file, value: file }))
   }
 
   const skillPalette = (value: string, cursor: number) => {
@@ -3036,6 +3077,9 @@ export function EnsembleV2App() {
   }
 
   const openFileCompletion = (token: FileReferenceToken) => {
+    // Opening the palette is an explicit user refresh point: the cached list
+    // paints immediately, and one bounded background pass catches new files.
+    refreshActiveFileIndex()
     const query = token.path.toLowerCase()
     const items = fileItems().filter((item) => fuzzyMatch(query, item.title))
     setCompletion({ kind: "file", query, start: token.start, end: token.end, cursor: 0, items })
@@ -3466,23 +3510,49 @@ export function EnsembleV2App() {
     })
   }
 
-  const openNative = () => {
+  /**
+   * Ticket #174: one `o` decision for every surface. A Direct conversation
+   * opens its agent; Work focus opens the focused card's assignee; a group
+   * chat asks which workspace member. A missing binding is a clear toast, not
+   * a silent dead key.
+   */
+  const openNative = async () => {
     const workspace = activeWorkspace()
-    if (surface()?.kind === "agent") {
-      const sessionID = chatContext()?.sessionID
-      if (sessionID) {
-        clearInteractionForLeave()
-        context.ui.router.navigate({ type: "session", sessionID })
-        return
-      }
+    const current = surface()
+    const task = selectedTask()
+    const route = nativeSessionRoute({
+      surface: current?.kind === "agent"
+        ? { kind: "agent", sessionID: chatContext()?.sessionID, agentName: surfaceAgent()?.name }
+        : current?.kind === "workspace"
+          ? { kind: "workspace" }
+          : null,
+      focus: interaction().focus,
+      assignee: task?.assigneeID ? { id: task.assigneeID, name: agentName(state(), task.assigneeID) } : undefined,
+      bindingFor: (agentID) => workspace ? state()?.bindings[`${workspace.id}:${agentID}`] : undefined,
+    })
+    if (route.kind === "missing") {
+      showToast({ title: "Ensemble", message: route.message, tone: "warning" })
+      return
     }
-    const agentID = selectedTask()?.assigneeID ?? workspace?.leaderID
-    if (!workspace || !agentID) return
-    const binding = state()?.bindings[`${workspace.id}:${agentID}`]
-    if (binding) {
+    if (route.kind === "navigate") {
       clearInteractionForLeave()
-      context.ui.router.navigate({ type: "session", sessionID: binding.sessionID })
+      context.ui.router.navigate({ type: "session", sessionID: route.sessionID })
+      return
     }
+    if (!workspace) {
+      showToast({ title: "Ensemble", message: "Open a workspace first.", tone: "warning" })
+      return
+    }
+    const selected = await openPicker("native")
+    const agentID = selected?.[0]
+    if (!agentID) return
+    const sessionID = boundSessionID(state()?.bindings ?? {}, workspace.id, agentID)
+    if (!sessionID) {
+      showToast({ title: "Ensemble", message: missingNativeSessionMessage(agentName(state(), agentID)), tone: "warning" })
+      return
+    }
+    clearInteractionForLeave()
+    context.ui.router.navigate({ type: "session", sessionID })
   }
 
   const restoreSettingsFocus = () => {
@@ -4281,6 +4351,13 @@ export function EnsembleV2App() {
     void refresh()
     const stopData = context.data.listen(({ details }: any) => {
       const type = typeof details?.type === "string" ? details.type : ""
+      // Ticket #176: file-created/edited events invalidate only the owning
+      // workspace's cached list; the refresh is async and rate-limited.
+      if (type === "file.edited" || type === "filesystem.changed") {
+        const file = typeof details?.data?.file === "string" ? details.data.file : typeof details?.file === "string" ? details.file : ""
+        refreshFileIndexForPath(file)
+        return
+      }
       if (type === "session.text.delta" || type === "session.idle" || type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") handleNativeEvent(details)
       // Reconnect may have missed events; recover with an immediate forced
       // snapshot while the version guard still prevents an older response
@@ -4549,9 +4626,10 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.completion.up", title: "Ensemble: Previous completion", bind: "up", run: () => moveCompletion(-1) },
         { id: "ensemble.v2.completion.down", title: "Ensemble: Next completion", bind: "down", run: () => moveCompletion(1) },
         { id: "ensemble.v2.completion.select", title: "Ensemble: Select completion", bind: "enter", run: () => { void selectCompletion().catch(showError) } },
+        { id: "ensemble.v2.completion.refresh", title: "Ensemble: Refresh file list", bind: "ctrl+r", enabled: () => completion()?.kind === "file", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); refreshActiveFileIndex() } },
         { id: "ensemble.v2.completion.cancel", title: "Ensemble: Close completion", bind: "escape", run: () => closeCompletion() },
       ],
-      bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
+      bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.refresh", "ensemble.v2.completion.cancel"],
     }))
     // Ticket #145: the host may consume a lone Escape before the raw listener
     // sees it; keep a thin layer so the logs overlay always closes/refreshes.
@@ -4589,12 +4667,14 @@ export function EnsembleV2App() {
 
   // Review fix (finding 5): picker rows are value-compared, so the row
   // array keeps identity across snapshot polls unless a value changed.
+  // Ticket #174: the label column is computed for the visible rows, so the
+  // separator between a name and its role/leader/busy detail never drifts.
   let pickerItemsPrev: PickerItem[] = []
+  const pickerDetailWidth = () => Math.max(8, Math.min(28, Math.floor(pickerGeometry().width / 2) - 6))
   const pickerItems = createMemo<PickerItem[]>(() => {
     const state = picker()
     if (!state) return []
-    const next = state.candidates
-      .filter((item) => !state.query || fuzzyMatch(state.query, item.label))
+    const next = pickerCandidateRows(state.candidates, state.query, { maxWidth: pickerDetailWidth() })
       .map((item) => ({ id: item.id, label: item.label, selected: state.selected.has(item.id) }))
     const stable = stablePickerItems(pickerItemsPrev, next)
     pickerItemsPrev = stable as PickerItem[]
@@ -4618,10 +4698,18 @@ export function EnsembleV2App() {
       ? workspaces().map((workspace) => ({ id: workspace.id, label: chromeJoin([`#${workspace.name}`, workspaceLabel(workspace.directory)]) }))
       : mode === "leader"
         ? (options.candidates ?? []).map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent)).map((agent) => ({ id: agent.id, label: agent.name }))
-        : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
-    const state: PickerState = {
+        : mode === "native"
+          ? nativePickerCandidates(activeAgents().map((agent) => ({
+              id: agent.id,
+              name: agent.name,
+              title: agent.title,
+              leader: activeWorkspace()?.leaderID === agent.id,
+              busy: isWorkingTask(state(), agent.id, activeWorkspace()?.id),
+            })))
+          : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
+    const next: PickerState = {
       mode,
-      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : "Switch workspace",
+      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : mode === "native" ? "Native session" : "Switch workspace",
       candidates,
       selected: new Set(options.selected ?? []),
       cursor: 0,
@@ -4630,7 +4718,7 @@ export function EnsembleV2App() {
       resolve,
     }
     setModal(true)
-    setPicker(state)
+    setPicker(next)
     dispatchInteraction({ type: "overlay.set", overlay: "dialog" })
   })
 
@@ -5004,7 +5092,7 @@ export function EnsembleV2App() {
     const draft = state.draft
     if (state.flow === "workspace") {
       const members = draft.memberIDs.map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent))
-      const memberStep: WizardStep = { key: "members", title: "Workspace members", description: "Space toggles a member. Enter continues.", kind: "multi", options: rosterAgents().map((agent) => ({ id: agent.id, label: agent.name, detail: agent.title || undefined })) }
+      const memberStep: WizardStep = { key: "members", title: "Workspace members", description: "Space toggles a member. Enter continues.", kind: "multi", options: rosterAgents().map((agent) => ({ id: agent.id, label: agent.name, detail: agent.title.trim() || "no title" })) }
       const leaderStep: WizardStep = { key: "leader", title: "Workspace leader", description: "Only members selected in the previous step are listed.", kind: "pick", options: members.map((agent) => ({ id: agent.id, label: agent.name })) }
       const synthesisStep: WizardStep = { key: "synthesis", title: "Leader synthesis", description: "Combine child replies into one final answer?", kind: "choice", options: [{ id: "yes", label: "Yes — let the leader synthesize" }, { id: "no", label: "No — keep replies separate" }] }
       if (state.edit) return [memberStep, leaderStep, synthesisStep]
@@ -5123,6 +5211,17 @@ export function EnsembleV2App() {
     const query = state.query
     return step.options.filter((option) => option.id === "__manual__" || !query || fuzzyMatch(query, option.label))
   }
+
+  // Ticket #174: the workspace-member step and every other label/detail list
+  // share one padded label column. The budget leaves room for the cursor,
+  // marker, separator, and the detail cell inside the overlay.
+  const wizardDetailWidth = () => Math.max(8, Math.min(24, wizardGeometry().width - 34))
+  const wizardRowLabels = createMemo(() =>
+    alignedDetailRows(
+      wizardItems().map((item) => ({ label: item.label, detail: item.detail })),
+      { maxWidth: wizardDetailWidth() },
+    ),
+  )
 
   const wizardIsMemoryStep = () => isWizardMemoryStep(wizardStep()?.key)
 
@@ -6482,7 +6581,8 @@ export function EnsembleV2App() {
                         const item = items[offset + slot]
                         if (!item) return ""
                         const marker = step.kind === "multi" ? (state.draft.memberIDs.includes(item.id) ? "[x] " : "[ ] ") : (wizardSelected(step, item.id) ? "(•) " : "( ) ")
-                        return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${item.detail ? chromeJoin([item.label, item.detail]) : item.label}`
+                        const label = wizardRowLabels()[offset + slot] ?? item.label
+                        return `${offset + slot === wizardCursor() ? "›" : " "} ${marker}${label}`
                       })()}</text>
                     )}</For>
                     }>
