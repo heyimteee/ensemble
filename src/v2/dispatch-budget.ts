@@ -1,5 +1,5 @@
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
-import type { DispatchGroup, Id, Settings, Subtask } from "./types.ts"
+import type { DispatchGroup, Id, Settings, Subtask, WorkKind } from "./types.ts"
 
 /**
  * Dispatch hop budget arithmetic (ticket #160).
@@ -255,6 +255,66 @@ export function dispatchBudgetSummary(group: DispatchGroup, groups: Record<Id, D
   }
 }
 
+/**
+ * Compact aggregate for diagnostics, the doctor, and log triage (#163).
+ * Counts and caps only; never task content. Derived state uses the same
+ * `dispatchGroupState` truth the Work header reads.
+ */
+export type DispatchLedgerSummary = {
+  groups: number
+  roots: number
+  continuations: number
+  activeGroups: number
+  exhaustedGroups: number
+  closedGroups: number
+  /** Groups whose own group hops are fully spent, closed or not. */
+  groupsAtLimit: number
+  usedHops: number
+  maxHops: number
+  commandUsedHops: number
+  commandMaxHops: number
+  continuationsUsed: number
+  maxContinuations: number
+}
+
+export function dispatchLedgerSummary(groups: Record<Id, DispatchGroup>): DispatchLedgerSummary {
+  const summary: DispatchLedgerSummary = {
+    groups: 0,
+    roots: 0,
+    continuations: 0,
+    activeGroups: 0,
+    exhaustedGroups: 0,
+    closedGroups: 0,
+    groupsAtLimit: 0,
+    usedHops: 0,
+    maxHops: 0,
+    commandUsedHops: 0,
+    commandMaxHops: 0,
+    continuationsUsed: 0,
+    maxContinuations: 0,
+  }
+  for (const group of Object.values(groups)) {
+    summary.groups++
+    summary.usedHops += group.usedHops
+    summary.maxHops += group.maxHops
+    if (group.usedHops >= group.maxHops) summary.groupsAtLimit++
+    if (isRootGroup(group)) {
+      summary.roots++
+      summary.commandUsedHops += group.commandUsedHops ?? 0
+      summary.commandMaxHops += group.commandMaxHops ?? 0
+      summary.continuationsUsed += group.continuationsUsed ?? 0
+      summary.maxContinuations += group.maxContinuations ?? 0
+    } else {
+      summary.continuations++
+    }
+    const state = dispatchGroupState(group, groups)
+    if (state === "active") summary.activeGroups++
+    else if (state === "exhausted") summary.exhaustedGroups++
+    else summary.closedGroups++
+  }
+  return summary
+}
+
 /* ------------------------------------------------------------------------- *
  * Ticket #162: exhaustion and continuation groups.
  *
@@ -494,12 +554,23 @@ export function continuationRefusalText(refusal: ContinuationRefusal): string {
 }
 
 /**
+ * Minimum work-item shape needed to decide whether a row spends a hop. Kept
+ * structural so diagnostics and the doctor can count ledger evidence without
+ * constructing a full Subtask.
+ */
+export type DispatchHopWorkItem = {
+  creatorType: "user" | "agent"
+  workKind?: WorkKind
+  handoff?: { completion?: boolean; batch?: boolean }
+}
+
+/**
  * True when creating this work item spends one hop: an agent-created
  * delegation or explicit handoff. User command recipients, peer turns,
  * completion handoffs, batch review, synthesis, retries, restarts, and
  * recovery never consume.
  */
-export function dispatchesHop(task: Pick<Subtask, "creatorType" | "workKind" | "handoff">): boolean {
+export function dispatchesHop(task: DispatchHopWorkItem): boolean {
   if (task.creatorType !== "agent") return false
   if (task.workKind !== "delegation" && task.workKind !== "handoff") return false
   if (task.handoff?.completion === true) return false
@@ -508,7 +579,7 @@ export function dispatchesHop(task: Pick<Subtask, "creatorType" | "workKind" | "
 }
 
 /** Existing non-completion delegation and handoff count for one group. */
-export function dispatchHopCount(tasks: readonly Pick<Subtask, "creatorType" | "workKind" | "handoff">[]): number {
+export function dispatchHopCount(tasks: readonly DispatchHopWorkItem[]): number {
   return tasks.reduce((count, task) => count + (dispatchesHop(task) ? 1 : 0), 0)
 }
 

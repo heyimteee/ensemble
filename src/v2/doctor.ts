@@ -1,3 +1,5 @@
+import { dispatchGroupState, dispatchHopCount, dispatchLedgerSummary, isRootGroup, type DispatchLedgerSummary } from "./dispatch-budget.ts"
+import type { DispatchGroup, WorkKind } from "./types.ts"
 import type { WorkspaceConfig } from "./workspace-config.ts"
 
 export type ServiceIdentity = {
@@ -34,10 +36,25 @@ export type DoctorBinding = {
   agentVersion: number
 }
 
+export type DoctorSubtask = {
+  id: string
+  workspaceID?: string
+  parentID?: string
+  dispatchGroupID?: string
+  /** Missing legacy values are treated as user-created (never consuming). */
+  creatorType: "user" | "agent"
+  workKind?: WorkKind
+  handoff?: { completion?: boolean; batch?: boolean }
+}
+
 export type DoctorSnapshot = {
   agents: Record<string, DoctorAgent>
   workspaces: Record<string, DoctorWorkspace>
   bindings: Record<string, DoctorBinding>
+  /** Ticket #163 ledger records; absent on pre-ledger services. */
+  dispatchGroups?: Record<string, DispatchGroup>
+  /** The work rows the ledger counters must agree with. */
+  subtasks?: Record<string, DoctorSubtask>
 }
 
 export type DoctorConfigRead =
@@ -97,6 +114,8 @@ export type DoctorLocationReport = {
     }
   >
   config: DoctorConfigReport
+  /** Compact dispatch-ledger view (ticket #163); zeroed when no ledger exists. */
+  dispatch: DispatchLedgerSummary
   mismatches: DoctorMismatch[]
 }
 
@@ -215,6 +234,20 @@ const remediation: Record<string, string> = {
     "Remove the archived agent from workspace membership or restore the agent, then reopen the workspace so its config is rewritten.",
   storage_leader_not_member:
     "Choose an existing workspace member as leader, then reopen the workspace so storage and .ensemble/config.json agree.",
+  dispatch_group_over_budget:
+    "A dispatch group recorded more hops than its captured cap. Restore the ledger record from a consistent backup or start a new command; never edit caps on a live group.",
+  dispatch_command_over_budget:
+    "The command ledger recorded more hops than the user's cap. Restore the ledger from a consistent backup or ask the user to start a new command; do not raise a live ceiling.",
+  dispatch_group_counter_mismatch:
+    "The ledger's hop counter is lower than the counted agent delegation and handoff rows in the group. Restore the ledger record from a consistent backup before relying on the budget; do not delete the extra work rows.",
+  dispatch_command_counter_mismatch:
+    "The command's hop counter disagrees with the sum of its groups. Restore the affected ledger records from a consistent backup before relying on the command budget.",
+  dispatch_continuation_orphan:
+    "A continuation group names a parent that does not exist. Restore the missing parent ledger record or mark the continuation closed; do not re-point it at an unrelated command.",
+  dispatch_group_unreachable:
+    "A dispatch group cannot walk to its declared root (missing parent, cycle, or mismatched root id). Restore the missing ledger records or close the group so support can trust the lineage.",
+  dispatch_continuation_empty:
+    "An active continuation group holds no work. Dispatch its first work item, close it, or start a new command so an idle segment cannot quietly consume the continuation allowance.",
   binding_unknown_workspace:
     "A session binding points at a workspace that no longer exists. Remove or repair the orphaned binding by recreating the workspace; do not hand-edit OpenCode storage.",
   binding_unknown_agent:
@@ -274,6 +307,35 @@ type PendingMismatch = {
 
 function locationWorkspace(input: DoctorLocationInput): DoctorWorkspace | undefined {
   return Object.values(input.snapshot.workspaces).find((workspace) => !workspace.archived && workspace.directory === input.directory)
+}
+
+/**
+ * Walk the parent chain from one group to the root it declares. Returns a
+ * reason code when the chain is broken; IDs only, no task content.
+ */
+function dispatchReachability(
+  group: DispatchGroup,
+  groups: Record<string, DispatchGroup>,
+): "missing-parent" | "cycle" | "root-mismatch" | undefined {
+  const seen = new Set<string>()
+  let current: DispatchGroup | undefined = group
+  while (current) {
+    if (seen.has(current.id)) return "cycle"
+    seen.add(current.id)
+    if (current.id === group.rootID) {
+      return current.rootID === current.id ? undefined : "root-mismatch"
+    }
+    if (!current.parentID) return "missing-parent"
+    const parent: DispatchGroup | undefined = groups[current.parentID]
+    if (!parent) return "missing-parent"
+    if (parent.rootID !== group.rootID) return "root-mismatch"
+    current = parent
+  }
+  return "missing-parent"
+}
+
+function countedDispatchHops(tasks: readonly DoctorSubtask[]): number {
+  return dispatchHopCount(tasks)
 }
 
 export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
@@ -430,6 +492,102 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
       // Native sessions are created lazily, not when membership is assigned.
     }
 
+    // Ticket #163: ledger invariants. Counters are derived facts, so the
+    // doctor compares them to the work rows that actually spent hops and to
+    // the parent/root lineage. A closed group may still hold exempt
+    // completion, batch, turn, and synthesis rows; those never count.
+    const dispatchGroups = input.snapshot.dispatchGroups ?? {}
+    const dispatchTasks = input.snapshot.subtasks ?? {}
+    const dispatchTasksByGroup = new Map<string, DoctorSubtask[]>()
+    for (const task of Object.values(dispatchTasks)) {
+      if (!task.dispatchGroupID) continue
+      const bucket = dispatchTasksByGroup.get(task.dispatchGroupID)
+      if (bucket) bucket.push(task)
+      else dispatchTasksByGroup.set(task.dispatchGroupID, [task])
+    }
+    for (const group of Object.values(dispatchGroups).sort((a, b) => a.id.localeCompare(b.id))) {
+      if (group.usedHops > group.maxHops) {
+        add(
+          [index],
+          "dispatch_group_over_budget",
+          { groupID: group.id, workspaceID: group.workspaceID, usedHops: group.usedHops, maxHops: group.maxHops },
+          `Dispatch group ${group.id} used ${group.usedHops} of ${group.maxHops} hops.`,
+          "storage",
+        )
+      }
+      const countedHops = countedDispatchHops(dispatchTasksByGroup.get(group.id) ?? [])
+      // Purged terminal rows may leave the counter higher; that only tightens
+      // the budget. A counter below the visible counted work is the unsafe
+      // direction because it would admit extra dispatches.
+      if (countedHops > group.usedHops) {
+        add(
+          [index],
+          "dispatch_group_counter_mismatch",
+          { groupID: group.id, workspaceID: group.workspaceID, usedHops: group.usedHops, countedHops },
+          `Dispatch group ${group.id} records ${group.usedHops} hops but ${countedHops} counted delegation/handoff rows reference it.`,
+          "storage",
+        )
+      }
+      if (isRootGroup(group)) {
+        if (group.commandUsedHops !== undefined && group.commandMaxHops !== undefined && group.commandUsedHops > group.commandMaxHops) {
+          add(
+            [index],
+            "dispatch_command_over_budget",
+            { rootID: group.id, workspaceID: group.workspaceID, commandUsedHops: group.commandUsedHops, commandMaxHops: group.commandMaxHops },
+            `Command ${group.id} used ${group.commandUsedHops} of ${group.commandMaxHops} hops.`,
+            "storage",
+          )
+        }
+        const familyUsedHops = Object.values(dispatchGroups)
+          .filter((item) => item.rootID === group.id)
+          .reduce((total, item) => total + item.usedHops, 0)
+        if (group.commandUsedHops !== undefined && familyUsedHops !== group.commandUsedHops) {
+          add(
+            [index],
+            "dispatch_command_counter_mismatch",
+            { rootID: group.id, workspaceID: group.workspaceID, commandUsedHops: group.commandUsedHops, groupUsedHops: familyUsedHops },
+            `Command ${group.id} records ${group.commandUsedHops} hops but its groups sum to ${familyUsedHops}.`,
+            "storage",
+          )
+        }
+        continue
+      }
+      const orphan = !group.parentID || !dispatchGroups[group.parentID]
+      if (orphan) {
+        add(
+          [index],
+          "dispatch_continuation_orphan",
+          { groupID: group.id, workspaceID: group.workspaceID, parentID: group.parentID ?? null, rootID: group.rootID },
+          `Continuation group ${group.id} names parent ${group.parentID ?? "(none)"}, which does not exist.`,
+          "storage",
+        )
+      } else {
+        const reason = dispatchReachability(group, dispatchGroups)
+        if (reason) {
+          add(
+            [index],
+            "dispatch_group_unreachable",
+            { groupID: group.id, workspaceID: group.workspaceID, rootID: group.rootID, reason },
+            `Dispatch group ${group.id} cannot reach root ${group.rootID} (${reason}).`,
+            "storage",
+          )
+        }
+      }
+      if (
+        dispatchGroupState(group, dispatchGroups) === "active" &&
+        group.usedHops === 0 &&
+        (dispatchTasksByGroup.get(group.id)?.length ?? 0) === 0
+      ) {
+        add(
+          [index],
+          "dispatch_continuation_empty",
+          { groupID: group.id, workspaceID: group.workspaceID, rootID: group.rootID, continuationIndex: group.continuationIndex },
+          `Continuation group ${group.id} is active with no work and no spent hops.`,
+          "storage",
+        )
+      }
+    }
+
     for (const item of Object.values(input.snapshot.bindings).sort((a, b) => a.key.localeCompare(b.key))) {
       const expectedKey = `${item.workspaceID}:${item.agentID}`
       if (item.key !== expectedKey) {
@@ -509,6 +667,7 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
       workspaces: sortedWorkspaceReport(input),
       bindings: sortedBindings(input),
       config,
+      dispatch: dispatchLedgerSummary(dispatchGroups),
       mismatches: [],
     }
   })
@@ -682,6 +841,7 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
       "Read-only diagnostic: the doctor calls only the diagnostic RPC and never calls invoke, snapshot, or mutating methods; it never writes files.",
       "Diagnostic reads do not trigger workspace discovery or config reconciliation. Reads are sequential, not atomic. One selected service is queried for every directory; this does not discover separate service processes.",
       "Session bindings are lazy and may be retained for former members; their absence alone is not a defect.",
+      "Dispatch counters may exceed visible counted work rows after terminal retention. The doctor flags only a counter below counted delegation/handoff work, a command whose counters disagree with its groups, and lineage or cap violations.",
     ],
     locations: reports,
     mismatches,

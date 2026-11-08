@@ -243,7 +243,85 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
       agentVersion: raw.agentVersion,
     }
   }
-  return { agents, workspaces, bindings }
+  // Ticket #163: ledger records are optional so a pre-ledger service still
+  // produces a usable report. Task rows are reduced to the fields hop counting
+  // needs; titles, instructions, and conversation text never travel.
+  let dispatchGroups: DoctorSnapshot["dispatchGroups"]
+  if (state.dispatchGroups !== undefined) {
+    if (!state.dispatchGroups || typeof state.dispatchGroups !== "object" || Array.isArray(state.dispatchGroups)) {
+      throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid dispatchGroups map.`)
+    }
+    dispatchGroups = {}
+    for (const [id, raw] of Object.entries<any>(state.dispatchGroups)) {
+      if (
+        !raw ||
+        typeof raw.id !== "string" ||
+        typeof raw.workspaceID !== "string" ||
+        typeof raw.rootID !== "string" ||
+        typeof raw.continuationIndex !== "number" ||
+        typeof raw.maxHops !== "number" ||
+        typeof raw.usedHops !== "number" ||
+        typeof raw.depthMax !== "number" ||
+        typeof raw.createdAt !== "number"
+      ) {
+        throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid dispatch group entry: ${id}`)
+      }
+      dispatchGroups[id] = {
+        id: raw.id,
+        workspaceID: raw.workspaceID,
+        rootID: raw.rootID,
+        ...(typeof raw.parentID === "string" ? { parentID: raw.parentID } : {}),
+        continuationIndex: raw.continuationIndex,
+        maxHops: raw.maxHops,
+        usedHops: raw.usedHops,
+        depthMax: raw.depthMax,
+        ...(typeof raw.commandMaxHops === "number" ? { commandMaxHops: raw.commandMaxHops } : {}),
+        ...(typeof raw.commandUsedHops === "number" ? { commandUsedHops: raw.commandUsedHops } : {}),
+        ...(typeof raw.maxContinuations === "number" ? { maxContinuations: raw.maxContinuations } : {}),
+        ...(typeof raw.continuationsUsed === "number" ? { continuationsUsed: raw.continuationsUsed } : {}),
+        createdAt: raw.createdAt,
+        ...(typeof raw.closedAt === "number" ? { closedAt: raw.closedAt } : {}),
+        ...(typeof raw.closeReason === "string" ? { closeReason: raw.closeReason } : {}),
+        ...(raw.reconciled === true ? { reconciled: true } : {}),
+      }
+    }
+  }
+  let subtasks: DoctorSnapshot["subtasks"]
+  if (state.subtasks !== undefined) {
+    if (!state.subtasks || typeof state.subtasks !== "object" || Array.isArray(state.subtasks)) {
+      throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid subtasks map.`)
+    }
+    subtasks = {}
+    for (const [id, raw] of Object.entries<any>(state.subtasks)) {
+      if (!raw || typeof raw.id !== "string") {
+        throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid subtask entry: ${id}`)
+      }
+      const workKind = raw.workKind === "delegation" || raw.workKind === "handoff" || raw.workKind === "turn" ? raw.workKind : undefined
+      subtasks[id] = {
+        id: raw.id,
+        ...(typeof raw.workspaceID === "string" ? { workspaceID: raw.workspaceID } : {}),
+        ...(typeof raw.parentID === "string" ? { parentID: raw.parentID } : {}),
+        ...(typeof raw.dispatchGroupID === "string" ? { dispatchGroupID: raw.dispatchGroupID } : {}),
+        creatorType: raw.creatorType === "agent" ? "agent" : "user",
+        ...(workKind ? { workKind } : {}),
+        ...(raw.handoff && typeof raw.handoff === "object"
+          ? {
+              handoff: {
+                ...(typeof raw.handoff.completion === "boolean" ? { completion: raw.handoff.completion } : {}),
+                ...(typeof raw.handoff.batch === "boolean" ? { batch: raw.handoff.batch } : {}),
+              },
+            }
+          : {}),
+      }
+    }
+  }
+  return {
+    agents,
+    workspaces,
+    bindings,
+    ...(dispatchGroups ? { dispatchGroups } : {}),
+    ...(subtasks ? { subtasks } : {}),
+  }
 }
 
 async function fetchDiagnostic(url: string, password: string | undefined, directory: string, fetchImpl: typeof fetch): Promise<DoctorSnapshot> {
@@ -382,6 +460,7 @@ function renderHuman(report: DoctorReport): string {
       lines.push(`      members: ${workspace.memberIDs.map((memberID, index) => `${workspace.memberNames[index] ?? "unknown"} (${memberID})`).join(", ") || "none"}`)
       lines.push(`      configVersion: ${workspace.configVersion ?? "missing"}; synthesis=${workspace.synthesis}; paused=${workspace.paused}; archived=${workspace.archived}`)
     }
+    lines.push(`  Dispatch: groups=${location.dispatch.groups} roots=${location.dispatch.roots} continuations=${location.dispatch.continuations} active=${location.dispatch.activeGroups} exhausted=${location.dispatch.exhaustedGroups} closed=${location.dispatch.closedGroups} hops=${location.dispatch.usedHops}/${location.dispatch.maxHops} command=${location.dispatch.commandUsedHops}/${location.dispatch.commandMaxHops}`)
     lines.push(`  Bindings (${location.bindings.length}):`)
     if (location.bindings.length === 0) lines.push("    none")
     for (const binding of location.bindings) {

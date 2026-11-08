@@ -274,6 +274,13 @@ export function createStoreObserver(logger: EnsembleLogger): StoreObserver {
         logger.event("info", "dispatch", next.reconciled ? "dispatch.group.reconciled" : "dispatch.group.created", fields)
         return
       }
+      // Ticket #163: sealing a group (a continuation seals its parent) is a
+      // lifecycle event, not routine counter churn. Emit it at info with the
+      // duration and reason code; exempt completion rows may still save later.
+      if (next.closedAt !== undefined && previous.closedAt === undefined) {
+        logger.event("info", "dispatch", "dispatch.group.closed", fields)
+        return
+      }
       logger.event("debug", "dispatch", "dispatch.group.updated", fields)
     },
 

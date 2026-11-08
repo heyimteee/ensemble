@@ -23,6 +23,7 @@ import {
   dispatchFanOutCount,
   dispatchGroupRemaining,
   dispatchGroupState,
+  dispatchLedgerSummary,
   dispatchRefusalText,
   dispatchTargetGroup,
   dispatchesHop,
@@ -1525,7 +1526,7 @@ export class EnsembleV2Service {
     return jsonSafe(payload)
   }
 
-  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
     await this.store.sync()
     this.refreshDmClock()
     this.noteViewDirectory(directory)
@@ -1537,6 +1538,12 @@ export class EnsembleV2Service {
     return jsonSafe({
       state,
       directory,
+      // Ticket #163: the compact, content-free ledger view support can read
+      // without scanning every row. Full group records remain in `state`.
+      dispatch: {
+        summary: dispatchLedgerSummary(state.dispatchGroups),
+        groups: Object.values(state.dispatchGroups).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)),
+      },
       ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
       ...(this.logger ? { logs: this.logger.stats() } : {}),
       service: {
@@ -3893,7 +3900,9 @@ export class EnsembleV2Service {
       })
       if (!validation.ok) {
         this.logger?.event("warn", "dispatch", "dispatch.settings.invalid", {
+          reason: "invalid-dispatch-limits",
           fields: Object.keys(payload).filter((field) => field.startsWith("dispatch")),
+          errorCount: validation.errors.length,
           errors: validation.errors,
         })
         throw Object.assign(new Error(validation.errors[0]!), { code: "invalid_settings" })

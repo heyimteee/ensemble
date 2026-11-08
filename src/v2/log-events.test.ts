@@ -127,6 +127,29 @@ test("ticket160: dispatch group creation and reconciliation log IDs, counts, and
   }
 })
 
+test("ticket163: a sealed group projects one closed event with IDs, counts, duration, and reason", async () => {
+  const { log, store } = setup()
+  await store.saveWorkspace(workspace())
+  const root: DispatchGroup = newRootDispatchGroup({ id: "dispatch_root", workspaceID: "w", settings: undefined, now: 10 })
+  await store.saveDispatchGroup({ ...root, usedHops: 8, commandUsedHops: 8 })
+  await store.saveDispatchGroup({ ...root, usedHops: 8, commandUsedHops: 8, closedAt: 30, closeReason: "continued" })
+
+  const closed = log.recent({ event: "dispatch.group.closed" })
+  assert.equal(closed.length, 1)
+  assert.equal(closed[0]?.level, "info")
+  assert.equal(closed[0]?.cat, "dispatch")
+  assert.equal((closed[0] as any).dispatchGroupID, "dispatch_root")
+  assert.equal((closed[0] as any).rootID, "dispatch_root")
+  assert.equal((closed[0] as any).usedHops, 8)
+  assert.equal((closed[0] as any).maxHops, 8)
+  assert.equal((closed[0] as any).closeReason, "continued")
+  assert.equal((closed[0] as any).closedAt, 30)
+  assert.equal((closed[0] as any).durationMs, 20)
+  for (const forbidden of ["title", "instruction", "path", "content", "text"] as const) {
+    assert.equal(forbidden in (closed[0] as any), false, `closed events carry no ${forbidden}`)
+  }
+})
+
 test("ticket161: hop events project IDs, counts, and reason codes only", () => {
   const group: DispatchGroup = {
     ...newRootDispatchGroup({ id: "dispatch_root", workspaceID: "w", settings: undefined, now: 1 }),
