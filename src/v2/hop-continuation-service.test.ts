@@ -515,6 +515,12 @@ test("ticket162: the leader can dispatch multiple children into the new continua
     const continuation = groups[0]!
     assert.equal(groupOf(snapshot, groupID).usedHops, 8, "children never fall back into the exhausted root")
     assert.equal(continuation.usedHops, 3)
+    const namingActive = await tools.get("delegate").execute(
+      { continuationOf: continuation.id, groupMaxHops: 8, maxHops: 0, assignee: "Sage", title: "Named active", instruction: "Check" },
+      { sessionID: novaSession },
+    )
+    assert.match(namingActive.content, /Continuation refused: the dispatch group still has \d+ of 8 hops; dispatch into it/)
+    assert.equal(continuationGroups((await handlers.snapshot({ directory })), groupID).length, 1, "naming an active continuation opens no second segment")
     const children = Object.values(snapshot.state.subtasks).filter((task: any) =>
       ["Continuation child one", "Continuation child two", "Continuation child three"].includes(task.title)
     ) as any[]
@@ -592,6 +598,90 @@ test("ticket163: invalid dispatch limits log one warn event with setting names, 
     for (const forbidden of ["title", "instruction", "path", "content", "text"] as const) {
       assert.equal(forbidden in entry, false, `invalid settings events carry no ${forbidden}`)
     }
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket159: a leader opens a continuation after spending every direct delegate", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-continuation-"))
+  const { ctx, handlers, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    const { sessionID, groupID } = await liveCommand(directory, handlers, workspace.id, nova.id, "Direct budget")
+    for (let index = 0; index < 8; index++) {
+      const delegated = await tools.get("delegate").execute(
+        { assignee: "Sage", title: `Direct ${index + 1}`, instruction: "Check", maxHops: 0 },
+        { sessionID },
+      )
+      assert.match(delegated.content, /Delegated to Sage/, `direct delegate ${index + 1}: ${delegated.content}`)
+    }
+    let snapshot = await handlers.snapshot({ directory })
+    const root = groupOf(snapshot, groupID)
+    assert.equal(root.usedHops, 8)
+    assert.equal(root.commandUsedHops, 8)
+    assert.equal(root.continuationsUsed, 0)
+    const rootTask = Object.values(snapshot.state.subtasks).find((task: any) => task.title === "Direct budget") as any
+    assert.equal(rootTask.taskMaxHops, undefined, "a user command recipient has no silent task budget")
+
+    const continued = await tools.get("delegate").execute(
+      { continuationOf: groupID, groupMaxHops: 8, maxHops: 0, assignee: "Sage", title: "After eight", instruction: "Check" },
+      { sessionID },
+    )
+    assert.match(continued.content, /Continuation group opened|Delegated to Sage/, continued.content)
+    assert.doesNotMatch(continued.content, /task budget is exhausted/)
+
+    snapshot = await handlers.snapshot({ directory })
+    const afterRoot = groupOf(snapshot, groupID)
+    assert.equal(afterRoot.usedHops, 8, "the spent root stays spent")
+    assert.equal(afterRoot.commandUsedHops, 9)
+    assert.equal(afterRoot.continuationsUsed, 1)
+    assert.equal(afterRoot.closeReason, "continued")
+    const groups = continuationGroups(snapshot, groupID)
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0]!.usedHops, 1)
+    const ninth = Object.values(snapshot.state.subtasks).find((task: any) => task.title === "After eight") as any
+    assert.equal(ninth.dispatchGroupID, groups[0]!.id)
+    assert.equal(ninth.dispatchDepth, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket159: a command-cap continuation refusal names the command, not the task", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-continuation-"))
+  const { ctx, handlers, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    const changed = await handlers.invoke({
+      directory,
+      action: "settings.update",
+      payload: { dispatchGroupMaxHops: 8, dispatchCommandMaxHops: 8, dispatchDepth: 8, dispatchContinuations: 0 },
+    })
+    assert.equal(changed.ok, true)
+    const { sessionID, groupID } = await liveCommand(directory, handlers, workspace.id, nova.id, "Direct cap")
+    for (let index = 0; index < 8; index++) {
+      await tools.get("delegate").execute(
+        { assignee: "Sage", title: `Cap ${index + 1}`, instruction: "Check", maxHops: 0 },
+        { sessionID },
+      )
+    }
+    const refused = await tools.get("delegate").execute(
+      { continuationOf: groupID, groupMaxHops: 8, maxHops: 0, assignee: "Sage", title: "Cap after", instruction: "Check" },
+      { sessionID },
+    )
+    assert.match(refused.content, /Continuation refused: the command budget is exhausted \(8\/8 hops\)/)
+    assert.match(refused.content, /start a new command for a fresh budget/)
+    assert.doesNotMatch(refused.content, /task budget/)
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(continuationGroups(snapshot, groupID).length, 0)
+    assert.equal(groupOf(snapshot, groupID).continuationsUsed, 0)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

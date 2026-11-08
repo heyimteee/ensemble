@@ -1,5 +1,5 @@
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
-import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchGroupExhausted, dispatchGroupRemaining, reconcileLegacyDispatchGroup, validateContinuation, type ContinuationRefusal, type DispatchRefusal } from "./dispatch-budget.ts"
+import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchFanOutCount, dispatchGroupExhausted, dispatchRefusalReasonCode, reconcileLegacyDispatchGroup, reconcileLegacyTaskBudgets, validateContinuation, type ContinuationRefusal, type DispatchRefusal, type DispatchRefusalReason } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
@@ -836,9 +836,10 @@ export class V2Store {
 
   /**
    * Ticket #160/#161 dispatch admission seam. One serialized mutation creates
-   * the work item and spends its group and command hop. Duplicate task ids are
-   * idempotent and never consume twice; a crash can leave at worst an
-   * unspent hop with its work item, never a spent hop without work.
+   * the work item and spends its group and command hop. Duplicate task ids and
+   * duplicate queue keys are idempotent and never consume twice; a crash can
+   * leave at worst an unspent hop with its work item, never a spent hop
+   * without work.
    *
    * `enforce` is the #161 policy switch. #160 admits without refusing so the
    * ledger can be observed before enforcement lands; #161 passes true and
@@ -857,7 +858,9 @@ export class V2Store {
     exhaustedBefore?: boolean
     exhaustedAfter?: boolean
     consumed: boolean
-    reason?: "task-exhausted" | "group-exhausted" | "group-closed" | "depth-exhausted" | "command-exhausted" | "fanout-exhausted"
+    /** True when an existing row with the same queue key was returned. */
+    deduped?: boolean
+    reason?: DispatchRefusalReason
     refusal?: DispatchRefusal
   }> {
     return this.write(async () => {
@@ -868,6 +871,23 @@ export class V2Store {
           task: existing,
           group: existing.dispatchGroupID ? this.state.dispatchGroups[existing.dispatchGroupID] : undefined,
           consumed: false,
+        }
+      }
+      // Queue-key idempotency belongs to the serialized admission, not to the
+      // caller's pre-check: two concurrent identical dispatches both pass the
+      // read-side lookup, then exactly one may create work and spend a hop.
+      const duplicate = subtask.queueKey
+        ? Object.values(this.state.subtasks).find(
+            (task) => task.workspaceID === subtask.workspaceID && task.queueKey === subtask.queueKey,
+          )
+        : undefined
+      if (duplicate) {
+        return {
+          admitted: true,
+          task: duplicate,
+          group: duplicate.dispatchGroupID ? this.state.dispatchGroups[duplicate.dispatchGroupID] : undefined,
+          consumed: false,
+          deduped: true,
         }
       }
       const parent = subtask.parentID ? this.state.subtasks[subtask.parentID] : undefined
@@ -885,22 +905,21 @@ export class V2Store {
       const root = group.id === group.rootID ? group : this.state.dispatchGroups[group.rootID]
       const exhaustedBefore = dispatchGroupExhausted(group, this.state.dispatchGroups)
       if (options.enforce) {
+        // The first hop of a continuation is the continuation's opening
+        // dispatch: it bypasses the caller's spent task budget just as the
+        // service preflight does, while the group, command, depth, and fan-out
+        // caps still apply. Later hops in the segment use the normal task rule.
+        const openingContinuation = group.continuationIndex > 0 && group.usedHops === 0
         const budget = dispatchBudgetState({
           group,
           groups: this.state.dispatchGroups,
-          task: parent,
+          task: openingContinuation ? undefined : parent,
           subtasks: this.state.subtasks,
           nextDepth: depth,
         })
-        const fanOutUsed = parent
-          ? Object.values(this.state.subtasks).filter(
-              (task) => task.parentID === parent.id && (!options.perRunKind || task.workKind === options.perRunKind),
-            ).length
-          : 0
+        const fanOutUsed = parent ? dispatchFanOutCount(parent.id, this.state.subtasks, options.perRunKind) : 0
         const refusal = dispatchAdmissionRefusal({ state: budget, maxPerRun: options.maxPerRun, fanOutUsed })
         if (refusal) {
-          const reason: "task-exhausted" | "group-exhausted" | "group-closed" | "depth-exhausted" | "command-exhausted" | "fanout-exhausted" =
-            refusal.layer === "closed" ? "group-closed" : `${refusal.layer}-exhausted`
           return {
             admitted: false,
             task: subtask,
@@ -909,7 +928,7 @@ export class V2Store {
             root,
             previousRoot: root,
             consumed: false,
-            reason,
+            reason: dispatchRefusalReasonCode(refusal),
             refusal,
           }
         }
@@ -1051,14 +1070,14 @@ export class V2Store {
       for (const id of batch) {
         const group = this.state.dispatchGroups[id]
         if (!group) continue
-        const remaining = dispatchGroupRemaining(group)
-        for (const task of byGroup.get(id) ?? []) {
-          if (task.state === "replied") continue
-          if (task.taskMaxHops === remaining) continue
-          // Mutate in place, matching the legacy dispatch-group backfill: the
-          // row keeps its identity and a concurrent foreign field update is
-          // never overwritten by a stale clone.
-          task.taskMaxHops = remaining
+        // Only live rows that still lack a budget are filled; a stored budget
+        // (including zero) is deliberate and is never overwritten. Mutate the
+        // existing row in place so a concurrent foreign field update is not
+        // replaced by a stale clone.
+        for (const grant of reconcileLegacyTaskBudgets(group, byGroup.get(id) ?? [])) {
+          const task = this.state.subtasks[grant.id]
+          if (!task) continue
+          task.taskMaxHops = grant.taskMaxHops
           await this.ctx.storage.set(`v2/subtask/${task.id}`, task)
           changes.push({ entity: "subtask", op: "upsert", task: structuredClone(task) })
         }

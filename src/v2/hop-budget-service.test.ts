@@ -299,7 +299,7 @@ test("ticket161: two concurrent dispatches at one remaining hop produce exactly 
   }
 })
 
-test("ticket161: a pending approval that becomes unaffordable is refused visibly without work", async () => {
+test("ticket161: a pending approval whose group is exhausted is refused visibly without work", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-hops-"))
   const { ctx, handlers, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
@@ -326,7 +326,7 @@ test("ticket161: a pending approval that becomes unaffordable is refused visibly
     const outside = Object.values(after.state.subtasks).filter((task: any) => task.assigneeID === echo.id)
     assert.equal(outside.length, 0, "an unaffordable approval creates no work")
     const messages = (after.state.messages[workspace.id] ?? []) as any[]
-    assert.ok(messages.some((message) => message.author === "system" && message.text.startsWith("Handoff refused: your task budget is exhausted (8/8 direct dispatches)")))
+    assert.ok(messages.some((message) => message.author === "system" && message.text.startsWith("Handoff refused: the dispatch group is exhausted (8/8 hops)")))
     assert.equal(after.state.dispatchGroups[groupID].usedHops, 8, "the refusal spends no hop")
   } finally {
     await stop()
@@ -410,6 +410,35 @@ test("ticket161: hop consumption and refusal log IDs, counts, and reason codes w
       false,
       "a controlled budget refusal is not a generic task failure",
     )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket159: concurrent identical delegates create one work item and consume one hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-hops-"))
+  const { ctx, handlers, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    const { sessionID, groupID } = await liveCommand(directory, handlers, workspace.id, nova.id, "Concurrent command")
+    const input = { assignee: "Sage", title: "Concurrent ask", instruction: "Check", maxHops: 0 }
+    const [first, second] = await Promise.all([
+      tools.get("delegate").execute(input, { sessionID }),
+      tools.get("delegate").execute(input, { sessionID }),
+    ])
+    assert.match(first.content, /Delegated to Sage|Already delegated to Sage/)
+    assert.match(second.content, /Delegated to Sage|Already delegated to Sage/)
+
+    const snapshot = await handlers.snapshot({ directory })
+    const rows = Object.values(snapshot.state.subtasks).filter((task: any) => task.title === "Concurrent ask")
+    assert.equal(rows.length, 1, "the serialized queue-key admission created one work item")
+    assert.equal(snapshot.state.dispatchGroups[groupID].usedHops, 1)
+    assert.equal(snapshot.state.dispatchGroups[groupID].commandUsedHops, 1)
+    const consumed = await handlers["logs.recent"]({ directory, cat: "dispatch", event: "dispatch.hop.consumed", limit: 20 })
+    assert.equal(consumed.entries.filter((entry: any) => entry.dispatchGroupID === groupID).length, 1, "one consumed hop row")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

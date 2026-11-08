@@ -9,7 +9,8 @@ import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
-import { LIMITS_ROW_IDS, cycleLimitsValue, limitsFromSettings, limitsSave, limitsSavedMessage } from "./limits.ts"
+import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
+import { dispatchLimits } from "../dispatch-budget.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
@@ -406,7 +407,7 @@ export function EnsembleV2App() {
   // Ticket #160: the workspace-level Limits panel is separate from per-agent
   // settings. It edits the four user dispatch ceilings for new commands.
   const [limitsOpen, setLimitsOpen] = createSignal(false)
-  const [limitsDraft, setLimitsDraft] = createSignal(limitsFromSettings(undefined))
+  const [limitsDraft, setLimitsDraft] = createSignal(dispatchLimits(undefined))
   const [limitsCursor, setLimitsCursor] = createSignal(0)
   const [limitsError, setLimitsError] = createSignal<string | undefined>(undefined)
   const [draft, setDraft] = createSignal<Agent | null>(null)
@@ -3461,7 +3462,7 @@ export function EnsembleV2App() {
   }
 
   const openLimits = () => {
-    setLimitsDraft(limitsFromSettings(state()?.settings))
+    setLimitsDraft(dispatchLimits(state()?.settings))
     setLimitsCursor(0)
     setLimitsError(undefined)
     setLimitsOpen(true)

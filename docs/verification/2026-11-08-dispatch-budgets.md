@@ -1,13 +1,13 @@
 # Dispatch budgets, continuation groups, and live evidence (#164)
 
-Status: **verified locally on Linux/tmux; fake-provider five/nine/cap and size matrix pass; real playground continuation smoke skipped because the live host runs the pre-#160 main tree and was not restarted or reconfigured**
+Status: **verified locally on Linux/tmux; fake-provider five/nine/cap and size matrix pass; review fix pass green on `npm run verify`; real playground continuation smoke remains a post-merge step because the live host was not restarted or reconfigured**
 Date: 2026-11-08
 Issue: [#164](https://github.com/heyimteee/ensemble/issues/164)
 Spec: [#159](https://github.com/heyimteee/ensemble/issues/159)
 ADR: [0004](../adr/0004-dispatch-budgets-and-continuation.md)
-Base: `integration/dispatch-budgets` at `b31b085` (includes #160–#163)
-Branch: `verify/dispatch-budgets`
-Worktree: `/home/tristan/dev/ensemble-164`
+Base: `integration/dispatch-budgets` at `a39998f` (includes #160–#163 and the #164 verification commit)
+Branch: `fix/dispatch-review` (review fix pass for #159)
+Worktree: `/home/tristan/dev/ensemble-159-fix`
 
 This record covers the delivery evidence for the dispatch-budget contract
 (#160–#163) and this documentation/live-verification pass (#164):
@@ -23,8 +23,32 @@ This record covers the delivery evidence for the dispatch-budget contract
 - `npm run test:live:sizes` passes 80×24, 100×30, 120×40, 160×50, and
   `NO_COLOR=1` with budget labels.
 - The full unit/integration suite passes.
-- The real playground continuation smoke is a documented skip; the post-merge
-  smoke is left for the leader (see [Skips](#skips-and-limitations)).
+- The real playground continuation smoke remains a clearly marked post-merge
+  step; the fix pass did not restart or reconfigure the live host.
+
+## Review fix pass (#159 two-axis review)
+
+The two-axis review of the integration tip identified the areas below. This
+pass addressed them on `fix/dispatch-review`:
+
+| Finding | Resolution and evidence |
+|---|---|
+| Leader continuation blocked by the root task's implicit budget | User-command recipients no longer receive a task budget; opening a continuation bypasses the caller's spent task budget at both service preflight and serialized admission, while group/command/continuation/fan-out caps still apply. `ticket159: a leader opens a continuation after spending every direct delegate` spends eight direct delegates, then opens one. |
+| Command-cap refusal could name the task | The same regression pair proves the command stop copy says `command budget` and contains no `task budget` text (`ticket159: a command-cap continuation refusal names the command, not the task`). |
+| Concurrent duplicate submissions consumed twice | Queue-key dedupe moved inside the serialized store admission; the service returns the winner without a second assignment line. `ticket159: concurrent identical admissions dedupe by queue key and consume once` and `ticket159: concurrent identical delegates create one work item and consume one hop`. |
+| Stale workspace instruction blocks | `reconcileEnsembleInstructions` refreshes `AGENTS.md` and `.ensemble/init.json` from either version marker during config reconciliation, preserving project content and never downgrading a newer version. Unit tests plus `ticket159: stale workspace instructions refresh on config reconciliation`. |
+| Duplicated tiers/defaults and derived arithmetic | `DISPATCH_LIMIT_DEFAULTS`, tiers, and `dispatchContinuationCapacity` are the single source; tool schemas, settings, limits rows, and tests consume them. Store fan-out and reconciliation use the shared helpers. |
+| Parallel failure vocabulary | Budget failure records use `DispatchRefusalLayer` and structured evidence only; refusal-copy regex matching was deleted. |
+| Wiring guards too broad | `app-wiring.test.ts` now has one wiring fact per test with at most two checks. |
+| Glossary not domain-only | Tiers, defaults, `maxHops`/schema, and panel/UI copy moved to the ADR and implementation notes. |
+| Baseline smells | `countedDispatchHops` and `limitsFromSettings` wrappers removed; `closeReason` is a typed union with one `dispatchGroupContinued` predicate; review-budget validation reuses `validateTaskMaxHops`; the continuation session cache was removed in favour of ledger routing; reconciliation fills only rows that still lack a task budget. |
+| Continuation guidance | Copy now says later leader delegations join automatically and naming an active continuation is refused while it has hops; a test asserts that refusal. |
+| Fake suite version literals | `scripts/live-check-fake.sh` reads `ENSEMBLE_BLOCK_VERSION` from `src/v2/init-block.ts` for both the block marker and `init.json` checks. |
+
+The full fake suite still stops earlier at the pre-existing
+`fake-queue-alpha` WORKING-card race, outside this diff; the `/init` segment
+that exercises the version assertion is not reached. The assertion itself is
+derived from source and covered by the init unit/service tests.
 
 ## Environment
 
@@ -44,14 +68,16 @@ This record covers the delivery evidence for the dispatch-budget contract
 
 | Command | Result |
 |---|---|
-| `npm run verify` | **Pass** — strict type check; **1136 tests passed, 0 failed, 0 skipped, 0 todo**, 40.3 s. |
-| `npm run test:live:multilocation` | **Pass** — **100/100 requests, 137/137 tasks succeeded, all at attempt 1, 0 `task.failed`, 0 failure records, 1 `service.start`, 1 warn-level `feed.gap`; tool probe and all three budget scenarios pass**. |
+| `npm run verify` (fix pass) | **Pass** — strict type check; **1157 tests passed, 0 failed, 0 skipped, 0 todo**, 40.4 s. |
+| `npm run verify` (pre-fix #164 pass) | **Pass** — 1136 tests passed. Superseded by the fix-pass run above. |
+| `npm run test:live:multilocation` (fix pass) | **Pass** — **100/100 requests, 137/137 tasks succeeded, all at attempt 1, 0 `task.failed`, 0 failure records, 1 `service.start`, 1 warn-level `feed.gap`; tool probe and all three budget scenarios pass** (five, nine with one continuation, cap with `command-exhausted`). Doctor reports `0 mismatches`. |
 | `npm run test:live:sizes` | **Pass** — 80×24, 100×30, 120×40, 160×50, and `NO_COLOR=1` with dispatch budget labels. |
 | Doctor in the same harness | **Pass** — `0 mismatches`, `Result: all requested locations agree`, dispatch counters consistent. |
 | Log summary in the same harness | **Pass** — 1269 rows, 0 malformed, 0 failures, 105 groups, 22 hops, 1 continued, 2 exhausted, 1 refused, 1 closed. |
 | `git diff --check` | **Pass** — exit 0, no whitespace errors. |
 | Prototype tree check (`git ls-files \| grep -i prototype`) | **Pass** — no prototype files in the tree. |
-| Real playground continuation smoke | **SKIP** — live plugin path is `main` at `b6237e1`, before #160; a continuation would require reloading/reconfiguring the live host. |
+| `npm run test:live:fake` (fix pass) | **FAIL outside this diff** — the pre-existing `fake-queue-alpha` WORKING-card wait missed the active window and saw the terminal hold. The script never reached the `/init` segment. The stale `ensemble:start v2` and init-version assertions were updated to read `ENSEMBLE_BLOCK_VERSION` from source. |
+| Real playground continuation smoke | **POST-MERGE STEP** — live plugin path remains `main` before #160; a continuation needs the merged tree loaded in the live host. The host was not restarted in this fix pass. |
 
 ## Multi-location harness (fake host)
 
@@ -187,10 +213,10 @@ At 80×24 the compact row keeps the agent name, budget, and status; the long
 task title yields first, matching the [ADR 0004](../adr/0004-dispatch-budgets-and-continuation.md)
 trade-off. The full title remains in the chat and native session.
 
-## Real playground continuation smoke
+## Real playground continuation smoke (post-merge step)
 
-**SKIP — not run; the live host cannot exercise continuation without a
-reload/reconfigure.**
+**POST-MERGE STEP — not run in this fix pass; the live host was not restarted
+or reconfigured.**
 
 Observed without changing anything:
 
@@ -201,10 +227,10 @@ Observed without changing anything:
 | Live path branch / HEAD | `main` / `b6237e1` (`ci: fetch pinned fd through the release API (#158)`) |
 | Budget tool support on that tree | None — it predates #160–#163 (`maxHops`, `continuationOf`, and the ledger do not exist there) |
 
-The user's live host was intentionally **not** restarted or reconfigured. To
-make the real playground support continuation, the live path would need to
-check out `integration/dispatch-budgets` (or later `main` after merge) and the
-host would need a reload/restart. The isolated real-host harness
+The user's live host was intentionally **not** restarted or reconfigured in
+this fix pass. To make the real playground support continuation, the live path
+would need to load the merged `main` (or `integration/dispatch-budgets`) and
+the host would need a deliberate reload/restart. The isolated real-host harness
 (`npm run test:live`) intentionally strips host credentials and the model
 catalog, so it cannot provide a real-model continuation run either.
 
@@ -227,6 +253,9 @@ is loaded into the live host:
   `log-summary-dispatch_*.json`, `fake.log`, `service-logs/`)
 - Size matrix log: `/tmp/opencode/164-sizes-final.log`
 - Verify log: `/tmp/opencode/164-verify-final2.log`
+- Fix-pass verify log: `/tmp/opencode/159-fix-verify-final2.log`
+- Fix-pass multi-location log: `/tmp/opencode/159-fix-multilocation.log`
+- Fix-pass fake-suite log: `/tmp/opencode/159-fix-fake.log`
 - Live-host skip evidence: `/tmp/opencode/164-live-host-state.txt`
 
 The harness cleans its isolated project, service, and TUI on success; the
@@ -234,24 +263,20 @@ copied artifacts above are the retained evidence.
 
 ## Skips and limitations
 
-- **Real playground continuation: NOT RUN.** The live path runs pre-#160
-  `main`; reloading/reconfiguring it was explicitly out of bounds. See the
-  post-merge steps above.
+- **Real playground continuation: POST-MERGE STEP.** The live path still runs
+  pre-#160 `main`; reloading/reconfiguring it was explicitly out of bounds for
+  this fix pass. See the post-merge steps above.
 - **macOS/Herdr: NOT RUN.** No macOS host is available.
 - **Hosted CI: NOT RUN.**
 - **Full real `test:live:all`: NOT RUN.** This pass used the isolated fake
   multi-location and size matrices; the model-dependent full matrix stays
   local.
-- **Full `test:live:fake`: NOT RUN as a pass.** A local attempt surfaced two
-  pre-existing full-scenario gaps unrelated to the budget harness: the init
-  assertion still expected `<!-- ensemble:start v2 -->` after the contract
-  moved to v4, and the short-lived `fake-queue-alpha` Work card can finish
-  before the 15 s card wait observes it. Both are outside #164's budget scope
-  and were left untouched; a focused follow-up should update the init
-  expectation and make that work-card wait observe the active window rather
-  than the terminal hold. Attempt logs:
-  `/tmp/opencode/164-full-fake-2.log` and
-  `/tmp/opencode/164-full-fake-3.log`.
+- **Full `test:live:fake`: FAIL outside this diff.** The fix pass updated the
+  stale init assertions to read the current contract version from source, but
+  the suite stops earlier at the known `fake-queue-alpha` Work card race: the
+  15 s WAITING card wait can miss the active window and observe the terminal
+  hold instead. That race predates #159 and is unrelated to the budget diff.
+  Attempt log: `/tmp/opencode/159-fix-fake.log`.
 - Multi-process budget coordination remains unsupported by design (ADR 0003,
   ADR 0004). The ledger is single-service.
 

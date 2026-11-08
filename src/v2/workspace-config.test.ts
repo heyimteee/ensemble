@@ -3,7 +3,8 @@ import assert from "node:assert/strict"
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { ensureEnsembleDirectory, readInitMetadata, readWorkspaceConfig, stripEnsembleBlock, writeAgentsBlock, writeHandoff, writeInitMetadata, writeWorkspaceConfig } from "./workspace-config.ts"
+import { ensureEnsembleDirectory, readEnsembleBlockVersion, readInitMetadata, readWorkspaceConfig, reconcileEnsembleInstructions, stripEnsembleBlock, writeAgentsBlock, writeHandoff, writeInitMetadata, writeWorkspaceConfig } from "./workspace-config.ts"
+import { ensembleBlock } from "./init-block.ts"
 import type { Agent, Workspace } from "./types.ts"
 
 const agent = (id: string, name: string): Agent => ({
@@ -35,7 +36,7 @@ test("AGENTS.md block is inserted at the top and replaced without duplication", 
   assert.ok(content.includes("# Existing"))
   writeAgentsBlock(directory, "<!-- ensemble:start v2 -->\nUPDATED\n<!-- ensemble:end -->")
   content = readFileSync(join(directory, "AGENTS.md"), "utf8")
-  assert.equal((content.match(/ensemble:start/g) ?? []).length, 1)
+  assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1)
   assert.ok(content.includes("UPDATED"))
   assert.equal(stripEnsembleBlock(content).trim(), "# Existing\n\nKeep me.")
 })
@@ -45,6 +46,37 @@ test("init metadata is readable", () => {
   writeInitMetadata(directory, 3)
   const value = JSON.parse(readFileSync(join(directory, ".ensemble", "init.json"), "utf8"))
   assert.equal(value.version, 3)
+})
+
+test("ticket159: a stale Ensemble block and init metadata are refreshed in place", () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-refresh-"))
+  writeFileSync(
+    join(directory, "AGENTS.md"),
+    "<!-- ensemble:start v3 -->\nOLD CONTRACT\n<!-- ensemble:end -->\n\n# Project\n\nKeep me.\n",
+  )
+  writeInitMetadata(directory, 3)
+  assert.equal(readEnsembleBlockVersion(readFileSync(join(directory, "AGENTS.md"), "utf8")), 3)
+
+  assert.equal(reconcileEnsembleInstructions(directory, 4, ensembleBlock()), true)
+  const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+  assert.equal(readEnsembleBlockVersion(content), 4)
+  assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1)
+  assert.equal(stripEnsembleBlock(content).trim(), "# Project\n\nKeep me.")
+  assert.equal(readInitMetadata(directory).version, 4)
+  assert.equal(reconcileEnsembleInstructions(directory, 4, ensembleBlock()), false, "a current block is stable")
+})
+
+test("ticket159: a stale block refreshes without metadata, and a newer block is never downgraded", () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-refresh-"))
+  writeFileSync(join(directory, "AGENTS.md"), "<!-- ensemble:start v2 -->\nOLD\n<!-- ensemble:end -->\n")
+  assert.equal(reconcileEnsembleInstructions(directory, 4, ensembleBlock()), true)
+  assert.equal(readEnsembleBlockVersion(readFileSync(join(directory, "AGENTS.md"), "utf8")), 4)
+
+  writeFileSync(join(directory, "AGENTS.md"), "<!-- ensemble:start v5 -->\nNEWER\n<!-- ensemble:end -->\n")
+  writeInitMetadata(directory, 5)
+  assert.equal(reconcileEnsembleInstructions(directory, 4, ensembleBlock()), false)
+  assert.match(readFileSync(join(directory, "AGENTS.md"), "utf8"), /NEWER/)
+  assert.equal(readInitMetadata(directory).version, 5)
 })
 
 

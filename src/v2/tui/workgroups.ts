@@ -1,4 +1,4 @@
-import { dispatchBudgetLabel } from "../dispatch-budget.ts"
+import { dispatchBudgetLabel, dispatchGroupContinued } from "../dispatch-budget.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import type { Subtask } from "../types.ts"
 import {
@@ -62,7 +62,7 @@ export function workGroupLabel(
     }
   }
   if (group.exhausted) parts.push("EXHAUSTED")
-  if (group.closeReason === "continued") parts.push("CONTINUED")
+  if (dispatchGroupContinued(group)) parts.push("CONTINUED")
   if (group.budget) parts.push(dispatchBudgetLabel(group.budget, "full"))
   parts.push(`${group.active} active`, `${group.done} done`)
   return parts.join(" · ")
@@ -151,7 +151,7 @@ function sectionTone(group: WorkGroup): "faint" | "warn" {
 
 /** A lineage or controlled-stop group always names itself, even when alone. */
 function showGroupLabel(group: WorkGroup, multi: boolean): boolean {
-  return multi || (group.continuationIndex ?? 0) > 0 || group.exhausted === true || group.closeReason === "continued"
+  return multi || (group.continuationIndex ?? 0) > 0 || group.exhausted === true || dispatchGroupContinued(group)
 }
 
 function cardSection(

@@ -140,7 +140,7 @@ test("review decisions parse per-item actions and refuse bad input", () => {
   }
   const missingBudget = parseReviewDecisions({ decisions: [{ item: "c1", action: "delegate", assignee: "Kim" }] })
   assert.equal(missingBudget.ok, false)
-  if (!missingBudget.ok) assert.match(missingBudget.reason, /must include maxHops/)
+  if (!missingBudget.ok) assert.match(missingBudget.reason, /requires maxHops/)
 })
 
 test("batch closure needs every item decided", () => {

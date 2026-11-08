@@ -7,7 +7,12 @@ set -euo pipefail
 # searchable shortcut help. It never calls a real model and needs no API key.
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 source "$SCRIPT_DIR/lib/live-harness.sh"
+
+# The canonical team contract version is owned by the source, not this script.
+ENSEMBLE_BLOCK_VERSION=$(sed -n 's/^export const ENSEMBLE_BLOCK_VERSION = \([0-9][0-9]*\)$/\1/p' "$REPO_ROOT/src/v2/init-block.ts" | head -n 1)
+[[ -n "$ENSEMBLE_BLOCK_VERSION" ]] || { echo "could not read ENSEMBLE_BLOCK_VERSION from src/v2/init-block.ts" >&2; exit 1; }
 
 live_require_runtime
 live_require_node
@@ -638,10 +643,10 @@ init_sessions=$(live_snapshot_value 'Object.values(output.state.initJobs).map(fu
 live_require_text "$LIVE_TUI_SESSION" "Ensemble init complete" 20 "System Agent final report is visible"
 live_assert_text "$LIVE_TUI_SESSION" "/init" "every init trigger leaves a visible audit line"
 live_assert_text "$LIVE_TUI_SESSION" "System Agent" "the System Agent authors the init report"
-grep -qF -- "<!-- ensemble:start v2 -->" "$LIVE_PROJECT/AGENTS.md" || live_fail "canonical AGENTS.md block was not written"
+grep -qF -- "<!-- ensemble:start v${ENSEMBLE_BLOCK_VERSION} -->" "$LIVE_PROJECT/AGENTS.md" || live_fail "canonical AGENTS.md block was not written"
 init_block_count=$(grep -oF -- "<!-- ensemble:start" "$LIVE_PROJECT/AGENTS.md" | wc -l | tr -d ' ')
 [[ "$init_block_count" == "1" ]] || live_fail "AGENTS.md carries $init_block_count Ensemble blocks"
-grep -qF -- '"version": 2' "$LIVE_PROJECT/.ensemble/init.json" || live_fail "init metadata version was not recorded"
+grep -qF -- "\"version\": ${ENSEMBLE_BLOCK_VERSION}" "$LIVE_PROJECT/.ensemble/init.json" || live_fail "init metadata version was not recorded"
 live_log "I, :init, and /init produced visible System Agent jobs and reports"
 
 # Inline work progress at this layer (ticket #56, slice A ticket #64): group

@@ -375,7 +375,7 @@ test("ticket162: Work shows continuation lineage and exhausted groups as a contr
       continuationsUsed: 1,
       createdAt: 1,
       closedAt: 10,
-      closeReason: "continued",
+      closeReason: "continued" as const,
     },
     dispatch_cont: {
       id: "dispatch_cont",

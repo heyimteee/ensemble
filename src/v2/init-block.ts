@@ -66,7 +66,7 @@ value:
 - **Task** — what you granted the recipient of this work item.
 - **Group** — one dispatch group inside one user command.
 - **Command** — all groups for one user command; the user owns this ceiling.
-- **Depth** — the ancestor chain inside the group (default 8).
+- **Depth** — the ancestor chain inside the group; the user sets the ceiling.
 
 Successful tool results show what is left. Completion handoffs, batch
 review, synthesis, group-chat peer turns, retries, restarts, recovery, and
@@ -79,9 +79,11 @@ exhausted group id) and a required \`groupMaxHops\` tier (8, 16, or 24) that
 fits the command remaining and continuation count. Only the leader may open
 one; peers return their result instead. A continuation references its parent
 and root, starts a fresh depth segment, and keeps the same command ledger.
-Later leader delegations join that continuation automatically (or by naming
-\`continuationOf\` again). When the command cap or continuation limit is
-reached, ask the user to start a new command for a fresh budget.
+Later leader delegations join that continuation automatically. Naming an
+active continuation as \`continuationOf\` is refused while it still has hops;
+pass \`continuationOf\` only for an exhausted group. When the command cap or
+continuation limit is reached, ask the user to start a new command for a
+fresh budget.
 
 ## End-of-turn handoff (mandatory)
 

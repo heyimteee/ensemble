@@ -1,5 +1,5 @@
 import type { EnsembleLogger } from "./logging.ts"
-import type { DispatchRefusal } from "./dispatch-budget.ts"
+import { dispatchCommandRemainingFromRoot, dispatchRefusalReasonCode, type DispatchRefusal } from "./dispatch-budget.ts"
 import type { StoreObserver } from "./store.ts"
 import type { Approval, DispatchGroup, InitJob, Message, Subtask } from "./types.ts"
 
@@ -119,10 +119,12 @@ export function dispatchHopEvent(input: {
   outcome: "consumed" | "refused"
   task: Pick<Subtask, "id" | "workspaceID" | "parentID" | "assigneeID" | "creatorAgentID" | "workKind" | "dispatchGroupID" | "taskMaxHops" | "dispatchDepth">
   group?: DispatchGroup
+  root?: DispatchGroup
   refusal?: DispatchRefusal
 }): { level: "info" | "warn"; event: string; fields: Record<string, unknown> } {
   const consumed = input.outcome === "consumed"
   const group = input.group
+  const root = input.root ?? group
   const fields: Record<string, unknown> = {
     workspaceID: input.task.workspaceID,
     dispatchGroupID: input.task.dispatchGroupID,
@@ -137,11 +139,9 @@ export function dispatchHopEvent(input: {
     usedHops: group?.usedHops,
     maxHops: group?.maxHops,
     groupRemaining: group ? Math.max(0, group.maxHops - group.usedHops) : undefined,
-    commandUsedHops: group?.commandUsedHops,
-    commandMaxHops: group?.commandMaxHops,
-    commandRemaining: group?.commandMaxHops !== undefined && group.commandUsedHops !== undefined
-      ? Math.max(0, group.commandMaxHops - group.commandUsedHops)
-      : undefined,
+    commandUsedHops: root?.commandUsedHops,
+    commandMaxHops: root?.commandMaxHops,
+    commandRemaining: dispatchCommandRemainingFromRoot(root),
     depthMax: group?.depthMax,
     continuationIndex: group?.continuationIndex,
   }
@@ -149,15 +149,12 @@ export function dispatchHopEvent(input: {
     return { level: "info", event: "dispatch.hop.consumed", fields }
   }
   const refusal = input.refusal
-  const reason = refusal
-    ? refusal.layer === "closed" ? "group-closed" : `${refusal.layer}-exhausted`
-    : "refused"
   return {
     level: "warn",
     event: "dispatch.hop.refused",
     fields: {
       ...fields,
-      reason,
+      reason: refusal ? dispatchRefusalReasonCode(refusal) : "refused",
       refusedLayer: refusal?.layer,
       refusedUsed: refusal?.used,
       refusedMax: refusal?.max,
@@ -190,9 +187,7 @@ export function dispatchGroupEvent(input: {
     groupRemaining: Math.max(0, input.group.maxHops - input.group.usedHops),
     commandUsedHops: root.commandUsedHops,
     commandMaxHops: root.commandMaxHops,
-    commandRemaining: root.commandMaxHops !== undefined && root.commandUsedHops !== undefined
-      ? Math.max(0, root.commandMaxHops - root.commandUsedHops)
-      : undefined,
+    commandRemaining: dispatchCommandRemainingFromRoot(root),
     continuationsUsed: root.continuationsUsed,
     maxContinuations: root.maxContinuations,
     reason: input.reason,

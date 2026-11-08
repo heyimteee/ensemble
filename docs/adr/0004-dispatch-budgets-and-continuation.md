@@ -65,6 +65,11 @@ command budgets remain the hard subtree cap. A missing `maxHops` is a
 validation error. Zero is valid and is the deliberate one-shot ask: the
 recipient may answer and complete, but may not create new work.
 
+A task budget belongs only to agent delegation and handoff work. User-command
+recipients, group-chat peer turns, completion handoffs, batch review,
+synthesis, retries, restarts, and recovery rows carry none; the service never
+silently grants them the group remaining.
+
 ### 3. Continuation policy
 
 A continuation is a new segment of the same command, not a new command.
@@ -81,8 +86,13 @@ A continuation is a new segment of the same command, not a new command.
   continued again.
 - The new group references its parent and root, starts at depth 0 for its
   segment, and leaves command counters and the depth ceiling on the root.
-- Later leader dispatches join the newest active continuation automatically,
-  or may name `continuationOf` again.
+- Opening a continuation is a new segment, not another dispatch from the
+  leader's current task budget. A leader that spent every direct delegate may
+  still open one; the group, command, continuation-count, and fan-out caps
+  still apply.
+- Later leader dispatches join the newest active continuation automatically;
+  naming an active continuation as `continuationOf` is refused while it still
+  has hops. Pass `continuationOf` only for an exhausted group.
 
 The command cap is the anti-laundering rule. A continuation cannot create a
 fresh command budget, and the continuation count prevents an endless sequence
@@ -101,7 +111,9 @@ is derived from counters and closure, never stored separately.
   is one serialized store mutation. A crash cannot leave a consumed hop
   without the work item.
 - Duplicate and idempotent submissions return the existing work item and do
-  not consume again.
+  not consume again. Deduplication covers both the task id and the queue key,
+  and the queue-key check runs inside the serialized admission so two
+  concurrent identical dispatches produce one work item and one hop.
 - Retry, restart, and recovery re-use the row and do not consume again.
 - Two concurrent dispatches at one remaining hop admit exactly one.
 - The single service from ADR 0003 owns the ledger. Multi-process budget
@@ -143,13 +155,17 @@ Pre-ledger groups are synthesized on first access:
 - Group and command maximums are at least the observed usage, so an upgrade
   never retroactively refuses work that was already admitted.
 - Observed depth raises the depth maximum when needed.
-- Live rows without a task budget receive the group's remaining budget.
+- Live rows that still lack a task budget receive the group's remaining
+  budget; a stored budget (including zero) is never overwritten.
 - Reconciliation is persisted on the serialized maintenance queue in bounded
   batches and logged as `dispatch.group.reconciled`.
 
 The team-contract block is bumped and stale workspace blocks are rewritten to
-the current contract. Because this is a developer preview, no compatibility
-flag is required; the contract version is the migration marker.
+the current contract on config reconciliation. Reconciliation reads
+`.ensemble/init.json` and the existing `AGENTS.md` block marker, preserves
+project-owned content, writes the current block and metadata, and never
+downgrades a newer version. Because this is a developer preview, no
+compatibility flag is required; the contract version is the migration marker.
 
 `settings.maxDepth` is **deprecated and ignored for enforcement**. Unified
 depth comes from `dispatchDepth` (settings, then the group capture). The field
@@ -177,8 +193,10 @@ it is a future settings cleanup, not a behavior change.
   its root, and no active continuation is empty.
 - **Failure truth.** A budget stop is a controlled stop with
   `FailureClass "budget"` and reason code `budget-exhausted`, not a generic
-  task failure. The Work pane renders exhaustion as a warning stop, distinct
-  from FAILED.
+  task failure. Only structured refusal evidence (`code`/`type` plus the
+  `DispatchRefusalLayer`) classifies a budget stop; user-facing refusal copy is
+  never matched as a second vocabulary. The Work pane renders exhaustion as a
+  warning stop, distinct from FAILED.
 
 ## Rejected alternatives
 

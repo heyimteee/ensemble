@@ -91,6 +91,40 @@ export function readInitMetadata(directory: string): { version?: number; install
   }
 }
 
+/** Version recorded in the canonical AGENTS.md block marker, if present. */
+export function readEnsembleBlockVersion(value: string): number | undefined {
+  const match = /<!-- ensemble:start v(\d+) -->/.exec(value)
+  if (!match) return undefined
+  const version = Number(match[1])
+  return Number.isFinite(version) ? version : undefined
+}
+
+/**
+ * Refresh a stale Ensemble instruction block in place (US37). The block marker
+ * and `.ensemble/init.json` are two views of one contract version; either can
+ * prove staleness. Project-owned content outside the block is preserved. A
+ * newer recorded version is never downgraded, and a directory that never ran
+ * init is left alone.
+ */
+export function reconcileEnsembleInstructions(directory: string, currentVersion: number, block: string): boolean {
+  const metadata = readInitMetadata(directory)
+  const agentsPath = join(directory, "AGENTS.md")
+  const content = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : ""
+  const blockVersion = readEnsembleBlockVersion(content)
+  const initialized = typeof metadata.version === "number" || blockVersion !== undefined
+  if (!initialized) return false
+  const staleMetadata = typeof metadata.version === "number" && metadata.version < currentVersion
+  const staleBlock = blockVersion !== undefined && blockVersion < currentVersion
+  const missingOrStaleBlock = typeof metadata.version === "number" && blockVersion !== currentVersion
+  const newer = (typeof metadata.version === "number" && metadata.version > currentVersion)
+    || (blockVersion !== undefined && blockVersion > currentVersion)
+  if (newer) return false
+  if (!staleMetadata && !staleBlock && !missingOrStaleBlock) return false
+  writeAgentsBlock(directory, block)
+  writeInitMetadata(directory, currentVersion)
+  return true
+}
+
 export function writeAgentsBlock(directory: string, block: string): void {
   const path = join(directory, "AGENTS.md")
   const existing = existsSync(path) ? readFileSync(path, "utf8") : ""

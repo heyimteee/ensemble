@@ -1,7 +1,7 @@
 import { deriveWorkStatus, isTerminalWorkStatus } from "./queue.ts"
 import { dispatchBudgetSummary, dispatchGroupExhausted, dispatchGroupState, type DispatchBudgetSummary, type DispatchGroupState } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
-import type { Approval, DispatchGroup, Id, Subtask } from "./types.ts"
+import type { Approval, DispatchCloseReason, DispatchGroup, Id, Subtask } from "./types.ts"
 
 /**
  * Ticket #136 dispatch-group Work lifecycle, shared by the TUI pane #141's
@@ -66,8 +66,8 @@ export type WorkGroup = {
   state?: DispatchGroupState
   /** Ticket #162: hop counters spent, even when the group has since closed. */
   exhausted?: boolean
-  /** Ticket #162: controlled-stop reason such as `continued`. */
-  closeReason?: string
+  /** Ticket #162: controlled-stop reason. */
+  closeReason?: DispatchCloseReason
 }
 
 export type WorkGroupOptions = {

@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { registerEnsembleTools } from "./tool-registrar.ts"
+import { DISPATCH_GROUP_TIERS } from "./dispatch-budget.ts"
 
 test("ticket161: delegate and handoff require a non-negative integer maxHops", () => {
   const tools = new Map<string, any>()
@@ -34,7 +35,7 @@ test("ticket161: delegate and handoff require a non-negative integer maxHops", (
   }
   const delegate = tools.get("delegate")
   assert.equal(delegate.input.properties.continuationOf.type, "string")
-  assert.deepEqual(delegate.input.properties.groupMaxHops.enum, [8, 16, 24])
+  assert.deepEqual(delegate.input.properties.groupMaxHops.enum, [...DISPATCH_GROUP_TIERS])
   assert.match(delegate.description, /continuationOf/)
   assert.match(delegate.description, /groupMaxHops/)
   const handoff = tools.get("handoff")

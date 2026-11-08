@@ -4,6 +4,7 @@ import {
   DISPATCH_COMMAND_TIERS,
   DISPATCH_DEPTH_MAX,
   DISPATCH_GROUP_TIERS,
+  DISPATCH_LIMIT_DEFAULTS,
   continuationDispatchLedger,
   continuationRefusalText,
   dispatchAdmissionRefusal,
@@ -41,10 +42,7 @@ const settings = (patch: Partial<Settings> = {}): Settings => ({
   maxDelegations: 10,
   maxDepth: 5,
   synthesis: true,
-  dispatchGroupMaxHops: 8,
-  dispatchCommandMaxHops: 24,
-  dispatchDepth: 8,
-  dispatchContinuations: 2,
+  ...dispatchLimitSettings(DISPATCH_LIMIT_DEFAULTS),
   ...patch,
 })
 
@@ -67,15 +65,10 @@ const task = (patch: Partial<Subtask> = {}): Subtask => ({
   ...patch,
 })
 
-test("ticket160: default limits are the 8/24/8/2 product tiers", () => {
-  assert.deepEqual(dispatchLimits(settings()), { groupMaxHops: 8, commandMaxHops: 24, depth: 8, continuations: 2 })
-  assert.deepEqual(dispatchLimits({}), { groupMaxHops: 8, commandMaxHops: 24, depth: 8, continuations: 2 })
-  assert.deepEqual(dispatchLimitSettings(dispatchLimits(settings())), {
-    dispatchGroupMaxHops: 8,
-    dispatchCommandMaxHops: 24,
-    dispatchDepth: 8,
-    dispatchContinuations: 2,
-  })
+test("ticket160: default limits are the one exported product set", () => {
+  assert.deepEqual(dispatchLimits(settings()), DISPATCH_LIMIT_DEFAULTS)
+  assert.deepEqual(dispatchLimits({}), DISPATCH_LIMIT_DEFAULTS)
+  assert.deepEqual(dispatchLimitSettings(dispatchLimits(settings())), dispatchLimitSettings(DISPATCH_LIMIT_DEFAULTS))
 })
 
 test("ticket160: every allowed tier validates and command never falls below group", () => {
@@ -162,7 +155,7 @@ test("ticket160: budget state and remaining values derive from the counters", ()
   })
   assert.equal(dispatchGroupState({ ...used, usedHops: 8 }), "exhausted")
   assert.equal(dispatchGroupState({ ...used, usedHops: 2, commandUsedHops: 24 }), "exhausted")
-  assert.equal(dispatchGroupState({ ...used, closedAt: 5, closeReason: "continuation" }), "closed")
+  assert.equal(dispatchGroupState({ ...used, closedAt: 5, closeReason: "continued" }), "closed")
 })
 
 test("ticket160: continuation groups carry lineage and resolve root command budget", () => {
@@ -423,7 +416,7 @@ test("ticket162: closed and superseded groups cannot be continued again", () => 
     ...newContinuationDispatchGroup({ id: "dispatch_c1", root: { ...root, continuationsUsed: 0 }, parentID: root.id, maxHops: 8, now: 2 }),
     usedHops: 8,
     closedAt: 9,
-    closeReason: "continued",
+    closeReason: "continued" as const,
   }
   const second = newContinuationDispatchGroup({ id: "dispatch_c2", root: { ...root, continuationsUsed: 2 }, parentID: first.id, maxHops: 8, now: 3 })
   const groups = { [root.id]: root, [first.id]: first, [second.id]: second }

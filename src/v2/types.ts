@@ -390,6 +390,9 @@ export type DmQueueEntry = {
  * (`active`, `exhausted`, `closed`) is derived from these counters and the
  * group's tasks by `dispatchGroupState`, never stored separately.
  */
+/** Why a dispatch group closed. A reason code, never task content. */
+export type DispatchCloseReason = "continued"
+
 export type DispatchGroup = {
   id: Id
   workspaceID: Id
@@ -415,8 +418,8 @@ export type DispatchGroup = {
   continuationsUsed?: number
   createdAt: number
   closedAt?: number
-  /** Why the group closed; a reason code, never task content. */
-  closeReason?: string
+  /** Why the group closed; a typed reason code, never task content. */
+  closeReason?: DispatchCloseReason
   /** Synthesized from pre-ledger rows during upgrade reconciliation. */
   reconciled?: boolean
 }

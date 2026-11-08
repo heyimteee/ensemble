@@ -1,3 +1,4 @@
+import { isDispatchRefusalLayer, type DispatchRefusalLayer } from "./dispatch-budget.ts"
 import type { LogEntry, LogLevel } from "./logging.ts"
 import type { Message, Subtask } from "./types.ts"
 
@@ -28,27 +29,24 @@ export type FailureClass =
  * Ticket #163: a controlled dispatch-budget stop is a reason code, not a
  * generic task failure. Only the layer and counts are recorded; refusal copy,
  * task titles, instructions, and conversation text never enter the record.
+ * The layer vocabulary is the dispatch seam's `DispatchRefusalLayer`.
  */
-export type BudgetFailureLayer = "task" | "group" | "command" | "depth" | "fanout" | "continuation" | "closed"
-
 export type BudgetFailure = {
-  layer: BudgetFailureLayer
+  layer: DispatchRefusalLayer
   used?: number
   max?: number
 }
 
 export const BUDGET_FAILURE_CODE = "budget-exhausted"
 
-const BUDGET_LAYERS: readonly BudgetFailureLayer[] = ["task", "group", "command", "depth", "fanout", "continuation", "closed"]
-
 function budgetNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : undefined
 }
 
 /**
- * Recognize a dispatch-budget refusal from either a structured error or the
- * shipped refusal copy. The result is deliberately narrow: a layer and, when
- * the copy carries it, the used/max pair.
+ * Recognize a dispatch-budget refusal from structured evidence only. Refusal
+ * copy is user-facing text; matching it here created a second, fragile
+ * vocabulary, so a plain error message never classifies as a budget stop.
  */
 export function budgetFailureReason(error: unknown): BudgetFailure | undefined {
   const source = (error ?? {}) as Record<string, any>
@@ -57,30 +55,14 @@ export function budgetFailureReason(error: unknown): BudgetFailure | undefined {
   const structured = code === "dispatch_budget_exhausted"
     || type === "dispatch.budget.exhausted"
     || type === "dispatch.budget.refused"
-  if (structured) {
-    const layer = BUDGET_LAYERS.find((item) => item === source.layer) ?? "group"
-    const used = budgetNumber(source.used)
-    const max = budgetNumber(source.max)
-    return {
-      layer,
-      ...(used !== undefined ? { used } : {}),
-      ...(max !== undefined ? { max } : {}),
-    }
-  }
-  const message = String(source.message ?? error ?? "")
-  if (!/(dispatch budget|task budget|dispatch group|command budget|continuation limit|dispatch depth|per run)/i.test(message)) return undefined
-  if (!/(exhausted|limit is reached|limit reached|limit is|less than|is closed)/i.test(message)) return undefined
-  let layer: BudgetFailureLayer = "group"
-  if (/task budget/i.test(message)) layer = "task"
-  else if (/continuation limit|continuation group/i.test(message)) layer = "continuation"
-  else if (/command budget/i.test(message)) layer = "command"
-  else if (/dispatch group/i.test(message)) layer = "group"
-  else if (/dispatch depth|depth limit/i.test(message)) layer = "depth"
-  else if (/per run|fan-?out|delegation limit|handoff limit/i.test(message)) layer = "fanout"
-  const counts = /\((\d+)\s*\/\s*(\d+)/.exec(message)
+  if (!structured) return undefined
+  const layer = isDispatchRefusalLayer(source.layer) ? source.layer : "group"
+  const used = budgetNumber(source.used)
+  const max = budgetNumber(source.max)
   return {
     layer,
-    ...(counts ? { used: budgetNumber(Number(counts[1])), max: budgetNumber(Number(counts[2])) } : {}),
+    ...(used !== undefined ? { used } : {}),
+    ...(max !== undefined ? { max } : {}),
   }
 }
 

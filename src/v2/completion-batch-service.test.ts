@@ -486,7 +486,7 @@ test("ticket162: review delegation requires an explicit maxHops budget", async (
       { batch: "batch-budget", decisions: [{ item: "budget-item", action: "delegate", assignee: "Sage" }] },
       { sessionID: "sess_nova" },
     )
-    assert.match(missing.content, /must include maxHops/)
+    assert.match(missing.content, /requires maxHops/)
     let snapshot = await handlers.snapshot({ directory })
     assert.equal(snapshot.state.subtasks["budget-item"].handoff?.decided, undefined)
     assert.equal(Object.values(snapshot.state.subtasks).some((task: any) => task.assigneeID === "sage" && task.title === "Budgeted follow-up"), false)
