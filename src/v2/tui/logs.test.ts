@@ -10,6 +10,8 @@ const entry = (patch: Partial<LogEntry> = {}): LogEntry => ({
   event: "retry.scheduled",
   pid: 1,
   role: "service",
+  instanceID: "boot-1",
+  threadID: 0,
   ...patch,
 })
 
@@ -66,10 +68,12 @@ test("tones and stats stay viewer-friendly", () => {
   assert.equal(logEntryTone("warn"), "warn")
   assert.equal(logEntryTone("info"), "info")
   assert.equal(logEntryTone("debug"), "muted")
-  const stats = formatLogStats({ level: "info", content: false, ringSize: 4, dropped: 1, written: 8, failedWrites: 0, dir: "/tmp/logs", mainFile: "/tmp/logs/main.jsonl" })
+  const stats = formatLogStats({ level: "info", instanceID: "boot-1", threadID: 0, content: false, ringSize: 4, dropped: 1, written: 8, failedWrites: 0, dir: "/tmp/logs", mainFile: "/tmp/logs/main.jsonl" })
   assert.match(stats, /level=info/)
   assert.match(stats, /content=off/)
   assert.match(stats, /ring=4/)
+  assert.match(stats, /instance=boot-1/)
+  assert.match(stats, /thread=0/)
   assert.match(stats, /dir=\/tmp\/logs/)
 })
 

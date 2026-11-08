@@ -88,6 +88,8 @@ export function formatLogStats(stats: any): string {
   if (!stats) return "logs unavailable"
   const parts = [
     `level=${stats.level ?? "info"}`,
+    stats.instanceID ? `instance=${stats.instanceID}` : "",
+    typeof stats.threadID === "number" ? `thread=${stats.threadID}` : "",
     `content=${stats.content ? "on" : "off"}`,
     `ring=${stats.ringSize ?? 0}`,
     `dropped=${stats.dropped ?? 0}`,

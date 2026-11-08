@@ -2,6 +2,7 @@ import { appendFile, rename } from "node:fs/promises"
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { threadId } from "node:worker_threads"
 
 /**
  * Structured operational logging for Ensemble.
@@ -37,6 +38,10 @@ export type LogEntry = {
   event: string
   pid: number
   role: string
+  /** Boot/mount identity; ticket #150 keeps one service log per role. */
+  instanceID: string
+  /** `node:worker_threads` thread id, so a hot-reload can be attributed. */
+  threadID: number
   [key: string]: unknown
 }
 
@@ -44,6 +49,8 @@ export type LoggerStats = {
   enabled: boolean
   level: LogLevel
   role: string
+  instanceID: string
+  threadID: number
   dir?: string
   mainFile?: string
   failureFile?: string
@@ -57,6 +64,8 @@ export type LoggerStats = {
 
 export type LoggerOptions = {
   role: "service" | "tui"
+  /** Stable identity for every row (service boot epoch / TUI mount UUID). */
+  instanceID?: string
   enabled?: boolean
   level?: LogLevel
   /** Explicit directory; null disables file sinks while keeping the ring. */
@@ -151,6 +160,8 @@ function filePrefix(role: string, failure = false): string {
 
 export class EnsembleLogger {
   readonly role: string
+  readonly instanceID: string
+  readonly threadID: number
   readonly level: LogLevel
   readonly content: boolean
   readonly enabled: boolean
@@ -177,6 +188,8 @@ export class EnsembleLogger {
 
   constructor(options: LoggerOptions) {
     this.role = options.role
+    this.instanceID = options.instanceID ?? String(process.pid)
+    this.threadID = threadId
     this.enabled = options.enabled ?? process.env.ENSEMBLE_LOG !== "0"
     const requested = options.level ?? (process.env.ENSEMBLE_LOG_LEVEL as LogLevel | undefined) ?? "info"
     this.level = requested in LEVELS ? requested : "info"
@@ -217,13 +230,15 @@ export class EnsembleLogger {
   event(level: LogLevel, cat: LogCategory, event: string, fields: LogFields = {}): void {
     if (!this.enabledFor(level)) return
     const entry: LogEntry = {
+      ...redactLogFields(fields),
       ts: new Date(this.now()).toISOString(),
       level,
       cat,
       event,
       pid: process.pid,
       role: this.role,
-      ...redactLogFields(fields),
+      instanceID: this.instanceID,
+      threadID: this.threadID,
     }
     this.pushRing(entry)
     const line = `${JSON.stringify(entry)}\n`
@@ -235,7 +250,7 @@ export class EnsembleLogger {
   }
 
   /** A self-contained failure record; written to the failure sink even at warn. */
-  failure(entry: Omit<LogEntry, "ts" | "pid" | "role"> & { ts?: string }): void {
+  failure(entry: Omit<LogEntry, "ts" | "pid" | "role" | "instanceID" | "threadID"> & { ts?: string }): void {
     if (!this.enabled) return
     const record: LogEntry = {
       ...redactLogFields(entry as LogFields),
@@ -245,6 +260,8 @@ export class EnsembleLogger {
       event: String(entry.event),
       pid: process.pid,
       role: this.role,
+      instanceID: this.instanceID,
+      threadID: this.threadID,
     }
     this.pushRing(record)
     const line = `${JSON.stringify(record)}\n`
@@ -262,6 +279,7 @@ export class EnsembleLogger {
     cat?: LogCategory
     event?: string
     taskID?: string
+    instanceID?: string
   } = {}): LogEntry[] {
     const limit = Math.max(1, Math.min(this.ringLimit, Math.floor(filter.limit ?? 200)))
     const minLevel = filter.level ? LEVELS[filter.level] : 0
@@ -269,7 +287,8 @@ export class EnsembleLogger {
       LEVELS[entry.level] >= minLevel
       && (!filter.cat || entry.cat === filter.cat)
       && (!filter.event || entry.event === filter.event || entry.event.startsWith(`${filter.event}.`))
-      && (!filter.taskID || entry.taskID === filter.taskID),
+      && (!filter.taskID || entry.taskID === filter.taskID)
+      && (!filter.instanceID || entry.instanceID === filter.instanceID),
     )
     return matches.slice(-limit)
   }
@@ -279,6 +298,8 @@ export class EnsembleLogger {
       enabled: this.enabled,
       level: this.level,
       role: this.role,
+      instanceID: this.instanceID,
+      threadID: this.threadID,
       ...(this.dir ? { dir: this.dir } : {}),
       ...(this.mainFile ? { mainFile: this.mainFile } : {}),
       ...(this.failureFile ? { failureFile: this.failureFile } : {}),
@@ -428,6 +449,44 @@ export class EnsembleLogger {
         keep.set(prefix, count + 1)
       }
     } catch {}
+  }
+}
+
+export type LogRateLimitDecision = {
+  /** True when this event should be emitted and its window restarted. */
+  allowed: boolean
+  /** Identical events suppressed since the last emitted one. */
+  suppressed: number
+}
+
+/**
+ * Ticket #150: identical warnings (notably `feed.reset`) collapse to one per
+ * window per instance. The first event emits immediately; the next allowed
+ * event reports how many identical events it swallowed.
+ */
+export function createLogRateLimiter(options: { windowMs?: number; now?: () => number } = {}): {
+  admit: (key: string) => LogRateLimitDecision
+} {
+  const windowMs = Math.max(1, options.windowMs ?? 10_000)
+  const now = options.now ?? Date.now
+  const windows = new Map<string, { last: number; suppressed: number }>()
+  return {
+    admit(key: string): LogRateLimitDecision {
+      const at = now()
+      const state = windows.get(key)
+      if (!state) {
+        windows.set(key, { last: at, suppressed: 0 })
+        return { allowed: true, suppressed: 0 }
+      }
+      if (at - state.last >= windowMs) {
+        const suppressed = state.suppressed
+        state.last = at
+        state.suppressed = 0
+        return { allowed: true, suppressed }
+      }
+      state.suppressed += 1
+      return { allowed: false, suppressed: state.suppressed }
+    },
   }
 }
 
