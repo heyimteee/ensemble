@@ -23,6 +23,7 @@ import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from ".
 import { STREAM_COALESCE_MS } from "./stream-coalescer.ts"
 import { createLogRateLimiter, createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { createStoreObserver } from "./log-events.ts"
+import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import type {
@@ -73,6 +74,7 @@ type Ctx = {
   tool: { transform: (factory: any) => Promise<any> }
 }
 type Json = Record<string, any>
+type HostRegistration = { dispose?: () => Promise<void> | void }
 
 /**
  * Protocol version advertised by the snapshot and the revision heartbeat.
@@ -306,7 +308,10 @@ export class EnsembleV2Service {
   readonly ctx: Ctx
   private store!: V2Store
   private readonly registrations = new Set<any>()
-  private retryRegistration: any
+  /** Per-location tool transforms, keyed by the plugin context that owns them. */
+  private readonly toolRegistrations = new Map<any, HostRegistration>()
+  /** Per-location retry hooks, keyed by the plugin context that owns them. */
+  private readonly retryHooks = new Map<any, HostRegistration>()
   private stopped = false
   private pumping = false
   private repump = false
@@ -419,11 +424,9 @@ export class EnsembleV2Service {
     // no live local run, and reconcileWaitingWork() repairs a working row
     // with no claim at all. Attempts are preserved until the next claim and
     // no approval is ever synthesized for dead work.
-    this.retryRegistration = await this.ctx.session.hook("retry", (event: any) => {
-      if (!this.profileForSession(event.sessionID)) return
-      if (availabilityFailure(event.error)) event.decision = { retry: false }
-    })
-    await this.installTools()
+    // Ticket #153: tools and retry hooks are location-scoped surfaces. They are
+    // installed by each LocationAdapter on its own plugin context, never here
+    // on the first context as a proxy for every other location.
     await this.migrateV1()
     void this.catalog.refresh()
     this.catalogAbort = new AbortController()
@@ -490,7 +493,7 @@ export class EnsembleV2Service {
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
       await this.maintenanceRun?.catch(() => undefined)
-      await this.retryRegistration?.dispose?.().catch(() => undefined)
+      await this.disposeHostRegistrations()
       await Promise.allSettled([...this.running])
       await this.releaseLocalClaims(localRunIDs).catch(() => undefined)
       // Emit any pending rate-limit summary while the logger is still open.
@@ -3427,136 +3430,77 @@ export class EnsembleV2Service {
     return found.workspace && found.agent ? { workspace: found.workspace, agent: found.agent } : undefined
   }
 
-  private async installTools(): Promise<void> {
-    await this.ctx.tool.transform((editor: any) => {
-      editor.namespace({ name: "ensemble", description: "Ensemble workspace collaboration." })
-      editor.add({
-        name: "workspace_info",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Show the current Ensemble workspace, directory, leader, members, and paused state.",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        execute: async (_input: Json, context: any) => this.toolWorkspaceInfo(context),
-      })
-      editor.add({
-        name: "list_workspaces",
-        options: { namespace: "ensemble", codemode: false },
-        description: "List Ensemble workspaces and their directories, leaders, and members.",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        execute: async () => this.toolListWorkspaces(),
-      })
-      editor.add({
-        name: "list_agents",
-        options: { namespace: "ensemble", codemode: false },
-        description: "List the Ensemble roster, workspace membership, and busy state.",
-        input: { type: "object", properties: {}, additionalProperties: false },
-        execute: async () => this.toolListAgents(),
-      })
-      editor.add({
-        name: "task_status",
-        options: { namespace: "ensemble", codemode: false },
-        description: "List pending, working, and replied Ensemble subtasks.",
-        input: { type: "object", properties: { workspaceID: { type: "string" } }, additionalProperties: false },
-        execute: async (input: Json, context: any) => this.toolTaskStatus(input, context),
-      })
-      editor.add({
-        name: "send_message",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Post a message to the group chat or queue a direct message to an agent.",
-        input: {
-          type: "object",
-          properties: { kind: { type: "string", enum: ["workspace", "agent"] }, id: { type: "string" }, text: { type: "string" } },
-          required: ["kind", "text"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolSendMessage(input, context),
-      })
-      editor.add({
-        name: "handoff",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Queue a typed hop to a teammate; the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate. Write a self-authored instruction for the recipient (what to do, context, expected output) — never paste the user's message verbatim; task stays the short display title.",
-        input: {
-          type: "object",
-          properties: { task: { type: "string" }, instruction: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" }, constraints: { type: "string" }, expected: { type: "string" } },
-          required: ["task", "summary", "path"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolHandoff(input, context),
-      })
-      editor.add({
-        name: "delegate",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Delegate a typed subtask to another workspace member and record it on the board. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
-        input: {
-          type: "object",
-          properties: {
-            assignee: { type: "string" },
-            title: { type: "string" },
-            instruction: { type: "string" },
-            constraints: { type: "string" },
-            expected: { type: "string" },
-            mode: { type: "string", enum: ["research", "edit"] },
-          },
-          required: ["assignee", "title", "instruction"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolDelegate(input, context),
-      })
-      editor.add({
-        name: "review",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Decide each item in a batch review turn (delegate, start, end, or dismiss). The batch closes only when every item is decided; non-leader reviewers hand it onward to the leader.",
-        input: {
-          type: "object",
-          properties: {
-            batch: { type: "string" },
-            decisions: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: { item: { type: "string" }, action: { type: "string" }, assignee: { type: "string" }, note: { type: "string" } },
-                required: ["item", "action"],
-                additionalProperties: false,
-              },
-            },
-            hand_to: { type: "string" },
-          },
-          required: ["batch", "decisions"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolReview(input, context),
-      })
-      editor.add({
-        name: "ask_person",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Ask the user for a judgment call and pause this subtask until they answer.",
-        input: { type: "object", properties: { question: { type: "string" } }, required: ["question"], additionalProperties: false },
-        execute: async (input: Json, context: any) => this.toolAsk(input, context),
-      })
-      editor.add({
-        name: "remember",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Save durable project, workspace, or cross-project knowledge. Cross-project knowledge needs approval.",
-        input: {
-          type: "object",
-          properties: { text: { type: "string" }, scope: { type: "string", enum: ["project", "workspace", "global"] } },
-          required: ["text", "scope"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolRemember(input, context),
-      })
-      editor.add({
-        name: "share",
-        options: { namespace: "ensemble", codemode: false },
-        description: "Request authorization before cross-project or private-transcript disclosure.",
-        input: {
-          type: "object",
-          properties: { text: { type: "string" }, scope: { type: "string", enum: ["cross_project", "private_transcript"] } },
-          required: ["text", "scope"],
-          additionalProperties: false,
-        },
-        execute: async (input: Json, context: any) => this.toolShare(input, context),
-      })
+  /**
+   * Install the Ensemble toolset on one host location. The returned handle is
+   * idempotent and removes only this context's registration; the location
+   * adapter stores it and disposes it when that location unloads (ticket #153).
+   */
+  async installToolsFor(ctx: any): Promise<HostRegistration> {
+    const existing = this.toolRegistrations.get(ctx)
+    if (existing) return existing
+    const registration = await ctx.tool.transform((editor: any) => registerEnsembleTools(editor, this.toolHandlers()))
+    const handle = this.hostRegistration(registration, this.toolRegistrations, ctx)
+    this.toolRegistrations.set(ctx, handle)
+    return handle
+  }
+
+  /** Install this location's retry hook; disposal is owned by its attachment. */
+  async installRetryHook(ctx: any): Promise<HostRegistration> {
+    const existing = this.retryHooks.get(ctx)
+    if (existing) return existing
+    const registration = await ctx.session.hook("retry", (event: any) => {
+      if (!this.profileForSession(event.sessionID)) return
+      if (availabilityFailure(event.error)) event.decision = { retry: false }
     })
+    const handle = this.hostRegistration(registration, this.retryHooks, ctx)
+    this.retryHooks.set(ctx, handle)
+    return handle
+  }
+
+  private toolHandlers(): EnsembleToolHandlers {
+    return {
+      workspaceInfo: (context) => this.toolWorkspaceInfo(context),
+      listWorkspaces: () => this.toolListWorkspaces(),
+      listAgents: () => this.toolListAgents(),
+      taskStatus: (input, context) => this.toolTaskStatus(input, context),
+      sendMessage: (input, context) => this.toolSendMessage(input, context),
+      handoff: (input, context) => this.toolHandoff(input, context),
+      delegate: (input, context) => this.toolDelegate(input, context),
+      review: (input, context) => this.toolReview(input, context),
+      askPerson: (input, context) => this.toolAsk(input, context),
+      remember: (input, context) => this.toolRemember(input, context),
+      share: (input, context) => this.toolShare(input, context),
+    }
+  }
+
+  /**
+   * Wrap a host registration so disposal is idempotent and removes it from the
+   * owning per-context map. A context can be installed again after disposal.
+   */
+  private hostRegistration(registration: any, owner: Map<any, HostRegistration>, ctx: any): HostRegistration {
+    let disposed = false
+    const handle: HostRegistration = {
+      dispose: async () => {
+        if (disposed) return
+        disposed = true
+        if (owner.get(ctx) === handle) owner.delete(ctx)
+        await registration?.dispose?.()
+      },
+    }
+    return handle
+  }
+
+  /** Stop-time cleanup for a service used without location attachments (tests). */
+  private async disposeHostRegistrations(): Promise<void> {
+    for (const registration of [...this.toolRegistrations.values(), ...this.retryHooks.values()]) {
+      try {
+        await registration.dispose?.()
+      } catch {
+        // Best-effort: one host registration must not block service teardown.
+      }
+    }
+    this.toolRegistrations.clear()
+    this.retryHooks.clear()
   }
 
   private async toolWorkspaceInfo(context: any): Promise<{ content: string }> {

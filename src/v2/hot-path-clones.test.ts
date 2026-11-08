@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { V2Store, cloneStats, resetCloneStats } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
 
@@ -105,7 +106,7 @@ async function setup(messageCount: number) {
   const { directory, values, workspace } = await seedLargeWorkspace(messageCount)
   const { ctx, tools } = fakeContext(values)
   const service = new EnsembleV2Service(ctx)
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const store = (service as any).store as V2Store
   return { directory, values, workspace, handlers: service.handlers(), tools, service, stop, store }
 }

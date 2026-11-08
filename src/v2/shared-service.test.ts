@@ -79,7 +79,7 @@ test("the global registry is versioned and reused structurally across module cop
   resetSharedEnsembleForTests()
   t.after(resetSharedEnsembleForTests)
 
-  const foreign = { version: SHARED_SERVICE_VERSION, acquire: async () => ({ service: {} as any, release: async () => {} }) }
+  const foreign = { version: SHARED_SERVICE_VERSION, acquire: async () => ({ service: {} as any, release: async () => {} }), attach: async () => ({}) }
   installRegistry(foreign)
   assert.equal(sharedEnsemble(), foreign, "a structurally compatible registry wins over class identity")
 
@@ -194,7 +194,7 @@ test("an acquire already awaiting the entry never joins its teardown", async () 
   await second.release()
 })
 
-test("every location registers and disposes its own RPC handlers against the one service", async (t) => {
+test("every location registers and disposes its own host surfaces against the one service", async (t) => {
   resetSharedEnsembleForTests()
   t.after(resetSharedEnsembleForTests)
 
@@ -202,10 +202,22 @@ test("every location registers and disposes its own RPC handlers against the one
   let stops = 0
   const attached: any[] = []
   const detached: any[] = []
+  const toolRegistrations: any[] = []
+  const hookRegistrations: any[] = []
   const service = {
     handlers: () => ({ fake: true }),
     attach: (registration: any) => { attached.push(registration) },
     detach: (registration: any) => { detached.push(registration) },
+    installToolsFor: async (ctx: any) => {
+      const registration = { kind: "tools", ctx, disposed: false, dispose: async () => { registration.disposed = true } }
+      toolRegistrations.push(registration)
+      return registration
+    },
+    installRetryHook: async (ctx: any) => {
+      const registration = { kind: "retry", ctx, disposed: false, dispose: async () => { registration.disposed = true } }
+      hookRegistrations.push(registration)
+      return registration
+    },
   }
   installRegistry(new SharedEnsemble(async () => {
     starts += 1
@@ -228,6 +240,8 @@ test("every location registers and disposes its own RPC handlers against the one
         return registration
       },
     },
+    tool: { transform: async () => ({ dispose: async () => undefined }) },
+    session: { hook: async () => ({ dispose: async () => undefined }) },
   }))
 
   const cleanups: Array<() => Promise<void>> = []
@@ -237,14 +251,22 @@ test("every location registers and disposes its own RPC handlers against the one
   assert.equal(registrations.length, 13, "every location registers its own RPC handlers")
   assert.equal(attached.length, 13)
   assert.deepEqual(registrations.map((registration) => registration.handlers), Array.from({ length: 13 }, () => ({ fake: true })))
+  assert.equal(toolRegistrations.length, 13, "every location installs its own tool transform")
+  assert.equal(hookRegistrations.length, 13, "every location installs its own retry hook")
+  assert.deepEqual(toolRegistrations.map((registration) => registration.ctx), contexts)
+  assert.deepEqual(hookRegistrations.map((registration) => registration.ctx), contexts)
 
   for (const cleanup of cleanups.slice(0, -1)) await cleanup()
   assert.equal(registrations.filter((registration) => registration.disposed).length, 12, "each location disposes its own registration")
+  assert.equal(toolRegistrations.filter((registration) => registration.disposed).length, 12, "each location disposes its own tool transform")
+  assert.equal(hookRegistrations.filter((registration) => registration.disposed).length, 12, "each location disposes its own retry hook")
   assert.equal(detached.length, 12)
   assert.equal(stops, 0, "the service stays up while a location remains")
 
   await cleanups.at(-1)!()
   assert.equal(registrations.every((registration) => registration.disposed), true)
+  assert.equal(toolRegistrations.every((registration) => registration.disposed), true)
+  assert.equal(hookRegistrations.every((registration) => registration.disposed), true)
   assert.equal(detached.length, 13)
   assert.equal(stops, 1, "the last location release stops the service")
 })

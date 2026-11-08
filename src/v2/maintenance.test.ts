@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
+import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 import { MAX_ATTEMPTS } from "./queue.ts"
 import type { Agent, Message, Subtask, Workspace } from "./types.ts"
@@ -121,7 +122,7 @@ test("snapshot performs no writes and runs no maintenance pass", async () => {
   const { ctx, values, writes } = fakeContext()
   const service = new EnsembleV2Service(ctx)
   const handlers = service.handlers()
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   await stop()
   const seed = await seedWorkspace(directory, values)
   const stale: Subtask = {
@@ -152,7 +153,7 @@ test("the maintenance timer reaps stale work and settles terminal streams", asyn
   const { ctx, values } = fakeContext()
   const service = new EnsembleV2Service(ctx)
   const handlers = service.handlers()
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   const seed = await seedWorkspace(directory, values)
   await seed.saveSubtask({
     id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Stale", instruction: "Do",
@@ -209,7 +210,7 @@ test("5k-task waiting-work reconciliation meets the latency budget", async (t) =
   const service = new EnsembleV2Service(ctx)
   const handlers = service.handlers()
   const started = performance.now()
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   try {
     const elapsed = await waitFor(async () => {
       const snapshot = await handlers.snapshot({ directory })
@@ -230,7 +231,7 @@ test("a config file event triggers discovery without a read-path pass", async ()
   const { ctx, emitEvent } = fakeContext()
   const service = new EnsembleV2Service(ctx)
   const handlers = service.handlers()
-  const stop = await service.start()
+  const stop = await startServiceForTest(service, service.ctx)
   try {
     await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
     await handlers.snapshot({ directory })
