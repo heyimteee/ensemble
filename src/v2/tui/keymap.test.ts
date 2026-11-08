@@ -30,10 +30,11 @@ function entryId(context: KeyContext, keys: string): string | undefined {
 
 test("roster Normal grammar carries navigation, opening, actions, filter, and leader", () => {
   const keys = keysFor("roster")
-  for (const sequence of ["j", "k", "g g", "shift+g", "h", "l", "enter", "tab", "/", "a", "e", "s", "x", "shift+x", "space"]) {
+  for (const sequence of ["j", "k", "g g", "shift+g", "h", "l", "enter", "tab", "/", "a", "e", "s", "x", "shift+x", "space", "z"]) {
     assert.ok(keys.includes(sequence), `roster keeps ${sequence}`)
   }
   assert.equal(entryId("roster", "enter"), "open")
+  assert.equal(entryId("roster", "z"), "rail.collapse", "z toggles the selected workspace group")
 })
 
 test("group chat and direct conversation scroll the transcript and never expose a message cursor", () => {

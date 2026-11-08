@@ -139,6 +139,7 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "init", scope: "normal", contexts: ["roster"], keys: ["shift+i"], title: "Init workspace files", group: "State", hint: "I init" },
   { id: "pause", scope: "normal", contexts: ["roster"], keys: ["p"], title: "Pause / resume workspace", group: "State" },
   { id: "filter", scope: "normal", contexts: ["roster"], keys: ["/"], title: "Filter roster", group: "Search", hint: "/ filter" },
+  { id: "rail.collapse", scope: "normal", contexts: ["roster"], keys: ["z"], title: "Collapse or expand the workspace group", group: "Navigation" },
   { id: "leader", scope: "normal", contexts: ["roster"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
   { id: "escape", scope: "normal", contexts: ["roster"], keys: ["escape"], title: "Clear filter", group: "Navigation", listed: false },
 

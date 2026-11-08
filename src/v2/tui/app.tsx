@@ -8,14 +8,14 @@ import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
-import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
-import { agentName, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceGroupLabel, workspaceLabel } from "./format.ts"
+import { agentName, busyCount, fuzzyMatch, headerQueuedSuffix, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import {
   RAIL_PULSE_STEP_MS,
@@ -31,6 +31,14 @@ import {
   type RailPulseStart,
 } from "./rail.ts"
 import { palette } from "./theme.ts"
+import {
+  buildRailModel,
+  clampRailCursor,
+  firstSelectableRailRow,
+  railCollapseTarget,
+  railSelectableCount,
+  toggleCollapsedRailGroup,
+} from "./railmodel.ts"
 import { pickerWindow, stablePickerItems, toggleSelected } from "./picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import {
@@ -400,6 +408,11 @@ export function EnsembleV2App() {
   const [transcriptSearch, setTranscriptSearch] = createSignal<TranscriptSearch | null>(null)
   let commandSession: CommandSession | undefined
   const [railCursor, setRailCursor] = createSignal(0)
+  // Ticket #171: durable rail collapse state, hydrated from UI state on
+  // the first snapshot and written back through `ui.save`. The serialized key
+  // suppresses the hydration echo after an optimistic local toggle.
+  const [collapsedRailGroups, setCollapsedRailGroups] = createSignal<string[]>([])
+  let railCollapsedKey = ""
   const [taskCursor, setTaskCursor] = createSignal(0)
   const [chatContext, setChatContext] = createSignal<ChatContext | null>(null)
   const [settingsAgentID, setSettingsAgentID] = createSignal<string | null>(null)
@@ -1033,35 +1046,85 @@ export function EnsembleV2App() {
   const workSectionMarginTop = (index: number) =>
     workPane().sections.slice(0, index).some((section) => section.mode === "cards") ? 1 : 0
   const selectedApproval = createMemo(() => pendingApprovals()[approvalCursor()])
-  // Ticket #77b: each agent row names the workspace it belongs to (active
-  // workspace first, else its most recent membership) and whether it leads
-  // it; agents outside every workspace read `homeless`.
-  const workspaceForAgent = (agentID: string) => {
-    const active = activeWorkspace()
-    if (active && active.memberIDs.includes(agentID)) return active
-    return workspaces().find((workspace) => workspace.memberIDs.includes(agentID))
-  }
-  const railItems = createMemo<RailItem[]>(() => {
-    const query = workspaceFilter().toLowerCase()
-    const agentItems: RailItem[] = rosterAgents().filter((agent) => !query || agent.name.toLowerCase().includes(query)).map((agent) => {
-      const workspace = workspaceForAgent(agent.id)
-      return {
-        kind: "agent" as const,
-        id: agent.id,
-        title: agent.name,
-        description: agent.title,
-        workspace: workspace ? `#${workspace.name}` : "homeless",
-        leader: workspace?.leaderID === agent.id,
-        detail: activeWorkspace() && !activeWorkspace()!.memberIDs.includes(agent.id) ? "guest" : "",
+  // Ticket #171: one rail model for the split Agents / Workspaces panes. The
+  // app supplies recency-ordered workspaces and server-derived counts; the
+  // pure model owns primary-workspace grouping, filtering, labels, and
+  // collapse. The legacy fallback fills only the workspaces the server did
+  // not report, so a row never scans the store on its own.
+  const railWorkspaceCounts = createMemo<Record<string, WorkspaceCounts>>(() => {
+    const server = client.counts()
+    const snapshot = state()
+    const counts: Record<string, WorkspaceCounts> = {}
+    for (const workspace of workspaces()) {
+      const entry = server?.[workspace.id]
+      counts[workspace.id] = entry ?? {
+        unread: unreadCount(snapshot, workspace),
+        busy: busyCount(snapshot, workspace.id),
       }
+    }
+    return counts
+  })
+  const railModel = createMemo(() => {
+    const counts = railWorkspaceCounts()
+    return buildRailModel({
+      agents: rosterAgents().map((agent) => ({ id: agent.id, name: agent.name, title: agent.title })),
+      workspaces: workspaces().map((workspace) => ({
+        id: workspace.id,
+        name: workspace.name,
+        directory: workspace.directory,
+        leaderID: workspace.leaderID,
+        memberIDs: workspace.memberIDs,
+        paused: workspace.paused,
+        lastActiveAt: workspace.lastActiveAt,
+        unread: counts[workspace.id]?.unread ?? 0,
+        busy: counts[workspace.id]?.busy ?? 0,
+      })),
+      activeWorkspaceID: workspaceID(),
+      collapsed: collapsedRailGroups(),
+      query: workspaceFilter(),
     })
-    const workspaceItems: RailItem[] = workspaces().filter((workspace) => !query || workspace.name.toLowerCase().includes(query) || workspace.directory.toLowerCase().includes(query)).map((workspace) => ({
-      kind: "workspace" as const,
-      id: workspace.id,
-      title: workspace.name,
-      group: workspaceGroupLabel(workspace.directory),
-    }))
-    return [...agentItems, ...workspaceItems]
+  })
+  const railVisibleRows = () => railModel().visibleRows
+  // Ticket #171: keep the initial cursor on the first agent or workspace so
+  // the rail preserves its old first-target selection; group headers stay
+  // reachable once the user actually moves. A transient empty model (feed
+  // reset or scoped replacement) may clamp the cursor to zero, so normalize
+  // again until the first deliberate move instead of only once at mount.
+  let railCursorMoved = false
+  createEffect(() => {
+    const rows = railVisibleRows()
+    if (rows.length === 0 || railCursorMoved) return
+    const first = firstSelectableRailRow(rows)
+    if (railCursor() !== first) setRailCursor(first)
+  })
+  // Ticket #171: hydrate collapse state from the first snapshot that carries
+  // it, then keep local toggles optimistic. The serialized key distinguishes
+  // the local echo of a save from a real external change.
+  createEffect(() => {
+    const stored = state()?.ui.collapsedRailGroups
+    if (!stored) return
+    const key = JSON.stringify(stored)
+    if (key === railCollapsedKey) return
+    railCollapsedKey = key
+    setCollapsedRailGroups([...stored])
+  })
+  const persistRailCollapsed = (next: string[]) => {
+    railCollapsedKey = JSON.stringify(next)
+    setCollapsedRailGroups(next)
+    void invoke(context, "ui.save", { collapsedRailGroups: next }).catch(() => undefined)
+  }
+  /** `z` and a header click share this: toggle the header or the selected agent's group. */
+  const toggleRailGroup = (groupID?: string) => {
+    const target = groupID ?? railCollapseTarget(railVisibleRows(), railCursor())
+    if (!target) return
+    railCursorMoved = true
+    persistRailCollapsed(toggleCollapsedRailGroup(collapsedRailGroups(), target))
+    const index = railModel().visibleRows.findIndex((row) => row.kind === "group" && row.id === target)
+    if (index >= 0) setRailCursor(index)
+  }
+  createEffect(() => {
+    const next = clampRailCursor(railCursor(), railVisibleRows().length)
+    if (next !== railCursor()) setRailCursor(next)
   })
   // Ticket #141: the group transcript renders the bounded loaded window, not
   // a hard 40-row slice, so paging older rows can actually display them.
@@ -1902,7 +1965,7 @@ export function EnsembleV2App() {
     }
     if (session.target === "roster") {
       setWorkspaceFilter(text)
-      const count = railItems().length
+      const count = railSelectableCount(railVisibleRows())
       notify(chromeJoin([`${count} roster ${count === 1 ? "match" : "matches"}`, `/${query}`]), "info")
       return
     }
@@ -2441,15 +2504,19 @@ export function EnsembleV2App() {
   }
 
   const enterRail = async (): Promise<boolean> => {
-    const item = railItems()[railCursor()]
-    if (!item) return false
-    if (item.kind === "agent") {
-      const agent = state()?.agents[item.id]
+    const row = railVisibleRows()[railCursor()]
+    if (!row) return false
+    if (row.kind === "group") {
+      toggleRailGroup(row.id)
+      return true
+    }
+    if (row.kind === "agent") {
+      const agent = state()?.agents[row.id]
       if (!agent) return false
       openAgent(agent)
       return true
     }
-    const workspace = state()?.workspaces[item.id]
+    const workspace = state()?.workspaces[row.id]
     if (!workspace) return false
     await openWorkspace(workspace)
     return true
@@ -2475,12 +2542,14 @@ export function EnsembleV2App() {
 
   const listPage = () => Math.max(1, Math.floor(messageHeight() / 2))
   const moveRail = (delta: number) => {
-    const length = railItems().length
+    const length = railVisibleRows().length
     if (length === 0) return
+    railCursorMoved = true
     setRailCursor((cursor) => Math.max(0, Math.min(length - 1, cursor + delta)))
   }
   const moveRailHalf = (direction: 1 | -1) => {
-    setRailCursor((cursor) => halfPageCursor(cursor, railItems().length, direction, listPage()))
+    railCursorMoved = true
+    setRailCursor((cursor) => halfPageCursor(cursor, railVisibleRows().length, direction, listPage()))
   }
   const moveTask = (delta: number) => {
     const length = visibleTasks().length
@@ -2542,7 +2611,7 @@ export function EnsembleV2App() {
 
   // Roster selection helpers: a/e/s/x/X act on the rail cursor, not the open
   // surface, so they work before Enter opens a chat.
-  const railSelection = () => railItems()[railCursor()]
+  const railSelection = () => railVisibleRows()[railCursor()]
   const railAgent = () => {
     const item = railSelection()
     return item?.kind === "agent" ? state()?.agents[item.id] : undefined
@@ -3978,10 +4047,11 @@ export function EnsembleV2App() {
   const keyActionHandlers: Record<string, () => unknown> = {
     "nav.down": () => moveRail(1),
     "nav.up": () => moveRail(-1),
-    "nav.top": () => setRailCursor(0),
-    "nav.bottom": () => setRailCursor(Math.max(0, railItems().length - 1)),
+    "nav.top": () => { railCursorMoved = true; setRailCursor(0) },
+    "nav.bottom": () => { railCursorMoved = true; setRailCursor(Math.max(0, railVisibleRows().length - 1)) },
     "nav.half.down": () => moveRailHalf(1),
     "nav.half.up": () => moveRailHalf(-1),
+    "rail.collapse": () => toggleRailGroup(),
     "nav.left": () => setFocusArea("rail"),
     "nav.right": () => setFocusArea("chat"),
     "focus.tab": () => cycleFocusZone(1),
@@ -5870,7 +5940,7 @@ export function EnsembleV2App() {
     if (picker()) return listPosition(picker()!.cursor, pickerItems().length)
     const prompt = textPrompt()
     if (prompt) return composerPosition(String(textPromptRef?.plainText ?? prompt.value), Number(textPromptRef?.cursorOffset ?? 0))
-    if (interaction().focus === "rail") return listPosition(railCursor(), railItems().length)
+    if (interaction().focus === "rail") return listPosition(railCursor(), railVisibleRows().length)
     if (interaction().focus === "work") return listPosition(taskCursorClamped(), visibleTasks().length)
     const metrics = transcriptScroll()
     return transcriptPosition(metrics.top, metrics.height, metrics.viewport)
@@ -6042,7 +6112,7 @@ export function EnsembleV2App() {
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} gap={1} opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} counts={client.counts()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} />
+          <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={limitsOpen()} fallback={

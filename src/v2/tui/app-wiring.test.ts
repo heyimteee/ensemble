@@ -261,7 +261,7 @@ test("approvals inbox receives one-shot arrival and resolution motion", () => {
 test("rail and approvals share the Braille motion tick", () => {
   // Behavior: chrome.test.ts Braille marks; the live reduced-motion check.
   const source = components()
-  assert.ok(source.includes("railBusyMark(busy, props.motionTick ?? 0, process.env)"))
+  assert.ok(source.includes("railBusyMark(row.busy, props.motionTick ?? 0, process.env)"))
   assert.ok(source.includes("approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)"))
 })
 
@@ -328,4 +328,36 @@ test("native Work activity labels card detail", () => {
 test("native Work activity clears when its session ends", () => {
   // Behavior: work-activity.test.ts clear behavior.
   assert.ok(app().includes("clearWorkActivitiesForSession"))
+})
+
+test("ticket171: the rail renders the pure Agents and Workspaces sections", () => {
+  // Behavior: railmodel.test.ts grouping, ordering, collapse, and visible rows.
+  const source = app()
+  assert.ok(source.includes("sections={railModel().sections}"))
+  assert.ok(components().includes("<For each={props.sections}>"))
+  assert.ok(components().includes("section.heading"))
+})
+
+test("ticket171: rail group headers toggle collapse by key and mouse", () => {
+  // Behavior: railmodel.test.ts collapse targets and toggling; keymap.test.ts roster z.
+  const source = app()
+  assert.ok(source.includes('"rail.collapse": () => toggleRailGroup()'))
+  assert.ok(components().includes("onToggleGroup(row.id)"))
+  assert.ok(components().includes("onMouseDown"))
+})
+
+test("ticket171: the rail cursor traverses the pure visible rows", () => {
+  // Behavior: railmodel.test.ts collapsed rows and visible row order.
+  const source = app()
+  assert.ok(source.includes("railVisibleRows().length"))
+  assert.ok(source.includes("const row = railVisibleRows()[railCursor()]"))
+  assert.ok(source.includes("firstSelectableRailRow(rows)"), "the initial cursor skips a leading group header")
+})
+
+test("ticket171: rail collapse state persists through durable UI state", () => {
+  // Behavior: store.test.ts UI reload; the app hydrates and saves collapsedRailGroups.
+  const source = app()
+  assert.ok(source.includes("collapsedRailGroups: next"))
+  assert.ok(source.includes('"ui.save"'))
+  assert.ok(source.includes("state()?.ui.collapsedRailGroups"))
 })
