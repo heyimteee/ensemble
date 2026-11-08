@@ -3910,7 +3910,8 @@ test("ticket169: incident replay — a pending deadline, existing reply, late su
   // The 18-character placeholder from the incident, already settled.
   await seed.saveMessage({ id: "m_placeholder", workspaceID: "w", seq: 1, author: "agent", agentID: "a", taskID: "t_late", text: "Reply interrupted.", kind: "text", streaming: false, interrupted: true, createdAt: 2, updatedAt: 2 })
   // A real answer already existed in the transcript and must survive.
-  const existingReply = "A two-thousand-character answer already existed."
+  const existingReply = "The source answer was already recorded. ".repeat(60).slice(0, 2_238)
+  assert.equal(existingReply.length, 2_238, "the incident's existing reply size")
   await seed.saveSubtask({
     id: "t_source", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Source", instruction: "Do",
     mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false,
