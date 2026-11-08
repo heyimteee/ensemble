@@ -159,6 +159,28 @@ export function workGroupsForTasks(
   subtasks: Record<string, Subtask>,
   options: WorkGroupOptions,
 ): WorkGroup[] {
+  return collectWorkGroups(tasks, subtasks, options, false)
+}
+
+/**
+ * Ticket #172: every dispatch group, including terminal groups whose completion
+ * hold has elapsed. The Work pane keeps finished groups in HISTORY instead of
+ * discarding them; visibility filtering belongs to the view, not the grouping.
+ */
+export function allWorkGroupsForTasks(
+  tasks: Subtask[],
+  subtasks: Record<string, Subtask>,
+  options: WorkGroupOptions,
+): WorkGroup[] {
+  return collectWorkGroups(tasks, subtasks, options, true)
+}
+
+function collectWorkGroups(
+  tasks: Subtask[],
+  subtasks: Record<string, Subtask>,
+  options: WorkGroupOptions,
+  includeComplete: boolean,
+): WorkGroup[] {
   const now = options.now
   const pendingApprovalIDs = options.pendingApprovalIDs ?? NO_IDS
   const nativeBlockedSubtaskIDs = options.nativeBlockedSubtaskIDs ?? NO_IDS
@@ -201,7 +223,7 @@ export function workGroupsForTasks(
       complete &&
       latestTerminalAt !== undefined &&
       now < latestTerminalAt + Math.max(0, holdMs)
-    if (active === 0 && !needsYou && !holding) continue
+    if (!includeComplete && active === 0 && !needsYou && !holding) continue
     const ledger = options.dispatchGroups?.[id]
     const parentLedger = ledger?.parentID ? options.dispatchGroups?.[ledger.parentID] : undefined
     groups.push({

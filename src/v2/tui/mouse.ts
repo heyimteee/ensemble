@@ -13,6 +13,7 @@
 export const MOUSE_PANE_IDS = {
   rail: "ensemble-pane-rail",
   chat: "ensemble-pane-chat",
+  work: "ensemble-pane-work",
   header: "ensemble-pane-header",
   statusline: "ensemble-pane-statusline",
   dialog: "ensemble-pane-dialog",

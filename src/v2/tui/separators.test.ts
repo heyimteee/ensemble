@@ -68,8 +68,10 @@ test("settings, memory, picker, and wizard chrome use bars instead of dots", () 
 
 test("app chrome no longer hardcodes the work footer or the activity dot", () => {
   const source = readFileSync(new URL("./app.tsx", import.meta.url), "utf8")
-  assert.ok(source.includes('chromeJoin(["d delegate"'), "the work footer joins through the shared grammar")
-  assert.ok(!source.includes("d delegate │ t reassign"), "the work footer no longer hardcodes a bar")
+  // Ticket #172: the Work pane's action hints come from the keymap catalog in
+  // the statusline, so the app carries no second hand-written footer.
+  assert.ok(!source.includes('chromeJoin(["d delegate"'), "the Work pane has no hand-written action footer")
+  assert.ok(!source.includes("d delegate │ t reassign"), "the Work pane no longer hardcodes a bar")
   assert.ok(!source.includes("· +{liveActivity().overflow} more"), "the activity overflow no longer uses a dot")
   assert.ok(source.includes("+{liveActivity().overflow} more"), "the activity overflow is plain chrome text")
   assert.ok(source.includes("text={surfaceTitle()}"), "the surface title renders through ChromeText for faint separators")

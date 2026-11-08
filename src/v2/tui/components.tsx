@@ -411,6 +411,8 @@ export function WorkCardView(props: {
   tide: WorkCardTide
   selected: boolean
   width: number
+  /** Ticket #172 basic mouse selection; full card actions belong to #173. */
+  onSelect?: () => void
 }) {
   const terminal = () => props.card.terminal
   const tone = (key: WorkCard["tones"]["glyph"]) => props.colors[key]
@@ -448,6 +450,13 @@ export function WorkCardView(props: {
       borderStyle="rounded"
       borderColor={props.selected ? props.colors.focus : props.colors.border}
       backgroundColor={props.colors.panel}
+      onMouseDown={(event: any) => {
+        if (Number(event?.button) !== 0) return
+        // Keep the root pane marker: a drag that starts on a card is still a
+        // pane-bounded text selection, while a plain click selects the card.
+        event?.preventDefault?.()
+        props.onSelect?.()
+      }}
     >
       <box width={1} flexShrink={0} alignSelf="stretch" backgroundColor={tone(props.card.tones.bar)} />
       <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
@@ -471,6 +480,8 @@ export function WorkCompactRowView(props: {
   tones: WorkCardTones
   selected: boolean
   terminal: boolean
+  /** Ticket #172 basic mouse selection; full card actions belong to #173. */
+  onSelect?: () => void
 }) {
   const tone = (key: WorkCardTones["glyph"]) => props.colors[key]
   const parts = (): StyledLinePart[] => [
@@ -485,14 +496,24 @@ export function WorkCompactRowView(props: {
     { text: props.row.status, fg: tone(props.tones.status) },
   ]
   return (
-    <StyledLineText
-      parts={parts}
-      fg={props.colors.text}
-      bg={props.colors.bg}
+    <box
       width="100%"
-      wrapMode="none"
       flexShrink={0}
-    />
+      onMouseDown={(event: any) => {
+        if (Number(event?.button) !== 0) return
+        event?.preventDefault?.()
+        props.onSelect?.()
+      }}
+    >
+      <StyledLineText
+        parts={parts}
+        fg={props.colors.text}
+        bg={props.colors.bg}
+        width="100%"
+        wrapMode="none"
+        flexShrink={0}
+      />
+    </box>
   )
 }
 

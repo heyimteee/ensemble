@@ -1,3 +1,4 @@
+import { FINISHED_RETENTION_MS, deriveWorkStatus, isTerminalWorkStatus } from "./queue.ts"
 import { approvalResolutionAt, workGroupsForTasks } from "./work-groups.ts"
 import type { Id, Message, ScopeName, ScopeVersions, SnapshotState, Subtask, Tier3Gate, TranscriptWindow, WorkspaceCounts } from "./types.ts"
 
@@ -104,6 +105,42 @@ export function projectVisibleWork(state: SnapshotState, now: number = Date.now(
     for (const task of group.tasks) projected[task.id] = task
   }
   return projected
+}
+
+function retainedFinished(task: Subtask, now: number): boolean {
+  if (!isTerminalWorkStatus(deriveWorkStatus(task, now))) return false
+  // The durable queue already retains finished rows for 24 h; an unknown
+  // finish time is retained like the durable cleanup retains it.
+  const finished = task.finishedAt ?? task.repliedAt ?? task.stoppedAt
+  return finished === undefined || now - finished < FINISHED_RETENTION_MS
+}
+
+/**
+ * Ticket #172: merge a bounded Work projection with finished rows the client
+ * already knows, keeping the same 24 h retention as the durable store. The
+ * HISTORY view needs those rows, but the scoped payload must stay bounded, so
+ * retention lives on the client side of the same policy.
+ */
+export function mergeRetainedWork(
+  projected: Record<Id, Subtask>,
+  previous: Record<Id, Subtask>,
+  now: number = Date.now(),
+): Record<Id, Subtask> {
+  const merged = { ...projected }
+  for (const task of Object.values(previous)) {
+    if (merged[task.id] !== undefined) continue
+    if (retainedFinished(task, now)) merged[task.id] = task
+  }
+  return merged
+}
+
+/** Visible dispatch work plus retained finished rows for the Work HISTORY view. */
+export function projectRetainedWork(
+  state: SnapshotState,
+  now: number = Date.now(),
+  holdMs?: number,
+): Record<Id, Subtask> {
+  return mergeRetainedWork(projectVisibleWork(state, now, holdMs), state.subtasks, now)
 }
 
 /** Server-derived unread and busy counts; the client never scans all rows. */

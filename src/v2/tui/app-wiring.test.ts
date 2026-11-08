@@ -67,14 +67,35 @@ test("the file index refreshes on activation, file events, and explicit refresh"
   assert.ok(source.includes("onCleanup(() => fileIndex.dispose())"))
 })
 
-test("the Work pane maps active tasks through dispatch groups", () => {
-  // Behavior: workgroups.test.ts group visibility and layout.
-  assert.ok(app().includes("workGroupsForTasks(active, state()?.subtasks"))
+test("ticket172: the Work pane maps active tasks through the view filter", () => {
+  // Behavior: workpane.test.ts ACTIVE/HISTORY filtering.
+  const source = app()
+  assert.ok(source.includes("workViewGroups(active, state()?.subtasks"))
+  assert.ok(source.includes("dispatchGroups: state()?.dispatchGroups ?? {}"))
 })
 
-test("the Work pane lays groups out for the current size", () => {
-  // Behavior: workgroups.test.ts card and compact layouts.
-  assert.ok(app().includes("workGroupLayout(groups, workContentWidth(), viewHeight(), now)"))
+test("ticket172: the Work pane paginates by its own width and body height", () => {
+  // Behavior: workpane.test.ts responsive pagination and size matrix.
+  const source = app()
+  assert.ok(source.includes("paginateWorkGroups(grouped.active, width, body, now)"))
+  assert.ok(source.includes("paginateWorkGroups(grouped.history, width, body, now)"))
+  assert.ok(source.includes("const panes = createMemo(() => workspacePaneWidths(renderSize().width))"))
+  assert.ok(source.includes("const messageWidth = () => showWorkPane() ? panes().chatContentWidth : panes().chatOnlyContentWidth"))
+  assert.ok(source.includes("const workContentWidth = () => panes().workContentWidth"))
+})
+
+test("ticket172: Work renders in a right pane, never inside the chat column", () => {
+  // Behavior: workpane.test.ts renders cards/rows; the live size matrix.
+  const source = app()
+  const chat = source.indexOf("id={MOUSE_PANE_IDS.chat}")
+  const work = source.indexOf("id={MOUSE_PANE_IDS.work}")
+  assert.ok(chat >= 0 && work > chat, "the Work pane is a sibling after the chat")
+  const chatBody = source.slice(chat, work)
+  assert.ok(!chatBody.includes("<WorkCardView"), "no Work card renders in the chat column")
+  assert.ok(!chatBody.includes("<WorkCompactRowView"), "no compact Work row renders in the chat column")
+  const workBody = source.slice(work, source.indexOf("id={MOUSE_PANE_IDS.statusline}"))
+  assert.ok(workBody.includes("<WorkCardView"))
+  assert.ok(workBody.includes("<WorkCompactRowView"))
 })
 
 test("the Work pane renders card sections with their card models", () => {
@@ -83,18 +104,39 @@ test("the Work pane renders card sections with their card models", () => {
 })
 
 test("the Work cursor reads the layout's selectable task list", () => {
-  // Behavior: workgroups.test.ts selectable tasks; the live Work checks.
-  assert.ok(app().includes("workPane().layout.selectableTasks"))
+  // Behavior: workpane.test.ts focus settlement; the live Work checks.
+  const source = app()
+  assert.ok(source.includes("workPane().layout.selectableTasks"))
+  assert.ok(source.includes("settleWorkFocus(tasks, workFocusID()"))
 })
 
-test("Work actions target the cursor-clamped visible task", () => {
-  // Behavior: workgroups.test.ts cursor clamping; the live Work checks.
+test("Work actions target the focused visible task", () => {
+  // Behavior: workpane.test.ts focus preservation; the live Work checks.
   assert.ok(app().includes("visibleTasks()[taskCursorClamped()]"))
 })
 
-test("dispatch-group Work cards stay mounted through the shared hold", () => {
-  // Behavior: workgroups.test.ts 1.2 s shared hold; the live group-removal check.
-  assert.ok(app().includes("workPane().groups.length > 0"))
+test("ticket172: completed groups stay in HISTORY after the shared hold", () => {
+  // Behavior: workpane.test.ts history retention and workgroups.test.ts hold.
+  const source = app()
+  assert.ok(source.includes("const views = workViews()"))
+  assert.ok(source.includes("views.history.groups"))
+})
+
+test("ticket172: f toggles ACTIVE/HISTORY and the drawer opens from the Work focus key", () => {
+  // Behavior: keymap.test.ts work f; workpane.test.ts filter focus.
+  const source = app()
+  assert.ok(source.includes('"work.filter": () => toggleWorkView()'))
+  assert.ok(source.includes('if (next === "work") setWorkDrawerOpen(true)'))
+  assert.ok(source.includes("global.work"))
+})
+
+test("ticket172: Work page controls and card selection are mouse-reachable", () => {
+  // Behavior: workpane.test.ts page layout; the live Work checks.
+  const source = app()
+  assert.ok(source.includes("selectWorkPage(workPane().page - 1)"))
+  assert.ok(source.includes("selectWorkPage(workPane().page + 1)"))
+  assert.ok(source.includes("onSelect={() => selectWorkCard(card.id)}"))
+  assert.ok(source.includes("onSelect={() => selectWorkCard(task.id)}"))
 })
 
 test("the TUI reads durable state through the fine-grained client store", () => {
@@ -320,8 +362,8 @@ test("ticket160: the Limits key trap owns keys before the page handlers", () => 
 test("ticket160: Work cards receive the dispatch ledger", () => {
   // Behavior: workgroups.test.ts group budgets.
   const source = app()
-  assert.ok(source.includes("dispatchGroups: ledger"))
-  assert.ok(source.includes("budgetFor,"))
+  assert.ok(source.includes("dispatchGroups: state()?.dispatchGroups ?? {}"))
+  assert.ok(source.includes("budgetFor: dispatchBudgetForTask,"))
 })
 
 test("ticket160: Work cards read each task's ledger budget", () => {

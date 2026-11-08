@@ -192,6 +192,13 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.restart", scope: "normal", contexts: ["work"], keys: ["shift+r"], title: "Restart work", group: "Work", hint: "R restart" },
   { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work", group: "Work", hint: "x cancel" },
   { id: "work.native", scope: "normal", contexts: ["work"], keys: ["o"], title: "Native session", group: "Navigate", hint: "o native" },
+  // Ticket #172 keeps the existing approval inbox reachable from Work focus;
+  // #173 moves approvals into the pane itself.
+  { id: "work.approvals", scope: "normal", contexts: ["work"], keys: ["v"], title: "Approvals", group: "Navigate" },
+  // Ticket #172: the filter is a Work-pane view switch, not the rail filter.
+  { id: "work.filter", scope: "normal", contexts: ["work"], keys: ["f"], title: "Toggle active and history", group: "View", hint: "f history" },
+  { id: "work.page.up", scope: "normal", contexts: ["work"], keys: ["pageup"], title: "Previous Work page", group: "Navigation", listed: false },
+  { id: "work.page.down", scope: "normal", contexts: ["work"], keys: ["pagedown"], title: "Next Work page", group: "Navigation", listed: false },
   { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Transcript", group: "Focus", hint: "tab chat" },
   { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Transcript", group: "Focus" },
   { id: "leader", scope: "normal", contexts: ["work"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
@@ -570,6 +577,8 @@ const TEXT_FIELDS: readonly KeyEntry[] = [
 const GLOBAL: readonly KeyEntry[] = [
   { id: "global.help", scope: "normal", contexts: ["global"], keys: ["?"], title: "Open help", group: "Global", hint: "? help" },
   { id: "global.native", scope: "normal", contexts: ["global"], keys: ["f2"], title: "Open Ensemble from a native session", group: "Global" },
+  // Ticket #172: below 96 columns the Work pane is a drawer; F3 toggles it.
+  { id: "global.work", scope: "normal", contexts: ["global"], keys: ["f3"], title: "Toggle the Work drawer", group: "Global", hint: "F3 work" },
 ]
 
 /** Help overlay grammar: the same dialog grammar used by every other list. */
@@ -877,6 +886,7 @@ export function normalizeKeyToken(event: {
   if (name === ":" || name === "colon" || sequence === ":") return ":"
   if ((name === ";" || name === "semicolon") && event?.shift) return ":"
   if (name === "backspace" || name === "pageup" || name === "pagedown" || name === "end" || name === "home") return name
+  if (/^f\d+$/i.test(name)) return name.toLowerCase()
   if (name === "?" || sequence === "?") return "?"
   if (name.startsWith("ctrl+") || name.startsWith("super+") || name.startsWith("alt+")) return name.toLowerCase()
   if (event?.ctrl && name.length === 1) return `ctrl+${name.toLowerCase()}`
