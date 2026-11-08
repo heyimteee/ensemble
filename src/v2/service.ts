@@ -343,11 +343,11 @@ export class EnsembleV2Service {
     await this.store.load()
     this.refreshDmClock()
     await this.reconcileInitJobs()
-    // Restart recovery lives in the store load path: rows left `working`
-    // across a restart return to `pending` with their attempt budget intact
-    // and no approval minted. A pending decision (ask_person and friends)
-    // survives on the row's approvalID; anything else is just retried.
-    // Approvals are never synthesized for dead work.
+    // Ticket #148: restart recovery is lease-safe. Load leaves `working` rows
+    // untouched; reapAndRetire() requeues only an expired/missing lease with
+    // no live local run, and reconcileWaitingWork() repairs a working row
+    // with no claim at all. Attempts are preserved until the next claim and
+    // no approval is ever synthesized for dead work.
     this.retryRegistration = await this.ctx.session.hook("retry", (event: any) => {
       if (!this.profileForSession(event.sessionID)) return
       if (availabilityFailure(event.error)) event.decision = { retry: false }
@@ -406,6 +406,10 @@ export class EnsembleV2Service {
     this.pump(false)
     return async () => {
       this.stopped = true
+      // Capture owned run ids before waiting: each run's finally releases its
+      // own claim, and any claim still held by these ids after settle is a
+      // clean-shutdown release. Foreign claims must survive.
+      const localRunIDs = new Set(this.activeRuns.keys())
       this.catalogAbort?.abort()
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer)
       this.maintenanceTimer = undefined
@@ -417,6 +421,7 @@ export class EnsembleV2Service {
       await this.maintenanceRun?.catch(() => undefined)
       await this.retryRegistration?.dispose?.().catch(() => undefined)
       await Promise.allSettled([...this.running])
+      await this.releaseLocalClaims(localRunIDs).catch(() => undefined)
       this.logger?.event("info", "service", "service.stop", {
         uptimeMs: now() - this.startedAtMs,
         activeRuns: this.activeRuns.size,
@@ -4591,15 +4596,38 @@ export class EnsembleV2Service {
       // A claim whose lease expired without a live owner goes back to the
       // queue with its attempt budget intact. Claims held by a live run in
       // this process are never reaped — the run's heartbeat owns them.
-      if (candidate.claimedBy && (candidate.leaseUntil === undefined || candidate.leaseUntil <= at) && !this.activeRuns.has(candidate.claimedBy)) {
-        const task = this.store.cloneSubtask(candidate.id)
-        if (!task) continue
-        task.claimedBy = undefined
-        task.leaseUntil = undefined
-        task.activeRunID = undefined
-        if (task.state === "working") task.state = "pending"
-        await this.store.saveSubtask(task)
+      // Ticket #148: a foreign claim with a live lease is deferred, never
+      // stolen; only expiry (or a missing lease) proves the owner is gone.
+      if (!candidate.claimedBy || this.activeRuns.has(candidate.claimedBy)) continue
+      if (candidate.leaseUntil !== undefined && candidate.leaseUntil > at) {
+        this.logger?.event("debug", "task", "task.recovery.deferred", {
+          workspaceID: candidate.workspaceID,
+          taskID: candidate.id,
+          dispatchGroupID: candidate.dispatchGroupID,
+          claimedBy: candidate.claimedBy,
+          leaseUntil: candidate.leaseUntil,
+          remainingMs: candidate.leaseUntil - at,
+          attempts: candidate.attempts,
+        })
+        continue
       }
+      const previousClaim = candidate.claimedBy
+      const task = this.store.cloneSubtask(candidate.id)
+      if (!task) continue
+      task.claimedBy = undefined
+      task.leaseUntil = undefined
+      task.activeRunID = undefined
+      if (task.state === "working") task.state = "pending"
+      await this.store.saveSubtask(task)
+      this.logger?.event("warn", "task", "task.recovery.requeued", {
+        workspaceID: task.workspaceID,
+        taskID: task.id,
+        dispatchGroupID: task.dispatchGroupID,
+        claimedBy: previousClaim,
+        leaseUntil: candidate.leaseUntil,
+        attempts: task.attempts,
+        state: task.state,
+      })
     }
     await this.purgeFinishedWork(at)
   }
@@ -4621,16 +4649,30 @@ export class EnsembleV2Service {
    * live, and the activity surface would then show a finished task as
    * working. Iterates the store's active streaming-id index, never the whole
    * transcript (ticket #134).
+   *
+   * Ticket #148: load no longer settles streams, so this is also the lease
+   * path. A row survives only while its task holds a live lease; a missing or
+   * expired lease means no run is producing text for it. A row with no task
+   * link settles once it is older than a full lease window.
    */
   private async settleTerminalStreams(): Promise<void> {
+    const at = now()
     for (const { workspaceID, messageID } of this.store.streamingMessages()) {
       const candidate = this.store.message(workspaceID, messageID)
-      if (!candidate?.streaming || !candidate.taskID) continue
-      const task = this.store.subtask(candidate.taskID)
-      if (task && task.state !== "replied") continue
+      if (!candidate?.streaming) continue
+      const task = candidate.taskID ? this.store.subtask(candidate.taskID) : undefined
+      let interrupted: boolean
+      if (task) {
+        const terminal = task.state === "replied"
+        const liveLease = task.leaseUntil !== undefined && task.leaseUntil > at
+        if (!terminal && liveLease) continue
+        interrupted = terminal ? task.outcome !== "succeeded" : true
+      } else {
+        if (at - (candidate.updatedAt ?? candidate.createdAt) < LEASE_MS) continue
+        interrupted = true
+      }
       const message = this.store.cloneMessage(workspaceID, candidate.id)
       if (!message) continue
-      const interrupted = task ? task.outcome !== "succeeded" : true
       settleStreamMessage(message, message.text || (interrupted ? "Reply interrupted." : "Reply completed."), interrupted)
       await this.store.saveMessage(message)
     }
@@ -5299,6 +5341,24 @@ export class EnsembleV2Service {
       current.claimedBy = undefined
       current.leaseUntil = undefined
       await this.store.saveSubtask(current)
+    }
+  }
+
+  /**
+   * Clean shutdown (ticket #148): release only claims whose owner is one of
+   * this service's run ids. A foreign claim belongs to another live service
+   * and must survive; a crash (no stop path) leaves the lease to expire.
+   */
+  private async releaseLocalClaims(runIDs: ReadonlySet<string>): Promise<void> {
+    if (runIDs.size === 0) return
+    for (const candidate of this.store.subtasks()) {
+      if (!candidate.claimedBy || !runIDs.has(candidate.claimedBy)) continue
+      const task = this.store.cloneSubtask(candidate.id)
+      if (!task) continue
+      task.claimedBy = undefined
+      task.leaseUntil = undefined
+      if (task.activeRunID !== undefined && runIDs.has(task.activeRunID)) task.activeRunID = undefined
+      await this.store.saveSubtask(task)
     }
   }
 

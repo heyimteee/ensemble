@@ -290,7 +290,7 @@ test("a live-text checkpoint persists without a coordination version or patch", 
   assert.equal((ctx.values.get("v2/message/w/00000001") as Message).text, "partial checkpoint")
 })
 
-test("a crash recovers the last streamed checkpoint and marks the run interrupted", async () => {
+test("a crash recovers the last streamed checkpoint and leaves settlement to the service", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx, undefined, { epoch: 1 })
   const live = message({ streaming: true, text: "partial", updatedAt: 2 })
@@ -303,8 +303,11 @@ test("a crash recovers the last streamed checkpoint and marks the run interrupte
   await recovered.load()
   const messageRow = recovered.message("w", "m")
   assert.equal(messageRow?.text, "partial checkpoint", "at most the text after the last checkpoint is lost")
-  assert.equal(messageRow?.streaming, false)
-  assert.equal(messageRow?.interrupted, true, "the crashed run is visibly interrupted")
+  // Ticket #148: load never declares a live stream dead. The service settles
+  // terminal/expired/stale rows from the streaming index after load.
+  assert.equal(messageRow?.streaming, true)
+  assert.equal(messageRow?.interrupted, undefined, "load writes no restart marker")
+  assert.deepEqual(recovered.streamingMessages(), [{ workspaceID: "w", messageID: "m" }])
 })
 
 test("a removal publishes a full remove change", async () => {

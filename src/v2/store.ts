@@ -135,8 +135,8 @@ export class V2Store {
   /**
    * Live streaming rows indexed by `workspaceID + NUL + messageID`. Maintenance
    * settles only these rows instead of scanning every message in every
-   * workspace. Kept in sync by `saveMessage`/`appendMessage` and the storage
-   * merge; cleared on load/reset/prune.
+   * workspace. Kept in sync by `saveMessage`/`appendMessage`, the load scan,
+   * the storage merge, and removal; cleared on reset/prune.
    */
   private readonly streaming = new Set<string>()
 
@@ -186,15 +186,13 @@ export class V2Store {
       if (!message?.workspaceID) continue
       const list = (this.state.messages[message.workspaceID] ??= [])
       list.push(message)
+      // Ticket #148: live rows survive load. The service settles terminal,
+      // expired, or stale rows from this index after load; load never decides
+      // that a stream is dead on its own.
+      this.trackStreaming(message)
     }
     for (const list of Object.values(this.state.messages)) {
       list.sort((a, b) => a.seq - b.seq)
-      for (const message of list) {
-        if (!message.streaming) continue
-        message.streaming = false
-        message.interrupted = true
-        if (!message.text) message.text = "Reply interrupted before completion."
-      }
     }
     for (const { value } of await this.scanAll("v2/subtask/")) {
       const subtask = value as Subtask
@@ -240,19 +238,11 @@ export class V2Store {
           expected: subtask.expected,
         })
       }
-      if (subtask.state === "working") {
-        // Restart recovery: re-queue interruptible work without duplicating
-        // it and without minting an approval. Attempts and the idempotency
-        // key are kept so the retried work resumes its budget instead of
-        // starting a second copy. Rows that still carry an approvalID keep
-        // waiting on that real pending decision; everything else retries.
-        subtask.state = "pending"
-        subtask.interrupted = false
-        subtask.activeRunID = undefined
-        subtask.claimedBy = undefined
-        subtask.leaseUntil = undefined
-        subtask.error = "Ensemble restarted while this subtask was working."
-      }
+      // Ticket #148: working rows are left exactly as stored. Load must never
+      // recover them: another service location may still own the claim and a
+      // live lease. Recovery belongs to the lease-aware reaper and the
+      // no-claim/waiting-work repair pass; rewriting here caused duplicate
+      // execution and attempt exhaustion.
     }
     // Legacy rows (persisted before ticket #135) carry no dispatch group.
     // Resolve one from the root ancestor so in-flight work keeps a coherent
