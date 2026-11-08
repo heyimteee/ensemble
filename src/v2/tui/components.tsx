@@ -1,12 +1,12 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { StyledText, TextAttributes, bg as bgStyle, fg as fgStyle } from "@opentui/core"
-import type { Agent, Approval, Memory, SkillOption, SnapshotState, WorkspaceCounts } from "../types.ts"
+import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
 import { approvalSource } from "../types.ts"
 import type { DispatchLimits } from "../dispatch-budget.ts"
 import { limitsPanelFooter, limitsPanelRows, limitsPanelSubtitle, limitsPanelTitle } from "./limits.ts"
 import type { InteractionMode } from "./interaction.ts"
 import { contrastText, type Palette, type ThemeColor } from "./theme.ts"
-import { busyCount, missingSkills, short, unreadCount } from "./format.ts"
+import { missingSkills, short } from "./format.ts"
 import { settingsTabLine, skillAssigned, skillPageItems, skillPaginationText, skillToggleMark } from "./skills.ts"
 import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
 import {
@@ -16,7 +16,6 @@ import {
   memoriesNoMatchLine,
   modelSummary,
   modelsEmptyLine,
-  railGroupLine,
   settingsCursorMark,
   settingsDivider,
   settingsFieldRow,
@@ -40,6 +39,7 @@ import {
 import { helpEntryKey, type HelpEntry, type HelpSection } from "./help.ts"
 import { pickerWindow } from "./picker.ts"
 import { railRowKey, type RailEmphasis } from "./rail.ts"
+import { railGroupHeading, type RailSection } from "./railmodel.ts"
 import { MOUSE_PANE_IDS } from "./mouse.ts"
 import { statuslineHints } from "./keymap.ts"
 import { displayWidth, fitStatuslineSegments, type StatuslinePart, type StatuslineSegment, type StatuslineTone } from "./statusline.ts"
@@ -53,20 +53,6 @@ import type { InitRow } from "./initrow.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
 
 export type SettingsTab = "general" | "models" | "memories" | "skillbox"
-
-export type RailItem = {
-  kind: "agent" | "workspace"
-  id: string
-  title: string
-  detail?: string
-  /** Agent-list secondary line: the agent's title. */
-  description?: string
-  /** Agent-list third line: the workspace it belongs to (`#name`) or "homeless". */
-  workspace?: string
-  /** True when the displayed workspace names this agent as leader. */
-  leader?: boolean
-  group?: string
-}
 
 export type ChatLine = {
   id: string
@@ -296,20 +282,19 @@ export function ToastOverlay(props: { colors: Palette; toast: ToastNotice; top: 
 
 export function Rail(props: {
   colors: Palette
-  items: RailItem[]
+  /** Ticket #171: pure sections; the app owns grouping, counts, and collapse state. */
+  sections: readonly RailSection[]
   cursor: number
   focus: boolean
   cursorVisible: boolean
-  activeWorkspaceID: string | null
-  state: SnapshotState | null
   pendingApprovals: number
   width: number
   filter: string
-  /** Ticket #141: server-derived unread/busy counts; falls back for legacy servers. */
-  counts?: Readonly<Record<string, WorkspaceCounts>>
   motionTick?: number
   /** One-shot unread/approval pulses and quiet row arrivals from ticket #121. */
   emphasis?: RailEmphasis
+  /** Mouse and keyboard both route through this; a group header toggles its rows. */
+  onToggleGroup: (groupID: string) => void
 }) {
   const approvalCountParts = (): StyledLinePart[] => {
     const parts: StyledLinePart[] = [{ text: "APPROVALS", fg: props.colors.accent }]
@@ -323,74 +308,92 @@ export function Rail(props: {
     }
     return parts
   }
+  const sectionBorder = () => props.focus ? props.colors.focus : props.colors.border
+  const sectionOffset = (sectionIndex: number) =>
+    props.sections.slice(0, sectionIndex).reduce((total, section) => total + section.rows.length, 0)
   return (
-    <box id={MOUSE_PANE_IDS.rail} width={props.width} border borderStyle="single" borderColor={props.focus ? props.colors.focus : props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" padding={1}>
+    <box id={MOUSE_PANE_IDS.rail} width={props.width} backgroundColor={props.colors.bg} flexDirection="column">
       <Show when={props.filter}>
         <text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>filter: {props.filter}</text>
       </Show>
-      <For each={props.items}>{(item, index) => {
-        const previous = index() > 0 ? props.items[index() - 1] : undefined
-        const kindHeader = item.kind !== previous?.kind
-          ? railGroupLine(item.kind, props.items.filter((entry) => entry.kind === item.kind).length)
-          : ""
-        const agentCount = props.items.filter((entry) => entry.kind === "agent").length
-        const workspaceCount = props.items.length - agentCount
-        const groupHeader = item.group && item.group !== previous?.group ? item.group : ""
-        // Read the cursor inside the rendered expression. A plain const here
-        // captures the value once per item and only refreshes when the poll
-        // rebuilds the list, which made j/k feel up to a tick late.
-        const selected = () => props.cursor === index()
-        // Slice E single-cursor rule: the `›` position marker renders only on
-        // the surface that owns the focus border, never on two surfaces at once.
-        const workspace = item.kind === "workspace" ? props.state?.workspaces[item.id] : undefined
-        // Ticket #141: the server-derived counts avoid scanning every message
-        // and task in the client. The old scan remains the legacy fallback.
-        const serverCounts = workspace ? props.counts?.[workspace.id] : undefined
-        const unread = serverCounts ? serverCounts.unread : workspace ? unreadCount(props.state, workspace) : 0
-        const busy = serverCounts ? serverCounts.busy : workspace ? busyCount(props.state, workspace.id) : 0
-        // Ticket #121: unread growth pulses the count once; a newly arrived row
-        // settles from muted to its normal tone without movement. Selection
-        // always wins the tone, so arrival emphasis never hides the cursor.
-        const unreadPulse = () => Boolean(props.emphasis?.unread.has(item.id))
-        const arriving = () => Boolean(props.emphasis?.arrivals.has(railRowKey(item.kind, item.id)))
-        const rowTone = () => selected() ? props.colors.good : arriving() ? props.colors.muted : props.colors.text
-        return (
-          <>
-            <Show when={kindHeader === railGroupLine("workspace", workspaceCount)}>
-              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>────────</text>
-            </Show>
-            <Show when={kindHeader}>
-              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{kindHeader}</text>
-            </Show>
-            <Show when={groupHeader}>
-              <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>  {groupHeader}</text>
-            </Show>
-            <box flexDirection="column">
-              <box flexDirection="row" width="100%">
-                <text fg={rowTone()} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
-                  {settingsCursorMark(selected() && props.cursorVisible)}{item.kind === "workspace" ? `#${item.title}` : item.title}
-                </text>
-                <Show when={item.kind === "agent" && item.leader}>
-                  <text fg={props.colors.faint} bg={props.colors.bg} flexShrink={0}> {chromeSeparator()} </text>
-                  <text fg={props.colors.leader} bg={props.colors.bg} flexShrink={0} attributes={TextAttributes.BOLD}>LEADER</text>
-                </Show>
-                <Show when={workspace?.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
-                <Show when={busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> {railBusyMark(busy, props.motionTick ?? 0, process.env)}</text></Show>
-                <Show when={unread > 0}><text fg={unreadPulse() ? props.colors.info : props.colors.muted} bg={props.colors.bg} flexShrink={0} attributes={unreadPulse() ? TextAttributes.BOLD : undefined}> ●{unread}</text></Show>
-              </box>
-              <Show when={item.kind === "agent"}>
-                <Show when={(item.description ?? "").trim()}>
-                  <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
-                    {"  ├ "}{short(item.description!, Math.max(8, props.width - 8))}
+      <For each={props.sections}>{(section, sectionIndex) => (
+        <box width="100%" flexGrow={section.id === "agents" ? 2 : 1} minHeight={0} border borderStyle="single" borderColor={sectionBorder()} backgroundColor={props.colors.bg} flexDirection="column" paddingLeft={1} paddingRight={1} overflow="hidden">
+          <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{section.heading}</text>
+          <For each={section.rows}>{(row, rowIndex) => {
+            // Read the cursor inside the rendered expression: a plain const
+            // here captures the value once per row and feels a tick late.
+            const index = () => sectionOffset(sectionIndex()) + rowIndex()
+            const selected = () => props.cursor === index()
+            if (row.kind === "group") {
+              return (
+                <box flexDirection="row" width="100%" onMouseDown={(event: any) => {
+                  if (Number(event?.button) !== 0) return
+                  // A header click toggles collapse; the drag-selection owner
+                  // still sees the gesture and keeps clipboard behavior.
+                  event?.preventDefault?.()
+                  props.onToggleGroup(row.id)
+                }}>
+                  <text fg={selected() ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="none" truncate>
+                    {settingsCursorMark(selected() && props.cursorVisible)}{railGroupHeading(row)}
                   </text>
-                </Show>
-                <ChromeText colors={props.colors} fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate attributes={TextAttributes.DIM} text={`  └ ${short(item.detail ? chromeJoin([item.workspace ?? "homeless", item.detail]) : item.workspace ?? "homeless", Math.max(8, props.width - 8))}`} />
-              </Show>
-            </box>
-          </>
-        )
-      }}</For>
-      <Show when={props.items.length === 0}><text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{railEmptyLine()}</text></Show>
+                </box>
+              )
+            }
+            if (row.kind === "agent") {
+              // Ticket #121: arrival settles quietly; selection always wins the tone.
+              const arriving = () => Boolean(props.emphasis?.arrivals.has(railRowKey("agent", row.id)))
+              const rowTone = () => selected() ? props.colors.good : arriving() ? props.colors.muted : props.colors.text
+              return (
+                <box flexDirection="column">
+                  <box flexDirection="row" width="100%">
+                    <text fg={rowTone()} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
+                      {"  "}{settingsCursorMark(selected() && props.cursorVisible)}{row.title}
+                    </text>
+                    <Show when={row.leader}>
+                      <text fg={props.colors.faint} bg={props.colors.bg} flexShrink={0}> {chromeSeparator()} </text>
+                      <text fg={props.colors.leader} bg={props.colors.bg} flexShrink={0} attributes={TextAttributes.BOLD}>LEADER</text>
+                    </Show>
+                    <Show when={row.guest}>
+                      <text fg={props.colors.faint} bg={props.colors.bg} flexShrink={0}> {chromeSeparator()} guest</text>
+                    </Show>
+                  </box>
+                  <Show when={row.role.trim()}>
+                    <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
+                      {"    ├ "}{short(row.role, Math.max(8, props.width - 10))}
+                    </text>
+                  </Show>
+                </box>
+              )
+            }
+            // Ticket #121: unread growth pulses the count once; a newly arrived
+            // row settles without movement. Active selection keeps its accent.
+            const unreadPulse = () => Boolean(props.emphasis?.unread.has(row.id))
+            const arriving = () => Boolean(props.emphasis?.arrivals.has(railRowKey("workspace", row.id)))
+            const rowTone = () => selected() ? props.colors.good : row.active ? props.colors.accent : arriving() ? props.colors.muted : props.colors.text
+            return (
+              <box flexDirection="column">
+                <box flexDirection="row" width="100%">
+                  <text fg={rowTone()} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
+                    {"  "}{settingsCursorMark(selected() && props.cursorVisible)}#{row.title}
+                  </text>
+                  <Show when={row.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
+                  <Show when={row.busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> {railBusyMark(row.busy, props.motionTick ?? 0, process.env)}</text></Show>
+                  <Show when={row.unread > 0}><text fg={unreadPulse() ? props.colors.info : props.colors.muted} bg={props.colors.bg} flexShrink={0} attributes={unreadPulse() ? TextAttributes.BOLD : undefined}> ●{row.unread}</text></Show>
+                </box>
+                <text fg={props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="none" truncate attributes={TextAttributes.DIM}>
+                  {"    ├ "}{short(row.group, Math.max(8, props.width - 10))}
+                </text>
+              </box>
+            )
+          }}</For>
+          <Show when={section.id === "agents" && props.sections.every((entry) => entry.rows.length === 0)}>
+            <text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{railEmptyLine()}</text>
+          </Show>
+          <Show when={section.id === "workspaces" && Boolean(props.filter) && section.rows.length === 0}>
+            <text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">No workspaces match.</text>
+          </Show>
+        </box>
+      )}</For>
       <text> </text>
       <StyledLineText parts={approvalCountParts} fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate />
       <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>v opens inbox</text>

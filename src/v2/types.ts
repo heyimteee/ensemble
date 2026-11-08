@@ -524,6 +524,11 @@ export type Snapshot = {
     ui: {
       activeWorkspaceID?: Id
       activeAgentID?: Id
+      /**
+       * Ticket #171: workspace group ids whose agent rows are collapsed in the
+       * rail. Durable so the rail reopens the way the user left it.
+       */
+      collapsedRailGroups?: Id[]
       history?: Record<string, {
         surface: "workspace" | "agent"
         workspaceID?: Id
