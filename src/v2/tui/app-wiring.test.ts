@@ -103,11 +103,13 @@ test("the Work pane renders card sections with their card models", () => {
   assert.ok(app().includes("section.mode === \"cards\""))
 })
 
-test("the Work cursor reads the layout's selectable task list", () => {
-  // Behavior: workpane.test.ts focus settlement; the live Work checks.
+test("ticket173: the Work cursor reads rendered card rectangles and settles by task identity", () => {
+  // Behavior: workpane.test.ts focus settlement; workfocus.test.ts spatial
+  // navigation, page edges, and nearest-position fallback.
   const source = app()
   assert.ok(source.includes("workPane().layout.selectableTasks"))
-  assert.ok(source.includes("settleWorkFocus(tasks, workFocusID()"))
+  assert.ok(source.includes("settleWorkFocusByPosition(pages, lastWorkFocus, workFocusIntent)"))
+  assert.ok(source.includes("workLayoutRects(workViews()[workView()].layout)"))
 })
 
 test("Work actions target the focused visible task", () => {
@@ -126,7 +128,7 @@ test("ticket172: f toggles ACTIVE/HISTORY and the drawer opens from the Work foc
   // Behavior: keymap.test.ts work f; workpane.test.ts filter focus.
   const source = app()
   assert.ok(source.includes('"work.filter": () => toggleWorkView()'))
-  assert.ok(source.includes('if (next === "work") setWorkDrawerOpen(true)'))
+  assert.ok(source.includes('if (next === "work" || next === "approvals") setWorkDrawerOpen(true)'))
   assert.ok(source.includes("global.work"))
 })
 
@@ -453,4 +455,66 @@ test("ticket174: label/detail list rows share the aligned column helper", () => 
   assert.ok(source.includes("alignedDetailRows("))
   assert.ok(source.includes("wizardRowLabels()"), "wizard rows render the aligned labels")
   assert.ok(source.includes("maxWidth: pickerDetailWidth()"), "picker rows keep one name column")
+})
+
+test("ticket173: focused cards are white and unfocused cards stay grey without a pane gate", () => {
+  // Behavior: theme.test.ts cardFocus vs border; workfocus.test.ts selection.
+  const source = app()
+  assert.ok(source.includes("selected={selectedTask()?.id === card.id}"), "card selection survives pane focus changes")
+  assert.ok(source.includes("selectedTask()?.id === task.id"), "compact rows share the same focus identity")
+  assert.ok(components().includes("workCardBorderColor(props.colors, props.selected)"))
+  assert.ok(app().includes("borderColor={workOwnsFocus() ? colors.focus : colors.border}"), "the pane border remains a separate state")
+})
+
+test("ticket173: hjkl, gg/G, and Ctrl+d/u run through the pure spatial navigator", () => {
+  // Behavior: workfocus.test.ts nearest-card navigation, page edges, and half pages.
+  const source = app()
+  assert.ok(source.includes('"work.down": () => moveTask(1)'))
+  assert.ok(source.includes('"work.left": () => moveTaskColumn(-1)'))
+  assert.ok(source.includes('"work.top": () => focusFirstWork()'))
+  assert.ok(source.includes('"work.bottom": () => focusLastWork()'))
+  assert.ok(source.includes('"work.half.down": () => moveTaskHalf(1)'))
+  assert.ok(source.includes("navigateWorkFocus(workFocusPages()"))
+  assert.ok(source.includes("halfPageWorkFocus(workFocusPages()"))
+})
+
+test("ticket173: approvals are sticky in the Work pane, with v focus and overflow-only V", () => {
+  // Behavior: workapprovals.test.ts window, overflow, and header grammar.
+  const source = app()
+  const work = source.indexOf("id={MOUSE_PANE_IDS.work}")
+  const approvals = source.indexOf("<WorkApprovalsView")
+  const statusline = source.indexOf("id={MOUSE_PANE_IDS.statusline}")
+  assert.ok(work >= 0 && approvals > work && approvals < statusline, "the sticky section mounts inside the Work pane above the pager")
+  assert.ok(source.includes('"work.approvals": () => focusWorkApprovals()'))
+  assert.ok(source.includes('"work.inbox": () => openApprovalsOverflow()'))
+  assert.ok(source.includes('"workApprovals.resolve": () => resolveInlineApproval()'))
+  assert.ok(source.includes('"workApprovals.back": () => dispatchInteraction({ type: "focus.set", focus: "work" })'))
+  assert.ok(source.includes("inlineApprovals().overflow === 0"), "V is an overflow affordance")
+})
+
+test("ticket173: Work card actions are advertised only when valid", () => {
+  // Behavior: workactions.test.ts per-status action policy.
+  const source = app()
+  assert.ok(source.includes("workTaskActions(selectedTask(), Date.now())"))
+  assert.ok(source.includes("if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)"))
+  assert.ok(source.includes('const task = selectedActionTask("work.retry")'))
+  assert.ok(source.includes('const task = selectedActionTask("work.cancel")'))
+})
+
+test("ticket173: card, page, and approval mouse controls stay reachable", () => {
+  // Behavior: workfocus.test.ts geometry; workapprovals.test.ts rows.
+  const source = app()
+  assert.ok(source.includes("onSelect={() => selectWorkCard(card.id)}"))
+  assert.ok(source.includes("onSelect={() => selectWorkCard(task.id)}"))
+  assert.ok(source.includes("selectWorkPage(workPane().page - 1)"))
+  assert.ok(source.includes("selectWorkPage(workPane().page + 1)"))
+  assert.ok(source.includes("onSelect={selectInlineApproval}"))
+  assert.ok(components().includes("props.onSelect(row.index, row.approval)"))
+})
+
+test("ticket173: Tab cycles rail, chat, work, and pending approvals", () => {
+  // Behavior: focus.test.ts nextFocusZone with and without approvals.
+  const source = app()
+  assert.ok(source.includes("nextFocusZone(focus, direction, hasWorkZone(), approvals)"))
+  assert.ok(source.includes("pendingApprovals().length > 0"))
 })

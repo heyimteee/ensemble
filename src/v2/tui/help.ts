@@ -86,6 +86,7 @@ const CONTEXT_SECTIONS: Record<KeyContext, HelpSectionID> = {
   roster: "roster",
   chat: "conversation",
   work: "work",
+  workApprovals: "work",
   composer: "composer-insert",
   settings: "settings",
   settingsField: "settings",
@@ -155,6 +156,10 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   ],
   work: [
     info("context", "d", "Delegates in the work list; inside a text buffer d is the delete operator."),
+    info("spatial", "h/j/k/l", "Focus moves to the nearest card in that direction; h/l stay in the row, j/k page at an edge, gg/G jump first/last, and Ctrl+d/u step a half page."),
+    info("focus.border", "white / grey", "The focused card has a white border; unfocused cards keep the grey border. The pane border separately shows whether Work owns the keyboard."),
+    info("actions", "d/t/r/R/x/o", "Only actions valid for the focused card are advertised: active cards delegate, reassign, restart, and cancel; stalled or retrying cards also retry; failed or cancelled history cards retry or restart; replied cards stay read-only. Enter opens the durable result when the card has one."),
+    info("approvals", "v / V", "Approvals are sticky at the bottom of the Work pane: v focuses them, j/k choose, Enter resolves, and Esc returns to the cards. V opens the full inbox only when the inline list overflows."),
   ],
   "composer-insert": [
     info("typing", "text", "Type at the cursor. Enter sends and keeps Insert focus; Shift+Enter adds a line."),

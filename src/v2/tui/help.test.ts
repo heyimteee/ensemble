@@ -87,6 +87,7 @@ test("catalog contexts land in the correct help section", () => {
     roster: "roster",
     chat: "conversation",
     work: "work",
+    workApprovals: "work",
     composerInsert: "composer-insert",
     composerNormal: "composer-normal",
     composerVisual: "composer-visual",
@@ -140,6 +141,21 @@ test("command names and mouse gestures are generated from their catalogs", () =>
     assert.equal(matches[0].keys, gesture.gesture)
     assert.equal(matches[0].title, gesture.title)
   }
+})
+
+test("ticket173: Work help states spatial focus, the white card border, actions, and inline approvals", () => {
+  const work = helpSections().find((section) => section.id === "work")
+  assert.ok(work, "the Work section exists")
+  const text = work!.entries.map((entry) => `${entry.id} ${entry.title}`).join(" ")
+  assert.ok(/nearest card/i.test(text), "help names spatial focus")
+  assert.ok(/white border/i.test(text), "help names the focused card border")
+  assert.ok(/V opens the full inbox only when/i.test(text), "help scopes V to overflow")
+  assert.ok(/v focuses them/i.test(text), "help teaches inline approvals focus")
+  const keys = work!.entries.map((entry) => entry.keys)
+  assert.ok(keys.includes("v") && keys.includes("V"), "both approval keys are documented")
+  assert.ok(keys.includes("h/j/k/l"), "spatial keys are documented")
+  assert.ok(keys.includes("gg") && keys.includes("G"), "first/last keys are documented")
+  assert.ok(keys.includes("Ctrl+D") && keys.includes("Ctrl+U"), "half-page keys are documented")
 })
 
 test("help retires stale hand-written Settings and wizard chords", () => {

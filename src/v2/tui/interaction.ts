@@ -207,6 +207,9 @@ function escape(state: InteractionState): InteractionResult {
       intents: [{ type: "close-overlay", overlay: state.overlay }],
     }
   }
+  if (state.focus === "approvals") {
+    return { state: { ...state, focus: "work" }, intents: [{ type: "blur-editor" }] }
+  }
   if (state.focus === "work") {
     return { state: { ...state, focus: "chat" }, intents: [{ type: "blur-editor" }] }
   }

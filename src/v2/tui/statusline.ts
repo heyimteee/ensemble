@@ -45,7 +45,7 @@ const FOCUS_LABELS: Partial<Record<InteractionFocus, string>> = {
   settings: "Settings",
   wizard: "Wizard",
   dialog: "Dialog",
-  approvals: "Approvals",
+  approvals: "Work approvals",
   help: "Help",
   work: "Work list",
 }

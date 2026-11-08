@@ -97,15 +97,28 @@ test("settings lists expose no Visual, yank, or paste and no per-tab filter chor
   assert.deepEqual(duplicateBindings(), [], "settings keys never collide in their context")
 })
 
-test("the work zone is reachable with Tab and keeps list navigation", () => {
+test("the work zone is reachable with Tab and keeps spatial list navigation", () => {
   const keys = keysFor("work")
-  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "escape"]) {
+  for (const sequence of ["j", "k", "h", "l", "g g", "shift+g", "ctrl+d", "ctrl+u", "enter", "tab", "escape", "v", "shift+v"]) {
     assert.ok(keys.includes(sequence), `work keeps ${sequence}`)
   }
   assert.equal(entryId("work", "f"), "work.filter", "ticket172: f toggles ACTIVE/HISTORY")
   assert.equal(entryId("work", "pageup"), "work.page.up")
   assert.equal(entryId("work", "pagedown"), "work.page.down")
-  assert.equal(entryId("work", "v"), "work.approvals", "ticket172: Work focus keeps approvals reachable")
+  assert.equal(entryId("work", "v"), "work.approvals", "ticket173: v focuses inline approvals")
+  assert.equal(entryId("work", "shift+v"), "work.inbox", "ticket173: V opens the overflow inbox")
+})
+
+test("ticket173: the inline approvals zone owns j/k, Enter, V, Esc, and Tab", () => {
+  const keys = keysFor("workApprovals")
+  for (const sequence of ["j", "k", "enter", "shift+v", "tab", "shift+tab", "escape"]) {
+    assert.ok(keys.includes(sequence), `approvals keeps ${sequence}`)
+  }
+  assert.equal(entryId("workApprovals", "j"), "workApprovals.down")
+  assert.equal(entryId("workApprovals", "k"), "workApprovals.up")
+  assert.equal(entryId("workApprovals", "enter"), "workApprovals.resolve")
+  assert.equal(entryId("workApprovals", "escape"), "workApprovals.back")
+  assert.equal(entryId("workApprovals", "shift+v"), "work.inbox")
 })
 
 test("the work list carries the shared task actions on their Normal keys", () => {
@@ -129,11 +142,22 @@ test("d delegates in the work list instead of invoking the text delete operator"
   assert.ok(!/delete/i.test(`${delegate?.id} ${delegate?.title}`), "work d never binds delete")
 })
 
-test("Esc and Tab return from the work list to the transcript", () => {
+test("ticket173: Work hints teach focus, history, approvals, overflow, and page keys", () => {
+  const hints = statuslineHints("work")
+  for (const hint of ["j/k cards", "h/l row", "ctrl+d/u page", "v approvals", "V inbox", "f history", "tab next"]) {
+    assert.ok(hints.includes(hint), `work hints include ${hint}: ${hints}`)
+  }
+  const approvals = statuslineHints("workApprovals")
+  for (const hint of ["j/k approvals", "enter resolve", "V inbox", "tab next", "esc work"]) {
+    assert.ok(approvals.includes(hint), `approval hints include ${hint}: ${approvals}`)
+  }
+})
+
+test("Esc and Tab move through the work zones without inventing a cursor", () => {
   const escape = normalEntries("work").find((entry) => entry.id === "escape")
   const tab = normalEntries("work").find((entry) => entry.id === "focus.tab")
   assert.match(escape?.title ?? "", /transcript/i)
-  assert.match(tab?.title ?? "", /transcript/i)
+  assert.match(tab?.title ?? "", /focus zone/i, "ticket173: Tab now cycles to approvals or the rail")
   assert.equal(actionId(resolveNormalKey("work", ["g"], "g")), "work.top")
   assert.equal(actionId(resolveNormalKey("work", [], "shift+g")), "work.bottom")
   assert.equal(actionId(resolveNormalKey("work", [], "x")), "work.cancel")
