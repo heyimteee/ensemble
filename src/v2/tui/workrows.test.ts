@@ -459,6 +459,48 @@ test("ticket156: card headers and tide rows share the exact width and right edge
   }
 })
 
+test("ticket160: budget labels preserve the card right edge and yield before the status word", () => {
+  const budget = { usedHops: 3, maxHops: 8, commandRemaining: 21, commandMaxHops: 24 }
+  for (let width = 16; width <= 120; width++) {
+    const card = cardWithMotion(task({ state: "working", workKind: "delegation" }), "Nova", {
+      now: 1000, tick: 2, tideTick: 3, width, variant: "current", env: {}, budgetFor: () => budget,
+    })
+    const header = workCardHeaderText(card.header)
+    assert.equal(header.length, width, `budget header width ${width}`)
+    assert.ok(header.endsWith(`${card.header.glyph} ${card.header.status}`), "the status word owns the right edge")
+    assert.equal(header.trimEnd().length, width, "the header never trails a blank")
+    if (card.header.budget) {
+      assert.ok(
+        ["hops 3/8 · cmd 21 left", "3/8 · 21 left", "3/8"].includes(card.header.budget.trimEnd()),
+        `width ${width} picked a known budget label`,
+      )
+    }
+  }
+  const at = (width: number) => cardWithMotion(task({ state: "working" }), "Nova", {
+    now: 1000, tick: 2, width, variant: "current", env: {}, budgetFor: () => budget,
+  }).header.budget.trimEnd()
+  assert.equal(at(16), "", "the narrowest card keeps identity and status only")
+  assert.equal(at(24), "3/8", "short label at compact card width")
+  assert.equal(at(32), "3/8 · 21 left", "medium label when the command segment fits")
+  assert.equal(at(40), "hops 3/8 · cmd 21 left", "full label at a wide card")
+})
+
+test("ticket160: compact rows carry the budget without moving the right edge", () => {
+  const budget = { usedHops: 5, maxHops: 8, commandRemaining: 16, commandMaxHops: 24 }
+  for (let width = 16; width <= 120; width++) {
+    const row = workCompactRow("Nova", "Check the build", "⠋", "WORKING", width, budget)
+    const text = workCompactRowText(row)
+    assert.equal(text.length, width, `compact budget width ${width}`)
+    assert.equal(text.lastIndexOf(row.status) + row.status.length, width)
+    assert.equal(text.trimEnd().length, width, "the compact row never trails a blank")
+  }
+  const at = (width: number) => workCompactRow("Nova", "Check the build", "⠋", "WORKING", width, budget).budget.trimEnd()
+  assert.equal(at(16), "", "the narrowest compact row keeps identity and status only")
+  assert.equal(at(24), "5/8", "short label at compact width")
+  assert.equal(at(32), "5/8 · 16 left", "medium label when the command segment fits")
+  assert.equal(at(40), "hops 5/8 · cmd 16 left", "full label at a wide row")
+})
+
 test("ticket156: terminal flat strips and compact rows keep the same exact right edge", () => {
   const glyphs = TIDE_GLYPHS as readonly string[]
   for (let width = 16; width <= 120; width++) {

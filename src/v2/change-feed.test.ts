@@ -188,7 +188,20 @@ test("shell entity mutations publish full-entity upserts without a snapshot fall
   assert.deepEqual(changes[3], { entity: "binding", op: "upsert", binding: binding() })
   assert.deepEqual(changes[4], { entity: "memory", op: "upsert", memory: memory() })
   assert.deepEqual(changes[5], { entity: "initJob", op: "upsert", job: initJob() })
-  assert.deepEqual(changes[6], { entity: "settings", op: "upsert", settings: { maxActiveRuns: 2, maxDelegations: 10, maxDepth: 5, synthesis: true } })
+  assert.deepEqual(changes[6], {
+    entity: "settings",
+    op: "upsert",
+    settings: {
+      maxActiveRuns: 2,
+      maxDelegations: 10,
+      maxDepth: 5,
+      synthesis: true,
+      dispatchGroupMaxHops: 8,
+      dispatchCommandMaxHops: 24,
+      dispatchDepth: 8,
+      dispatchContinuations: 2,
+    },
+  })
   assert.deepEqual(changes[7], { entity: "ui", op: "upsert", ui: { activeWorkspaceID: "w" } })
   for (const batch of batches) {
     for (const entry of batch.entries) {

@@ -6,8 +6,10 @@ import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { relative } from "node:path"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
-import { ApprovalList, ChromeText, HelpView, InitRowView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
+import { dispatchBudgetSummary } from "../dispatch-budget.ts"
+import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type RailItem, type SettingsTab } from "./components.tsx"
+import { LIMITS_ROW_IDS, cycleLimitsValue, limitsFromSettings, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, parseSlashCommand, type ComposerValidationState } from "./composer.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
@@ -401,6 +403,12 @@ export function EnsembleV2App() {
   const [chatContext, setChatContext] = createSignal<ChatContext | null>(null)
   const [settingsAgentID, setSettingsAgentID] = createSignal<string | null>(null)
   const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("general")
+  // Ticket #160: the workspace-level Limits panel is separate from per-agent
+  // settings. It edits the four user dispatch ceilings for new commands.
+  const [limitsOpen, setLimitsOpen] = createSignal(false)
+  const [limitsDraft, setLimitsDraft] = createSignal(limitsFromSettings(undefined))
+  const [limitsCursor, setLimitsCursor] = createSignal(0)
+  const [limitsError, setLimitsError] = createSignal<string | undefined>(undefined)
   const [draft, setDraft] = createSignal<Agent | null>(null)
   const [dirty, setDirty] = createSignal(false)
   const [leaderMode, setLeaderMode] = createSignal(false)
@@ -779,6 +787,13 @@ export function EnsembleV2App() {
   })
   const surfaceAgent = createMemo(() => { const value = surface(); return value?.kind === "agent" ? state()?.agents[value.agentID] : undefined })
   const selectedAgent = createMemo(() => surface()?.kind === "agent" ? surfaceAgent() : undefined)
+  /** Ticket #160: the ledger budget for one task's dispatch group. */
+  const dispatchBudgetForTask = (task: Subtask) => {
+    const ledger = state()?.dispatchGroups ?? {}
+    const group = task.dispatchGroupID ? ledger[task.dispatchGroupID] : undefined
+    return group ? dispatchBudgetSummary(group, ledger) : undefined
+  }
+
   const activeTasks = createMemo(() => {
     const workspace = activeWorkspace()
     return workspace ? Object.values(state()?.subtasks ?? {}).filter((task) => task.workspaceID === workspace.id) : []
@@ -893,11 +908,14 @@ export function EnsembleV2App() {
     // affected card detail without a snapshot or a full Work rebuild.
     const activities = workActivities()
     const active = activeTasks()
+    const ledger = state()?.dispatchGroups ?? {}
+    const budgetFor = dispatchBudgetForTask
     const groups = workGroupsForTasks(active, state()?.subtasks ?? {}, {
       now,
       pendingApprovalIDs: pendingApprovalIDs(),
       nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
       resolvedAtForTask: approvalResolutionAt(state()?.approvals ?? {}),
+      dispatchGroups: ledger,
     })
     const layout = workGroupLayout(groups, workContentWidth(), viewHeight(), now)
     const pendingApprovalSet = pendingApprovalIDs()
@@ -907,6 +925,7 @@ export function EnsembleV2App() {
       width: Math.max(12, layout.cardContentWidth),
       pendingApprovalIDs: pendingApprovalSet,
       nativeBlockedSubtaskIDs: nativeBlockedSet,
+      budgetFor,
       pendingFor: (item) => (pendingWork()?.id === item.id ? pendingWork()!.action : null),
       variantFor: (item) => tideVariantFor(tideAssignments, item.id, now),
       detailFor: (item) => workActivityLabel(activities, item.id, now) ?? activityStateForTask(item, {
@@ -1595,7 +1614,7 @@ export function EnsembleV2App() {
   // keys. The newest mount alone is not enough; the Ensemble route must be
   // visible too.
   const ownsRawKeys = () => pageActivation.ownsRawKeys(pageToken, isOurRoute())
-  const isModal = () => modal() || helpOpen() || approvalsOpen() || logsOpen() || Boolean(settingsAgentID())
+  const isModal = () => modal() || helpOpen() || approvalsOpen() || logsOpen() || limitsOpen() || Boolean(settingsAgentID())
   // Ticket #119: feedback raised while a dialog owns the surface goes to the
   // statusline; the toast never paints over a modal. The host toast remains a
   // fallback only when this page is not the visible route.
@@ -1829,6 +1848,7 @@ export function EnsembleV2App() {
   const runNamedCommand = async (command: ParsedCommand): Promise<void> => {
     switch (command.name) {
       case "settings": openSettings(); return
+      case "limits": openLimits(); return
       case "approvals": openApprovals(); return
       case "workspace": await pickWorkspace(); return
       case "agent": await pickAgent(); return
@@ -2145,7 +2165,7 @@ export function EnsembleV2App() {
     if (lastSnapshotMeta && result.epoch === lastSnapshotMeta.epoch && result.version < lastSnapshotMeta.version) return
     batch(() => {
       if (result.shell) client.applyShellSnapshot(result.shell)
-      if (result.work) client.applyWorkProjection(result.work, result.version)
+      if (result.work) client.applyWorkProjection(result.work, result.version, result.dispatchGroups)
       const window = result.transcript
       const target = window?.workspaceID ?? requestedWorkspaceID
       if (window && target) client.applyTranscriptWindow(target, window, "replace")
@@ -2821,6 +2841,7 @@ export function EnsembleV2App() {
     const activeWizard = wizard()
     if (activeWizard) completeWizard(activeWizard, undefined)
     if (settingsAgentID()) finishSettingsClose()
+    if (limitsOpen()) closeLimits()
     if (logsOpen()) closeLogs()
     if (helpOpen()) closeHelp()
     setApprovalsOpen(false)
@@ -3057,6 +3078,7 @@ export function EnsembleV2App() {
       case "workspace": await pickWorkspace(); return
       case "agent": mention(); return
       case "settings": openSettings(); return
+      case "limits": openLimits(); return
       case "approvals": openApprovals(); return
       case "pause": await togglePause(true); return
       case "resume": await togglePause(false); return
@@ -3436,6 +3458,76 @@ export function EnsembleV2App() {
       finishSettingsClose()
     })
     if (ok) showToast({ title: "Settings", message: `Saved ${agent.name}.`, tone: "success" })
+  }
+
+  const openLimits = () => {
+    setLimitsDraft(limitsFromSettings(state()?.settings))
+    setLimitsCursor(0)
+    setLimitsError(undefined)
+    setLimitsOpen(true)
+  }
+
+  const closeLimits = () => {
+    setLimitsOpen(false)
+    setLimitsError(undefined)
+  }
+
+  const moveLimitsCursor = (delta: number) => {
+    setLimitsCursor((current) => Math.max(0, Math.min(LIMITS_ROW_IDS.length - 1, current + delta)))
+    setLimitsError(undefined)
+  }
+
+  const changeLimitsValue = (delta: number) => {
+    const row = LIMITS_ROW_IDS[limitsCursor()]
+    if (!row) return
+    setLimitsDraft((current) => cycleLimitsValue(current, row, delta))
+    setLimitsError(undefined)
+  }
+
+  const saveLimits = async () => {
+    const values = limitsDraft()
+    const result = limitsSave(values)
+    if (!result.ok) {
+      setLimitsError(result.error)
+      return
+    }
+    if (busy()) return
+    setBusy(true)
+    try {
+      await invoke(context, "settings.update", result.patch)
+      await refresh()
+      closeLimits()
+      showToast({ title: "Dispatch limits", message: limitsSavedMessage(values), tone: "success" })
+    } catch (error: any) {
+      // The panel stays open with the service's actionable message; the
+      // user can correct the value without retyping the command.
+      setLimitsError(error?.message ?? String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleLimitsKey = (event: any) => {
+    const token = normalizeKeyToken(event)
+    const actions: Record<string, () => void> = {
+      j: () => moveLimitsCursor(1),
+      down: () => moveLimitsCursor(1),
+      k: () => moveLimitsCursor(-1),
+      up: () => moveLimitsCursor(-1),
+      h: () => changeLimitsValue(-1),
+      left: () => changeLimitsValue(-1),
+      l: () => changeLimitsValue(1),
+      right: () => changeLimitsValue(1),
+      enter: () => void saveLimits(),
+      s: () => void saveLimits(),
+      escape: () => closeLimits(),
+      q: () => closeLimits(),
+    }
+    const action = actions[token]
+    if (!action) return
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    action()
   }
 
   const addBackup = async () => {
@@ -3961,6 +4053,7 @@ export function EnsembleV2App() {
     "leader.new.workspace": () => createWorkspace(),
     "leader.edit.workspace": () => editWorkspace(),
     "leader.settings": () => openSettings(),
+    "leader.limits": () => openLimits(),
     "leader.archive.workspace": () => archiveWorkspace(),
     "leader.delete.workspace": () => deleteWorkspace(),
     "leader.archive.agent": () => archiveSelectedAgent(),
@@ -4177,6 +4270,8 @@ export function EnsembleV2App() {
       // v5.6 T10: the help overlay owns every key while open. Its grammar is
       // local to the overlay and never changes interaction mode or focus.
       if (helpOpen()) { handleHelpKey(event); return }
+      // Ticket #160: the workspace Limits panel traps its own keys while open.
+      if (limitsOpen()) { handleLimitsKey(event); return }
       // v5.6 T6: one catalog-driven handler owns wizards, pickers, prompts,
       // confirms, results, and the approval inbox. It traps every key while a
       // dialog is open so `:`/Space never leak to the surface underneath.
@@ -5724,6 +5819,7 @@ export function EnsembleV2App() {
   }
 
   const surfaceTitle = () => {
+    if (limitsOpen()) return chromeJoin(["Dispatch limits", activeWorkspace() ? `#${activeWorkspace()!.name}` : "workspace"])
     const current = surface()
     if (!current) return "No chat open"
     if (current.kind === "agent") {
@@ -5927,7 +6023,8 @@ export function EnsembleV2App() {
           <Rail colors={colors} items={railItems()} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} activeWorkspaceID={workspaceID()} state={state()} counts={client.counts()} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chromeOwnsFocus(chromeFocus(), "chat") ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chromeFocus() === "chat" || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
-            <Show when={settingsAgentID()} fallback={
+            <Show when={limitsOpen()} fallback={
+              <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
                 <Show when={approvalsOpen()} fallback={
                   <Show when={surface()} fallback={
@@ -6091,6 +6188,7 @@ export function EnsembleV2App() {
                                             glyph,
                                             pending ? pendingWorkLabel(pending) : workCardStateWord(rowStatus, needsYou),
                                             Math.max(1, workContentWidth() - 2),
+                                            dispatchBudgetForTask(task),
                                           ),
                                           tones: workCardTones(rowStatus, needsYou),
                                         }
@@ -6197,6 +6295,9 @@ export function EnsembleV2App() {
               </Show>
             }>
               <SettingsView colors={colors} agent={draft()} tab={settingsTab()} dirty={dirty()} cursor={settingsCursorClamped()} memories={filteredMemories()} memoryFilter={memoryFilter()} memoryTotal={agentMemories().length} skills={filteredSkills()} skillFilter={skillFilter()} skillCatalog={skills()} skillPage={skillPage()} acknowledgement={settingsAck()} field={settingsField()} fieldMode={interaction().mode} fieldRef={(value: any) => { settingsFieldRef = value; applyEditorCaret(value); if (value) settingsFieldVimBuffer() }} onFieldContentChange={syncSettingsFieldFromEditor} onFieldCursorChange={syncSettingsFieldFromEditor} />
+            </Show>
+            }>
+              <LimitsView colors={colors} workspaceName={activeWorkspace()?.name} limits={limitsDraft()} cursor={limitsCursor()} error={limitsError()} />
             </Show>
           </box>
         </box>

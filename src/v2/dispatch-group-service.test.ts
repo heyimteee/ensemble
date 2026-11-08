@@ -106,6 +106,120 @@ const handoffFile = (directory: string, name: string, body: string): string => {
   return `.ensemble/handoffs/${name}`
 }
 
+test("ticket160: a user command creates a root ledger group with the default caps", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-group-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { workspace } = await setupPair(directory, handlers)
+    const sent = await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    assert.equal(sent.ok, true)
+    const snapshot = await handlers.snapshot({ directory })
+    const task = Object.values(snapshot.state.subtasks).find((item: any) => item.creatorType === "user") as any
+    assert.ok(task.dispatchGroupID)
+    const group = snapshot.state.dispatchGroups[task.dispatchGroupID]
+    assert.ok(group, "the command group is in the snapshot")
+    assert.equal(group.rootID, group.id)
+    assert.equal(group.continuationIndex, 0)
+    assert.equal(group.maxHops, 8)
+    assert.equal(group.commandMaxHops, 24)
+    assert.equal(group.depthMax, 8)
+    assert.equal(group.maxContinuations, 2)
+    assert.equal(group.usedHops, 0, "a user command and its initial recipients consume nothing")
+    assert.equal(group.commandUsedHops, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket160: settings changes apply to new commands only and reject an invalid tier", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-group-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "First" } })
+    let snapshot = await handlers.snapshot({ directory })
+    const first = Object.values(snapshot.state.subtasks).find((item: any) => item.title === "First") as any
+    const firstGroup = snapshot.state.dispatchGroups[first.dispatchGroupID]
+    assert.equal(firstGroup.maxHops, 8)
+
+    const invalid = await handlers.invoke({ directory, action: "settings.update", payload: { dispatchGroupMaxHops: 16, dispatchCommandMaxHops: 8 } })
+    assert.equal(invalid.ok, false)
+    assert.equal(invalid.error?.code, "invalid_settings")
+    assert.match(invalid.error?.message ?? "", /Command hops \(8\) must be at least group hops \(16\)/)
+
+    const saved = await handlers.invoke({
+      directory,
+      action: "settings.update",
+      payload: { dispatchGroupMaxHops: 16, dispatchCommandMaxHops: 32, dispatchDepth: 4, dispatchContinuations: 1 },
+    })
+    assert.equal(saved.ok, true)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Second" } })
+    snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.settings.dispatchGroupMaxHops, 16)
+    assert.equal(snapshot.state.settings.dispatchCommandMaxHops, 32)
+    assert.equal(snapshot.state.settings.dispatchDepth, 4)
+    assert.equal(snapshot.state.settings.dispatchContinuations, 1)
+    assert.equal(snapshot.state.dispatchGroups[first.dispatchGroupID].maxHops, 8, "the live group keeps its captured cap")
+    const second = Object.values(snapshot.state.subtasks).find((item: any) => item.title === "Second") as any
+    const secondGroup = snapshot.state.dispatchGroups[second.dispatchGroupID]
+    assert.equal(secondGroup.maxHops, 16)
+    assert.equal(secondGroup.commandMaxHops, 32)
+    assert.equal(secondGroup.depthMax, 4)
+    assert.equal(secondGroup.maxContinuations, 1)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket160: agent delegation and handoff consume hops; completion and batch review stay exempt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-group-"))
+  const { ctx, tools } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    const novaSession = await bindingSessionID(handlers, directory, nova.id)
+    let groupID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const root = Object.values(next.state.subtasks).find((task: any) => task.creatorType === "user" && task.title === "Coordinate") as any
+      if (!root?.dispatchGroupID) return false
+      groupID = root.dispatchGroupID
+      return Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === root.id && run.status === "running")
+    })
+    assert.equal((await handlers.snapshot({ directory })).state.dispatchGroups[groupID].usedHops, 0)
+    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Child work", instruction: "Check" }, { sessionID: novaSession })
+    assert.match(delegated.content, /Delegated to Sage/)
+    const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Hand work\n---\n# Handoff\n")
+    await tools.get("handoff").execute({ task: "Hand work", summary: "", path, to: "Sage" }, { sessionID: novaSession })
+    let mid = await handlers.snapshot({ directory })
+    assert.equal(mid.state.dispatchGroups[groupID].usedHops, 2, "two agent dispatches consumed two hops")
+    assert.equal(mid.state.dispatchGroups[groupID].commandUsedHops, 2)
+    // Completion handoffs and the consolidated batch review arrive later in
+    // the same group but never spend another hop.
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.handoff?.batch === true)
+    }, 15000)
+    mid = await handlers.snapshot({ directory })
+    assert.equal(mid.state.dispatchGroups[groupID].usedHops, 2)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("one user command fan-out shares one dispatch group and a second command mints another", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-group-"))
   const { ctx } = fakeContext()
@@ -331,7 +445,21 @@ test("legacy rows resolve one deterministic root group after service load", asyn
     attempts: 1, createdAt: 1, finishedAt: Date.now(), repliedAt: Date.now(), workKind: "delegation" as const,
   }
   await seed.saveSubtask({ ...base, id: "legacy-root", assigneeID: "nova", title: "Root", instruction: "Root", queueKey: "work:w:delegation:user:root" })
-  await seed.saveSubtask({ ...base, id: "legacy-child", parentID: "legacy-root", assigneeID: "nova", title: "Child", instruction: "Child", queueKey: "work:w:delegation:user:child" })
+  await seed.saveSubtask({
+    ...base,
+    id: "legacy-child",
+    parentID: "legacy-root",
+    creatorType: "agent",
+    creatorAgentID: "nova",
+    assigneeID: "nova",
+    title: "Child",
+    instruction: "Child",
+    queueKey: "work:w:delegation:agent:child",
+    state: "pending",
+    outcome: "pending",
+    repliedAt: undefined,
+    finishedAt: undefined,
+  })
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
@@ -340,6 +468,22 @@ test("legacy rows resolve one deterministic root group after service load", asyn
     const expected = legacyDispatchGroupID("legacy-root")
     assert.equal((snapshot.state.subtasks as any)["legacy-root"].dispatchGroupID, expected)
     assert.equal((snapshot.state.subtasks as any)["legacy-child"].dispatchGroupID, expected)
+    const group = snapshot.state.dispatchGroups[expected]
+    assert.ok(group, "legacy work is reconciled into a ledger record")
+    assert.equal(group.reconciled, true)
+    assert.equal(group.usedHops, 1, "one non-completion legacy delegation is one hop")
+    assert.ok(group.maxHops >= group.usedHops)
+    assert.ok((group.commandMaxHops ?? 0) >= (group.commandUsedHops ?? 0))
+    assert.equal(group.commandUsedHops, 1)
+    // Live legacy work receives the remaining group budget, and nothing is
+    // retroactively refused.
+    const remaining = group.maxHops - group.usedHops
+    for (const id of ["legacy-root", "legacy-child"]) {
+      const task = (snapshot.state.subtasks as any)[id]
+      if (task.state !== "replied") assert.equal(task.taskMaxHops, remaining)
+    }
+    assert.ok(ctx.storage, "the seeded store used the fake host storage")
+    assert.ok((await handlers.snapshot({ directory })).state.dispatchGroups[expected], "reconciliation persists across snapshots")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

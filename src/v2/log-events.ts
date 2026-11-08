@@ -1,6 +1,6 @@
 import type { EnsembleLogger } from "./logging.ts"
 import type { StoreObserver } from "./store.ts"
-import type { Approval, InitJob, Message, Subtask } from "./types.ts"
+import type { Approval, DispatchGroup, InitJob, Message, Subtask } from "./types.ts"
 
 /**
  * Domain-event projection for the store (ticket #145).
@@ -65,6 +65,33 @@ function initEvent(previous: InitJob | undefined, next: InitJob): string {
   if (!previous) return "init.started"
   if (previous.state !== next.state && next.state !== "running") return "init.finished"
   return "init.updated"
+}
+
+/**
+ * Dispatch ledger fields are IDs, counts, and limits only (ticket #160).
+ * Task titles, instructions, handoff paths, file content, and conversation
+ * text must never enter a dispatch event.
+ */
+function dispatchGroupFields(group: DispatchGroup, previous?: DispatchGroup): Record<string, unknown> {
+  return {
+    workspaceID: group.workspaceID,
+    dispatchGroupID: group.id,
+    rootID: group.rootID,
+    parentID: group.parentID,
+    continuationIndex: group.continuationIndex,
+    fromUsedHops: previous?.usedHops,
+    usedHops: group.usedHops,
+    maxHops: group.maxHops,
+    depthMax: group.depthMax,
+    commandUsedHops: group.commandUsedHops,
+    commandMaxHops: group.commandMaxHops,
+    continuationsUsed: group.continuationsUsed,
+    maxContinuations: group.maxContinuations,
+    reconciled: group.reconciled === true,
+    ...(group.closedAt !== undefined
+      ? { closedAt: group.closedAt, durationMs: Math.max(0, group.closedAt - group.createdAt), closeReason: group.closeReason }
+      : {}),
+  }
 }
 
 function messageFields(message: Message): Record<string, unknown> {
@@ -140,6 +167,15 @@ export function createStoreObserver(logger: EnsembleLogger): StoreObserver {
         state: previous.state,
         outcome: previous.outcome,
       })
+    },
+
+    dispatchGroup(next, previous) {
+      const fields = dispatchGroupFields(next, previous)
+      if (!previous) {
+        logger.event("info", "dispatch", next.reconciled ? "dispatch.group.reconciled" : "dispatch.group.created", fields)
+        return
+      }
+      logger.event("debug", "dispatch", "dispatch.group.updated", fields)
     },
 
     messageAppended(message) {

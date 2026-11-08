@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { createInitialState } from "../defaults.ts"
 import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
-import type { Agent, Approval, InitJob, Memory, Message, ModelOption, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
+import type { Agent, Approval, DispatchGroup, InitJob, Memory, Message, ModelOption, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
 import { createClientStore, reduceClientState } from "./client-store.ts"
 
 const agent = (id: string, name: string): Agent => ({
@@ -96,6 +96,22 @@ const memory = (id: string): Memory => ({
   createdAt: 1,
   updatedAt: 1,
   history: [],
+})
+
+const dispatchGroup = (id: string, patch: Partial<DispatchGroup> = {}): DispatchGroup => ({
+  id,
+  workspaceID: "w1",
+  rootID: id,
+  continuationIndex: 0,
+  maxHops: 8,
+  usedHops: 0,
+  depthMax: 8,
+  commandMaxHops: 24,
+  commandUsedHops: 0,
+  maxContinuations: 2,
+  continuationsUsed: 0,
+  createdAt: 1,
+  ...patch,
 })
 
 const initJob = (id: string): InitJob => ({
@@ -220,6 +236,47 @@ test("a metadata update leaves entity state untouched", () => {
   assert.equal(store.catalogRevision(), 8)
 })
 
+test("ticket160: dispatch groups apply incrementally and prune without touching Work state", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.subtasks.t1 = task("t1", { dispatchGroupID: "dispatch_1" })
+    state.dispatchGroups.dispatch_1 = dispatchGroup("dispatch_1")
+  })))
+  const before = store.state()!
+  assert.equal(before.dispatchGroups.dispatch_1?.usedHops, 0)
+
+  store.applyChanges([
+    { entity: "dispatchGroup", op: "upsert", group: dispatchGroup("dispatch_1", { usedHops: 2, commandUsedHops: 2 }) },
+    { entity: "dispatchGroup", op: "upsert", group: dispatchGroup("dispatch_2") },
+  ], 5)
+  const updated = store.state()!
+  assert.equal(updated.dispatchGroups.dispatch_1?.usedHops, 2)
+  assert.equal(updated.dispatchGroups.dispatch_2?.rootID, "dispatch_2")
+  assert.equal(updated.subtasks, before.subtasks, "group updates keep Work row identity")
+  assert.equal(updated.messages, before.messages)
+
+  store.applyChanges([{ entity: "dispatchGroup", op: "remove", id: "dispatch_2" }], 6)
+  assert.equal(store.state()!.dispatchGroups.dispatch_2, undefined)
+  assert.equal(store.state()!.dispatchGroups.dispatch_1?.usedHops, 2)
+})
+
+test("ticket160: a Work projection resync merges its ledger groups", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.subtasks.t1 = task("t1", { dispatchGroupID: "dispatch_1" })
+    state.dispatchGroups.dispatch_1 = dispatchGroup("dispatch_1")
+  })))
+  store.applyWorkProjection(
+    { t2: task("t2", { dispatchGroupID: "dispatch_2" }) },
+    7,
+    { dispatch_2: dispatchGroup("dispatch_2"), dispatch_root: dispatchGroup("dispatch_root") },
+  )
+  assert.equal(store.state()!.subtasks.t2?.id, "t2")
+  assert.equal(store.state()!.dispatchGroups.dispatch_2?.rootID, "dispatch_2")
+  assert.equal(store.state()!.dispatchGroups.dispatch_root?.maxHops, 8)
+  assert.equal(store.state()!.dispatchGroups.dispatch_1?.id, "dispatch_1", "unnamed historical groups stay cached")
+})
+
 test("shell entity changes apply incrementally without replacing unrelated state", () => {
   const store = createClientStore()
   store.applySnapshot(snapshot(stateWith((state) => {
@@ -236,7 +293,7 @@ test("shell entity changes apply incrementally without replacing unrelated state
     { entity: "binding", op: "upsert", binding: binding("a1", "s1") },
     { entity: "memory", op: "upsert", memory: memory("mem1") },
     { entity: "initJob", op: "upsert", job: initJob("init1") },
-    { entity: "settings", op: "upsert", settings: { maxActiveRuns: 1, maxDelegations: 2, maxDepth: 3, synthesis: false } },
+    { entity: "settings", op: "upsert", settings: { maxActiveRuns: 1, maxDelegations: 2, maxDepth: 3, synthesis: false, dispatchGroupMaxHops: 8, dispatchCommandMaxHops: 24, dispatchDepth: 8, dispatchContinuations: 2 } },
     { entity: "ui", op: "upsert", ui: { activeWorkspaceID: "w1" } },
   ], 6)
 

@@ -241,9 +241,10 @@ export function decidePatchApply(previous: SnapshotMeta | undefined, batch: Patc
 }
 
 /**
- * True when a malformed or unknown batch mentions only Work (subtask)
- * entities. That evidence lets recovery resync the Work scope instead of
- * reconstructing the whole shell and transcript.
+ * True when a malformed or unknown batch mentions only Work entities —
+ * subtasks and their dispatch-group ledger rows (ticket #160). That evidence
+ * lets recovery resync the Work scope instead of reconstructing the whole
+ * shell and transcript.
  */
 export function isWorkOnlyPatch(batch: PatchBatch | undefined): boolean {
   const value = batch as any
@@ -255,7 +256,7 @@ export function isWorkOnlyPatch(batch: PatchBatch | undefined): boolean {
     const source = entry.entities ?? entry.changes
     if (!Array.isArray(source)) return false
     for (const change of source) {
-      if (!change || typeof change !== "object" || change.entity !== "subtask") return false
+      if (!change || typeof change !== "object" || (change.entity !== "subtask" && change.entity !== "dispatchGroup")) return false
       sawWork = true
     }
   }

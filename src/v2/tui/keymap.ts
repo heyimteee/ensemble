@@ -94,6 +94,7 @@ const LEADER: readonly KeyEntry[] = [
   { id: "leader.new.workspace", scope: "leader", contexts: SURFACES, keys: ["n"], title: "New workspace", group: "Create" },
   { id: "leader.edit.workspace", scope: "leader", contexts: SURFACES, keys: ["e"], title: "Edit workspace", group: "Edit" },
   { id: "leader.settings", scope: "leader", contexts: SURFACES, keys: ["s"], title: "Settings", group: "Edit" },
+  { id: "leader.limits", scope: "leader", contexts: SURFACES, keys: ["l"], title: "Dispatch limits", group: "Edit", hint: "l limits" },
   { id: "leader.archive.workspace", scope: "leader", contexts: SURFACES, keys: ["w"], title: "Archive workspace", group: "Archive" },
   { id: "leader.delete.workspace", scope: "leader", contexts: SURFACES, keys: ["shift+w"], title: "Delete workspace", group: "Delete" },
   { id: "leader.archive.agent", scope: "leader", contexts: SURFACES, keys: ["shift+a"], title: "Archive agent", group: "Archive" },

@@ -159,6 +159,35 @@ test("ticket136: header counts name groups, active, and done instead of recent",
   assert.deepEqual(counts, { groups: 2, active: 2, done: 4 })
 })
 
+test("ticket160: a group carries its ledger budget into the label", () => {
+  const items = [
+    working({ id: "a", dispatchGroupID: "dispatch_1", createdAt: 1 }),
+    replied({ id: "b", dispatchGroupID: "dispatch_1", createdAt: 2 }),
+  ]
+  const ledger = {
+    dispatch_1: {
+      id: "dispatch_1",
+      workspaceID: "w",
+      rootID: "dispatch_1",
+      continuationIndex: 0,
+      maxHops: 8,
+      usedHops: 3,
+      depthMax: 8,
+      commandMaxHops: 24,
+      commandUsedHops: 3,
+      maxContinuations: 2,
+      continuationsUsed: 0,
+      createdAt: 1,
+    },
+  }
+  const groups = workGroupsForTasks(items, record(...items), { now: 5_000, dispatchGroups: ledger })
+  assert.deepEqual(groups[0].budget, { usedHops: 3, maxHops: 8, commandRemaining: 21, commandMaxHops: 24 })
+  assert.equal(workGroupLabel(groups[0], 1), "GROUP 1 · hops 3/8 · cmd 21 left · 1 active · 1 done")
+  const without = workGroupsForTasks(items, record(...items), { now: 5_000 })
+  assert.equal(without[0].budget, undefined)
+  assert.equal(workGroupLabel(without[0], 1), "GROUP 1 · 1 active · 1 done")
+})
+
 test("ticket136: group labels appear only when more than one group is visible", () => {
   const group = { id: "g1", active: 2, done: 1 } as any
   assert.equal(workGroupLabel(group, 1), "GROUP 1 · 2 active · 1 done")

@@ -2,6 +2,8 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid
 import { StyledText, TextAttributes, bg as bgStyle, fg as fgStyle } from "@opentui/core"
 import type { Agent, Approval, Memory, SkillOption, SnapshotState, WorkspaceCounts } from "../types.ts"
 import { approvalSource } from "../types.ts"
+import type { DispatchLimits } from "../dispatch-budget.ts"
+import { limitsPanelFooter, limitsPanelRows, limitsPanelSubtitle, limitsPanelTitle } from "./limits.ts"
 import type { InteractionMode } from "./interaction.ts"
 import { contrastText, type Palette, type ThemeColor } from "./theme.ts"
 import { busyCount, missingSkills, short, unreadCount } from "./format.ts"
@@ -415,6 +417,7 @@ export function WorkCardView(props: {
   const header = (): StyledLinePart[] => [
     { text: props.card.header.name, fg: props.colors.paleBlue },
     { text: props.card.header.gap, fg: props.colors.text },
+    { text: props.card.header.budget, fg: props.colors.faint },
     { text: props.glyph, fg: tone(props.card.tones.glyph) },
     { text: " ", fg: tone(props.card.tones.status) },
     { text: props.card.header.status, fg: tone(props.card.tones.status) },
@@ -473,6 +476,7 @@ export function WorkCompactRowView(props: {
     { text: props.row.separator, fg: props.colors.faint },
     { text: props.row.title, fg: props.terminal ? props.colors.muted : props.colors.text },
     { text: props.row.gap, fg: props.colors.text },
+    { text: props.row.budget, fg: props.colors.faint },
     { text: props.row.glyph, fg: tone(props.tones.glyph) },
     { text: " ", fg: tone(props.tones.status) },
     { text: props.row.status, fg: tone(props.tones.status) },
@@ -709,6 +713,34 @@ export function SettingsView(props: {
         <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{settingsDivider()}</text>
       </box>
     </Show>
+  )
+}
+
+/**
+ * Workspace-level dispatch Limits panel (ticket #160). It is deliberately
+ * separate from the per-agent settings tabs: these are the user's ceilings for
+ * every new command, not agent identity.
+ */
+export function LimitsView(props: {
+  colors: Palette
+  workspaceName?: string
+  limits: DispatchLimits
+  cursor: number
+  error?: string
+}) {
+  const rows = () => limitsPanelRows(props.limits, props.cursor)
+  return (
+    <box flexDirection="column" padding={1} flexGrow={1}>
+      <ChromeText colors={props.colors} fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate text={limitsPanelTitle(props.workspaceName)} />
+      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="word">{limitsPanelSubtitle()}</text>
+      <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{settingsDivider()}</text>
+      <box border borderStyle="single" borderColor={props.colors.border} backgroundColor={props.colors.bg} flexDirection="column" paddingLeft={1} paddingRight={1}>
+        <For each={rows()}>{(row) => (
+          <text fg={row.selected ? props.colors.good : props.colors.text} bg={props.colors.bg} width="100%" truncate>{row.text}</text>
+        )}</For>
+      </box>
+      <text fg={props.error ? props.colors.bad : props.colors.faint} bg={props.colors.bg} width="100%" wrapMode="word">{props.error || limitsPanelFooter()}</text>
+    </box>
   )
 }
 

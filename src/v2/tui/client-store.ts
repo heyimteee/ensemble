@@ -4,7 +4,7 @@ import { createInitialState } from "../defaults.ts"
 import { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
 import { CLIENT_MESSAGE_LIMIT, projectVisibleWork, trimMessages } from "../scoped-read.ts"
 import { configMetadataApplies } from "./refresh-coordinator.ts"
-import type { EntityChange, FeedMeta, Id, Message, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, TranscriptWindow, WorkspaceCounts } from "../types.ts"
+import type { DispatchGroup, EntityChange, FeedMeta, Id, Message, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, TranscriptWindow, WorkspaceCounts } from "../types.ts"
 
 /**
  * Durable client updates. A snapshot is the only full replacement; every
@@ -17,7 +17,7 @@ export type ClientStateUpdate =
   | { type: "subtask.remove"; id: Id }
   | { type: "message.stream"; workspaceID: Id; id: Id; text: string; updatedAt: number }
   | { type: "entity.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
-  | { type: "work.snapshot"; subtasks: Record<Id, Subtask>; version: number; updatedAt?: number }
+  | { type: "work.snapshot"; subtasks: Record<Id, Subtask>; groups?: Record<Id, DispatchGroup>; version: number; updatedAt?: number }
   | { type: "shell.snapshot"; state: SnapshotState }
   | { type: "transcript.window"; workspaceID: Id; messages: Message[]; mode: "replace" | "older" }
 
@@ -39,6 +39,8 @@ function entityChangeKey(change: EntityChange): string | undefined {
   switch (change.entity) {
     case "subtask":
       return `subtask\u0000${change.op === "upsert" ? change.task.id : change.id}`
+    case "dispatchGroup":
+      return `dispatchGroup\u0000${change.op === "upsert" ? change.group.id : change.id}`
     case "message":
       return `message\u0000${change.op === "upsert" ? change.message.workspaceID : change.workspaceID}\u0000${change.op === "upsert" ? change.message.id : change.id}`
     case "agent":
@@ -87,6 +89,18 @@ function reduceEntityChanges(state: SnapshotState, changes: EntityChange[]): Sna
           const subtasks = { ...next.subtasks }
           delete subtasks[change.id]
           copy().subtasks = subtasks
+        }
+        break
+      }
+      case "dispatchGroup": {
+        if (change.op === "upsert") {
+          if (next.dispatchGroups[change.group.id] === change.group) break
+          copy().dispatchGroups = { ...next.dispatchGroups, [change.group.id]: change.group }
+        } else {
+          if (!(change.id in next.dispatchGroups)) break
+          const groups = { ...next.dispatchGroups }
+          delete groups[change.id]
+          copy().dispatchGroups = groups
         }
         break
       }
@@ -242,9 +256,13 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
       return { ...next, version, updatedAt }
     }
     case "work.snapshot": {
+      // A Work projection resync replaces visible tasks and merges the groups
+      // it names; historical groups not in this projection stay cached until
+      // the next full snapshot or explicit removal.
       return {
         ...state,
         subtasks: update.subtasks,
+        ...(update.groups ? { dispatchGroups: { ...state.dispatchGroups, ...update.groups } } : {}),
         version: update.version,
         updatedAt: update.updatedAt ?? state.updatedAt,
       }
@@ -255,6 +273,7 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
         ...state,
         agents: shell.agents,
         workspaces: shell.workspaces,
+        dispatchGroups: shell.dispatchGroups ?? state.dispatchGroups,
         initJobs: shell.initJobs,
         bindings: shell.bindings,
         memories: shell.memories,
@@ -346,8 +365,8 @@ export type ClientStore = {
   applyStream: (update: MessageStream) => void
   /** Scoped Work resync: replace subtasks and metadata, keep other entities. */
   applyWorkSnapshot: (snapshot: Snapshot) => void
-  /** Scoped Work projection resync (ticket #141). */
-  applyWorkProjection: (tasks: Record<Id, Subtask>, version: number) => void
+  /** Scoped Work projection resync (tickets #141/#160). */
+  applyWorkProjection: (tasks: Record<Id, Subtask>, version: number, groups?: Record<Id, DispatchGroup>) => void
   /** Scoped shell resync: replace shell entities, keep Work and transcript. */
   applyShellSnapshot: (state: SnapshotState) => void
   /** Merge one durable transcript page; "older" keeps the paged range. */
@@ -562,8 +581,8 @@ export function createClientStore(): ClientStore {
         applyMetadata(snapshot)
       })
     },
-    applyWorkProjection: (tasks, version) => {
-      apply({ type: "work.snapshot", subtasks: tasks, version })
+    applyWorkProjection: (tasks, version, groups) => {
+      apply({ type: "work.snapshot", subtasks: tasks, version, ...(groups ? { groups } : {}) })
       clearTombstones()
     },
     applyShellSnapshot: (state) => {

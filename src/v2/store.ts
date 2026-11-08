@@ -1,4 +1,5 @@
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
+import { dispatchGroupRemaining, reconcileLegacyDispatchGroup } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
@@ -7,8 +8,10 @@ import type {
   ChangeEntry,
   ChangesSince,
   ChatMessage,
+  DispatchGroup,
   EntityChange,
   FeedResetReason,
+  Id,
   InitJob,
   Memory,
   Message,
@@ -43,6 +46,8 @@ const CLONE_DEBUG_ENV = "ENSEMBLE_DEBUG_CLONES"
 const NO_CLONE_STATS = { count: 0, totalMs: 0, maxMs: 0, lastMs: 0 }
 /** Ticket #138: bounded in-memory change ring for `changes.since`. */
 export const CHANGE_RING_LIMIT = 256
+/** Ticket #160: legacy group writes per reconciliation pass. */
+export const RECONCILE_GROUPS_PER_PASS = 128
 
 export type StoreChangeOptions = {
   /** Boot identity. A different epoch always resets client cursors. */
@@ -67,6 +72,8 @@ export type StoreChangeOptions = {
 export type StoreObserver = {
   subtask?: (next: Subtask, previous: Subtask | undefined) => void
   subtaskRemoved?: (previous: Subtask) => void
+  /** Dispatch-group lifecycle (ticket #160); IDs, counts, and limits only. */
+  dispatchGroup?: (next: DispatchGroup, previous: DispatchGroup | undefined) => void
   messageAppended?: (message: Message) => void
   messageSaved?: (next: Message, previous: Message | undefined) => void
   messageRemoved?: (previous: Message) => void
@@ -140,6 +147,12 @@ export class V2Store {
    * the storage merge, and removal; cleared on reset/prune.
    */
   private readonly streaming = new Set<string>()
+  /**
+   * Legacy groups synthesized in memory but not yet written. Reconciliation
+   * persists them (and grants live task budgets) on the serialized queue, so
+   * `load` and `sync` never write from a read path.
+   */
+  private readonly pendingReconciliations = new Set<Id>()
 
   private trackStreaming(message: Message): void {
     const key = streamKey(message.workspaceID, message.id)
@@ -167,6 +180,7 @@ export class V2Store {
   async load(): Promise<void> {
     this.state = createInitialState()
     this.streaming.clear()
+    this.pendingReconciliations.clear()
     const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
     if (meta && typeof meta === "object") {
       this.state.version = Number(meta.version ?? 0)
@@ -198,6 +212,10 @@ export class V2Store {
     for (const { value } of await this.scanAll("v2/subtask/")) {
       const subtask = value as Subtask
       if (subtask?.id) this.state.subtasks[subtask.id] = subtask
+    }
+    for (const { value } of await this.scanAll("v2/dispatchgroup/")) {
+      const group = value as DispatchGroup
+      if (group?.id) this.state.dispatchGroups[group.id] = group
     }
     for (const { value } of await this.scanAll("v2/init/")) {
       const job = value as InitJob
@@ -249,6 +267,10 @@ export class V2Store {
     // Resolve one from the root ancestor so in-flight work keeps a coherent
     // group; the row becomes durable on its next save.
     this.backfillDispatchGroups()
+    // Ticket #160: every referenced group resolves a ledger record. Legacy
+    // trees synthesize one in memory here; the service persists and logs the
+    // reconciliation on the serialized queue before pumping.
+    this.synthesizeLegacyDispatchGroups()
     if (this.state.ui.activeWorkspaceID && !this.state.workspaces[this.state.ui.activeWorkspaceID]) {
       this.state.ui.activeWorkspaceID = undefined
     }
@@ -444,6 +466,15 @@ export class V2Store {
       this.state.subtasks[subtask.id] = subtask
     }
     this.backfillDispatchGroups()
+    for (const { value } of await this.scanAll("v2/dispatchgroup/")) {
+      const group = value as DispatchGroup
+      if (!group?.id) continue
+      // A locally synthesized legacy group is not durable yet; a storage row
+      // always wins once it exists.
+      if (this.pendingReconciliations.has(group.id)) continue
+      this.state.dispatchGroups[group.id] = group
+    }
+    this.synthesizeLegacyDispatchGroups()
     for (const { value } of await this.scanAll("v2/init/")) {
       const job = value as InitJob
       if (!job?.id) continue
@@ -568,6 +599,14 @@ export class V2Store {
 
   subtask(subtaskID: string): Subtask | undefined {
     return this.state.subtasks[subtaskID]
+  }
+
+  dispatchGroups(): DispatchGroup[] {
+    return Object.values(this.state.dispatchGroups)
+  }
+
+  dispatchGroup(groupID: string): DispatchGroup | undefined {
+    return this.state.dispatchGroups[groupID]
   }
 
   messages(workspaceID: string): readonly Message[] {
@@ -772,6 +811,161 @@ export class V2Store {
     })
   }
 
+  async saveDispatchGroup(group: DispatchGroup): Promise<void> {
+    await this.write(async () => {
+      const previous = this.state.dispatchGroups[group.id]
+      this.state.dispatchGroups[group.id] = group
+      this.pendingReconciliations.delete(group.id)
+      await this.ctx.storage.set(`v2/dispatchgroup/${group.id}`, group)
+      await this.commit([{ entity: "dispatchGroup", op: "upsert", group: structuredClone(group) }])
+      this.notify(() => this.observer?.dispatchGroup?.(group, previous))
+    })
+  }
+
+  async removeDispatchGroup(id: string): Promise<void> {
+    await this.write(async () => {
+      const previous = this.state.dispatchGroups[id]
+      delete this.state.dispatchGroups[id]
+      this.pendingReconciliations.delete(id)
+      await this.ctx.storage.remove(`v2/dispatchgroup/${id}`)
+      await this.commit([{ entity: "dispatchGroup", op: "remove", id }])
+      if (previous) this.notify(() => this.observer?.dispatchGroup?.({ ...previous, closedAt: previous.closedAt ?? Date.now() }, previous))
+    })
+  }
+
+  /**
+   * Ticket #160/#161 dispatch admission seam. One serialized mutation creates
+   * the work item and spends its group and command hop. Duplicate task ids are
+   * idempotent and never consume twice; a crash can leave at worst an
+   * unspent hop with its work item, never a spent hop without work.
+   *
+   * `enforce` is the #161 policy switch. #160 admits without refusing so the
+   * ledger can be observed before enforcement lands; #161 passes true and
+   * receives a typed refusal naming the exhausted layer.
+   */
+  async admitDispatchedSubtask(
+    subtask: Subtask,
+    options: { enforce?: boolean } = {},
+  ): Promise<{
+    admitted: boolean
+    task: Subtask
+    group?: DispatchGroup
+    consumed: boolean
+    reason?: "group-exhausted" | "command-exhausted"
+  }> {
+    return this.write(async () => {
+      const existing = this.state.subtasks[subtask.id]
+      if (existing) {
+        return {
+          admitted: true,
+          task: existing,
+          group: existing.dispatchGroupID ? this.state.dispatchGroups[existing.dispatchGroupID] : undefined,
+          consumed: false,
+        }
+      }
+      const groupID = subtask.dispatchGroupID
+      const group = groupID ? this.state.dispatchGroups[groupID] : undefined
+      if (!group) {
+        this.state.subtasks[subtask.id] = subtask
+        await this.ctx.storage.set(`v2/subtask/${subtask.id}`, subtask)
+        await this.commit([{ entity: "subtask", op: "upsert", task: structuredClone(subtask) }])
+        this.notify(() => this.observer?.subtask?.(subtask, undefined))
+        return { admitted: true, task: subtask, consumed: false }
+      }
+      const root = group.id === group.rootID ? group : this.state.dispatchGroups[group.rootID]
+      if (options.enforce) {
+        if (group.usedHops >= group.maxHops) {
+          return { admitted: false, task: subtask, group, consumed: false, reason: "group-exhausted" }
+        }
+        if (root && root.commandUsedHops !== undefined && root.commandMaxHops !== undefined && root.commandUsedHops >= root.commandMaxHops) {
+          return { admitted: false, task: subtask, group, consumed: false, reason: "command-exhausted" }
+        }
+      }
+      const nextGroup: DispatchGroup = { ...group, usedHops: group.usedHops + 1 }
+      if (root === group) nextGroup.commandUsedHops = (group.commandUsedHops ?? 0) + 1
+      const nextRoot = root === group
+        ? nextGroup
+        : root && root.commandUsedHops !== undefined
+          ? { ...root, commandUsedHops: root.commandUsedHops + 1 }
+          : root
+      this.state.dispatchGroups[nextGroup.id] = nextGroup
+      if (nextRoot && nextRoot.id !== nextGroup.id) this.state.dispatchGroups[nextRoot.id] = nextRoot
+      this.state.subtasks[subtask.id] = subtask
+      // Work item first: a crash between these writes under-counts the hop
+      // rather than spending budget with no queued work.
+      await this.ctx.storage.set(`v2/subtask/${subtask.id}`, subtask)
+      await this.ctx.storage.set(`v2/dispatchgroup/${nextGroup.id}`, nextGroup)
+      if (nextRoot && nextRoot.id !== nextGroup.id) await this.ctx.storage.set(`v2/dispatchgroup/${nextRoot.id}`, nextRoot)
+      const changes: EntityChange[] = [
+        { entity: "subtask", op: "upsert", task: structuredClone(subtask) },
+        { entity: "dispatchGroup", op: "upsert", group: structuredClone(nextGroup) },
+        ...(nextRoot && nextRoot.id !== nextGroup.id
+          ? [{ entity: "dispatchGroup" as const, op: "upsert" as const, group: structuredClone(nextRoot) }]
+          : []),
+      ]
+      await this.commit(changes)
+      this.notify(() => this.observer?.subtask?.(subtask, undefined))
+      this.notify(() => this.observer?.dispatchGroup?.(nextGroup, group))
+      if (nextRoot && nextRoot.id !== nextGroup.id) this.notify(() => this.observer?.dispatchGroup?.(nextRoot, root))
+      return { admitted: true, task: subtask, group: nextGroup, consumed: true }
+    })
+  }
+
+  /**
+   * Persist and log legacy group reconciliation. Idempotent: only groups
+   * synthesized since the last pass are written, in one version. Live tasks
+   * receive the remaining group budget as their task budget (#161 enforces).
+   */
+  async reconcileDispatchGroups(): Promise<Id[]> {
+    return this.write(async () => {
+      const ids = [...this.pendingReconciliations]
+      if (ids.length === 0) return []
+      // A large upgrade can surface thousands of one-command groups. Writes
+      // are bounded per pass so reconciliation never blocks pump work; groups
+      // with consumed hops go first because they carry budget truth.
+      const ordered = [
+        ...ids.filter((id) => (this.state.dispatchGroups[id]?.usedHops ?? 0) > 0),
+        ...ids.filter((id) => (this.state.dispatchGroups[id]?.usedHops ?? 0) === 0),
+      ]
+      const batch = ordered.slice(0, RECONCILE_GROUPS_PER_PASS)
+      // Index once: a large pre-ledger history must not make reconciliation
+      // quadratic in groups × tasks.
+      const byGroup = new Map<Id, Subtask[]>()
+      for (const task of Object.values(this.state.subtasks)) {
+        const id = task.dispatchGroupID
+        if (!id) continue
+        const bucket = byGroup.get(id)
+        if (bucket) bucket.push(task)
+        else byGroup.set(id, [task])
+      }
+      const changedGroups: DispatchGroup[] = []
+      const changes: EntityChange[] = []
+      for (const id of batch) {
+        const group = this.state.dispatchGroups[id]
+        if (!group) continue
+        const remaining = dispatchGroupRemaining(group)
+        for (const task of byGroup.get(id) ?? []) {
+          if (task.state === "replied") continue
+          if (task.taskMaxHops === remaining) continue
+          // Mutate in place, matching the legacy dispatch-group backfill: the
+          // row keeps its identity and a concurrent foreign field update is
+          // never overwritten by a stale clone.
+          task.taskMaxHops = remaining
+          await this.ctx.storage.set(`v2/subtask/${task.id}`, task)
+          changes.push({ entity: "subtask", op: "upsert", task: structuredClone(task) })
+        }
+        await this.ctx.storage.set(`v2/dispatchgroup/${id}`, group)
+        changes.push({ entity: "dispatchGroup", op: "upsert", group: structuredClone(group) })
+        changedGroups.push(group)
+      }
+      for (const id of batch) this.pendingReconciliations.delete(id)
+      if (changes.length === 0) return []
+      await this.commit(changes)
+      for (const group of changedGroups) this.notify(() => this.observer?.dispatchGroup?.(group, undefined))
+      return changedGroups.map((group) => group.id)
+    })
+  }
+
   async saveInitJob(job: InitJob): Promise<void> {
     await this.write(async () => {
       const previous = this.state.initJobs[job.id]
@@ -916,6 +1110,7 @@ export class V2Store {
     await this.write(async () => {
       const messages = [...(this.state.messages[workspaceID] ?? [])]
       const subtaskIDs = Object.values(this.state.subtasks).filter((subtask) => subtask.workspaceID === workspaceID).map((subtask) => subtask.id)
+      const dispatchGroupIDs = Object.values(this.state.dispatchGroups).filter((group) => group.workspaceID === workspaceID).map((group) => group.id)
       const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
       const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
       const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
@@ -927,6 +1122,7 @@ export class V2Store {
         if (key.startsWith(`${workspaceID}\u0000`)) this.streaming.delete(key)
       }
       for (const id of subtaskIDs) delete this.state.subtasks[id]
+      for (const id of dispatchGroupIDs) delete this.state.dispatchGroups[id]
       for (const id of initJobIDs) delete this.state.initJobs[id]
       for (const [key, binding] of Object.entries(this.state.bindings)) if (binding.workspaceID === workspaceID) delete this.state.bindings[key]
       for (const id of memoryIDs) delete this.state.memories[id]
@@ -937,6 +1133,7 @@ export class V2Store {
       await this.removePrefixNow(`v2/binding/${workspaceID}/`)
       await this.removePrefixNow(`v2/dm/${workspaceID}/`)
       for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
+      for (const id of dispatchGroupIDs) await this.ctx.storage.remove(`v2/dispatchgroup/${id}`)
       for (const id of initJobIDs) await this.ctx.storage.remove(`v2/init/${id}`)
       for (const id of memoryIDs) await this.ctx.storage.remove(`v2/memory/${id}`)
       for (const id of approvalIDs) await this.ctx.storage.remove(`v2/approval/${id}`)
@@ -950,6 +1147,7 @@ export class V2Store {
           { entity: "workspace" as const, op: "remove" as const, id: workspaceID },
           ...messages.map((message) => ({ entity: "message" as const, op: "remove" as const, workspaceID, id: message.id })),
           ...subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
+          ...dispatchGroupIDs.map((id) => ({ entity: "dispatchGroup" as const, op: "remove" as const, id })),
           ...initJobIDs.map((id) => ({ entity: "initJob" as const, op: "remove" as const, id })),
           ...memoryIDs.map((id) => ({ entity: "memory" as const, op: "remove" as const, id })),
           ...approvalIDs.map((id) => ({ entity: "approval" as const, op: "remove" as const, id })),
@@ -977,6 +1175,7 @@ export class V2Store {
     if (parts[1] === "agent" && parts[2]) delete this.state.agents[parts[2]]
     if (parts[1] === "workspace" && parts[2]) delete this.state.workspaces[parts[2]]
     if (parts[1] === "subtask" && parts[2]) delete this.state.subtasks[parts[2]]
+    if (parts[1] === "dispatchgroup" && parts[2]) delete this.state.dispatchGroups[parts[2]]
     if (parts[1] === "init" && parts[2]) delete this.state.initJobs[parts[2]]
     if (parts[1] === "memory" && parts[2]) delete this.state.memories[parts[2]]
     if (parts[1] === "approval" && parts[2]) delete this.state.approvals[parts[2]]
@@ -1009,15 +1208,51 @@ export class V2Store {
     }
   }
 
+  /**
+   * Ticket #160: synthesize a ledger record for every referenced group that
+   * has none. Stored groups win, so this only runs for pre-ledger trees and
+   * for foreign rows merged by `sync`. The pass is in-memory; reconciliation
+   * writes and logs on the serialized queue via `reconcileDispatchGroups`.
+   */
+  private synthesizeLegacyDispatchGroups(): void {
+    const byGroup = new Map<Id, Subtask[]>()
+    for (const task of Object.values(this.state.subtasks)) {
+      const id = task.dispatchGroupID ?? resolveDispatchGroupID(task, this.state.subtasks)
+      if (!id) continue
+      const bucket = byGroup.get(id)
+      if (bucket) bucket.push(task)
+      else byGroup.set(id, [task])
+    }
+    for (const [id, tasks] of byGroup) {
+      if (this.state.dispatchGroups[id]) continue
+      const workspaceID = tasks[0]?.workspaceID
+      if (!workspaceID) continue
+      this.state.dispatchGroups[id] = reconcileLegacyDispatchGroup({
+        id,
+        workspaceID,
+        tasks,
+        allTasks: this.state.subtasks,
+        settings: this.state.settings,
+      })
+      this.pendingReconciliations.add(id)
+    }
+  }
+
+  /** True while a synthesized legacy group still needs a durable write. */
+  pendingReconciliationCount(): number {
+    return this.pendingReconciliations.size
+  }
+
   async reset(): Promise<void> {
     await this.write(async () => {
       const previousPublished = this.lastPublishedVersion
-      for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/init/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
+      for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/dispatchgroup/", "v2/init/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
         await this.removePrefixNow(prefix)
       }
       await this.ctx.storage.remove("v2/meta")
       this.state = createInitialState()
       this.streaming.clear()
+      this.pendingReconciliations.clear()
       await this.commit([])
       // A reset destroys prior entity state, so the ring cannot describe the
       // difference. Keep only the new version and publish an explicit reset.
@@ -1141,7 +1376,9 @@ export class V2Store {
       return
     }
     for (const change of changes) {
-      const scope: ScopeName = change.entity === "subtask"
+      // Dispatch groups are part of the Work read model (ticket #160): a Work
+      // resync carries them with the visible tasks.
+      const scope: ScopeName = change.entity === "subtask" || change.entity === "dispatchGroup"
         ? "work"
         : change.entity === "message"
           ? "transcript"
