@@ -45,7 +45,7 @@ import { chromeJoin, chromeSeparator, chromeSeparatorParts } from "./separators.
 import { isReducedMotion } from "./motion.ts"
 import type { ToastNotice, ToastTone } from "./toast.ts"
 import { approvalResolvedTone, type ApprovalResolvedSettle } from "./approvals.ts"
-import { TIDE_GLYPHS, tideTone } from "./tide.ts"
+import { tideRowParts, tideTone } from "./tide.ts"
 import type { WorkCard, WorkCardTide, WorkCardTones, WorkCompactRow } from "./workrows.ts"
 import type { InitRow } from "./initrow.ts"
 import { SYSTEM_AGENT_NAME } from "../system-agent.ts"
@@ -419,13 +419,19 @@ export function WorkCardView(props: {
     { text: " ", fg: tone(props.card.tones.status) },
     { text: props.card.header.status, fg: tone(props.card.tones.status) },
   ]
-  // One styled line with one chunk per tide sample. Each sample is exactly
-  // two cells: one glyph and one blank. The blank is deliberate: it is the
-  // approved Sub-Cell Tide gap and keeps the strip from reading as a solid bar.
+  // Ticket #156: one styled chunk per exact-width tide part. Every sample but
+  // the last is one glyph plus the approved Sub-Cell Tide blank; the final
+  // sample is the glyph alone, and an even row starts with one padding blank.
   // Terminal cards arrive with a flat settled strip, so this row stops moving.
-  const tide = (): StyledLinePart[] => props.tide.tideLevels.map((level) => ({
-    text: `${TIDE_GLYPHS[level]} `,
-    fg: terminal() ? props.colors.faint : props.card.needsYou ? props.colors.warn : props.colors[tideTone(level)],
+  const tide = (): StyledLinePart[] => tideRowParts(props.tide.tideLevels, props.card.width).map((part) => ({
+    text: part.text,
+    fg: part.level === undefined
+      ? props.colors.faint
+      : terminal()
+        ? props.colors.faint
+        : props.card.needsYou
+          ? props.colors.warn
+          : props.colors[tideTone(part.level)],
   }))
   return (
     <box
