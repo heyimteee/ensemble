@@ -1,13 +1,13 @@
 import { Plugin } from "@opencode/plugin"
 import { EnsembleV2Rpc } from "./rpc.ts"
-import { SharedEnsemble } from "./shared-service.ts"
-
-const shared = new SharedEnsemble()
+import { sharedEnsemble } from "./shared-service.ts"
 
 export default Plugin.define({
   id: "ensemble.v2",
   async setup(ctx) {
-    const { service, release } = await shared.acquire(ctx)
+    // Resolve per setup: OpenCode re-evaluates this module once per location,
+    // and a registry version change must be picked up by later locations.
+    const { service, release } = await sharedEnsemble().acquire(ctx)
     let registration: any
     try {
       registration = await ctx.rpc.register(EnsembleV2Rpc, service.handlers())
