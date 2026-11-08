@@ -19,7 +19,10 @@ test("agent onboarding includes the persona and the full Ensemble contract", () 
   assert.match(prompt, /\*\*Command\*\*/)
   assert.match(prompt, /\*\*Depth\*\*/)
   assert.match(prompt, /cannot raise a ceiling/i)
-  assert.match(prompt, /ensemble:start v3/)
+  assert.match(prompt, /continuationOf/)
+  assert.match(prompt, /groupMaxHops/)
+  assert.match(prompt, /fresh budget/)
+  assert.match(prompt, /ensemble:start v4/)
 })
 
 test("init instruction replaces an existing Ensemble block instead of duplicating", () => {

@@ -93,7 +93,7 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
   editor.add({
     name: "delegate",
     options: { namespace: "ensemble", codemode: false },
-    description: "Delegate a typed subtask to another workspace member with the required maxHops budget (0 = one-shot ask) and record it on the board. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
+    description: "Delegate a typed subtask to another workspace member with the required maxHops budget (0 = one-shot ask) and record it on the board. The workspace leader may pass continuationOf (an exhausted dispatch group id) with a required groupMaxHops tier to open a continuation group; later delegations join it. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
     input: {
       type: "object",
       properties: {
@@ -104,6 +104,8 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
         expected: { type: "string" },
         mode: { type: "string", enum: ["research", "edit"] },
         maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
+        continuationOf: { type: "string", description: "Workspace leader only: id of the exhausted dispatch group to continue." },
+        groupMaxHops: { type: "integer", enum: [8, 16, 24], description: "Required with continuationOf: hops for the new group tier, bounded by the command remaining." },
       },
       required: ["assignee", "title", "instruction", "maxHops"],
       additionalProperties: false,
@@ -113,7 +115,7 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
   editor.add({
     name: "review",
     options: { namespace: "ensemble", codemode: false },
-    description: "Decide each item in a batch review turn (delegate, start, end, or dismiss). The batch closes only when every item is decided; non-leader reviewers hand it onward to the leader.",
+    description: "Decide each item in a batch review turn (delegate, start, end, or dismiss). A delegate decision requires maxHops for the recipient. The batch closes only when every item is decided; non-leader reviewers hand it onward to the leader.",
     input: {
       type: "object",
       properties: {
@@ -122,7 +124,7 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
           type: "array",
           items: {
             type: "object",
-            properties: { item: { type: "string" }, action: { type: "string" }, assignee: { type: "string" }, note: { type: "string" } },
+            properties: { item: { type: "string" }, action: { type: "string" }, assignee: { type: "string" }, note: { type: "string" }, maxHops: { type: "integer", minimum: 0, description: "Required for delegate: direct dispatches the recipient may make." } },
             required: ["item", "action"],
             additionalProperties: false,
           },

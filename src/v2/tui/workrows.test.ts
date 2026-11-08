@@ -939,3 +939,22 @@ test("ticket155: activity detail truncates to the card width and rebuilds the ca
   assert.notEqual(next, first, "a new activity label rebuilds the cached detail")
   assert.equal(next.detail, "reading auth.ts…")
 })
+
+test("ticket162: exhausted group budgets keep the card and compact right edge", () => {
+  const budget = { usedHops: 8, maxHops: 8, commandRemaining: 16, commandMaxHops: 24 }
+  for (let width = 16; width <= 120; width++) {
+    const card = cardWithMotion(task({ state: "working" }), "Nova", {
+      now: 1000, tick: 2, tideTick: 3, width, variant: "current", env: {}, budgetFor: () => budget,
+    })
+    const header = workCardHeaderText(card.header)
+    assert.equal(header.length, width, `exhausted card width ${width}`)
+    assert.ok(header.endsWith(`${card.header.glyph} ${card.header.status}`))
+    assert.equal(header.trimEnd().length, width)
+    const row = workCompactRow("Nova", "Check the build", "⠋", "WORKING", width, budget)
+    const text = workCompactRowText(row)
+    assert.equal(text.length, width, `exhausted compact width ${width}`)
+    assert.equal(text.lastIndexOf(row.status) + row.status.length, width)
+    assert.equal(text.trimEnd().length, width)
+    if (row.budget) assert.ok(row.budget.includes("8/8"), `width ${width} keeps the exhausted count`)
+  }
+})

@@ -1,3 +1,4 @@
+import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import type { DispatchGroup, Id, Settings, Subtask } from "./types.ts"
 
 /**
@@ -172,6 +173,8 @@ export function newContinuationDispatchGroup(input: {
   root: DispatchGroup
   parentID: Id
   maxHops: number
+  /** Creation order within the command; defaults from the root counters. */
+  continuationIndex?: number
   now?: number
 }): DispatchGroup {
   return {
@@ -179,7 +182,7 @@ export function newContinuationDispatchGroup(input: {
     workspaceID: input.root.workspaceID,
     rootID: input.root.rootID,
     parentID: input.parentID,
-    continuationIndex: (input.root.continuationsUsed ?? 0) + 1,
+    continuationIndex: input.continuationIndex ?? (input.root.continuationsUsed ?? 0) + 1,
     maxHops: Math.max(1, Math.trunc(input.maxHops)),
     usedHops: 0,
     depthMax: input.root.depthMax,
@@ -189,13 +192,24 @@ export function newContinuationDispatchGroup(input: {
 
 export type DispatchGroupState = "active" | "exhausted" | "closed"
 
+/**
+ * True when no further hop can be admitted from this group: its own hops are
+ * spent or the root command ledger has no hops left. Closing a continued
+ * parent does not erase this truth, so the Work header can still say
+ * EXHAUSTED after a continuation exists.
+ */
+export function dispatchGroupExhausted(group: DispatchGroup, groups?: Record<Id, DispatchGroup>): boolean {
+  if (group.usedHops >= group.maxHops) return true
+  const root = isRootGroup(group) ? group : groups?.[group.rootID]
+  return root?.commandUsedHops !== undefined &&
+    root.commandMaxHops !== undefined &&
+    root.commandUsedHops >= root.commandMaxHops
+}
+
 /** Derived state: never stored separately from the counters. */
-export function dispatchGroupState(group: DispatchGroup): DispatchGroupState {
+export function dispatchGroupState(group: DispatchGroup, groups?: Record<Id, DispatchGroup>): DispatchGroupState {
   if (group.closedAt !== undefined) return "closed"
-  if (group.usedHops >= group.maxHops) return "exhausted"
-  if (isRootGroup(group) && group.commandUsedHops !== undefined && group.commandMaxHops !== undefined && group.commandUsedHops >= group.commandMaxHops) {
-    return "exhausted"
-  }
+  if (dispatchGroupExhausted(group, groups)) return "exhausted"
   return "active"
 }
 
@@ -238,6 +252,244 @@ export function dispatchBudgetSummary(group: DispatchGroup, groups: Record<Id, D
     maxHops: group.maxHops,
     ...(commandRemaining !== undefined ? { commandRemaining } : {}),
     ...(root?.commandMaxHops !== undefined ? { commandMaxHops: root.commandMaxHops } : {}),
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * Ticket #162: exhaustion and continuation groups.
+ *
+ * A continuation is a new segment of the same command: it references its
+ * parent and root, captures a leader-chosen group tier, resets depth for the
+ * segment, and leaves the root command ledger authoritative. Only the leader
+ * may open one, only after the referenced group is exhausted, and only while
+ * the command cap, continuation count, and command remaining all fit.
+ *
+ * Closed groups: opening a continuation seals its parent with
+ * `closeReason: "continued"`. A closed group admits no new dispatch hop and
+ * cannot be continued again; exempt completion, batch, synthesis, retry, and
+ * recovery rows still save directly. Exhausted counters stay visible for the
+ * Work header.
+ * ------------------------------------------------------------------------- */
+
+export type ContinuationRefusalReason =
+  | "not-leader"
+  | "unknown-group"
+  | "invalid-group-budget"
+  | "command-exhausted"
+  | "command-insufficient"
+  | "group-active"
+  | "group-closed"
+  | "group-superseded"
+  | "continuations-exhausted"
+
+export type ContinuationRefusal = {
+  reason: ContinuationRefusalReason
+  groupID?: Id
+  rootID?: Id
+  used?: number
+  max?: number
+  remaining?: number
+  requested?: number
+  continuationsUsed?: number
+  maxContinuations?: number
+}
+
+export type ContinuationValidation =
+  | { ok: true; root: DispatchGroup; parent: DispatchGroup; maxHops: number }
+  | { ok: false; refusal: ContinuationRefusal }
+
+function validGroupTier(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value)) return undefined
+  return DISPATCH_GROUP_TIERS.includes(value as (typeof DISPATCH_GROUP_TIERS)[number]) ? value : undefined
+}
+
+/**
+ * Ordered verdict for opening one continuation group. The caller must pass the
+ * referenced group id and the required leader-chosen group tier. The order is
+ * leadership, group identity, tier, command ceiling, group stop, closure, then
+ * the continuation count so copy always names the first blocking layer.
+ */
+export function validateContinuation(input: {
+  continuationOf: unknown
+  groupMaxHops: unknown
+  groups: Record<Id, DispatchGroup>
+  workspaceID: Id
+  isLeader: boolean
+}): ContinuationValidation {
+  if (!input.isLeader) return { ok: false, refusal: { reason: "not-leader" } }
+  const id = typeof input.continuationOf === "string" ? input.continuationOf.trim() : ""
+  const parent = id ? input.groups[id] : undefined
+  if (!id || !parent || parent.workspaceID !== input.workspaceID) {
+    return { ok: false, refusal: { reason: "unknown-group", groupID: id || undefined } }
+  }
+  const root = isRootGroup(parent) ? parent : input.groups[parent.rootID]
+  if (!root || root.workspaceID !== input.workspaceID) {
+    return { ok: false, refusal: { reason: "unknown-group", groupID: parent.id, rootID: parent.rootID } }
+  }
+  const requested = validGroupTier(input.groupMaxHops)
+  if (requested === undefined) {
+    return {
+      ok: false,
+      refusal: {
+        reason: "invalid-group-budget",
+        groupID: parent.id,
+        rootID: root.id,
+        ...(typeof input.groupMaxHops === "number" ? { requested: input.groupMaxHops } : {}),
+      },
+    }
+  }
+  const commandMax = root.commandMaxHops
+  const commandUsed = root.commandUsedHops
+  if (commandMax === undefined || commandUsed === undefined || commandUsed >= commandMax) {
+    return {
+      ok: false,
+      refusal: {
+        reason: "command-exhausted",
+        groupID: parent.id,
+        rootID: root.id,
+        used: commandUsed,
+        max: commandMax,
+      },
+    }
+  }
+  const remaining = Math.max(0, commandMax - commandUsed)
+  if (requested > remaining) {
+    return {
+      ok: false,
+      refusal: { reason: "command-insufficient", groupID: parent.id, rootID: root.id, remaining, requested },
+    }
+  }
+  if (parent.usedHops < parent.maxHops) {
+    return {
+      ok: false,
+      refusal: {
+        reason: "group-active",
+        groupID: parent.id,
+        rootID: root.id,
+        used: parent.usedHops,
+        max: parent.maxHops,
+        remaining: Math.max(0, parent.maxHops - parent.usedHops),
+      },
+    }
+  }
+  if (parent.closedAt !== undefined) {
+    return {
+      ok: false,
+      refusal: { reason: "group-closed", groupID: parent.id, rootID: root.id, used: parent.usedHops, max: parent.maxHops },
+    }
+  }
+  if (parent.continuationIndex !== (root.continuationsUsed ?? 0)) {
+    return {
+      ok: false,
+      refusal: { reason: "group-superseded", groupID: parent.id, rootID: root.id },
+    }
+  }
+  const continuationsUsed = root.continuationsUsed ?? 0
+  const maxContinuations = root.maxContinuations ?? 0
+  if (continuationsUsed >= maxContinuations) {
+    return {
+      ok: false,
+      refusal: {
+        reason: "continuations-exhausted",
+        groupID: parent.id,
+        rootID: root.id,
+        continuationsUsed,
+        maxContinuations,
+      },
+    }
+  }
+  return { ok: true, root, parent, maxHops: requested }
+}
+
+/**
+ * One serialized continuation mutation: increment the root continuation
+ * count, seal the exhausted parent as continued, and mint the linked segment.
+ * Command counters and depth caps stay on the root; the segment starts empty.
+ */
+export function continuationDispatchLedger(input: {
+  id: Id
+  root: DispatchGroup
+  parent: DispatchGroup
+  maxHops: number
+  now?: number
+}): { root: DispatchGroup; parent: DispatchGroup; group: DispatchGroup } {
+  const at = input.now ?? Date.now()
+  const continuationIndex = (input.root.continuationsUsed ?? 0) + 1
+  const seal = { closedAt: at, closeReason: "continued" as const }
+  const root: DispatchGroup = {
+    ...input.root,
+    continuationsUsed: continuationIndex,
+    ...(input.parent.id === input.root.id ? seal : {}),
+  }
+  const parent: DispatchGroup = input.parent.id === input.root.id
+    ? root
+    : { ...input.parent, ...seal }
+  const group = newContinuationDispatchGroup({
+    id: input.id,
+    root,
+    parentID: input.parent.id,
+    maxHops: input.maxHops,
+    continuationIndex,
+    now: at,
+  })
+  return { root, parent, group }
+}
+
+/** Newest active continuation for one command, if any. Pure. */
+export function activeContinuationGroup(rootID: Id, groups: Record<Id, DispatchGroup>): DispatchGroup | undefined {
+  let best: DispatchGroup | undefined
+  for (const group of Object.values(groups)) {
+    if (group.id === rootID || group.rootID !== rootID) continue
+    if (dispatchGroupState(group, groups) !== "active") continue
+    if (!best || group.continuationIndex > best.continuationIndex) best = group
+  }
+  return best
+}
+
+/**
+ * Delegate target for one command: keep an active group, otherwise route to
+ * the newest active continuation. An exhausted command with no continuation
+ * returns the same group so the ordinary budget refusal names the stop.
+ */
+export function dispatchTargetGroup(group: DispatchGroup, groups: Record<Id, DispatchGroup>): DispatchGroup {
+  if (dispatchGroupState(group, groups) === "active") return group
+  return activeContinuationGroup(group.rootID, groups) ?? group
+}
+
+/**
+ * Depth within one group segment. A parent outside the child's group starts a
+ * fresh segment at 0; a same-group parent increments the stored depth.
+ */
+export function dispatchChildDepth(parent: Subtask | undefined, groupID: Id | undefined, subtasks: Record<Id, Subtask>): number {
+  if (!parent) return 0
+  const parentGroup = parent.dispatchGroupID ?? resolveDispatchGroupID(parent, subtasks)
+  if (groupID && parentGroup && parentGroup !== groupID) return 0
+  return dispatchDepthFor(parent, subtasks) + 1
+}
+
+/** Continuation refusal copy: names the blocking layer and the next action. */
+export function continuationRefusalText(refusal: ContinuationRefusal): string {
+  switch (refusal.reason) {
+    case "not-leader":
+      return "only the workspace leader can open a continuation group; return your result to the leader in the group chat."
+    case "unknown-group":
+      return "that dispatch group is not part of this workspace; check the group id and retry."
+    case "invalid-group-budget":
+      return refusal.requested === undefined
+        ? `groupMaxHops is required with continuationOf; choose one of ${DISPATCH_GROUP_TIERS.join(", ")} hops.`
+        : `groupMaxHops must be one of ${DISPATCH_GROUP_TIERS.join(", ")} hops.`
+    case "command-exhausted":
+      return `the command budget is exhausted (${refusal.used ?? "?"}/${refusal.max ?? "?"} hops); ask the user to start a new command for a fresh budget.`
+    case "command-insufficient":
+      return `the command budget has ${refusal.remaining ?? "no"} hops left, less than the requested ${refusal.requested}-hop group; ask the user to start a new command for a fresh budget.`
+    case "group-active":
+      return `the dispatch group still has ${refusal.remaining} of ${refusal.max} hops; dispatch into it instead of opening a continuation.`
+    case "group-closed":
+      return "that dispatch group is already closed; continue the newest active group or ask the user to start a new command."
+    case "group-superseded":
+      return "that dispatch group was already continued; continue the newest group, or ask the user to start a new command."
+    case "continuations-exhausted":
+      return `the continuation limit is reached (${refusal.continuationsUsed}/${refusal.maxContinuations}); ask the user to start a new command for a fresh budget.`
   }
 }
 
@@ -389,7 +641,7 @@ export function dispatchFanOutCount(parentID: Id, subtasks: Record<Id, Subtask>,
   return count
 }
 
-export type DispatchRefusalLayer = "task" | "group" | "depth" | "command" | "fanout"
+export type DispatchRefusalLayer = "task" | "group" | "closed" | "depth" | "command" | "fanout"
 
 export type DispatchRefusal = {
   layer: DispatchRefusalLayer
@@ -405,6 +657,8 @@ export type DispatchBudgetState = {
   groupUsed: number
   groupMax: number
   groupRemaining: number
+  /** A continued parent is sealed; it admits no further work. */
+  closed: boolean
   commandUsed?: number
   commandMax?: number
   commandRemaining?: number
@@ -438,6 +692,7 @@ export function dispatchBudgetState(input: {
     groupUsed: group.usedHops,
     groupMax: group.maxHops,
     groupRemaining: dispatchGroupRemaining(group),
+    closed: group.closedAt !== undefined,
     ...(commandUsed !== undefined ? { commandUsed } : {}),
     ...(commandMax !== undefined ? { commandMax } : {}),
     ...(commandUsed !== undefined && commandMax !== undefined ? { commandRemaining: Math.max(0, commandMax - commandUsed) } : {}),
@@ -463,6 +718,9 @@ export function dispatchAdmissionRefusal(input: {
   if (state.taskMax !== undefined && state.taskUsed >= state.taskMax) {
     return { layer: "task", used: state.taskUsed, max: state.taskMax }
   }
+  if (state.closed) {
+    return { layer: "closed", used: state.groupUsed, max: state.groupMax }
+  }
   if (state.groupUsed >= state.groupMax) {
     return { layer: "group", used: state.groupUsed, max: state.groupMax }
   }
@@ -485,7 +743,9 @@ export function dispatchRefusalText(kind: "delegation" | "handoff", refusal: Dis
     case "task":
       return `your task budget is exhausted (${refusal.used}/${refusal.max} direct dispatches); Return your result to the leader in the group chat.`
     case "group":
-      return `the dispatch group is exhausted (${refusal.used}/${refusal.max} hops); Return your result to the leader in the group chat.`
+      return `the dispatch group is exhausted (${refusal.used}/${refusal.max} hops); Return your result to the leader in the group chat. The leader can continue this command in a new group while the command budget allows.`
+    case "closed":
+      return "the dispatch group is closed; Return your result to the leader in the group chat. The leader can continue the newest group in this command."
     case "depth":
       return `the dispatch depth limit is ${refusal.max} (next depth ${refusal.used}); Return your result to the leader in the group chat.`
     case "command":
@@ -513,7 +773,7 @@ export function dispatchBudgetContext(state: DispatchBudgetState, task?: Pick<Su
   return [
     `<ensemble_dispatch_budget group="${state.groupID}" root="${state.rootID}" parent="${state.parentID ?? ""}" continuation="${state.continuationIndex}"${taskID} group_used="${state.groupUsed}" group_max="${state.groupMax}" group_remaining="${state.groupRemaining}" command_used="${state.commandUsed ?? ""}" command_max="${state.commandMax ?? ""}" command_remaining="${state.commandRemaining ?? ""}" task_used="${state.taskUsed}" task_max="${state.taskMax ?? ""}" task_remaining="${state.taskRemaining ?? ""}" depth="${state.depth}" depth_max="${state.depthMax}">`,
     `Dispatch budget — group ${state.groupUsed}/${state.groupMax} (${state.groupRemaining} left), command ${state.commandUsed ?? "?"}/${state.commandMax ?? "?"}${state.commandRemaining !== undefined ? ` (${state.commandRemaining} left)` : ""}, task ${state.taskMax !== undefined ? `${state.taskUsed}/${state.taskMax} (${state.taskRemaining} left)` : `${state.taskUsed} used (unlimited)`}, depth ${state.depth}/${state.depthMax}.`,
-    "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask. Completion handoffs, batch review, synthesis, group-chat peer turns, retries, restarts, recovery, and idempotent replays do not consume hops; cancellation does not refund them. You cannot raise these ceilings; when a budget is exhausted, return your result to the leader.",
+    "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask. Completion handoffs, batch review, synthesis, group-chat peer turns, retries, restarts, recovery, and idempotent replays do not consume hops; cancellation does not refund them. You cannot raise these ceilings; when a budget is exhausted, return your result to the leader. The workspace leader may open a linked continuation group with ensemble_delegate's continuationOf plus a required groupMaxHops tier; when the command or continuation cap is reached, ask the user to start a new command.",
     "</ensemble_dispatch_budget>",
   ].join("\n")
 }

@@ -113,7 +113,7 @@ test("review decisions parse per-item actions and refuse bad input", () => {
   assert.deepEqual(REVIEW_ACTIONS, ["delegate", "start", "end", "dismiss"])
   const parsed = parseReviewDecisions({
     decisions: [
-      { item: "c1", action: "delegate", assignee: "Kim", note: "Follow up" },
+      { item: "c1", action: "delegate", assignee: "Kim", note: "Follow up", maxHops: 2 },
       { item: "c2", action: "end" },
     ],
   })
@@ -121,6 +121,7 @@ test("review decisions parse per-item actions and refuse bad input", () => {
   if (parsed.ok) {
     assert.equal(parsed.decisions.length, 2)
     assert.equal(parsed.decisions[0].assignee, "Kim")
+    assert.equal(parsed.decisions[0].maxHops, 2, "review delegation carries its explicit task budget")
   }
   for (const bad of [
     {},
@@ -128,12 +129,18 @@ test("review decisions parse per-item actions and refuse bad input", () => {
     { decisions: [{ item: "", action: "end" }] },
     { decisions: [{ item: "c1", action: "delete" }] },
     { decisions: [{ item: "c1", action: "delegate" }] },
+    { decisions: [{ item: "c1", action: "delegate", assignee: "Kim" }] },
+    { decisions: [{ item: "c1", action: "delegate", assignee: "Kim", maxHops: -1 }] },
+    { decisions: [{ item: "c1", action: "delegate", assignee: "Kim", maxHops: 1.5 }] },
     { decisions: [{ item: "c1", action: "end" }, { item: "c1", action: "dismiss" }] },
   ]) {
     const refused = parseReviewDecisions(bad)
     assert.equal(refused.ok, false)
     if (!refused.ok) assert.ok(refused.reason.length > 0)
   }
+  const missingBudget = parseReviewDecisions({ decisions: [{ item: "c1", action: "delegate", assignee: "Kim" }] })
+  assert.equal(missingBudget.ok, false)
+  if (!missingBudget.ok) assert.match(missingBudget.reason, /must include maxHops/)
 })
 
 test("batch closure needs every item decided", () => {

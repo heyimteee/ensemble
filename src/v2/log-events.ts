@@ -149,17 +149,63 @@ export function dispatchHopEvent(input: {
     return { level: "info", event: "dispatch.hop.consumed", fields }
   }
   const refusal = input.refusal
+  const reason = refusal
+    ? refusal.layer === "closed" ? "group-closed" : `${refusal.layer}-exhausted`
+    : "refused"
   return {
     level: "warn",
     event: "dispatch.hop.refused",
     fields: {
       ...fields,
-      reason: refusal ? `${refusal.layer}-exhausted` : "refused",
+      reason,
       refusedLayer: refusal?.layer,
       refusedUsed: refusal?.used,
       refusedMax: refusal?.max,
     },
   }
+}
+
+/**
+ * Ticket #162 dispatch-group lifecycle projection: continuation creation and
+ * exhaustion are IDs, counts, and reason codes only. Task titles,
+ * instructions, handoff paths, and conversation text must never enter these
+ * rows.
+ */
+export function dispatchGroupEvent(input: {
+  event: "continued" | "exhausted"
+  group: DispatchGroup
+  root?: DispatchGroup
+  parent?: DispatchGroup
+  reason: "continued" | "group-exhausted" | "command-exhausted"
+}): { level: "info" | "warn"; event: string; fields: Record<string, unknown> } {
+  const root = input.root ?? input.group
+  const fields: Record<string, unknown> = {
+    workspaceID: input.group.workspaceID,
+    dispatchGroupID: input.group.id,
+    rootID: input.group.rootID,
+    parentID: input.group.parentID,
+    continuationIndex: input.group.continuationIndex,
+    usedHops: input.group.usedHops,
+    maxHops: input.group.maxHops,
+    groupRemaining: Math.max(0, input.group.maxHops - input.group.usedHops),
+    commandUsedHops: root.commandUsedHops,
+    commandMaxHops: root.commandMaxHops,
+    commandRemaining: root.commandMaxHops !== undefined && root.commandUsedHops !== undefined
+      ? Math.max(0, root.commandMaxHops - root.commandUsedHops)
+      : undefined,
+    continuationsUsed: root.continuationsUsed,
+    maxContinuations: root.maxContinuations,
+    reason: input.reason,
+  }
+  if (input.parent) {
+    fields.parentUsedHops = input.parent.usedHops
+    fields.parentMaxHops = input.parent.maxHops
+    fields.parentCloseReason = input.parent.closeReason
+  }
+  if (input.event === "continued") {
+    return { level: "info", event: "dispatch.group.continued", fields }
+  }
+  return { level: "warn", event: "dispatch.group.exhausted", fields }
 }
 
 export function createStoreObserver(logger: EnsembleLogger): StoreObserver {

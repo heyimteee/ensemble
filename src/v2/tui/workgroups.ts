@@ -31,23 +31,41 @@ export {
 } from "../work-groups.ts"
 export type { WorkGroup, WorkGroupOptions } from "../work-groups.ts"
 
-/** The Work header names groups, active work, and terminal work; "recent" is gone. */
-export function workSummaryCounts(groupCount: number, activeCount: number, doneCount: number): string {
+/** The Work header names groups, active work, terminal work, and controlled stops. */
+export function workSummaryCounts(groupCount: number, activeCount: number, doneCount: number, exhaustedCount = 0): string {
   const groups = Math.max(0, Math.floor(groupCount))
   const active = Math.max(0, Math.floor(activeCount))
   const done = Math.max(0, Math.floor(doneCount))
+  const exhausted = Math.max(0, Math.floor(exhaustedCount))
   if (groups === 0 && active === 0 && done === 0) return "WORK │ none yet"
-  return `WORK ${groups} ${groups === 1 ? "group" : "groups"} · ${active} active · ${done} done`
+  const base = `WORK ${groups} ${groups === 1 ? "group" : "groups"} · ${active} active · ${done} done`
+  return exhausted > 0 ? `${base} · ${exhausted} exhausted` : base
 }
 
 /**
  * A subtle label shown only when more than one group is visible. Ticket #160
- * adds the ledger budget; the renderer truncates the line, and the status
- * counts stay after it so a narrow width still names the group's work.
+ * adds the ledger budget; ticket #162 adds continuation lineage and the
+ * exhausted/continued controlled-stop words. The renderer truncates the line,
+ * and the status counts stay after it so a narrow width still names the
+ * group's work.
  */
-export function workGroupLabel(group: Pick<WorkGroup, "active" | "done" | "budget">, ordinal: number): string {
-  const budget = group.budget ? ` · ${dispatchBudgetLabel(group.budget, "full")}` : ""
-  return `GROUP ${Math.max(1, Math.floor(ordinal))}${budget} · ${group.active} active · ${group.done} done`
+export function workGroupLabel(
+  group: Pick<WorkGroup, "active" | "done" | "budget" | "continuationIndex" | "parentContinuationIndex" | "exhausted" | "closeReason">,
+  ordinal: number,
+): string {
+  const parts = [`GROUP ${Math.max(1, Math.floor(ordinal))}`]
+  const continuation = group.continuationIndex ?? 0
+  if (continuation > 0) {
+    parts.push(`CONT ${continuation}`)
+    if (group.parentContinuationIndex !== undefined) {
+      parts.push(`from ${group.parentContinuationIndex === 0 ? "root" : `CONT ${group.parentContinuationIndex}`}`)
+    }
+  }
+  if (group.exhausted) parts.push("EXHAUSTED")
+  if (group.closeReason === "continued") parts.push("CONTINUED")
+  if (group.budget) parts.push(dispatchBudgetLabel(group.budget, "full"))
+  parts.push(`${group.active} active`, `${group.done} done`)
+  return parts.join(" · ")
 }
 
 /** Two card groups fit one card row each; older groups become compact group rows. */
@@ -59,6 +77,8 @@ export type WorkGroupSection = {
   groupID: string
   /** Null for a single visible group; group labels appear only when there are several. */
   label: string | null
+  /** Ticket #162: controlled-stop sections use the warning tone, not error. */
+  tone: "faint" | "warn"
   mode: WorkGroupSectionMode
   /** Tasks represented individually on this render (cards or compact rows). */
   tasks: Subtask[]
@@ -125,6 +145,15 @@ function emptyLayout(): WorkGroupLayout {
   }
 }
 
+function sectionTone(group: WorkGroup): "faint" | "warn" {
+  return group.exhausted || group.state === "closed" ? "warn" : "faint"
+}
+
+/** A lineage or controlled-stop group always names itself, even when alone. */
+function showGroupLabel(group: WorkGroup, multi: boolean): boolean {
+  return multi || (group.continuationIndex ?? 0) > 0 || group.exhausted === true || group.closeReason === "continued"
+}
+
 function cardSection(
   group: WorkGroup,
   ordinal: number,
@@ -136,6 +165,7 @@ function cardSection(
   return {
     groupID: group.id,
     label: showLabel ? workGroupLabel(group, ordinal) : null,
+    tone: sectionTone(group),
     mode: "cards",
     tasks,
     overflow,
@@ -147,6 +177,7 @@ function summarySection(group: WorkGroup, ordinal: number): WorkGroupSection {
   return {
     groupID: group.id,
     label: workGroupLabel(group, ordinal),
+    tone: sectionTone(group),
     mode: "summary",
     tasks: [],
     overflow: 0,
@@ -160,6 +191,7 @@ function compactRowsSection(group: WorkGroup, ordinal: number, rows: number, sho
   return {
     groupID: group.id,
     label: showLabel ? workGroupLabel(group, ordinal) : null,
+    tone: sectionTone(group),
     mode: "rows",
     tasks,
     overflow: group.complete ? 0 : overflow,
@@ -190,7 +222,7 @@ function compactLayout(
   let remainingTasks = taskBudget
   for (let index = groups.length - 1; index >= 0; index--) {
     const group = groups[index]
-    const labelCost = multi ? 1 : 0
+    const labelCost = showGroupLabel(group, multi) ? 1 : 0
     let rows = 0
     if (!group.complete && remainingTasks > 0) rows = Math.min(remainingTasks, group.tasks.length)
     let cost = labelCost + rows
@@ -211,7 +243,7 @@ function compactLayout(
     const rows = chosen.get(index) ?? 0
     sections.push(
       rows > 0
-        ? compactRowsSection(group, index + 1, rows, multi)
+        ? compactRowsSection(group, index + 1, rows, showGroupLabel(group, multi))
         : summarySection(group, index + 1),
     )
   }
@@ -269,7 +301,7 @@ export function workGroupLayout(
     const cardSet = new Set(cardIndices)
     const sections: WorkGroupSection[] = []
     for (let index = 0; index < groups.length; index++) {
-      if (cardSet.has(index)) sections.push(cardSection(groups[index], index + 1, columns, multi))
+      if (cardSet.has(index)) sections.push(cardSection(groups[index], index + 1, columns, showGroupLabel(groups[index], multi)))
       else if (summaryIndices.has(index)) sections.push(summarySection(groups[index], index + 1))
     }
     const cardCount = cardIndices.length

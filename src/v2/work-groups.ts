@@ -1,5 +1,5 @@
 import { deriveWorkStatus, isTerminalWorkStatus } from "./queue.ts"
-import { dispatchBudgetSummary, type DispatchBudgetSummary } from "./dispatch-budget.ts"
+import { dispatchBudgetSummary, dispatchGroupExhausted, dispatchGroupState, type DispatchBudgetSummary, type DispatchGroupState } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import type { Approval, DispatchGroup, Id, Subtask } from "./types.ts"
 
@@ -54,6 +54,20 @@ export type WorkGroup = {
   createdAt: number
   /** Ticket #160: used/max hops plus command remaining, when a ledger exists. */
   budget?: DispatchBudgetSummary
+  /** Ticket #162: root command group for continuation lineage. */
+  rootID?: string
+  /** Ticket #162: parent group of a continuation segment. */
+  parentID?: string
+  /** Ticket #162: 0 for a root group, 1..N for continuations. */
+  continuationIndex?: number
+  /** Ticket #162: continuation index of the parent, for the Work lineage label. */
+  parentContinuationIndex?: number
+  /** Ticket #162: derived active/exhausted/closed state. */
+  state?: DispatchGroupState
+  /** Ticket #162: hop counters spent, even when the group has since closed. */
+  exhausted?: boolean
+  /** Ticket #162: controlled-stop reason such as `continued`. */
+  closeReason?: string
 }
 
 export type WorkGroupOptions = {
@@ -189,6 +203,7 @@ export function workGroupsForTasks(
       now < latestTerminalAt + Math.max(0, holdMs)
     if (active === 0 && !needsYou && !holding) continue
     const ledger = options.dispatchGroups?.[id]
+    const parentLedger = ledger?.parentID ? options.dispatchGroups?.[ledger.parentID] : undefined
     groups.push({
       id,
       tasks: ordered,
@@ -199,7 +214,16 @@ export function workGroupsForTasks(
       latestTerminalAt,
       createdAt: Number.isFinite(createdAt) ? createdAt : 0,
       ...(ledger && options.dispatchGroups
-        ? { budget: dispatchBudgetSummary(ledger, options.dispatchGroups) }
+        ? {
+            budget: dispatchBudgetSummary(ledger, options.dispatchGroups),
+            rootID: ledger.rootID,
+            parentID: ledger.parentID,
+            continuationIndex: ledger.continuationIndex,
+            ...(parentLedger ? { parentContinuationIndex: parentLedger.continuationIndex } : {}),
+            state: dispatchGroupState(ledger, options.dispatchGroups),
+            exhausted: dispatchGroupExhausted(ledger, options.dispatchGroups),
+            closeReason: ledger.closeReason,
+          }
         : {}),
     })
   }

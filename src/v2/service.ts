@@ -12,19 +12,28 @@ import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFa
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey } from "./queue.ts"
 import {
+  DISPATCH_MIN_GROUP_HOPS,
+  activeContinuationGroup,
+  continuationRefusalText,
   dispatchAdmissionRefusal,
   dispatchBudgetLine,
   dispatchBudgetState,
+  dispatchChildDepth,
   dispatchDepthFor,
   dispatchFanOutCount,
   dispatchGroupRemaining,
+  dispatchGroupState,
   dispatchRefusalText,
+  dispatchTargetGroup,
   dispatchesHop,
   dispatchLimitSettings,
   dispatchLimits,
+  newContinuationDispatchGroup,
   newRootDispatchGroup,
+  validateContinuation,
   validateDispatchLimits,
   validateTaskMaxHops,
+  type ContinuationRefusal,
   type DispatchBudgetState,
   type DispatchRefusal,
 } from "./dispatch-budget.ts"
@@ -41,7 +50,7 @@ import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from ".
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
 import { createLogRateLimiter, createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
-import { createStoreObserver, dispatchHopEvent } from "./log-events.ts"
+import { createStoreObserver, dispatchGroupEvent, dispatchHopEvent } from "./log-events.ts"
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
@@ -356,6 +365,15 @@ export class EnsembleV2Service {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   private readonly runBySession = new Map<string, string>()
   private readonly activeRuns = new Map<string, Run>()
+  /**
+   * Ticket #162: the last continuation a leader opened from one session,
+   * scoped to its workspace. Subsequent leader dispatches without
+   * `continuationOf` target this group instead of falling back into the
+   * exhausted parent. A new user command clears the workspace's entries, and
+   * the ledger is re-read on every use so a closed or spent target falls back
+   * to the newest active continuation.
+   */
+  private readonly continuationTargets = new Map<string, { workspaceID: string; rootID: string; groupID: string }>()
   private readonly directBusy = new Set<string>()
   /** Last identity text version written per native session (chat polls must not rewrite it). */
   private readonly identityVersions = new Map<string, number>()
@@ -1621,11 +1639,11 @@ export class EnsembleV2Service {
       "</ensemble_persona>",
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
       "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path, recipient, and required maxHops. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
-      "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work). Your turn context shows task, group, command, and depth budgets; successful results show what remains. You cannot raise a ceiling — when a budget is exhausted, return your result to the leader in the group chat.",
+      "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work). Your turn context shows task, group, command, and depth budgets; successful results show what remains. You cannot raise a ceiling. When a budget is exhausted, return your result to the leader; only the leader may open a linked continuation group with ensemble_delegate's continuationOf plus a required groupMaxHops tier. When the command or continuation cap is reached, ask the user to start a new command for a fresh budget.",
       "Answer first: write your own answer in the group chat before handing off. A handoff forwards a completed result or clearly scoped work; it is never a substitute for answering your assignment.",
       "A `/skill` token in a user message is a deliberate skill request. When it applies to your part, load that skill with the native skill tool rather than treating it as prose.",
       "When a user message addresses multiple agents, handle only the part addressed to you. Do not delegate or duplicate another addressed agent's part; use ensemble_task_status and ensemble_workspace_info when you need coordination state.",
-      "End-of-turn handoff (mandatory): every non-leader turn must end with a handoff to another member — hand off explicitly with ensemble_handoff, or the server hands your finished turn to the workspace leader automatically and the group shows `Handed to $Name`. The leader may end turns normally or hand off voluntarily. A batch review turn lists every pending completion: decide each item with ensemble_review (delegate, start, end, or dismiss) — the batch closes only when every item is decided; non-leaders hand it onward to the leader.",
+      "End-of-turn handoff (mandatory): every non-leader turn must end with a handoff to another member — hand off explicitly with ensemble_handoff, or the server hands your finished turn to the workspace leader automatically and the group shows `Handed to $Name`. The leader may end turns normally or hand off voluntarily. A batch review turn lists every pending completion: decide each item with ensemble_review (delegate, start, end, or dismiss) — a delegate decision requires maxHops for the recipient — and the batch closes only when every item is decided; non-leaders hand it onward to the leader.",
       "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
       "",
       ensembleBlock(),
@@ -2712,6 +2730,7 @@ export class EnsembleV2Service {
     // this fan-out (and every descendant hop) inherits it. A second command
     // mints a second group even while the first is still active.
     const dispatchGroupID = newDispatchGroupID()
+    this.forgetContinuations(workspace.id)
     if (plan.kind === "skills" && explicitIDs.length > 0) {
       const expected = skillRecipients.map((recipient) => recipient.agentID).sort()
       const requested = [...explicitIDs].sort()
@@ -2882,6 +2901,36 @@ export class EnsembleV2Service {
     }))
   }
 
+  /* Ticket #162: session-scoped continuation routing. */
+
+  private continuationKey(workspaceID: string, sessionID: string): string {
+    return `${workspaceID}\0${sessionID}`
+  }
+
+  private rememberContinuation(workspaceID: string, sessionID: string, rootID: string, groupID: string): void {
+    this.continuationTargets.set(this.continuationKey(workspaceID, sessionID), {
+      workspaceID,
+      rootID,
+      groupID,
+    })
+  }
+
+  private forgetContinuations(workspaceID: string): void {
+    for (const [key, target] of this.continuationTargets) {
+      if (target.workspaceID === workspaceID) this.continuationTargets.delete(key)
+    }
+  }
+
+  private rememberedContinuation(workspaceID: string, sessionID: string): DispatchGroup | undefined {
+    const target = this.continuationTargets.get(this.continuationKey(workspaceID, sessionID))
+    if (!target) return undefined
+    const groups = this.store.read().dispatchGroups
+    const group = groups[target.groupID]
+    if (!group) return undefined
+    const active = activeContinuationGroup(target.rootID, groups)
+    return active ?? (dispatchGroupState(group, groups) === "active" ? group : undefined)
+  }
+
   /**
    * One ordered preflight over the prospective dispatch. The store repeats
    * the same verdict atomically inside `admitDispatchedSubtask`; this call
@@ -2893,14 +2942,19 @@ export class EnsembleV2Service {
     groupID: string
     maxPerRun?: number
     perRunKind?: WorkKind
+    /** A continuation group that exists only in this prospective dispatch. */
+    prospectiveGroup?: DispatchGroup
   }): { state?: DispatchBudgetState; depth: number; refusal?: DispatchRefusal } {
     const state = this.store.read()
-    const group = state.dispatchGroups[input.groupID]
-    const depth = input.parent ? dispatchDepthFor(input.parent, state.subtasks) + 1 : 0
+    const groups = input.prospectiveGroup
+      ? { ...state.dispatchGroups, [input.prospectiveGroup.id]: input.prospectiveGroup }
+      : state.dispatchGroups
+    const group = groups[input.groupID]
+    const depth = dispatchChildDepth(input.parent, input.groupID, state.subtasks)
     if (!group) return { depth }
     const budget = dispatchBudgetState({
       group,
-      groups: state.dispatchGroups,
+      groups,
       task: input.parent,
       subtasks: state.subtasks,
       nextDepth: depth,
@@ -2933,9 +2987,49 @@ export class EnsembleV2Service {
       return { admitted: true, consumed: false }
     }
     const result = await this.store.admitDispatchedSubtask(task, { enforce: true, maxPerRun: options.maxPerRun, perRunKind: options.perRunKind })
-    if (result.consumed) this.logDispatchHop("consumed", result.task, result.group)
-    else if (!result.admitted && result.refusal) this.logDispatchHop("refused", task, result.group, result.refusal)
+    if (result.consumed) {
+      this.logDispatchHop("consumed", result.task, result.group)
+      await this.noteDispatchGroupExhaustion(result)
+    } else if (!result.admitted && result.refusal) this.logDispatchHop("refused", task, result.group, result.refusal)
     return result
+  }
+
+  /**
+   * Ticket #162: one visible exhaustion notice per active-to-exhausted
+   * transition. A group that spends its final hop (or the hop that spends the
+   * command ledger) posts a concise controlled-stop line and a warn event;
+   * routine hops stay in the budget labels and tool results.
+   */
+  private async noteDispatchGroupExhaustion(result: {
+    task: Subtask
+    group?: DispatchGroup
+    previousGroup?: DispatchGroup
+    root?: DispatchGroup
+    previousRoot?: DispatchGroup
+    exhaustedBefore?: boolean
+    exhaustedAfter?: boolean
+  }): Promise<void> {
+    if (!result.group || result.exhaustedAfter !== true || result.exhaustedBefore === true) return
+    const state = this.store.read()
+    const workspace = state.workspaces[result.task.workspaceID]
+    if (!workspace) return
+    const root = result.root ?? state.dispatchGroups[result.group.rootID]
+    const commandSpent =
+      root?.commandUsedHops !== undefined &&
+      root.commandMaxHops !== undefined &&
+      root.commandUsedHops >= root.commandMaxHops
+    const reason = commandSpent ? "command-exhausted" as const : "group-exhausted" as const
+    const commandRemaining = Math.max(0, (root?.commandMaxHops ?? 0) - (root?.commandUsedHops ?? 0))
+    const continuationsLeft = (root?.maxContinuations ?? 0) - (root?.continuationsUsed ?? 0)
+    const canContinue = commandRemaining >= DISPATCH_MIN_GROUP_HOPS && continuationsLeft > 0
+    const text = commandSpent
+      ? `Command budget exhausted (${root?.commandUsedHops ?? "?"}/${root?.commandMaxHops ?? "?"} hops). Ask the user to start a new command for a fresh budget.`
+      : canContinue
+        ? `Dispatch group exhausted (${result.group.usedHops}/${result.group.maxHops} hops; ${commandRemaining} of ${root?.commandMaxHops ?? "?"} command hops left). The leader can continue this command in a new group.`
+        : `Dispatch group exhausted (${result.group.usedHops}/${result.group.maxHops} hops; ${commandRemaining} of ${root?.commandMaxHops ?? "?"} command hops left and ${continuationsLeft} continuations remaining). Ask the user to start a new command for a fresh budget.`
+    await this.appendMessage(workspace, { author: "system", text, kind: "system", taskID: result.task.id })
+    const entry = dispatchGroupEvent({ event: "exhausted", group: result.group, root, reason })
+    this.logger?.event(entry.level, "dispatch", entry.event, entry.fields)
   }
 
   private logDispatchHop(
@@ -2945,6 +3039,43 @@ export class EnsembleV2Service {
     refusal?: DispatchRefusal,
   ): void {
     const entry = dispatchHopEvent({ outcome, task, group, refusal })
+    this.logger?.event(entry.level, "dispatch", entry.event, entry.fields)
+  }
+
+  private async refuseContinuation(workspace: Workspace, refusal: ContinuationRefusal): Promise<{ content: string }> {
+    const text = `Continuation refused: ${continuationRefusalText(refusal)}`
+    await this.appendMessage(workspace, { author: "system", text, kind: "system" })
+    this.logger?.event("warn", "dispatch", "dispatch.group.refused", {
+      workspaceID: workspace.id,
+      dispatchGroupID: refusal.groupID,
+      rootID: refusal.rootID,
+      reason: refusal.reason,
+      usedHops: refusal.used,
+      maxHops: refusal.max,
+      commandRemaining: refusal.remaining,
+      requestedHops: refusal.requested,
+      continuationsUsed: refusal.continuationsUsed,
+      maxContinuations: refusal.maxContinuations,
+    })
+    return { content: text }
+  }
+
+  /** Group-chat and log line for one opened continuation; creation spends no hop. */
+  private async noteContinuationCreated(
+    workspace: Workspace,
+    group: DispatchGroup,
+    root: DispatchGroup,
+    parent: DispatchGroup,
+  ): Promise<void> {
+    const commandRemaining = root.commandMaxHops !== undefined && root.commandUsedHops !== undefined
+      ? Math.max(0, root.commandMaxHops - root.commandUsedHops)
+      : undefined
+    await this.appendMessage(workspace, {
+      author: "system",
+      text: `Continuation group opened (${group.maxHops} hops; ${commandRemaining ?? "?"} of ${root.commandMaxHops ?? "?"} command hops left).`,
+      kind: "system",
+    })
+    const entry = dispatchGroupEvent({ event: "continued", group, root, parent, reason: "continued" })
     this.logger?.event(entry.level, "dispatch", entry.event, entry.fields)
   }
 
@@ -3027,7 +3158,7 @@ export class EnsembleV2Service {
     })
     await this.ensureDispatchGroupLedger(dispatchGroupID, input.workspace.id)
     const group = this.store.dispatchGroup(dispatchGroupID)
-    const depth = parent ? dispatchDepthFor(parent, state.subtasks) + 1 : 0
+    const depth = dispatchChildDepth(parent, dispatchGroupID, state.subtasks)
     const taskMaxHops = input.taskMaxHops ?? (group ? dispatchGroupRemaining(group) : undefined)
     const key = workKey({
       actor: input.creatorAgentID ?? input.creatorType,
@@ -4637,6 +4768,9 @@ export class EnsembleV2Service {
         instruction: item.instruction,
         constraints: item.constraints,
         expected: decision.note ?? item.expected,
+        // Ticket #162: review delegation carries its explicit task budget;
+        // parseReviewDecisions refuses a delegate decision without one.
+        taskMaxHops: decision.maxHops,
         maxPerRun: this.store.read().settings.maxDelegations,
       })
       if (!created.admitted) {
@@ -4822,6 +4956,10 @@ export class EnsembleV2Service {
       await this.appendMessage(workspace, { author: "system", text: `Delegation refused: workspace ${workspace.name} is paused.`, kind: "system" })
       return { content: "This workspace is paused." }
     }
+    const continuationRef = typeof input.continuationOf === "string" ? input.continuationOf.trim() : ""
+    if (continuationRef && workspace.leaderID !== agent.id) {
+      return this.refuseContinuation(workspace, { reason: "not-leader" })
+    }
     if (workspace.leaderID !== agent.id) {
       await this.appendMessage(workspace, { author: "system", text: `Delegation refused: only the workspace leader (${this.agentName(workspace.leaderID)}) can delegate subtasks.`, kind: "system" })
       return { content: "Only the workspace leader can delegate subtasks." }
@@ -4831,14 +4969,62 @@ export class EnsembleV2Service {
       await this.appendMessage(workspace, { author: "system", text: `Delegation refused: ${String(input.assignee)} is not available.`, kind: "system" })
       return { content: "That agent is unavailable." }
     }
-    const dispatchGroupID = subtask ? resolveDispatchGroupID(subtask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
-    await this.ensureDispatchGroupLedger(dispatchGroupID, workspace.id)
-    // Idempotency precedes the budget checks: a replay returns the existing
-    // work even after the group has since been spent.
     const title = String(input.title)
     const instruction = String(input.instruction)
     const constraints = input.constraints ? String(input.constraints) : undefined
     const expected = input.expected ? String(input.expected) : undefined
+    let dispatchGroupID = ""
+    let prospectiveGroup: DispatchGroup | undefined
+    let opened: { group: DispatchGroup; root: DispatchGroup; parent: DispatchGroup; created: boolean } | undefined
+    if (continuationRef) {
+      const validation = validateContinuation({
+        continuationOf: continuationRef,
+        groupMaxHops: input.groupMaxHops,
+        groups: state.dispatchGroups,
+        workspaceID: workspace.id,
+        isLeader: true,
+      })
+      if (validation.ok) {
+        // A planned continuation is validated by the store again inside its
+        // serialized mutation. The preflight below treats it as if it already
+        // existed, so a task/fan-out refusal creates no empty group.
+        const planned = newContinuationDispatchGroup({
+          id: newDispatchGroupID(),
+          root: validation.root,
+          parentID: validation.parent.id,
+          maxHops: validation.maxHops,
+        })
+        dispatchGroupID = planned.id
+        prospectiveGroup = planned
+        opened = { group: planned, root: validation.root, parent: validation.parent, created: true }
+      } else if (validation.refusal.reason === "group-closed" || validation.refusal.reason === "group-superseded") {
+        // A replay or an additional child can name the closed parent: route it
+        // to the active continuation instead of opening a second segment.
+        const parent = state.dispatchGroups[continuationRef]
+        const active = parent ? activeContinuationGroup(parent.rootID, state.dispatchGroups) : undefined
+        if (!active) return this.refuseContinuation(workspace, validation.refusal)
+        const root = state.dispatchGroups[active.rootID] ?? active
+        const activeParent = active.parentID ? state.dispatchGroups[active.parentID] ?? root : root
+        dispatchGroupID = active.id
+        opened = { group: active, root, parent: activeParent, created: false }
+      } else {
+        return this.refuseContinuation(workspace, validation.refusal)
+      }
+    } else {
+      const currentGroupID = subtask ? resolveDispatchGroupID(subtask, state.subtasks) : undefined
+      const current = currentGroupID ? state.dispatchGroups[currentGroupID] : undefined
+      const direct = current ? dispatchTargetGroup(current, state.dispatchGroups) : undefined
+      const directActive = direct !== undefined && dispatchGroupState(direct, state.dispatchGroups) === "active"
+      const remembered = directActive ? undefined : this.rememberedContinuation(workspace.id, context.sessionID)
+      // A remembered target is only valid for the same command ledger as the
+      // caller's current work item; a new command clears the workspace map,
+      // and this guard keeps a stale session from crossing commands anyway.
+      const usableRemembered = remembered && (!current || remembered.rootID === current.rootID) ? remembered : undefined
+      dispatchGroupID = (directActive ? direct!.id : usableRemembered?.id ?? direct?.id ?? currentGroupID) ?? newDispatchGroupID()
+    }
+    if (!prospectiveGroup) await this.ensureDispatchGroupLedger(dispatchGroupID, workspace.id)
+    // Idempotency precedes the budget checks: a replay returns the existing
+    // work even after the group has since been spent.
     const key = workKey({
       actor: agent.id,
       workspaceID: workspace.id,
@@ -4856,14 +5042,31 @@ export class EnsembleV2Service {
     // the recipient may make. Zero is a deliberate one-shot ask.
     const taskBudget = validateTaskMaxHops("ensemble_delegate", input.maxHops)
     if (!taskBudget.ok) return { content: taskBudget.reason }
-    // Ordered preflight: task availability, group, depth, command, fan-out.
+    // Ordered preflight: task availability, closed/group, depth, command,
+    // fan-out. A planned continuation group participates as a prospective
+    // segment; creation itself spends no hop.
     const preflight = this.dispatchPreflight({
       parent: subtask,
       groupID: dispatchGroupID,
       maxPerRun: state.settings.maxDelegations,
+      ...(prospectiveGroup ? { prospectiveGroup } : {}),
     })
     if (preflight.refusal) {
-      return this.refuseDispatch(workspace, "delegation", preflight.refusal, subtask, this.store.dispatchGroup(dispatchGroupID), { recipientID: target.id, actorID: agent.id, taskMaxHops: taskBudget.maxHops, dispatchDepth: preflight.depth })
+      return this.refuseDispatch(workspace, "delegation", preflight.refusal, subtask, prospectiveGroup ?? this.store.dispatchGroup(dispatchGroupID), { recipientID: target.id, actorID: agent.id, taskMaxHops: taskBudget.maxHops, dispatchDepth: preflight.depth })
+    }
+    if (opened?.created) {
+      const created = await this.store.createContinuationDispatchGroup({
+        id: opened.group.id,
+        workspaceID: workspace.id,
+        parentID: opened.parent.id,
+        maxHops: opened.group.maxHops,
+      })
+      if (!created.ok) return this.refuseContinuation(workspace, created.refusal)
+      opened = { group: created.group, root: created.root, parent: created.parent, created: true }
+      this.rememberContinuation(workspace.id, context.sessionID, created.root.id, created.group.id)
+      await this.noteContinuationCreated(workspace, created.group, created.root, created.parent)
+    } else if (opened) {
+      this.rememberContinuation(workspace.id, context.sessionID, opened.root.id, opened.group.id)
     }
     if (!workspace.memberIDs.includes(target.id)) {
       const approval: Approval = {
@@ -4915,7 +5118,10 @@ export class EnsembleV2Service {
     this.schedule()
     const remaining = this.dispatchResultLine({ groupID: dispatchGroupID, task: subtask, nextDepth: preflight.depth })
     if (created.deduped) return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.${remaining ? ` ${remaining}` : ""}` }
-    return { content: `Delegated to ${target.name}. The reply will arrive in the group chat.${remaining ? ` ${remaining}` : ""}` }
+    const prefix = opened?.created
+      ? `Continuation group opened in ${dispatchGroupID}. Further leader delegations join it automatically or by naming continuationOf. `
+      : ""
+    return { content: `${prefix}Delegated to ${target.name}. The reply will arrive in the group chat.${remaining ? ` ${remaining}` : ""}` }
   }
 
   private async toolAsk(input: Json, context: any): Promise<{ content: string }> {

@@ -2,8 +2,8 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
 import { createLogger } from "./logging.ts"
-import { createStoreObserver, dispatchHopEvent } from "./log-events.ts"
-import { newRootDispatchGroup } from "./dispatch-budget.ts"
+import { createStoreObserver, dispatchGroupEvent, dispatchHopEvent } from "./log-events.ts"
+import { continuationDispatchLedger, newRootDispatchGroup } from "./dispatch-budget.ts"
 import type { Approval, DispatchGroup, Subtask, Workspace } from "./types.ts"
 
 function fakeContext() {
@@ -194,4 +194,50 @@ test("approval observer logs request and resolution", async () => {
   assert.deepEqual(log.recent().map((entry) => entry.event), ["approval.requested", "approval.resolved"])
   assert.equal((log.recent()[1] as any).fromStatus, "pending")
   assert.equal((log.recent()[1] as any).status, "approved")
+})
+
+test("ticket162: continuation and exhaustion events carry IDs, counts, and reason codes only", () => {
+  const root = {
+    ...newRootDispatchGroup({ id: "dispatch_root", workspaceID: "w", settings: undefined, now: 1 }),
+    usedHops: 8,
+    commandUsedHops: 8,
+  }
+  const ledger = continuationDispatchLedger({ id: "dispatch_cont", root, parent: root, maxHops: 8, now: 10 })
+  const continued = dispatchGroupEvent({ event: "continued", group: ledger.group, root: ledger.root, parent: ledger.parent, reason: "continued" })
+  assert.equal(continued.level, "info")
+  assert.equal(continued.event, "dispatch.group.continued")
+  assert.equal(continued.fields.workspaceID, "w")
+  assert.equal(continued.fields.dispatchGroupID, "dispatch_cont")
+  assert.equal(continued.fields.rootID, "dispatch_root")
+  assert.equal(continued.fields.parentID, "dispatch_root")
+  assert.equal(continued.fields.continuationIndex, 1)
+  assert.equal(continued.fields.usedHops, 0)
+  assert.equal(continued.fields.maxHops, 8)
+  assert.equal(continued.fields.groupRemaining, 8)
+  assert.equal(continued.fields.commandUsedHops, 8)
+  assert.equal(continued.fields.commandMaxHops, 24)
+  assert.equal(continued.fields.commandRemaining, 16)
+  assert.equal(continued.fields.continuationsUsed, 1)
+  assert.equal(continued.fields.maxContinuations, 2)
+  assert.equal(continued.fields.parentUsedHops, 8)
+  assert.equal(continued.fields.parentMaxHops, 8)
+  assert.equal(continued.fields.parentCloseReason, "continued")
+  assert.equal(continued.fields.reason, "continued")
+
+  const exhausted = dispatchGroupEvent({ event: "exhausted", group: root, root, reason: "group-exhausted" })
+  assert.equal(exhausted.level, "warn")
+  assert.equal(exhausted.event, "dispatch.group.exhausted")
+  assert.equal(exhausted.fields.dispatchGroupID, "dispatch_root")
+  assert.equal(exhausted.fields.usedHops, 8)
+  assert.equal(exhausted.fields.maxHops, 8)
+  assert.equal(exhausted.fields.commandRemaining, 16)
+  assert.equal(exhausted.fields.reason, "group-exhausted")
+
+  for (const entry of [continued, exhausted]) {
+    for (const forbidden of ["title", "instruction", "path", "content", "text"] as const) {
+      assert.equal(forbidden in entry.fields, false, `dispatch group events carry no ${forbidden}`)
+    }
+  }
+  const serialized = JSON.stringify([continued, exhausted])
+  assert.ok(!serialized.includes("secret"))
 })
