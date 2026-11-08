@@ -14,9 +14,9 @@ import type { Subtask, WorkKind } from "./types.ts"
  * - `MAX_ATTEMPTS = 5`, `LEASE_MS = 60s`, `HEARTBEAT_MS = ~20s`, and
  *   `DEADLINE_MS = 5min` are taken unchanged from OpenBot
  *   (`DEFAULT_MAX_ATTEMPTS`, `leaseMs`, `RENEW_EVERY_MS`,
- *   `DEFAULT_DELIVERY_DEADLINE_MS`). Delegation uses the same 5-minute
- *   deadline: a delegated subtask that cannot finish in 5 minutes of claimed
- *   work is failed with its reason preserved rather than retried forever.
+ *   `DEFAULT_DELIVERY_DEADLINE_MS`). Ticket #168 keeps the window only as a
+ *   delivery timestamp: queue wait never fails work, and a claimed run may
+ *   exceed it while its heartbeat lease stays live.
  * - OpenBot reaps with `REAP_OLDER_THAN_MS = 24h` for idempotency retention.
  *   Ensemble keeps finished rows for the same 24h (`FINISHED_RETENTION_MS`)
  *   before retention-bounded cleanup. Duplicate suppression honors the row
@@ -37,11 +37,30 @@ import type { Subtask, WorkKind } from "./types.ts"
 export const MAX_ATTEMPTS = 5
 export const LEASE_MS = 60_000
 export const HEARTBEAT_MS = 20_000
+/**
+ * Queue delivery window kept for visibility and operator diagnostics. It is
+ * not an execution guillotine (ticket #168): pending work never fails because
+ * it waited, and claimed work is governed by its heartbeat lease.
+ */
 export const DEADLINE_MS = 5 * 60_000
 export const FINISHED_RETENTION_MS = 24 * 60 * 60_000
 
-export type DerivedWorkStatus = "pending" | "working" | "retrying" | "replied" | "failed" | "cancelled"
+export type DerivedWorkStatus =
+  | "pending"
+  | "working"
+  | "waiting"
+  | "retrying"
+  | "needs_you"
+  | "replied"
+  | "failed"
+  | "stalled"
+  | "cancelled"
 
+/**
+ * Statuses that end the active lifecycle. `stalled` is deliberately not
+ * terminal: no run will start, but the card stays mounted until the user
+ * retries, cancels, or dismisses it (ticket #170 builds on this boundary).
+ */
 export function isTerminalWorkStatus(status: DerivedWorkStatus): boolean {
   return status === "replied" || status === "failed" || status === "cancelled"
 }
@@ -52,19 +71,37 @@ export function isTerminalWorkStatus(status: DerivedWorkStatus): boolean {
  * this function is the source of truth. Pure: no I/O, no clock reads —
  * the caller passes `now`.
  *
- * Cancellation is structural: only an explicit `stoppedAt` marker reads
- * cancelled. Free-form error text is never substring-matched, so a failure
- * whose reason mentions "cancel" or "paused" still reads failed.
+ * Precedence (ticket #168): terminal -> live lease/active run -> needs-you ->
+ * awaiting children -> scheduled retry -> stalled exhaustion -> queued
+ * pending. A live lease always wins over an old deadline or attempt count.
+ *
+ * `failed` is reserved for a structured native execution failure. Rows with a
+ * structured delivery/lease/attempt cause derive `stalled`. Legacy terminal
+ * failures without a structured cause stay `failed` so the migration can never
+ * mask a genuine native error. Cancellation is structural: only `stoppedAt`
+ * reads cancelled; free-form error text is never substring-matched.
  */
 export function deriveWorkStatus(task: Subtask, now: number): DerivedWorkStatus {
   if (task.state === "replied") {
     if (task.stoppedAt !== undefined) return "cancelled"
-    return task.outcome === "succeeded" ? "replied" : "failed"
+    if (task.outcome === "succeeded") return "replied"
+    if (task.failure === undefined) return "failed"
+    return task.failure.kind === "native" ? "failed" : "stalled"
   }
-  if (task.attempts >= MAX_ATTEMPTS) return "failed"
-  if (task.deadlineAt !== undefined && now >= task.deadlineAt) return "failed"
-  if (task.claimedBy && task.leaseUntil !== undefined && task.leaseUntil > now) return "working"
-  if (task.attempts > 0 || task.error) return "retrying"
+  const liveLease = task.claimedBy !== undefined && task.leaseUntil !== undefined && task.leaseUntil > now
+  const activeRun = task.activeRunID !== undefined
+    && task.claimedBy === task.activeRunID
+    && (task.leaseUntil === undefined || task.leaseUntil > now)
+  if (liveLease || activeRun) return "working"
+  if (task.interrupted || task.approvalID !== undefined) return "needs_you"
+  if (task.awaitingChildren) return "waiting"
+  const lostLease = task.claimedBy !== undefined && task.attempts > 0 && task.attempts < MAX_ATTEMPTS
+  // A retry time that has arrived is still a scheduled retry until the pump
+  // claims the row; only clearing `retryAfter` ends the backoff.
+  const scheduledRetry = task.retryAfter !== undefined
+  if (lostLease || scheduledRetry) return "retrying"
+  // Exhausted delivery/lease retries have no native error to call their own.
+  if (task.attempts >= MAX_ATTEMPTS) return "stalled"
   return "pending"
 }
 
