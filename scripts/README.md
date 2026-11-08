@@ -59,11 +59,21 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   `feed.gap` lines in the TUI log. A fifth channel/agent pair then runs a
   fake-provider `ensemble_ask_person` tool call from that non-first location:
   the probe requires the pending approval, resolves it, and requires cleanup
-  (spec #146 and #157).
+  (spec #146 and #157). A sixth channel then runs the deterministic
+  dispatch-budget relay (spec #159 / ticket #164): five hops in one group, nine
+  hops across a continuation, an 8-hop command-cap stop, and one consumed row
+  per hop. These scenarios run after the measured 100-request path, so its
+  counts and timings stay unchanged. The probe then runs the doctor and
+  `logs:summary` (whole run and each budget root group). Set
+  `ENSEMBLE_LIVE_ARTIFACTS=/path` to copy the driver output, doctor text, log
+  summaries, and service/TUI JSONL there before the isolated tree is removed.
 - `npm run logs:summary -- --dir <logs>`: read-only JSONL summary by role,
   instance, level, event, task, failures, warnings, `feed.reset`, and
-  `feed.gap`. Use `--json` for the machine-readable form and `--since` to scope
-  a verification run.
+  `feed.gap`. It adds dispatch counts (groups, hops, exhausted, continued,
+  refused, closed, reconciled, invalid settings) and recent exhaustion/refusal
+  warnings. `--group <id>` includes both the named group and its continuation
+  lineage (rows whose `dispatchGroupID` or `rootID` matches). Use `--json` for
+  the machine-readable form and `--since` to scope a verification run.
 
 The aggregate runner streams each scenario's output unchanged and never
 retries. A failing scenario stops the run and later scenarios are reported as
@@ -169,18 +179,26 @@ The fake provider is infrastructure only and is never imported by the plugin.
 It implements `/v1/models` and `/v1/chat/completions` (also without `/v1`).
 `fake-rich-fixture` selects the Markdown reply; other prompts get a short
 onboarding reply. SSE ends with `finish_reason: "stop"` and `[DONE]`.
+`fake-budget-relay:chain=…;consumed=…;total=…;next=…;mode=…` selects the
+dispatch-budget fixture: the provider writes the typed handoff file under
+`--handoff-dir` and emits one `ensemble_handoff` or `ensemble_delegate` tool
+call, then answers normally after the tool result. It also closes a completion
+batch with `ensemble_review`. The multi-location harness passes the isolated
+workspace's handoff directory.
 
 ## Size matrix
 
-`npm run test:live:sizes` (ticket #127, group lifecycle ticket #136) is the
-targeted Work-card geometry check. It starts the isolated fake host once,
+`npm run test:live:sizes` (ticket #127, group lifecycle ticket #136, budget
+labels ticket #164) is the targeted Work-card geometry check. It starts the isolated fake host once,
 creates three agents and one workspace through the RPC surface, then restarts
 the TUI at 80×24, 100×30, 120×40, and 160×50. At each size it starts one
 long-running fake dispatch-group fan-out and checks the group header, the
-visible card count, the overflow line, compact fallback, focus ownership, and
-the composer. At 120×40 and 100×30 it appends a second command mid-group to
-prove newest-group capacity priority, group labels, and independent group
-removal after the shared 1.2 s hold. Override the set with
+dispatch budget label, the visible card count, the overflow line, compact
+fallback, focus ownership, and the composer. At 120×40 and 100×30 it appends a
+second command mid-group to prove newest-group capacity priority, group labels
+with hop/command remaining, and independent group removal after the shared
+1.2 s hold. At 80×24 the compact row keeps the name, budget, and status while
+the long fixture title ellipsizes. Override the set with
 `ENSEMBLE_V6_SIZES="120x40 160x50"`.
 
 The same run records the idle TUI process CPU at 160×50, then the TUI process

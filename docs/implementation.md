@@ -168,7 +168,7 @@ handoffs/            typed Markdown handoffs
 init.json            AGENTS.md block version
 ```
 
-`I`, `:init`, or a message-start `/init` appends a visible `/init` audit line and starts a System Agent init job. An init alias attached to an agent anchor is rejected as a mixed solo request; a prose `/init` is ordinary text. The job creates a temporary native session in the workspace, calls native `/init` with the full `initInstructions()` text (inspect the project, preserve project guidance, replace one Ensemble block), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the versioned `<!-- ensemble:start v2 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
+`I`, `:init`, or a message-start `/init` appends a visible `/init` audit line and starts a System Agent init job. An init alias attached to an agent anchor is rejected as a mixed solo request; a prose `/init` is ordinary text. The job creates a temporary native session in the workspace, calls native `/init` with the full `initInstructions()` text (inspect the project, preserve project guidance, replace one Ensemble block), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the current `<!-- ensemble:start v4 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
 
 Reset is available through the `/reset-ensemble` composer command, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
@@ -190,7 +190,7 @@ Write tools are registered globally but refuse outside an Ensemble-bound session
 - `ensemble_remember`
 - `ensemble_share`
 
-`ensemble_send_message` posts to the group or sends a direct agent message (member DMs deliver with an envelope carrying addressing, correlation, ordering, and delivery state; cross-boundary contact requires an `outside_roster` approval). A group post that names `$Name`/`!Name` mentions also creates one peer turn per named member: a durable `turn` work item through the same queue, lease, retry, and recovery machinery as delegations, with per-agent serialization, depth and per-run caps, idempotency, and visible per-recipient refusals (unknown/archived/outside-roster mentions never abort the remaining peers). The recipient's reply in the asking transcript is the relay, attributed via `answeredByID` and linked by correlationID, with no second leg. `ensemble_handoff` validates a typed Markdown file under `.ensemble/handoffs/` as structured frontmatter and creates a handoff hop: a queued unit of work routed to the named recipient, acknowledged in the group chat, retried within its attempt budget and deadline, and relayed back into the asking conversation (or failed visibly there). Handoff caps are handoff-specific, not the generic delegation settings: chains stop after one hop (`HANDOFF_MAX_DEPTH = 1`), and one run fans out at most three hops (`HANDOFF_MAX_PER_RUN = 3`); only handoff hops count toward the per-run budget because relay/failure-notice legs are messages, not work rows. `ensemble_delegate` remains the leader-only work-creating tool.
+`ensemble_send_message` posts to the group or sends a direct agent message (member DMs deliver with an envelope carrying addressing, correlation, ordering, and delivery state; cross-boundary contact requires an `outside_roster` approval). A group post that names `$Name`/`!Name` mentions also creates one peer turn per named member: a durable `turn` work item through the same queue, lease, retry, and recovery machinery as delegations, with per-agent serialization, unified depth and per-run caps, idempotency, and visible per-recipient refusals (unknown/archived/outside-roster mentions never abort the remaining peers). The recipient's reply in the asking transcript is the relay, attributed via `answeredByID` and linked by correlationID, with no second leg. `ensemble_handoff` validates a typed Markdown file under `.ensemble/handoffs/` as structured frontmatter and creates a handoff hop: a queued unit of work routed to the named recipient, acknowledged in the group chat, retried within its attempt budget and deadline, and relayed back into the asking conversation (or failed visibly there). Every delegation and handoff requires `maxHops`; the group's depth ceiling and the per-run fan-out cap (three handoffs) still apply. Relay and failure-notice legs are messages, not work rows, so they never consume a hop or the fan-out budget. `ensemble_delegate` remains the leader-only work-creating tool and is the only path that can open a continuation group. See [Dispatch budgets](#dispatch-budgets).
 
 Idempotency keys (`work:`/`handoff:`) scope actor, workspace, kind, a hashed run prefix (never the raw parent id), the addressed recipient, and the canonical task/constraints/expected body. Suppression honors the row lifetime: a matching row suppresses resubmission while it is retained (live or terminal; finished rows purge after 24h retention). Intentional re-asks stay explicit: `task.retry`/`task.restart` re-queue the same row, and asking from a different parent/run is a different unit of work by construction. Cancellation is structural: only an explicit `stoppedAt` marker reads `cancelled`; error text is never substring-matched.
 
@@ -256,10 +256,79 @@ pending ──assign──▶ working ──result──▶ replied
 
 - Failed replies stay **Replied** with a failed outcome.
 - Approval waits are badges on **Working**, not a fourth state.
-- The leader delegates through the `ensemble_delegate` tool with a typed envelope. Delegation depth is capped by `maxDepth`.
+- The leader delegates through the `ensemble_delegate` tool with a typed envelope and a required `maxHops` task budget. Depth is the group's unified `dispatchDepth` ceiling; `settings.maxDepth` is deprecated and no longer enforced.
 - When all children reply, a leader synthesis subtask is created unless the workspace disables synthesis.
 - The board groups Pending, Working, and Replied. `d` delegates, `t` reassigns, `Enter` opens the result, `r` retries, `R` stops and restarts, `x` cancels, and `o` opens the run.
 - Reassignment and restart interrupt the active run and clear its run token, so a late reply from the stopped run cannot overwrite the new assignee.
+
+## Dispatch budgets
+
+The dispatch trust model is recorded in [ADR 0004](adr/0004-dispatch-budgets-and-continuation.md).
+One user command gets one root dispatch group and a durable ledger. Four
+layers bound work, each with one owner:
+
+| Layer | Field | Bounds | Owner | Default | Tiers |
+|---|---|---|---|---|---|
+| Command | `commandMaxHops` | Every hop for one user command | User settings | 24 | 8, 16, 24, 32, 40, 48 |
+| Group | `maxHops` | Hops in one group | User for the root; leader for a continuation | 8 | 8, 16, 24 |
+| Task | `taskMaxHops` | Direct dispatches the recipient may make | Dispatching agent (`maxHops`) | Required | Any integer ≥ 0 |
+| Depth | `depthMax` | Longest ancestor chain in one group segment | User settings | 8 | 1–16 |
+
+Settings fields are `dispatchGroupMaxHops`, `dispatchCommandMaxHops`,
+`dispatchDepth`, and `dispatchContinuations`. They are validated as one set:
+command hops cannot be below group hops, and the continuation count must fit
+at the smallest 8-hop group (`group + 8 × continuations ≤ command`). A root
+group captures the current values, so settings edits apply to new commands
+only. `:limits` and the leader menu edit the same four values; the service
+revalidates every `settings.update`.
+
+**Consumption.** A user command and its initial recipients consume nothing.
+An agent-created delegation or explicit handoff consumes one group and one
+command hop in the same serialized store mutation. Completion handoffs, batch
+review, synthesis, peer turns, retries, restarts, recovery, and idempotent
+replays never consume; cancellation never refunds. Two concurrent dispatches
+at one remaining hop admit exactly one.
+
+**Required task budget.** `ensemble_delegate`, `ensemble_handoff`, and a
+`delegate` decision in `ensemble_review` require `maxHops`. Missing or
+malformed values are validation errors, never silent defaults. Zero is a
+one-shot ask: the recipient may answer and complete but cannot create work.
+The task budget counts direct dispatches, not a reserved subtree; the group
+and command remain the hard subtree cap. Refusal order is task, closed group,
+group, depth, command, then per-run fan-out. Copy names the layer and the next
+action (return to the leader, continue in a new group, or ask the user for a
+new command).
+
+**Continuations.** A continuation is a leader-only, linked segment of the
+same command. It is allowed only after the referenced group is exhausted, with
+a required `groupMaxHops` tier that fits the command remaining and the
+captured continuation count. Creating it seals the parent with
+`closeReason: "continued"` and spends no hop; the first work item spends one.
+The new group references its parent and root, starts a fresh depth segment,
+and leaves command counters and depth on the root. Later leader dispatches
+join the newest active continuation automatically or by naming `continuationOf`
+again. A closed group admits no new hop; completion, batch, synthesis,
+peer-turn, retry, restart, and recovery rows may still save directly.
+
+**Ledger.** `SnapshotState.dispatchGroups` is a full durable map. Each
+`DispatchGroup` records identity, workspace, root, parent, continuation index,
+group maximum/used hops, depth maximum, root-only command maximum/used,
+continuation maximum/used, creation/close time, close reason, and a
+`reconciled` marker. State (`active`, `exhausted`, `closed`) is derived from
+counters and closure, never stored. The store's `admitDispatchedSubtask`
+performs admission, counter increments, and work creation in one serialized
+mutation. Snapshots, scoped reads, the change feed, and `diagnostic` carry the
+full group entities; protocol-2 clients fall back to a snapshot.
+
+**Upgrade and migration.** The required task budget is enforced immediately.
+Pre-ledger groups are synthesized on first access and persisted in bounded
+maintenance batches (`reconcileDispatchGroups`): used hops equal the existing
+non-completion delegation/handoff count, caps are raised to at least observed
+usage and depth, and live rows without a budget receive the group's remaining
+budget. No in-flight work is retroactively refused. Reconciliation logs
+`dispatch.group.reconciled`; the team contract is bumped and stale workspace
+blocks are rewritten. `settings.maxDepth` is deprecated: it remains readable
+but is ignored for enforcement, and removal is a future settings cleanup.
 
 ## Scheduling and recovery
 
@@ -334,7 +403,7 @@ Approvals appear inline in the chat and in the inbox. Resolutions are idempotent
 - The interaction layer is modal: Normal, Insert, Visual, and Command share one binding catalog and one Esc ladder. `Space` is the leader, `Esc` never leaves, and the old Ctrl app shortcuts are gone.
 - `Space ?` opens a searchable shortcut reference with fuzzy filtering and a scrollable list generated from the binding catalog.
 - The Leader key is `Space`; `Space q` and `:q` leave Ensemble deliberately, and `Esc` never leaves.
-- The versioned team contract is v2. It explicitly defines `$Name` chat mentions, `@path` file references, and Ensemble tools as the work-dispatch mechanism.
+- The versioned team contract is v4 (`ENSEMBLE_BLOCK_VERSION = 4`); stale workspace blocks are rewritten on reconciliation. It defines `$Name` chat mentions, `@path` file references, Ensemble tools as the work-dispatch mechanism, the required `maxHops` task budget, and the layered command/group/task/depth budgets with leader-only continuation groups.
 - Agent replies that write `@KnownAgent` are display-normalized to `$KnownAgent`; a system note clarifies that a mention does not dispatch work.
 - The shared service is the root fix for the stale-location lost update: Jessy's profile and binding remained in storage, but one location held a workspace row without her. Both locations now reconcile to three members.
 
@@ -432,7 +501,9 @@ v7 sections; this section explains how Work moves through them.
 A **Dispatch group** is the set of Subtasks caused by one dispatch action: one
 user command plus every descendant handoff, delegation, peer turn, synthesis,
 completion hop, and group-scoped completion batch it caused. The group id is
-durable on the Subtask; there is no separate group table.
+durable on the Subtask, and the group's caps and counters live in the durable
+dispatch ledger described in [Dispatch budgets](#dispatch-budgets). A
+continuation group is a linked segment of the same command, not a new command.
 
 - **Minting.** A user message mints exactly one group and passes it to every
   task in that fan-out. The root work item carries the group in its
@@ -484,6 +555,12 @@ layer:
 - The card header is name left in pale blue, a flexible spacer, then the glyph
   and the uppercase status. The status word never truncates; the name
   truncates first.
+- Ticket #160/#164: cards and compact rows carry the dispatch budget just left
+  of the glyph (`hops 3/8 · cmd 21 left`, `3/8 · 21 left`, or `3/8`). The label
+  yields before the status word and the right edge; at the narrowest rows a
+  long title yields before the budget. Group labels add hop and command
+  remaining, `EXHAUSTED`, and `CONT N · from root` lineage. Exhaustion uses
+  the warning tone, never the failure treatment.
 - State tones are pure mapping: WORKING/RETRYING use a yellow Braille glyph, a
   grey status word, and a yellow left bar; REPLIED uses a green dot, status,
   and bar; NEEDS YOU uses a yellow diamond, status, and bar; QUEUED is faint
@@ -574,6 +651,30 @@ batches/resets, and refresh measurements. `service.location` is logged once on
 the first viewed directory, and `logs.recent` accepts an `instanceID` filter.
 Lease heartbeats and streaming deltas never produce lines; they remain counters
 or trace-only data.
+
+The `dispatch` category records `dispatch.group.created`, `dispatch.group.continued`,
+`dispatch.group.exhausted`, `dispatch.group.closed`, `dispatch.group.reconciled`,
+`dispatch.group.refused`, `dispatch.hop.consumed`, `dispatch.hop.refused`, and
+`dispatch.settings.invalid`. Rows carry workspace, group, root, parent,
+continuation index, actor/recipient IDs, work kind, caps, used and remaining
+counts, depth, reason code, and duration. They never carry task titles,
+instructions, handoff paths, file content, or conversation text. Exhaustion and
+refusal rows are warnings; routine hops stay info. `logs.recent` filters by
+category and the `diagnostic` response includes both the compact ledger summary
+and the full group entities. `scripts/log-summary.mjs` reports group, hop,
+exhausted, continued, refused, closed, reconciled, and invalid-settings counts;
+`--group <id>` includes the group's continuation lineage (rows whose
+`dispatchGroupID` is the group or whose `rootID` is the group).
+
+A dispatch refusal is a controlled stop, not a generic failure. A failure
+record that recognizes the budget layers reports `FailureClass "budget"` with
+reason code `budget-exhausted`, and the Work pane renders exhaustion with the
+warning tone instead of FAILED. The doctor checks every group against its
+captured caps, checks a group counter is never below its visible counted work
+(the unsafe direction; a higher counter after terminal retention is allowed),
+checks each root's command counter equals the sum of its groups, checks every
+continuation has a parent and reaches its root, and flags an active
+continuation with no work and no spent hops.
 
 `feed.reset` names its reason and identical resets collapse to one warning per
 10 s per instance with a `suppressed` count; a burst that stops also reports a

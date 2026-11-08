@@ -41,8 +41,26 @@ _Avoid_: Channel, room, group (when referring to this concept).
 
 **Work**: A queued or running execution of a subtask, with an agent, mode, and status.
 
-**Dispatch group**: The set of Subtasks caused by one dispatch action: one user command plus every descendant handoff, delegation, peer turn, synthesis, completion hop, and group-scoped completion batch it caused. A new command mints a new group; a legacy task without a stored group derives one from its root ancestor.
+**Dispatch group**: The set of Subtasks caused by one dispatch action: one user command plus every descendant handoff, delegation, peer turn, synthesis, completion hop, and group-scoped completion batch it caused. A new command mints a new root group; a continuation group is a linked segment of the same command. A legacy task without a stored group derives one from its root ancestor.
 _Avoid_: Batch (for the whole dispatch), run (a single execution, not the fan-out).
+
+**Hop**: One consuming agent-created delegation or explicit handoff. A user command and its initial recipients, completion handoffs, batch review, synthesis, peer turns, retries, restarts, recovery, and idempotent replays consume no hop. Cancellation does not refund one.
+
+**Command budget**: The user-owned ceiling on hops for one user command across every group. Default 24 in 8-hop tiers (8, 16, 24, 32, 40, 48). It is the anti-laundering cap: a continuation cannot create a fresh command total.
+
+**Group budget**: The hops allowed inside one dispatch group. The root group captures the user's group setting (default 8; tiers 8, 16, 24); a continuation group is sized by the leader within the command remaining.
+
+**Task budget**: `maxHops` on a delegation or handoff: the direct dispatches the recipient may make. Required on every call; `0` is a one-shot ask. It bounds local fan-out, not a reserved subtree.
+
+**Depth**: The longest ancestor chain inside one group segment. The user sets the ceiling (default 8, allowed 1–16); a continuation starts a fresh segment.
+
+**Continuation group**: A leader-opened, linked segment of the same command after the referenced group is exhausted. It references its parent and root, resets depth, and spends from the same command ledger. Only the leader may open one, and only while the command remaining and continuation count allow.
+
+**Dispatch ledger**: The durable per-group record of caps, used hops, depth, command counters, continuation lineage, and closure. Budget state (active, exhausted, closed) is derived from it, never stored separately.
+
+**Exhausted group**: A group with no hop left, either because its own cap or the command cap is spent. It is a controlled stop, not a failed task.
+
+**Limits panel**: The workspace-level TUI surface (`:limits` or the leader menu) that edits group hops, command hops, depth, and continuations for new commands.
 
 **Pending settings**: A saved role, model, or Skillbox change that will apply to subsequent work, not silently to an active turn.
 

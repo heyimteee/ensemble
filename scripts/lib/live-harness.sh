@@ -436,7 +436,7 @@ live_start_fake_provider() {
   [[ -f "$script" ]] || live_fail "fake provider script is missing: $script"
   rm -f "$LIVE_FAKE_URL_FILE"
   "$LIVE_TMUX_BIN" new-session -d -s "$LIVE_FAKE_SESSION" -x 120 -y 20 -c "$LIVE_ROOT" \
-    "$(live_command "$LIVE_NODE_BIN" "$script" --url-file "$LIVE_FAKE_URL_FILE") >'$LIVE_LOGS/fake.log' 2>&1"
+    "$(live_command "$LIVE_NODE_BIN" "$script" --url-file "$LIVE_FAKE_URL_FILE" "$@") >'$LIVE_LOGS/fake.log' 2>&1"
   live_wait_for 20 "fake provider URL file" test -s "$LIVE_FAKE_URL_FILE" \
     || live_fail "fake provider did not write its URL"
   LIVE_FAKE_URL=$(cat "$LIVE_FAKE_URL_FILE")
