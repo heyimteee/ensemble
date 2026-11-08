@@ -339,6 +339,7 @@ export const EnsembleV2Rpc = Rpc.define({
           state: { type: "object", additionalProperties: true },
           directory: { type: "string" },
           logs: { type: "object", additionalProperties: true },
+          service: { type: "object", additionalProperties: true },
           clones: {
             type: "object",
             properties: {

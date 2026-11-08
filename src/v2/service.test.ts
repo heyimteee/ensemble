@@ -9,6 +9,7 @@ import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
 import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
+import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import { FALLBACK_REPLIES } from "./execution.ts"
 
 type Handlers = {
@@ -5624,6 +5625,12 @@ test("ticket150: log rows identify the service instance, location, and thread", 
     const locations = logs.entries.filter((entry: any) => entry.event === "service.location")
     assert.equal(locations.length, 1, "the first view directory is logged once per instance")
     assert.equal(locations[0].directory, directory)
+
+    const diagnostic = await handlers.diagnostic({ directory }) as any
+    assert.equal(diagnostic.service.instanceID, logs.stats.instanceID)
+    assert.equal(diagnostic.service.threadID, 0)
+    assert.equal(diagnostic.service.registryVersion, SHARED_SERVICE_VERSION)
+    assert.ok(diagnostic.service.startedAt > 0)
 
     const filtered = await handlers["logs.recent"]({ directory, instanceID: logs.stats.instanceID, limit: 500 })
     assert.equal(filtered.entries.length, logs.entries.length)

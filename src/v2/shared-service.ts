@@ -1,4 +1,6 @@
 import { EnsembleV2Service } from "./service.ts"
+import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
+export { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 
 type Entry = {
   service: EnsembleV2Service
@@ -9,13 +11,6 @@ type Entry = {
 }
 
 type CreateService = (ctx: any) => Promise<{ service: EnsembleV2Service; stop: () => Promise<void> }>
-
-/**
- * Contract version for the process-global registry. Bump it when the registry
- * shape or service lifecycle changes; a new registry then starts alongside the
- * old one until the old locations release their references.
- */
-export const SHARED_SERVICE_VERSION = 1
 
 const createService: CreateService = async (ctx) => {
   const service = new EnsembleV2Service(ctx)

@@ -52,6 +52,16 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   `fd`; `npm run test:live:preflight -- all` also requires and prints it for the
   real scenario. Set `ENSEMBLE_LIVE_EXPECT_NODE` and
   `ENSEMBLE_LIVE_EXPECT_OPENCODE` to fail on a present-but-wrong version.
+- `npm run test:live:multilocation`: the single-service regression probe. Starts
+  the isolated fake host and TUI, creates four channels and eight agents, sends
+  100 requests, and asserts one `service.start`, zero `task.failed`, zero
+  failure records, all related tasks successful, and fewer than five warn-level
+  `feed.gap` lines in the TUI log. This is the regression net for the plugin
+  loading once per location (spec #146).
+- `npm run logs:summary -- --dir <logs>`: read-only JSONL summary by role,
+  instance, level, event, task, failures, warnings, `feed.reset`, and
+  `feed.gap`. Use `--json` for the machine-readable form and `--since` to scope
+  a verification run.
 
 The aggregate runner streams each scenario's output unchanged and never
 retries. A failing scenario stops the run and later scenarios are reported as
@@ -61,15 +71,16 @@ retries. A failing scenario stops the run and later scenarios are reported as
 
 CI keeps the existing `verify` job (`npm ci` then `npm run verify`) and adds a
 `live` job on every push and pull request. The live job pins the host toolset:
-Ubuntu 24.04, Node 26.12.1 through `actions/setup-node`, OpenCode 2.2.5 through
-`npm install --global @opencode/cli@2.2.5`, the runner's `tmux`, and fd 10.2.0
+Ubuntu 24.04, Node 26.12.1 through `actions/setup-node`, OpenCode 2.2.6 through
+`npm install --global @opencode/cli@2.2.6`, the runner's `tmux`, and fd 10.2.0
 from its release archive. It then runs `npm run test:live:preflight` (fake
-scope) followed by `npm run test:live:fake:all`; both steps set
-`ENSEMBLE_LIVE_REQUIRE=1`. The preflight prints the resolved versions and fails
-if a required tool is missing or the pinned Node/OpenCode version differs. The
-fake/empty suite does not use fd; the job still installs it so the same pinned
-toolset can validate the full local matrix with `npm run test:live:preflight --
-all`. Real-model checks stay local and are never required in CI.
+scope), `npm run test:live:fake:all`, and
+`npm run test:live:multilocation`; all steps set `ENSEMBLE_LIVE_REQUIRE=1`. The
+preflight prints the resolved versions and fails if a required tool is missing
+or the pinned Node/OpenCode version differs. The fake/empty and multi-location
+suites do not use fd; the job still installs it so the same pinned toolset can
+validate the full local matrix with `npm run test:live:preflight -- all`.
+Real-model checks stay local and are never required in CI.
 
 ## Skip versus fail
 
