@@ -144,7 +144,7 @@ test("10k-message handoff publishes its task change with zero full-state clones"
     writeFileSync(path, "---\nensemble: handoff\ntask: Summarize the deploy\n---\n# Handoff\n")
     const started = performance.now()
     const asked = await setupState.tools.get("handoff").execute(
-      { task: "Summarize the deploy", summary: "Short version", path: ".ensemble/handoffs/ask.md", to: "Sage" },
+      { maxHops: 1, task: "Summarize the deploy", summary: "Short version", path: ".ensemble/handoffs/ask.md", to: "Sage" },
       { sessionID: "sess_nova" },
     )
     const handoffMs = performance.now() - started
@@ -168,7 +168,7 @@ test("10k-message delegation publishes its task change with zero full-state clon
   try {
     withCloneDebug(t)
     const delegated = await setupState.tools.get("delegate").execute(
-      { assignee: "Sage", title: "Check the deploy", instruction: "Review it." },
+      { maxHops: 1, assignee: "Sage", title: "Check the deploy", instruction: "Review it." },
       { sessionID: "sess_nova" },
     )
     assert.match(delegated.content, /Delegated to Sage/)

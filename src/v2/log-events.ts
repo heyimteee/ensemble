@@ -1,4 +1,5 @@
 import type { EnsembleLogger } from "./logging.ts"
+import type { DispatchRefusal } from "./dispatch-budget.ts"
 import type { StoreObserver } from "./store.ts"
 import type { Approval, DispatchGroup, InitJob, Message, Subtask } from "./types.ts"
 
@@ -106,6 +107,58 @@ function messageFields(message: Message): Record<string, unknown> {
     correlationID: message.correlationID,
     chars: message.text.length,
     streaming: message.streaming === true,
+  }
+}
+
+/**
+ * Ticket #161 hop projection: consumption and refusal are IDs, counts, and
+ * reason codes only. Task titles, instructions, handoff paths, file content,
+ * and conversation text must never enter these rows.
+ */
+export function dispatchHopEvent(input: {
+  outcome: "consumed" | "refused"
+  task: Pick<Subtask, "id" | "workspaceID" | "parentID" | "assigneeID" | "creatorAgentID" | "workKind" | "dispatchGroupID" | "taskMaxHops" | "dispatchDepth">
+  group?: DispatchGroup
+  refusal?: DispatchRefusal
+}): { level: "info" | "warn"; event: string; fields: Record<string, unknown> } {
+  const consumed = input.outcome === "consumed"
+  const group = input.group
+  const fields: Record<string, unknown> = {
+    workspaceID: input.task.workspaceID,
+    dispatchGroupID: input.task.dispatchGroupID,
+    rootID: group?.rootID,
+    taskID: input.task.id,
+    parentID: input.task.parentID,
+    actorID: input.task.creatorAgentID,
+    recipientID: input.task.assigneeID,
+    workKind: input.task.workKind ?? "delegation",
+    taskMaxHops: input.task.taskMaxHops,
+    dispatchDepth: input.task.dispatchDepth,
+    usedHops: group?.usedHops,
+    maxHops: group?.maxHops,
+    groupRemaining: group ? Math.max(0, group.maxHops - group.usedHops) : undefined,
+    commandUsedHops: group?.commandUsedHops,
+    commandMaxHops: group?.commandMaxHops,
+    commandRemaining: group?.commandMaxHops !== undefined && group.commandUsedHops !== undefined
+      ? Math.max(0, group.commandMaxHops - group.commandUsedHops)
+      : undefined,
+    depthMax: group?.depthMax,
+    continuationIndex: group?.continuationIndex,
+  }
+  if (consumed) {
+    return { level: "info", event: "dispatch.hop.consumed", fields }
+  }
+  const refusal = input.refusal
+  return {
+    level: "warn",
+    event: "dispatch.hop.refused",
+    fields: {
+      ...fields,
+      reason: refusal ? `${refusal.layer}-exhausted` : "refused",
+      refusedLayer: refusal?.layer,
+      refusedUsed: refusal?.used,
+      refusedMax: refusal?.max,
+    },
   }
 }
 

@@ -26,8 +26,7 @@ import { runPrefixHash, stableHash } from "./queue.ts"
 export const HANDOFF_MARKER = "ensemble: handoff"
 export const HANDOFF_CORRELATION_PREFIX = "handoff"
 
-/** Spec handoff caps: chains stop after one hop, and one run fans out at most three hops. */
-export const HANDOFF_MAX_DEPTH = 1
+/** Spec handoff cap: one run fans out at most three hops. */
 export const HANDOFF_MAX_PER_RUN = 3
 
 /**

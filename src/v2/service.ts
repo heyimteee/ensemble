@@ -12,15 +12,25 @@ import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFa
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, parseWorkKind, stableHash, workKey } from "./queue.ts"
 import {
+  dispatchAdmissionRefusal,
+  dispatchBudgetLine,
+  dispatchBudgetState,
+  dispatchDepthFor,
+  dispatchFanOutCount,
+  dispatchGroupRemaining,
+  dispatchRefusalText,
   dispatchesHop,
   dispatchLimitSettings,
   dispatchLimits,
   newRootDispatchGroup,
   validateDispatchLimits,
+  validateTaskMaxHops,
+  type DispatchBudgetState,
+  type DispatchRefusal,
 } from "./dispatch-budget.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
-import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_DEPTH, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
+import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
@@ -31,7 +41,7 @@ import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from ".
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
 import { createLogRateLimiter, createLogger, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
-import { createStoreObserver } from "./log-events.ts"
+import { createStoreObserver, dispatchHopEvent } from "./log-events.ts"
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
@@ -1528,7 +1538,7 @@ export class EnsembleV2Service {
     // reports its suppressed total to the viewer instead of losing it.
     this.feedResetLimiter.flush()
     const levels = ["error", "warn", "info", "debug", "trace"]
-    const categories = ["service", "task", "retry", "approval", "message", "feed", "refresh", "tui", "host", "failure"]
+    const categories = ["service", "task", "retry", "approval", "message", "feed", "refresh", "tui", "host", "dispatch", "failure"]
     if (input.level && !levels.includes(input.level)) throw invalidInput(`level must be one of ${levels.join(", ")}.`)
     if (input.cat && !categories.includes(input.cat)) throw invalidInput(`cat must be one of ${categories.join(", ")}.`)
     const entries = logger.recent({
@@ -1610,7 +1620,8 @@ export class EnsembleV2Service {
       agent.role || "You are a focused teammate.",
       "</ensemble_persona>",
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
-      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path and recipient. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
+      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path, recipient, and required maxHops. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
+      "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work). Your turn context shows task, group, command, and depth budgets; successful results show what remains. You cannot raise a ceiling — when a budget is exhausted, return your result to the leader in the group chat.",
       "Answer first: write your own answer in the group chat before handing off. A handoff forwards a completed result or clearly scoped work; it is never a substitute for answering your assignment.",
       "A `/skill` token in a user message is a deliberate skill request. When it applies to your part, load that skill with the native skill tool rather than treating it as prose.",
       "When a user message addresses multiple agents, handle only the part addressed to you. Do not delegate or duplicate another addressed agent's part; use ensemble_task_status and ensemble_workspace_info when you need coordination state.",
@@ -2872,19 +2883,113 @@ export class EnsembleV2Service {
   }
 
   /**
+   * One ordered preflight over the prospective dispatch. The store repeats
+   * the same verdict atomically inside `admitDispatchedSubtask`; this call
+   * exists so refusal copy and the log event are ready before any approval or
+   * message side effect, and so the order is observable at the handler seam.
+   */
+  private dispatchPreflight(input: {
+    parent?: Subtask
+    groupID: string
+    maxPerRun?: number
+    perRunKind?: WorkKind
+  }): { state?: DispatchBudgetState; depth: number; refusal?: DispatchRefusal } {
+    const state = this.store.read()
+    const group = state.dispatchGroups[input.groupID]
+    const depth = input.parent ? dispatchDepthFor(input.parent, state.subtasks) + 1 : 0
+    if (!group) return { depth }
+    const budget = dispatchBudgetState({
+      group,
+      groups: state.dispatchGroups,
+      task: input.parent,
+      subtasks: state.subtasks,
+      nextDepth: depth,
+    })
+    const fanOutUsed = input.parent && input.maxPerRun !== undefined
+      ? dispatchFanOutCount(input.parent.id, state.subtasks, input.perRunKind)
+      : 0
+    return {
+      state: budget,
+      depth,
+      refusal: dispatchAdmissionRefusal({ state: budget, maxPerRun: input.maxPerRun, fanOutUsed }),
+    }
+  }
+
+  /**
    * Persist one newly created work item. Agent-created delegation and explicit
    * handoff hops spend one group and command hop in the same serialized store
-   * mutation (#160 records usage; #161 turns the refusal on). Completion
-   * handoffs, peer turns, batch review, retries, recovery, and user command
-   * recipients never consume.
+   * mutation; the admission seam enforces task, group, depth, command, and
+   * per-run fan-out in that order (#161). Completion handoffs, peer turns,
+   * batch review, retries, recovery, and user command recipients never
+   * consume.
    */
-  private async persistNewWork(task: Subtask): Promise<void> {
+  private async persistNewWork(
+    task: Subtask,
+    options: { maxPerRun?: number; perRunKind?: WorkKind } = {},
+  ): Promise<{ admitted: boolean; consumed: boolean; refusal?: DispatchRefusal; group?: DispatchGroup }> {
     await this.ensureDispatchGroupLedger(task.dispatchGroupID, task.workspaceID)
-    if (dispatchesHop(task)) {
-      await this.store.admitDispatchedSubtask(task)
-      return
+    if (!dispatchesHop(task)) {
+      await this.store.saveSubtask(task)
+      return { admitted: true, consumed: false }
     }
-    await this.store.saveSubtask(task)
+    const result = await this.store.admitDispatchedSubtask(task, { enforce: true, maxPerRun: options.maxPerRun, perRunKind: options.perRunKind })
+    if (result.consumed) this.logDispatchHop("consumed", result.task, result.group)
+    else if (!result.admitted && result.refusal) this.logDispatchHop("refused", task, result.group, result.refusal)
+    return result
+  }
+
+  private logDispatchHop(
+    outcome: "consumed" | "refused",
+    task: Subtask,
+    group: DispatchGroup | undefined,
+    refusal?: DispatchRefusal,
+  ): void {
+    const entry = dispatchHopEvent({ outcome, task, group, refusal })
+    this.logger?.event(entry.level, "dispatch", entry.event, entry.fields)
+  }
+
+  private async refuseDispatch(
+    workspace: Workspace,
+    kind: "delegation" | "handoff",
+    refusal: DispatchRefusal,
+    task?: Subtask,
+    group?: DispatchGroup,
+    options: { log?: boolean; recipientID?: string; actorID?: string; taskMaxHops?: number; dispatchDepth?: number } = {},
+  ): Promise<{ content: string }> {
+    const label = kind === "handoff" ? "Handoff" : "Delegation"
+    const text = `${label} refused: ${dispatchRefusalText(kind, refusal)}`
+    await this.appendMessage(workspace, { author: "system", text, kind: "system" })
+    if (options.log !== false && task) {
+      // The event names the attempted dispatch: the sender's work item, the
+      // intended recipient, and the grant that would have applied.
+      this.logDispatchHop("refused", {
+        ...task,
+        ...(options.actorID ? { creatorAgentID: options.actorID } : {}),
+        assigneeID: options.recipientID ?? task.assigneeID,
+        workKind: kind,
+        ...(options.taskMaxHops !== undefined ? { taskMaxHops: options.taskMaxHops } : {}),
+        ...(options.dispatchDepth !== undefined ? { dispatchDepth: options.dispatchDepth } : {}),
+      }, group, refusal)
+    }
+    return { content: text }
+  }
+
+  private dispatchResultLine(input: {
+    groupID: string
+    task?: Subtask
+    nextDepth: number
+  }): string {
+    const state = this.store.read()
+    const group = state.dispatchGroups[input.groupID]
+    if (!group) return ""
+    const budget = dispatchBudgetState({
+      group,
+      groups: state.dispatchGroups,
+      task: input.task,
+      subtasks: state.subtasks,
+      nextDepth: input.nextDepth,
+    })
+    return dispatchBudgetLine(budget)
   }
 
   private async createWorkItem(input: {
@@ -2903,7 +3008,11 @@ export class EnsembleV2Service {
     skillGrants?: string[]
     turn?: { correlationID?: string; askerKind: "user" | "agent"; askerID?: string }
     dispatchGroupID?: string
-  }): Promise<{ subtask: Subtask; deduped: boolean }> {
+    /** Required on agent delegation/handoff; other work gets the group remaining. */
+    taskMaxHops?: number
+    maxPerRun?: number
+    perRunKind?: WorkKind
+  }): Promise<{ subtask: Subtask; deduped: boolean; admitted: boolean; refusal?: DispatchRefusal }> {
     const kind: WorkKind = parseWorkKind(input.kind ?? "delegation") ?? (() => { throw invalidInput(`Unknown work kind: ${String(input.kind)}.`) })()
     // Central propagation: explicit group (a user command fan-out or an
     // approval payload) wins, then the parent/run group, then a new group.
@@ -2916,6 +3025,10 @@ export class EnsembleV2Service {
       parent,
       subtasks: state.subtasks,
     })
+    await this.ensureDispatchGroupLedger(dispatchGroupID, input.workspace.id)
+    const group = this.store.dispatchGroup(dispatchGroupID)
+    const depth = parent ? dispatchDepthFor(parent, state.subtasks) + 1 : 0
+    const taskMaxHops = input.taskMaxHops ?? (group ? dispatchGroupRemaining(group) : undefined)
     const key = workKey({
       actor: input.creatorAgentID ?? input.creatorType,
       workspaceID: input.workspace.id,
@@ -2933,7 +3046,7 @@ export class EnsembleV2Service {
     // terminal. Root work also hashes its dispatch group, so a repeated user
     // command is a new dispatch. Retention expiry ends suppression naturally.
     const existing = this.findWorkByKey(input.workspace.id, key)
-    if (existing) return { subtask: existing, deduped: true }
+    if (existing) return { subtask: existing, deduped: true, admitted: true }
     const at = now()
     const subtask: Subtask = {
       id: id("task"),
@@ -2957,6 +3070,8 @@ export class EnsembleV2Service {
       workKind: kind,
       queueKey: key,
       dispatchGroupID,
+      ...(taskMaxHops !== undefined ? { taskMaxHops } : {}),
+      dispatchDepth: depth,
       deadlineAt: at + DEADLINE_MS,
       ...(input.skillGrants && input.skillGrants.length > 0 ? { skillGrants: [...new Set(input.skillGrants)] } : {}),
     }
@@ -2967,7 +3082,8 @@ export class EnsembleV2Service {
       const correlationID = input.turn.correlationID ?? correlationIDForKey("turn", key)
       subtask.turn = { correlationID, askerKind: input.turn.askerKind, askerID: input.turn.askerID }
     }
-    await this.persistNewWork(subtask)
+    const admission = await this.persistNewWork(subtask, { maxPerRun: input.maxPerRun, perRunKind: input.perRunKind })
+    if (!admission.admitted) return { subtask, deduped: false, admitted: false, refusal: admission.refusal }
     this.noteWorkChanged(subtask)
     await this.appendMessage(input.workspace, {
       author: "system",
@@ -2979,7 +3095,7 @@ export class EnsembleV2Service {
       taskID: subtask.id,
       correlationID: subtask.turn?.correlationID,
     })
-    return { subtask, deduped: false }
+    return { subtask, deduped: false, admitted: true }
   }
 
   /**
@@ -3062,16 +3178,6 @@ export class EnsembleV2Service {
     return (subtask.skillGrants?.length ?? 0) > 0
   }
 
-  private delegationDepth(state: SnapshotState, subtaskID: string): number {
-    let depth = 0
-    let current = state.subtasks[subtaskID]
-    while (current?.parentID && depth < 100) {
-      depth++
-      current = state.subtasks[current.parentID]
-    }
-    return depth
-  }
-
   private agentName(agentID: string | undefined): string {
     if (!agentID) return "Unassigned"
     return this.store.agent(agentID)?.name ?? "Unknown agent"
@@ -3101,10 +3207,17 @@ export class EnsembleV2Service {
     if (parent && this.isTriageTask(parent)) {
       throw Object.assign(new Error("A leader triage task cannot be delegated from; the leader must use the skill or delegate its own guidance."), { code: "triage_no_delegate" })
     }
-    if (parent && this.delegationDepth(state, parent.id) >= state.settings.maxDepth) throw Object.assign(new Error(`The delegation depth limit is ${state.settings.maxDepth}.`), { code: "delegation_depth" })
+    // Unified depth (ticket #161): the group's depthMax governs every kind of
+    // work; settings.maxDepth is no longer a second cap.
+    const dispatchGroupID = parent ? resolveDispatchGroupID(parent, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
+    await this.ensureDispatchGroupLedger(dispatchGroupID, workspace.id)
+    const group = this.store.dispatchGroup(dispatchGroupID)
+    const depthMax = group?.depthMax ?? dispatchLimits(state.settings).depth
+    if (parent && dispatchDepthFor(parent, state.subtasks) + 1 > depthMax) {
+      throw Object.assign(new Error(`The dispatch depth limit is ${depthMax}.`), { code: "delegation_depth" })
+    }
     // A user-initiated delegation from inside a task joins that task's group;
     // a root delegation is its own one-task dispatch.
-    const dispatchGroupID = parent ? resolveDispatchGroupID(parent, state.subtasks) : newDispatchGroupID()
     const subtask = await this.createSubtask({
       workspace,
       parentID: parent?.id,
@@ -3357,6 +3470,9 @@ export class EnsembleV2Service {
           const correlationID = typeof approval.payload.correlationID === "string" && approval.payload.correlationID ? String(approval.payload.correlationID) : correlationIDForKey("turn", turnKey)
           if (!this.findWorkByKey(workspace.id, turnKey)) {
             const at = now()
+            const parentTask = parentID ? this.store.subtask(parentID) : undefined
+            const parentGroup = this.store.dispatchGroup(dispatchGroupID)
+            const depth = parentTask ? dispatchDepthFor(parentTask, this.store.read().subtasks) + 1 : 0
             const turn: Subtask = {
               id: id("task"),
               workspaceID: workspace.id,
@@ -3379,6 +3495,8 @@ export class EnsembleV2Service {
               workKind: "turn",
               queueKey: turnKey,
               dispatchGroupID,
+              ...(parentGroup ? { taskMaxHops: dispatchGroupRemaining(parentGroup) } : {}),
+              dispatchDepth: depth,
               deadlineAt: at + DEADLINE_MS,
               turn: { correlationID, askerKind: "agent", askerID: approval.agentID },
             }
@@ -3395,12 +3513,27 @@ export class EnsembleV2Service {
           }
         } else if (approval.payload.handoff) {
           // Approved cross-boundary handoff: the hop is the effect. It runs
-          // through the same queue, lease, and retry machinery as any hop.
+          // through the same queue, lease, and retry machinery as any hop,
+          // and revalidates the budget snapshot carried by the approval. A
+          // request that became unaffordable is refused visibly, not queued.
           const recipientID = String(approval.payload.assigneeID ?? "")
           const hopTask = String(approval.payload.title ?? approval.detail ?? "Handoff")
           const hopParentID = typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID
           const hopSenderID = typeof approval.payload.senderID === "string" ? String(approval.payload.senderID) : (approval.agentID ?? "")
           const dispatchGroupID = this.approvalDispatchGroupID(approval, hopParentID)
+          const parentTask = hopParentID ? this.store.subtask(hopParentID) : undefined
+          const group = this.store.dispatchGroup(dispatchGroupID)
+          const depth = typeof approval.payload.depth === "number"
+            ? approval.payload.depth
+            : parentTask
+              ? dispatchDepthFor(parentTask, this.store.read().subtasks) + 1
+              : 0
+          const storedMaxHops = approval.payload.maxHops
+          const maxHops = typeof storedMaxHops === "number" && Number.isInteger(storedMaxHops) && storedMaxHops >= 0
+            ? storedMaxHops
+            : group
+              ? dispatchGroupRemaining(group)
+              : undefined
           const hopKey = handoffWorkKey({
             actor: hopSenderID,
             workspaceID: workspace.id,
@@ -3417,7 +3550,7 @@ export class EnsembleV2Service {
             const hop: Subtask = {
               id: id("task"),
               workspaceID: workspace.id,
-              parentID: typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID,
+              parentID: hopParentID,
               creatorType: "agent",
               creatorAgentID: approval.agentID,
               assigneeID: recipientID,
@@ -3436,17 +3569,30 @@ export class EnsembleV2Service {
               workKind: "handoff",
               queueKey: hopKey,
               dispatchGroupID,
+              ...(maxHops !== undefined ? { taskMaxHops: maxHops } : {}),
+              dispatchDepth: depth,
               deadlineAt: at + DEADLINE_MS,
               handoff: {
                 correlationID,
-                senderID: typeof approval.payload.senderID === "string" ? String(approval.payload.senderID) : (approval.agentID ?? ""),
+                senderID: hopSenderID,
                 recipientID,
-                depth: typeof approval.payload.depth === "number" ? approval.payload.depth : 1,
-                parentID: typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID,
+                depth,
+                parentID: hopParentID,
                 path: typeof approval.payload.path === "string" ? String(approval.payload.path) : undefined,
               },
             }
-            await this.persistNewWork(hop)
+            const admission = await this.persistNewWork(hop, { maxPerRun: HANDOFF_MAX_PER_RUN, perRunKind: "handoff" })
+            if (!admission.admitted) {
+              const refusal = admission.refusal ?? { layer: "group" as const, used: group?.usedHops ?? 0, max: group?.maxHops ?? 0 }
+              await this.appendMessage(workspace, {
+                author: "system",
+                text: `Handoff refused: ${dispatchRefusalText("handoff", refusal)}`,
+                kind: "system",
+                taskID: hopParentID,
+                correlationID,
+              })
+              return approval
+            }
             this.noteWorkChanged(hop)
             const recipientName = this.store.agent(recipientID)?.name ?? recipientID
             // Ticket #73: concise system ack — no policy sentence, no ref, no agent bubble.
@@ -3461,8 +3607,18 @@ export class EnsembleV2Service {
           }
         } else if (approval.payload.assigneeID) {
           const parentID = typeof approval.payload.parentID === "string" ? String(approval.payload.parentID) : approval.subtaskID
-          await this.createSubtask({
+          const parentTask = parentID ? this.store.subtask(parentID) : undefined
+          const dispatchGroupID = this.approvalDispatchGroupID(approval, parentID)
+          const group = this.store.dispatchGroup(dispatchGroupID)
+          const storedMaxHops = approval.payload.maxHops
+          const maxHops = typeof storedMaxHops === "number" && Number.isInteger(storedMaxHops) && storedMaxHops >= 0
+            ? storedMaxHops
+            : group
+              ? dispatchGroupRemaining(group)
+              : undefined
+          const created = await this.createWorkItem({
             workspace,
+            parentID,
             assigneeID: String(approval.payload.assigneeID ?? ""),
             creatorType: "agent",
             creatorAgentID: approval.agentID,
@@ -3471,8 +3627,20 @@ export class EnsembleV2Service {
             constraints: approval.payload.constraints ? String(approval.payload.constraints) : undefined,
             expected: approval.payload.expected ? String(approval.payload.expected) : undefined,
             mode: approval.payload.mode === "edit" ? "edit" : "research",
-            dispatchGroupID: this.approvalDispatchGroupID(approval, parentID),
+            dispatchGroupID,
+            ...(maxHops !== undefined ? { taskMaxHops: maxHops } : {}),
+            maxPerRun: this.store.read().settings.maxDelegations,
           })
+          if (!created.admitted) {
+            const refusal = created.refusal ?? { layer: "group" as const, used: group?.usedHops ?? 0, max: group?.maxHops ?? 0 }
+            await this.appendMessage(workspace, {
+              author: "system",
+              text: `Delegation refused: ${dispatchRefusalText("delegation", refusal)}`,
+              kind: "system",
+              taskID: parentTask?.id,
+            })
+            return approval
+          }
         } else if (approval.payload.agentID && approval.payload.text) {
           // Approved cross-boundary direct message: send once with the
           // envelope correlation approved by the user.
@@ -3789,8 +3957,9 @@ export class EnsembleV2Service {
       const runTask = run ? state.subtasks[run.subtaskID] : undefined
       // One agent post is one dispatch: its mentions and approvals share one
       // group even when the post comes from outside a live run.
-      const dispatchGroupID = runTask ? resolveDispatchGroupID(runTask, state.subtasks) : newDispatchGroupID()
-      const askingDepth = run ? this.delegationDepth(state, run.subtaskID) : 0
+      const dispatchGroupID = runTask ? resolveDispatchGroupID(runTask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
+      const askingDepth = runTask ? dispatchDepthFor(runTask, state.subtasks) : 0
+      const peerDepthMax = state.dispatchGroups[dispatchGroupID]?.depthMax ?? dispatchLimits(state.settings).depth
       // Outside-roster contact follows the existing approval model: the user
       // consents first, then the approved turn runs through the same queue.
       for (const agent of outsideRefs) {
@@ -3835,8 +4004,8 @@ export class EnsembleV2Service {
       for (const agentID of mentionIDs) {
         const agent = state.agents[agentID]
         if (!agent) continue
-        if (askingDepth >= state.settings.maxDepth) {
-          const reason = `the delegation depth limit is ${state.settings.maxDepth}.`
+        if (askingDepth + 1 > peerDepthMax) {
+          const reason = `the dispatch depth limit is ${peerDepthMax}.`
           await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, reason), kind: "system" })
           noteRefusal(agent.name, reason)
           continue
@@ -3951,28 +4120,6 @@ export class EnsembleV2Service {
     const recipient = resolved.agent
     const path = relative(workspace.directory, absolute)
     const hopInstruction = `${brief} (${path})`
-    if (!workspace.memberIDs.includes(recipient.id)) {
-      const run = this.runForSession(state, context.sessionID)
-      const runTask = run ? state.subtasks[run.subtaskID] : undefined
-      const dispatchGroupID = runTask ? resolveDispatchGroupID(runTask, state.subtasks) : newDispatchGroupID()
-      const correlationID = parsed.data.correlationID || newCorrelationID()
-      const approval: Approval = {
-        id: id("approval"),
-        workspaceID: workspace.id,
-        subtaskID: run?.subtaskID,
-        agentID: sender.id,
-        kind: "outside_roster",
-        source: "workspace",
-        title: `${sender.name} wants to hand off to ${recipient.name}`,
-        detail: task,
-        payload: { assigneeID: recipient.id, title: task, instruction: hopInstruction, constraints, expected, mode: "research", handoff: true, correlationID, path, depth: (run ? this.delegationDepth(state, run.subtaskID) : 0) + 1, parentID: run?.subtaskID, senderID: sender.id, dispatchGroupID },
-        status: "pending",
-        createdAt: now(),
-      }
-      await this.store.saveApproval(approval)
-      await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${recipient.name}`, kind: "approval", taskID: run?.subtaskID })
-      return { content: `Approval required before contacting ${recipient.name}.` }
-    }
     const run = this.runForSession(state, context.sessionID)
     // Parentless-hop hole (ticket #70): a handoff called from a session
     // with no live run would orphan the hop (parentID undefined), so the
@@ -3984,15 +4131,15 @@ export class EnsembleV2Service {
     // would double-queue under a separate key).
     const askingSubtaskID = run?.subtaskID ?? newestOpenSenderTaskID(state, workspace.id, sender.id)
     const askingTask = askingSubtaskID ? state.subtasks[askingSubtaskID] : undefined
-    const dispatchGroupID = askingTask ? resolveDispatchGroupID(askingTask, state.subtasks) : newDispatchGroupID()
-    const askingDepth = askingSubtaskID ? this.delegationDepth(state, askingSubtaskID) : 0
+    const dispatchGroupID = askingTask ? resolveDispatchGroupID(askingTask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
+    await this.ensureDispatchGroupLedger(dispatchGroupID, workspace.id)
     // Idempotency spans terminal rows for the row's lifetime: the handoff hop
     // is the effect, so a retried or resubmitted handoff from the same run
     // returns the existing record instead of executing twice. Checked before
-    // the depth/per-run caps so an idempotent replay never turns into a cap
-    // refusal. When the original run has already finished, the anchor can be a
-    // newer open row (for example an inbound completion hop); fall back to the
-    // same logical ask so anchor drift cannot duplicate the hop either.
+    // the budget caps so an idempotent replay never turns into a refusal.
+    // When the original run has already finished, the anchor can be a newer
+    // open row (for example an inbound completion hop); fall back to the same
+    // logical ask so anchor drift cannot duplicate the hop either.
     const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: askingSubtaskID, recipientID: recipient.id, task, instruction: brief, constraints, expected })
     const duplicate = this.findWorkByKey(workspace.id, key) ?? (!run ? Object.values(state.subtasks).find((item) =>
       item.workspaceID === workspace.id &&
@@ -4006,21 +4153,60 @@ export class EnsembleV2Service {
       (item.expected ?? "") === (expected ?? "")
     ) : undefined)
     if (duplicate) return { content: handoffDuplicateText(recipient.name, task) }
-    // Handoff-specific caps (spec #53): chains stop after one hop, and one
-    // run fans out at most HANDOFF_MAX_PER_RUN hops. Only handoff hops count
-    // toward the per-run budget — relay/failure-notice legs are messages,
-    // not work rows, so control legs never consume it.
-    if (askingDepth >= HANDOFF_MAX_DEPTH) {
-      return fail(`the handoff depth limit is ${HANDOFF_MAX_DEPTH}.`)
-    }
-    if (askingSubtaskID) {
-      const hops = Object.values(state.subtasks).filter((item) => item.parentID === askingSubtaskID && item.workKind === "handoff")
-      if (hops.length >= HANDOFF_MAX_PER_RUN) {
-        return fail(`the handoff limit is ${HANDOFF_MAX_PER_RUN} per run.`)
-      }
+    // Required task budget: the sender must say how many direct dispatches
+    // the recipient may make. Zero is a deliberate one-shot ask.
+    const taskBudget = validateTaskMaxHops("ensemble_handoff", input.maxHops)
+    if (!taskBudget.ok) return { content: taskBudget.reason }
+    // Ordered preflight: task availability, group, depth, command, fan-out.
+    // The old HANDOFF_MAX_DEPTH=1 cap is gone; the group's depthMax governs
+    // every kind of work, and the per-run handoff cap stays last.
+    const preflight = this.dispatchPreflight({
+      parent: askingTask,
+      groupID: dispatchGroupID,
+      maxPerRun: HANDOFF_MAX_PER_RUN,
+      perRunKind: "handoff",
+    })
+    if (preflight.refusal) {
+      return this.refuseDispatch(workspace, "handoff", preflight.refusal, askingTask, this.store.dispatchGroup(dispatchGroupID), { recipientID: recipient.id, actorID: sender.id, taskMaxHops: taskBudget.maxHops, dispatchDepth: preflight.depth })
     }
     const at = now()
     const correlationID = parsed.data.correlationID || correlationIDForKey("handoff", key)
+    if (!workspace.memberIDs.includes(recipient.id)) {
+      // Cross-workspace handoffs carry the granted budget through approval and
+      // revalidate it when the approval resolves; an approval that becomes
+      // unaffordable is refused visibly without creating work.
+      const approval: Approval = {
+        id: id("approval"),
+        workspaceID: workspace.id,
+        subtaskID: run?.subtaskID,
+        agentID: sender.id,
+        kind: "outside_roster",
+        source: "workspace",
+        title: `${sender.name} wants to hand off to ${recipient.name}`,
+        detail: task,
+        payload: {
+          assigneeID: recipient.id,
+          title: task,
+          instruction: hopInstruction,
+          constraints,
+          expected,
+          mode: "research",
+          handoff: true,
+          correlationID,
+          path,
+          depth: preflight.depth,
+          parentID: askingSubtaskID,
+          senderID: sender.id,
+          dispatchGroupID,
+          maxHops: taskBudget.maxHops,
+        },
+        status: "pending",
+        createdAt: at,
+      }
+      await this.store.saveApproval(approval)
+      await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${recipient.name}`, kind: "approval", taskID: run?.subtaskID })
+      return { content: `Approval required before contacting ${recipient.name}.` }
+    }
     const hop: Subtask = {
       id: id("task"),
       workspaceID: workspace.id,
@@ -4043,17 +4229,22 @@ export class EnsembleV2Service {
       workKind: "handoff",
       queueKey: key,
       dispatchGroupID,
+      taskMaxHops: taskBudget.maxHops,
+      dispatchDepth: preflight.depth,
       deadlineAt: at + DEADLINE_MS,
       handoff: {
         correlationID,
         senderID: sender.id,
         recipientID: recipient.id,
-        depth: askingDepth + 1,
+        depth: preflight.depth,
         parentID: askingSubtaskID,
         path,
       },
     }
-    await this.persistNewWork(hop)
+    const admission = await this.persistNewWork(hop, { maxPerRun: HANDOFF_MAX_PER_RUN, perRunKind: "handoff" })
+    if (!admission.admitted) {
+      return this.refuseDispatch(workspace, "handoff", admission.refusal!, askingTask, this.store.dispatchGroup(dispatchGroupID), { log: false })
+    }
     this.noteWorkChanged(hop)
     // Ticket #73: the group sees only a concise system line. The policy
     // sentence and correlation ref stay in the tool result below, which is
@@ -4066,7 +4257,8 @@ export class EnsembleV2Service {
       correlationID,
     })
     this.schedule()
-    return { content: `Handed to $${recipient.name} for ${task} (ref ${correlationID}). Your turn stays open until the answer arrives here — do not call ensemble_delegate after a handoff (leader-only; would double-queue).` }
+    const remaining = this.dispatchResultLine({ groupID: dispatchGroupID, task: askingTask, nextDepth: preflight.depth })
+    return { content: `Handed to $${recipient.name} for ${task} (ref ${correlationID}). Your turn stays open until the answer arrives here — do not call ensemble_delegate after a handoff (leader-only; would double-queue).${remaining ? ` ${remaining}` : ""}` }
   }
 
   /**
@@ -4106,7 +4298,9 @@ export class EnsembleV2Service {
       return undefined
     }
     const recipient = state.agents[route.to] ?? leader
-    const dispatchGroupID = resolveDispatchGroupID(finished, state.subtasks)
+    const dispatchGroupID = resolveDispatchGroupID(finished, state.subtasks) ?? newDispatchGroupID()
+    const dispatchGroup = state.dispatchGroups[dispatchGroupID]
+    const dispatchDepth = dispatchDepthFor(finished, state.subtasks) + 1
     const key = completionWorkKey({ workspaceID: workspace.id, finishedTaskID: finished.id, recipientID: recipient.id })
     const duplicate = this.findWorkByKey(workspace.id, key)
     if (duplicate) return duplicate
@@ -4147,6 +4341,8 @@ export class EnsembleV2Service {
       workKind: "handoff",
       queueKey: key,
       dispatchGroupID,
+      ...(dispatchGroup ? { taskMaxHops: dispatchGroupRemaining(dispatchGroup) } : {}),
+      dispatchDepth,
       deadlineAt: at + DEADLINE_MS,
       retryAfter: at + COMPLETION_QUIET_WINDOW_MS,
       handoff: {
@@ -4256,6 +4452,8 @@ export class EnsembleV2Service {
     if (items.length < 2) return
     const at = now()
     const correlationID = newCorrelationID()
+    const batchGroup = live.dispatchGroups[dispatchGroupID]
+    const batchDepth = items[0] ? dispatchDepthFor(items[0], live.subtasks) + 1 : 0
     const chain = [...new Set(items.flatMap((item) => item.handoff?.chain ?? []))]
     const listing = items.map((item) => ({
       id: item.id,
@@ -4283,6 +4481,8 @@ export class EnsembleV2Service {
       workKind: "handoff",
       queueKey: `batch:${workspaceID}:${recipientID}:${stableHash(`${dispatchGroupID}\0${ids.join("\0")}`)}`,
       dispatchGroupID,
+      ...(batchGroup ? { taskMaxHops: dispatchGroupRemaining(batchGroup) } : {}),
+      dispatchDepth: batchDepth,
       deadlineAt: at + DEADLINE_MS,
       // Early consolidation can group an item that is still inside its quiet
       // window; the review itself waits for the newest item.
@@ -4437,7 +4637,12 @@ export class EnsembleV2Service {
         instruction: item.instruction,
         constraints: item.constraints,
         expected: decision.note ?? item.expected,
+        maxPerRun: this.store.read().settings.maxDelegations,
       })
+      if (!created.admitted) {
+        const refusal = created.refusal ?? { layer: "group" as const, used: 0, max: 0 }
+        return `${item.id} (${item.title}): refused — ${dispatchRefusalText("delegation", refusal)}`
+      }
       item.state = "replied"
       item.outcome = "succeeded"
       item.repliedAt = at
@@ -4610,7 +4815,6 @@ export class EnsembleV2Service {
     const { workspace, agent } = found
     const run = this.runForSession(state, context.sessionID)
     const subtask = run ? state.subtasks[run.subtaskID] : undefined
-    const dispatchGroupID = subtask ? resolveDispatchGroupID(subtask, state.subtasks) : newDispatchGroupID()
     // Every refusal below is posted to the group chat as well as returned to
     // the caller: a tool-result string alone is invisible from the board's
     // perspective, which read as silently missing delegation state.
@@ -4627,16 +4831,39 @@ export class EnsembleV2Service {
       await this.appendMessage(workspace, { author: "system", text: `Delegation refused: ${String(input.assignee)} is not available.`, kind: "system" })
       return { content: "That agent is unavailable." }
     }
-    if (subtask && this.delegationDepth(state, subtask.id) >= state.settings.maxDepth) {
-      await this.appendMessage(workspace, { author: "system", text: `Delegation refused: the delegation depth limit is ${state.settings.maxDepth}.`, kind: "system" })
-      return { content: `The delegation depth limit is ${state.settings.maxDepth}.` }
-    }
-    if (subtask) {
-      const children = Object.values(state.subtasks).filter((item) => item.parentID === subtask.id)
-      if (children.length >= state.settings.maxDelegations) {
-        await this.appendMessage(workspace, { author: "system", text: `Delegation refused: the delegation limit is ${state.settings.maxDelegations}.`, kind: "system" })
-        return { content: `The delegation limit is ${state.settings.maxDelegations}.` }
-      }
+    const dispatchGroupID = subtask ? resolveDispatchGroupID(subtask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
+    await this.ensureDispatchGroupLedger(dispatchGroupID, workspace.id)
+    // Idempotency precedes the budget checks: a replay returns the existing
+    // work even after the group has since been spent.
+    const title = String(input.title)
+    const instruction = String(input.instruction)
+    const constraints = input.constraints ? String(input.constraints) : undefined
+    const expected = input.expected ? String(input.expected) : undefined
+    const key = workKey({
+      actor: agent.id,
+      workspaceID: workspace.id,
+      kind: "delegation",
+      parentID: subtask?.id,
+      dispatchGroupID,
+      assigneeID: target.id,
+      title,
+      instruction,
+      constraints,
+      expected,
+    })
+    if (this.findWorkByKey(workspace.id, key)) return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.` }
+    // Required task budget: the sender must say how many direct dispatches
+    // the recipient may make. Zero is a deliberate one-shot ask.
+    const taskBudget = validateTaskMaxHops("ensemble_delegate", input.maxHops)
+    if (!taskBudget.ok) return { content: taskBudget.reason }
+    // Ordered preflight: task availability, group, depth, command, fan-out.
+    const preflight = this.dispatchPreflight({
+      parent: subtask,
+      groupID: dispatchGroupID,
+      maxPerRun: state.settings.maxDelegations,
+    })
+    if (preflight.refusal) {
+      return this.refuseDispatch(workspace, "delegation", preflight.refusal, subtask, this.store.dispatchGroup(dispatchGroupID), { recipientID: target.id, actorID: agent.id, taskMaxHops: taskBudget.maxHops, dispatchDepth: preflight.depth })
     }
     if (!workspace.memberIDs.includes(target.id)) {
       const approval: Approval = {
@@ -4647,8 +4874,19 @@ export class EnsembleV2Service {
         kind: "outside_roster",
         source: "workspace",
         title: `${agent.name} wants to contact ${target.name}`,
-        detail: String(input.instruction),
-        payload: { assigneeID: target.id, title: input.title, instruction: input.instruction, constraints: input.constraints, expected: input.expected, mode: input.mode, parentID: subtask?.id, dispatchGroupID },
+        detail: instruction,
+        payload: {
+          assigneeID: target.id,
+          title,
+          instruction,
+          constraints,
+          expected,
+          mode: input.mode,
+          parentID: subtask?.id,
+          dispatchGroupID,
+          maxHops: taskBudget.maxHops,
+          depth: preflight.depth,
+        },
         status: "pending",
         createdAt: now(),
       }
@@ -4656,22 +4894,28 @@ export class EnsembleV2Service {
       await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact ${target.name}`, kind: "approval", taskID: subtask?.id })
       return { content: `Approval required before contacting ${target.name}.` }
     }
-    const { deduped } = await this.createWorkItem({
+    const created = await this.createWorkItem({
       workspace,
       parentID: subtask?.id,
       assigneeID: target.id,
       creatorType: "agent",
       creatorAgentID: agent.id,
-      title: String(input.title),
-      instruction: String(input.instruction),
-      constraints: input.constraints ? String(input.constraints) : undefined,
-      expected: input.expected ? String(input.expected) : undefined,
+      title,
+      instruction,
+      constraints,
+      expected,
       mode: input.mode === "edit" ? "edit" : "research",
       dispatchGroupID,
+      taskMaxHops: taskBudget.maxHops,
+      maxPerRun: state.settings.maxDelegations,
     })
+    if (!created.admitted) {
+      return this.refuseDispatch(workspace, "delegation", created.refusal!, subtask, this.store.dispatchGroup(dispatchGroupID), { log: false })
+    }
     this.schedule()
-    if (deduped) return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.` }
-    return { content: `Delegated to ${target.name}. The reply will arrive in the group chat.` }
+    const remaining = this.dispatchResultLine({ groupID: dispatchGroupID, task: subtask, nextDepth: preflight.depth })
+    if (created.deduped) return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.${remaining ? ` ${remaining}` : ""}` }
+    return { content: `Delegated to ${target.name}. The reply will arrive in the group chat.${remaining ? ` ${remaining}` : ""}` }
   }
 
   private async toolAsk(input: Json, context: any): Promise<{ content: string }> {

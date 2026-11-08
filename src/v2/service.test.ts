@@ -1082,7 +1082,7 @@ test("paused workspaces reject delegation and depth limits are enforced", async 
   try {
     const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
     const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
-    await handlers.invoke({ directory, action: "settings.update", payload: { maxDepth: 1 } })
+    await handlers.invoke({ directory, action: "settings.update", payload: { dispatchDepth: 1 } })
     const root = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, assigneeID: agent.result.id, title: "Root", instruction: "Root" } })
     const child = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, parentID: root.result.id, assigneeID: agent.result.id, title: "Child", instruction: "Child" } })
     const grandchild = await handlers.invoke({ directory, action: "task.delegate", payload: { workspaceID: workspace.result.id, parentID: child.result.id, assigneeID: agent.result.id, title: "Grandchild", instruction: "Grandchild" } })
@@ -1150,9 +1150,9 @@ test("agent tools delegate, ask, remember, and share while a run is active", asy
       return true
     })
     const toolContext = { sessionID }
-    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, toolContext)
+    const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Child", instruction: "Check" }, toolContext)
     assert.match(delegated.content, /Delegated to Sage/)
-    const outside = await tools.get("delegate").execute({ assignee: "Echo", title: "Outside", instruction: "Check" }, toolContext)
+    const outside = await tools.get("delegate").execute({ maxHops: 1, assignee: "Echo", title: "Outside", instruction: "Check" }, toolContext)
     assert.match(outside.content, /Approval required/)
     const asked = await tools.get("ask_person").execute({ question: "Which API?" }, toolContext)
     assert.match(asked.content, /Waiting/)
@@ -1176,7 +1176,7 @@ test("agent tools delegate, ask, remember, and share while a run is active", asy
     assert.match(cross.content, /Cross-workspace/)
     mkdirSync(join(directory, ".ensemble", "handoffs"), { recursive: true })
     writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-1.md"), "---\nensemble: handoff\ntask: task\n---\n# Handoff\n")
-    const handoff = await tools.get("handoff").execute({ task: "task", summary: "summary", path: ".ensemble/handoffs/task-nova-sage-1.md", to: "Sage" }, toolContext)
+    const handoff = await tools.get("handoff").execute({ maxHops: 1, task: "task", summary: "summary", path: ".ensemble/handoffs/task-nova-sage-1.md", to: "Sage" }, toolContext)
     assert.match(handoff.content, /Handed to \$Sage/)
     const snapshot = await handlers.snapshot({ directory })
     assert.ok(Object.values(snapshot.state.memories).some((memory: any) => memory.text === "Use pnpm"))
@@ -1299,7 +1299,7 @@ test("disabling synthesis closes a parent task when children reply", async () =>
       const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
       return parent?.state === "working" && Object.values(next.state.runs).some((run: any) => run.status === "running")
     })
-    await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       return (next.state.messages[workspace.result.id] ?? []).some((message: any) => message.text === "Delegated subtasks completed.")
@@ -1546,11 +1546,11 @@ test("init runs as a visible System Agent job and publishes the full report", as
     assert.equal(job.sessionID.startsWith("session_"), true)
     assert.equal(commands.filter((entry) => entry.name === "init").length, 1)
     const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
-    assert.ok(content.startsWith("<!-- ensemble:start v2 -->"))
+    assert.ok(content.startsWith("<!-- ensemble:start v3 -->"))
     assert.ok(content.includes("# Repo"))
     assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1)
     const metadata = JSON.parse(readFileSync(join(directory, ".ensemble", "init.json"), "utf8"))
-    assert.equal(metadata.version, 2)
+    assert.equal(metadata.version, 3)
   } finally {
     await stop()
   }
@@ -2865,7 +2865,7 @@ test("agent-created delegation starts work with no further RPC", async () => {
       const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
       return parent?.state === "working" && Object.values(next.state.runs).some((run: any) => run.status === "running")
     })
-    const delegated = await tools.get("delegate").execute({ assignee: "Kaluna", title: "Child", instruction: "Check" }, { sessionID })
+    const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee: "Kaluna", title: "Child", instruction: "Check" }, { sessionID })
     assert.match(delegated.content, /Delegated to Kaluna/)
     // No further RPC: snapshots alone must show the child running to completion.
     await waitFor(async () => {
@@ -2911,7 +2911,7 @@ test("non-leader delegation refusal is visible in the group chat", async () => {
     })
     const before = await handlers.snapshot({ directory })
     const taskCount = Object.keys(before.state.subtasks).length
-    const refused = await tools.get("delegate").execute({ assignee: "Nova", title: "Sneaky", instruction: "Check" }, { sessionID })
+    const refused = await tools.get("delegate").execute({ maxHops: 1, assignee: "Nova", title: "Sneaky", instruction: "Check" }, { sessionID })
     assert.match(refused.content, /Only the workspace leader/)
     const after = await handlers.snapshot({ directory })
     assert.equal(Object.keys(after.state.subtasks).length, taskCount)
@@ -2948,9 +2948,9 @@ test("resubmitting the same delegation executes once", async () => {
       const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
       return parent?.state === "working" && Object.values(next.state.runs).some((run: any) => run.status === "running")
     })
-    const first = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    const first = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
     assert.match(first.content, /Delegated to Sage/)
-    const second = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    const second = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
     assert.match(second.content, /Already delegated to Sage/)
     const after = await handlers.snapshot({ directory })
     const children = Object.values(after.state.subtasks).filter((task: any) => task.title === "Child")
@@ -3618,7 +3618,7 @@ test("handoff creates a pending typed hop with correlation and dedupes resubmiss
     })
     mkdirSync(join(directory, ".ensemble", "handoffs"), { recursive: true })
     writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-1.md"), "---\nensemble: handoff\ntask: task\n---\n# Handoff\n")
-    const input = { task: "task", summary: "summary", path: ".ensemble/handoffs/task-nova-sage-1.md", to: "Sage" }
+    const input = { task: "task", summary: "summary", path: ".ensemble/handoffs/task-nova-sage-1.md", to: "Sage", maxHops: 1 }
     const first = await tools.get("handoff").execute(input, { sessionID })
     assert.match(first.content, /Handed to \$Sage/)
     const second = await tools.get("handoff").execute(input, { sessionID })
@@ -3673,7 +3673,7 @@ test("task_status exposes the derived lifecycle facts", async () => {
       sessionID = binding.sessionID
       return true
     })
-    await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
+    await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID })
     // Derived lifecycle facts are asserted once the child is actually claimed;
     // an immediate read can legitimately observe the queued row first.
     await waitFor(async () => {
@@ -3863,7 +3863,9 @@ test("ticket68: ask_person parks the run until the user answers", async () => {
       const binding = Object.values(next.state.bindings)[0] as any
       if (!binding) return false
       sessionID = binding.sessionID
-      return true
+      // The ask must land inside the live run; wait for the claim itself.
+      const task = Object.values(next.state.subtasks).find((item: any) => item.title === "Decide this") as any
+      return Boolean(task) && Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === task.id && run.status === "running")
     })
     const asked = await tools.get("ask_person").execute({ question: "Which API?" }, { sessionID })
     assert.match(asked.content, /Waiting/)
@@ -4243,7 +4245,7 @@ test("ticket76: a delegated child and a later user task both settle in order", a
       sessionID = binding.sessionID
       return true
     })
-    await tools.get("delegate").execute({ assignee: "Sage", title: "child", instruction: "check" }, { sessionID })
+    await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "child", instruction: "check" }, { sessionID })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "later" } })
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
@@ -4517,6 +4519,10 @@ test("skill.send creates one exact prompt per unique agent with resolved titles 
       instructions.some((entry) => entry.value.includes("When a user message addresses multiple agents") && entry.value.includes("ensemble_task_status")),
       "the identity contract tells each agent to handle only its addressed part",
     )
+    assert.ok(
+      instructions.some((entry) => entry.value.includes("requires maxHops") && entry.value.includes("maxHops: 0")),
+      "the identity contract teaches the required task budget and the zero option",
+    )
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -4750,7 +4756,7 @@ test("a delegatee receives leader guidance without a host skill grant", async ()
       return task?.state === "working" && Boolean(leaderSession)
     })
     const guidance = "Apply the public-research method to the release notes; return a concise source list."
-    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Research follow-up", instruction: guidance }, { sessionID: leaderSession })
+    const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Research follow-up", instruction: guidance }, { sessionID: leaderSession })
     assert.match(delegated.content, /Delegated to Sage/)
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })

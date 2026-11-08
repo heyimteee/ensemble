@@ -323,3 +323,197 @@ export function reconcileLegacyTaskBudgets(group: DispatchGroup, tasks: readonly
     .filter((task) => task.state !== "replied" && task.taskMaxHops === undefined)
     .map((task) => ({ ...task, taskMaxHops: remaining }))
 }
+
+/* ------------------------------------------------------------------------- *
+ * Ticket #161: required task budgets and hop enforcement.
+ *
+ * The service asks for a task budget on every delegation and handoff, stores
+ * it as `taskMaxHops` on the created work item, and checks the four layers in
+ * one order everywhere: task availability, group, depth, command, then the
+ * per-run fan-out guard. `dispatchAdmissionRefusal` is the single ordered
+ * verdict used by both the service preflight and the store's atomic admission,
+ * so copy and enforcement cannot drift.
+ * ------------------------------------------------------------------------- */
+
+export type TaskBudgetValidation =
+  | { ok: true; maxHops: number }
+  | { ok: false; reason: string }
+
+/**
+ * Validate the required `maxHops` argument. Zero is a deliberate one-shot ask
+ * (the recipient may answer and complete, but may not create new work); a
+ * missing or malformed value is a validation error that teaches both.
+ */
+export function validateTaskMaxHops(tool: "ensemble_delegate" | "ensemble_handoff", value: unknown): TaskBudgetValidation {
+  if (value === undefined || value === null) {
+    return {
+      ok: false,
+      reason: `${tool} requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work).`,
+    }
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return {
+      ok: false,
+      reason: `${tool} maxHops must be a non-negative integer. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work).`,
+    }
+  }
+  return { ok: true, maxHops: value }
+}
+
+/** Unified dispatch depth: a stored value wins, legacy rows derive the parent chain. */
+export function dispatchDepthFor(task: Subtask | undefined, byID: Record<Id, Subtask>): number {
+  if (!task) return 0
+  if (typeof task.dispatchDepth === "number" && Number.isFinite(task.dispatchDepth)) {
+    return Math.max(0, Math.trunc(task.dispatchDepth))
+  }
+  return observedDepth(task, byID)
+}
+
+/** Direct dispatches already spent from one work item's task budget. */
+export function dispatchTaskHopCount(taskID: Id, subtasks: Record<Id, Subtask>): number {
+  let count = 0
+  for (const task of Object.values(subtasks)) {
+    if (task.parentID === taskID && dispatchesHop(task)) count++
+  }
+  return count
+}
+
+/** Direct child work items for the per-run fan-out guard. */
+export function dispatchFanOutCount(parentID: Id, subtasks: Record<Id, Subtask>, workKind?: Subtask["workKind"]): number {
+  let count = 0
+  for (const task of Object.values(subtasks)) {
+    if (task.parentID !== parentID) continue
+    if (workKind && task.workKind !== workKind) continue
+    count++
+  }
+  return count
+}
+
+export type DispatchRefusalLayer = "task" | "group" | "depth" | "command" | "fanout"
+
+export type DispatchRefusal = {
+  layer: DispatchRefusalLayer
+  used: number
+  max: number
+}
+
+export type DispatchBudgetState = {
+  groupID: Id
+  rootID: Id
+  parentID?: Id
+  continuationIndex: number
+  groupUsed: number
+  groupMax: number
+  groupRemaining: number
+  commandUsed?: number
+  commandMax?: number
+  commandRemaining?: number
+  taskMax?: number
+  taskUsed: number
+  taskRemaining?: number
+  /** Depth of the work item being admitted. */
+  depth: number
+  depthMax: number
+}
+
+/** Derive every budget layer for one prospective dispatch. */
+export function dispatchBudgetState(input: {
+  group: DispatchGroup
+  groups: Record<Id, DispatchGroup>
+  task?: Subtask
+  subtasks: Record<Id, Subtask>
+  nextDepth?: number
+}): DispatchBudgetState {
+  const { group } = input
+  const root = isRootGroup(group) ? group : input.groups[group.rootID]
+  const taskUsed = input.task ? dispatchTaskHopCount(input.task.id, input.subtasks) : 0
+  const taskMax = input.task?.taskMaxHops
+  const commandUsed = root?.commandUsedHops
+  const commandMax = root?.commandMaxHops
+  return {
+    groupID: group.id,
+    rootID: group.rootID,
+    ...(group.parentID !== undefined ? { parentID: group.parentID } : {}),
+    continuationIndex: group.continuationIndex,
+    groupUsed: group.usedHops,
+    groupMax: group.maxHops,
+    groupRemaining: dispatchGroupRemaining(group),
+    ...(commandUsed !== undefined ? { commandUsed } : {}),
+    ...(commandMax !== undefined ? { commandMax } : {}),
+    ...(commandUsed !== undefined && commandMax !== undefined ? { commandRemaining: Math.max(0, commandMax - commandUsed) } : {}),
+    ...(taskMax !== undefined ? { taskMax } : {}),
+    taskUsed,
+    ...(taskMax !== undefined ? { taskRemaining: Math.max(0, taskMax - taskUsed) } : {}),
+    depth: input.nextDepth ?? (input.task ? dispatchDepthFor(input.task, input.subtasks) : 0),
+    depthMax: group.depthMax,
+  }
+}
+
+/**
+ * Ordered verdict for one prospective dispatch. The order is contractual: a
+ * work item at its task limit reports task budget even when the group and
+ * command are also exhausted.
+ */
+export function dispatchAdmissionRefusal(input: {
+  state: DispatchBudgetState
+  maxPerRun?: number
+  fanOutUsed?: number
+}): DispatchRefusal | undefined {
+  const { state } = input
+  if (state.taskMax !== undefined && state.taskUsed >= state.taskMax) {
+    return { layer: "task", used: state.taskUsed, max: state.taskMax }
+  }
+  if (state.groupUsed >= state.groupMax) {
+    return { layer: "group", used: state.groupUsed, max: state.groupMax }
+  }
+  if (state.depth > state.depthMax) {
+    return { layer: "depth", used: state.depth, max: state.depthMax }
+  }
+  if (state.commandUsed !== undefined && state.commandMax !== undefined && state.commandUsed >= state.commandMax) {
+    return { layer: "command", used: state.commandUsed, max: state.commandMax }
+  }
+  if (input.maxPerRun !== undefined && (input.fanOutUsed ?? 0) >= input.maxPerRun) {
+    return { layer: "fanout", used: input.fanOutUsed ?? 0, max: input.maxPerRun }
+  }
+  return undefined
+}
+
+/** Refusal copy names the exhausted layer and the next action, never content. */
+export function dispatchRefusalText(kind: "delegation" | "handoff", refusal: DispatchRefusal): string {
+  const noun = kind === "handoff" ? "handoff" : "delegation"
+  switch (refusal.layer) {
+    case "task":
+      return `your task budget is exhausted (${refusal.used}/${refusal.max} direct dispatches); Return your result to the leader in the group chat.`
+    case "group":
+      return `the dispatch group is exhausted (${refusal.used}/${refusal.max} hops); Return your result to the leader in the group chat.`
+    case "depth":
+      return `the dispatch depth limit is ${refusal.max} (next depth ${refusal.used}); Return your result to the leader in the group chat.`
+    case "command":
+      return `the command budget is exhausted (${refusal.used}/${refusal.max} hops); Ask the user to start a new command.`
+    case "fanout":
+      return `the ${noun} limit is ${refusal.max} per run; Return your result to the leader in the group chat.`
+  }
+}
+
+/** Compact successful-result line: what the sender has left after the hop. */
+export function dispatchBudgetLine(state: DispatchBudgetState): string {
+  const task = state.taskMax === undefined || state.taskRemaining === undefined
+    ? "task unlimited"
+    : `task ${state.taskRemaining} of ${state.taskMax} dispatches`
+  const group = `group ${state.groupRemaining} of ${state.groupMax} hops`
+  const command = state.commandRemaining === undefined || state.commandMax === undefined
+    ? "command not tracked"
+    : `command ${state.commandRemaining} of ${state.commandMax} hops`
+  return `Remaining — ${task}, ${group}, ${command}, depth ${state.depth} of ${state.depthMax}. You cannot raise these ceilings.`
+}
+
+/** Structured turn-context block. IDs and counts only; never task content. */
+export function dispatchBudgetContext(state: DispatchBudgetState, task?: Pick<Subtask, "id">): string {
+  const taskID = task ? ` task_id="${task.id}"` : ""
+  return [
+    `<ensemble_dispatch_budget group="${state.groupID}" root="${state.rootID}" parent="${state.parentID ?? ""}" continuation="${state.continuationIndex}"${taskID} group_used="${state.groupUsed}" group_max="${state.groupMax}" group_remaining="${state.groupRemaining}" command_used="${state.commandUsed ?? ""}" command_max="${state.commandMax ?? ""}" command_remaining="${state.commandRemaining ?? ""}" task_used="${state.taskUsed}" task_max="${state.taskMax ?? ""}" task_remaining="${state.taskRemaining ?? ""}" depth="${state.depth}" depth_max="${state.depthMax}">`,
+    `Dispatch budget — group ${state.groupUsed}/${state.groupMax} (${state.groupRemaining} left), command ${state.commandUsed ?? "?"}/${state.commandMax ?? "?"}${state.commandRemaining !== undefined ? ` (${state.commandRemaining} left)` : ""}, task ${state.taskMax !== undefined ? `${state.taskUsed}/${state.taskMax} (${state.taskRemaining} left)` : `${state.taskUsed} used (unlimited)`}, depth ${state.depth}/${state.depthMax}.`,
+    "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask. Completion handoffs, batch review, synthesis, group-chat peer turns, retries, restarts, recovery, and idempotent replays do not consume hops; cancellation does not refund them. You cannot raise these ceilings; when a budget is exhausted, return your result to the leader.",
+    "</ensemble_dispatch_budget>",
+  ].join("\n")
+}

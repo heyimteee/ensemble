@@ -1,3 +1,4 @@
+import { dispatchBudgetContext, dispatchBudgetState, dispatchDepthFor } from "./dispatch-budget.ts"
 import type { Agent, Memory, SnapshotState, Subtask, Workspace } from "./types.ts"
 
 export function skillPermissions(skillbox: string[]): Array<{ action: string; resource: string; effect: "allow" | "deny" }> {
@@ -123,9 +124,23 @@ export function contextForTask(state: SnapshotState, task: Subtask, workspace: W
   const childResults = task.stage === "synthesis"
     ? children.map((child) => `- ${state.agents[child.assigneeID ?? ""]?.name ?? "Agent"}: ${state.messages[workspace.id]?.find((message) => message.id === child.resultMessageID)?.text ?? child.error ?? "(no reply)"}`).join("\n")
     : ""
+  const dispatchGroup = task.dispatchGroupID ? state.dispatchGroups[task.dispatchGroupID] : undefined
+  const dispatchBudget = dispatchGroup
+    ? dispatchBudgetContext(
+        dispatchBudgetState({
+          group: dispatchGroup,
+          groups: state.dispatchGroups,
+          task,
+          subtasks: state.subtasks,
+          nextDepth: task.dispatchDepth ?? dispatchDepthFor(task, state.subtasks),
+        }),
+        task,
+      )
+    : ""
   return [
     `<ensemble_persona name="${agent.name}">\n${agent.role}\n</ensemble_persona>`,
     memoryContext(memories),
+    dispatchBudget,
     task.workKind === "handoff" && task.handoff
       ? `<ensemble_handoff from="${state.agents[task.handoff.senderID]?.name ?? task.handoff.senderID}" ref="${task.handoff.correlationID}" depth="${task.handoff.depth}">\nThis turn is a handoff hop. Answer in this conversation as yourself; the reply is relayed to the asking conversation.\n</ensemble_handoff>`
       : "",

@@ -111,7 +111,7 @@ test("non-leader completion auto-handoffs to the leader with finished content", 
     const { nova, sage, workspace } = await setupPair(directory, handlers)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
-    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Do research", instruction: "Check" }, { sessionID: novaSession })
+    const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Do research", instruction: "Check" }, { sessionID: novaSession })
     assert.match(delegated.content, /Delegated to Sage/)
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
@@ -180,7 +180,7 @@ test("explicit handoff satisfies the end-of-turn obligation", async () => {
     // explicit handoff is issued from inside it.
     ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 2500)) }
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
-    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Do research", instruction: "Check" }, { sessionID: novaSession })
+    const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Do research", instruction: "Check" }, { sessionID: novaSession })
     assert.match(delegated.content, /Delegated to Sage/)
     // Sage hands off explicitly from inside the run before it finishes.
     await waitFor(async () => {
@@ -196,7 +196,7 @@ test("explicit handoff satisfies the end-of-turn obligation", async () => {
     mkdirSync(join(directory, ".ensemble", "handoffs"), { recursive: true })
     writeFileSync(join(directory, ".ensemble", "handoffs", "ask.md"), "---\nensemble: handoff\ntask: Follow up\n---\n# Handoff\n")
     const asked = await tools.get("handoff").execute(
-      { task: "Follow up", summary: "", path: ".ensemble/handoffs/ask.md", to: "Nova" },
+      { maxHops: 1, task: "Follow up", summary: "", path: ".ensemble/handoffs/ask.md", to: "Nova" },
       { sessionID: sageSession },
     )
     assert.match(asked.content, /Handed to \$Nova/)
@@ -282,10 +282,13 @@ test("two completions produce one batch review with per-item decisions", async (
       ) as any
       if (!binding) return false
       novaSession = binding.sessionID
-      return true
+      // The binding lands before the run registers; all three delegations
+      // must join the command group, so wait for the leader's run itself.
+      const root = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
+      return Boolean(root) && Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === root.id && run.status === "running")
     })
     for (const [assignee, title] of [["Sage", "First work"], ["Kim", "Second work"], ["Sage", "Third work"]] as const) {
-      const delegated = await tools.get("delegate").execute({ assignee, title, instruction: "Check" }, { sessionID: novaSession })
+      const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee, title, instruction: "Check" }, { sessionID: novaSession })
       assert.match(delegated.content, new RegExp(`Delegated to ${assignee}`))
     }
     let batch: any

@@ -116,7 +116,7 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Summarize the deploy\n---\n# Handoff\n")
-    const asked = await tools.get("handoff").execute({ task: "Summarize the deploy", summary: "Short version", path, to: "Sage" }, { sessionID })
+    const asked = await tools.get("handoff").execute({ maxHops: 1, task: "Summarize the deploy", summary: "Short version", path, to: "Sage" }, { sessionID })
     assert.match(asked.content, /Handed to \$Sage/)
     // Ticket #73: the waiting policy stays in the tool result for the
     // calling model — it never renders as an agent bubble.
@@ -155,7 +155,7 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
     assert.equal(relayed[0].correlationID, hop.handoff.correlationID)
     for (const message of messages) assert.ok(!message.text.includes("@Sage"), `agent mention must use $Name syntax: ${message.text}`)
     // Resubmission after delivery still dedupes: one execution, not two.
-    const again = await tools.get("handoff").execute({ task: "Summarize the deploy", summary: "Short version", path, to: "Sage" }, { sessionID })
+    const again = await tools.get("handoff").execute({ maxHops: 1, task: "Summarize the deploy", summary: "Short version", path, to: "Sage" }, { sessionID })
     assert.match(again.content, /Already handed to \$Sage/)
     const terminal = await handlers.snapshot({ directory })
     assert.equal(Object.values(terminal.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true).length, 1)
@@ -192,7 +192,7 @@ test("handoff carries a tailored instruction distinct from the user text", async
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Deploy summary\n---\n# Handoff\n")
     const tailored = "Condense the deploy notes into three exec-ready bullets; flag rollout risks."
     const first = await tools.get("handoff").execute(
-      { task: "Deploy summary", instruction: tailored, summary: "Exec-ready bullets", path, to: "Sage", constraints: "Keep it under 100 words", expected: "Three bullets" },
+      { maxHops: 1, task: "Deploy summary", instruction: tailored, summary: "Exec-ready bullets", path, to: "Sage", constraints: "Keep it under 100 words", expected: "Three bullets" },
       { sessionID },
     )
     assert.match(first.content, /Handed to \$Sage/)
@@ -207,7 +207,7 @@ test("handoff carries a tailored instruction distinct from the user text", async
     assert.equal(hops[0].expected, "Three bullets")
     // Same title, distinct brief: a distinct unit of work, not a duplicate.
     const retitled = await tools.get("handoff").execute(
-      { task: "Deploy summary", instruction: "Now also cover the rollback plan.", summary: "Exec-ready bullets", path, to: "Sage" },
+      { maxHops: 1, task: "Deploy summary", instruction: "Now also cover the rollback plan.", summary: "Exec-ready bullets", path, to: "Sage" },
       { sessionID },
     )
     assert.match(retitled.content, /Handed to \$Sage/)
@@ -216,7 +216,7 @@ test("handoff carries a tailored instruction distinct from the user text", async
     assert.equal(Object.values(afterSecond.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 2)
     // Resubmission with the same brief still dedupes.
     const again = await tools.get("handoff").execute(
-      { task: "Deploy summary", instruction: tailored, summary: "Exec-ready bullets", path, to: "Sage", constraints: "Keep it under 100 words", expected: "Three bullets" },
+      { maxHops: 1, task: "Deploy summary", instruction: tailored, summary: "Exec-ready bullets", path, to: "Sage", constraints: "Keep it under 100 words", expected: "Three bullets" },
       { sessionID },
     )
     assert.match(again.content, /Already handed to \$Sage/)
@@ -237,15 +237,15 @@ test("malformed, unknown, and missing-recipient handoffs are refused visibly", a
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const bad = handoffFile(directory, "bad.md", "Just prose mentioning ensemble: handoff without structure.\n")
-    const malformed = await tools.get("handoff").execute({ task: "T", summary: "S", path: bad, to: "Sage" }, { sessionID })
+    const malformed = await tools.get("handoff").execute({ maxHops: 1, task: "T", summary: "S", path: bad, to: "Sage" }, { sessionID })
     assert.match(malformed.content, /frontmatter/)
     const missingTask = handoffFile(directory, "no-task.md", "---\nensemble: handoff\n---\n# Handoff\n")
-    const noTask = await tools.get("handoff").execute({ task: "", summary: "", path: missingTask, to: "Sage" }, { sessionID })
+    const noTask = await tools.get("handoff").execute({ maxHops: 1, task: "", summary: "", path: missingTask, to: "Sage" }, { sessionID })
     assert.match(noTask.content, /non-empty task/)
     const withTask = handoffFile(directory, "with-task.md", "---\nensemble: handoff\ntask: Help\n---\n# Handoff\n")
-    const unknown = await tools.get("handoff").execute({ task: "Help", summary: "", path: withTask, to: "Nope" }, { sessionID })
+    const unknown = await tools.get("handoff").execute({ maxHops: 1, task: "Help", summary: "", path: withTask, to: "Nope" }, { sessionID })
     assert.match(unknown.content, /No agent matches/)
-    const noRecipient = await tools.get("handoff").execute({ task: "Help", summary: "", path: withTask }, { sessionID })
+    const noRecipient = await tools.get("handoff").execute({ maxHops: 1, task: "Help", summary: "", path: withTask }, { sessionID })
     assert.match(noRecipient.content, /must name a recipient/)
     const after = await handlers.snapshot({ directory })
     assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 0)
@@ -317,7 +317,7 @@ test("a handoff hop that cannot start delivers a failure notice in the asking co
   const handlers = service.handlers()
   try {
     const path = handoffFile(directory, "ask.md", "---\nensemble: handoff\ntask: Summarize\n---\n# Handoff\n")
-    const asked = await tools.get("handoff").execute({ task: "Summarize", summary: "", path, to: "Sage" }, { sessionID: "sess_nova" })
+    const asked = await tools.get("handoff").execute({ maxHops: 1, task: "Summarize", summary: "", path, to: "Sage" }, { sessionID: "sess_nova" })
     assert.match(asked.content, /Handed to \$Sage/)
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
@@ -343,6 +343,7 @@ test("handoff depth and per-run caps are refused visibly", async () => {
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "settings.update", payload: { dispatchDepth: 1 } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
     // The store binding lands before the run registers its session: wait for
@@ -358,15 +359,15 @@ test("handoff depth and per-run caps are refused visibly", async () => {
     // run land; the fourth is refused without queueing.
     for (const [index, task] of ["First work", "Second work", "Third work"].entries()) {
       const path = handoffFile(directory, `ask-${index}.md`, `---\nensemble: handoff\ntask: ${task}\n---\n# Handoff\n`)
-      const asked = await tools.get("handoff").execute({ task, summary: "", path, to: "Sage" }, { sessionID: novaSession })
+      const asked = await tools.get("handoff").execute({ maxHops: 1, task, summary: "", path, to: "Sage" }, { sessionID: novaSession })
       assert.match(asked.content, /Handed to \$Sage/)
     }
     const cappedPath = handoffFile(directory, "ask-capped.md", "---\nensemble: handoff\ntask: Fourth work\n---\n# Handoff\n")
-    const capped = await tools.get("handoff").execute({ task: "Fourth work", summary: "", path: cappedPath, to: "Sage" }, { sessionID: novaSession })
+    const capped = await tools.get("handoff").execute({ maxHops: 1, task: "Fourth work", summary: "", path: cappedPath, to: "Sage" }, { sessionID: novaSession })
     assert.match(capped.content, /the handoff limit is 3 per run/)
     // Depth: chains stop after one hop. Delegate a child, then ask from
     // inside it (asking depth 1): refused without queueing.
-    const delegated = await tools.get("delegate").execute({ assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID: novaSession })
+    const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Child", instruction: "Check" }, { sessionID: novaSession })
     assert.match(delegated.content, /Delegated to Sage/)
     const sageSession = await bindingSessionID(handlers, directory, sage.id)
     let childID = ""
@@ -378,8 +379,8 @@ test("handoff depth and per-run caps are refused visibly", async () => {
       return Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === childID && run.status === "running")
     }, 15_000)
     const deepPath = handoffFile(directory, "deep.md", "---\nensemble: handoff\ntask: Deep work\n---\n# Handoff\n")
-    const deep = await tools.get("handoff").execute({ task: "Deep work", summary: "", path: deepPath, to: "Nova" }, { sessionID: sageSession })
-    assert.match(deep.content, /the handoff depth limit is 1/)
+    const deep = await tools.get("handoff").execute({ maxHops: 1, task: "Deep work", summary: "", path: deepPath, to: "Nova" }, { sessionID: sageSession })
+    assert.match(deep.content, /the dispatch depth limit is 1/)
     const after = await handlers.snapshot({ directory })
     // Explicit hops only: completion handoffs (ticket #71) are separate
     // terminal deliveries, never extra fan-out under the per-run budget.
@@ -404,7 +405,7 @@ test("cancelling a handoff hop records a terminal cancelled state with correlati
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const path = handoffFile(directory, "stop.md", "---\nensemble: handoff\ntask: Long work\n---\n# Handoff\n")
-    const asked = await tools.get("handoff").execute({ task: "Long work", summary: "", path, to: "Sage" }, { sessionID })
+    const asked = await tools.get("handoff").execute({ maxHops: 1, task: "Long work", summary: "", path, to: "Sage" }, { sessionID })
     assert.match(asked.content, /Handed to \$Sage/)
     let hopID = ""
     await waitFor(async () => {
@@ -485,7 +486,7 @@ test("approved cross-boundary handoffs create a typed hop through the queue", as
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const sessionID = await bindingSessionID(handlers, directory, nova.id)
     const path = handoffFile(directory, "outside.md", "---\nensemble: handoff\ntask: Outside help\n---\n# Handoff\n")
-    const asked = await tools.get("handoff").execute({ task: "Outside help", summary: "", path, to: "Echo" }, { sessionID })
+    const asked = await tools.get("handoff").execute({ maxHops: 1, task: "Outside help", summary: "", path, to: "Echo" }, { sessionID })
     assert.match(asked.content, /Approval required before contacting Echo/)
     const pending = await handlers.snapshot({ directory })
     const approval = (Object.values(pending.state.approvals) as any[])[0]
