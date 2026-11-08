@@ -59,6 +59,8 @@ export type LoggerStats = {
   written: number
   failedWrites: number
   content: boolean
+  /** `feed.gap` events observed by this logger (ticket #150 diagnostics). */
+  feedGaps: number
   lastError?: string
 }
 
@@ -183,6 +185,7 @@ export class EnsembleLogger {
   private droppedCount = 0
   private writtenCount = 0
   private failedWriteCount = 0
+  private feedGapCount = 0
   private lastErrorText?: string
   private warnedWrite = false
 
@@ -229,6 +232,7 @@ export class EnsembleLogger {
 
   event(level: LogLevel, cat: LogCategory, event: string, fields: LogFields = {}): void {
     if (!this.enabledFor(level)) return
+    if (event === "feed.gap") this.feedGapCount += 1
     const entry: LogEntry = {
       ...redactLogFields(fields),
       ts: new Date(this.now()).toISOString(),
@@ -308,6 +312,7 @@ export class EnsembleLogger {
       written: this.writtenCount,
       failedWrites: this.failedWriteCount,
       content: this.content,
+      feedGaps: this.feedGapCount,
       ...(this.lastErrorText ? { lastError: this.lastErrorText } : {}),
     }
   }
@@ -459,17 +464,57 @@ export type LogRateLimitDecision = {
   suppressed: number
 }
 
+export type LogRateLimiterOptions = {
+  windowMs?: number
+  now?: () => number
+  /**
+   * Trailing summary for a burst that stops inside its window. Called once at
+   * window close with the suppressed total, so the count is never lost.
+   */
+  report?: (key: string, suppressed: number) => void
+}
+
+export type LogRateLimiter = {
+  admit: (key: string) => LogRateLimitDecision
+  /** Report and clear every window with a suppressed count (viewer/shutdown). */
+  flush: () => void
+}
+
 /**
  * Ticket #150: identical warnings (notably `feed.reset`) collapse to one per
  * window per instance. The first event emits immediately; the next allowed
- * event reports how many identical events it swallowed.
+ * event reports how many identical events it swallowed, and a burst that stops
+ * reports its suppressed total when the window closes (or on `flush`).
  */
-export function createLogRateLimiter(options: { windowMs?: number; now?: () => number } = {}): {
-  admit: (key: string) => LogRateLimitDecision
-} {
+export function createLogRateLimiter(options: LogRateLimiterOptions = {}): LogRateLimiter {
   const windowMs = Math.max(1, options.windowMs ?? 10_000)
   const now = options.now ?? Date.now
-  const windows = new Map<string, { last: number; suppressed: number }>()
+  const windows = new Map<string, { last: number; suppressed: number; timer?: ReturnType<typeof setTimeout> }>()
+
+  const report = (key: string, suppressed: number) => {
+    if (suppressed <= 0) return
+    options.report?.(key, suppressed)
+  }
+
+  const clearTimer = (state: { timer?: ReturnType<typeof setTimeout> }) => {
+    if (state.timer === undefined) return
+    clearTimeout(state.timer)
+    state.timer = undefined
+  }
+
+  const scheduleTrailing = (key: string, state: { last: number; suppressed: number; timer?: ReturnType<typeof setTimeout> }) => {
+    if (!options.report || state.timer !== undefined) return
+    const delay = Math.max(1, state.last + windowMs - now())
+    state.timer = setTimeout(() => {
+      state.timer = undefined
+      const suppressed = state.suppressed
+      state.suppressed = 0
+      state.last = now()
+      report(key, suppressed)
+    }, delay)
+    state.timer.unref?.()
+  }
+
   return {
     admit(key: string): LogRateLimitDecision {
       const at = now()
@@ -480,12 +525,24 @@ export function createLogRateLimiter(options: { windowMs?: number; now?: () => n
       }
       if (at - state.last >= windowMs) {
         const suppressed = state.suppressed
+        clearTimer(state)
         state.last = at
         state.suppressed = 0
         return { allowed: true, suppressed }
       }
       state.suppressed += 1
+      scheduleTrailing(key, state)
       return { allowed: false, suppressed: state.suppressed }
+    },
+    flush(): void {
+      for (const [key, state] of windows) {
+        const suppressed = state.suppressed
+        if (suppressed <= 0) continue
+        clearTimer(state)
+        state.suppressed = 0
+        state.last = now()
+        report(key, suppressed)
+      }
     },
   }
 }

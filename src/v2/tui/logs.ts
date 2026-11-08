@@ -93,6 +93,7 @@ export function formatLogStats(stats: any): string {
     `content=${stats.content ? "on" : "off"}`,
     `ring=${stats.ringSize ?? 0}`,
     `dropped=${stats.dropped ?? 0}`,
+    `feedGaps=${stats.feedGaps ?? 0}`,
     `written=${stats.written ?? 0}`,
     `failedWrites=${stats.failedWrites ?? 0}`,
     stats.dir ? `dir=${stats.dir}` : "dir=(disabled)",

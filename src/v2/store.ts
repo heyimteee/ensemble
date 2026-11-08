@@ -5,6 +5,7 @@ import type {
   Agent,
   Approval,
   ChangeEntry,
+  ChangesSince,
   ChatMessage,
   EntityChange,
   FeedResetReason,
@@ -1059,9 +1060,9 @@ export class V2Store {
    * the snapshot path; a fresh cursor gets contiguous full-entity entries.
    * Ticket #150: every reset names its reason so `feed.reset` is attributable.
    */
-  changesSince(epoch: number, version: number): { epoch: number; version: number; reset: boolean; reason?: FeedResetReason; entries: ChangeEntry[] } {
+  changesSince(epoch: number, version: number): ChangesSince {
     const current = this.state.version
-    const reset = (reason: FeedResetReason) => ({ epoch: this.epochValue, version: current, reset: true, reason, entries: [] as ChangeEntry[] })
+    const reset = (reason: FeedResetReason): ChangesSince => ({ epoch: this.epochValue, version: current, reset: true, reason, entries: [] as ChangeEntry[] })
     if (!Number.isFinite(epoch) || !Number.isFinite(version) || version < 0) return reset("invalid-cursor")
     if (epoch !== this.epochValue) return reset("epoch")
     if (version > current) return reset("future-version")

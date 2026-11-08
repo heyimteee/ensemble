@@ -284,6 +284,7 @@ test("a changes.since response recovers a dropped event as patches or a reset", 
     epoch: 10,
     version: 6,
     reset: true,
+    reason: "ring-gap",
     entries: [],
   }) as any).reason, "reset")
   assert.equal((decideChangesSince(meta({ version: 4 }), {

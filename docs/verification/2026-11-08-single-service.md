@@ -1,11 +1,12 @@
 # Single service per host and safe recovery (#151)
 
-Status: **verified locally on Linux/tmux; real post-fix replay skipped by design**
+Status: **verified locally on Linux/tmux; real post-fix replay skipped by design; review fixes recorded below**
 Date: 2026-11-08
 Issue: [#151](https://github.com/heyimteee/ensemble/issues/151)
 Spec: [#146](https://github.com/heyimteee/ensemble/issues/146)
 ADR: [0003](../adr/0003-single-service-and-safe-recovery.md)
 Base: `integration/single-service` at `b6420fd` (includes #147, #148, #149, #150)
+Review fixes: `fix/spec-146-review`
 Branch: `verify/single-service`
 Worktree: `/home/tristan/dev/ensemble-151`
 
@@ -36,10 +37,10 @@ log attribution (#150):
 
 | Command | Result |
 |---|---|
-| `npm run verify` | **Pass** — strict type check; **1007 tests passed, 0 failed, 0 skipped, 0 todo**, 28.0 s. |
-| Mock 100 (`ENSEMBLE_ROOT=/home/tristan/dev/ensemble-151 bash /tmp/opencode/mock100-setup-verify.sh`) | **Pass** — driver exit 0; **100 jobs, 137/137 tasks succeeded, 0 failed, 0 `task.failed`, 1 `service.start`, `maxObservedRuns=8`**. |
+| `npm run verify` | **Pass** — strict type check; **1014 tests passed, 0 failed, 0 skipped, 0 todo**, 26.9 s. |
+| Mock 100 (`ENSEMBLE_ROOT=/home/tristan/dev/ensemble-review bash /tmp/opencode/mock100-setup-verify.sh`) | **Pass** — driver exit 0; **100 jobs, 137/137 tasks succeeded, 0 failed, 0 `task.failed`, 1 `service.start`, `maxObservedRuns=8`**. |
 | `npm run test:live:fake:all` | **Pass** — `fake` 194 s, `fake-empty` 9 s; **2 passed, 0 failed, 0 skipped, 0 not run** (203 s total). |
-| Targeted restart/recovery tests (`--test-name-pattern="ticket14[89]"`) | **Pass** — **13 tests passed**, 0 failed, 0 skipped (1.44 s): 6 `ticket148`, 7 `ticket149`. |
+| Targeted restart/recovery tests (`--test-name-pattern="ticket14[89]"`) | **Pass** — **15 tests passed**, 0 failed, 0 skipped (0.33 s): 7 `ticket148`, 8 `ticket149`. |
 | `git diff --check` | **Pass** — exit 0, no whitespace errors. |
 | Prototype tree check (`git ls-files \| grep -i prototype`) | **Pass** — no prototype files in the tree. |
 
@@ -92,27 +93,54 @@ Event totals: `task.created` 137, `task.claimed` 137, `task.transition` 137,
 
 | Bucket | n | min | median | mean | p95 | max |
 |---|---|---|---|---|---|---|
-| Easy | 34 | 1.96 | 2.80 | 3.62 | 6.07 | 6.48 |
-| Medium | 33 | 2.62 | 3.41 | 3.93 | 5.59 | 5.65 |
-| Hard | 33 | 3.27 | 4.08 | 4.44 | 5.56 | 5.68 |
-| All | 100 | 1.96 | 3.64 | 4.00 | 5.88 | 6.48 |
+| Easy | 34 | 1.87 | 2.71 | 3.59 | 6.04 | 6.32 |
+| Medium | 33 | 2.59 | 3.36 | 3.91 | 5.46 | 5.52 |
+| Hard | 33 | 3.31 | 4.03 | 4.45 | 5.55 | 5.59 |
+| All | 100 | 1.87 | 3.71 | 3.98 | 5.86 | 6.32 |
 
 ### Artifacts
 
-- Results: `/tmp/opencode/mock100-results.json`
-- Harness output: `/tmp/opencode/151-mock100.log`
+- Results: `/tmp/opencode/mock100-artifacts-1794117806/mock100-results.json`
+- Harness output: `/tmp/opencode/146-review-mock100.log`
 - Service log and server/fake logs:
-  `/tmp/opencode/mock100-artifacts-1794115782/`
-- Reproduced audit output: `/tmp/opencode/151-mock100-audit.txt`
+  `/tmp/opencode/mock100-artifacts-1794117806/`
+- Prior verification artifacts: `/tmp/opencode/mock100-artifacts-1794115782/`
+
+## Prototype evidence for #148's 13-instance acceptance
+
+#148's acceptance asks for a mock 100 with 13 service instances (registry fix
+disabled or simulated) to be 100/100 with 0 `task.failed`. That run predates the
+merged code and is recorded here as **prototype evidence**, not as a run of the
+final tree:
+
+| Observation | Result |
+|---|---|
+| Service instances / `service.start` rows | **13 / 13** |
+| Plugin locations (project + 4 channels + 8 agents) | 13 |
+| Task rows | **137/137 succeeded**, all at attempt 1 |
+| Jobs | 100 sent, 0 job errors |
+| `task.failed` / failure records | **0 / 0** |
+| Failure sink (`service-failures-*.jsonl`) | absent |
+| Service log rows | 1,351 (`role=service`); instance/thread attribution absent in this pre-#150 build |
+
+The run shows lease-safe recovery is sufficient defense even when the registry
+does not collapse the 13 loads into one service. It produced 8→0 task failures
+compared with the pre-fix baseline.
+
+Artifacts: `/tmp/opencode/mock100-artifacts-1794109203/`
+(`mock100-results.json`, `logs/service-20261108-3784961.jsonl`). The merged tree
+was separately verified with the registry active: one `service.start` and
+137/137 tasks in the main mock above. No prototype source remains in the tree.
 
 ## Restart and recovery tests
 
 `node --test --experimental-strip-types --test-name-pattern="ticket14[89]"
-src/v2/service.test.ts` → **13 passed, 0 failed, 0 skipped**:
+src/v2/service.test.ts` → **15 passed, 0 failed, 0 skipped**:
 
 | Ticket | Test | Result |
 |---|---|---|
 | #148 | load leaves a live foreign lease working row untouched | pass |
+| #148 | a live lease is never retired for attempts or a passed deadline | pass |
 | #148 | an expired lease is requeued once and attempts rise only on the next claim | pass |
 | #148 | a working row with no claim and no local run is repaired | pass |
 | #148 | stop releases local claims and preserves foreign claims | pass |
@@ -120,6 +148,7 @@ src/v2/service.test.ts` → **13 passed, 0 failed, 0 skipped**:
 | #148 | a second service over shared storage never steals a live claim | pass |
 | #149 | restart requeue writes a failure attempt with the previous claim and lease | pass |
 | #149 | restart retirement writes a terminal failure record | pass |
+| #149 | stream finalization reports settlement and result eligibility separately | pass |
 | #149 | a recovered then successful task clears its restart error | pass |
 | #149 | a fallback reply is retried as an empty answer | pass |
 | #149 | an exhausted fallback reply fails visibly without a result | pass |
@@ -129,6 +158,26 @@ src/v2/service.test.ts` → **13 passed, 0 failed, 0 skipped**:
 These cover the crash path by simulation: an unexpired foreign claim is never
 stolen, expiry requeues exactly once with attempts preserved, a clean stop
 releases only local claims, and a recovered success clears the restart error.
+
+## Review fixes (spec #146 code review)
+
+| Finding | Fix | Evidence |
+|---|---|---|
+| Unsupported `ctx.directory` | `service.start` reads the declared `ctx.location.directory`, falling back to cwd | `ticket150: log rows identify the service instance, location, and thread` |
+| Acquire/stop race | `acquire()` re-checks the entry after its await; a stopping entry is never joined | `an acquire already awaiting the entry never joins its teardown` |
+| Live rows retired early | A live lease always wins over attempts/deadline; retire happens only after expiry | `ticket148: a live lease is never retired for attempts or a passed deadline` |
+| Wrong retire labels | Deadline → `timeout`/`deadline-exceeded`; exhaustion → `internal`/`attempts-exhausted`; only recovery is `restart` | `ticket149: restart retirement writes a terminal failure record` |
+| Requeue error leak | Requeue writes failure evidence only; legacy transient strings are dropped on retire | `ticket148: an expired lease ...`, `ticket149: restart retirement ...` |
+| Lost suppressed count | Window-close trailing summary plus `flush()` on `logs.recent`/stop | `a suppressed burst reports its total when the window closes`, `ticket150: feed resets ...` |
+| Private test seams | Maintenance is triggered through `invoke`; one narrow documented run hook replaces `activeRuns` access | `ticket148: ...expired lease...`, `ticket148: stop releases local claims...` |
+| Duplicated fixtures/blocks | Shared `seedAgent`/`seedWorkspace` fixtures; `retireTask`/`requeueRecoveredTask` helpers | full `service.test.ts` run |
+| Duplicated `changesSince` shape | Store returns the canonical `ChangesSince` union | `npm run check`, `store.test.ts` |
+| Duplicated failure reason | Top-level `reason` derives from `decision.reason` | `failure-record.test.ts` |
+| Unused coalescer API / unreachable reason | Foreign epochs use the delayed `createRefreshCoordinator`; reset reason is mandatory on resets | `foreign-epoch patches coalesce one delayed snapshot...` |
+| Ambiguous stream finalization | `finalizeStream` returns `{ message, eligible, reason }`; callers gate `resultMessageID` explicitly | `ticket149: stream finalization reports settlement and result eligibility separately` |
+| Missing gap counter | Logger stats count `feed.gap`; `:logs` shows `feedGaps` | `the logger counts feed gaps...`, `:logs shows the feed-gap counter...` |
+| 13-instance prototype evidence | Recorded explicitly above | `/tmp/opencode/mock100-artifacts-1794109203/` |
+| Real replay skip | Limitation kept explicit with a manual post-restart procedure above | not run |
 
 ## Real playground baseline (pre-fix)
 
@@ -156,6 +205,32 @@ running inside. The isolated mock 100 covers the same production code path,
 and `ticket149: the request-23 shape never succeeds on a stale fallback`
 reproduces request 23's stale-placeholder shape against the fixed code.
 
+### Manual replay procedure after a host restart
+
+This procedure was **not run** for this record and the host was **not**
+restarted by the verification agent. Run it after the user deliberately
+restarts the playground host:
+
+1. Confirm one service for the restarted realm: count distinct `instanceID`
+   values and `service.start` rows in the service log; expect **one service
+   start**, even though the host loads the plugin at every location.
+2. Replay the 30 prompts against the live playground:
+   `python3 /tmp/opencode/playground-postfix.py /tmp/opencode/playground-prompts.json`
+   (append-only results land in `/tmp/opencode/playground-postfix-results.jsonl`).
+3. Audit the replay:
+   - **30/30** requests sent with no send error; every task row `state=replied`.
+   - **0** duplicate completion handoffs: each `handoff.completion=true`
+     delivery appears once per correlation/recipient pair.
+   - **0** placeholder results: no `resultMessageID` or agent result text is in
+     `FALLBACK_REPLIES` (`Reply completed.`, `Reply interrupted.`,
+     `Reply interrupted before completion.`).
+   - **<5** `feed.gap` warnings, or `feedGaps < 5` in the `logs.recent` stats
+     shown by `:logs`.
+   - **1** `service.start` / distinct service `instanceID`.
+4. Record the host version, command, counts, and artifact paths in this file.
+   A skipped replay is not a pass; the mock and targeted tests are the current
+   evidence.
+
 ## Decision evidence
 
 | Invariant / acceptance | Evidence | Result |
@@ -168,7 +243,7 @@ reproduces request 23's stale-placeholder shape against the fixed code.
 | No placeholder success | `ticket149` fallback and request-23 tests | pass |
 | Mock 100 clean | 100/100 requests, 137/137 tasks, 0 `task.failed`, 0 failure records | pass |
 | Attributable logs | 926/926 rows carry role, instance, and thread | pass |
-| `npm run verify` | 1007/1007 tests | pass |
+| `npm run verify` | 1014/1014 tests | pass |
 | Documentation | `docs/implementation.md` already documents the registry and lease-safe recovery from #147/#148 | pass |
 
 ## Skips and limitations

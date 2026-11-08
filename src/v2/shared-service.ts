@@ -4,6 +4,8 @@ type Entry = {
   service: EnsembleV2Service
   stop: () => Promise<void>
   refs: number
+  /** Set before the final release starts teardown; acquiring one is invalid. */
+  stopping: boolean
 }
 
 type CreateService = (ctx: any) => Promise<{ service: EnsembleV2Service; stop: () => Promise<void> }>
@@ -39,40 +41,51 @@ export class SharedEnsemble {
   }
 
   async acquire(ctx: any): Promise<{ service: EnsembleV2Service; release: () => Promise<void> }> {
-    // A new location must not overlap the old service's teardown. Every waiter
-    // wakes together and coalesces onto the same post-stop creation below.
-    while (this.stopping) await this.stopping
-    if (!this.pending) {
-      this.pending = this.start(ctx).catch((error) => {
-        this.pending = undefined
-        throw error
-      })
-    }
-    const entry = await this.pending
-    entry.refs += 1
-    let released = false
-    return {
-      service: entry.service,
-      release: async () => {
-        if (released) return
-        released = true
-        entry.refs -= 1
-        if (entry.refs > 0) return
-        this.pending = undefined
-        const stopping = entry.stop()
-        this.stopping = stopping
-        try {
-          await stopping
-        } finally {
-          if (this.stopping === stopping) this.stopping = undefined
-        }
-      },
+    for (;;) {
+      // A new location must not overlap the old service's teardown. Every
+      // waiter wakes together and coalesces onto the same post-stop creation.
+      while (this.stopping) await this.stopping
+      if (!this.pending) {
+        const created = this.start(ctx)
+        this.pending = created
+        // Clear the slot only when this attempt still owns it; a replacement
+        // may already have been installed by the time rejection is observed.
+        created.catch(() => {
+          if (this.pending === created) this.pending = undefined
+        })
+      }
+      const pending = this.pending
+      const entry = await pending
+      // The last release can clear `pending` and start teardown while this
+      // acquire was already awaiting the resolved entry. Re-check after the
+      // await so an acquire never joins a stopping service.
+      if (this.pending !== pending || entry.stopping) continue
+      entry.refs += 1
+      let released = false
+      return {
+        service: entry.service,
+        release: async () => {
+          if (released) return
+          released = true
+          entry.refs -= 1
+          if (entry.refs > 0) return
+          entry.stopping = true
+          this.pending = undefined
+          const stopping = Promise.resolve().then(() => entry.stop())
+          this.stopping = stopping
+          try {
+            await stopping
+          } finally {
+            if (this.stopping === stopping) this.stopping = undefined
+          }
+        },
+      }
     }
   }
 
   private async start(ctx: any): Promise<Entry> {
     const { service, stop } = await this.create(ctx)
-    return { service, stop, refs: 0 }
+    return { service, stop, refs: 0, stopping: false }
   }
 }
 
