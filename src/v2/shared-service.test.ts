@@ -208,6 +208,9 @@ test("every location registers and disposes its own host surfaces against the on
     handlers: () => ({ fake: true }),
     attach: (registration: any) => { attached.push(registration) },
     detach: (registration: any) => { detached.push(registration) },
+    trackLocation: () => undefined,
+    untrackLocation: () => undefined,
+    handleHostEvent: async () => undefined,
     installToolsFor: async (ctx: any) => {
       const registration = { kind: "tools", ctx, disposed: false, dispose: async () => { registration.disposed = true } }
       toolRegistrations.push(registration)
@@ -242,6 +245,14 @@ test("every location registers and disposes its own host surfaces against the on
     },
     tool: { transform: async () => ({ dispose: async () => undefined }) },
     session: { hook: async () => ({ dispose: async () => undefined }) },
+    event: {
+      subscribe: async function* (options: any = {}) {
+        const signal: AbortSignal | undefined = options?.signal
+        if (!signal) return
+        if (signal.aborted) return
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }))
+      },
+    },
   }))
 
   const cleanups: Array<() => Promise<void>> = []

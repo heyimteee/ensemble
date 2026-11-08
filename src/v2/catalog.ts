@@ -41,6 +41,8 @@ export class Catalog {
   private models: ModelOption[] = []
   private skills: SkillOption[] = []
   private promise: Promise<void> | undefined
+  private queuedSource: any
+  private queuedSourceSet = false
   private failure: string | undefined
   private generation = 0
   private revisionValue = 0
@@ -69,15 +71,25 @@ export class Catalog {
     return this.failure
   }
 
-  refresh(): Promise<void> {
-    if (this.promise) return this.promise
+  refresh(source?: any): Promise<void> {
+    const ctx = source ?? this.ctx
+    if (this.promise) {
+      // A location-scoped update that arrives during a refresh from another
+      // location must still be read. Queue one follow-up instead of dropping
+      // the event into the coalesced in-flight pass.
+      if (ctx !== this.ctx) {
+        this.queuedSource = ctx
+        this.queuedSourceSet = true
+      }
+      return this.promise
+    }
     const generation = ++this.generation
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, 10_000) })
     const work = (async () => {
       const [modelsResult, skillsRaw] = await Promise.all([
-        this.ctx.model.list().then((value: any) => ({ value, error: undefined as unknown }), (error: unknown) => ({ value: [], error })),
-        this.ctx.skill.list().catch(() => []),
+        ctx.model.list().then((value: any) => ({ value, error: undefined as unknown }), (error: unknown) => ({ value: [], error })),
+        ctx.skill.list().catch(() => []),
       ])
       // A timed-out earlier attempt must not clobber a newer refresh.
       if (generation !== this.generation) return
@@ -103,6 +115,12 @@ export class Catalog {
     this.promise = Promise.race([work, timeout]).finally(() => {
       if (timer) clearTimeout(timer)
       this.promise = undefined
+      if (this.queuedSourceSet) {
+        const next = this.queuedSource
+        this.queuedSource = undefined
+        this.queuedSourceSet = false
+        void this.refresh(next)
+      }
     })
     return this.promise
   }
