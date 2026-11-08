@@ -150,6 +150,7 @@ import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { scopesToResync } from "../scoped-read.ts"
 import { approvalResolutionAt } from "../work-groups.ts"
 import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { createFeedGapReporter } from "./feed-gaps.ts"
 import { createClientStore } from "./client-store.ts"
 import { createStreamCoalescer } from "../stream-coalescer.ts"
 import {
@@ -2230,6 +2231,13 @@ export function EnsembleV2App() {
     run: () => { void refreshFull().catch(() => undefined) },
     delayMs: 200,
   })
+  // Ticket #150 follow-up: count every gap, but emit one truthful summary per
+  // window. Recovered catch-ups are debug; only a full-snapshot fallback or
+  // exhausted recovery passes warn.
+  const feedGapReporter = createFeedGapReporter({
+    emit: (level, event, fields) => logger.event(level, "feed", event, fields),
+    count: () => logger.recordFeedGap(),
+  })
   /** Review fix: a Work-shaped bad batch repairs only the Work scope. */
   const recoverWorkScope = async (): Promise<void> => {
     if (scopedReads && supportsScopedReads(lastSnapshotMeta)) {
@@ -2241,12 +2249,16 @@ export function EnsembleV2App() {
   }
   let feedRecovery: Promise<void> | undefined
   let feedRecoveryAgain = false
-  const recoverFeed = (): Promise<void> => {
+  let feedRecoverySettle: ((outcome: "recovered" | "full" | "exhausted") => void) | undefined
+  const recoverFeed = (onOutcome?: (outcome: "recovered" | "full" | "exhausted") => void): Promise<void> => {
     if (feedRecovery) {
       feedRecoveryAgain = true
+      if (onOutcome && !feedRecoverySettle) feedRecoverySettle = onOutcome
       return feedRecovery
     }
+    feedRecoverySettle = onOutcome
     feedRecovery = (async () => {
+      let outcome: "recovered" | "full" | "exhausted" = "recovered"
       try {
         let passes = 0
         do {
@@ -2255,6 +2267,7 @@ export function EnsembleV2App() {
           const cursor = lastSnapshotMeta
           if (!cursor || !supportsPatchFeed(cursor)) {
             await refreshFull().catch(() => undefined)
+            outcome = "full"
             continue
           }
           let result: ChangesSince
@@ -2266,6 +2279,7 @@ export function EnsembleV2App() {
             })
           } catch {
             await refreshFull().catch(() => undefined)
+            outcome = "full"
             continue
           }
           const decision = decideChangesSince(cursor, result)
@@ -2295,9 +2309,14 @@ export function EnsembleV2App() {
           // A scoped resync that cannot name or repair the gap falls back to
           // the full durable snapshot.
           await refreshFull().catch(() => undefined)
+          outcome = "full"
         } while (feedRecoveryAgain && passes < 3)
+        if (feedRecoveryAgain && passes >= 3 && outcome !== "full") outcome = "exhausted"
       } finally {
+        const settle = feedRecoverySettle
+        feedRecoverySettle = undefined
         feedRecovery = undefined
+        settle?.(outcome)
       }
     })()
     return feedRecovery
@@ -2322,22 +2341,33 @@ export function EnsembleV2App() {
     }
     if (payload.counts) client.applyCounts(payload.counts)
     if (decision.action === "ignore") return
-    logger.event("warn", "feed", "feed.gap", {
+    // One observation per gap, one summary per burst. Recovery below classifies
+    // whether the gap actually resolved or fell back.
+    feedGapReporter.record({
       reason: decision.reason,
-      epoch: payload.epoch,
-      from: payload.from,
-      version: payload.version,
-      entries: payload.entries?.length,
+      ...(payload.epoch !== undefined ? { epoch: payload.epoch } : {}),
+      ...(payload.from !== undefined ? { from: payload.from } : {}),
+      ...(payload.version !== undefined ? { version: payload.version } : {}),
+      ...(payload.entries !== undefined ? { entries: payload.entries.length } : {}),
       reset: payload.reset === true,
     })
     // A malformed batch that can only have touched Work resyncs just the Work
-    // scope; anything else needs the full durable snapshot boundary.
+    // scope; anything else needs the full durable snapshot boundary. These
+    // decisions are hard fallbacks, not recoverable cursor catch-ups.
     if (decision.reason === "malformed" || decision.reason === "other") {
+      feedGapReporter.settle("full")
       if (isWorkOnlyPatch(payload)) void recoverWorkScope()
       else void refreshFull().catch(() => undefined)
       return
     }
-    void recoverFeed()
+    if (decision.reason !== "gap") {
+      // reset/epoch/unloaded keep their warning semantics even when a scoped
+      // resync can repair them: the service cursor was not usable.
+      feedGapReporter.settle("full")
+      void recoverFeed()
+      return
+    }
+    void recoverFeed((outcome) => feedGapReporter.settle(outcome))
   }
 
   const openAgent = (agent: Agent) => {
@@ -4024,6 +4054,7 @@ export function EnsembleV2App() {
     heartbeatDisposed = true
     stopHeartbeat()
     foreignEpochRefresh.dispose()
+    feedGapReporter.dispose()
     groupStream.dispose()
     dmStream.dispose()
     snapshotRefresh.dispose()

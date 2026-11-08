@@ -103,10 +103,10 @@ test("flush reports pending suppressions for the viewer or shutdown", () => {
 
 test("the logger counts feed gaps for diagnostics and :logs", () => {
   const log = createLogger({ role: "tui", dir: null, level: "warn", now })
-  log.event("warn", "feed", "feed.gap", { reason: "gap" })
-  log.event("warn", "feed", "feed.gap", { reason: "epoch" })
+  log.recordFeedGap()
+  log.recordFeedGap()
   log.event("warn", "feed", "feed.reset", { reason: "epoch" })
-  assert.equal(log.stats().feedGaps, 2)
+  assert.equal(log.stats().feedGaps, 2, "coalesced gap lines never undercount the observed rate")
 })
 
 test("logging redacts credentials and keeps errors structured", () => {
