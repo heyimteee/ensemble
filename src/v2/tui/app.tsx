@@ -4,7 +4,6 @@ import { SyntaxStyle } from "@opentui/core"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { relative } from "node:path"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
@@ -163,6 +162,7 @@ import { approvalResolutionAt } from "../work-groups.ts"
 import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createFeedGapReporter } from "./feed-gaps.ts"
 import { createClientStore } from "./client-store.ts"
+import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"
 import { createStreamCoalescer } from "../stream-coalescer.ts"
 import { applyWorkActivity, clearWorkActivitiesForSession, isWorkActivity, pruneWorkActivities, workActivityLabel, type WorkActivity } from "../work-activity.ts"
 import {
@@ -2979,17 +2979,58 @@ export function EnsembleV2App() {
     if (composerActive()) dispatchInteraction({ type: "focus.set", focus: "chat" })
   }
 
+  // Ticket #176: file completion reads one cached per-workspace list. A cold
+  // or stale cache paints immediately and refreshes in the background; a
+  // filter keystroke never spawns `fd`.
+  const fileIndex = createFileIndex({
+    discover: discoverWorkspaceFiles,
+    onUpdate: (updatedWorkspaceID) => {
+      if (workspaceID() !== updatedWorkspaceID) return
+      const current = completion()
+      if (current?.kind !== "file" || !composerRef) return
+      const value = String(composerRef.plainText ?? "")
+      const cursor = Number(composerRef.cursorOffset ?? value.length)
+      syncFileCompletion(value, cursor, current)
+    },
+  })
+  onCleanup(() => fileIndex.dispose())
+  // The root key changes only when the active workspace or its directory
+  // changes, so snapshot repaints do not re-prime discovery.
+  const activeFileRoot = createMemo(() => {
+    const workspace = activeWorkspace()
+    return workspace ? `${workspace.id}\u0000${workspace.directory}` : ""
+  })
+  createEffect(() => {
+    const root = activeFileRoot()
+    if (!root) return
+    const separator = root.indexOf("\u0000")
+    void fileIndex.refresh(root.slice(0, separator), root.slice(separator + 1)).catch(() => undefined)
+  })
+  const refreshActiveFileIndex = () => {
+    const workspace = activeWorkspace()
+    if (!workspace) return
+    void fileIndex.refresh(workspace.id, workspace.directory).catch(() => undefined)
+  }
+  /** A host file event names one path; refresh every workspace it belongs to. */
+  const refreshFileIndexForPath = (file: string) => {
+    const normalized = file.replaceAll("\\", "/")
+    let matched = false
+    for (const workspace of workspaces()) {
+      const directory = workspace.directory.replaceAll("\\", "/").replace(/\/+$/, "")
+      if (normalized && (normalized === directory || normalized.startsWith(`${directory}/`))) {
+        matched = true
+        void fileIndex.refresh(workspace.id, workspace.directory).catch(() => undefined)
+      }
+    }
+    if (!matched) refreshActiveFileIndex()
+  }
+
   const agentItems = () => activeAgents().map((agent) => ({ title: activeWorkspace()?.leaderID === agent.id ? chromeJoin([agent.name, "leader"]) : agent.name, value: agent.name }))
 
   const fileItems = () => {
     const workspace = activeWorkspace()
     if (!workspace) return []
-    try {
-      const output = execFileSync("fd", ["--type", "f", "--hidden", "--exclude", ".git", "--exclude", ".ensemble", "--exclude", "node_modules", "--max-depth", "4", ".", workspace.directory], { encoding: "utf8", timeout: 5000 })
-      return output.split("\n").filter(Boolean).slice(0, 500).map((file) => relative(workspace.directory, file)).map((file) => ({ title: file, value: file }))
-    } catch {
-      return []
-    }
+    return fileIndex.paths(workspace.id, workspace.directory).map((file) => ({ title: file, value: file }))
   }
 
   const skillPalette = (value: string, cursor: number) => {
@@ -3036,6 +3077,9 @@ export function EnsembleV2App() {
   }
 
   const openFileCompletion = (token: FileReferenceToken) => {
+    // Opening the palette is an explicit user refresh point: the cached list
+    // paints immediately, and one bounded background pass catches new files.
+    refreshActiveFileIndex()
     const query = token.path.toLowerCase()
     const items = fileItems().filter((item) => fuzzyMatch(query, item.title))
     setCompletion({ kind: "file", query, start: token.start, end: token.end, cursor: 0, items })
@@ -4307,6 +4351,13 @@ export function EnsembleV2App() {
     void refresh()
     const stopData = context.data.listen(({ details }: any) => {
       const type = typeof details?.type === "string" ? details.type : ""
+      // Ticket #176: file-created/edited events invalidate only the owning
+      // workspace's cached list; the refresh is async and rate-limited.
+      if (type === "file.edited" || type === "filesystem.changed") {
+        const file = typeof details?.data?.file === "string" ? details.data.file : typeof details?.file === "string" ? details.file : ""
+        refreshFileIndexForPath(file)
+        return
+      }
       if (type === "session.text.delta" || type === "session.idle" || type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") handleNativeEvent(details)
       // Reconnect may have missed events; recover with an immediate forced
       // snapshot while the version guard still prevents an older response
@@ -4575,9 +4626,10 @@ export function EnsembleV2App() {
         { id: "ensemble.v2.completion.up", title: "Ensemble: Previous completion", bind: "up", run: () => moveCompletion(-1) },
         { id: "ensemble.v2.completion.down", title: "Ensemble: Next completion", bind: "down", run: () => moveCompletion(1) },
         { id: "ensemble.v2.completion.select", title: "Ensemble: Select completion", bind: "enter", run: () => { void selectCompletion().catch(showError) } },
+        { id: "ensemble.v2.completion.refresh", title: "Ensemble: Refresh file list", bind: "ctrl+r", enabled: () => completion()?.kind === "file", run: (_input, event) => { event?.preventDefault?.(); event?.stopPropagation?.(); refreshActiveFileIndex() } },
         { id: "ensemble.v2.completion.cancel", title: "Ensemble: Close completion", bind: "escape", run: () => closeCompletion() },
       ],
-      bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.cancel"],
+      bindings: ["ensemble.v2.completion.up", "ensemble.v2.completion.down", "ensemble.v2.completion.select", "ensemble.v2.completion.refresh", "ensemble.v2.completion.cancel"],
     }))
     // Ticket #145: the host may consume a lone Escape before the raw listener
     // sees it; keep a thin layer so the logs overlay always closes/refreshes.
