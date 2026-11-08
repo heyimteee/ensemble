@@ -48,6 +48,25 @@ test("file completion opens, filters, and inserts through one token scanner", ()
   assert.ok(source.includes("replaceFileReference(value, item.value, state.start, state.end)"))
 })
 
+test("file completion filters the cached index instead of spawning fd", () => {
+  // Behavior: file-index.test.ts cache hits and bounded refresh rate.
+  const source = app()
+  assert.ok(source.includes('import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"'))
+  assert.ok(source.includes("fileIndex.paths(workspace.id, workspace.directory)"))
+  assert.ok(!source.includes('execFileSync("fd", ["--type", "f"'))
+  assert.ok(!source.includes('"--max-depth", "4", ".", workspace.directory'))
+})
+
+test("the file index refreshes on activation, file events, and explicit refresh", () => {
+  // Behavior: file-index.test.ts stale-while-refresh and refresh coalescing.
+  const source = app()
+  assert.ok(source.includes("fileIndex.refresh(root.slice(0, separator), root.slice(separator + 1))"))
+  assert.ok(source.includes('type === "file.edited" || type === "filesystem.changed"'))
+  assert.ok(source.includes("refreshFileIndexForPath(file)"))
+  assert.ok(source.includes('id: "ensemble.v2.completion.refresh"'))
+  assert.ok(source.includes("onCleanup(() => fileIndex.dispose())"))
+})
+
 test("the Work pane maps active tasks through dispatch groups", () => {
   // Behavior: workgroups.test.ts group visibility and layout.
   assert.ok(app().includes("workGroupsForTasks(active, state()?.subtasks"))
