@@ -69,6 +69,31 @@ test("a failure record is self-contained without conversation content", () => {
   assert.equal(record.content, undefined)
 })
 
+test("a restart recovery record carries the previous claim and lease expiry", () => {
+  const record: any = buildFailureRecord({
+    event: "failure.attempt",
+    level: "warn",
+    incidentID: "failure_restart",
+    failureClass: "restart",
+    task: task({ state: "pending", outcome: "pending", error: "Recovered after an expired lease; retrying." }),
+    error: "The work lease expired before the run finished.",
+    decision: { type: "retry", attempt: 3, maxAttempts: 5, delayMs: 0, retryAt: 40, reason: "lease-expired" },
+    previousClaim: "run_dead",
+    leaseExpiredAt: 30,
+    reason: "lease-expired",
+  })
+
+  assert.equal(record.failureClass, "restart")
+  assert.equal(record.previousClaim, "run_dead")
+  assert.equal(record.leaseExpiredAt, 30)
+  assert.equal(record.reason, "lease-expired")
+  assert.equal(record.decision.type, "retry")
+  assert.equal(record.decision.reason, "lease-expired")
+  assert.equal(record.decision.attempt, 3)
+  assert.equal(record.decision.maxAttempts, 5)
+  assert.equal(record.decision.delayMs, 0)
+})
+
 test("content logging attaches instruction and message text only when enabled", () => {
   const record: any = buildFailureRecord({
     event: "failure.attempt",

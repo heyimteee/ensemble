@@ -31,6 +31,24 @@ export type ToolOutcome = {
   code?: string
 }
 
+export const REPLY_COMPLETED = "Reply completed."
+export const REPLY_INTERRUPTED = "Reply interrupted."
+export const REPLY_INTERRUPTED_BEFORE_COMPLETION = "Reply interrupted before completion."
+
+/** Internal stream-settlement text (ticket #149). These strings exist only to
+ * keep an interrupted row from rendering blank; they are never a successful
+ * answer and must never be stored as `resultMessageID`.
+ */
+export const FALLBACK_REPLIES: ReadonlySet<string> = new Set([
+  REPLY_COMPLETED,
+  REPLY_INTERRUPTED,
+  REPLY_INTERRUPTED_BEFORE_COMPLETION,
+])
+
+export function isFallbackReply(text: string | undefined | null): boolean {
+  return typeof text === "string" && FALLBACK_REPLIES.has(text.trim())
+}
+
 export function assistantResult(messages: any[], since: number): { text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any } {
   const texts: string[] = []
   const tools: string[] = []
