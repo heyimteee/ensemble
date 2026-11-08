@@ -432,8 +432,8 @@ export class V2Store {
     // claim stays visible and this instance will not double-claim it while
     // its lease is fresh — always re-check ownership before running (see
     // `claimWon` in queue.ts). Two processes actively pumping against one
-    // store is unsupported: `SharedEnsemble` keeps one service per process
-    // and `sync()` exists to converge cross-location views of that service.
+    // store is unsupported: `sharedEnsemble()` keeps one service per host
+    // realm and `sync()` exists to converge cross-location views of it.
     // Runs stay instance-owned: they track live native sessions, which only
     // the owning process can drive.
     for (const { value } of await this.scanAll("v2/subtask/")) {

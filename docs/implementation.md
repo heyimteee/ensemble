@@ -25,6 +25,7 @@ OpenCode engine
 ### Components
 
 - **`src/v2/service.ts`** — domain service and orchestrator. Workspaces, agents, messages, subtasks, delegation, approvals, memory, model fallback, scheduling, recovery.
+- **`src/v2/shared-service.ts`** — process-global, versioned `SharedEnsemble` registry on `globalThis`; reference-counts locations so one service starts per host realm.
 - **`src/v2/catalog.ts`** — model/skill catalog refresh with a timeout guard.
 - **`src/v2/execution.ts`** — pure execution helpers: model availability, tool-call inspection, prompt/context assembly, memory formatting, Skillbox permissions.
 - **`src/v2/skill-invocation.ts`** — the shared pure skill invocation planner used by composer completion and server validation: anchors, assigned/General skills, owner choices, direct-chat rejection, and work titles.
@@ -192,7 +193,30 @@ Idempotency keys (`work:`/`handoff:`) scope actor, workspace, kind, a hashed run
 
 Outside-roster rule: the user is the authorizer, so a user group post naming a roster agent outside the workspace fails loudly with a clear message and no leader fallback. Agent posts (group mentions and handoffs) follow the existing approval model instead: contact needs user consent, then the approved turn/hop runs once through the same queue.
 
-Single-process claim boundary: claim ownership (`claimedBy`, `leaseUntil`, `activeRunID`) is process-local. Store `sync()` never overwrites a locally held claim with a storage row's claim fields, and a fresh claim is re-read from storage before work starts (`claimWon`) so a racing writer cannot be double-claimed silently. Two processes actively pumping against one store is unsupported; `SharedEnsemble` keeps one service per process and `sync()` converges cross-location views of that service.
+Single-process claim boundary: claim ownership (`claimedBy`, `leaseUntil`, `activeRunID`) is process-local. Store `sync()` never overwrites a locally held claim with a storage row's claim fields, and a fresh claim is re-read from storage before work starts (`claimWon`) so a racing writer cannot be double-claimed silently. Two processes actively pumping against one store is unsupported; `sharedEnsemble()` keeps one service per host realm and `sync()` converges cross-location views of that service.
+
+### Shared service registry
+
+OpenCode re-evaluates the plugin module once per location (project, channel, or
+agent home). `src/v2/shared-service.ts` keeps one `SharedEnsemble` registry on
+`globalThis` under `Symbol.for("ensemble.v2.shared-service")`, so every module
+load joins the same service and store:
+
+- The registry exposes `SHARED_SERVICE_VERSION`. A location reuses an existing
+  registry only when it is structurally compatible
+  (`typeof registry.acquire === "function"`) and the version matches. The check
+  must never use `instanceof`: class identity changes when the module is
+  evaluated again for another location.
+- `acquire(ctx)` reference-counts the location. The first location's plugin
+  context owns storage, sessions, events, and tools for the realm; later
+  locations share that service and supply their own RPC registration.
+  `release()` is idempotent, and the service stops only after the last location
+  releases it.
+- Every location still registers and disposes its own RPC handlers. The
+  registry shares the service and store, not the transport registration.
+- A version bump creates a new registry while the old one keeps serving its
+  existing locations until they release. Lease-safe recovery covers that
+  overlap window; do not rely on the global slot to point at the old registry.
 
 ## Subtasks
 
