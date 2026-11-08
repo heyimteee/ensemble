@@ -9,6 +9,12 @@
  *   - every task succeeded, with no task.failed or failure records
  *   - the TUI logged fewer than five warn-level feed.gap lines
  *
+ * A fifth channel/agent pair then proves the per-location tool registry
+ * (spec #152): the fake provider emits an `ensemble_ask_person` tool call from
+ * that non-first location, and the probe requires a durable pending approval,
+ * resolves it, and asserts cleanup. A missing tool leaves no approval and
+ * fails the probe.
+ *
  * It is test infrastructure only; the plugin never imports this file.
  */
 import { mkdirSync, readFileSync, readdirSync } from "node:fs"
@@ -20,6 +26,12 @@ const CHANNELS = [
   { name: "mock-c", lead: "epsilon", peer: "zeta" },
   { name: "mock-d", lead: "eta", peer: "theta" },
 ]
+
+// Ticket #157: a deliberately separate fifth location. It is created after the
+// 100-request run so the request mix, counts, and timings stay unchanged.
+const PROBE = { name: "mock-e", lead: "iota", peer: "kappa" }
+const PROBE_PROMPT = "Probe 101: fake-ask-person"
+const PROBE_QUESTION = "Which release channel should this task use?"
 
 function readArg(name, fallback) {
   const index = process.argv.indexOf(name)
@@ -145,6 +157,137 @@ function fail(message, failures) {
   console.error(`live-multilocation: ${message}`)
 }
 
+function probeTranscript(state, workspaceID) {
+  const messages = Object.values(state.messages ?? {})
+    .flat()
+    .filter((message) => message.workspaceID === workspaceID)
+    .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+    .slice(-20)
+    .map((message) => ({ seq: message.seq, author: message.author, kind: message.kind, text: String(message.text ?? "").slice(0, 300) }))
+  const tasks = Object.values(state.subtasks ?? {})
+    .filter((task) => task.workspaceID === workspaceID)
+    .map((task) => ({ id: task.id, title: task.title, state: task.state, outcome: task.outcome, approvalID: task.approvalID ?? "", error: task.error ?? "" }))
+  const approvals = Object.values(state.approvals ?? {})
+    .filter((approval) => approval.workspaceID === workspaceID)
+    .map((approval) => ({ id: approval.id, kind: approval.kind, status: approval.status, detail: approval.detail }))
+  return { messages, tasks, approvals }
+}
+
+/**
+ * Ticket #157 regression for the missing per-location tools. The fifth channel
+ * is never the first plugin location, so its native session only has
+ * `ensemble_ask_person` if the realm installs tools on every attached location.
+ * The fake provider emits the tool call; a pass requires the durable pending
+ * approval, an explicit decision, and no pending row left behind.
+ */
+async function runToolProbe(failures) {
+  const started = Date.now()
+  const failuresBefore = failures.length
+  const probe = {
+    status: "fail",
+    channel: PROBE.name,
+    prompt: PROBE_PROMPT,
+    workspaceID: "",
+    agentID: "",
+    approvalID: "",
+    detail: "",
+    resolution: "",
+    taskState: "",
+    outcome: "",
+    elapsedMs: 0,
+    transcript: null,
+  }
+  try {
+    const lead = await invoke("agent.create", {
+      name: PROBE.lead,
+      title: "Probe leader",
+      role: "Non-first-location tool probe.",
+      mainModel: { providerID: "ensemble-fake", modelID: "ensemble-fake-model" },
+    })
+    const peer = await invoke("agent.create", {
+      name: PROBE.peer,
+      title: "Probe peer",
+      role: "Non-first-location tool probe.",
+      mainModel: { providerID: "ensemble-fake", modelID: "ensemble-fake-model" },
+    })
+    const directory = join(project, "channels", PROBE.name)
+    mkdirSync(directory, { recursive: true })
+    const workspace = await invoke("workspace.create", {
+      name: PROBE.name,
+      directory,
+      memberIDs: [lead.id, peer.id],
+      leaderID: lead.id,
+      synthesis: true,
+    })
+    probe.workspaceID = workspace.id
+    probe.agentID = lead.id
+    // Let onboarding prompts and this new location's plugin boot settle.
+    await sleep(3_000)
+    await invoke("message.send", { workspaceID: workspace.id, text: PROBE_PROMPT, recipientIDs: [lead.id] })
+
+    const approvalDeadline = Date.now() + 90_000
+    let approval
+    while (Date.now() < approvalDeadline) {
+      const state = await snapshot()
+      approval = Object.values(state.approvals ?? {}).find((item) =>
+        item.status === "pending" && item.kind === "ask_person" && item.workspaceID === workspace.id
+      )
+      if (approval) break
+      await sleep(1_000)
+    }
+    if (!approval) {
+      const state = await snapshot()
+      probe.transcript = probeTranscript(state, workspace.id)
+      probe.elapsedMs = Date.now() - started
+      fail(`tool probe: no pending ask_person approval in ${PROBE.name}; the non-first location did not execute ensemble_ask_person`, failures)
+      return probe
+    }
+    probe.approvalID = approval.id
+    probe.detail = String(approval.detail ?? "")
+    if (probe.detail !== PROBE_QUESTION) fail(`tool probe: unexpected question detail "${probe.detail}"`, failures)
+
+    await invoke("approval.resolve", {
+      id: approval.id,
+      approve: true,
+      resolution: "Approved by the multi-location tool probe.",
+    })
+
+    const cleanupDeadline = Date.now() + 120_000
+    let cleanup
+    while (Date.now() < cleanupDeadline) {
+      const state = await snapshot()
+      const pending = Object.values(state.approvals ?? {}).filter((item) =>
+        item.status === "pending" && item.workspaceID === workspace.id
+      )
+      const task = approval.subtaskID ? state.subtasks?.[approval.subtaskID] : undefined
+      cleanup = {
+        pending: pending.length,
+        approvalStatus: state.approvals?.[approval.id]?.status ?? "",
+        taskState: task?.state ?? "",
+        outcome: task?.outcome ?? "",
+        error: task?.error ?? "",
+      }
+      if (cleanup.pending === 0 && cleanup.taskState === "replied" && cleanup.outcome === "succeeded") break
+      await sleep(1_000)
+    }
+    probe.resolution = cleanup?.approvalStatus ?? ""
+    probe.taskState = cleanup?.taskState ?? ""
+    probe.outcome = cleanup?.outcome ?? ""
+    probe.elapsedMs = Date.now() - started
+    if (probe.resolution !== "approved") fail(`tool probe: approval resolved as "${probe.resolution}", expected approved`, failures)
+    if ((cleanup?.pending ?? 1) !== 0) fail(`tool probe: ${cleanup?.pending ?? "unknown"} pending approval(s) remain after resolution`, failures)
+    if (probe.taskState !== "replied" || probe.outcome !== "succeeded") {
+      fail(`tool probe: task ended ${probe.taskState}/${probe.outcome}${cleanup?.error ? ` (${cleanup.error})` : ""}`, failures)
+    }
+    if (failures.length === failuresBefore) probe.status = "pass"
+    return probe
+  } catch (error) {
+    probe.elapsedMs = Date.now() - started
+    fail(`tool probe failed: ${error?.message ?? error}`, failures)
+    return probe
+  }
+}
+
 async function main() {
   const failures = []
   const agents = {}
@@ -234,6 +377,30 @@ async function main() {
     row.event === "feed.gap" && row.level === "warn" && row.ts >= runStarted)
   if (gapWarnings.length >= 5) fail(`expected <5 warn-level feed.gap lines, saw ${gapWarnings.length}`, failures)
 
+  // Ticket #157: the fifth location attaches after the measured 100-request
+  // run, then a fake-provider ask_person tool call must produce a real
+  // approval on that channel. Re-read the logs afterwards: a later location
+  // must not start a second service, and the resolved probe must not add
+  // failures.
+  const toolProbe = await runToolProbe(failures)
+  const serviceAfterProbe = readLogs("service-")
+  const startsAfterProbe = serviceAfterProbe.rows.filter((row) => row.event === "service.start")
+  const taskFailedAfterProbe = serviceAfterProbe.rows.filter((row) => row.event === "task.failed")
+  const failureRecordsAfterProbe = serviceAfterProbe.rows.filter((row) => row.cat === "failure")
+  if (startsAfterProbe.length !== 1) fail(`expected 1 service.start after the fifth location attached, saw ${startsAfterProbe.length}`, failures)
+  if (taskFailedAfterProbe.length !== 0) fail(`expected 0 task.failed after the tool probe, saw ${taskFailedAfterProbe.length}`, failures)
+  if (failureRecordsAfterProbe.length !== 0) fail(`expected 0 failure records after the tool probe, saw ${failureRecordsAfterProbe.length}`, failures)
+  if (toolProbe.approvalID) {
+    const requested = serviceAfterProbe.rows.filter((row) => row.event === "approval.requested" && row.approvalID === toolProbe.approvalID)
+    const resolved = serviceAfterProbe.rows.filter((row) => row.event === "approval.resolved" && row.approvalID === toolProbe.approvalID)
+    if (requested.length !== 1) fail(`tool probe: expected 1 approval.requested row, saw ${requested.length}`, failures)
+    if (resolved.length !== 1) fail(`tool probe: expected 1 approval.resolved row, saw ${resolved.length}`, failures)
+  }
+  const tuiAfterProbe = readLogs("tui-")
+  const gapWarningsAfterProbe = tuiAfterProbe.rows.filter((row) =>
+    row.event === "feed.gap" && row.level === "warn" && row.ts >= runStarted)
+  if (gapWarningsAfterProbe.length >= 5) fail(`expected <5 warn-level feed.gap lines after the tool probe, saw ${gapWarningsAfterProbe.length}`, failures)
+
   const summary = {
     jobs: jobs.length,
     jobsFailed,
@@ -246,10 +413,10 @@ async function main() {
       counts[String(task.attempts ?? 0)] = (counts[String(task.attempts ?? 0)] ?? 0) + 1
       return counts
     }, {}),
-    serviceStarts: starts.length,
-    taskFailed: taskFailed.length,
-    failureRecords: failureRecords.length,
-    tuiGapWarnings: gapWarnings.length,
+    serviceStarts: startsAfterProbe.length,
+    taskFailed: taskFailedAfterProbe.length,
+    failureRecords: failureRecordsAfterProbe.length,
+    tuiGapWarnings: gapWarningsAfterProbe.length,
     maxObservedRuns: maxRuns,
     settleMs: elapsedMs,
     resultMessages: [...tasks.values()].filter((task) => task.resultMessageID).length,
@@ -257,7 +424,8 @@ async function main() {
       .map((task) => messageById.get(task.resultMessageID)?.text?.length ?? 0)
       .filter((chars) => chars > 0)
       .reduce((sum, chars) => sum + chars, 0),
-    files: { service: service.rows.length, tui: tui.rows.length, malformed: service.malformed + tui.malformed },
+    toolProbe,
+    files: { service: serviceAfterProbe.rows.length, tui: tuiAfterProbe.rows.length, malformed: serviceAfterProbe.malformed + tuiAfterProbe.malformed },
     failures,
   }
   if (out) {

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Multi-location regression probe (spec #146).
+# Multi-location regression probe (spec #146, extended by #157).
 #
 # Starts the isolated fake host, opens the TUI, creates four channels and eight
-# agents, sends 100 requests, and asserts:
+# agents, sends 100 requests, then adds a fifth channel/agent pair whose native
+# session must execute ensemble_ask_person. It asserts:
 #   - one service.start despite one plugin load per location
-#   - every task succeeds; no task.failed or failure records
+#   - every 100-run task succeeds; no task.failed or failure records
+#   - the fifth location creates and resolves a durable ask_person approval
 #   - fewer than five warn-level feed.gap lines in the TUI log
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
