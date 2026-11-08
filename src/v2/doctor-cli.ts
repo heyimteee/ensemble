@@ -3,8 +3,9 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { canonicalDirectory } from "./paths.ts"
+import { isDerivedWorkStatus } from "./queue.ts"
 import { workspaceConfigPath, CONFIG_VERSION, type WorkspaceConfig } from "./workspace-config.ts"
-import { diagnoseLocations, type DoctorConfigRead, type DoctorLocationInput, type DoctorReport, type DoctorSnapshot, type DoctorSubtask, type ServiceIdentity } from "./doctor.ts"
+import { diagnoseLocations, type DoctorConfigRead, type DoctorLocationInput, type DoctorReport, type DoctorSnapshot, type ServiceIdentity } from "./doctor.ts"
 
 export type DoctorOptions = {
   json: boolean
@@ -175,18 +176,6 @@ export function validateServerUrl(value: string): string {
   return value.replace(/\/+$/, "")
 }
 
-const DERIVED_STATUSES: ReadonlySet<string> = new Set([
-  "pending",
-  "working",
-  "waiting",
-  "retrying",
-  "needs_you",
-  "replied",
-  "failed",
-  "stalled",
-  "cancelled",
-])
-
 function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
   const state = (output as any)?.state
   if (!state || typeof state !== "object") throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has no state object.`)
@@ -311,7 +300,7 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
       const workKind = raw.workKind === "delegation" || raw.workKind === "handoff" || raw.workKind === "turn" ? raw.workKind : undefined
       const stateValue = raw.state === "pending" || raw.state === "working" || raw.state === "replied" ? raw.state : undefined
       const outcomeValue = raw.outcome === "pending" || raw.outcome === "succeeded" || raw.outcome === "failed" ? raw.outcome : undefined
-      const statusValue = typeof raw.status === "string" && DERIVED_STATUSES.has(raw.status) ? raw.status as DoctorSubtask["status"] : undefined
+      const statusValue = isDerivedWorkStatus(raw.status) ? raw.status : undefined
       const failureKind = raw.failure?.kind === "native" || raw.failure?.kind === "delivery" || raw.failure?.kind === "lease" || raw.failure?.kind === "attempts"
         ? raw.failure.kind
         : undefined
@@ -338,6 +327,7 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
         ...(outcomeValue ? { outcome: outcomeValue } : {}),
         ...(statusValue ? { status: statusValue } : {}),
         ...(typeof raw.interrupted === "boolean" ? { interrupted: raw.interrupted } : {}),
+        ...(typeof raw.approvalID === "string" ? { approvalID: raw.approvalID } : {}),
         ...(typeof raw.awaitingChildren === "boolean" ? { awaitingChildren: raw.awaitingChildren } : {}),
         ...(number(raw.attempts) !== undefined ? { attempts: number(raw.attempts) } : {}),
         ...(number(raw.createdAt) !== undefined ? { createdAt: number(raw.createdAt) } : {}),

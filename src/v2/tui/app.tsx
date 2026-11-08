@@ -221,7 +221,7 @@ import {
   type WorkFocusPosition,
 } from "./workfocus.ts"
 import { workApprovalLimit, workApprovalSection } from "./workapprovals.ts"
-import { isWorkActionID, workTaskActions, type WorkActionID } from "./workactions.ts"
+import { isWorkActionID, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
 import {
   accumulateCompletions,
   BUBBLE_CHROME,
@@ -489,10 +489,10 @@ export function EnsembleV2App() {
   // durable rows. The track is UI-local and prunes itself after each window.
   const [approvalMotion, setApprovalMotion] = createSignal<ApprovalInboxMotion>({ emphasized: new Set(), resolved: [], active: false })
   const approvalTrack = createApprovalInboxTrack()
-  // Review fix (finding 2): the work row with an in-flight Stop/Cancel (or
-  // retry/restart) action shows its interim label until the terminal state
-  // arrives; cleared in a finally so it can never stick.
-  const [pendingWork, setPendingWork] = createSignal<{ id: string; action: PendingWorkAction } | null>(null)
+  // Ticket #173: the focused card shows an in-flight Stop/Cancel (or
+  // retry/restart) label until the durable update settles it, and the error
+  // path clears it so it can never stick.
+  const [pendingWork, setPendingWork] = createSignal<WorkPendingAction | null>(null)
   const [settingsCursor, setSettingsCursor] = createSignal(0)
   const [settingsField, setSettingsField] = createSignal<SettingsFieldState | null>(null)
   const [settingsFieldText, setSettingsFieldText] = createSignal("")
@@ -1157,15 +1157,19 @@ export function EnsembleV2App() {
     if (settlement.page !== workPage()) setWorkPage(settlement.page)
     if (settlement.id !== workFocusID()) setWorkFocusID(settlement.id)
   })
-  // Ticket #173: a pending-action label stays on its card through the RPC and
-  // clears as soon as the durable row reaches its terminal update.
+  // Ticket #173: a pending-action label stays on its card until the durable
+  // row moves past the state the action was dispatched from, and clears on a
+  // disappeared row. The RPC return alone never clears it.
+  const clearPendingWork = (id: string) => {
+    setPendingWork((current) => (current?.id === id ? null : current))
+  }
+  const beginPendingWork = (task: Subtask, action: PendingWorkAction) => {
+    setPendingWork({ id: task.id, action, before: workLifecycleSignature(task) })
+  }
   createEffect(() => {
     const pending = pendingWork()
     if (!pending) return
-    const task = state()?.subtasks[pending.id]
-    if (!task || isTerminalWorkStatus(deriveWorkStatus(task, Date.now()))) {
-      setPendingWork((current) => (current?.id === pending.id ? null : current))
-    }
+    if (pendingWorkSettled(pending, state()?.subtasks[pending.id])) clearPendingWork(pending.id)
   })
   const workHeader = () => {
     const pane = workPane()
@@ -3767,25 +3771,25 @@ export function EnsembleV2App() {
 
   const retrySelected = async () => {
     const task = selectedActionTask("work.retry"); if (!task) return
-    setPendingWork({ id: task.id, action: "retry" })
-    try { await run("Retry subtask", async () => { await invoke(context, "task.retry", { id: task.id }) }) }
-    finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
+    beginPendingWork(task, "retry")
+    const ok = await run("Retry subtask", async () => { await invoke(context, "task.retry", { id: task.id }) })
+    if (!ok) clearPendingWork(task.id)
   }
   const restartSelected = async () => {
     const task = selectedActionTask("work.restart"); if (!task) return
-    setPendingWork({ id: task.id, action: "restart" })
-    try { await run("Restart subtask", async () => { await invoke(context, "task.restart", { id: task.id }) }) }
-    finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
+    beginPendingWork(task, "restart")
+    const ok = await run("Restart subtask", async () => { await invoke(context, "task.restart", { id: task.id }) })
+    if (!ok) clearPendingWork(task.id)
   }
   // Review fix (finding 2): the row shows `Stopping…`/`Cancelling…` (or the
-  // retry/restart analogue) while its RPC is in flight, until the terminal
-  // state arrives. The finally clears it on completion AND error, so no row
-  // can stick on the interim label.
+  // retry/restart analogue) while its RPC is in flight and until the durable
+  // update settles it. The error path clears it explicitly so no row can stick
+  // on the interim label.
   const cancelSelected = async (action: PendingWorkAction = "cancel") => {
     const task = selectedActionTask("work.cancel"); if (!task) return
-    setPendingWork({ id: task.id, action })
-    try { await run(action === "stop" ? "Stop subtask" : "Cancel subtask", async () => { await invoke(context, "task.cancel", { id: task.id }) }) }
-    finally { setPendingWork((current) => (current?.id === task.id ? null : current)) }
+    beginPendingWork(task, action)
+    const ok = await run(action === "stop" ? "Stop subtask" : "Cancel subtask", async () => { await invoke(context, "task.cancel", { id: task.id }) })
+    if (!ok) clearPendingWork(task.id)
   }
   // Slice C: on a direct surface with parked user-owned input, `x` removes
   // the oldest queued line (the inline `[x remove]` affordance); everywhere
@@ -6777,10 +6781,10 @@ export function EnsembleV2App() {
                         // rebuilding static card data.
                         const view = createMemo(() => {
                           const now = Date.now()
-                          const rowStatus = deriveWorkStatus(task, now)
+                          const rowStatus = deriveWorkStatus(task, now, { pendingApprovalIDs: pendingApprovalIDs(), nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs() })
                           const terminal = isTerminalWorkStatus(rowStatus)
                           const needsYou = !terminal && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
-                          const pending = !terminal && pendingWork()?.id === task.id ? pendingWork()!.action : null
+                          const pending = pendingWork()?.id === task.id ? pendingWork()!.action : null
                           const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
                           return {
                             terminal,

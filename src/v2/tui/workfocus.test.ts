@@ -2,7 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_ROWS } from "./workrows.ts"
-import { paginateWorkGroups, type WorkPanePage, type WorkPaneSection } from "./workpane.ts"
+import { paginateWorkGroups, workPaneBodyHeight, workspacePaneWidths, type WorkPanePage, type WorkPaneSection } from "./workpane.ts"
 import { workViewGroups } from "./workpane.ts"
 import {
   firstWorkFocus,
@@ -249,8 +249,9 @@ test("ticket173: the size matrix emits in-bounds rectangles for every supported 
   const views = workViewGroups(items, record(...items), { now: 5_000 })
   const matrix: Array<[number, number]> = [[80, 24], [100, 30], [120, 40], [160, 50]]
   for (const [width, height] of matrix) {
-    const content = Math.max(36, Math.floor(width * 0.4) - 4)
-    const body = Math.max(4, height - 24)
+    const panes = workspacePaneWidths(width)
+    const content = panes.workContentWidth
+    const body = workPaneBodyHeight(height)
     const layout = paginateWorkGroups(views.active, content, body, 5_000)
     const pages = workLayoutRects(layout)
     for (const page of pages) {

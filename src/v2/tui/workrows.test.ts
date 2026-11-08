@@ -14,7 +14,6 @@ import {
   hasActiveWork,
   isNeedsYouTask,
   mergeStreamingActivity,
-  needsYouSuffix,
   orderedWorkItems,
   pendingWorkLabel,
   queuedActivityFrame,
@@ -40,7 +39,6 @@ import {
   workCardsForTasks,
   workGlyph,
   workRowFrame,
-  workRowText,
   workStatusLabel,
   type WorkCard,
   type WorkCardMotion,
@@ -113,36 +111,8 @@ test("work status labels name the visible lifecycle", () => {
   assert.equal(workStatusLabel("cancelled"), "cancelled")
 })
 
-test("work rows show the assigned agent and derived state", () => {
-  assert.equal(
-    workRowText(task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }), "Nova", 1000),
-    "⠋ Check the build │ Nova │ working",
-  )
-  assert.equal(
-    workRowText(task({ state: "replied", outcome: "succeeded" }), "Nova", 1000),
-    "● Check the build │ Nova │ replied",
-  )
-  assert.equal(
-    workRowText(task({ state: "replied", outcome: "failed", error: "boom" }), "Sage", 1000),
-    "✕ Check the build │ Sage │ failed",
-  )
-  assert.equal(
-    workRowText(task({ interrupted: true }), "Sage", 1000),
-    "◆ ◆ Check the build │ Sage │ waiting │ needs you │ v to resolve",
-    "an interruption needs the user without a caller-supplied flag",
-  )
-  assert.equal(
-    workRowText(task({ awaitingChildren: true }), "Sage", 1000),
-    "◌ Check the build │ Sage │ waiting",
-  )
-  assert.equal(
-    workRowText(task({ state: "replied", outcome: "failed", failure: { kind: "attempts", reason: "attempts-exhausted" } }), "Sage", 1000),
-    "◍ Check the build │ Sage │ stalled",
-  )
-})
-
 test("work rows keep unassigned work visible", () => {
-  assert.ok(workRowText(task({ assigneeID: undefined }), "Unassigned", 1000).includes("Unassigned"))
+  assert.ok(workCompactRowText(workCompactRow("Unassigned", "Check the build", "▫", "queued", 40)).includes("Unassigned"))
 })
 
 test("work block mounts only while active work exists", () => {
@@ -403,38 +373,6 @@ test("review fix: interim work labels name the in-flight action", () => {
   assert.equal(pendingWorkLabel("restart"), "Restarting…")
 })
 
-test("review fix: pending work rows show the interim label until terminal", () => {
-  const running = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
-  assert.equal(
-    workRowText(running, "Nova", 1000, { pending: "cancel" }),
-    "⠋ Check the build │ Nova │ Cancelling…",
-  )
-  assert.equal(
-    workRowText(running, "Nova", 1000, { pending: "stop" }),
-    "⠋ Check the build │ Nova │ Stopping…",
-  )
-  assert.equal(
-    workRowText(task({ state: "pending" }), "Nova", 1000, { pending: "retry" }),
-    "▫ Check the build │ Nova │ Retrying…",
-  )
-  // No pending action: the derived status renders as before.
-  assert.equal(workRowText(running, "Nova", 1000), "⠋ Check the build │ Nova │ working")
-  assert.equal(workRowText(running, "Nova", 1000, { pending: null }), "⠋ Check the build │ Nova │ working")
-})
-
-test("review fix: needs-you rows carry a distinct marker, never plain waiting", () => {
-  const running = task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 })
-  assert.equal(
-    workRowText(running, "Nova", 1000, { needsYou: true }),
-    `◆ ⠋ Check the build │ Nova │ working${needsYouSuffix()}`,
-  )
-  assert.ok(workRowText(running, "Nova", 1000, { needsYou: true }).includes("needs you"))
-  assert.ok(workRowText(running, "Nova", 1000, { needsYou: true }).includes("v to resolve"))
-  assert.ok(!workRowText(running, "Nova", 1000).includes(NEEDS_YOU_MARK))
-  // Interim + needs-you compose: the marker survives while stopping.
-  assert.ok(workRowText(running, "Nova", 1000, { needsYou: true, pending: "stop" }).includes("Stopping…"))
-})
-
 test("review fix: needs-you derives from existing interruption/approval state", () => {
   const pending = task({ approvalID: "ap" })
   assert.equal(isNeedsYouTask(task({ interrupted: true }), new Set()), true)
@@ -656,13 +594,12 @@ test("ticket136: terminal cards keep their final glyph, state word, and a flat s
       tideTick: 7,
       width: 40,
       variant: "travel",
-      pendingFor: () => "stop",
       detailFor: () => "should not appear",
       pendingApprovalIDs: new Set(["ap"]),
     })
     assert.equal(card.terminal, true)
     assert.equal(card.needsYou, false, "a terminal card without a pending decision keeps its final state")
-    assert.equal(card.detail, state, "terminal details ignore pending/activity callbacks")
+    assert.equal(card.detail, state, "terminal details ignore activity callbacks")
     assert.equal(card.header.glyph, glyph)
     assert.equal(card.header.status, state.toUpperCase())
     assert.equal(card.tideVariant, "travel", "the active assignment carries into the terminal card")
@@ -670,6 +607,13 @@ test("ticket136: terminal cards keep their final glyph, state word, and a flat s
     assert.equal(card.tide, " ▁".repeat(20))
   }
   assert.equal(cardWithMotion(task({ state: "pending" }), "Nova", { now: 1_000, tick: 0, width: 40 }).terminal, false)
+})
+
+test("ticket173: a pending action label reaches the card before the durable update lands", () => {
+  const stalled = task({ state: "replied", outcome: "failed", attempts: 5, failure: { kind: "attempts", reason: "attempts-exhausted" } })
+  const card = workCardForTask(stalled, "Nova", { now: 1_000, width: 40, pendingFor: () => "retry" })
+  assert.equal(card.status, "stalled")
+  assert.equal(card.detail, "Retrying…", "the interim label is visible while the retry is in flight")
 })
 
 test("ticket136: a terminal card with a still-pending approval keeps the NEEDS YOU treatment", () => {

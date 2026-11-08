@@ -8,7 +8,7 @@ Status: **developer preview**, compatibility recorded against OpenCode 2.2.1. Th
 
 ```text
 Ensemble TUI workspace page
-  agents + workspaces rail · direct/group chat · subtask board · settings · approvals
+  agents + workspaces rail · direct/group chat · Work pane · settings · approvals
                          │
                   typed RPC + events
                          │
@@ -58,15 +58,28 @@ Workspace {
 ```
 
 - One canonical directory maps to one active workspace.
-- Switching workspace changes the chat, task board, and directory for new runs.
+- Switching workspace changes the chat, Work pane, and directory for new runs.
 - Sessions are bound to `workspace + agent`, so switching does not discard them.
 - `<workspace>/.ensemble/config.json` is authoritative for workspace name, leader, members, synthesis, and paused state. OpenCode storage remains authoritative for agents, messages, subtasks, approvals, memories, bindings, and history.
 - Valid config files discovered in a directory register a workspace automatically; invalid config is rejected and the last good state is kept.
 - `.ensemble/` is created when a workspace is created, is added to `.gitignore`, and contains only config, handoffs, and init metadata. Conversation history stays in OpenCode storage.
 
-The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent workspace directories come first, `~/` expands, and manual paths are supported. The workspace rail groups workspaces by canonical project directory, supports `/` search, and shows unread (`●`), busy (Braille `⠋`), and paused (`⏸`) markers. The selected workspace and subtask are persisted and restored when the page reopens.
+The directory picker uses `fd` to enumerate directories and fuzzy filtering in the TUI. Recent workspace directories come first, `~/` expands, and manual paths are supported. The workspace rail groups workspaces by canonical project directory, supports `/` search, and shows unread (`●`), busy (Braille `⠋`), and paused (`⏸`) markers. The selected workspace, focused task, and focused pane are persisted and restored when the page reopens.
 
 A workspace can be paused with `p`; paused workspaces reject new work until resumed. Automatic leader synthesis is chosen when the workspace is created.
+
+## Workspace shell
+
+The root row is three stable panes: Rail, Chat, Work. [ADR 0006](adr/0006-three-pane-workspace-shell.md) records the decision and trade-offs; this section maps it to the implementation.
+
+- **Widths.** `workspacePaneWidths(terminalWidth)` in `tui/workpane.ts` is the only width function. It owns the rail clamp, the chat remainder, the Work share, and the drawer width. The transcript composes `messageWidth` from `chatContentWidth` while Work is present and `chatOnlyContentWidth` when it is absent. `workPaneBodyHeight` is the matching body-height helper. Breakpoints: ≥118 columns is the full three-pane card shell, 96–117 is three panes with compact Work, and <96 becomes a right drawer toggled by the Work focus key or `F3`. No consumer recomputes these numbers; the size tests read the same helpers.
+- **Rail.** `tui/railmodel.ts` is pure. Agents group by primary workspace (active workspace, then most recent membership, then Homeless), each agent appears once, the subline is the role title, and a group header carries the workspace name, counts, and collapse state. `z` and a header click toggle a group; `j`/`k` skip collapsed agents. Collapse is durable UI state (`ui.collapsedRailGroups`). The Workspaces section is a separate pane with the directory label, unread/busy counts, paused marker, and active selection. One cursor traverses the visible rows.
+- **Work pane.** `workpane.ts` filters `workViewGroups` into ACTIVE (non-terminal groups, terminal cards removed) and HISTORY (all-terminal groups, newest latest-finish first, tasks chronological). `paginateWorkGroups` lays whole group rows into pages by body height and repeats a group header with `cont.` when it crosses a page. The card design is unchanged; only container width/height and the focus border adapt. Completed groups leave ACTIVE at once and remain in HISTORY after the shared hold, so the pane does not add a second retention policy.
+- **Focus and actions.** `workfocus.ts` turns the rendered page sections into card rectangles and `nextWorkCard` picks the nearest card with perpendicular tie-breaking. `j`/`k` at a page edge auto-page and keep the horizontal column; `gg`/`G` and `Ctrl+d`/`u` use the same geometry. Focus is stored by task id in `app.tsx` and settled by `settleWorkFocusByPosition`; a disappearing card falls back to the nearest prior position. `Enter` opens the result; `d`/`t`/`r`/`R`/`x`/`o` run only the actions `workTaskActions` advertises for the derived status. A pending retry/restart/cancel label is compared against the dispatch-time lifecycle signature and clears on the durable update, never on the RPC return alone.
+- **Approvals.** `workapprovals.ts` windows pending approvals into a sticky bottom section with header, overflow count, and one shared cursor. `v` focuses it, `j`/`k` moves, `Enter` resolves, and `Esc` returns to Work. `V` opens the full inbox only when rows overflow, and approvals join the Tab cycle only while pending.
+- **Borders and alignment.** Focused cards use `theme.cardFocus` (white); unfocused cards use the subdued border grey, while the Work pane keeps its own separate focus border. `format.ts` `alignedDetailRows` computes one label width for the member wizard and picker rows, so `|` separators align for ASCII and Unicode and long labels truncate once.
+- **Native picker.** A group-chat `o` opens a picker of workspace members (name, role, leader, busy); Enter routes to that member's native session, Esc closes, and a missing binding raises a clear toast. Work focus `o` opens the focused card's assignee directly, and a DM keeps the current agent route.
+- **Performance.** Rail grouping, view filtering, pagination, spatial navigation, and alignment are pure functions. There are no new timers: the existing one-shot Work invalidation timer still covers status, lease, retry, and hold transitions. Static card data stays in the identity cache; focus changes only the selected prop, and approvals reuse the existing pending memo.
 
 ## Agents
 
@@ -376,7 +389,7 @@ Approvals cover:
 - cross-project/private transcript sharing
 - interrupted work
 
-Approvals appear inline in the chat and in the inbox. Resolutions are idempotent: repeating the same decision returns the resolved approval, while a conflicting decision fails with `already_resolved`. Only the user can approve. Approving interrupted work resumes it once; discarding marks it failed.
+Approvals appear inline in the chat and as a sticky section at the bottom of the Work pane, with the full inbox reserved for overflow. Resolutions are idempotent: repeating the same decision returns the resolved approval, while a conflicting decision fails with `already_resolved`. Only the user can approve. Approving interrupted work resumes it once; discarding marks it failed.
 
 ## Leader key
 

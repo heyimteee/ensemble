@@ -28,13 +28,18 @@ export type WorkApprovalSection = {
   cursor: number | undefined
 }
 
+/** One clamp for inline rows, shared by body-height sizing and the window. */
+function inlineApprovalRows(limit: number): number {
+  return Math.max(1, Math.min(MAX_INLINE_APPROVALS, Math.floor(limit) || 1))
+}
+
 /**
  * Rows available to the sticky section. The header always takes one row, and
  * a tiny body still shows one approval rather than hiding the decision.
  */
 export function workApprovalLimit(bodyHeight: number): number {
   const body = Math.max(0, Math.floor(bodyHeight))
-  return Math.max(1, Math.min(MAX_INLINE_APPROVALS, body - 1 || 1))
+  return inlineApprovalRows(body - 1 || 1)
 }
 
 /**
@@ -49,7 +54,7 @@ export function workApprovalSection(
 ): WorkApprovalSection {
   const total = approvals.length
   if (total === 0) return { total: 0, rows: [], overflow: 0, cursor: undefined }
-  const rows = Math.max(1, Math.min(MAX_INLINE_APPROVALS, Math.floor(limit) || 1))
+  const rows = inlineApprovalRows(limit)
   const selected = Math.max(0, Math.min(total - 1, Math.floor(cursor) || 0))
   const start = rows >= total ? 0 : Math.max(0, Math.min(total - rows, selected - Math.floor(rows / 2)))
   return {

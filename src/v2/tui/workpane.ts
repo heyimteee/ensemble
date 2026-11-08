@@ -1,7 +1,7 @@
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { allWorkGroupsForTasks, workFinishedAt, type WorkGroup, type WorkGroupOptions } from "../work-groups.ts"
 import type { Subtask } from "../types.ts"
-import { WORK_CARD_GAP_COLS, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
+import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS, workCardContentWidth } from "./workrows.ts"
 import { workGroupLabel } from "./workgroups.ts"
 
 /**
@@ -80,7 +80,7 @@ export function workspacePaneWidths(terminalWidth: number): ShellPaneWidths {
       chatWidth,
       workWidth,
       workChrome,
-      workContentWidth: Math.max(WORK_CARD_MIN_WIDTH - 5, workWidth - workChrome),
+      workContentWidth: Math.max(WORK_CARD_MIN_WIDTH - WORK_CARD_HORIZONTAL_CHROME, workWidth - workChrome),
       chatContentWidth: Math.max(20, chatWidth - 9),
       chatOnlyContentWidth: Math.max(20, chatWidth - 9),
     }
@@ -104,7 +104,7 @@ export function workspacePaneWidths(terminalWidth: number): ShellPaneWidths {
     chatWidth,
     workWidth,
     workChrome,
-    workContentWidth: Math.max(WORK_CARD_MIN_WIDTH - 5, workWidth - workChrome),
+    workContentWidth: Math.max(WORK_CARD_MIN_WIDTH - WORK_CARD_HORIZONTAL_CHROME, workWidth - workChrome),
     chatContentWidth: Math.max(20, chatWidth - 9),
     chatOnlyContentWidth: Math.max(20, chatOnlyWidth - 9),
   }
@@ -274,7 +274,7 @@ export function paginateWorkGroups(
   const cards = fitColumns >= 2 && body >= WORK_CARD_ROWS + 2
   const columns = cards ? fitColumns : 0
   const cardWidth = cards ? Math.floor((width - WORK_CARD_GAP_COLS * (columns - 1)) / columns) : 0
-  const cardContentWidth = cards ? Math.max(12, cardWidth - 5) : Math.max(12, width)
+  const cardContentWidth = cards ? workCardContentWidth(cardWidth) : Math.max(12, width)
   const atoms: SectionAtom[] = []
   groups.forEach((group, index) => {
     const fullLabel = workGroupLabel(group, index + 1)

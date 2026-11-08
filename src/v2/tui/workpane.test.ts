@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
-import { WORK_CARD_GAP_COLS, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
+import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
 import {
   paginateWorkGroups,
   settleWorkFocus,
@@ -82,7 +82,7 @@ test("ticket172: work content width adapts from compact rows to three card colum
   for (const terminalWidth of [80, 96, 100, 120, 140, 160, 200]) {
     const panes = workspacePaneWidths(terminalWidth)
     assert.equal(panes.workContentWidth, panes.workWidth - panes.workChrome)
-    assert.ok(panes.workContentWidth >= WORK_CARD_MIN_WIDTH - 5, "the pane keeps a legible card width")
+    assert.ok(panes.workContentWidth >= WORK_CARD_MIN_WIDTH - WORK_CARD_HORIZONTAL_CHROME, "the pane keeps a legible card width")
   }
 })
 
@@ -264,7 +264,7 @@ test("ticket172: card pages keep the exact right edge at pane widths", () => {
     const used = layout.cardWidth * layout.columns + WORK_CARD_GAP_COLS * (layout.columns - 1)
     assert.ok(used <= panes.workContentWidth)
     assert.ok(panes.workContentWidth - used < layout.columns + WORK_CARD_GAP_COLS)
-    assert.equal(layout.cardContentWidth, layout.cardWidth - 5)
+    assert.equal(layout.cardContentWidth, layout.cardWidth - WORK_CARD_HORIZONTAL_CHROME)
   }
 })
 

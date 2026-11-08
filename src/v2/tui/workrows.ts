@@ -6,7 +6,7 @@ import { TRANSCRIPT_WINDOW } from "../scoped-read.ts"
 import type { Subtask } from "../types.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
-import { chromeJoin, chromeSeparator } from "./separators.ts"
+import { chromeJoin } from "./separators.ts"
 import {
   flatTideLevels,
   flatTideStrip,
@@ -53,34 +53,17 @@ export function workGlyph(status: DerivedWorkStatus): string {
   return GLYPHS[status]
 }
 
+/** One inline status label for work, shared by activity and card copy. Pure. */
 export function workStatusLabel(status: DerivedWorkStatus): string {
   return status === "needs_you" ? "needs you" : status
 }
 
-/** One inline row: `{glyph} {title} │ {agent} │ {status}`. Pure. */
-export function workRowText(
-  task: Subtask,
-  agentLabel: string,
-  now: number,
-  opts: { pending?: PendingWorkAction | null; needsYou?: boolean } = {},
-): string {
-  const status = deriveWorkStatus(task, now)
-  const segment = opts.pending
-    ? pendingWorkLabel(opts.pending)
-    : status === "needs_you"
-      ? "waiting"
-      : workStatusLabel(status)
-  const row = chromeJoin([`${workGlyph(status)} ${short(task.title || "(untitled)", 60)}`, agentLabel, segment])
-  if (!opts.needsYou && status !== "needs_you") return row
-  return `${NEEDS_YOU_MARK} ${row}${needsYouSuffix()}`
-}
-
 /**
  * In-flight work-action labels (brief §2.8/`Stopping…` pattern, ticket
- * acceptance row 19): while a Stop/Cancel (or analogous retry/restart) RPC
- * is in flight the row shows the interim label instead of the derived
- * status, until the terminal state arrives. Callers clear the pending action
- * in a finally so no row can stick on the interim label. Pure.
+ * acceptance row 19): while a Stop/Cancel (or analogous retry/restart) RPC is
+ * in flight the card shows the interim label instead of the derived status,
+ * until the durable update that settles the action lands. An error clears it
+ * explicitly so no card can stick on the interim label. Pure.
  */
 export type PendingWorkAction = "stop" | "cancel" | "retry" | "restart"
 
@@ -99,16 +82,12 @@ export function pendingWorkLabel(action: PendingWorkAction): string {
 
 /**
  * Distinct attention marker for work blocked on the user (brief §2.2/`needs
- * you` amber override): interrupted runs and approval-gated work (ask_person
- * and friends) render `◆` + `│ needs you │ v to resolve`, visually distinct
- * from plain pending `▫`. Derived from existing interruption/approval state
- * only — no new coordination semantics. Pure.
+ * you` amber override): interrupted runs and approval-gated work render the
+ * single `◆` glyph plus the uppercase `NEEDS YOU` state word in the card
+ * header. Exactly one marker is drawn per card. Derived from existing
+ * interruption/approval state only — no new coordination semantics. Pure.
  */
 export const NEEDS_YOU_MARK = "◆"
-
-export function needsYouSuffix(): string {
-  return ` ${chromeSeparator()} needs you ${chromeSeparator()} v to resolve`
-}
 
 /** True while the task waits on the user: interrupted, gated on a still-pending approval, or blocked by a native permission mirror. */
 export { isNeedsYouTask }
@@ -816,7 +795,10 @@ const NO_TASK_IDS: ReadonlySet<string> = new Set<string>()
  * approvals, and layout width; no animation clock reaches this function.
  */
 export function workCardForTask(task: Subtask, agentLabel: string, options: WorkCardOptions): WorkCard {
-  const status = deriveWorkStatus(task, options.now)
+  const status = deriveWorkStatus(task, options.now, {
+    pendingApprovalIDs: options.pendingApprovalIDs,
+    nativeBlockedSubtaskIDs: options.nativeBlockedSubtaskIDs,
+  })
   const terminal = isTerminalWorkStatus(status)
   // A terminal card is display-only: the terminal state owns the glyph and
   // detail, and an old interruption must not revive needs-you. A still-pending
@@ -827,7 +809,7 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     options.pendingApprovalIDs ?? NO_TASK_IDS,
     options.nativeBlockedSubtaskIDs ?? NO_TASK_IDS,
   )
-  const pending = terminal ? null : options.pendingFor?.(task) ?? null
+  const pending = options.pendingFor?.(task) ?? null
   const width = Math.max(16, Math.floor(options.width))
   const textWidth = Math.max(8, width - 2)
   const variant = options.variantFor?.(task) ?? options.variant ?? "current"
@@ -973,6 +955,12 @@ export const WORK_CARD_GAP_ROWS = 1
 export const WORK_CARD_GAP_COLS = 1
 /** Minimum outer card width that keeps the header, title, detail, and tide legible. */
 export const WORK_CARD_MIN_WIDTH = 24
+/** Outer-to-content chrome: rounded border (2), left accent bar (1), and side padding (2). */
+export const WORK_CARD_HORIZONTAL_CHROME = 5
+/** Content width inside the card chrome, floored at the legible minimum. */
+export function workCardContentWidth(outerWidth: number): number {
+  return Math.max(12, Math.floor(outerWidth) - WORK_CARD_HORIZONTAL_CHROME)
+}
 /** Section header plus the key-hint row in card mode. */
 export const WORK_BLOCK_CHROME_ROWS = 2
 /**

@@ -102,10 +102,10 @@ pending, unclaimed work solely because its queue timestamp had passed.
 - **The status union is wider than the persisted state.** `Subtask.state`
   remains `pending | working | replied` for storage compatibility; the
   canonical lifecycle is always derived separately.
-- **Completed groups clear; history is a separate pane decision.** Non-terminal
-  cards never start the shared hold. A complete group still clears after the
-  normal hold; retaining it in a history list is the right Work pane's concern
-  (#172).
+- **Completed groups leave ACTIVE but remain in HISTORY (#172).** The shared
+  hold still clears the active card; the Work pane keeps the group in its
+  HISTORY view under the same finished-work retention instead of discarding
+  it. A non-terminal card never starts the hold.
 - **A stalled card requires an explicit action.** There is no auto-retry after
   the budget; retry, restart, cancel, or dismissal is a user decision.
 
@@ -116,6 +116,8 @@ pending, unclaimed work solely because its queue timestamp had passed.
 - Do not show `retrying` without a scheduled retry or lost claim.
 - Keep migration classification on structured fields; never substring-match
   user-visible error copy.
+- Do not use the persisted `state === "replied"` as a terminal test; stalled
+  rows keep that storage cache. Service decisions use `deriveWorkStatus`.
 
 ## Validation
 
@@ -123,6 +125,7 @@ pending, unclaimed work solely because its queue timestamp had passed.
 |---|---|
 | Pure status table (lease, deadline, retry, waiting, needs-you, native, stall) | `src/v2/queue.test.ts` |
 | Queue wait past the window, live lease past deadline, lost lease, exhausted attempts, native error, completion handoff, waiting, cancellation, legacy reconciliation | `src/v2/service.test.ts` (`ticket168`) |
+| Stalled child keeps its parent waiting; stalled row survives finished-work retention; migration repairs a late result; a lease-loss requeue carries retry evidence and the late answer repairs; a held run heartbeats across its delivery deadline | `src/v2/service.test.ts` (`ticket165`, `ticket169`, `ticket170`) |
 | TUI labels, glyphs, tones, and mounted stalled cards | `src/v2/tui/workrows.test.ts` |
 | Non-terminal group persistence, stalled retry/cancel transitions, stalled section tone, no completion timer | `src/v2/tui/workgroups.test.ts` (`ticket170`) |
 | Explicit retry/restart of an exhausted row, recovery notice supersede, tool-only empty turn, lifecycle and recovery logs, diagnostic recovery rows | `src/v2/service.test.ts` (`ticket170`) |
