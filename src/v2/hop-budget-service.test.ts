@@ -404,6 +404,12 @@ test("ticket161: hop consumption and refusal log IDs, counts, and reason codes w
     assert.equal(refusal.refusedLayer, "task")
     assert.equal(refusal.refusedUsed, 0)
     assert.ok(!JSON.stringify(refusals.entries).includes("SECRET_REFUSED"))
+    const failureRows = await handlers["logs.recent"]({ directory, cat: "failure", limit: 20 })
+    assert.equal(
+      failureRows.entries.some((entry: any) => entry.dispatchGroupID === groupID),
+      false,
+      "a controlled budget refusal is not a generic task failure",
+    )
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

@@ -21,7 +21,68 @@ export type FailureClass =
   | "init"
   | "empty-reply"
   | "restart"
+  | "budget"
   | "internal"
+
+/**
+ * Ticket #163: a controlled dispatch-budget stop is a reason code, not a
+ * generic task failure. Only the layer and counts are recorded; refusal copy,
+ * task titles, instructions, and conversation text never enter the record.
+ */
+export type BudgetFailureLayer = "task" | "group" | "command" | "depth" | "fanout" | "continuation" | "closed"
+
+export type BudgetFailure = {
+  layer: BudgetFailureLayer
+  used?: number
+  max?: number
+}
+
+export const BUDGET_FAILURE_CODE = "budget-exhausted"
+
+const BUDGET_LAYERS: readonly BudgetFailureLayer[] = ["task", "group", "command", "depth", "fanout", "continuation", "closed"]
+
+function budgetNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : undefined
+}
+
+/**
+ * Recognize a dispatch-budget refusal from either a structured error or the
+ * shipped refusal copy. The result is deliberately narrow: a layer and, when
+ * the copy carries it, the used/max pair.
+ */
+export function budgetFailureReason(error: unknown): BudgetFailure | undefined {
+  const source = (error ?? {}) as Record<string, any>
+  const code = String(source.code ?? "")
+  const type = String(source.type ?? "")
+  const structured = code === "dispatch_budget_exhausted"
+    || type === "dispatch.budget.exhausted"
+    || type === "dispatch.budget.refused"
+  if (structured) {
+    const layer = BUDGET_LAYERS.find((item) => item === source.layer) ?? "group"
+    const used = budgetNumber(source.used)
+    const max = budgetNumber(source.max)
+    return {
+      layer,
+      ...(used !== undefined ? { used } : {}),
+      ...(max !== undefined ? { max } : {}),
+    }
+  }
+  const message = String(source.message ?? error ?? "")
+  if (!/(dispatch budget|task budget|dispatch group|command budget|continuation limit|dispatch depth|per run)/i.test(message)) return undefined
+  if (!/(exhausted|limit is reached|limit reached|limit is|less than|is closed)/i.test(message)) return undefined
+  let layer: BudgetFailureLayer = "group"
+  if (/task budget/i.test(message)) layer = "task"
+  else if (/continuation limit|continuation group/i.test(message)) layer = "continuation"
+  else if (/command budget/i.test(message)) layer = "command"
+  else if (/dispatch group/i.test(message)) layer = "group"
+  else if (/dispatch depth|depth limit/i.test(message)) layer = "depth"
+  else if (/per run|fan-?out|delegation limit|handoff limit/i.test(message)) layer = "fanout"
+  const counts = /\((\d+)\s*\/\s*(\d+)/.exec(message)
+  return {
+    layer,
+    ...(counts ? { used: budgetNumber(Number(counts[1])), max: budgetNumber(Number(counts[2])) } : {}),
+  }
+}
 
 export type FailureDecision =
   | { type: "retry"; attempt: number; maxAttempts: number; delayMs: number; retryAt: number; reason?: string }
@@ -58,6 +119,8 @@ export type FailureRecordInput = {
   durationMs?: number
   toolOutcomes?: ToolOutcome[]
   lastMessages?: Message[]
+  /** Explicit budget stop; inferred from a structured error or refusal copy when omitted. */
+  budget?: BudgetFailure
   version?: number
   epoch?: number
   content?: boolean
@@ -67,6 +130,9 @@ const MAX_MESSAGE_TEXT = 4_000
 
 /** Classify the error without pretending to know more than the host exposes. */
 export function classifyFailure(error: unknown, fallback: FailureClass = "internal"): FailureClass {
+  // Ticket #163: an explicit budget refusal is a controlled stop, never a
+  // generic internal/provider failure.
+  if (budgetFailureReason(error)) return "budget"
   const source = (error ?? {}) as Record<string, any>
   const type = String(source.type ?? "")
   const code = String(source.code ?? "")
@@ -125,12 +191,15 @@ function messageMetadata(messages: Message[], content: boolean): Array<Record<st
 
 export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "ts" | "pid" | "role" | "instanceID" | "threadID"> & { ts?: string } {
   const { task } = input
+  const budget = input.budget ?? budgetFailureReason(input.error)
+  // A recognized budget stop is never reported as a generic failure class.
+  const failureClass: FailureClass = budget ? "budget" : input.failureClass
   return {
     level: input.level as LogLevel,
     event: input.event,
     cat: "failure",
     incidentID: input.incidentID,
-    failureClass: input.failureClass,
+    failureClass,
     taskID: task.id,
     workspaceID: task.workspaceID,
     dispatchGroupID: task.dispatchGroupID,
@@ -148,6 +217,17 @@ export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "t
     deadlineAt: task.deadlineAt,
     retryAfter: task.retryAfter,
     approvalID: task.approvalID,
+    // IDs, counts, and a reason code only; never the refusal copy or task content.
+    ...(budget
+      ? {
+          reasonCode: BUDGET_FAILURE_CODE,
+          budget: {
+            layer: budget.layer,
+            ...(budget.used !== undefined ? { used: budget.used } : {}),
+            ...(budget.max !== undefined ? { max: budget.max } : {}),
+          },
+        }
+      : {}),
     handling: task.handoff
       ? {
           correlationID: task.handoff.correlationID,

@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { diagnoseLocations, type DoctorBinding, type DoctorConfigRead, type DoctorLocationInput, type DoctorSnapshot, type DoctorWorkspace } from "./doctor.ts"
+import { diagnoseLocations, type DoctorBinding, type DoctorConfigRead, type DoctorLocationInput, type DoctorSnapshot, type DoctorSubtask, type DoctorWorkspace } from "./doctor.ts"
+import type { DispatchGroup } from "./types.ts"
 
 const service = { id: "svc-1", pid: 100, version: "2.2.3" }
 
@@ -35,11 +36,15 @@ function snapshot(input: {
   agents: ReturnType<typeof agent>[]
   workspaces?: DoctorWorkspace[]
   bindings?: DoctorBinding[]
+  dispatchGroups?: DispatchGroup[]
+  subtasks?: DoctorSubtask[]
 }): DoctorSnapshot {
   return {
     agents: Object.fromEntries(input.agents.map((item) => [item.id, item])),
     workspaces: Object.fromEntries((input.workspaces ?? []).map((item) => [item.id, item])),
     bindings: Object.fromEntries((input.bindings ?? []).map((item) => [item.key, item])),
+    ...(input.dispatchGroups ? { dispatchGroups: Object.fromEntries(input.dispatchGroups.map((item) => [item.id, item])) } : {}),
+    ...(input.subtasks ? { subtasks: Object.fromEntries(input.subtasks.map((item) => [item.id, item])) } : {}),
   }
 }
 
@@ -305,4 +310,149 @@ test("empty input produces an empty agreeing report", () => {
   assert.equal(report.summary.locations, 0)
   assert.equal(report.summary.mismatchCount, 0)
   assert.equal(report.summary.crossLocation, false)
+})
+
+/* Ticket #163: dispatch ledger invariants. */
+
+const dispatchRoot = (patch: Partial<DispatchGroup> = {}): DispatchGroup => ({
+  id: "dispatch_root",
+  workspaceID: site.id,
+  rootID: "dispatch_root",
+  continuationIndex: 0,
+  maxHops: 8,
+  usedHops: 0,
+  depthMax: 8,
+  commandMaxHops: 24,
+  commandUsedHops: 0,
+  maxContinuations: 2,
+  continuationsUsed: 0,
+  createdAt: 1,
+  ...patch,
+})
+
+const dispatchCont = (patch: Partial<DispatchGroup> = {}): DispatchGroup => ({
+  id: "dispatch_cont",
+  workspaceID: site.id,
+  rootID: "dispatch_root",
+  parentID: "dispatch_root",
+  continuationIndex: 1,
+  maxHops: 8,
+  usedHops: 0,
+  depthMax: 8,
+  createdAt: 2,
+  ...patch,
+})
+
+const dispatchTask = (id: string, dispatchGroupID: string, patch: Partial<DoctorSubtask> = {}): DoctorSubtask => ({
+  id,
+  workspaceID: site.id,
+  dispatchGroupID,
+  creatorType: "agent",
+  workKind: "delegation",
+  ...patch,
+})
+
+function dispatchSnapshot(groups: DispatchGroup[], tasks: DoctorSubtask[] = []): DoctorSnapshot {
+  return snapshot({
+    agents: [clark, jessy],
+    workspaces: [site],
+    bindings: [binding(site.id, clark.id), binding(site.id, jessy.id), binding("home", clark.id), binding("home", jessy.id)],
+    dispatchGroups: groups,
+    subtasks: tasks,
+  })
+}
+
+const dispatchCodes = (groups: DispatchGroup[], tasks: DoctorSubtask[] = []) =>
+  diagnoseLocations([location(site.directory, dispatchSnapshot(groups, tasks), validConfig())])
+
+test("ticket163: a consistent ledger, closed parent, and exempt completion rows produce no dispatch mismatch", () => {
+  const report = dispatchCodes(
+    [
+      dispatchRoot({ usedHops: 2, commandUsedHops: 3, closedAt: 10, closeReason: "continued" }),
+      dispatchCont({ usedHops: 1 }),
+    ],
+    [
+      dispatchTask("r1", "dispatch_root"),
+      dispatchTask("r2", "dispatch_root", { workKind: "handoff" }),
+      dispatchTask("c1", "dispatch_cont"),
+      // Exempt rows may still live in a closed group: completion handoffs,
+      // completion batches, peer turns, and the user-owned synthesis row.
+      dispatchTask("done", "dispatch_root", { workKind: "handoff", handoff: { completion: true } }),
+      dispatchTask("batch", "dispatch_root", { workKind: "handoff", handoff: { completion: true, batch: true } }),
+      dispatchTask("turn", "dispatch_root", { workKind: "turn" }),
+      dispatchTask("synthesis", "dispatch_root", { creatorType: "user" }),
+    ],
+  )
+  assert.equal(report.ok, true, report.mismatches.map((mismatch) => mismatch.message).join("; "))
+  assert.deepEqual(report.mismatches, [])
+  assert.equal(report.locations[0]?.dispatch.groups, 2)
+  assert.equal(report.locations[0]?.dispatch.roots, 1)
+  assert.equal(report.locations[0]?.dispatch.continuations, 1)
+  assert.equal(report.locations[0]?.dispatch.activeGroups, 1)
+  assert.equal(report.locations[0]?.dispatch.closedGroups, 1)
+  assert.equal(report.locations[0]?.dispatch.usedHops, 3)
+  assert.equal(report.locations[0]?.dispatch.commandUsedHops, 3)
+})
+
+test("ticket163: the doctor detects an over-budget group and a command overrun", () => {
+  const report = dispatchCodes([
+    dispatchRoot({ usedHops: 9, commandUsedHops: 25 }),
+    dispatchCont({ usedHops: 1 }),
+  ])
+  const codes = report.mismatches.map((mismatch) => mismatch.code)
+  assert.equal(report.ok, false)
+  assert.ok(codes.includes("dispatch_group_over_budget"))
+  assert.ok(codes.includes("dispatch_command_over_budget"))
+  const over = report.mismatches.find((mismatch) => mismatch.code === "dispatch_group_over_budget")
+  assert.equal(over?.scope, "storage")
+  assert.deepEqual(over?.details, { groupID: "dispatch_root", workspaceID: site.id, usedHops: 9, maxHops: 8 })
+  assert.ok(over?.remediation.length)
+})
+
+test("ticket163: the doctor detects hops counted on work items but absent from the group counter", () => {
+  const report = dispatchCodes(
+    [dispatchRoot({ usedHops: 1, commandUsedHops: 1 })],
+    [dispatchTask("one", "dispatch_root"), dispatchTask("two", "dispatch_root")],
+  )
+  const mismatch = report.mismatches.find((item) => item.code === "dispatch_group_counter_mismatch")
+  assert.ok(mismatch)
+  assert.deepEqual(mismatch?.details, {
+    groupID: "dispatch_root",
+    workspaceID: site.id,
+    usedHops: 1,
+    countedHops: 2,
+  })
+})
+
+test("ticket163: the doctor detects an orphan continuation that names a missing parent", () => {
+  const report = dispatchCodes(
+    [dispatchRoot({ commandUsedHops: 1 }), dispatchCont({ parentID: "dispatch_missing", usedHops: 1 })],
+    [dispatchTask("c1", "dispatch_cont")],
+  )
+  const mismatch = report.mismatches.find((item) => item.code === "dispatch_continuation_orphan")
+  assert.ok(mismatch)
+  assert.equal(mismatch?.details.groupID, "dispatch_cont")
+  assert.equal(mismatch?.details.parentID, "dispatch_missing")
+  assert.equal(mismatch?.details.rootID, "dispatch_root")
+})
+
+test("ticket163: the doctor detects a group that cannot reach its declared root", () => {
+  const report = dispatchCodes(
+    [dispatchRoot({ commandUsedHops: 1 }), dispatchCont({ rootID: "dispatch_ghost", usedHops: 1 })],
+    [dispatchTask("c1", "dispatch_cont")],
+  )
+  const mismatch = report.mismatches.find((item) => item.code === "dispatch_group_unreachable")
+  assert.ok(mismatch)
+  assert.equal(mismatch?.details.groupID, "dispatch_cont")
+  assert.equal(mismatch?.details.rootID, "dispatch_ghost")
+  assert.equal(mismatch?.details.reason, "root-mismatch")
+})
+
+test("ticket163: the doctor detects an empty active continuation group", () => {
+  const report = dispatchCodes([dispatchRoot(), dispatchCont()])
+  const mismatch = report.mismatches.find((item) => item.code === "dispatch_continuation_empty")
+  assert.ok(mismatch)
+  assert.equal(mismatch?.details.groupID, "dispatch_cont")
+  assert.equal(mismatch?.details.rootID, "dispatch_root")
+  assert.equal(mismatch?.details.continuationIndex, 1)
 })

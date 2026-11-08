@@ -10,6 +10,7 @@ import type { LogEntry } from "./logging.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
+  diagnostic: (input: unknown) => Promise<any>
   invoke: (input: unknown) => Promise<any>
   "logs.recent": (input: unknown) => Promise<{ entries: LogEntry[] }>
 }
@@ -54,6 +55,7 @@ function fakeContext() {
     rpc: {
       register: async (_schema: unknown, value: any) => {
         handlers.snapshot = value.snapshot
+        handlers.diagnostic = value.diagnostic
         handlers.invoke = value.invoke
         handlers["logs.recent"] = value["logs.recent"]
         return { events: { emit: async () => undefined } }
@@ -279,6 +281,33 @@ test("ticket162: a nine-hop relay crosses the exhausted root into one continuati
       assert.equal(forbidden in exhaustion, false, `dispatch events carry no ${forbidden}`)
       assert.equal(forbidden in continuationEvent, false, `dispatch events carry no ${forbidden}`)
     }
+
+    const closedLogs = await handlers["logs.recent"]({ directory, cat: "dispatch", event: "dispatch.group.closed", limit: 20 })
+    const closedEvent = closedLogs.entries.find((entry: any) => entry.dispatchGroupID === groupID) as any
+    assert.ok(closedEvent, "sealing the continued parent emits one closed event")
+    assert.equal(closedEvent.level, "info")
+    assert.equal(closedEvent.rootID, groupID)
+    assert.equal(closedEvent.closeReason, "continued")
+    assert.equal(closedEvent.usedHops, 8)
+    assert.equal(closedEvent.maxHops, 8)
+    assert.equal(typeof closedEvent.durationMs, "number")
+
+    const diagnostic = await handlers.diagnostic({ directory })
+    assert.ok(diagnostic.state.dispatchGroups[groupID], "the diagnostic keeps full group records")
+    assert.equal(diagnostic.dispatch.summary.groups, 2)
+    assert.equal(diagnostic.dispatch.summary.roots, 1)
+    assert.equal(diagnostic.dispatch.summary.continuations, 1)
+    assert.equal(diagnostic.dispatch.summary.closedGroups, 1)
+    assert.equal(diagnostic.dispatch.summary.activeGroups, 1)
+    assert.equal(diagnostic.dispatch.summary.groupsAtLimit, 1)
+    assert.equal(diagnostic.dispatch.summary.usedHops, 9)
+    assert.equal(diagnostic.dispatch.summary.commandUsedHops, 9)
+    assert.equal(diagnostic.dispatch.summary.commandMaxHops, 24)
+    assert.equal(diagnostic.dispatch.summary.continuationsUsed, 1)
+    assert.equal(diagnostic.dispatch.groups.length, 2)
+    const dispatchJson = JSON.stringify(diagnostic.dispatch)
+    assert.ok(!dispatchJson.includes(secretTitle), "diagnostic groups carry no task titles")
+    assert.ok(!dispatchJson.includes("SECRET_INSTRUCTION_B2"), "diagnostic groups carry no instructions")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -428,8 +457,7 @@ test("ticket162: a continuation is refused while the referenced group still has 
   }
 })
 
-test("ticket162: only the leader can open a continuation group", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "ensemble-continuation-"))
+test("ticket162: only the leader can open a continuation group", async () => {  const directory = mkdtempSync(join(tmpdir(), "ensemble-continuation-"))
   const { ctx, handlers, tools } = fakeContext()
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
@@ -533,6 +561,37 @@ test("ticket162: a closed group refuses new work and routes the leader to the ac
     assert.equal(routedTask.dispatchGroupID, continuation.id)
     assert.equal(groupOf(snapshot, groupID).usedHops, 8)
     assert.equal(groupOf(snapshot, groupID).continuationsUsed, 1)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket163: invalid dispatch limits log one warn event with setting names, never task content", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-continuation-"))
+  const { ctx, handlers } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    await setupPair(directory, handlers)
+    const invalid = await handlers.invoke({
+      directory,
+      action: "settings.update",
+      payload: { dispatchGroupMaxHops: 24, dispatchCommandMaxHops: 8, dispatchDepth: 8, dispatchContinuations: 2 },
+    })
+    assert.equal(invalid.ok, false, "the impossible limit set is rejected")
+    const logs = await handlers["logs.recent"]({ directory, cat: "dispatch", event: "dispatch.settings.invalid", limit: 20 })
+    assert.equal(logs.entries.length, 1)
+    const entry = logs.entries[0] as any
+    assert.equal(entry.level, "warn")
+    assert.equal(entry.reason, "invalid-dispatch-limits")
+    assert.ok(Array.isArray(entry.fields))
+    assert.ok(entry.fields.includes("dispatchCommandMaxHops"))
+    assert.ok(entry.errorCount >= 1)
+    assert.ok(Array.isArray(entry.errors) && entry.errors.length > 0)
+    for (const forbidden of ["title", "instruction", "path", "content", "text"] as const) {
+      assert.equal(forbidden in entry, false, `invalid settings events carry no ${forbidden}`)
+    }
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

@@ -144,6 +144,32 @@ function snapshotFor(directory: string, includeJessy: boolean) {
             agentVersion: 1,
           },
         },
+        dispatchGroups: {
+          dispatch_root: {
+            id: "dispatch_root",
+            workspaceID: "workspace_site",
+            rootID: "dispatch_root",
+            continuationIndex: 0,
+            maxHops: 8,
+            usedHops: 1,
+            depthMax: 8,
+            commandMaxHops: 24,
+            commandUsedHops: 1,
+            maxContinuations: 2,
+            continuationsUsed: 0,
+            createdAt: 1,
+          },
+        },
+        subtasks: {
+          task_root: {
+            id: "task_root",
+            workspaceID: "workspace_site",
+            dispatchGroupID: "dispatch_root",
+            creatorType: "agent",
+            workKind: "delegation",
+            title: "PRIVATE-TASK-TITLE",
+          },
+        },
       },
       models: [],
       skills: [],
@@ -172,6 +198,7 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
   mkdirSync(directoryB)
   writeConfig(directoryA, ["Clark"])
   let includeJessy = false
+  let brokenLedger = false
   const server = createServer((request, response) => {
     request.resume()
     if (request.headers.authorization !== `Basic ${Buffer.from(`opencode:${PASSWORD}`).toString("base64")}`) {
@@ -180,7 +207,9 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
       return
     }
     response.writeHead(200, { "content-type": "application/json" })
-    response.end(JSON.stringify(snapshotFor(directoryA, includeJessy)))
+    const body = snapshotFor(directoryA, includeJessy) as any
+    if (brokenLedger) body.output.state.dispatchGroups.dispatch_root.usedHops = 9
+    response.end(JSON.stringify(body))
   })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address()
@@ -208,7 +237,11 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
     assert.equal(report.summary.locations, 2)
     assert.equal(report.summary.services, 1)
     assert.deepEqual(report.locations[0].service, { id: "svc-test", pid: 4242, version: "2.2.3" })
+    assert.equal(report.locations[0].dispatch.groups, 1)
+    assert.equal(report.locations[0].dispatch.usedHops, 1)
+    assert.equal(report.locations[0].dispatch.commandUsedHops, 1)
     assert.equal(output.includes(PASSWORD), false)
+    assert.equal(output.includes("PRIVATE-TASK-TITLE"), false)
 
     includeJessy = true
     writeConfig(directoryA, ["Clark", "Jessy"])
@@ -236,6 +269,23 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
     assert.match(output, /Remediation:/)
     assert.match(output, /config_storage_members_differ:/)
     assert.equal(output.includes(PASSWORD), false)
+
+    // Ticket #163: the doctor sees the ledger through the diagnostic RPC and
+    // reports a seeded over-budget counter without exposing task content.
+    includeJessy = false
+    brokenLedger = true
+    writeConfig(directoryA, ["Clark"])
+    output = ""
+    const broken = await runDoctor(["--json", "--service-file", descriptor, "--server", serverUrl, directoryA], {
+      env: {},
+      home: root,
+      stdout: (text) => { output += text },
+      stderr: () => undefined,
+    })
+    assert.equal(broken, 1)
+    const brokenReport = JSON.parse(output)
+    assert.ok(brokenReport.mismatches.some((mismatch: any) => mismatch.code === "dispatch_group_over_budget"))
+    assert.equal(output.includes("PRIVATE-TASK-TITLE"), false)
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     rmSync(root, { recursive: true, force: true })
@@ -296,6 +346,8 @@ test("CLI uses the default descriptor, password override, snapshot-only wire con
     assert.equal(report.ok, true)
     assert.match(report.caveats.join(" "), /diagnostic|read-only|discovery|reconciliation/i)
     assert.equal(report.locations[0].agents[0].name, "Clark")
+    assert.equal(report.locations[0].dispatch.groups, 1)
+    assert.equal(report.locations[0].dispatch.usedHops, 1)
     assert.equal(readFileSync(join(directory, ".ensemble", "config.json"), "utf8"), before)
     writeConfig(directory, ["Clark", "Jessy"])
     const divergentConfig = readFileSync(join(directory, ".ensemble", "config.json"), "utf8")

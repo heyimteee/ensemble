@@ -7,7 +7,7 @@
  *
  * Usage:
  *   node scripts/log-summary.mjs [--dir DIR] [--since ISO] [--level warn]
- *                                [--event PREFIX] [--task ID] [--json]
+ *                                [--event PREFIX] [--task ID] [--group ID] [--json]
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
@@ -37,6 +37,7 @@ if (help) {
   --level LEVEL    minimum level: error|warn|info|debug|trace
   --event PREFIX   only events equal to or starting with PREFIX
   --task ID        only rows carrying taskID
+  --group ID       only rows for one dispatch group or its continuation lineage
   --json           print the full machine-readable summary
   --help           show this help`)
   process.exit(0)
@@ -47,6 +48,7 @@ const since = arg("--since", undefined)
 const level = arg("--level", undefined)
 const event = arg("--event", undefined)
 const task = arg("--task", undefined)
+const group = arg("--group", undefined)
 const asJson = process.argv.includes("--json")
 if (level && !(level in LEVELS)) throw new Error(`unknown level: ${level}`)
 if (!existsSync(dir)) {
@@ -69,6 +71,35 @@ let first = ""
 let last = ""
 let feedResets = 0
 let feedGaps = 0
+const dispatchGroupIDs = new Set()
+const dispatchExhaustions = []
+const dispatchRefusals = []
+const dispatchCounts = {
+  created: 0,
+  continued: 0,
+  exhausted: 0,
+  closed: 0,
+  reconciled: 0,
+  hops: 0,
+  refused: 0,
+  invalidSettings: 0,
+}
+
+function dispatchWarning(entry) {
+  return {
+    ts: entry.ts,
+    level: entry.level,
+    event: entry.event,
+    dispatchGroupID: entry.dispatchGroupID,
+    rootID: entry.rootID,
+    reason: entry.reason,
+    usedHops: entry.usedHops,
+    maxHops: entry.maxHops,
+    commandUsedHops: entry.commandUsedHops,
+    commandMaxHops: entry.commandMaxHops,
+    continuationIndex: entry.continuationIndex,
+  }
+}
 
 for (const name of readdirSync(dir).filter((item) => item.endsWith(".jsonl")).sort()) {
   const path = join(dir, name)
@@ -80,6 +111,7 @@ for (const name of readdirSync(dir).filter((item) => item.endsWith(".jsonl")).so
     if (level && LEVELS[entry.level] > LEVELS[level]) continue
     if (event && entry.event !== event && !String(entry.event ?? "").startsWith(`${event}.`)) continue
     if (task && entry.taskID !== task) continue
+    if (group && entry.dispatchGroupID !== group && entry.rootID !== group) continue
     rows++
     if (!first || entry.ts < first) first = entry.ts
     if (!last || entry.ts > last) last = entry.ts
@@ -92,6 +124,26 @@ for (const name of readdirSync(dir).filter((item) => item.endsWith(".jsonl")).so
     if (entry.taskID) tasks.add(entry.taskID)
     if (entry.event === "feed.reset") feedResets++
     if (entry.event === "feed.gap" || entry.event === "feed.gap.recovered") feedGaps++
+    if (String(entry.event ?? "").startsWith("dispatch.")) {
+      if (entry.dispatchGroupID) dispatchGroupIDs.add(entry.dispatchGroupID)
+      switch (entry.event) {
+        case "dispatch.group.created": dispatchCounts.created++; break
+        case "dispatch.group.continued": dispatchCounts.continued++; break
+        case "dispatch.group.exhausted":
+          dispatchCounts.exhausted++
+          dispatchExhaustions.push(dispatchWarning(entry))
+          break
+        case "dispatch.group.closed": dispatchCounts.closed++; break
+        case "dispatch.group.reconciled": dispatchCounts.reconciled++; break
+        case "dispatch.hop.consumed": dispatchCounts.hops++; break
+        case "dispatch.hop.refused":
+        case "dispatch.group.refused":
+          dispatchCounts.refused++
+          dispatchRefusals.push(dispatchWarning(entry))
+          break
+        case "dispatch.settings.invalid": dispatchCounts.invalidSettings++; break
+      }
+    }
     if (entry.event === "task.failed") {
       failedTasks.add(entry.taskID)
       failures.push(entry)
@@ -105,9 +157,17 @@ for (const name of readdirSync(dir).filter((item) => item.endsWith(".jsonl")).so
   }
 }
 
+const dispatch = {
+  groups: dispatchGroupIDs.size,
+  ...dispatchCounts,
+  groupIDs: [...dispatchGroupIDs].sort(),
+  recentExhaustions: dispatchExhaustions.slice(-10),
+  recentRefusals: dispatchRefusals.slice(-10),
+}
+
 const summary = {
   dir,
-  filters: { since, level, event, task },
+  filters: { since, level, event, task, group },
   rows,
   malformed,
   first,
@@ -130,6 +190,7 @@ const summary = {
   failureCount: failures.length,
   feedResets,
   feedGaps,
+  dispatch,
 }
 
 if (asJson) {
@@ -145,6 +206,7 @@ console.log(`instances: ${Object.entries(instances).map(([key, value]) => `${key
 console.log(`levels: ${Object.entries(levels).map(([key, value]) => `${key}=${value}`).join(" ") || "-"}`)
 console.log(`tasks: ${tasks.size}  failed: ${failedTasks.size}  failures: ${failures.length}`)
 console.log(`feed: resets=${feedResets} gaps=${feedGaps}`)
+console.log(`dispatch: groups=${dispatch.groups} hops=${dispatch.hops} exhausted=${dispatch.exhausted} continued=${dispatch.continued} refused=${dispatch.refused} closed=${dispatch.closed}`)
 console.log("")
 console.log("top events:")
 for (const [key, value] of Object.entries(events).sort((a, b) => b[1] - a[1]).slice(0, 15)) {
@@ -162,5 +224,14 @@ if (warnings.length > 0) {
   console.log(`warnings: ${warnings.length} (last ${Math.min(10, warnings.length)})`)
   for (const entry of warnings.slice(-10)) {
     console.log(`  ${entry.ts} ${entry.level} ${entry.event} ${entry.reason ?? ""}`)
+  }
+}
+const dispatchWarnings = [...dispatchExhaustions, ...dispatchRefusals].slice(-10)
+if (dispatchWarnings.length > 0) {
+  const total = dispatchExhaustions.length + dispatchRefusals.length
+  console.log("")
+  console.log(`dispatch warnings: ${total} (last ${dispatchWarnings.length})`)
+  for (const entry of dispatchWarnings) {
+    console.log(`  ${entry.ts} ${entry.level} ${entry.event} group=${entry.dispatchGroupID ?? "-"} root=${entry.rootID ?? "-"} reason=${entry.reason ?? ""} ${entry.usedHops ?? "?"}/${entry.maxHops ?? "?"}`)
   }
 }
