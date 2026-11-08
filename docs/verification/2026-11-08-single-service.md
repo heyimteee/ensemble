@@ -243,11 +243,31 @@ Follow-up `fix/feed-gap-noise`:
 - `reset`, `epoch`, `malformed`, and `other` decisions keep their warning and
   fallback semantics.
 
+#### Post-fix warning-rate smoke (10 requests)
+
+After the gap-noise merge, the active host hot-reloaded the TUI (new mount
+`6185e96f-118c-467a-9cf9-47d0d9c01c6e`; the service stayed on its single
+epoch). A mixed 10-request smoke was run:
+
+| Metric | Result |
+|---|---|
+| Requests | **10/10 completed** |
+| Task rows | **13/13 replied/succeeded** |
+| Attempts | **all at attempt 1** |
+| Placeholders / duplicate handoffs | **0 / 0** |
+| `service.start` (subject) | **1** |
+| Service `task.failed` / failure records | **0 / 0** |
+| Warn-level TUI `feed.gap` lines | **0** |
+
+The new TUI logged only `tui.mount`; recovered gaps are debug-only and the
+`feedGaps` counter remains available in `:logs`. The service log for the smoke
+contains no warn/error rows.
+
 ### Manual replay procedure (repeatable check)
 
 Run this after the user deliberately restarts the playground host, or when
-checking the warning rate again. It was **not** rerun after the gap-noise fix
-because the active host was not restarted.
+checking the warning rate again. The full 30-run was not repeated after the
+gap-noise fix; the 10-request smoke above is the warning-rate check.
 
 1. Confirm one service for the restarted realm: count distinct `instanceID`
    values and `service.start` rows in the service log; expect **one service
@@ -283,15 +303,17 @@ because the active host was not restarted.
 | Mock 100 clean | 100/100 requests, 137/137 tasks, 0 `task.failed`, 0 failure records | pass |
 | Real playground 30-run | 30/30 requests, 39/39 tasks, attempts 1, 0 placeholders, 0 duplicate handoffs | pass |
 | Gap truth | Recovered gaps are debug `feed.gap.recovered`; warnings only for real fallbacks | pass (targeted tests) |
+| Gap warning rate after fix | 10-request mixed live smoke: 0 warn-level `feed.gap`, 13/13 tasks | pass |
 | Attributable logs | 926/926 rows carry role, instance, and thread | pass |
 | `npm run verify` | 1020/1020 tests | pass |
 | Documentation | `docs/implementation.md` already documents the registry and lease-safe recovery from #147/#148 | pass |
 
 ## Skips and limitations
 
-- **Gap-noise fix live recheck: NOT RUN.** The functional 30-run above used the
-  live host after hot reload; measuring the post-fix warning rate requires the
-  manual replay after a deliberate host restart.
+- **Gap-noise fix live recheck: PASS.** The 30-run predates the warning-level
+  fix; a post-fix 10-request mixed smoke on the hot-reloaded TUI produced **0**
+  warn-level `feed.gap` lines and 13/13 successful tasks. Recovered gaps are
+  debug summaries; the full 30-run was not repeated after the gap fix.
 - **macOS/Herdr: NOT RUN.** No macOS host is available; the existing manual
   checklist remains authoritative there.
 - **Hosted CI: NOT RUN.**
