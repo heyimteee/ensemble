@@ -565,9 +565,13 @@ or trace-only data.
 `feed.reset` names its reason and identical resets collapse to one warning per
 10 s per instance with a `suppressed` count; a burst that stops also reports a
 trailing summary when the window closes (and `logs.recent`/shutdown flush any
-pending count). The logger counts `feed.gap` events in its stats, `:logs` shows
-`feedGaps`, and the TUI coalesces foreign-epoch patches into one forced snapshot
-instead of a reset loop.
+pending count). Every TUI `feed.gap` observation increments the logger's
+`feedGaps` stat, but a burst collapses into one trailing line per 10 s: a
+caught-up `changes.since` recovery is debug `feed.gap.recovered`, while a
+full-snapshot fallback, exhausted recovery passes, or a reset/epoch/malformed/
+other decision warns as `feed.gap`. `:logs` shows `feedGaps`, and the TUI
+coalesces foreign-epoch patches into one forced snapshot instead of a reset
+loop.
 
 A failure is a self-contained JSONL record, not a longer `task.error` string.
 Each failed attempt emits `failure.attempt` at `warn`, an uncertain outcome

@@ -140,6 +140,15 @@ test(":logs shows the feed-gap counter from logger stats", () => {
   assert.ok(source.includes("feedGaps: (result?.stats?.feedGaps ?? 0) + logger.stats().feedGaps"))
 })
 
+test("gap recovery uses the coalesced reporter and classifies its outcome", () => {
+  // Behavior: feed-gaps.test.ts recovery summaries and fallback warnings.
+  const source = app()
+  assert.ok(source.includes("createFeedGapReporter({"))
+  assert.ok(source.includes("feedGapReporter.record({"))
+  assert.ok(source.includes('void recoverFeed((outcome) => feedGapReporter.settle(outcome))'))
+  assert.ok(source.includes('feedGapReporter.settle("full")'))
+})
+
 test("the TUI log rows carry a per-mount identity", () => {
   // Behavior: logging.test.ts base attribution fields.
   assert.ok(app().includes('createLogger({ role: "tui", instanceID: randomUUID() })'))

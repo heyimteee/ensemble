@@ -230,9 +230,16 @@ export class EnsembleLogger {
     return this.enabled && LEVELS[level] <= LEVELS[this.level]
   }
 
+  /**
+   * Count one observed feed gap. Bookkeeping is separate from emission so a
+   * coalesced burst still reports the true gap rate in diagnostics.
+   */
+  recordFeedGap(): void {
+    this.feedGapCount += 1
+  }
+
   event(level: LogLevel, cat: LogCategory, event: string, fields: LogFields = {}): void {
     if (!this.enabledFor(level)) return
-    if (event === "feed.gap") this.feedGapCount += 1
     const entry: LogEntry = {
       ...redactLogFields(fields),
       ts: new Date(this.now()).toISOString(),
