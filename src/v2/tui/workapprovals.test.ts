@@ -4,6 +4,7 @@ import type { Approval } from "../types.ts"
 import { chromeJoin } from "./separators.ts"
 import {
   approvalsColumnMode,
+  approvalsForWorkspace,
   approvalsPaneLayout,
   closeFullApprovals,
   fullApprovalsHeader,
@@ -67,6 +68,17 @@ test("ticket185: the small approvals summary names the count, the +N more overfl
   const overflow = workApprovalSection([approval(0), approval(1), approval(2), approval(3)], 0, 3)
   assert.equal(workApprovalsHeader(overflow, false), chromeJoin(["APPROVALS 4 pending", "+1 more", "v open"]))
   assert.equal(workApprovalsHeader(overflow, true), chromeJoin(["APPROVALS 4 pending", "+1 more", "enter open"]))
+})
+
+test("ticket185: approvals stay scoped to the visible workspace", () => {
+  const rows = {
+    one: approval(0, { workspaceID: "w1" }),
+    two: approval(1, { workspaceID: "w2" }),
+    unscoped: approval(2),
+  }
+  assert.deepEqual(approvalsForWorkspace(rows, "w1").map((row) => row.id), ["ap-0"])
+  assert.deepEqual(approvalsForWorkspace(rows, "w2").map((row) => row.id), ["ap-1"])
+  assert.deepEqual(approvalsForWorkspace(rows, undefined).map((row) => row.id), ["ap-2"], "no workspace shows only unattributed rows")
 })
 
 test("ticket185: the right column is closed, split, or full", () => {

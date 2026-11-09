@@ -34,6 +34,20 @@ export function approvalsColumnMode(state: ApprovalsModeState, rightVisible: boo
   return state.full ? "full" : "split"
 }
 
+/**
+ * Ticket #185: the right column is workspace-scoped. Rows carrying another
+ * workspace never enter this inbox; unattributed rows are kept only when no
+ * workspace is in view (the legacy/no-workspace case).
+ */
+export function approvalsForWorkspace(
+  approvals: Readonly<Record<string, Approval>>,
+  workspaceID: string | undefined,
+): Approval[] {
+  return Object.values(approvals).filter((approval) =>
+    approval.workspaceID === undefined ? workspaceID === undefined : approval.workspaceID === workspaceID,
+  )
+}
+
 export type InlineApprovalRow = {
   approval: Approval
   /** Index in the full pending list, so `j/k` and `Enter` share one cursor. */

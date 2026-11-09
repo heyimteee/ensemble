@@ -81,7 +81,8 @@ The [doctor reference](../../README.md#runtime-diagnosis) and `npm run doctor --
 `workspacePaneWidths`, `workPaneBodyHeight`, ACTIVE/HISTORY filtering, and
 pagination; [railmodel.ts](../../src/v2/tui/railmodel.ts) owns rail grouping;
 [workfocus.ts](../../src/v2/tui/workfocus.ts) owns spatial navigation;
-[workapprovals.ts](../../src/v2/tui/workapprovals.ts) owns the inline window;
+[workapprovals.ts](../../src/v2/tui/workapprovals.ts) owns the approvals
+modes, workspace scope, and window budgets;
 [picker.ts](../../src/v2/tui/picker.ts) owns native-session routing; and
 [format.ts](../../src/v2/tui/format.ts) owns `alignedDetailRows`. The decision
 and trade-offs are recorded in [ADR 0006](../adr/0006-three-pane-workspace-shell.md).

@@ -225,7 +225,7 @@ import {
   type WorkDirection,
   type WorkFocusPosition,
 } from "./workfocus.ts"
-import { approvalsColumnMode, approvalsPaneLayout, closeFullApprovals, fullApprovalsHeader, fullApprovalsSection, openFullApprovals, workApprovalSection } from "./workapprovals.ts"
+import { approvalsColumnMode, approvalsForWorkspace, approvalsPaneLayout, closeFullApprovals, fullApprovalsHeader, fullApprovalsSection, openFullApprovals, workApprovalSection } from "./workapprovals.ts"
 import { nativeSubagentFocusChild, nativeSubagentFocusID, nativeSubagentWorkStatus } from "./nativecards.ts"
 import { isWorkActionID, nativeSubagentActions, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
 import {
@@ -959,12 +959,9 @@ export function EnsembleV2App() {
     if (current?.kind === "agent" && current.workspaceID) return current.workspaceID
     return activeWorkspace()?.id
   }
-  const workspaceApprovals = createMemo(() => {
-    const workspaceID = approvalWorkspaceID()
-    return Object.values(state()?.approvals ?? {}).filter((approval) =>
-      approval.workspaceID === undefined ? workspaceID === undefined : approval.workspaceID === workspaceID,
-    )
-  })
+  const workspaceApprovals = createMemo(() =>
+    approvalsForWorkspace(state()?.approvals ?? {}, approvalWorkspaceID()),
+  )
   const pendingApprovals = createMemo(() => workspaceApprovals().filter((approval) => approval.status === "pending"))
   // Ticket #183: hydrate the column switches from durable UI state, then keep
   // local toggles optimistic. The serialized key suppresses the echo of our
