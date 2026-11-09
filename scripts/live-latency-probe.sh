@@ -67,14 +67,18 @@ live_tmux_env_add "OPENCODE_DISABLE_FREE_MODELS=1"
 live_start_server
 live_check_plugin
 
-# Build the smallest rail fixture through the public RPC surface: one agent
-# row and one workspace row, so j/k visibly moves the cursor between them.
+# Build the smallest rail fixture through the public RPC surface: two agent
+# rows in the Agents pane, so j/k visibly moves the cursor between them.
 live_invoke agent.create '{"name":"ProbeAgent","title":"Latency","role":"Rail latency fixture.","mainModel":{"providerID":"ensemble-fake","modelID":"ensemble-fake-model"}}' >/dev/null
 live_wait_for "$LIVE_STEP_TIMEOUT" "ProbeAgent in the snapshot" live_snapshot_has_agent_named "ProbeAgent" \
   || live_fail "latency fixture agent was not created"
+live_invoke agent.create '{"name":"ProbeAgent2","title":"Latency","role":"Second rail latency fixture.","mainModel":{"providerID":"ensemble-fake","modelID":"ensemble-fake-model"}}' >/dev/null
+live_wait_for "$LIVE_STEP_TIMEOUT" "ProbeAgent2 in the snapshot" live_snapshot_has_agent_named "ProbeAgent2" \
+  || live_fail "second latency fixture agent was not created"
 probe_agent=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return agent.name === "ProbeAgent" })[0]?.id' | tr -d '"')
-[[ -n "$probe_agent" ]] || live_fail "latency fixture agent id is missing"
-live_invoke workspace.create "{\"name\":\"LatencyProbe\",\"memberIDs\":[\"$probe_agent\"],\"leaderID\":\"$probe_agent\"}" >/dev/null
+probe_agent2=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return agent.name === "ProbeAgent2" })[0]?.id' | tr -d '"')
+[[ -n "$probe_agent" && -n "$probe_agent2" ]] || live_fail "latency fixture agent ids are missing"
+live_invoke workspace.create "{\"name\":\"LatencyProbe\",\"memberIDs\":[\"$probe_agent\",\"$probe_agent2\"],\"leaderID\":\"$probe_agent\"}" >/dev/null
 live_wait_for "$LIVE_STEP_TIMEOUT" "LatencyProbe in the snapshot" live_snapshot_has_workspace_named "LatencyProbe" \
   || live_fail "latency fixture workspace was not created"
 probe_ws=$(live_snapshot_value 'Object.keys(output.state.workspaces)[0]' | tr -d '"')
@@ -102,7 +106,7 @@ CURSOR_MARK=$("$LIVE_NODE_BIN" --experimental-strip-types -e '
 ' "$LIVE_ROOT/src/v2/tui/settings.ts") || live_fail "could not read settingsCursorMark"
 [[ -n "$CURSOR_MARK" ]] || live_fail "settingsCursorMark returned an empty marker"
 AGENT_MARK="${CURSOR_MARK}ProbeAgent"
-WORKSPACE_MARK="${CURSOR_MARK}#LatencyProbe"
+SECOND_AGENT_MARK="${CURSOR_MARK}ProbeAgent2"
 
 wait_for_marker() {
   local marker="$1" seconds="$2"
@@ -144,14 +148,14 @@ samples=()
 for ((i = 0; i < SAMPLES; i++)); do
   if (( i % 2 == 0 )); then
     wait_for_marker "$AGENT_MARK" 5 || live_fail "rail cursor left ProbeAgent before sample $((i + 1))"
-    measure_key "j" "$WORKSPACE_MARK"
+    measure_key "j" "$SECOND_AGENT_MARK"
     samples+=("$MEASURED_MS")
-    wait_for_marker "$WORKSPACE_MARK" 5 || live_fail "j did not move the rail cursor to the workspace"
+    wait_for_marker "$SECOND_AGENT_MARK" 5 || live_fail "j did not move the rail cursor to ProbeAgent2"
   else
-    wait_for_marker "$WORKSPACE_MARK" 5 || live_fail "rail cursor left #LatencyProbe before sample $((i + 1))"
+    wait_for_marker "$SECOND_AGENT_MARK" 5 || live_fail "rail cursor left ProbeAgent2 before sample $((i + 1))"
     measure_key "k" "$AGENT_MARK"
     samples+=("$MEASURED_MS")
-    wait_for_marker "$AGENT_MARK" 5 || live_fail "k did not move the rail cursor to the agent"
+    wait_for_marker "$AGENT_MARK" 5 || live_fail "k did not move the rail cursor to ProbeAgent"
   fi
 done
 

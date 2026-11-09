@@ -6,9 +6,10 @@ Issue: [#186](https://github.com/heyimteee/ensemble/issues/186)
 Spec: [#178](https://github.com/heyimteee/ensemble/issues/178)
 Tickets: [#180](https://github.com/heyimteee/ensemble/issues/180), [#181](https://github.com/heyimteee/ensemble/issues/181), [#183](https://github.com/heyimteee/ensemble/issues/183), [#184](https://github.com/heyimteee/ensemble/issues/184), [#185](https://github.com/heyimteee/ensemble/issues/185)
 ADRs: [0006](../adr/0006-three-pane-workspace-shell.md)
-Base: `integration/workspace-interaction` at `7c879da` (includes #180/#181/#183/#184/#185/#187 and #188)
+Base: `integration/workspace-interaction` at `3c65604` (includes #180/#181/#183/#184/#185/#187, #188, and #189)
 Branch: `verify/pane-interaction`
 Worktree: `/home/tristan/dev/ensemble-186`
+Final merge commit: `a33059a` (verified tree)
 
 This record is the release evidence for the pane-interaction delivery:
 
@@ -41,6 +42,11 @@ This record is the release evidence for the pane-interaction delivery:
   popup clipped its body), and a former auto-expanded HISTORY group never
   rolled up.
 
+The full fake suite ran on commit `00ed668`, the pane-interaction content
+immediately before the final `3c65604` (#189) merge. `npm run verify`, the size
+matrix, multi-location, latency, and the empty-catalog suite ran on the merged
+tree `a33059a`; #189 touches service/session continuity, not the pane shell.
+
 ## Environment
 
 | Item | Value |
@@ -59,15 +65,15 @@ This record is the release evidence for the pane-interaction delivery:
 
 | Command | Result |
 |---|---|
-| `npm run verify` | **PENDING** |
-| `ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:fake` (`ENSEMBLE_LIVE_ARTIFACTS=/tmp/opencode/verification-186/fake`) | **PENDING** |
-| `ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:sizes` | **PENDING** |
-| `ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:multilocation` | **PENDING** |
-| `npm run test:live:fake:empty` | **PENDING** |
-| `npm run test:live:latency` | **PENDING** |
+| `npm run verify` | **Pass** — strict type check; **1530 tests passed, 0 failed, 0 skipped, 0 todo**, 47.7 s. |
+| `ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:fake` (`ENSEMBLE_LIVE_ARTIFACTS=/tmp/opencode/artifacts-186-fake`) | **Pass on `00ed668`** — full fake scenario including the #180/#181/#183/#184/#185 pane-interaction checks, doctor, and log summary. 53 `live:` lines; artifacts under `/tmp/opencode/artifacts-186-fake`. |
+| `ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:sizes` | **Pass** — 80×24, 100×30, 120×40, and 160×50, `NO_COLOR=1`, the CPU/load probe, pane heading/border colours, drawer durability/F3 removal, drawer full-approvals geometry, and page-edge `j`/`k`/`h`/`l`. Console copy under `/tmp/opencode/artifacts-186-sizes/console.log`. |
+| `ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:multilocation` | **Pass** — 100/100 jobs, 137/137 task rows succeeded, one `service.start`, 0 `task.failed`, 0 failure records, 1 warn-level `feed.gap`, the fake `ask_person` tool probe approved and replied, and doctor `Mismatches: none`. Artifacts under `/tmp/opencode/artifacts-186-multi`. |
+| `npm run test:live:fake:empty` | **Pass** — empty model catalog, agent wizard empty-state, init routing, and solo guard. Console copy under `/tmp/opencode/artifacts-186-empty/console.log`. |
+| `npm run test:live:latency` | **Pass** (measurement only) — rail `j`/`k` min 9 ms, p50 9 ms, p95 12 ms, max 12 ms (n=10); delegation card min 190 ms, p50 1940 ms, p95 1956 ms, max 1956 ms (n=5). Console copy under `/tmp/opencode/artifacts-186-latency/console.log`. |
 | Real host-catalog matrix (`npm run test:live` / `test:live:all`) | **POST-MERGE** — the live host runs `main`; the host was not restarted or reconfigured |
-| `git diff --check` | **PENDING** |
-| Prototype source check | **PENDING** |
+| `git diff --check` | **PASS** |
+| Prototype source check | **PASS** — no prototype files in the tree or diff |
 
 ## Focus-state matrix
 
@@ -125,7 +131,44 @@ muted, or faint tone.
 | Activity summary | With live work and the Work pane open, chat shows one `Working…` line and later one `Asking $FakeAgent…` line; no `│ working…` per-agent row is rendered. |
 | Approvals small/full | A pending ask shows `APPROVALS 1 pending │ v open` under Work; Enter from the small selection opens `APPROVALS 1 pending │ 1/1` full height, Work is hidden, `Esc` returns to split. |
 | Retired surfaces | The rail slice contains no `APPROVALS` footer; `V` no longer opens a chat approvals modal; `v` opens the right-column inbox from chat. |
-| Drawer approvals | At 80×24, a pending approval opens full height in the drawer (`APPROVALS 1 pending │ 1/1`), Work is covered, and rejection clears it. |
+| Drawer approvals | At 80×24, `v` opens the full-height inbox in the drawer (`APPROVALS 0 pending`), Work is covered, the heading is white, and `Esc` returns to split. Pending resolution is exercised at 160×80; pending-in-drawer is listed as a skip below. |
+
+## Size matrix
+
+`npm run test:live:sizes` restarted the isolated fake TUI at each approved
+size with a fresh five-group/six-task fixture and checked the shell before the
+fixture started (so the hold tasks stay active through every functional probe).
+
+| Size | Result |
+|---|---|
+| 80×24 | Drawer starts open; `Space b r` closes/reopens; `F3` does nothing; closed drawer survives restart; five compact rows, page edge to `page 2/2`, whitespace drawer full approvals, `NO_COLOR` untouched by this size. |
+| 100×30 | Three panes, compact Work rows, group labels, budget, focus, page indicator, exact right edge, white focused / grey unfocused pane headings and borders. |
+| 120×40 | Same compact contract at the middle breakpoint. |
+| 160×50 | Three panes, five groups/six tasks in two-column cards over two pages, `hjkl`, `gg`/`G`, `j`/`k` and `h`/`l` page edges, right edge, white/grey card and pane focus. |
+| `NO_COLOR=1` | 120×40 restart keeps frame-0 glyphs and the state word; no animated frame appears. |
+
+The load probe recorded idle TUI CPU 6.7% and 16.7%, 21.1%, and 26.7% for
+one, two, and three working cards; those numbers are observations, not
+thresholds.
+
+## Latency measurement
+
+| Probe | Samples (ms) | Summary |
+|---|---|---|
+| Agents rail cursor `j`/`k` | 9, 9, 9, 9, 9, 12, 9, 10, 9, 9 | min 9, p50 9, p95 12, max 12, mean 9.4 (n=10) |
+| Delegation card appearance | 190, 1956, 1953, 1931, 1940 | min 190, p50 1940, p95 1956, max 1956, mean 1594.0 (n=5) |
+
+The first card sample measured a warm path; later samples include the full
+patch/repaint path. These are measurements, not pass/fail thresholds.
+
+## Multi-location
+
+`npm run test:live:multilocation` kept one service (`serviceStarts: 1`) across
+the measured run: 100/100 jobs, 137/137 task rows succeeded on attempt 1, 0
+`task.failed`, 0 failure records, and one warn-level `feed.gap`. The fake
+`ask_person` tool probe created a real pending approval, resolved it, and the
+linked task ended `replied/succeeded`. The dispatch-budget relay and doctor
+finished with `Mismatches: none`.
 
 ## Product fixes found by verification
 
@@ -139,6 +182,12 @@ muted, or faint tone.
 
 ## Skips
 
+- **Pending approvals in the 80×24 drawer** are not automated in the size
+  matrix: the populated size fixture queues the ask behind its active tasks.
+  The width-independent pending split/full/resolve path passes at 160×80, and
+  the 80×24 drawer proves the same full-height surface, white heading,
+  Work-covered layout, and split return on the empty inbox. Manual evidence is
+  the `/tmp/opencode/artifacts-186-sizes/console.log` drawer section.
 - The real host-catalog matrix is **post-merge**: the user's live host runs
   `main` and was not restarted or reconfigured. This is an environment limit,
   not a skipped assertion.
