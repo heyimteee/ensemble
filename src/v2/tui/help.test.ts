@@ -234,6 +234,16 @@ test("v5.8 help teaches palette scoping, General triage, solo init, exact-text g
   assert.match(title("composer-insert:composer.skill-validation"), /name/i)
 })
 
+test("ticket196: help keeps @ file-only and points to / for skills", () => {
+  const entry = helpSections()
+    .flatMap((section) => section.entries.map((candidate) => ({ section: section.id, ...candidate })))
+    .find((candidate) => candidate.section === "composer-insert" && candidate.id === "composer.prefixes")
+  assert.ok(entry, "the composer prefix entry exists")
+  assert.match(entry!.title, /@ completes workspace files only/)
+  assert.match(entry!.title, /\/ lists commands and skills/)
+  assert.match(entry!.title, /empty @ palette points to \//)
+})
+
 test("help filtering is fuzzy and n/N wrap through matches", () => {
   const sections = helpSections()
   assert.deepEqual(filterHelpSections(sections, ""), sections)

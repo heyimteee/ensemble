@@ -11,6 +11,7 @@ import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
 import { isSubstantiveReply, planLateSuccessRepair, settlementText, shouldInterruptSettledReply } from "./stream-settlement.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
+import { decideTurnFinalization, type TurnFinalizationFacts } from "./turn-finalization.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, isTerminalWorkStatus, parseWorkKind, stableHash, workKey, type DerivedWorkStatus } from "./queue.ts"
 import {
   activeContinuationGroup,
@@ -4806,6 +4807,55 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Ticket #194: project durable facts for the one turn-finalization policy.
+   * This is data gathering only — every decision and every side effect belongs
+   * to the policy function and the caller's existing terminal-write path.
+   */
+  private turnFinalizationFacts(
+    task: Subtask,
+    reply: string,
+    children: Subtask[],
+    state: SnapshotState,
+  ): TurnFinalizationFacts {
+    const workspace = state.workspaces[task.workspaceID]
+    const batchItems = task.handoff?.batch === true
+      ? (task.handoff.itemIDs ?? []).map((itemID) => ({
+          id: itemID,
+          decided: state.subtasks[itemID]?.handoff?.decided,
+        }))
+      : []
+    return {
+      task: {
+        taskID: task.id,
+        workKind: task.workKind ?? "delegation",
+        completion: task.handoff?.completion === true,
+        batch: task.handoff?.batch === true,
+        leader: workspace !== undefined && task.assigneeID === workspace.leaderID,
+        explicitHandoff: children.some((child) => child.workKind === "handoff" && child.handoff?.completion !== true),
+      },
+      nativeChildren: Object.values(state.nativeSubagents)
+        .filter((run) => run.parentTaskID === task.id)
+        .map((run) => ({
+          childSessionID: run.childSessionID,
+          parentTaskID: run.parentTaskID,
+          state: run.state,
+          startedAt: run.startedAt,
+          finishedAt: run.finishedAt,
+        })),
+      batchItems,
+      finalText: {
+        text: reply,
+        mentionedMemberIDs: workspace ? parseMentions(reply, workspace, state.agents) : [],
+      },
+      createdWork: children.map((child) => ({
+        workID: child.id,
+        workKind: child.workKind ?? "delegation",
+        assigneeID: child.assigneeID,
+      })),
+    }
+  }
+
+  /**
    * Ticket #71 mandatory completion handoff (server-enforced). A non-leader
    * turn that reaches its success finalize without an explicit handoff hop
    * cannot finish silently: the server queues one completion hop carrying
@@ -7565,6 +7615,22 @@ export class EnsembleV2Service {
         return
       }
       const children = this.store.subtasks().filter((item) => item.parentID === currentTask.id)
+      // Ticket #194: the one turn-finalization policy sits at the existing
+      // terminal-write boundary. It currently accepts every managed turn;
+      // #197/#198/#200 add wait/correct/warn orchestration here rather than
+      // growing parallel finalization checks elsewhere.
+      const finalization = decideTurnFinalization(this.turnFinalizationFacts(currentTask, reply, children, current))
+      if (finalization.action !== "accept") {
+        // Accept-only while the seam is introduced: an unexpected decision
+        // must not change today's terminal write. IDs and reason only.
+        this.logger?.event("warn", "task", "task.finalization.unwired", {
+          workspaceID: currentTask.workspaceID,
+          taskID: currentTask.id,
+          workKind: currentTask.workKind ?? "delegation",
+          decision: finalization.action,
+          reason: finalization.reason,
+        })
+      }
       currentTask.activeRunID = undefined
       currentTask.claimedBy = undefined
       currentTask.leaseUntil = undefined
