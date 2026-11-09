@@ -44,6 +44,9 @@ _Avoid_: Channel, room, group (when referring to this concept).
 **Work status**: The observed lifecycle of Work: pending, working, waiting, retrying, needs you, replied, failed, stalled, or cancelled. Failed names a native execution error; stalled names a delivery, lease, or attempt-exhaustion problem. Work status is derived from the durable delivery and execution facts, not read from a stored label.
 _Avoid_: Task state (when referring to the derived lifecycle), timeout error (for a stall).
 
+**Delivery hold**: A durable timer that keeps a queued delivery from being claimed before its quiet window or recipient is free: completion handoffs, batch consolidation, and native-permission waits. A held delivery reads as queued and offers no retry action; it is not a retry and carries no attempt countdown. Retry backoff remains reserved for a failed attempt or a lost lease.
+_Avoid_: Retry timer (for a healthy delivery), retry (for a completion hop).
+
 **Recovered work**: Work whose real answer arrives after a retry or a false stalled or terminal state. The answer supersedes transient retry and failure notices.
 
 **Rail**: The left navigation surface, split into Agents grouped by primary workspace and a separate Workspaces section. It is navigation over the roster and workspace list, not a second store.

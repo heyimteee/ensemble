@@ -17,7 +17,7 @@ export type TurnFinalizationDecision =
   | { action: "accept" }
   | { action: "wait"; reason: string }
   | { action: "correct"; reason: string; remainingIDs?: Id[] }
-  | { action: "warn"; reason: string }
+  | { action: "warn"; reason: string; remainingIDs?: Id[] }
 
 /** Durable task and work-kind projection for one finishing turn. */
 export type TurnTaskFacts = {
@@ -32,6 +32,11 @@ export type TurnTaskFacts = {
   leader: boolean
   /** The run already handed off explicitly, satisfying the completion contract. */
   explicitHandoff: boolean
+  /**
+   * Ticket #198: this batch has already spent its one correction turn.
+   * Durable so a restart cannot grant a second correction.
+   */
+  batchCorrectionSent: boolean
 }
 
 /** One native child session mapped to the finishing task. */
@@ -74,11 +79,23 @@ export type TurnFinalizationFacts = {
 /**
  * Decide one managed turn's finalization.
  *
- * Ticket #194 introduces the seam with the current behaviour only: every
- * managed turn is accepted. The decision union is already shaped for the
- * contracts that build on it, so later tickets add the wait, correction, and
- * warning rules here instead of growing parallel checks in the service.
+ * Ticket #194 introduced the seam; #198 adds the batch-review contract. A
+ * batch review with any undecided item gets one correction turn. If that
+ * correction still leaves items undecided, the turn warns instead of
+ * finalizing as a successful reply, so the batch can stay open for the user.
+ * The decision is pure: the service performs the correction prompt and the
+ * durable write.
  */
-export function decideTurnFinalization(_facts: TurnFinalizationFacts): TurnFinalizationDecision {
+export function decideTurnFinalization(facts: TurnFinalizationFacts): TurnFinalizationDecision {
+  if (facts.task.batch) {
+    const remainingIDs = facts.batchItems
+      .filter((item) => item.decided === undefined)
+      .map((item) => item.id)
+    if (remainingIDs.length > 0) {
+      return facts.task.batchCorrectionSent
+        ? { action: "warn", reason: "review-incomplete", remainingIDs }
+        : { action: "correct", reason: "review-incomplete", remainingIDs }
+    }
+  }
   return { action: "accept" }
 }

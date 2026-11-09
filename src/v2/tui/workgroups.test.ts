@@ -232,6 +232,16 @@ test("ticket144: a retry countdown refreshes every second and stops at the ETA",
   assert.equal(nextWorkInvalidation([retrying], [], 6_000), 7_000, "a due retry keeps refreshing until claimed")
 })
 
+test("ticket193: a delivery hold schedules one claim wake-up and no per-second refresh", () => {
+  const held = task({ id: "hold", deliveryHoldUntil: 5_500 })
+  assert.equal(nextWorkInvalidation([held], [], 1_500), 5_500, "a held delivery wakes once at its claim time")
+  assert.equal(nextWorkInvalidation([held], [], 5_500), undefined, "a due hold needs no further timer")
+
+  const legacy = task({ id: "legacy", attempts: 0, retryAfter: 5_500 })
+  assert.equal(nextWorkInvalidation([legacy], [], 1_500), 5_500, "a legacy delivery uses its retry timestamp without a countdown")
+  assert.equal(nextWorkInvalidation([legacy], [], 5_500), undefined)
+})
+
 test("ticket162: Work shows continuation lineage and exhausted groups as a controlled stop", () => {
   const items = [
     working({ id: "root-live", dispatchGroupID: "dispatch_root", createdAt: 1 }),

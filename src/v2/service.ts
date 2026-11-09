@@ -3023,6 +3023,7 @@ export class EnsembleV2Service {
       subtask.claimedBy = undefined
       subtask.leaseUntil = undefined
       subtask.retryAfter = undefined
+      subtask.deliveryHoldUntil = undefined
       subtask.repliedAt = at
       subtask.finishedAt = at
       subtask.stoppedAt = at
@@ -3788,10 +3789,18 @@ export class EnsembleV2Service {
     subtask.claimedBy = undefined
     subtask.leaseUntil = undefined
     subtask.retryAfter = undefined
+    subtask.deliveryHoldUntil = undefined
     subtask.repliedAt = undefined
     subtask.finishedAt = undefined
     subtask.stoppedAt = undefined
     subtask.failure = undefined
+    // Ticket #198: an explicit retry starts a fresh managed turn, so the
+    // batch's review bookkeeping begins again (still at most one correction
+    // for this turn).
+    if (subtask.handoff) {
+      subtask.handoff.reviewCorrectionSent = undefined
+      subtask.handoff.reviewIncomplete = undefined
+    }
     // A fresh explicit budget is only needed when the automatic one is spent;
     // otherwise keep the visible attempt history (existing lifecycle tests and
     // operator expectations count cumulative attempts).
@@ -3843,6 +3852,7 @@ export class EnsembleV2Service {
     subtask.claimedBy = undefined
     subtask.leaseUntil = undefined
     subtask.retryAfter = undefined
+    subtask.deliveryHoldUntil = undefined
     subtask.repliedAt = at
     subtask.finishedAt = at
     subtask.stoppedAt = at
@@ -3872,10 +3882,15 @@ export class EnsembleV2Service {
     subtask.claimedBy = undefined
     subtask.leaseUntil = undefined
     subtask.retryAfter = undefined
+    subtask.deliveryHoldUntil = undefined
     subtask.repliedAt = undefined
     subtask.finishedAt = undefined
     subtask.stoppedAt = undefined
     subtask.failure = undefined
+    if (subtask.handoff) {
+      subtask.handoff.reviewCorrectionSent = undefined
+      subtask.handoff.reviewIncomplete = undefined
+    }
     subtask.deadlineAt = now() + DEADLINE_MS
     await this.store.saveSubtask(subtask)
     return subtask
@@ -3946,6 +3961,7 @@ export class EnsembleV2Service {
           subtask.claimedBy = undefined
           subtask.leaseUntil = undefined
           subtask.retryAfter = undefined
+          subtask.deliveryHoldUntil = undefined
           subtask.repliedAt = at
           subtask.finishedAt = at
           subtask.stoppedAt = at
@@ -3964,6 +3980,7 @@ export class EnsembleV2Service {
           subtask.claimedBy = undefined
           subtask.leaseUntil = undefined
           subtask.retryAfter = undefined
+          subtask.deliveryHoldUntil = undefined
           subtask.repliedAt = at
           subtask.finishedAt = at
           // Ticket #170: a user rejection is an explicit controlled stop, not
@@ -3990,6 +4007,7 @@ export class EnsembleV2Service {
         subtask.claimedBy = undefined
         subtask.leaseUntil = undefined
         subtask.retryAfter = undefined
+        subtask.deliveryHoldUntil = undefined
         subtask.finishedAt = undefined
         subtask.stoppedAt = undefined
         subtask.failure = undefined
@@ -4511,7 +4529,7 @@ export class EnsembleV2Service {
     const workspaceID = found.workspace?.id ?? input.workspaceID
     const at = Date.now()
     const tasks = Object.values(state.subtasks).filter((task) => !workspaceID || task.workspaceID === workspaceID)
-    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, failure: task.failure, assignee: task.assigneeID, parent: task.parentID, dispatchGroupID: task.dispatchGroupID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
+    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, retryAfter: task.retryAfter, deliveryHoldUntil: task.deliveryHoldUntil, failure: task.failure, assignee: task.assigneeID, parent: task.parentID, dispatchGroupID: task.dispatchGroupID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
   }
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
@@ -4884,6 +4902,7 @@ export class EnsembleV2Service {
         batch: task.handoff?.batch === true,
         leader: workspace !== undefined && task.assigneeID === workspace.leaderID,
         explicitHandoff: children.some((child) => child.workKind === "handoff" && child.handoff?.completion !== true),
+        batchCorrectionSent: task.handoff?.reviewCorrectionSent === true,
       },
       nativeChildren: Object.values(state.nativeSubagents)
         .filter((run) => run.parentTaskID === task.id)
@@ -4905,6 +4924,115 @@ export class EnsembleV2Service {
         assigneeID: child.assigneeID,
       })),
     }
+  }
+
+  /**
+   * Ticket #198: append one correction turn to an already-running native
+   * session and read the answer after it settles. The caller owns the
+   * contract-specific prompt and durable marker; this helper performs only
+   * the prompt/wait/read cycle so #200 can reuse the same bounded path.
+   */
+  private async runCorrectionTurn(
+    sessionID: string,
+    text: string,
+  ): Promise<{ text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any }> {
+    const startedAt = now()
+    try {
+      await this.ctx.session.prompt({ sessionID, text, delivery: "steer" })
+      await this.ctx.session.wait({ sessionID }).catch(() => undefined)
+      const messages = listData(await this.ctx.session.context({ sessionID }))
+      return assistantResult(messages, startedAt)
+    } catch {
+      // A failed correction turn is not an execution retry: the caller falls
+      // through to its contract fallback with the original answer intact.
+      return { text: "", tools: [], toolOutcomes: [] }
+    }
+  }
+
+  /**
+   * Ticket #198: spend the one batch-review correction turn. The durable
+   * marker is written before the prompt so a crash or restart cannot grant a
+   * second correction. The correction lists only remaining item ids and the
+   * required tool action; it never restates item content.
+   */
+  private async correctBatchReview(
+    task: Subtask,
+    remainingIDs: Id[],
+    sessionID: string,
+  ): Promise<{ text: string } | undefined> {
+    const batch = this.store.cloneSubtask(task.id)
+    if (!batch?.handoff?.batch) return undefined
+    batch.handoff.reviewCorrectionSent = true
+    await this.store.saveSubtask(batch)
+    this.noteWorkChanged(batch)
+    this.logger?.event("info", "task", "task.batch.correction", {
+      workspaceID: batch.workspaceID,
+      taskID: batch.id,
+      dispatchGroupID: batch.dispatchGroupID,
+      remaining: remainingIDs.length,
+      remainingIDs,
+    })
+    const prompt = [
+      `Review incomplete: ${remainingIDs.length} batch item${remainingIDs.length === 1 ? "" : "s"} still need${remainingIDs.length === 1 ? "s" : ""} a disposition.`,
+      `Remaining item ids: ${remainingIDs.join(", ")}.`,
+      `Call ensemble_review now for batch "${batch.id}" and decide every remaining item with action "delegate" (include an assignee and maxHops), "start", "end", or "dismiss". Do not finish with a plain reply.`,
+    ].join("\n")
+    const result = await this.runCorrectionTurn(sessionID, prompt)
+    return { text: result.text }
+  }
+
+  /**
+   * Ticket #198: after its one correction, a batch with undecided items stays
+   * open as NEEDS YOU. The durable reason outranks `pending` in the canonical
+   * status derivation and keeps the row out of the scheduler, so the review
+   * can never loop and its items can never run directly in place of it.
+   */
+  private async holdIncompleteBatchReview(
+    task: Subtask,
+    remainingIDs: Id[],
+    live: Message | undefined,
+    globalEpoch: number,
+    workspaceEpoch: number,
+  ): Promise<void> {
+    const batch = this.store.cloneSubtask(task.id)
+    if (!batch?.handoff || batch.state === "replied") return
+    batch.state = "pending"
+    batch.outcome = "pending"
+    batch.awaitingChildren = false
+    batch.activeRunID = undefined
+    batch.claimedBy = undefined
+    batch.leaseUntil = undefined
+    batch.retryAfter = undefined
+    batch.deliveryHoldUntil = undefined
+    batch.handoff.reviewIncomplete = "review-incomplete"
+    await this.store.saveSubtask(batch)
+    this.noteWorkChanged(batch)
+    const workspace = this.store.workspace(batch.workspaceID)
+    if (workspace) {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: `Review incomplete: ${remainingIDs.length} of ${batch.handoff.itemIDs?.length ?? remainingIDs.length} items still undecided (${remainingIDs.join(", ")}). The batch stays open for you — restart this review to continue.`,
+        kind: "system",
+        taskID: batch.id,
+      })
+    }
+    await this.finalizeStream(
+      live,
+      "Review incomplete — decide the remaining items to close this batch.",
+      true,
+      globalEpoch,
+      workspaceEpoch,
+      batch.workspaceID,
+    )
+    this.logger?.event("warn", "task", "task.batch.incomplete", {
+      workspaceID: batch.workspaceID,
+      taskID: batch.id,
+      dispatchGroupID: batch.dispatchGroupID,
+      state: batch.state,
+      remaining: remainingIDs.length,
+      remainingIDs,
+      reason: batch.handoff.reviewIncomplete,
+    })
   }
 
   /**
@@ -4988,7 +5116,7 @@ export class EnsembleV2Service {
       dispatchGroupID,
       dispatchDepth,
       deadlineAt: at + DEADLINE_MS,
-      retryAfter: at + COMPLETION_QUIET_WINDOW_MS,
+      deliveryHoldUntil: at + COMPLETION_QUIET_WINDOW_MS,
       handoff: {
         correlationID,
         senderID: finisherID,
@@ -5079,11 +5207,17 @@ export class EnsembleV2Service {
       }
       batch.handoff.itemIDs = merged
       batch.title = batchReviewTitle(merged.length)
-      // Never run a review before the newest item's quiet window; early
-      // consolidation may have grouped an item that is still parked.
+      // Never run a review before the newest item's delivery hold; early
+      // consolidation may have grouped an item that is still parked. Batch
+      // reviews are deliveries, so their timer is a hold, never a retry.
+      if (batch.retryAfter !== undefined && batch.deliveryHoldUntil === undefined && batch.attempts === 0 && batch.failure === undefined) {
+        batch.deliveryHoldUntil = batch.retryAfter
+        batch.retryAfter = undefined
+      }
       for (const itemID of ids) {
         const item = this.store.subtask(itemID)
-        if (item?.retryAfter !== undefined) batch.retryAfter = Math.max(batch.retryAfter ?? 0, item.retryAfter)
+        const hold = item?.deliveryHoldUntil ?? item?.retryAfter
+        if (hold !== undefined) batch.deliveryHoldUntil = Math.max(batch.deliveryHoldUntil ?? 0, hold)
       }
       await this.store.saveSubtask(batch)
       this.noteWorkChanged(batch)
@@ -5126,9 +5260,9 @@ export class EnsembleV2Service {
       dispatchGroupID,
       dispatchDepth: batchDepth,
       deadlineAt: at + DEADLINE_MS,
-      // Early consolidation can group an item that is still inside its quiet
-      // window; the review itself waits for the newest item.
-      retryAfter: Math.max(at, ...items.map((item) => item.retryAfter ?? at)),
+      // Early consolidation can group an item that is still inside its
+      // delivery hold; the review itself waits for the newest item.
+      deliveryHoldUntil: Math.max(at, ...items.map((item) => item.deliveryHoldUntil ?? item.retryAfter ?? at)),
       handoff: {
         correlationID,
         senderID: items[0]?.handoff?.senderID ?? recipientID,
@@ -5179,7 +5313,7 @@ export class EnsembleV2Service {
       // Ticket #138 follow-through: count siblings that are still inside their
       // quiet window too. If two completions already exist, batching wins over
       // the eligibility boundary; otherwise a pump that runs between two
-      // near-simultaneous retryAfter values claims the older hop alone and the
+      // near-simultaneous delivery holds claims the older hop alone and the
       // group can never form a batch.
       const dispatchGroupID = resolveDispatchGroupID(task, state.subtasks)
       if (!dispatchGroupID) continue
@@ -5292,6 +5426,8 @@ export class EnsembleV2Service {
       item.outcome = "succeeded"
       item.repliedAt = at
       item.finishedAt = at
+      item.retryAfter = undefined
+      item.deliveryHoldUntil = undefined
       if (item.handoff) {
         item.handoff.decided = "delegated"
         item.handoff.answeredByID = reviewer.id
@@ -5307,6 +5443,7 @@ export class EnsembleV2Service {
       item.outcome = "pending"
       item.error = undefined
       item.retryAfter = undefined
+      item.deliveryHoldUntil = undefined
       item.activeRunID = undefined
       item.claimedBy = undefined
       item.leaseUntil = undefined
@@ -5322,6 +5459,8 @@ export class EnsembleV2Service {
     item.state = "replied"
     item.repliedAt = at
     item.finishedAt = at
+    item.retryAfter = undefined
+    item.deliveryHoldUntil = undefined
     if (item.handoff) {
       item.handoff.answeredByID = reviewer.id
       item.handoff.decided = decision.action === "dismiss" ? "dismissed" : "ended"
@@ -5349,8 +5488,11 @@ export class EnsembleV2Service {
       batch.state = "replied"
       batch.outcome = "succeeded"
       batch.awaitingChildren = false
+      if (batch.handoff) batch.handoff.reviewIncomplete = undefined
       batch.repliedAt = at
       batch.finishedAt = at
+      batch.retryAfter = undefined
+      batch.deliveryHoldUntil = undefined
       await this.store.saveSubtask(batch)
       this.noteWorkChanged(batch)
       await this.appendMessage(workspace, {
@@ -5374,8 +5516,11 @@ export class EnsembleV2Service {
     batch.state = "replied"
     batch.outcome = "succeeded"
     batch.awaitingChildren = false
+    if (batch.handoff) batch.handoff.reviewIncomplete = undefined
     batch.repliedAt = at
     batch.finishedAt = at
+    batch.retryAfter = undefined
+    batch.deliveryHoldUntil = undefined
     await this.store.saveSubtask(batch)
     this.noteWorkChanged(batch)
     if (route.decision === "terminate") {
@@ -5422,7 +5567,7 @@ export class EnsembleV2Service {
         queueKey: key,
         dispatchGroupID,
         deadlineAt: at + DEADLINE_MS,
-        retryAfter: at + COMPLETION_QUIET_WINDOW_MS,
+        deliveryHoldUntil: at + COMPLETION_QUIET_WINDOW_MS,
         handoff: {
           correlationID,
           senderID: reviewer.id,
@@ -5833,6 +5978,7 @@ export class EnsembleV2Service {
     task.leaseUntil = undefined
     task.activeRunID = undefined
     task.retryAfter = undefined
+    task.deliveryHoldUntil = undefined
     task.repliedAt ??= at
     task.finishedAt = at
     task.resultMessageID = plan.messageID
@@ -5928,6 +6074,7 @@ export class EnsembleV2Service {
     task.claimedBy = undefined
     task.leaseUntil = undefined
     task.retryAfter = undefined
+    task.deliveryHoldUntil = undefined
     task.repliedAt = at
     task.finishedAt = at
     await this.store.saveSubtask(task)
@@ -5973,6 +6120,7 @@ export class EnsembleV2Service {
     // `pending` row, and a late success from the expired run still has durable
     // evidence to recover from instead of being rejected as a fresh queue row.
     task.retryAfter = at
+    task.deliveryHoldUntil = undefined
     await this.store.saveSubtask(task)
     this.recordRecoveryFailure(candidate, task, {
       event: "failure.attempt",
@@ -6149,6 +6297,7 @@ export class EnsembleV2Service {
         task.outcome = "pending"
         task.activeRunID = undefined
         task.retryAfter = undefined
+        task.deliveryHoldUntil = undefined
         await this.store.saveSubtask(task)
         this.noteWorkChanged(task)
       }
@@ -6202,7 +6351,7 @@ export class EnsembleV2Service {
           if (directory) busyEditDirs.add(directory)
         }
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
+          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && task.handoff?.reviewIncomplete === undefined && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && (task.deliveryHoldUntil === undefined || task.deliveryHoldUntil <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)
         const skipped = (task: Subtask, reason: string, extra: Record<string, unknown> = {}) => {
           if (task.retryAfter === undefined) return
@@ -7411,12 +7560,13 @@ export class EnsembleV2Service {
     }
     // A waiting parent still needs its children and synthesis.
     if (derived === "waiting") return false
-    // A pending row with no scheduled retry and no structured failure was
-    // moved by an explicit user action (retry, restart, reassign) or is
-    // freshly queued. The interrupted run's leftover result must not clobber
-    // it (ticket #169). A service-scheduled retry still carries `retryAfter`;
-    // a false terminal carries `failure`; both are recoverable below.
-    if (derived === "pending" && task.retryAfter === undefined && task.failure === undefined) return false
+    // A pending row with no scheduled retry, delivery hold, or structured
+    // failure was moved by an explicit user action (retry, restart, reassign)
+    // or is freshly queued. The interrupted run's leftover result must not
+    // clobber it (ticket #169). A service-scheduled retry still carries
+    // `retryAfter`; a delivery hold carries `deliveryHoldUntil`; a false
+    // terminal carries `failure`; all are recoverable below.
+    if (derived === "pending" && task.retryAfter === undefined && task.deliveryHoldUntil === undefined && task.failure === undefined) return false
     // Waiting for a user decision is not a late success.
     if (derived === "needs_you") return false
     const workspace = this.store.workspace(task.workspaceID)
@@ -7477,6 +7627,7 @@ export class EnsembleV2Service {
     task.leaseUntil = undefined
     task.activeRunID = undefined
     task.retryAfter = undefined
+    task.deliveryHoldUntil = undefined
     task.repliedAt ??= at
     task.finishedAt = at
     task.resultMessageID = resultMessageID
@@ -7493,12 +7644,16 @@ export class EnsembleV2Service {
   private async runTask(taskID: string): Promise<void> {
     const task = this.store.cloneSubtask(taskID)
     if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
+    // Ticket #198: an incomplete batch review waits for the user, never for
+    // another automatic correction turn.
+    if (task.handoff?.reviewIncomplete !== undefined) return
     // Do not run work the queue has retired/stalled: the next reapAndRetire
     // pass (or the current one) records the terminal state with its reason.
     // Ticket #168: an old delivery timestamp never blocks a claim; only the
     // heartbeat lease and attempt budget govern execution.
     if (task.attempts >= MAX_ATTEMPTS) return
     if (task.retryAfter !== undefined && now() < task.retryAfter) return
+    if (task.deliveryHoldUntil !== undefined && now() < task.deliveryHoldUntil) return
     const workspace = this.store.workspace(task.workspaceID)
     const agent = this.store.agent(task.assigneeID)
     if (!workspace || !agent) return
@@ -7520,6 +7675,7 @@ export class EnsembleV2Service {
     task.leaseUntil = at + LEASE_MS
     task.deadlineAt ??= at + DEADLINE_MS
     task.retryAfter = undefined
+    task.deliveryHoldUntil = undefined
     task.failure = undefined
     await this.store.saveSubtask(task)
     // Claim fencing: the claim is only real if the stored row still names
@@ -7573,17 +7729,20 @@ export class EnsembleV2Service {
       task.activeRunID = undefined
       task.claimedBy = undefined
       task.leaseUntil = undefined
-      task.retryAfter = now() + 10_000
+      // A host permission block is a delivery hold, not a failed attempt:
+      // the card stays QUEUED and offers no retry action (ticket #193).
+      task.deliveryHoldUntil = now() + 10_000
+      task.retryAfter = undefined
       task.failure = undefined
       await this.store.saveSubtask(task)
-      this.logger?.event("warn", "retry", "retry.scheduled", {
+      this.logger?.event("warn", "task", "delivery.held", {
         workspaceID: task.workspaceID,
         taskID: task.id,
         dispatchGroupID: task.dispatchGroupID,
         attempt: task.attempts,
         maxAttempts: MAX_ATTEMPTS,
         delayMs: 10_000,
-        retryAfter: task.retryAfter,
+        holdUntil: task.deliveryHoldUntil,
         reason: "native-permission-pending",
       })
       this.defer(10_000, () => this.schedule())
@@ -7712,8 +7871,8 @@ export class EnsembleV2Service {
         if (!result.failure) break
         if (!availabilityFailure(result.failure) || anyToolCall(messages, attemptStartedAt) || index === models.length - 1) break
       }
-      const current = this.store.read()
-      const currentTask = this.store.cloneSubtask(task.id)
+      let current = this.store.read()
+      let currentTask = this.store.cloneSubtask(task.id)
       if (!currentTask) return
       const ownsRun = currentTask.activeRunID === runID
       if (result?.failure) {
@@ -7787,7 +7946,7 @@ export class EnsembleV2Service {
       // finalize as success or be handed off as completed work; retry inside
       // the budget, then fail visibly. Ticket #149: an internal fallback
       // string is not an answer either.
-      const reply = isFallbackReply(mention.text) ? "" : mention.text.trim()
+      let reply = isFallbackReply(mention.text) ? "" : mention.text.trim()
       // A terminal state (or a lost claim) always wins over a late run result,
       // but a substantive late answer repairs the false placeholder it left
       // behind (ticket #169). Nothing below may resurrect a settled row by
@@ -7841,17 +8000,61 @@ export class EnsembleV2Service {
         await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
         return
       }
-      const children = this.store.subtasks().filter((item) => item.parentID === currentTask.id)
+      let children = this.store.subtasks().filter((item) => item.parentID === task.id)
       // Ticket #194: the one turn-finalization policy sits at the existing
       // terminal-write boundary. Ticket #197 settles the native child and its
       // post-child wake-up answer before this point, so the policy evaluates
-      // the final reply exactly once; no second finalization seam exists.
-      // #198/#200 add correction orchestration here rather than growing
-      // parallel finalization checks elsewhere.
-      const finalization = decideTurnFinalization(this.turnFinalizationFacts(currentTask, reply, children, current))
+      // the final reply; no second finalization seam exists. #198/#200 add
+      // correction orchestration here rather than growing parallel checks
+      // elsewhere.
+      let finalization = decideTurnFinalization(this.turnFinalizationFacts(currentTask, reply, children, current))
+      // Ticket #198: a batch review may not finalize as a successful reply
+      // while any item lacks a disposition. Spend the one correction turn in
+      // the same native session; it is not an execution retry, so the attempt
+      // budget and dispatch group are untouched.
+      if (finalization.action === "correct" && finalization.reason === "review-incomplete") {
+        const correction = await this.correctBatchReview(
+          currentTask,
+          finalization.remainingIDs ?? [],
+          binding.sessionID,
+        )
+        if (!correction) return
+        const correctionReply = isFallbackReply(correction.text) ? "" : correction.text.trim()
+        current = this.store.read()
+        const refreshed = this.store.cloneSubtask(task.id)
+        if (!refreshed) return
+        // A reset or workspace change during the correction turn must not
+        // write this run's contract result into the new epoch.
+        if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return
+        currentTask = refreshed
+        // The correction itself may have closed the batch through
+        // ensemble_review, or a user action may have settled it meanwhile.
+        if (refreshed.activeRunID !== runID || refreshed.state === "replied") {
+          await this.recoverLateSuccess({
+            task: refreshed,
+            reply: correctionReply || reply,
+            live,
+            runID,
+            agentID: agent.id,
+            globalEpoch,
+            workspaceEpoch,
+          })
+          return
+        }
+        if (correctionReply) reply = correctionReply
+        children = this.store.subtasks().filter((item) => item.parentID === refreshed.id)
+        finalization = decideTurnFinalization(this.turnFinalizationFacts(refreshed, reply, children, current))
+      }
+      // The correction could not close the batch: keep it open as NEEDS YOU
+      // with a durable reason. Its items stay parked behind the batch and the
+      // row is never claimed for another automatic correction.
+      if (finalization.action === "warn" && finalization.reason === "review-incomplete") {
+        await this.holdIncompleteBatchReview(currentTask, finalization.remainingIDs ?? [], live, globalEpoch, workspaceEpoch)
+        return
+      }
       if (finalization.action !== "accept") {
-        // Accept-only while the seam is introduced: an unexpected decision
-        // must not change today's terminal write. IDs and reason only.
+        // IDs and reason only; an unexpected decision must not invent a
+        // terminal write outside the contracts above.
         this.logger?.event("warn", "task", "task.finalization.unwired", {
           workspaceID: currentTask.workspaceID,
           taskID: currentTask.id,
@@ -7968,7 +8171,7 @@ export class EnsembleV2Service {
         // produced a result. Queue/stall states still preserve substantive
         // text per #169.
         const superseded = status === "working"
-          || (status === "pending" && settled?.retryAfter === undefined && settled?.failure === undefined)
+          || (status === "pending" && settled?.retryAfter === undefined && settled?.deliveryHoldUntil === undefined && settled?.failure === undefined)
         const interrupted = !settled || !status
           ? true
           : superseded
@@ -8048,7 +8251,10 @@ export class EnsembleV2Service {
       // Ticket #191: a terminal row must not retain fields from the queue
       // lifecycle after its run releases the claim.
       if (current.activeRunID === runID) current.activeRunID = undefined
-      if (current.state === "replied") current.retryAfter = undefined
+      if (current.state === "replied") {
+        current.retryAfter = undefined
+        current.deliveryHoldUntil = undefined
+      }
       await this.store.saveSubtask(current)
     }
   }
@@ -8067,7 +8273,10 @@ export class EnsembleV2Service {
       task.claimedBy = undefined
       task.leaseUntil = undefined
       if (task.activeRunID !== undefined && runIDs.has(task.activeRunID)) task.activeRunID = undefined
-      if (task.state === "replied") task.retryAfter = undefined
+      if (task.state === "replied") {
+        task.retryAfter = undefined
+        task.deliveryHoldUntil = undefined
+      }
       await this.store.saveSubtask(task)
     }
   }
@@ -8147,6 +8356,7 @@ export class EnsembleV2Service {
     input.task.claimedBy = undefined
     input.task.leaseUntil = undefined
     input.task.retryAfter = now() + delayMs
+    input.task.deliveryHoldUntil = undefined
     input.task.failure = undefined
     await this.store.saveSubtask(input.task)
     const attempt = nextRetryAttempt(input.task.attempts, MAX_ATTEMPTS)
@@ -8245,6 +8455,7 @@ export class EnsembleV2Service {
     input.task.claimedBy = undefined
     input.task.leaseUntil = undefined
     input.task.retryAfter = undefined
+    input.task.deliveryHoldUntil = undefined
     input.task.failure = undefined
     await this.store.saveApproval(approval)
     await this.store.saveSubtask(input.task)
@@ -8299,6 +8510,7 @@ export class EnsembleV2Service {
     task.claimedBy = undefined
     task.leaseUntil = undefined
     task.retryAfter = undefined
+    task.deliveryHoldUntil = undefined
     task.repliedAt = at
     task.finishedAt = at
     await this.store.saveSubtask(task)

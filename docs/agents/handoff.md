@@ -45,7 +45,11 @@ Related: [handoff terminology](../../GLOSSARY.md), ticket
 
 A recipient of a batch review owns the disposition, not just acknowledgement:
 
-- Decide every item; an undecided item keeps the batch open.
+- Decide every item; an undecided item keeps the batch open. A review turn
+  that replies without `ensemble_review` gets one correction turn naming the
+  remaining item ids. If items are still undecided after that, the batch stays
+  open as `NEEDS YOU` with a review-incomplete reason; it never closes silently
+  and its items never run in its place.
 - `delegate` requires a self-authored instruction and a real recipient.
 - `start` and `end` record work state; `dismiss` records that no work is
   needed, with the reason in the note.

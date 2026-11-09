@@ -8,6 +8,7 @@ import { startServiceForTest } from "./test-service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
+import { workTaskActions } from "./tui/workactions.ts"
 import type { Agent, Workspace } from "./types.ts"
 import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
 import { ENSEMBLE_BLOCK_VERSION } from "./init-block.ts"
@@ -4243,6 +4244,121 @@ test("ticket168: pending work past the delivery window stays queued and still ru
   }
 })
 
+test("ticket193: a completion hop for a busy recipient stays queued without a retry action", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-193-busy-recipient-"))
+  const { ctx, nativeSessions } = fakeContext()
+  const at = Date.now()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Max" }))
+  await seed.saveWorkspace(siteWorkspace(directory, { leaderID: "a", memberIDs: ["a", "b"] }))
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "session_leader", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: "b", sessionID: "session_member", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  nativeSessions.set("session_leader", { id: "session_leader", title: "Nova · site" })
+  nativeSessions.set("session_member", { id: "session_member", title: "Max · site" })
+  // The leader is busy with another live claim; the completion delivery must
+  // wait for it as queued work, never as a failed retry.
+  await seed.saveSubtask({
+    id: "leader_busy", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Leader work", instruction: "Run",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, createdAt: at, claimedBy: "run_leader", activeRunID: "run_leader", leaseUntil: at + 60_000,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "$Max Finish this" } })
+    let hopID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const hop = Object.values(next.state.subtasks).find(
+        (task: any) => task.workKind === "handoff" && task.handoff?.completion === true,
+      ) as any
+      if (!hop) return false
+      hopID = hop.id
+      return hop.state === "pending"
+    })
+    const immediate = (await handlers.snapshot({ directory })).state.subtasks[hopID] as any
+    assert.equal(immediate.status, "pending", "a quiet-window delivery reads queued")
+    assert.equal(immediate.retryAfter, undefined, "a delivery hold is not a retry marker")
+    assert.equal(typeof immediate.deliveryHoldUntil, "number")
+    assert.ok(immediate.deliveryHoldUntil > Date.now())
+    assert.ok(![...workTaskActions(immediate, Date.now())].includes("work.retry"), "queued delivery offers no retry action")
+
+    await new Promise((resolve) => setTimeout(resolve, 1_300))
+    const busy = (await handlers.snapshot({ directory })).state.subtasks[hopID] as any
+    assert.equal(busy.status, "pending", "a busy recipient keeps the delivery queued, never retrying")
+    assert.equal(busy.retryAfter, undefined)
+    assert.ok(![...workTaskActions(busy, Date.now())].includes("work.retry"))
+
+    // Free the leader: the queued delivery runs normally and is never logged
+    // as a retry recovery.
+    const serviceStore = (service as any).store as V2Store
+    await serviceStore.removeSubtask("leader_busy")
+    ;(service as any).schedule()
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks[hopID] as any)?.state === "replied"
+    }, 10_000)
+    const recovered = await handlers["logs.recent"]({ directory, event: "task.recovered", taskID: hopID, limit: 20 })
+    assert.equal(recovered.entries.length, 0, "a delivery claim is not a retry recovery")
+    const retried = await handlers["logs.recent"]({ directory, event: "retry.scheduled", taskID: hopID, limit: 20 })
+    assert.equal(retried.entries.length, 0, "a delivery hold never schedules a retry")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket193: a completion batch waits on a delivery hold and reads queued", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-193-batch-hold-"))
+  const { ctx } = fakeContext()
+  const at = Date.now()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Max" }))
+  await seed.saveWorkspace(siteWorkspace(directory, { leaderID: "a", memberIDs: ["a", "b"] }))
+  await seed.saveSubtask({
+    id: "leader_busy", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Leader work", instruction: "Run",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 1, createdAt: at, claimedBy: "run_leader", activeRunID: "run_leader", leaseUntil: at + 60_000,
+  })
+  for (const [index, id] of ["hop_one", "hop_two"].entries()) {
+    await seed.saveSubtask({
+      id, workspaceID: "w", creatorType: "agent", creatorAgentID: "b", assigneeID: "a", title: `Completion ${index + 1}`,
+      instruction: "Review", mode: "research", state: "pending", stage: "initial", outcome: "pending",
+      interrupted: false, awaitingChildren: false, attempts: 0, createdAt: at + index,
+      workKind: "handoff", queueKey: `completion:w:parent_${index}:a`, dispatchGroupID: "group_batch",
+      deliveryHoldUntil: at + 60_000,
+      handoff: { correlationID: `handoff_${index}`, senderID: "b", recipientID: "a", depth: 1, completion: true },
+    })
+  }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    let batchID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const batch = Object.values(next.state.subtasks).find(
+        (task: any) => task.workKind === "handoff" && task.handoff?.batch === true,
+      ) as any
+      if (!batch || batch.handoff?.itemIDs?.length !== 2) return false
+      batchID = batch.id
+      return true
+    })
+    const batch = (await handlers.snapshot({ directory })).state.subtasks[batchID] as any
+    assert.equal(batch.status, "pending", "a batch consolidation hold is queued work")
+    assert.equal(batch.retryAfter, undefined, "batch consolidation is not a retry")
+    assert.equal(batch.deliveryHoldUntil, at + 60_000, "the batch honors the newest delivery hold")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket168: a completion handoff is not failed by the delivery window", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-168-completion-handoff-"))
   const { ctx } = fakeContext()
@@ -4319,7 +4435,7 @@ test("ticket168: cancellation is explicit and never a timeout or failure", async
   await seed.saveSubtask({
     id: "t", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Stop me", instruction: "Do",
     mode: "research", state: "pending", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
-    attempts: 1, retryAfter: Date.now() + 60_000, createdAt: 1,
+    attempts: 1, retryAfter: Date.now() + 60_000, deliveryHoldUntil: Date.now() + 60_000, createdAt: 1,
   })
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
@@ -4333,6 +4449,8 @@ test("ticket168: cancellation is explicit and never a timeout or failure", async
     assert.equal(row.status, "cancelled")
     assert.equal(row.stoppedAt !== undefined, true)
     assert.equal(row.failure, undefined, "a stop is not a native failure")
+    assert.equal(row.retryAfter, undefined, "a stop clears the retry marker")
+    assert.equal(row.deliveryHoldUntil, undefined, "a stop clears the delivery hold")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -8967,6 +9085,7 @@ test("ticket191: releasing a terminal run claim clears queue and retry fields", 
     activeRunID: "run_1",
     leaseUntil: at + 60_000,
     retryAfter: at + 1,
+    deliveryHoldUntil: at + 1,
     createdAt: at,
   })
   const service = new EnsembleV2Service(ctx)
@@ -8978,6 +9097,7 @@ test("ticket191: releasing a terminal run claim clears queue and retry fields", 
     assert.equal(task.leaseUntil, undefined)
     assert.equal(task.activeRunID, undefined)
     assert.equal(task.retryAfter, undefined)
+    assert.equal(task.deliveryHoldUntil, undefined)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -9012,6 +9132,7 @@ test("ticket191: shutdown release clears terminal retry fields", async () => {
     activeRunID: "run_1",
     leaseUntil: at + 60_000,
     retryAfter: at + 1,
+    deliveryHoldUntil: at + 1,
     createdAt: at,
   })
   const service = new EnsembleV2Service(ctx)
@@ -9023,6 +9144,7 @@ test("ticket191: shutdown release clears terminal retry fields", async () => {
     assert.equal(task.leaseUntil, undefined)
     assert.equal(task.activeRunID, undefined)
     assert.equal(task.retryAfter, undefined)
+    assert.equal(task.deliveryHoldUntil, undefined)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

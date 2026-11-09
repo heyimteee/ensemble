@@ -45,7 +45,7 @@ export type DoctorSubtask = {
   /** Missing legacy values are treated as user-created (never consuming). */
   creatorType: "user" | "agent"
   workKind?: WorkKind
-  handoff?: { completion?: boolean; batch?: boolean }
+  handoff?: { completion?: boolean; batch?: boolean; reviewIncomplete?: string }
   /**
    * Ticket #170 lifecycle facts. The service overlay already derives `status`;
    * the doctor repeats the canonical derivation when it is absent and uses the
@@ -65,6 +65,8 @@ export type DoctorSubtask = {
   leaseUntil?: number
   activeRunID?: string
   retryAfter?: number
+  /** Queued-delivery hold; terminal rows must not retain it (ticket #193). */
+  deliveryHoldUntil?: number
   finishedAt?: number
   repliedAt?: number
   stoppedAt?: number
@@ -404,7 +406,9 @@ function doctorWorkStatus(task: DoctorSubtask, now: number): DerivedWorkStatus |
     ...(task.leaseUntil !== undefined ? { leaseUntil: task.leaseUntil } : {}),
     ...(task.activeRunID !== undefined ? { activeRunID: task.activeRunID } : {}),
     ...(task.retryAfter !== undefined ? { retryAfter: task.retryAfter } : {}),
+    ...(task.deliveryHoldUntil !== undefined ? { deliveryHoldUntil: task.deliveryHoldUntil } : {}),
     ...(task.failure !== undefined ? { failure: task.failure } : {}),
+    ...(task.handoff !== undefined ? { handoff: task.handoff } : {}),
   }, now)
 }
 
@@ -469,7 +473,7 @@ function checkWorkRows(input: DoctorLocationInput, add: (
       if (terminal && task.outcome === "failed" && task.stoppedAt !== undefined && task.failure !== undefined) problems.push("cancelled-with-failure")
       if (!terminal && (task.repliedAt !== undefined || task.finishedAt !== undefined)) problems.push("non-terminal-with-finish")
       if (!terminal && task.outcome !== "pending") problems.push("non-terminal-nonpending-outcome")
-      if (terminal && (task.claimedBy !== undefined || task.activeRunID !== undefined || task.retryAfter !== undefined)) problems.push("terminal-with-queue-fields")
+      if (terminal && (task.claimedBy !== undefined || task.activeRunID !== undefined || task.retryAfter !== undefined || task.deliveryHoldUntil !== undefined)) problems.push("terminal-with-queue-fields")
       if (terminal && task.outcome === "pending") problems.push("terminal-pending-outcome")
       if (problems.length > 0) {
         add(

@@ -206,6 +206,7 @@ export function buildFailureRecord(input: FailureRecordInput): Omit<LogEntry, "t
     assigneeID: task.assigneeID,
     deadlineAt: task.deadlineAt,
     retryAfter: task.retryAfter,
+    deliveryHoldUntil: task.deliveryHoldUntil,
     approvalID: task.approvalID,
     // IDs, counts, and a reason code only; never the refusal copy or task content.
     ...(budget

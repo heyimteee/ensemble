@@ -26,6 +26,7 @@ const TASK_CONTEXT_FIELDS = [
   "assigneeID",
   "stage",
   "retryAfter",
+  "deliveryHoldUntil",
   "deadlineAt",
 ] as const
 
@@ -228,6 +229,7 @@ export function createStoreObserver(logger: EnsembleLogger): StoreObserver {
         changed,
         attempts: next.attempts,
         retryAfter: next.retryAfter,
+        deliveryHoldUntil: next.deliveryHoldUntil,
         deadlineAt: next.deadlineAt,
       }
       if (next.state !== previous.state || next.outcome !== previous.outcome) {
