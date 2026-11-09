@@ -16,8 +16,8 @@ import type { HandoffDecision, Id, NativeSubagentState, WorkKind } from "./types
 export type TurnFinalizationDecision =
   | { action: "accept" }
   | { action: "wait"; reason: string }
-  | { action: "correct"; reason: string; remainingIDs?: Id[] }
-  | { action: "warn"; reason: string; remainingIDs?: Id[] }
+  | { action: "correct"; reason: string; remainingIDs?: Id[]; unbackedMemberIDs?: Id[] }
+  | { action: "warn"; reason: string; remainingIDs?: Id[]; unbackedMemberIDs?: Id[] }
 
 /** Durable task and work-kind projection for one finishing turn. */
 export type TurnTaskFacts = {
@@ -37,6 +37,12 @@ export type TurnTaskFacts = {
    * Durable so a restart cannot grant a second correction.
    */
   batchCorrectionSent: boolean
+  /**
+   * Ticket #200: this turn has already spent its one unbacked-mention
+   * correction turn. Durable so a retry or restart cannot loop the
+   * correction.
+   */
+  mentionCorrectionSent: boolean
 }
 
 /** One native child session mapped to the finishing task. */
@@ -79,12 +85,15 @@ export type TurnFinalizationFacts = {
 /**
  * Decide one managed turn's finalization.
  *
- * Ticket #194 introduced the seam; #198 adds the batch-review contract. A
- * batch review with any undecided item gets one correction turn. If that
- * correction still leaves items undecided, the turn warns instead of
- * finalizing as a successful reply, so the batch can stay open for the user.
- * The decision is pure: the service performs the correction prompt and the
- * durable write.
+ * Ticket #194 introduced the seam; #198 adds the batch-review contract and
+ * #200 adds unbacked member mentions. A batch review with any undecided item
+ * gets one correction turn. If that correction still leaves items undecided,
+ * the turn warns instead of finalizing as a successful reply, so the batch can
+ * stay open for the user. A mentioned member with no work created by this run
+ * gets one correction turn to create the work or remove the mention; if the
+ * mention is still unbacked, the turn finalizes with a visible warning. The
+ * decision is pure: the service performs the correction prompt and the durable
+ * write.
  */
 export function decideTurnFinalization(facts: TurnFinalizationFacts): TurnFinalizationDecision {
   if (facts.task.batch) {
@@ -96,6 +105,16 @@ export function decideTurnFinalization(facts: TurnFinalizationFacts): TurnFinali
         ? { action: "warn", reason: "review-incomplete", remainingIDs }
         : { action: "correct", reason: "review-incomplete", remainingIDs }
     }
+  }
+  // Ticket #200: a mentioned member is backed only by work this run created
+  // for them. The policy owns the backing rule; callers pass the members and
+  // the created work, never a precomputed backed/unbacked split.
+  const unbackedMemberIDs = facts.finalText.mentionedMemberIDs
+    .filter((memberID) => !facts.createdWork.some((work) => work.assigneeID === memberID))
+  if (unbackedMemberIDs.length > 0) {
+    return facts.task.mentionCorrectionSent
+      ? { action: "warn", reason: "mention-unbacked", unbackedMemberIDs }
+      : { action: "correct", reason: "mention-unbacked", unbackedMemberIDs }
   }
   return { action: "accept" }
 }
