@@ -702,6 +702,27 @@ test("ticket115: needs-you cards carry the static marker and waiting detail", ()
   assert.equal(card.needsYou, true)
 })
 
+test("ticket198: an incomplete batch review card says why it needs the user", () => {
+  const card = cardWithMotion(task({
+    state: "pending",
+    attempts: 1,
+    handoff: {
+      correlationID: "batch_corr",
+      senderID: "nova",
+      recipientID: "sage",
+      depth: 1,
+      completion: true,
+      batch: true,
+      itemIDs: ["i1", "i2"],
+      reviewIncomplete: "review-incomplete",
+    },
+  }), "Sage", { now: 1000, tick: 3, width: 40 })
+  assert.equal(card.header.status, "NEEDS YOU")
+  assert.equal(card.needsYou, true)
+  assert.equal(card.detail, "review incomplete · waiting for you")
+  assert.equal(workCardDetail("needs_you", { needsYou: true, reviewIncomplete: true }), "review incomplete · waiting for you")
+})
+
 test("ticket115: card titles truncate to the content width instead of wrapping", () => {
   const longTitle = `t${"i".repeat(100)}`
   const card = cardWithMotion(task({ title: longTitle }), "Nova", { now: 1000, tick: 0, width: 20 })

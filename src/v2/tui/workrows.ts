@@ -796,6 +796,8 @@ export function workCardDetail(
   opts: {
     pending?: PendingWorkAction | null
     needsYou?: boolean
+    /** Ticket #198: an open batch review could not close after its correction. */
+    reviewIncomplete?: boolean
     activity?: string
     retryAfter?: number
     attempts?: number
@@ -804,7 +806,7 @@ export function workCardDetail(
   } = {},
 ): string {
   if (opts.pending) return pendingWorkLabel(opts.pending)
-  if (opts.needsYou) return waitingForYouLine()
+  if (opts.needsYou) return opts.reviewIncomplete ? "review incomplete · waiting for you" : waitingForYouLine()
   switch (status) {
     case "pending":
       return "queued"
@@ -879,6 +881,7 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     detail: short(workCardDetail(status, {
       pending,
       needsYou,
+      reviewIncomplete: task.handoff?.reviewIncomplete !== undefined,
       activity: options.detailFor?.(task),
       retryAfter: task.retryAfter,
       attempts: task.attempts,

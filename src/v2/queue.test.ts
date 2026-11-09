@@ -126,6 +126,24 @@ test("a task gated on an approval reads needs_you", () => {
   assert.equal(deriveWorkStatus(task, 1000), "needs_you")
 })
 
+test("ticket198: an incomplete batch review reads needs_you", () => {
+  const task = base({
+    state: "pending",
+    attempts: 1,
+    handoff: {
+      correlationID: "batch_corr",
+      senderID: "nova",
+      recipientID: "sage",
+      depth: 1,
+      completion: true,
+      batch: true,
+      itemIDs: ["i1", "i2"],
+      reviewIncomplete: "review-incomplete",
+    },
+  })
+  assert.equal(deriveWorkStatus(task, 1000), "needs_you")
+})
+
 test("needs-you outranks a scheduled retry and waiting children", () => {
   const task = base({ state: "pending", attempts: 1, interrupted: true, awaitingChildren: true, retryAfter: 2000 })
   assert.equal(deriveWorkStatus(task, 1000), "needs_you")

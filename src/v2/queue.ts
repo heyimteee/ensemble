@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import type { Subtask, WorkKind } from "./types.ts"
+import type { HandoffInfo, Subtask, WorkKind } from "./types.ts"
 
 /**
  * Durable coordination queue mechanics, adapted from OpenBot's `work/queue.ts`
@@ -84,17 +84,19 @@ export function isTerminalWorkStatus(status: DerivedWorkStatus): boolean {
 
 /**
  * One needs-you rule shared by the service, grouping, and the TUI. A task
- * needs the user when its run was interrupted, when its linked approval is
- * still pending, or when a native permission mirror blocks its session. The
- * pending sets are optional: without them the durable link alone counts, which
- * keeps service-side derivation conservative.
+ * needs the user when its run was interrupted, when its batch review could
+ * not close after its one correction (ticket #198), when its linked approval
+ * is still pending, or when a native permission mirror blocks its session.
+ * The pending sets are optional: without them the durable link alone counts,
+ * which keeps service-side derivation conservative.
  */
 export function workNeedsYou(
-  task: Pick<Subtask, "id" | "interrupted" | "approvalID">,
+  task: Pick<Subtask, "id" | "interrupted" | "approvalID"> & { handoff?: Pick<HandoffInfo, "reviewIncomplete"> },
   pendingApprovalIDs?: ReadonlySet<string>,
   nativeBlockedSubtaskIDs?: ReadonlySet<string>,
 ): boolean {
   if (task.interrupted) return true
+  if (task.handoff?.reviewIncomplete !== undefined) return true
   if (task.approvalID !== undefined && (pendingApprovalIDs === undefined || pendingApprovalIDs.has(task.approvalID))) return true
   return nativeBlockedSubtaskIDs?.has(task.id) === true
 }
@@ -108,7 +110,7 @@ export type WorkNeedsYouContext = {
 export type WorkLifecycle = Pick<
   Subtask,
   "id" | "state" | "outcome" | "interrupted" | "approvalID" | "awaitingChildren" | "attempts" | "claimedBy" | "leaseUntil" | "activeRunID" | "retryAfter" | "deliveryHoldUntil" | "failure" | "stoppedAt"
->
+> & { handoff?: Pick<HandoffInfo, "reviewIncomplete"> }
 
 /**
  * The single canonical derivation of a work item's visible lifecycle.

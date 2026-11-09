@@ -3740,6 +3740,13 @@ export class EnsembleV2Service {
     subtask.finishedAt = undefined
     subtask.stoppedAt = undefined
     subtask.failure = undefined
+    // Ticket #198: an explicit retry starts a fresh managed turn, so the
+    // batch's review bookkeeping begins again (still at most one correction
+    // for this turn).
+    if (subtask.handoff) {
+      subtask.handoff.reviewCorrectionSent = undefined
+      subtask.handoff.reviewIncomplete = undefined
+    }
     // A fresh explicit budget is only needed when the automatic one is spent;
     // otherwise keep the visible attempt history (existing lifecycle tests and
     // operator expectations count cumulative attempts).
@@ -3826,6 +3833,10 @@ export class EnsembleV2Service {
     subtask.finishedAt = undefined
     subtask.stoppedAt = undefined
     subtask.failure = undefined
+    if (subtask.handoff) {
+      subtask.handoff.reviewCorrectionSent = undefined
+      subtask.handoff.reviewIncomplete = undefined
+    }
     subtask.deadlineAt = now() + DEADLINE_MS
     await this.store.saveSubtask(subtask)
     return subtask
@@ -4832,6 +4843,7 @@ export class EnsembleV2Service {
         batch: task.handoff?.batch === true,
         leader: workspace !== undefined && task.assigneeID === workspace.leaderID,
         explicitHandoff: children.some((child) => child.workKind === "handoff" && child.handoff?.completion !== true),
+        batchCorrectionSent: task.handoff?.reviewCorrectionSent === true,
       },
       nativeChildren: Object.values(state.nativeSubagents)
         .filter((run) => run.parentTaskID === task.id)
@@ -4853,6 +4865,115 @@ export class EnsembleV2Service {
         assigneeID: child.assigneeID,
       })),
     }
+  }
+
+  /**
+   * Ticket #198: append one correction turn to an already-running native
+   * session and read the answer after it settles. The caller owns the
+   * contract-specific prompt and durable marker; this helper performs only
+   * the prompt/wait/read cycle so #200 can reuse the same bounded path.
+   */
+  private async runCorrectionTurn(
+    sessionID: string,
+    text: string,
+  ): Promise<{ text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any }> {
+    const startedAt = now()
+    try {
+      await this.ctx.session.prompt({ sessionID, text, delivery: "steer" })
+      await this.ctx.session.wait({ sessionID }).catch(() => undefined)
+      const messages = listData(await this.ctx.session.context({ sessionID }))
+      return assistantResult(messages, startedAt)
+    } catch {
+      // A failed correction turn is not an execution retry: the caller falls
+      // through to its contract fallback with the original answer intact.
+      return { text: "", tools: [], toolOutcomes: [] }
+    }
+  }
+
+  /**
+   * Ticket #198: spend the one batch-review correction turn. The durable
+   * marker is written before the prompt so a crash or restart cannot grant a
+   * second correction. The correction lists only remaining item ids and the
+   * required tool action; it never restates item content.
+   */
+  private async correctBatchReview(
+    task: Subtask,
+    remainingIDs: Id[],
+    sessionID: string,
+  ): Promise<{ text: string } | undefined> {
+    const batch = this.store.cloneSubtask(task.id)
+    if (!batch?.handoff?.batch) return undefined
+    batch.handoff.reviewCorrectionSent = true
+    await this.store.saveSubtask(batch)
+    this.noteWorkChanged(batch)
+    this.logger?.event("info", "task", "task.batch.correction", {
+      workspaceID: batch.workspaceID,
+      taskID: batch.id,
+      dispatchGroupID: batch.dispatchGroupID,
+      remaining: remainingIDs.length,
+      remainingIDs,
+    })
+    const prompt = [
+      `Review incomplete: ${remainingIDs.length} batch item${remainingIDs.length === 1 ? "" : "s"} still need${remainingIDs.length === 1 ? "s" : ""} a disposition.`,
+      `Remaining item ids: ${remainingIDs.join(", ")}.`,
+      `Call ensemble_review now for batch "${batch.id}" and decide every remaining item with action "delegate" (include an assignee and maxHops), "start", "end", or "dismiss". Do not finish with a plain reply.`,
+    ].join("\n")
+    const result = await this.runCorrectionTurn(sessionID, prompt)
+    return { text: result.text }
+  }
+
+  /**
+   * Ticket #198: after its one correction, a batch with undecided items stays
+   * open as NEEDS YOU. The durable reason outranks `pending` in the canonical
+   * status derivation and keeps the row out of the scheduler, so the review
+   * can never loop and its items can never run directly in place of it.
+   */
+  private async holdIncompleteBatchReview(
+    task: Subtask,
+    remainingIDs: Id[],
+    live: Message | undefined,
+    globalEpoch: number,
+    workspaceEpoch: number,
+  ): Promise<void> {
+    const batch = this.store.cloneSubtask(task.id)
+    if (!batch?.handoff || batch.state === "replied") return
+    batch.state = "pending"
+    batch.outcome = "pending"
+    batch.awaitingChildren = false
+    batch.activeRunID = undefined
+    batch.claimedBy = undefined
+    batch.leaseUntil = undefined
+    batch.retryAfter = undefined
+    batch.deliveryHoldUntil = undefined
+    batch.handoff.reviewIncomplete = "review-incomplete"
+    await this.store.saveSubtask(batch)
+    this.noteWorkChanged(batch)
+    const workspace = this.store.workspace(batch.workspaceID)
+    if (workspace) {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: `Review incomplete: ${remainingIDs.length} of ${batch.handoff.itemIDs?.length ?? remainingIDs.length} items still undecided (${remainingIDs.join(", ")}). The batch stays open for you — restart this review to continue.`,
+        kind: "system",
+        taskID: batch.id,
+      })
+    }
+    await this.finalizeStream(
+      live,
+      "Review incomplete — decide the remaining items to close this batch.",
+      true,
+      globalEpoch,
+      workspaceEpoch,
+      batch.workspaceID,
+    )
+    this.logger?.event("warn", "task", "task.batch.incomplete", {
+      workspaceID: batch.workspaceID,
+      taskID: batch.id,
+      dispatchGroupID: batch.dispatchGroupID,
+      state: batch.state,
+      remaining: remainingIDs.length,
+      remainingIDs,
+      reason: batch.handoff.reviewIncomplete,
+    })
   }
 
   /**
@@ -5308,6 +5429,7 @@ export class EnsembleV2Service {
       batch.state = "replied"
       batch.outcome = "succeeded"
       batch.awaitingChildren = false
+      if (batch.handoff) batch.handoff.reviewIncomplete = undefined
       batch.repliedAt = at
       batch.finishedAt = at
       batch.retryAfter = undefined
@@ -5335,6 +5457,7 @@ export class EnsembleV2Service {
     batch.state = "replied"
     batch.outcome = "succeeded"
     batch.awaitingChildren = false
+    if (batch.handoff) batch.handoff.reviewIncomplete = undefined
     batch.repliedAt = at
     batch.finishedAt = at
     batch.retryAfter = undefined
@@ -6169,7 +6292,7 @@ export class EnsembleV2Service {
           if (directory) busyEditDirs.add(directory)
         }
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && (task.deliveryHoldUntil === undefined || task.deliveryHoldUntil <= at) && !this.batchBlocked(state, task))
+          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && task.handoff?.reviewIncomplete === undefined && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && (task.deliveryHoldUntil === undefined || task.deliveryHoldUntil <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)
         const skipped = (task: Subtask, reason: string, extra: Record<string, unknown> = {}) => {
           if (task.retryAfter === undefined) return
@@ -7288,6 +7411,9 @@ export class EnsembleV2Service {
   private async runTask(taskID: string): Promise<void> {
     const task = this.store.cloneSubtask(taskID)
     if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
+    // Ticket #198: an incomplete batch review waits for the user, never for
+    // another automatic correction turn.
+    if (task.handoff?.reviewIncomplete !== undefined) return
     // Do not run work the queue has retired/stalled: the next reapAndRetire
     // pass (or the current one) records the terminal state with its reason.
     // Ticket #168: an old delivery timestamp never blocks a claim; only the
@@ -7485,8 +7611,8 @@ export class EnsembleV2Service {
         if (!result.failure) break
         if (!availabilityFailure(result.failure) || anyToolCall(messages, attemptStartedAt) || index === models.length - 1) break
       }
-      const current = this.store.read()
-      const currentTask = this.store.cloneSubtask(task.id)
+      let current = this.store.read()
+      let currentTask = this.store.cloneSubtask(task.id)
       if (!currentTask) return
       const ownsRun = currentTask.activeRunID === runID
       if (result?.failure) {
@@ -7560,7 +7686,7 @@ export class EnsembleV2Service {
       // finalize as success or be handed off as completed work; retry inside
       // the budget, then fail visibly. Ticket #149: an internal fallback
       // string is not an answer either.
-      const reply = isFallbackReply(mention.text) ? "" : mention.text.trim()
+      let reply = isFallbackReply(mention.text) ? "" : mention.text.trim()
       // A terminal state (or a lost claim) always wins over a late run result,
       // but a substantive late answer repairs the false placeholder it left
       // behind (ticket #169). Nothing below may resurrect a settled row by
@@ -7614,15 +7740,59 @@ export class EnsembleV2Service {
         await this.finalizeStream(live, errorText, true, globalEpoch, workspaceEpoch, task.workspaceID)
         return
       }
-      const children = this.store.subtasks().filter((item) => item.parentID === currentTask.id)
+      let children = this.store.subtasks().filter((item) => item.parentID === task.id)
       // Ticket #194: the one turn-finalization policy sits at the existing
-      // terminal-write boundary. It currently accepts every managed turn;
-      // #197/#198/#200 add wait/correct/warn orchestration here rather than
-      // growing parallel finalization checks elsewhere.
-      const finalization = decideTurnFinalization(this.turnFinalizationFacts(currentTask, reply, children, current))
+      // terminal-write boundary. #197/#198/#200 add wait/correct/warn
+      // orchestration here rather than growing parallel finalization checks
+      // elsewhere.
+      let finalization = decideTurnFinalization(this.turnFinalizationFacts(currentTask, reply, children, current))
+      // Ticket #198: a batch review may not finalize as a successful reply
+      // while any item lacks a disposition. Spend the one correction turn in
+      // the same native session; it is not an execution retry, so the attempt
+      // budget and dispatch group are untouched.
+      if (finalization.action === "correct" && finalization.reason === "review-incomplete") {
+        const correction = await this.correctBatchReview(
+          currentTask,
+          finalization.remainingIDs ?? [],
+          binding.sessionID,
+        )
+        if (!correction) return
+        const correctionReply = isFallbackReply(correction.text) ? "" : correction.text.trim()
+        current = this.store.read()
+        const refreshed = this.store.cloneSubtask(task.id)
+        if (!refreshed) return
+        // A reset or workspace change during the correction turn must not
+        // write this run's contract result into the new epoch.
+        if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return
+        currentTask = refreshed
+        // The correction itself may have closed the batch through
+        // ensemble_review, or a user action may have settled it meanwhile.
+        if (refreshed.activeRunID !== runID || refreshed.state === "replied") {
+          await this.recoverLateSuccess({
+            task: refreshed,
+            reply: correctionReply || reply,
+            live,
+            runID,
+            agentID: agent.id,
+            globalEpoch,
+            workspaceEpoch,
+          })
+          return
+        }
+        if (correctionReply) reply = correctionReply
+        children = this.store.subtasks().filter((item) => item.parentID === refreshed.id)
+        finalization = decideTurnFinalization(this.turnFinalizationFacts(refreshed, reply, children, current))
+      }
+      // The correction could not close the batch: keep it open as NEEDS YOU
+      // with a durable reason. Its items stay parked behind the batch and the
+      // row is never claimed for another automatic correction.
+      if (finalization.action === "warn" && finalization.reason === "review-incomplete") {
+        await this.holdIncompleteBatchReview(currentTask, finalization.remainingIDs ?? [], live, globalEpoch, workspaceEpoch)
+        return
+      }
       if (finalization.action !== "accept") {
-        // Accept-only while the seam is introduced: an unexpected decision
-        // must not change today's terminal write. IDs and reason only.
+        // IDs and reason only; an unexpected decision must not invent a
+        // terminal write outside the contracts above.
         this.logger?.event("warn", "task", "task.finalization.unwired", {
           workspaceID: currentTask.workspaceID,
           taskID: currentTask.id,
