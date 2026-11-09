@@ -6,8 +6,10 @@ import {
   handoffAckText,
   handoffDuplicateText,
   handoffFailureText,
+  handoffFileContent,
   handoffGroupAckText,
   handoffWorkKey,
+  inlineHandoffFileName,
   newDirectEnvelope,
   parseHandoffFile,
   resolveHandoffRecipient,
@@ -48,6 +50,46 @@ test("missing task is refused with a clear reason", () => {
 test("missing frontmatter markers are refused", () => {
   const parsed = parseHandoffFile(`ensemble: handoff\ntask: Something\n`)
   assert.equal(parsed.ok, false)
+})
+
+// Ticket #195: inline handoffs generate their own file. The name is one flat
+// basename so no task, recipient, or nonce value can traverse out of the
+// handoff directory.
+test("generated handoff filenames are safe, flat, and unique", () => {
+  const base = { task: "../../etc/passwd", from: "../Nova", to: "a/b\\c", at: 1700000000000, nonce: "../x/y" }
+  const name = inlineHandoffFileName(base)
+  assert.match(name, /^[a-z0-9-]+\.md$/)
+  assert.ok(!name.includes("/"))
+  assert.ok(!name.includes("\\"))
+  assert.ok(!name.includes(".."))
+  assert.notEqual(name, inlineHandoffFileName({ ...base, nonce: "z9" }))
+  assert.notEqual(name, inlineHandoffFileName({ ...base, at: 1700000000001 }))
+})
+
+// Ticket #195: the service-written record must be a valid handoff file with
+// the typed fields, including a multi-line instruction kept in the body.
+test("generated handoff content parses back to the typed record", () => {
+  const content = handoffFileContent({
+    task: "Deploy summary",
+    instruction: "Read src/deploy.ts.\nList the rollout risks.",
+    summary: "Exec-ready bullets",
+    constraints: "Under 100 words",
+    expected: "Three bullets",
+    from: "Nova",
+    to: "Sage",
+    correlationID: "handoff_abc",
+    createdAt: 1700000000000,
+  })
+  const parsed = parseHandoffFile(content)
+  assert.equal(parsed.ok, true)
+  assert.equal(parsed.ok && parsed.data.task, "Deploy summary")
+  assert.equal(parsed.ok && parsed.data.instruction, "Read src/deploy.ts. List the rollout risks.")
+  assert.equal(parsed.ok && parsed.data.summary, "Exec-ready bullets")
+  assert.equal(parsed.ok && parsed.data.constraints, "Under 100 words")
+  assert.equal(parsed.ok && parsed.data.expected, "Three bullets")
+  assert.equal(parsed.ok && parsed.data.to, "Sage")
+  assert.equal(parsed.ok && parsed.data.correlationID, "handoff_abc")
+  assert.match(content, /## Instruction\n\nRead src\/deploy\.ts\.\nList the rollout risks\./)
 })
 
 test("handoff idempotency key scopes actor, run prefix, and recipient", () => {

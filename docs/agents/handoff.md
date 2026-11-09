@@ -21,6 +21,10 @@ Related: [handoff terminology](../../GLOSSARY.md), ticket
   instruction in your own words — never a copy of the user's message. `task`
   stays the short display title; the recipient's work item uses your
   instruction.
+- `ensemble_handoff` is one step: supply the typed task, recipient,
+  instruction, and required `maxHops`; the service writes the durable handoff
+  file under `.ensemble/handoffs/`. A supplied `path` is optional and must
+  already exist inside that directory.
 - Answer first: write your own answer in the group chat before handing off. A
   handoff forwards a completed result or clearly scoped work; it is never a
   substitute for answering your assignment.

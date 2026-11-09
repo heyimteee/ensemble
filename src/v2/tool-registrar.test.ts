@@ -40,6 +40,12 @@ test("ticket161: delegate and handoff require a non-negative integer maxHops", (
   assert.match(delegate.description, /groupMaxHops/)
   const handoff = tools.get("handoff")
   assert.equal("continuationOf" in handoff.input.properties, false, "peers cannot open a continuation group")
+  // Ticket #195: path is optional and the service writes the file; only the
+  // task title and the required budget are mandatory.
+  assert.equal(handoff.input.required.includes("path"), false)
+  assert.equal(handoff.input.required.includes("summary"), false)
+  assert.match(handoff.description, /Omit path/)
+  assert.match(handoff.description, /writes the handoff file/)
   const review = tools.get("review")
   assert.ok("maxHops" in review.input.properties.decisions.items.properties, "review decisions accept an explicit budget")
   assert.equal(review.input.properties.decisions.items.properties.maxHops.minimum, 0)

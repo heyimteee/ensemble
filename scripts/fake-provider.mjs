@@ -22,6 +22,9 @@ const FAKE_ASK_PROMPT = "fake-ask-person"
 // observable on frame 0 without making the trigger sticky in session history.
 const FAKE_MOTION_PROMPT = "fake-motion-static"
 const FAKE_NATIVE_ERROR_PROMPT = "fake-native-error"
+// Ticket #195: one-step inline handoff fixture. The sender omits `path`; the
+// service must write the handoff file and queue the same durable hop.
+const FAKE_INLINE_HANDOFF_PROMPT = "inline-handoff-probe"
 // Ticket #188: a real native subagent fixture. The parent turn calls the host's
 // built-in `subagent` tool in background mode; the child prompt carries the
 // child marker so it streams a bounded hold instead of answering immediately.
@@ -521,6 +524,7 @@ const server = createServer(async (request, response) => {
     const subagentChild = latestUserText.includes(FAKE_SUBAGENT_CHILD_PROMPT)
     const subagentParent = latestUserText.includes(FAKE_SUBAGENT_PROMPT)
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
+    const inlineHandoff = latestUserText.includes(FAKE_INLINE_HANDOFF_PROMPT)
     const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
     const answered = /User answer:/i.test(latestUserText)
     const toolResult = lastUser >= 0 && messages.slice(lastUser + 1).some((message) => message?.role === "tool")
@@ -612,6 +616,25 @@ const server = createServer(async (request, response) => {
       return
     }
     try {
+      // Ticket #195: emit the one-step handoff with no path. The service
+      // resolves FakeAgent, validates the typed budget, writes the file under
+      // .ensemble/handoffs, and queues the durable hop.
+      if (body?.stream !== false && inlineHandoff && !toolResult) {
+        await streamToolCall(
+          response,
+          requestID,
+          "ensemble_handoff",
+          {
+            task: "Inline handoff fixture",
+            instruction: "Confirm the inline handoff fixture.",
+            summary: "Inline handoff fixture",
+            to: "InlinePeer",
+            maxHops: 0,
+          },
+          "inline_handoff_tool_call",
+        )
+        return
+      }
       if (body?.stream !== false && subagentChild) {
         // The real child session streams long enough that the parent's first
         // turn has already reached idle before this reply completes.

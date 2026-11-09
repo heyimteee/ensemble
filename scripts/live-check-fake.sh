@@ -3084,6 +3084,36 @@ live_key "$LIVE_TUI_SESSION" "f"
 live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 10 "ACTIVE view restored after the history probes"
 live_log "task-level HISTORY split, expansion, rollup, dismiss, clear, and retention verified"
 
+# Ticket #195: the fake sender supplies no handoff path. The service writes a
+# valid file under the workspace handoff directory and queues the same durable
+# hop; one call, one file, one hop.
+# A fresh recipient keeps its native session free of earlier hold fixtures, so
+# the hop answers immediately instead of inheriting another probe's long stream.
+live_invoke "agent.create" '{"name":"InlinePeer"}' >/dev/null
+inline_peer_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "InlinePeer" }).id' | tr -d '"')
+[[ -n "$inline_peer_id" && "$inline_peer_id" != "null" ]] || live_fail "inline handoff recipient was not created"
+inline_members=$(live_snapshot_value "output.state.workspaces['$ws_id'].memberIDs.concat(['$inline_peer_id'])")
+live_invoke "workspace.update" "{\"id\":\"$ws_id\",\"memberIDs\":$inline_members}" >/dev/null
+live_focus_chat "$LIVE_TUI_SESSION"
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"inline-handoff-probe\",\"recipientIDs\":[\"$helper_id\"]}" >/dev/null
+inline_hop_path=""
+for _ in $(seq 1 60); do
+  inline_hop_path=$(live_snapshot_value '(function () { var task = Object.values(output.state.subtasks).filter(function (t) { return t.workKind === "handoff" && t.title === "Inline handoff fixture" })[0]; return task && task.handoff ? task.handoff.path : "" })()' | tr -d '"')
+  [[ -n "$inline_hop_path" && "$inline_hop_path" != "null" ]] && break
+  sleep 0.25
+done
+[[ -n "$inline_hop_path" && "$inline_hop_path" != "null" ]] || live_fail "inline handoff produced no generated path"
+[[ "$inline_hop_path" == .ensemble/handoffs/*.md ]] || live_fail "inline handoff path is not under .ensemble/handoffs (got $inline_hop_path)"
+[[ -f "$LIVE_PROJECT/$inline_hop_path" ]] || live_fail "inline handoff file was not written at $inline_hop_path"
+grep -qF -- "ensemble: handoff" "$LIVE_PROJECT/$inline_hop_path" || live_fail "inline handoff file has no handoff frontmatter"
+grep -qF -- "task: Inline handoff fixture" "$LIVE_PROJECT/$inline_hop_path" || live_fail "inline handoff file has no typed task"
+grep -qF -- "correlation: handoff_" "$LIVE_PROJECT/$inline_hop_path" || live_fail "inline handoff file has no correlation"
+inline_files=$(find "$LIVE_PROJECT/.ensemble/handoffs" -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')
+[[ "$inline_files" == "1" ]] || live_fail "inline handoff wrote $inline_files files instead of one"
+live_require_text "$LIVE_TUI_SESSION" "Handed to \$InlinePeer · Inline handoff fixture" 30 "concise inline handoff ack"
+live_wait_for_subtask_status "Inline handoff fixture" replied 45 || live_fail "inline handoff hop did not deliver"
+live_log "ticket #195 inline handoff wrote one file and queued one durable hop"
+
 # Operator evidence: the doctor and the structured log summary are artifacts
 # for the verification record. A genuine native rejection is the only failure.
 OPENCODE_PASSWORD="$LIVE_SERVER_PASSWORD" "$LIVE_NODE_BIN" --experimental-strip-types \
