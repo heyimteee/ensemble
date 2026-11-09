@@ -26,7 +26,7 @@ export function settingsCursorMark(selected: boolean): string {
   return selected ? "› " : "  "
 }
 
-/** Header grammar: `Name │ settings` plus dirty/saved and pending-deferral
+/** Header grammar: `Name │ settings` plus dirty/saved and pending-apply
  *  flags. A new edit always wins over the previous saved state. */
 export function settingsHeader(
   agentName: string,
@@ -38,7 +38,7 @@ export function settingsHeader(
     agentName,
     "settings",
     ...(dirty ? ["UNSAVED"] : saved ? ["Saved"] : []),
-    ...(pending ? ["pending next task"] : []),
+    ...(pending ? ["pending next message"] : []),
   ])
 }
 

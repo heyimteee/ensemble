@@ -30,7 +30,9 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   const prompts: any[] = []
   const permissionUpdates: Array<{ sessionID: string; permissions: any[] }> = []
   const instructions: Array<{ sessionID: string; key: string; value: string }> = []
+  const modelSwitches: Array<{ sessionID: string; model: any }> = []
   const createdSessionIDs: string[] = []
+  const nativeSessions = new Map<string, any>()
   let sessions = 0
   const handlers: Partial<Handlers> = {}
   const emitted: Array<{ name: string; data: any }> = []
@@ -78,9 +80,19 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     },
     session: {
       hook: async () => ({ dispose: async () => undefined }),
-      create: async ({ title }: any) => { const id = `session_${++sessions}`; createdSessionIDs.push(id); return { data: { id, title } } },
+      create: async ({ title }: any) => {
+        const id = `session_${++sessions}`
+        createdSessionIDs.push(id)
+        nativeSessions.set(id, { id, title })
+        return { data: { id, title } }
+      },
+      get: async ({ sessionID }: any) => {
+        const found = nativeSessions.get(sessionID)
+        if (!found) throw Object.assign(new Error("Session not found."), { code: "session_not_found" })
+        return { data: found }
+      },
       instructions: { entry: { put: async (input: any) => { instructions.push(input) } } },
-      switchModel: async () => undefined,
+      switchModel: async (input: any) => { modelSwitches.push({ sessionID: String(input.sessionID), model: input.model }) },
       prompt: async (input: any) => { prompts.push({ ...input }) },
       update: async (input: any) => { permissionUpdates.push({ sessionID: String(input.sessionID), permissions: input.permissions }) },
       wait: async () => { await new Promise((resolve) => setTimeout(resolve, 5)) },
@@ -88,7 +100,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
         data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: "OK" }] }],
       }),
       interrupt: async ({ sessionID }: any) => { interruptedSessions.push(sessionID) },
-      remove: async ({ sessionID }: any) => { removedSessions.push(sessionID) },
+      remove: async ({ sessionID }: any) => { removedSessions.push(sessionID); nativeSessions.delete(sessionID) },
       move: async ({ sessionID, directory }: any) => { movedSessions.push({ sessionID, directory }); return { data: { id: sessionID, directory } } },
       command: async ({ sessionID, name, text }: any) => { commands.push({ sessionID, name, text }); return { data: {} } },
     },
@@ -114,7 +126,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     skill: { list: async (): Promise<any[]> => [] },
     event,
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, createdSessionIDs, tools, emitted, emitEvent }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, modelSwitches, createdSessionIDs, nativeSessions, tools, emitted, emitEvent }
 }
 
 /** Shared fixtures for tests that need durable work without exercising setup. */
@@ -136,6 +148,31 @@ async function seedAgent(store: V2Store, patch: Partial<Agent> = {}): Promise<vo
 
 async function seedWorkspace(store: V2Store, directory: string, patch: Partial<Workspace> = {}): Promise<void> {
   await store.saveWorkspace(siteWorkspace(directory, patch))
+}
+
+async function seedRebindBinding(
+  ctx: any,
+  directory: string,
+  binding: { workspaceID: string; sessionID: string; history?: string[]; kind?: "workspace" | "home" },
+  nativeSessions?: Map<string, any>,
+): Promise<void> {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { role: "Rebind private role" })
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({
+    workspaceID: binding.workspaceID,
+    agentID: "a",
+    sessionID: binding.sessionID,
+    history: binding.history ?? [],
+    kind: binding.kind ?? "workspace",
+    directory,
+    agentVersion: 1,
+    updatedAt: 1,
+  })
+  for (const sessionID of new Set([binding.sessionID, ...(binding.history ?? [])])) {
+    nativeSessions?.set(sessionID, { id: sessionID })
+  }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -733,9 +770,9 @@ test("resolved stale approvals do not resurrect cancelled work", async () => {
   }
 })
 
-test("native-session deletion covers sessions replaced by behavior changes", async () => {
+test("native-session deletion covers current and historical sessions", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
-  const { ctx, removedSessions } = fakeContext()
+  const { ctx, removedSessions, nativeSessions } = fakeContext()
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
@@ -751,7 +788,11 @@ test("native-session deletion covers sessions replaced by behavior changes", asy
       const next = await handlers.snapshot({ directory })
       return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
     })
-    await handlers.invoke({ directory, action: "agent.update", payload: { id: agent.result.id, role: "New role" } })
+    const first = await handlers.snapshot({ directory })
+    const bound = Object.values(first.state.bindings)[0] as any
+    // The native session disappears outside Ensemble. The next task replaces
+    // it and keeps the retired id for native-session deletion.
+    nativeSessions.delete(bound.sessionID)
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Second" } })
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
@@ -759,6 +800,8 @@ test("native-session deletion covers sessions replaced by behavior changes", asy
     })
     const before = await handlers.snapshot({ directory })
     const binding = Object.values(before.state.bindings)[0] as any
+    assert.notEqual(binding.sessionID, bound.sessionID)
+    assert.deepEqual(binding.history, [bound.sessionID])
     const deleted = await handlers.invoke({ directory, action: "workspace.delete", payload: { id: workspace.result.id, deleteNativeSessions: true } })
     assert.equal(deleted.ok, true)
     assert.equal(removedSessions.length, 2)
@@ -1404,6 +1447,425 @@ test("agent model, backup, and skillbox updates bump behavior version", async ()
     assert.equal(updated.result.color, "magenta")
   } finally {
     await stop()
+  }
+})
+
+test("ticket189: a behavior version bump reuses the workspace session and applies settings in place", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-reuse-"))
+  const { ctx, createdSessionIDs, instructions, permissionUpdates, modelSwitches } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", role: "First role" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "First" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const first = await handlers.snapshot({ directory })
+    const binding = Object.values(first.state.bindings)[0] as any
+    const instructionMark = instructions.length
+    const permissionMark = permissionUpdates.length
+    const switchMark = modelSwitches.length
+    assert.equal(createdSessionIDs.length, 1)
+
+    await handlers.invoke({
+      directory,
+      action: "agent.update",
+      payload: { id: agent.result.id, role: "Second role", skillbox: ["alpha"] },
+    })
+    const pending = await handlers.snapshot({ directory })
+    assert.equal(pending.state.agents[agent.result.id].pendingSettings, true)
+
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Second" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).filter((task: any) => task.state === "replied").length >= 2
+    })
+    const after = await handlers.snapshot({ directory })
+    const next = Object.values(after.state.bindings)[0] as any
+    assert.equal(createdSessionIDs.length, 1, "the behavior bump does not create a session")
+    assert.equal(next.sessionID, binding.sessionID, "the bound session is reused")
+    assert.deepEqual(next.history ?? [], [], "the version bump appends no history")
+    assert.equal(next.agentVersion, 2)
+    assert.equal(after.state.agents[agent.result.id].pendingSettings, false)
+
+    const identity = instructions
+      .slice(instructionMark)
+      .filter((entry) => entry.sessionID === binding.sessionID && entry.key === "ensemble.v2.identity")
+    assert.ok(identity.some((entry) => entry.value.includes("Second role")), "the new role is applied to the bound session")
+    const switched = modelSwitches.slice(switchMark).filter((entry) => entry.sessionID === binding.sessionID)
+    assert.ok(switched.length > 0, "the main model is applied to the bound session")
+    assert.deepEqual(switched[0].model, { providerID: "probe", id: "probe-model" })
+    const permissions = permissionUpdates.slice(permissionMark).filter((entry) => entry.sessionID === binding.sessionID)
+    assert.ok(
+      permissions.some((entry) => entry.permissions.some((rule: any) => rule.action === "skill" && rule.resource === "alpha" && rule.effect === "allow")),
+      "the Skillbox baseline is applied to the bound session",
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: a behavior version bump refreshes the direct session in place", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-dm-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-189-dm-home-"))
+  const { ctx, createdSessionIDs, instructions, permissionUpdates, modelSwitches } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "First role", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    const before = await handlers.snapshot({ directory })
+    const binding = (Object.values(before.state.bindings)[0] as any)
+    const instructionMark = instructions.length
+    const permissionMark = permissionUpdates.length
+    const switchMark = modelSwitches.length
+
+    await handlers.invoke({ directory, action: "agent.update", payload: { id: "a", role: "Direct role", skillbox: ["alpha"] } })
+    await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+
+    const after = await handlers.snapshot({ directory })
+    const next = Object.values(after.state.bindings)[0] as any
+    assert.equal(createdSessionIDs.length, 1, "a direct chat keeps its native session")
+    assert.equal(next.sessionID, binding.sessionID)
+    assert.equal(next.agentVersion, 2)
+    assert.equal(after.state.agents.a.pendingSettings, false)
+    assert.ok(
+      instructions.slice(instructionMark).some((entry) => entry.sessionID === binding.sessionID && entry.value.includes("Direct role")),
+      "the new identity is applied to the direct session",
+    )
+    assert.ok(modelSwitches.slice(switchMark).some((entry) => entry.sessionID === binding.sessionID), "the model is switched in place")
+    assert.ok(
+      permissionUpdates
+        .slice(permissionMark)
+        .some((entry) => entry.sessionID === binding.sessionID && entry.permissions.some((rule: any) => rule.resource === "alpha" && rule.effect === "allow")),
+      "the Skillbox baseline is applied to the direct session",
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: a running task cannot resurrect pendingSettings or clobber a concurrent update", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-stale-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waits = 0
+  ctx.session.wait = async () => { waits++; await gate }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", role: "First role" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "First" } })
+    await waitFor(async () => waits === 1)
+    await handlers.invoke({ directory, action: "agent.update", payload: { id: agent.result.id, role: "Mid-run role" } })
+    release?.()
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const during = await handlers.snapshot({ directory })
+    assert.equal(during.state.agents[agent.result.id].version, 2, "the run's stale save does not clobber the update")
+    assert.equal(during.state.agents[agent.result.id].role, "Mid-run role")
+    assert.equal(during.state.agents[agent.result.id].pendingSettings, true, "the update still awaits its next message")
+
+    ctx.session.wait = async () => { await new Promise((resolve) => setTimeout(resolve, 5)) }
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Second" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).filter((task: any) => task.state === "replied").length >= 2
+    })
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.agents[agent.result.id].version, 2)
+    assert.equal(after.state.agents[agent.result.id].pendingSettings, false, "the next message applies and clears the flag")
+  } finally {
+    release?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: agent updates audit changed field names without content", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-audit-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const role = "CLASSIFIED ROLE TEXT"
+    const skill = "covert-skill"
+    await handlers.invoke({
+      directory,
+      action: "agent.update",
+      payload: { id: agent.result.id, name: "Nova Prime", title: "Lead", role, skillbox: [skill], color: "magenta", backupModels: [agent.result.mainModel] },
+    })
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "agent.updated", limit: 20 })
+    assert.equal(logs.entries.length, 1)
+    const entry = logs.entries[0]
+    assert.equal(entry.agentID, agent.result.id)
+    assert.equal(entry.version, 2)
+    assert.deepEqual(
+      [...entry.changed].sort(),
+      ["backupModels", "color", "name", "role", "skillbox", "title"],
+    )
+    const serialized = JSON.stringify(logs.entries)
+    assert.ok(!serialized.includes(role), "the audit never carries role text")
+    assert.ok(!serialized.includes(skill), "the audit never carries skill names")
+    assert.ok(!serialized.includes("probe-model"), "the audit never carries model values")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+
+test("ticket189: agent.rebindSession moves a workspace binding to a history entry", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-"))
+  const { ctx, nativeSessions, modelSwitches, permissionUpdates, instructions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old1", "session_old2"] }, nativeSessions)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const toFirst = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_old1" },
+    })
+    assert.equal(toFirst.ok, true)
+    assert.equal(toFirst.result.binding.sessionID, "session_old1")
+    assert.deepEqual(toFirst.result.binding.history, ["session_current", "session_old2"])
+    assert.equal(toFirst.result.binding.agentVersion, 1)
+    assert.equal(typeof toFirst.result.binding.updatedAt, "number")
+    assert.ok(modelSwitches.some((entry) => entry.sessionID === "session_old1"), "the rebound session receives the current model")
+    assert.ok(
+      permissionUpdates.some((entry) => entry.sessionID === "session_old1" && entry.permissions.some((rule: any) => rule.action === "skill" && rule.effect === "deny")),
+      "the rebound session receives the current Skillbox baseline",
+    )
+    assert.ok(
+      instructions.some((entry) => entry.sessionID === "session_old1" && entry.key === "ensemble.v2.identity"),
+      "the rebound session receives the current identity",
+    )
+
+    const toSecond = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_old2" },
+    })
+    assert.equal(toSecond.ok, true)
+    assert.equal(toSecond.result.binding.sessionID, "session_old2")
+    assert.deepEqual(toSecond.result.binding.history, ["session_old1", "session_current"])
+
+    const back = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_current" },
+    })
+    assert.equal(back.ok, true)
+    assert.equal(back.result.binding.sessionID, "session_current")
+    assert.deepEqual(back.result.binding.history, ["session_old2", "session_old1"], "the newest retired session leads history")
+
+    const snap = await handlers.snapshot({ directory })
+    const binding = Object.values(snap.state.bindings)[0] as any
+    assert.equal(binding.sessionID, "session_current")
+    assert.deepEqual(binding.history, ["session_old2", "session_old1"])
+
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "agent.session.rebound", limit: 20 })
+    assert.equal(logs.entries.length, 3)
+    const latest = logs.entries.at(-1)
+    assert.equal(latest.agentID, "a")
+    assert.equal(latest.workspaceID, "w")
+    assert.equal(latest.sessionID, "session_current")
+    assert.equal(latest.fromSessionID, "session_old2")
+    assert.ok(!JSON.stringify(logs.entries).includes("Rebind private role"), "rebind logs carry ids only")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: agent.rebindSession to the current session is a no-op", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-noop-"))
+  const { ctx, nativeSessions, modelSwitches, permissionUpdates, instructions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old"] }, nativeSessions)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const before = await handlers.snapshot({ directory })
+    const beforeBinding = Object.values(before.state.bindings)[0] as any
+    const result = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_current" },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.result.binding.sessionID, "session_current")
+    const after = await handlers.snapshot({ directory })
+    const afterBinding = Object.values(after.state.bindings)[0] as any
+    assert.deepEqual(afterBinding, beforeBinding, "the binding is returned and stored unchanged")
+    assert.deepEqual(afterBinding.history, ["session_old"], "the current session is not added to its own history")
+    assert.equal(afterBinding.updatedAt, 1)
+    assert.equal(modelSwitches.length, 0, "a no-op does not switch models")
+    assert.equal(permissionUpdates.length, 0, "a no-op does not apply permissions")
+    assert.equal(instructions.length, 0, "a no-op does not write identity")
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "agent.session.rebound", limit: 20 })
+    assert.equal(logs.entries.length, 0, "a no-op writes no rebind audit row")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: agent.rebindSession rejects a history session that no longer exists", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-missing-"))
+  const { ctx, nativeSessions, modelSwitches, permissionUpdates, instructions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old"] }, nativeSessions)
+  nativeSessions.delete("session_old")
+  ;(ctx.session as any).get = async ({ sessionID }: any) => nativeSessions.get(sessionID)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const before = await handlers.snapshot({ directory })
+    const beforeBinding = Object.values(before.state.bindings)[0] as any
+    const result = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_old" },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.error?.code, "invalid_session")
+    const after = await handlers.snapshot({ directory })
+    const afterBinding = Object.values(after.state.bindings)[0] as any
+    assert.deepEqual(afterBinding, beforeBinding, "a missing target leaves the binding untouched")
+    assert.equal(modelSwitches.length, 0)
+    assert.equal(permissionUpdates.length, 0)
+    assert.equal(instructions.length, 0)
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "agent.session.rebound", limit: 20 })
+    assert.equal(logs.entries.length, 0, "a rejected rebind writes no audit row")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: agent.rebindSession rejects an unknown target or missing binding", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-"))
+  const { ctx } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old"] })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const unknown = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_ghost" },
+    })
+    assert.equal(unknown.ok, false)
+    assert.equal(unknown.error?.code, "invalid_session")
+    const missing = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "missing", sessionID: "session_current" },
+    })
+    assert.equal(missing.ok, false)
+    assert.equal(missing.error?.code, "not_found")
+    const after = await handlers.snapshot({ directory })
+    const binding = Object.values(after.state.bindings)[0] as any
+    assert.equal(binding.sessionID, "session_current", "a rejected action leaves the binding untouched")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: agent.rebindSession rejects a busy current session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-"))
+  const { ctx } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old"] })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    ;(service as any).activeRuns.set("run_busy", {
+      id: "run_busy", subtaskID: "t", workspaceID: "w", agentID: "a", sessionID: "session_current", status: "running", startedAt: 1,
+    })
+    const busy = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_old" },
+    })
+    assert.equal(busy.ok, false)
+    assert.equal(busy.error?.code, "session_busy")
+    ;(service as any).activeRuns.clear()
+    ;(service as any).directBusy.add("session_current")
+    const direct = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_old" },
+    })
+    assert.equal(direct.ok, false)
+    assert.equal(direct.error?.code, "session_busy")
+    const after = await handlers.snapshot({ directory })
+    const binding = Object.values(after.state.bindings)[0] as any
+    assert.equal(binding.sessionID, "session_current")
+  } finally {
+    ;(service as any).directBusy.clear()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: agent.rebindSession rebinds the home binding when workspaceID is omitted", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-home-"))
+  const { ctx, nativeSessions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "home", sessionID: "session_home_current", history: ["session_home_old"], kind: "home" }, nativeSessions)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const result = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", sessionID: "session_home_old" },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.result.binding.workspaceID, "home")
+    assert.equal(result.result.binding.sessionID, "session_home_old")
+    assert.deepEqual(result.result.binding.history, ["session_home_current"])
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "agent.session.rebound", limit: 20 })
+    assert.equal(logs.entries.length, 1)
+    assert.equal(logs.entries[0].workspaceID, "home")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
   }
 })
 
