@@ -46,15 +46,6 @@ export function workGroupLabel(
   return parts.join(" · ")
 }
 
-/** Ticket #184: a short, pure age for a rolled-up history row. */
-export function workAgeLabel(ageMs: number): string {
-  const seconds = Math.max(0, Math.floor(ageMs / 1000))
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m`
-  return `${Math.floor(minutes / 60)}h`
-}
-
 /** The latest terminal finish in a history group, with the recorded hold origin as fallback. */
 export function workHistoryFinishedAt(
   group: Pick<WorkGroup, "tasks" | "latestTerminalAt" | "createdAt"> & { native?: WorkGroup["native"] },
@@ -74,15 +65,16 @@ export function workHistoryFinishedAt(
 
 /**
  * Ticket #184: the one-line grammar for a rolled-up history group. Done count
- * first, active count only while the group still has live work, then age.
+ * first, active count only while the group still has live work, then age. The
+ * caller computes the age once from the canonical finish timestamp.
  */
 export function workHistoryRollupLabel(
-  group: Pick<WorkGroup, "active" | "done" | "tasks" | "latestTerminalAt" | "createdAt">,
+  group: Pick<WorkGroup, "active" | "done">,
   ordinal: number,
-  now: number,
+  age: string,
 ): string {
   const parts = [`GROUP ${Math.max(1, Math.floor(ordinal))}`, `${Math.max(0, group.done)} done`]
   if (group.active > 0) parts.push(`${group.active} active`)
-  parts.push(workAgeLabel(now - workHistoryFinishedAt(group)))
+  parts.push(age)
   return parts.join(" · ")
 }

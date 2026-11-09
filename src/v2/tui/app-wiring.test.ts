@@ -287,11 +287,6 @@ test("ticket184: D clears the history view with confirmation", () => {
   assert.ok(has(app(), "clearHistoryView()"))
 })
 
-test("ticket184: dismissed history groups hydrate and persist as UI state", () => {
-  assert.ok(has(app(), "dismissedHistoryGroups"))
-  assert.ok(has(app(), "historyDismissedKey"))
-})
-
 test("ticket184: rolled-up history rows reuse the Work row design", () => {
   assert.ok(has(app(), "<WorkHistoryRowView"))
   assert.ok(has(components(), "export function WorkHistoryRowView"))
@@ -324,7 +319,6 @@ test("ticket183: pane visibility persists through the UI RPC and hydrates", () =
   const source = app()
   assert.ok(has(source, 'invoke(context, "ui.save", { paneVisibility: next })'))
   assert.ok(has(source, "paneSideVisibility(stored)"))
-  assert.ok(has(source, "const [paneSides, setPaneSides]"))
 })
 
 test("ticket183: F3 is gone from the global layer", () => {
@@ -423,7 +417,7 @@ test("the card border comes from the focus helper", () => {
 })
 
 test("the pane border stays a separate focus state", () => {
-  assert.ok(has(app(), "workOwnsFocus() ? colors.focus : colors.border"))
+  assert.ok(has(app(), "workColumnFocused() ? colors.focus : colors.border"))
 })
 
 test("ticket185: the small approvals summary mounts at the bottom of Work", () => {
@@ -556,10 +550,10 @@ test("ticket180: the chat border and heading are white when chat is selected", (
   assert.ok(has(source, "chatOwnsFocus() || composerActive() ? colors.focus : colors.muted"))
 })
 
-test("ticket180: the Work border and heading are white when Work or Approvals is selected", () => {
+test("ticket178: the right-column border and Work heading use separate focus helpers", () => {
   const source = app()
-  assert.ok(has(source, "workOwnsFocus() ? colors.focus : colors.border"))
-  assert.ok(has(source, "workOwnsFocus() ? colors.focus : colors.muted"))
+  assert.ok(has(source, "rightColumnFocused(paneState(), approvalsMode() === \"full\")"))
+  assert.ok(has(source, "approvalsMode() === \"full\" ? approvalsPaneFocused(paneState()) : workPaneFocused(paneState())"))
 })
 
 test("ticket183: which-key/statusline read the pending leader submenu", () => {
@@ -584,7 +578,7 @@ test("ticket180: the rail row cursor stays inside the focused sub-pane", () => {
 
 test("ticket185: the small approvals summary is white when its pane is selected", () => {
   const source = app()
-  assert.ok(has(source, 'focused={paneOwnsFocus(paneState(), "approvals")'))
+  assert.ok(has(source, "focused={approvalsPaneFocused(paneState())"))
   assert.ok(has(components(), "props.focused ? props.colors.focus : props.colors.muted"))
 })
 

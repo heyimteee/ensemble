@@ -1609,6 +1609,68 @@ test("ticket189: a running task cannot resurrect pendingSettings or clobber a co
   }
 })
 
+test("ticket189 review: a failed behavior apply keeps the session and retries on the next message", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-apply-retry-"))
+  const { ctx, createdSessionIDs } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const originalUpdate = ctx.session.update
+  let updateCalls = 0
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", role: "First role" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "First" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const first = await handlers.snapshot({ directory })
+    const binding = Object.values(first.state.bindings)[0] as any
+
+    await handlers.invoke({ directory, action: "agent.update", payload: { id: agent.result.id, role: "Second role" } })
+    ctx.session.update = async (input: any) => {
+      updateCalls += 1
+      if (updateCalls === 1) throw new Error("host refused the permission update")
+      return originalUpdate(input)
+    }
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Second" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).filter((task: any) => task.state === "replied").length >= 2
+    })
+    const failed = await handlers.snapshot({ directory })
+    const failedBinding = Object.values(failed.state.bindings)[0] as any
+    assert.equal(createdSessionIDs.length, 1, "a failed apply never creates a session")
+    assert.equal(failedBinding.sessionID, binding.sessionID, "the same native session is kept")
+    assert.equal(failedBinding.agentVersion, 1, "a failed apply does not advance the binding version")
+    assert.equal(failed.state.agents[agent.result.id].pendingSettings, true, "the next message still owns the apply")
+    assert.equal(updateCalls, 1)
+
+    ctx.session.update = originalUpdate
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Third" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).filter((task: any) => task.state === "replied").length >= 3
+    })
+    const retried = await handlers.snapshot({ directory })
+    const retriedBinding = Object.values(retried.state.bindings)[0] as any
+    assert.equal(createdSessionIDs.length, 1, "the retry still reuses the session")
+    assert.equal(retriedBinding.sessionID, binding.sessionID)
+    assert.equal(retriedBinding.agentVersion, 2, "the next message applies the version")
+    assert.equal(retried.state.agents[agent.result.id].pendingSettings, false)
+    assert.equal(updateCalls, 1, "the successful retry used the restored host update")
+  } finally {
+    ctx.session.update = originalUpdate
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket189: agent updates audit changed field names without content", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-189-audit-"))
   const { ctx } = fakeContext()
@@ -1840,6 +1902,39 @@ test("ticket189: agent.rebindSession rejects a busy current session", async () =
     ;(service as any).directBusy.clear()
     await stop()
     rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189 review: agent.rebindSession rejects when the behavior apply fails", async () => {
+  for (const surface of ["switchModel", "update"] as const) {
+    const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-apply-"))
+    const { ctx, nativeSessions } = fakeContext()
+    await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old"] }, nativeSessions)
+    const service = new EnsembleV2Service(ctx)
+    const stop = await startServiceForTest(service, service.ctx)
+    const handlers = service.handlers()
+    const original = ctx.session[surface]
+    ctx.session[surface] = async () => { throw new Error(`host refused ${surface}`) }
+    try {
+      const result = await handlers.invoke({
+        directory,
+        action: "agent.rebindSession",
+        payload: { agentID: "a", workspaceID: "w", sessionID: "session_old" },
+      })
+      assert.equal(result.ok, false, `${surface}: the rebind is rejected`)
+      assert.equal(result.error?.code, "session_apply_failed", `${surface}: the rejection names the failed apply`)
+      const after = await handlers.snapshot({ directory })
+      const binding = Object.values(after.state.bindings)[0] as any
+      assert.equal(binding.sessionID, "session_current", `${surface}: the binding keeps its session`)
+      assert.deepEqual(binding.history, ["session_old"], `${surface}: the history is unchanged`)
+      assert.equal(binding.agentVersion, 1, `${surface}: the version is unchanged`)
+      const logs = await (handlers as any)["logs.recent"]({ directory, event: "agent.session.rebound", limit: 20 })
+      assert.equal(logs.entries.length, 0, `${surface}: a rejected rebind writes no audit row`)
+    } finally {
+      ctx.session[surface] = original
+      await stop()
+      rmSync(directory, { recursive: true, force: true })
+    }
   }
 })
 

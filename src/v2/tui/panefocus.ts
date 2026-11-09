@@ -241,9 +241,27 @@ export function chatPaneFocused(state: PaneFocus): boolean {
   return state.pane === "chat"
 }
 
-/** The right column (Work or the approvals surface) is one border. */
+/**
+ * The Work pane owns the Work heading and cards. Approvals is a separate
+ * stacked pane, so selecting the small approvals summary in split mode never
+ * whitens the WORK heading.
+ */
 export function workPaneFocused(state: PaneFocus): boolean {
-  return state.pane === "work" || state.pane === "approvals"
+  return state.pane === "work"
+}
+
+/** The small or full approvals pane owns its own heading and rows. */
+export function approvalsPaneFocused(state: PaneFocus): boolean {
+  return state.pane === "approvals"
+}
+
+/**
+ * The right column is one outer border. Work selection owns it in split mode;
+ * full approvals replaces Work, so only then does selecting approvals own the
+ * column border. The small approvals pane draws its own focused summary.
+ */
+export function rightColumnFocused(state: PaneFocus, fullApprovals = false): boolean {
+  return state.pane === "work" || (fullApprovals && state.pane === "approvals")
 }
 
 /** Work cards gain their white border only while Work owns interaction. */

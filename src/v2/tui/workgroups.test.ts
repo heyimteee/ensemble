@@ -197,14 +197,14 @@ test("ticket184: a history row names done, active when relevant, and the age", (
     replied({ id: "done", dispatchGroupID: "dispatch_1", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
   ]
   const groups = workGroupsForTasks(items, record(...items), { now: 6_000, holdMs: 60_000 })
-  assert.equal(workHistoryRollupLabel(groups[0], 1, 6_000), "GROUP 1 · 1 done · 1 active · 5s")
+  assert.equal(workHistoryRollupLabel(groups[0], 1, "5s"), "GROUP 1 · 1 done · 1 active · 5s")
   const finished = replied({ id: "done", dispatchGroupID: "dispatch_1", finishedAt: 1_000, repliedAt: 1_000 })
   const doneOnly = workGroupsForTasks(
     [finished],
     record(finished),
     { now: 3_601_000, holdMs: 4_000_000 },
   )
-  assert.equal(workHistoryRollupLabel(doneOnly[0], 2, 3_601_000), "GROUP 2 · 1 done · 1h", "an inactive group omits the active count")
+  assert.equal(workHistoryRollupLabel(doneOnly[0], 2, "1h"), "GROUP 2 · 1 done · 1h", "an inactive group omits the active count")
 })
 
 test("ticket142: Work invalidation targets status and group-hold expiry without an animation clock", () => {

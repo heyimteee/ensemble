@@ -2,6 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import {
   PANE_ORDER,
+  approvalsPaneFocused,
   chatPaneFocused,
   composeFromPane,
   cyclePaneFocus,
@@ -15,6 +16,7 @@ import {
   paneVisibilityFor,
   railSectionFocused,
   recoverPaneFocus,
+  rightColumnFocused,
   togglePaneSide,
   visiblePanes,
   workCardsFocused,
@@ -36,7 +38,8 @@ test("ticket180: focus-state matrix covers every pane, mode, and visibility", ()
       assert.equal(railSectionFocused(state, "agents"), pane === "agents")
       assert.equal(railSectionFocused(state, "workspaces"), pane === "workspaces")
       assert.equal(chatPaneFocused(state), pane === "chat")
-      assert.equal(workPaneFocused(state), pane === "work" || pane === "approvals")
+      assert.equal(workPaneFocused(state), pane === "work")
+      assert.equal(approvalsPaneFocused(state), pane === "approvals")
       assert.equal(workCardsFocused(state), pane === "work" && mode === "interact")
 
       const visible = Object.fromEntries(PANE_ORDER.map((id) => [id, id !== pane])) as Record<PaneID, boolean>
@@ -134,6 +137,19 @@ test("ticket180: Work cards are white only while interacting, never for pane sel
   assert.equal(workCardsFocused(focus("work")), false, "Work select shows a white pane border and grey cards")
   assert.equal(workCardsFocused(focus("work", "interact")), true)
   assert.equal(workCardsFocused(focus("approvals", "interact")), false)
+})
+
+test("ticket178: split approvals selection focuses the small pane without whitening Work", () => {
+  const splitApprovals = focus("approvals")
+  assert.equal(approvalsPaneFocused(splitApprovals), true)
+  assert.equal(workPaneFocused(splitApprovals), false, "the WORK heading stays muted in split mode")
+  assert.equal(rightColumnFocused(splitApprovals), false, "the split outer right border stays grey")
+  assert.equal(rightColumnFocused(splitApprovals, true), true, "full approvals owns the right-column border")
+  assert.equal(rightColumnFocused(focus("work")), true)
+  assert.equal(rightColumnFocused(focus("work"), true), true)
+  assert.equal(rightColumnFocused(focus("chat")), false)
+  assert.equal(rightColumnFocused(focus("chat"), true), false)
+  assert.equal(workPaneFocused(focus("work", "interact")), true)
 })
 
 test("ticket180: rail headings and chat border follow their own pane", () => {

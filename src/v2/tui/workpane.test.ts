@@ -244,6 +244,25 @@ test("ticket184: HISTORY cards order by finish, newest first", () => {
   assert.deepEqual(views.history[0]?.tasks.map((item) => item.id), ["middle", "early", "late"])
 })
 
+test("ticket184/#187: HISTORY cards mix tasks and native subagents by finish, newest first", () => {
+  const items = [
+    replied({ id: "older-task", dispatchGroupID: "dispatch_1", createdAt: 1, finishedAt: 2_000, repliedAt: 2_000 }),
+    replied({ id: "newer-task", dispatchGroupID: "dispatch_1", createdAt: 2, finishedAt: 6_000, repliedAt: 6_000 }),
+  ]
+  const runs = [
+    nativeRun({ childSessionID: "middle-child", state: "replied", startedAt: 3, finishedAt: 4_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 9_999_999 }, runs)
+  const state = reconcileHistoryView(views.history, emptyHistoryViewState())
+  const rows = historyPaneGroups(views.history, state)
+  const layout = paginateWorkGroups(rows, 59, 40, 9_999_999)
+  assert.deepEqual(
+    layout.items.map((item) => item.kind === "task" ? item.task.id : item.run.childSessionID),
+    ["newer-task", "middle-child", "older-task"],
+    "a newer native finish sits above an older task and below a newer task",
+  )
+})
+
 test("ticket184: the newest history group expands and older groups roll up", () => {
   const items = [
     replied({ id: "old", dispatchGroupID: "dispatch_old", createdAt: 1, finishedAt: 1_000, repliedAt: 1_000 }),
@@ -305,6 +324,35 @@ test("ticket184: a finish in a collapsed group updates its count and marks it wi
   assert.equal(reconcileHistoryView(groups, next), next, "an unchanged reconcile keeps the same state")
 })
 
+test("ticket184: a later finish that promotes a collapsed group keeps it collapsed and fresh", () => {
+  const newest = [
+    replied({ id: "a", dispatchGroupID: "dispatch_a", createdAt: 1, finishedAt: 5_000, repliedAt: 5_000 }),
+    replied({ id: "b1", dispatchGroupID: "dispatch_b", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
+  ]
+  const initial = reconcileHistoryView(
+    workViewGroups(newest, record(...newest), { now: 6_000 }).history,
+    emptyHistoryViewState(),
+  )
+  assert.equal(initial.expanded.dispatch_a, true, "the newest group starts expanded")
+  assert.equal(initial.expanded.dispatch_b, false, "the older group starts rolled up")
+  const later = [
+    ...newest,
+    replied({ id: "b2", dispatchGroupID: "dispatch_b", createdAt: 3, finishedAt: 7_000, repliedAt: 7_000 }),
+  ]
+  const groups = workViewGroups(later, record(...later), { now: 8_000 }).history
+  assert.deepEqual(groups.map((group) => group.id), ["dispatch_b", "dispatch_a"], "the later finish promotes B")
+  const next = reconcileHistoryView(groups, initial)
+  assert.equal(next.expanded.dispatch_b, false, "the promoted group stays collapsed at index 0")
+  assert.equal(next.fresh.dispatch_b, true, "the promoted group carries the new marker")
+  assert.equal(next.done.dispatch_b, 2, "its done count follows the new finish")
+  assert.equal(next.expanded.dispatch_a, false, "the former auto-expanded newest rolls up")
+  const rows = historyPaneGroups(groups, next)
+  assert.deepEqual(rows.map((group) => [group.id, group.collapsed, group.fresh]), [
+    ["dispatch_b", true, true],
+    ["dispatch_a", true, false],
+  ])
+})
+
 test("ticket184/#186: a former auto-expanded newest rolls up unless the user expanded it", () => {
   const older = replied({ id: "a", dispatchGroupID: "dispatch_a", createdAt: 1, finishedAt: 5_000, repliedAt: 5_000 })
   const first = reconcileHistoryView(
@@ -347,6 +395,7 @@ test("ticket184: history pagination gives every group a focusable row", () => {
   const header = layout.pages[0]?.sections[0]
   assert.equal(header?.rollup?.collapsed, false)
   assert.equal(header?.rollup?.done, 1)
+  assert.equal(header?.rollup?.age, "1s", "the row age is computed once from the latest finish")
   const rollup = layout.pages[0]?.sections[2]
   assert.equal(rollup?.groupID, "dispatch_old")
   assert.equal(rollup?.rollup?.collapsed, true)

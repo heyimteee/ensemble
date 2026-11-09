@@ -167,7 +167,7 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   ],
   work: [
     info("context", "d", "Delegates in the work list; inside a text buffer d is the delete operator."),
-    info("spatial", "h/j/k/l", "Focus moves to the nearest card in that direction; h/l stay in the row, j/k page at an edge, gg/G jump first/last, and Ctrl+d/u step a half page."),
+    info("spatial", "h/j/k/l", "Focus moves to the nearest card in that direction; h/l page at the leftmost/rightmost row edge, j/k page at a vertical edge, gg/G jump first/last, and Ctrl+d/u step a half page."),
     info("focus.border", "white / grey", "The selected Work pane has a white border; cards are white only after Enter enters Work interaction. The pane border and card focus stay separate."),
     info("actions", "d/t/r/R/x/o", "Only actions valid for the focused card are advertised: active cards delegate, reassign, restart, and cancel; stalled or retrying cards also retry; failed or cancelled history cards retry or restart; replied cards stay read-only. Enter opens the durable result when the card has one."),
     info("approvals", "v / Enter", "Approvals live only in the right column. Split mode pins a small summary under Work; v opens the full-height inbox from any pane, Enter from the small selection opens the same inbox, j/k move, Enter resolves, and Esc returns to split mode. Closing the right pane hides approvals."),

@@ -3,8 +3,9 @@ import { resolveDispatchGroupID } from "../dispatch-group.ts"
 import { allWorkGroupsForTasks, workFinishedAt, type WorkGroup, type WorkGroupOptions } from "../work-groups.ts"
 import type { NativeSubagentRun, Subtask } from "../types.ts"
 import type { PaneSideVisibility } from "./panefocus.ts"
+import { ageLabel } from "./format.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS, workCardContentWidth } from "./workrows.ts"
-import { workGroupLabel, workAgeLabel, workHistoryFinishedAt, workHistoryRollupLabel } from "./workgroups.ts"
+import { workGroupLabel, workHistoryFinishedAt, workHistoryRollupLabel } from "./workgroups.ts"
 
 /**
  * Ticket #172: one responsive shell model for the three-pane workspace.
@@ -201,22 +202,6 @@ function groupItems(group: WorkGroup): WorkPaneItem[] {
   ]
 }
 
-function latestFinish(group: WorkGroup): number {
-  // HISTORY orders by finish time, newest first. An approval resolution may
-  // be later than the task's finish, so it is only the fallback. A native
-  // subagent's finish counts like a task finish for its parent group.
-  let latest: number | undefined
-  for (const task of group.tasks) {
-    const finished = workFinishedAt(task)
-    if (finished !== undefined && (latest === undefined || finished > latest)) latest = finished
-  }
-  for (const run of group.native ?? []) {
-    const finished = run.finishedAt ?? run.startedAt
-    if (latest === undefined || finished > latest) latest = finished
-  }
-  return latest ?? group.latestTerminalAt ?? group.createdAt
-}
-
 function newestFinish(left: Subtask, right: Subtask): number {
   return (workFinishedAt(right) ?? 0) - (workFinishedAt(left) ?? 0) || right.createdAt - left.createdAt || left.id.localeCompare(right.id)
 }
@@ -262,6 +247,34 @@ function newestNativeFinish(left: NativeSubagentRun, right: NativeSubagentRun): 
   return (right.finishedAt ?? right.startedAt) - (left.finishedAt ?? left.startedAt)
     || right.startedAt - left.startedAt
     || left.childSessionID.localeCompare(right.childSessionID)
+}
+
+function historyItemFinish(item: WorkPaneItem): number {
+  return item.kind === "task"
+    ? workFinishedAt(item.task) ?? item.task.createdAt
+    : item.run.finishedAt ?? item.run.startedAt
+}
+
+function historyItemCreatedAt(item: WorkPaneItem): number {
+  return item.kind === "task" ? item.task.createdAt : item.run.startedAt
+}
+
+function historyItemID(item: WorkPaneItem): string {
+  return item.kind === "task" ? item.task.id : item.run.childSessionID
+}
+
+/**
+ * Ticket #184/#187: HISTORY cards order by finish, newest first, across both
+ * card kinds. The start time and id keep the order stable on equal finishes;
+ * ACTIVE keeps the task-then-native order `groupItems` produces.
+ */
+function newestHistoryItems(items: readonly WorkPaneItem[]): WorkPaneItem[] {
+  return [...items].sort(
+    (left, right) =>
+      historyItemFinish(right) - historyItemFinish(left) ||
+      historyItemCreatedAt(right) - historyItemCreatedAt(left) ||
+      historyItemID(left).localeCompare(historyItemID(right)),
+  )
 }
 
 export function workViewGroups(
@@ -315,7 +328,7 @@ export function workViewGroups(
   active.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
   history.sort(
     (left, right) =>
-      latestFinish(right) - latestFinish(left) ||
+      workHistoryFinishedAt(right) - workHistoryFinishedAt(left) ||
       right.createdAt - left.createdAt ||
       left.id.localeCompare(right.id),
   )
@@ -325,22 +338,20 @@ export function workViewGroups(
 /**
  * Ticket #184: sticky history presentation state.
  *
- * `expanded` records the group's row state once seen: the newest group starts
- * expanded, every other group starts rolled up, and Enter's decision survives
- * later updates. `done` is the terminal-card count last rendered, so a finish
- * in a collapsed group increments the count and sets `fresh` without moving the
- * page or opening the group. `fresh` stays until the group is expanded or
- * dismissed.
+ * `expanded` is the resolved sticky render state for every seen group: a new
+ * group at the top starts expanded, a group that was already seen keeps the
+ * row it rendered last time, and a former auto-expanded newest rolls up when a
+ * newer group arrives. `manual` is only the explicit user override; an entry
+ * there always wins. `done` is the terminal-card count last rendered, so a
+ * finish in a collapsed group increments the count and sets `fresh` without
+ * moving the page or opening the group. `fresh` stays until the group is
+ * expanded or dismissed.
  */
 export type HistoryViewState = {
   expanded: Record<string, boolean>
   done: Record<string, number>
   fresh: Record<string, boolean>
-  /**
-   * Explicit user expansion choices. A group without an entry follows the
-   * newest-first default: only the newest group expands, and a former newest
-   * rolls up when a newer group arrives.
-   */
+  /** Explicit user expansion choices; they outrank the newest-first default. */
   manual: Record<string, boolean>
 }
 
@@ -371,7 +382,12 @@ export function reconcileHistoryView(
   const manual: Record<string, boolean> = {}
   groups.forEach((group, index) => {
     const priorExpanded = previous.manual[group.id]
-    const isExpanded = priorExpanded ?? index === 0
+    const wasSeen = previous.expanded[group.id] !== undefined
+    // A seen group keeps the row it rendered last time, even when a later
+    // finish promotes it to index 0. Only a never-seen newest group expands;
+    // manual choices always win. An auto-expanded newest therefore rolls up
+    // when a newer group arrives.
+    const isExpanded = priorExpanded ?? (wasSeen && previous.expanded[group.id] === false ? false : index === 0)
     const priorDone = previous.done[group.id]
     expanded[group.id] = isExpanded
     done[group.id] = group.done
@@ -559,7 +575,8 @@ export function paginateWorkGroups(
     const fullLabel = workGroupLabel(group, index + 1)
     const tone = sectionTone(group, now)
     if (group.history) {
-      const age = workAgeLabel(now - workHistoryFinishedAt(group))
+      const finishedAt = workHistoryFinishedAt(group)
+      const age = ageLabel(finishedAt, now)
       atoms.push({
         groupID: group.id,
         fullLabel,
@@ -576,12 +593,12 @@ export function paginateWorkGroups(
           collapsed: group.collapsed === true,
           fresh: group.fresh === true,
           age,
-          label: workHistoryRollupLabel(group, index + 1, now),
+          label: workHistoryRollupLabel(group, index + 1, age),
         },
       })
       if (group.collapsed === true) return
     }
-    const items = groupItems(group)
+    const items = group.history ? newestHistoryItems(groupItems(group)) : groupItems(group)
     if (cards) {
       for (let offset = 0; offset < items.length; offset += columns) {
         atoms.push({
