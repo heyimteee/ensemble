@@ -1910,9 +1910,12 @@ export class EnsembleV2Service {
   /**
    * Ticket #189: apply the agent's current behavior to a native session in
    * place. These are the same host surfaces runTask and the identity poll
-   * already use; none of them requires a new session.
+   * already use; none of them requires a new session. Returns true only when
+   * every part applied, so the binding advances its version only after a
+   * complete apply; a failure leaves the old version for the next message or
+   * DM to retry.
    */
-  private async applyAgentBehavior(sessionID: string, agent: Agent): Promise<void> {
+  private async applyAgentBehavior(sessionID: string, agent: Agent): Promise<boolean> {
     try {
       await this.ctx.session.instructions.entry.put({
         sessionID,
@@ -1921,29 +1924,40 @@ export class EnsembleV2Service {
       })
       this.identityVersions.set(sessionID, agent.version)
     } catch {
-      // The next identity poll can retry; model and permissions still apply.
+      return false
     }
-    await this.ctx.session.switchModel({
-      sessionID,
-      model: {
-        providerID: agent.mainModel.providerID,
-        id: agent.mainModel.modelID,
-        ...(agent.mainModel.variant ? { variant: agent.mainModel.variant } : {}),
-      },
-    }).catch(() => undefined)
-    await this.ctx.session.update({
-      sessionID,
-      permissions: skillPermissions(agent.skillbox),
-    }).catch(() => undefined)
+    try {
+      await this.ctx.session.switchModel({
+        sessionID,
+        model: {
+          providerID: agent.mainModel.providerID,
+          id: agent.mainModel.modelID,
+          ...(agent.mainModel.variant ? { variant: agent.mainModel.variant } : {}),
+        },
+      })
+    } catch {
+      return false
+    }
+    try {
+      await this.ctx.session.update({
+        sessionID,
+        permissions: skillPermissions(agent.skillbox),
+      })
+    } catch {
+      return false
+    }
+    return true
   }
 
   /**
    * Refresh a stored binding whose native session is still alive. Returns true
-   * when the behavior was applied (and the binding saved) this call.
+   * when the behavior was applied (and the binding saved) this call. A failed
+   * apply leaves `agentVersion` and `pendingSettings` untouched so the next
+   * task or DM retries on the same session.
    */
   private async refreshAgentSession(binding: SessionBinding, agent: Agent): Promise<boolean> {
     if (binding.agentVersion === agent.version) return false
-    await this.applyAgentBehavior(binding.sessionID, agent)
+    if (!(await this.applyAgentBehavior(binding.sessionID, agent))) return false
     binding.agentVersion = agent.version
     binding.updatedAt = now()
     await this.store.saveBinding(binding)
@@ -2259,7 +2273,9 @@ export class EnsembleV2Service {
       throw Object.assign(new Error("The target session no longer exists."), { code: "invalid_session" })
     }
     const fromSessionID = binding.sessionID
-    await this.applyAgentBehavior(target, agent)
+    if (!(await this.applyAgentBehavior(target, agent))) {
+      throw Object.assign(new Error("Could not apply the agent settings to the target session."), { code: "session_apply_failed" })
+    }
     await this.clearPendingSettings(agent.id)
     const next: SessionBinding = {
       ...binding,
@@ -6440,6 +6456,21 @@ export class EnsembleV2Service {
     return next
   }
 
+  /**
+   * Ticket #182 review: fill only the parent task, dispatch group, workspace,
+   * and parent agent fields an existing record is still missing. The
+   * session-created and idle-background paths must apply exactly this patch.
+   */
+  private parentPatch(existing: NativeSubagentRun, context: NativeParentContext): Partial<NativeSubagentRun> {
+    const patch: Partial<NativeSubagentRun> = {}
+    if (!existing.parentTaskID && context.task?.id) patch.parentTaskID = context.task.id
+    if (!existing.dispatchGroupID && context.task?.dispatchGroupID) patch.dispatchGroupID = context.task.dispatchGroupID
+    if (!existing.workspaceID && context.workspaceID) patch.workspaceID = context.workspaceID
+    if (!existing.parentAgentID && context.agentID) patch.parentAgentID = context.agentID
+    if (!existing.parentAgent && context.agentName) patch.parentAgent = context.agentName
+    return patch
+  }
+
   private async handleNativeSubagentCreated(event: any): Promise<void> {
     const data = event?.data ?? event
     const childSessionID = typeof data?.sessionID === "string" ? data.sessionID : ""
@@ -6450,12 +6481,7 @@ export class EnsembleV2Service {
     const fallback = nativeSubagentFallbackInstruction({ title: data?.title, agent: data?.agent })
     const existing = this.store.nativeSubagent(childSessionID)
     if (existing) {
-      const patch: Partial<NativeSubagentRun> = {}
-      if (!existing.parentTaskID && context.task?.id) patch.parentTaskID = context.task.id
-      if (!existing.dispatchGroupID && context.task?.dispatchGroupID) patch.dispatchGroupID = context.task.dispatchGroupID
-      if (!existing.workspaceID && context.workspaceID) patch.workspaceID = context.workspaceID
-      if (!existing.parentAgentID && context.agentID) patch.parentAgentID = context.agentID
-      if (!existing.parentAgent && context.agentName) patch.parentAgent = context.agentName
+      const patch = this.parentPatch(existing, context)
       const isFallback = this.nativeSubagentFallbacks.has(childSessionID)
       const pending = isFallback ? this.takeNativeSubagentPending(context.sessionID) : undefined
       if (pending) {
@@ -6570,12 +6596,7 @@ export class EnsembleV2Service {
       const description = boundNativeSubagentInstruction(entry.description)
       const existing = this.store.nativeSubagent(childSessionID)
       if (existing) {
-        const patch: Partial<NativeSubagentRun> = {}
-        if (!existing.parentTaskID && context.task?.id) patch.parentTaskID = context.task.id
-        if (!existing.dispatchGroupID && context.task?.dispatchGroupID) patch.dispatchGroupID = context.task.dispatchGroupID
-        if (!existing.workspaceID && context.workspaceID) patch.workspaceID = context.workspaceID
-        if (!existing.parentAgentID && context.agentID) patch.parentAgentID = context.agentID
-        if (!existing.parentAgent && context.agentName) patch.parentAgent = context.agentName
+        const patch = this.parentPatch(existing, context)
         if (description && this.nativeSubagentFallbacks.has(childSessionID)) {
           patch.instruction = description
           this.nativeSubagentFallbacks.delete(childSessionID)

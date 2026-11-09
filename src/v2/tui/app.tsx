@@ -138,7 +138,7 @@ import {
   type InteractionResult,
   type InteractionState,
 } from "./interaction.ts"
-import { chatPaneFocused, cyclePaneFocus, enterPane, focusForPaneToggle, movePaneFocus, paneOwnsFocus, paneSideVisibility, paneVisibilityFor, railSectionFocused, togglePaneSide, workCardsFocused, workPaneFocused, type PaneFocus, type PaneID, type PaneSide, type PaneSideVisibility, type PaneVisibility } from "./panefocus.ts"
+import { approvalsPaneFocused, chatPaneFocused, cyclePaneFocus, enterPane, focusForPaneToggle, movePaneFocus, paneSideVisibility, paneVisibilityFor, railSectionFocused, rightColumnFocused, togglePaneSide, workCardsFocused, workPaneFocused, type PaneFocus, type PaneID, type PaneSide, type PaneSideVisibility, type PaneVisibility } from "./panefocus.ts"
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
 import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
@@ -1604,9 +1604,12 @@ export function EnsembleV2App() {
   // dump: no streamed body text anywhere. The motion tick keeps the hold
   // closing reactive while the work clock owns the repaint.
   const hasActiveWorkNow = () => hasActiveWork(activeTasks(), Date.now())
-  // Ticket #180: each pane owns its own border and heading; cards stay grey
-  // until Work is entered.
-  const workOwnsFocus = () => workPaneFocused(paneState()) && !composerActive() && !overlayOpen()
+  // Ticket #180/#178: each pane owns its own border and heading; cards stay
+  // grey until Work is entered. Ticket #185: full approvals replaces Work in
+  // the right column, so its selection owns the column border and header while
+  // the split-mode small approvals pane keeps only its own focused summary.
+  const workColumnFocused = () => rightColumnFocused(paneState(), approvalsMode() === "full") && !composerActive() && !overlayOpen()
+  const workHeaderFocused = () => (approvalsMode() === "full" ? approvalsPaneFocused(paneState()) : workPaneFocused(paneState())) && !composerActive() && !overlayOpen()
   const chatOwnsFocus = () => chatPaneFocused(paneState()) && !overlayOpen()
   // Slice C stop affordance (brief §2.5): while active work runs on the group
   // surface a run is abortable, so the composer names `Ctrl+C stop`; the hint
@@ -7045,7 +7048,7 @@ export function EnsembleV2App() {
               zIndex={workPaneMode() === "drawer" ? 60 : undefined}
               border
               borderStyle="single"
-              borderColor={workOwnsFocus() ? colors.focus : colors.border}
+              borderColor={workColumnFocused() ? colors.focus : colors.border}
               backgroundColor={colors.bg}
               flexDirection="column"
               paddingLeft={1}
@@ -7061,7 +7064,7 @@ export function EnsembleV2App() {
                   else dispatchInteraction({ type: "focus.set", focus: "work" })
                 }}
               >
-                <ChromeText colors={colors} fg={workOwnsFocus() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate text={approvalsMode() === "full" ? fullApprovalsHeader(fullApprovals()) : workHeader()} />
+                <ChromeText colors={colors} fg={workHeaderFocused() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate text={approvalsMode() === "full" ? fullApprovalsHeader(fullApprovals()) : workHeader()} />
               </box>
               <Show when={approvalsMode() === "full"} fallback={
                 <>
@@ -7193,7 +7196,7 @@ export function EnsembleV2App() {
                 <WorkApprovalsView
                   colors={colors}
                   section={inlineApprovals()}
-                  focused={paneOwnsFocus(paneState(), "approvals") && !overlayOpen()}
+                  focused={approvalsPaneFocused(paneState()) && !overlayOpen()}
                   resolvingID={resolvingApprovalID()}
                   motionTick={motionFrame()}
                   emphasized={approvalMotion().emphasized}

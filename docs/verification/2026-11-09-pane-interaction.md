@@ -27,9 +27,11 @@ This record is the release evidence for the pane-interaction delivery:
   chat, reopening selects the column without entering content, and `F3` is
   retired.
 - HISTORY partitions tasks, so one group can appear in ACTIVE and HISTORY with
-  disjoint cards. The newest group expands, a former auto-expanded newest
-  rolls up, older groups are compact rollups, `Enter` expands, `x` dismisses,
-  `D` clears the view, and `h`/`l` cross page edges.
+  disjoint cards. A never-seen newest group expands, a former auto-expanded
+  newest rolls up, a collapsed group promoted by a later finish stays collapsed
+  with a `fresh` marker, older groups are compact rollups, `Enter` expands, `x`
+  dismisses, `D` clears the view, and `h`/`l` cross page edges. HISTORY cards
+  order by finish, newest first, across task and native subagent cards.
 - Chat keeps one aggregate activity line (`Asking $Name…`, `Working…`, and the
   `+N more` overflow) with the Work pane open; no per-agent row returns.
 - Approvals are only the right column's small summary and full-height inbox.
@@ -131,7 +133,22 @@ muted, or faint tone.
 | Activity summary | With live work and the Work pane open, chat shows one `Working…` line and later one `Asking $FakeAgent…` line; no `│ working…` per-agent row is rendered. |
 | Approvals small/full | A pending ask shows `APPROVALS 1 pending │ v open` under Work; Enter from the small selection opens `APPROVALS 1 pending │ 1/1` full height, Work is hidden, `Esc` returns to split. |
 | Retired surfaces | The rail slice contains no `APPROVALS` footer; `V` no longer opens a chat approvals modal; `v` opens the right-column inbox from chat. |
-| Drawer approvals | At 80×24, `v` opens the full-height inbox in the drawer (`APPROVALS 0 pending`), Work is covered, the heading is white, and `Esc` returns to split. Pending resolution is exercised at 160×80; pending-in-drawer is listed as a skip below. |
+| Drawer approvals | At 80×24, `v` opens the full-height inbox in the drawer (`APPROVALS 0 pending`), Work is covered, the heading is white, and `Esc` returns to split. Pending resolution is exercised at 160×80; pending-in-drawer is listed as a skip below with unit-seam layout evidence. |
+
+**Workspace-scoped approvals.** The inbox deliberately filters pending approvals
+to the active workspace (`approvalsForWorkspace`), so one workspace cannot see
+or resolve another workspace's decisions. Spec #178 did not ask for that
+boundary; it is a safety decision and is covered by the pure approvals tests.
+
+**Pending approvals in the 80×24 drawer (unit seam).** The live size matrix
+does not hold a pending approval in the populated drawer fixture, so no live
+80×24 pending pass is claimed. The width-independent layout is covered by
+`src/v2/tui/workapprovals.test.ts`: at `workspacePaneWidths(80)`
+(`workWidth ≥ 30`), split geometry keeps a positive Work body and a positive
+small-approval row budget, and full geometry gives `workBodyHeight = 0` with a
+positive inbox row budget (`approvalRows ≥ 2` at `workPaneBodyHeight(24)`).
+The 160×80 live checks cover pending split/full/open/resolve and the Esc
+return; only the pending-in-drawer combination is a unit-only seam.
 
 ## Size matrix
 
@@ -186,8 +203,14 @@ finished with `Mismatches: none`.
   matrix: the populated size fixture queues the ask behind its active tasks.
   The width-independent pending split/full/resolve path passes at 160×80, and
   the 80×24 drawer proves the same full-height surface, white heading,
-  Work-covered layout, and split return on the empty inbox. Manual evidence is
-  the `/tmp/opencode/artifacts-186-sizes/console.log` drawer section.
+  Work-covered layout, and split return on the empty inbox. The unit seam adds
+  positive split/full row budgets at the drawer width (see the unit-seam note
+  above); no live 80×24 pending pass is claimed. Manual evidence is the
+  `/tmp/opencode/artifacts-186-sizes/console.log` drawer section.
+- **Workspace-scoped approvals** are intentional, not a skipped cross-workspace
+  check: another workspace's pending rows are filtered out by design and the
+  boundary is covered by `approvalsForWorkspace` tests. Cross-workspace
+  leakage would be a defect, not a missing capability.
 - The real host-catalog matrix is **post-merge**: the user's live host runs
   `main` and was not restarted or reconfigured. This is an environment limit,
   not a skipped assertion.

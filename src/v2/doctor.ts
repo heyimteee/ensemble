@@ -532,12 +532,10 @@ function checkWorkRows(input: DoctorLocationInput, add: (
 }
 
 /**
- * Walk the parent chain from one group to the root it declares. Returns a
- * reason code when the chain is broken; IDs only, no task content.
- */
-/**
- * Ticket #182: native subagent invariants over structured fields only. The
- * record's display instruction is not part of DoctorSnapshot at all.
+ * Ticket #182: native subagent invariants over structured fields only. Checks
+ * orphaned records, parent/group mismatches, contradictory lifecycle fields,
+ * and active records that outlived the retention window. The record's display
+ * instruction is not part of DoctorSnapshot at all.
  */
 function checkNativeSubagents(input: DoctorLocationInput, add: (
   indexes: number[],
@@ -605,6 +603,10 @@ function checkNativeSubagents(input: DoctorLocationInput, add: (
   }
 }
 
+/**
+ * Walk the parent chain from one group to the root it declares. Returns a
+ * reason code when the chain is broken; IDs only, no task content.
+ */
 function dispatchReachability(
   group: DispatchGroup,
   groups: Record<string, DispatchGroup>,
