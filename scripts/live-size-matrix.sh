@@ -145,7 +145,7 @@ focus_work() {
   for attempt in 1 2 3 4 5 6; do
     pane=$(live_capture "$LIVE_TUI_SESSION")
     if grep -qF "NORMAL  │ Work list" <<<"$pane"; then return 0; fi
-    if grep -qF "│ Work list" <<<"$pane" || grep -qF "│ Work approvals" <<<"$pane"; then
+    if grep -qF "│ Work list" <<<"$pane" || grep -qF "│ Approvals" <<<"$pane"; then
       live_key "$LIVE_TUI_SESSION" Escape
       sleep 0.35
       continue

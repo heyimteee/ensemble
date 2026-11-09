@@ -175,6 +175,24 @@ test("ticket183: durable side switches derive one per-pane visibility map", () =
   )
 })
 
+test("ticket185: full approvals hide Work while keeping the approvals pane visible", () => {
+  const visible = paneVisibilityFor(
+    { left: true, right: true },
+    { work: true, approvals: true, fullApprovals: true },
+  )
+  assert.deepEqual(visible, { agents: true, workspaces: true, chat: true, work: false, approvals: true })
+  assert.deepEqual(visiblePanes(visible), ["agents", "workspaces", "chat", "approvals"], "Tab skips hidden Work")
+})
+
+test("ticket185: a closed right column hides full approvals too", () => {
+  const visible = paneVisibilityFor(
+    { left: false, right: false },
+    { work: true, approvals: true, fullApprovals: true },
+  )
+  assert.deepEqual(visible, { agents: false, workspaces: false, chat: true, work: false, approvals: false })
+  assert.deepEqual(visiblePanes(visible), ["chat"])
+})
+
 test("ticket183: toggling a side flips exactly one column", () => {
   assert.deepEqual(togglePaneSide({ left: true, right: true }, "left"), { left: false, right: true })
   assert.deepEqual(togglePaneSide({ left: false, right: true }, "left"), { left: true, right: true })
