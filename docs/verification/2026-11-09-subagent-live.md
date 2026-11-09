@@ -39,8 +39,8 @@ This record covers:
 
 | Command | Result |
 |---|---|
-| `npm run verify` | **Pass** — strict type check; **1514 tests passed, 0 failed, 0 skipped, 0 todo**, 44.7 s (post-merge tree including #185). |
-| `node --test --experimental-strip-types --test-name-pattern 'ticket188' src/v2/service.test.ts src/v2/tui/change-feed.test.ts` | **Pass** — 4 ticket #188 tests: barrier hold/release, timeout + privacy, `experimental.idle` shape, dispatch-group patch validation. |
+| `npm run verify` | **Pass** — strict type check; **1515 tests passed, 0 failed, 0 skipped, 0 todo**, 45.6 s (post-merge tree including #185). |
+| `node --test --experimental-strip-types --test-name-pattern 'ticket188' src/v2/service.test.ts src/v2/tui/change-feed.test.ts` | **Pass** — 5 ticket #188 tests: barrier hold/release, timeout + privacy, reset abort, `experimental.idle` shape, dispatch-group patch validation. |
 | `ENSEMBLE_LIVE_REQUIRE=1 ENSEMBLE_LIVE_ARTIFACTS=/tmp/opencode/verification-188/barrier npm run test:live:subagent` | **Pass** — isolated real OpenCode 2.2.6 host + fake provider; real child session, card, barrier, HISTORY, cleanup, restart retention, privacy, `experimental.idle` shape. |
 | Pre-barrier baseline (`integration/workspace-interaction` archive at `ae039ce` + this probe/fixture only): `ENSEMBLE_SUBAGENT_EXPECT=early bash scripts/live-subagent-probe.sh` | **Pass as a baseline** — the parent task replied while the child record was not successful (`cancelled` by `task-terminal` cleanup at 388 ms), proving early finalization on the unbarriered tree. |
 | `git diff --check` | **Pass** — no whitespace errors. |
@@ -71,7 +71,7 @@ finishes while the child is still working. The probe asserts:
 
 | Assertion | Live evidence |
 |---|---|
-| `session.created.parentID` delivery | Durable record `childSessionID=ses_e41628c7fffeytMCSaH9iAiJFn`, `parentSessionID`, `parentTaskID=task_43bbf5f86ae84b1dae06`, source `session-created`. |
+| `session.created.parentID` delivery | Durable record `childSessionID=ses_e415da952ffep2jAkps6DV52iY`, `parentSessionID`, `parentTaskID=task_05008f34947c4d4e8ef5`, source `session-created`. |
 | Parent agent / task / group / workspace mapping | `parentAgent=Kakiko`, same `dispatchGroupID` and `workspaceID` as the parent task; one task row only; `usedHops` unchanged. |
 | Card name | Work card header shows `KAKIKO`. |
 | Card title | Card title shows the bounded `Subagents: Watch the…` prefix (full instruction truncated to the rendered card width). |
@@ -81,7 +81,7 @@ finishes while the child is still working. The probe asserts:
 | Restart retention | The isolated server and TUI are killed and restarted on the same state root; the record is still `replied` and HISTORY shows the card. |
 | Cleanup | Deleting the probe workspace/agent leaves zero native records; no queue row, no hop spend. |
 | No instruction content | `diagnostic`, `logs.recent`, and every isolated service JSONL entry contain no `Watch the CI pipeline`; the durable record still carries it for display. (`fake.log` is fake-provider test infrastructure and records request tails; it is not an Ensemble log and is excluded from this assertion.) |
-| `experimental.idle` shape | Debug entry `native.subagent.idle-hook` at `04:42:32.608Z`: `count:1`, `background:[{kind:"subagent", sessionID, childSessionID}]`; no `description`, shell `command`, or image `path`. |
+| `experimental.idle` shape | Debug entry `native.subagent.idle-hook` at `04:47:52.876Z`: `count:1`, `background:[{kind:"subagent", sessionID, childSessionID}]`; no `description`, shell `command`, or image `path`. |
 
 The probe needs no API key and no external model. It is Linux/tmux only, like
 the rest of the live harness. It defaults `ENSEMBLE_LOG_LEVEL=debug` for the
@@ -131,16 +131,17 @@ Implementation:
   parent-session waiter. A timeout logs `native.subagent.barrier.timeout` with
   child IDs/count/duration only, finalizes the parent, and the existing
   task-terminal cleanup closes the live child record. Service stop releases all
-  waiters, so shutdown cannot hang.
+  waiters, and an epoch change (reset, workspace delete/archive) wakes and aborts
+  the barrier so those lifecycle paths cannot wait for the bound.
 - When the barrier releases after a real child, the run waits once more for a
   host wake-up turn and re-reads the assistant result, so a notification turn's
   later answer is not lost. A run with no active child pays no extra wait.
 - Logs: `native.subagent.barrier.released` and `.timeout` carry parent task,
   parent session, child IDs, count, and duration; never the instruction.
 
-Live evidence after the barrier: record created at `04:42:32.206`, child
-`replied` at `04:42:37.314`, `barrier.released` at `04:42:37.315`
-(`durationMs: 4703`), with the parent remaining `working` and heartbeating for
+Live evidence after the barrier: record created at `04:47:52.505`, child
+`replied` at `04:47:57.618`, `barrier.released` at `04:47:57.618`
+(`durationMs: 4738`), with the parent remaining `working` and heartbeating for
 the whole child window.
 
 The timeout test proves the bound releases a missing child, the task replies,
@@ -151,12 +152,12 @@ no instruction content.
 
 **Available and verified.** The isolated host delivered the hook while the
 parent was idle and the child still streamed. The service's debug entry at
-`04:42:32.608Z` is:
+`04:47:52.876Z` is:
 
 ```json
-{"sessionID":"ses_e41628dc0ffeIR5UCfYpyAg13J","count":1,
- "background":[{"kind":"subagent","sessionID":"ses_e41628dc0ffeIR5UCfYpyAg13J",
- "childSessionID":"ses_e41628c7fffeytMCSaH9iAiJFn"}],
+{"sessionID":"ses_e415daa8bffeOdnGrKrgl4wpY5","count":1,
+ "background":[{"kind":"subagent","sessionID":"ses_e415daa8bffeOdnGrKrgl4wpY5",
+ "childSessionID":"ses_e415da952ffep2jAkps6DV52iY"}],
  "event":"native.subagent.idle-hook"}
 ```
 

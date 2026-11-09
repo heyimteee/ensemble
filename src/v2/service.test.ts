@@ -7186,6 +7186,81 @@ test("ticket188: the barrier releases work after its bound and logs no instructi
   }
 })
 
+test("ticket188: reset aborts the barrier instead of waiting for its bound", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-188-barrier-reset-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20, nativeSubagentBarrierMs: 5_000 })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  let resetStarted = false
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    const claimed = await handlers.snapshot({ directory })
+    const binding = Object.values(claimed.state.bindings)[0] as any
+    emitEvent({
+      id: "evt_188_reset_child",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_188_reset", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_188_reset?.state === "working")
+    releaseWait?.()
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    resetStarted = true
+    let timer: NodeJS.Timeout | undefined
+    const tooSlow = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("ensemble.reset waited for the barrier bound")), 1_500)
+      timer.unref?.()
+    })
+    try {
+      const reset = await Promise.race([
+        handlers.invoke({ directory, action: "ensemble.reset", payload: { confirmation: "RESET" } }),
+        tooSlow,
+      ])
+      assert.equal(reset.ok, true)
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+    const after = await handlers.snapshot({ directory })
+    assert.deepEqual(Object.values(after.state.workspaces), [])
+    assert.deepEqual(Object.values(after.state.subtasks), [])
+    assert.deepEqual(Object.values(after.state.nativeSubagents), [])
+  } finally {
+    if (resetStarted) {
+      const live = (await handlers.snapshot({ directory }).catch(() => undefined))?.state.nativeSubagents.child_188_reset
+      if (live?.state === "working") {
+        emitEvent({
+          id: "evt_188_reset_cleanup",
+          created: Date.now(),
+          type: "session.execution.succeeded",
+          data: { sessionID: "child_188_reset" },
+        })
+      }
+    }
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket188: experimental.idle accepts the documented subagent background shape without content logs", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-188-idle-hook-"))
   const previousLogLevel = process.env.ENSEMBLE_LOG_LEVEL

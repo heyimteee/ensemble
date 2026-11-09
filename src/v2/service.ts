@@ -2704,6 +2704,7 @@ export class EnsembleV2Service {
     this.globalEpoch++
     this.epochValue++
     this.workspaceEpoch.clear()
+    this.releaseNativeSubagentWaiters()
     await this.cancelActiveInitJobs(undefined, "Ensemble was reset.")
     await this.waitForInitRuns()
     for (const run of this.activeRuns.values()) await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
@@ -2746,6 +2747,7 @@ export class EnsembleV2Service {
     workspace.archived = true
     workspace.lastActiveAt = now()
     this.workspaceEpoch.set(workspaceID, (this.workspaceEpoch.get(workspaceID) ?? 0) + 1)
+    this.wakeNativeSubagentWaitersForWorkspace(workspaceID)
     await this.cancelActiveInitJobs(workspaceID, "Workspace archived.")
     await this.store.saveWorkspace(workspace)
     try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
@@ -2762,6 +2764,7 @@ export class EnsembleV2Service {
     const workspace = this.store.workspace(workspaceID)
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     this.workspaceEpoch.set(workspaceID, (this.workspaceEpoch.get(workspaceID) ?? 0) + 1)
+    this.wakeNativeSubagentWaitersForWorkspace(workspaceID)
     await this.cancelActiveInitJobs(workspaceID, "Workspace deleted.")
     await this.cancelWorkspaceSubtasks(workspaceID, "Workspace deleted.")
     for (const run of this.activeRuns.values()) {
@@ -6188,10 +6191,20 @@ export class EnsembleV2Service {
     })
   }
 
-  private async awaitNativeSubagentBarrier(parentSessionID: string, task: Subtask): Promise<boolean> {
+  private async awaitNativeSubagentBarrier(
+    parentSessionID: string,
+    task: Subtask,
+    globalEpoch: number,
+    workspaceEpoch: number,
+  ): Promise<boolean> {
     const startedAt = now()
     let waited = false
     for (;;) {
+      // Reset, workspace delete/archive, and service stop already changed the
+      // run's lifecycle identity. Never hold a run the rest of the system has
+      // retired; the caller's existing epoch/ownership checks take over.
+      if (this.stopped || this.globalEpoch !== globalEpoch) return false
+      if ((this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return false
       const active = this.activeNativeChildrenForTask(parentSessionID, task.id)
       if (active.length === 0) {
         if (waited) {
@@ -6218,6 +6231,20 @@ export class EnsembleV2Service {
       }
       await this.waitForNativeSubagentSignal(parentSessionID, remaining)
     }
+  }
+
+  /** Wake barriers whose parent session belongs to a retiring workspace. */
+  private wakeNativeSubagentWaitersForWorkspace(workspaceID: string): void {
+    const taskIDs = new Set(
+      this.store.subtasks().filter((task) => task.workspaceID === workspaceID).map((task) => task.id),
+    )
+    const sessions = new Set<string>()
+    for (const run of this.store.nativeSubagents()) {
+      if (run.workspaceID === workspaceID || (run.parentTaskID !== undefined && taskIDs.has(run.parentTaskID))) {
+        sessions.add(run.parentSessionID)
+      }
+    }
+    for (const sessionID of sessions) this.notifyNativeSubagentWaiters(sessionID)
   }
 
   /** IDs, names, states, and durations only. Instructions never enter a log. */
@@ -7190,7 +7217,7 @@ export class EnsembleV2Service {
         // the run on the existing heartbeat until its children are terminal;
         // then let a host wake-up turn settle and use its latest answer.
         if (!result.failure) {
-          const released = await this.awaitNativeSubagentBarrier(binding.sessionID, task)
+          const released = await this.awaitNativeSubagentBarrier(binding.sessionID, task, globalEpoch, workspaceEpoch)
           if (released && !this.stopped) {
             await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
             messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
