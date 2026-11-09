@@ -58,3 +58,15 @@ test("ticket155: tool and execution events derive identity without exposing cont
   assert.equal(hostEventKey({ type: "session.execution.started", created: 9, data: { sessionID: "s1" } }), "session.execution.started:s1:9")
   assert.equal(hostEventKey({ type: "session.tool.failed", data: { sessionID: "s1" } }), undefined)
 })
+
+test("ticket182: session create and delete events derive stable child-session identity", () => {
+  const created = {
+    type: "session.created",
+    created: 7,
+    data: { sessionID: "child_1", parentID: "parent_1", agent: "build", title: "CI watcher" },
+  }
+  assert.equal(hostEventKey(created), "session.created:child_1:parent_1:7")
+  assert.equal(hostEventKey({ ...created, id: "evt_created_1" }), "id:evt_created_1")
+  assert.equal(hostEventKey({ type: "session.deleted", created: 8, data: { sessionID: "child_1" } }), "session.deleted:child_1:8")
+  assert.equal(hostEventKey({ type: "session.created", data: { parentID: "parent_1" } }), undefined)
+})

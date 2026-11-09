@@ -165,6 +165,37 @@ export type SubtaskOutcome = "succeeded" | "failed" | "pending"
 export type SubtaskStage = "initial" | "synthesis"
 
 /**
+ * Ticket #182: lifecycle of one native OpenCode subagent child session.
+ *
+ * A NativeSubagentRun is not a Subtask: it never enters the coordination
+ * queue, consumes no hop budget, and has no retry/cancel action. It is a
+ * compact durable projection of host child sessions, keyed by the child
+ * session id so duplicate host events cannot create parallel records.
+ */
+export type NativeSubagentState = "working" | "replied" | "failed" | "cancelled"
+export type NativeSubagentSource = "session-created" | "idle-background" | "tool-call"
+
+export type NativeSubagentRun = {
+  childSessionID: Id
+  /** Resolved Ensemble-bound parent session; direct parent when no binding matched. */
+  parentSessionID: Id
+  parentTaskID?: Id
+  dispatchGroupID?: Id
+  workspaceID?: Id
+  parentAgentID?: Id
+  parentAgent?: string
+  /**
+   * Display-only instruction head. Durable records may carry it; logs and
+   * diagnostics must not. Bounded to one line by the tracker.
+   */
+  instruction: string
+  state: NativeSubagentState
+  startedAt: number
+  finishedAt?: number
+  source: NativeSubagentSource
+}
+
+/**
  * Structured terminal cause for a work item (ticket #168). `native` is a real
  * execution or model error. `delivery`, `lease`, and `attempts` are queue
  * causes: they derive `stalled`, never `failed`. Only rows that can no longer
@@ -546,6 +577,7 @@ export type Snapshot = {
     subtasks: Record<Id, Subtask>
     dispatchGroups: Record<Id, DispatchGroup>
     initJobs: Record<Id, InitJob>
+    nativeSubagents: Record<Id, NativeSubagentRun>
     bindings: Record<string, SessionBinding>
     memories: Record<Id, Memory>
     approvals: Record<Id, Approval>
@@ -643,6 +675,8 @@ export type EntityChange =
   | { entity: "memory"; op: "remove"; id: Id }
   | { entity: "initJob"; op: "upsert"; job: InitJob }
   | { entity: "initJob"; op: "remove"; id: Id }
+  | { entity: "nativeSubagent"; op: "upsert"; run: NativeSubagentRun }
+  | { entity: "nativeSubagent"; op: "remove"; id: Id }
   | { entity: "settings"; op: "upsert"; settings: Settings }
   | { entity: "ui"; op: "upsert"; ui: SnapshotState["ui"] }
 

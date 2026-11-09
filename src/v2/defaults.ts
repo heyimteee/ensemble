@@ -22,6 +22,7 @@ export function createInitialState(): SnapshotState {
     subtasks: {},
     dispatchGroups: {},
     initJobs: {},
+    nativeSubagents: {},
     bindings: {},
     memories: {},
     approvals: {},

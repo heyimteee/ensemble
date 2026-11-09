@@ -382,3 +382,33 @@ test("SnapshotMeta stays the feed cursor shape", () => {
   const value: SnapshotMeta = meta({ version: 3 })
   assert.equal(value.protocol, 3)
 })
+
+test("ticket182: native subagent entities validate and apply through the patch feed", () => {
+  const run = {
+    childSessionID: "child_1",
+    parentSessionID: "parent_1",
+    parentTaskID: "t1",
+    dispatchGroupID: "dispatch_1",
+    workspaceID: "w1",
+    parentAgentID: "a1",
+    parentAgent: "Ada",
+    instruction: "watch the CI",
+    state: "working" as const,
+    startedAt: 2,
+    source: "session-created" as const,
+  }
+  const decision = decidePatchApply(meta({ version: 4 }), batch({
+    from: 4,
+    version: 5,
+    entries: [{ version: 5, changes: [], entities: [{ entity: "nativeSubagent", op: "upsert", run }] }],
+  }))
+  assert.equal(decision.action, "apply")
+  assert.ok(decision.action === "apply" && decision.changes.length === 1)
+
+  const store = createClientStore()
+  const state = createInitialState()
+  state.version = 4
+  store.applySnapshot({ state, models: [], skills: [], directory: "/tmp/ensemble" })
+  if (decision.action === "apply") store.applyChanges(decision.changes, decision.version)
+  assert.equal(store.state()?.nativeSubagents.child_1?.instruction, "watch the CI")
+})

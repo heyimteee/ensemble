@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { diagnoseLocations, type DoctorBinding, type DoctorConfigRead, type DoctorLocationInput, type DoctorSnapshot, type DoctorSubtask, type DoctorWorkspace } from "./doctor.ts"
+import { diagnoseLocations, type DoctorBinding, type DoctorConfigRead, type DoctorLocationInput, type DoctorNativeSubagent, type DoctorSnapshot, type DoctorSubtask, type DoctorWorkspace } from "./doctor.ts"
 import type { DispatchGroup } from "./types.ts"
 
 const service = { id: "svc-1", pid: 100, version: "2.2.3" }
@@ -38,6 +38,7 @@ function snapshot(input: {
   bindings?: DoctorBinding[]
   dispatchGroups?: DispatchGroup[]
   subtasks?: DoctorSubtask[]
+  nativeSubagents?: DoctorNativeSubagent[]
 }): DoctorSnapshot {
   return {
     agents: Object.fromEntries(input.agents.map((item) => [item.id, item])),
@@ -45,6 +46,7 @@ function snapshot(input: {
     bindings: Object.fromEntries((input.bindings ?? []).map((item) => [item.key, item])),
     ...(input.dispatchGroups ? { dispatchGroups: Object.fromEntries(input.dispatchGroups.map((item) => [item.id, item])) } : {}),
     ...(input.subtasks ? { subtasks: Object.fromEntries(input.subtasks.map((item) => [item.id, item])) } : {}),
+    ...(input.nativeSubagents ? { nativeSubagents: Object.fromEntries(input.nativeSubagents.map((item) => [item.childSessionID, item])) } : {}),
   }
 }
 
@@ -606,4 +608,78 @@ test("ticket163: the doctor detects an empty active continuation group", () => {
   assert.equal(mismatch?.details.groupID, "dispatch_cont")
   assert.equal(mismatch?.details.rootID, "dispatch_root")
   assert.equal(mismatch?.details.continuationIndex, 1)
+})
+
+/* Ticket #182: native subagent records are checked without their instruction. */
+
+const nativeChild = (patch: Partial<DoctorNativeSubagent> = {}): DoctorNativeSubagent => ({
+  childSessionID: "child_1",
+  parentSessionID: "parent_session",
+  parentTaskID: "task_parent",
+  dispatchGroupID: "dispatch_root",
+  workspaceID: site.id,
+  state: "working",
+  startedAt: 1,
+  source: "session-created",
+  ...patch,
+})
+
+test("ticket182: a consistent native child record produces no mismatch", () => {
+  const snap = snapshot({
+    agents: [clark, jessy],
+    workspaces: [site],
+    bindings: [binding(site.id, clark.id), binding(site.id, jessy.id)],
+    dispatchGroups: [dispatchRoot()],
+    subtasks: [dispatchTask("task_parent", "dispatch_root", { creatorType: "user" })],
+    nativeSubagents: [nativeChild({ startedAt: Date.now() })],
+  })
+  const report = diagnoseLocations([location(site.directory, snap, validConfig())])
+  assert.deepEqual(report.mismatches, [])
+})
+
+test("ticket182: the doctor detects orphaned child records", () => {
+  const snap = snapshot({
+    agents: [clark, jessy],
+    workspaces: [site],
+    bindings: [binding(site.id, clark.id), binding(site.id, jessy.id)],
+    dispatchGroups: [dispatchRoot()],
+    nativeSubagents: [nativeChild({ parentTaskID: "task_ghost", workspaceID: "workspace_ghost", dispatchGroupID: "group_ghost" })],
+  })
+  const report = diagnoseLocations([location(site.directory, snap, validConfig())])
+  const mismatch = report.mismatches.find((item) => item.code === "native_subagent_orphaned")
+  assert.ok(mismatch)
+  assert.equal(mismatch?.details.childSessionID, "child_1")
+  assert.deepEqual(mismatch?.details.problems, ["missing-workspace", "missing-parent-task", "missing-dispatch-group"])
+  assert.ok(!JSON.stringify(report).includes("instruction"))
+})
+
+test("ticket182: the doctor detects parent/task/group mismatches", () => {
+  const otherWorkspace = workspace({ id: "workspace_other", directory: "/projects/other", leaderID: clark.id, memberIDs: [clark.id] })
+  const snap = snapshot({
+    agents: [clark, jessy],
+    workspaces: [site, otherWorkspace],
+    bindings: [binding(site.id, clark.id), binding(site.id, jessy.id)],
+    dispatchGroups: [dispatchRoot(), dispatchRoot({ id: "dispatch_other" })],
+    subtasks: [dispatchTask("task_parent", "dispatch_other", { creatorType: "user", workspaceID: "workspace_other" })],
+    nativeSubagents: [nativeChild({ startedAt: Date.now() })],
+  })
+  const report = diagnoseLocations([location(site.directory, snap, validConfig())])
+  const mismatch = report.mismatches.find((item) => item.code === "native_subagent_mismatch")
+  assert.ok(mismatch)
+  assert.deepEqual(mismatch?.details.problems, ["workspace-task-mismatch", "group-task-mismatch"])
+})
+
+test("ticket182: the doctor detects a child record stuck active past retention", () => {
+  const snap = snapshot({
+    agents: [clark, jessy],
+    workspaces: [site],
+    bindings: [binding(site.id, clark.id), binding(site.id, jessy.id)],
+    dispatchGroups: [dispatchRoot()],
+    subtasks: [dispatchTask("task_parent", "dispatch_root", { creatorType: "user" })],
+    nativeSubagents: [nativeChild({ startedAt: 1 })],
+  })
+  const report = diagnoseLocations([{ ...location(site.directory, snap, validConfig()), now: 1 + 24 * 60 * 60_000 + 1 }])
+  const mismatch = report.mismatches.find((item) => item.code === "native_subagent_stale")
+  assert.ok(mismatch)
+  assert.equal(mismatch?.details.state, "working")
 })

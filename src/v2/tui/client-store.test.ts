@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { createInitialState } from "../defaults.ts"
 import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
-import type { Agent, Approval, DispatchGroup, InitJob, Memory, Message, ModelOption, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
+import type { Agent, Approval, DispatchGroup, InitJob, Memory, Message, ModelOption, NativeSubagentRun, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
 import { createClientStore, reduceClientState } from "./client-store.ts"
 
 const agent = (id: string, name: string): Agent => ({
@@ -121,6 +121,21 @@ const initJob = (id: string): InitJob => ({
   state: "running",
   previousAgentsMD: null,
   startedAt: 1,
+})
+
+const nativeSubagent = (id: string, patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
+  childSessionID: id,
+  parentSessionID: "s_parent",
+  parentTaskID: "t1",
+  dispatchGroupID: "dispatch_1",
+  workspaceID: "w1",
+  parentAgentID: "a1",
+  parentAgent: "Ada",
+  instruction: "watch the CI",
+  state: "working",
+  startedAt: 1,
+  source: "session-created",
+  ...patch,
 })
 
 function stateWith(entities: (state: SnapshotState) => void): SnapshotState {
@@ -258,6 +273,29 @@ test("ticket160: dispatch groups apply incrementally and prune without touching 
   store.applyChanges([{ entity: "dispatchGroup", op: "remove", id: "dispatch_2" }], 6)
   assert.equal(store.state()!.dispatchGroups.dispatch_2, undefined)
   assert.equal(store.state()!.dispatchGroups.dispatch_1?.usedHops, 2)
+})
+
+test("ticket182: native subagent records apply and remove incrementally", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.nativeSubagents.child_1 = nativeSubagent("child_1")
+  })))
+  const before = store.state()!
+  assert.equal(before.nativeSubagents.child_1?.instruction, "watch the CI")
+
+  store.applyChanges([
+    { entity: "nativeSubagent", op: "upsert", run: nativeSubagent("child_1", { state: "replied", finishedAt: 5 }) },
+    { entity: "nativeSubagent", op: "upsert", run: nativeSubagent("child_2") },
+  ], 5)
+  const updated = store.state()!
+  assert.equal(updated.nativeSubagents.child_1?.state, "replied")
+  assert.equal(updated.nativeSubagents.child_2?.childSessionID, "child_2")
+  assert.equal(updated.subtasks, before.subtasks, "child records never touch queue Work state")
+  assert.equal(updated.messages, before.messages)
+
+  store.applyChanges([{ entity: "nativeSubagent", op: "remove", id: "child_2" }], 6)
+  assert.equal(store.state()!.nativeSubagents.child_2, undefined)
+  assert.equal(store.state()!.nativeSubagents.child_1?.state, "replied")
 })
 
 test("ticket160: a Work projection resync merges its ledger groups", () => {
@@ -715,6 +753,7 @@ test("a scoped shell resync replaces shell entities but preserves the loaded tra
     state.workspaces.w1 = workspace("w1", "site")
     state.messages.w1 = [message("m1", "hello")]
     state.subtasks.t1 = task("t1")
+    state.nativeSubagents.child_1 = nativeSubagent("child_1")
   })))
 
   const shell = stateWith((state) => {
@@ -723,6 +762,7 @@ test("a scoped shell resync replaces shell entities but preserves the loaded tra
     state.workspaces.w2 = workspace("w2", "other")
     state.messages = {}
     state.subtasks = {}
+    state.nativeSubagents.child_2 = nativeSubagent("child_2")
   })
   store.applyShellSnapshot(shell)
 
@@ -731,6 +771,8 @@ test("a scoped shell resync replaces shell entities but preserves the loaded tra
   assert.equal(store.state()?.workspaces.w2?.name, "other")
   assert.equal(store.state()?.messages.w1?.[0]?.text, "hello", "transcript is untouched by shell resync")
   assert.equal(store.state()?.subtasks.t1?.id, "t1", "Work is untouched by shell resync")
+  assert.equal(store.state()?.nativeSubagents.child_2?.instruction, "watch the CI")
+  assert.equal(store.state()?.nativeSubagents.child_1, undefined, "shell resync replaces the child record set")
   assert.equal(store.state()?.version, 9)
 })
 
