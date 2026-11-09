@@ -538,6 +538,39 @@ test("picker rows keep one name column", () => {
 
 // ---- Settings, limits, and activity ----
 
+test("chat renders one aggregate activity summary line", () => {
+  const source = app()
+  assert.ok(has(source, "activitySummary("))
+  assert.ok(has(source, "text={liveActivity().text}"))
+})
+
+test("per-agent activity rows are gone", () => {
+  const source = app()
+  assert.ok(!has(source, "liveActivity().shown"))
+  assert.ok(!has(source, "liveActivity().queued"))
+  assert.ok(!has(source, "<For each={liveActivity()}"))
+  assert.ok(!has(source, "activityFrameForKind(entry.kind"))
+})
+
+test("carded work is not suppressed from the summary", () => {
+  const source = app()
+  assert.ok(!has(source, "suppressCardedActivity("))
+  assert.ok(!has(source, "cardedTaskIDs"))
+})
+
+test("the activity summary is not gated on the Work pane", () => {
+  const source = app()
+  const start = source.indexOf("const liveActivity = createMemo(")
+  const end = source.indexOf("const hasChatContent", start)
+  assert.ok(start >= 0 && end > start, "activity summary memo exists")
+  const memo = source.slice(start, end)
+  assert.ok(!has(memo, "showWorkPane"), "the summary ignores Work-pane visibility")
+  assert.ok(!has(memo, "cardedTaskIDs"), "the summary ignores card suppression")
+  const render = source.indexOf("text={liveActivity().text}")
+  const workPane = source.indexOf("<Show when={showWorkPane()}>")
+  assert.ok(render >= 0 && workPane > render, "the summary renders in chat before the Work pane sibling")
+})
+
 test("the System Agent init guard runs before slash-command fallthrough", () => {
   const source = app()
   const guard = source.indexOf("const initIssue = initComposerIssue(text)")

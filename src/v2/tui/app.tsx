@@ -152,7 +152,7 @@ import { commandCompletions, completeCommand, parseCommandLine, type ParsedComma
 import { createLogger, type EnsembleLogger, type LogEntry } from "../logging.ts"
 import { formatLogEntry, formatLogStats, logEntryTone, logsRpcInput, logsTitle, parseLogsCommand, sortLogEntries, type LogsViewFilter } from "./logs.ts"
 import { createPageActivation } from "./page-activation.ts"
-import { chromeJoin, chromeSeparator } from "./separators.ts"
+import { chromeJoin } from "./separators.ts"
 import { focusWhenReady, halfPageCursor } from "./focus.ts"
 import { LEADER_POPUP_DELAY_MS } from "./leader.ts"
 import { createCommandHistory, recallHistory, rememberHistory, startHistory, type CommandHistory } from "./history.ts"
@@ -168,21 +168,16 @@ import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"
 import { createStreamCoalescer } from "../stream-coalescer.ts"
 import { applyWorkActivity, clearWorkActivitiesForSession, isWorkActivity, pruneWorkActivities, workActivityLabel, type WorkActivity } from "../work-activity.ts"
 import {
-  ACTIVITY_DEFAULT_VERB,
-  MAX_VISIBLE_ACTIVITY,
   NEEDS_YOU_MARK,
   TRANSCRIPT_WINDOW,
-  activityFrameForKind,
   activityStateForTask,
+  activitySummary,
   hasActiveWork,
   isNeedsYouTask,
   mergeStreamingActivity,
   pendingWorkLabel,
-  queuedActivityFrame,
-  selectActivityAgents,
   splitActivityGroups,
   splitLiveFinalized,
-  suppressCardedActivity,
   createWorkCardCache,
   pruneWorkCardCache,
   workCardForTaskCached,
@@ -193,7 +188,6 @@ import {
   workCompactRow,
   workRowFrame,
   type ActivityEntry,
-  type ActivityVerbKind,
   type PendingWorkAction,
   type WorkCard,
   type WorkCardOptions,
@@ -1135,14 +1129,6 @@ export function EnsembleV2App() {
       workExpiryTimer = undefined
     }
   })
-  const cardedTaskIDs = createMemo(() => {
-    const sections = workPane().sections
-    return new Set(
-      sections
-        .filter((section) => section.mode === "cards")
-        .flatMap((section) => section.cards.map((card) => card.id)),
-    )
-  })
   // Ticket #173: rectangles are the cursor geometry. This memo depends on the
   // layout only, never on focus or the current page, so moving the cursor can
   // never rebuild card data.
@@ -1609,7 +1595,7 @@ export function EnsembleV2App() {
     return stable
   })
   const liveActivity = createMemo(() => {
-    const taskLive: ActivityEntry[] = []
+    let taskLive: ActivityEntry[] = []
     let queuedEntries: ActivityEntry[] = []
     if (surface()?.kind === "workspace") {
       const groups = splitActivityGroups(
@@ -1623,7 +1609,7 @@ export function EnsembleV2App() {
           agentNameFor: (agentID) => agentName(state(), agentID),
         },
       )
-      taskLive.push(...groups.live)
+      taskLive = groups.live
       queuedEntries = groups.queued
     }
     // Ticket #74: task-less streaming rows never synthesize the generic
@@ -1631,34 +1617,9 @@ export function EnsembleV2App() {
     // or recent delta exists; stale orphans and task-backed agents add
     // nothing, so finished turns leave no ghost line behind.
     const merged = mergeStreamingActivity(taskLive, liveMessages(), Date.now())
-    // Ticket #115 follow-up: suppress the task-backed line only after the
-    // merge. Keeping it in `taskLive` during the merge prevents the same
-    // agent's streaming row from replacing the suppressed card detail.
-    const visible = suppressCardedActivity({ live: merged, queued: queuedEntries }, cardedTaskIDs())
-    const live = visible.live
-    const queued = visible.queued.map((entry) => entry.label)
-    const selected = selectActivityAgents(live, MAX_VISIBLE_ACTIVITY)
-    const byLabel = new Map<string, ActivityEntry>()
-    for (const entry of live) if (!byLabel.has(entry.label)) byLabel.set(entry.label, entry)
-    const shown = selected.shown.map((label) => {
-      const entry = byLabel.get(label)
-      return { label, agentID: entry?.agentID, verb: entry?.verb ?? ACTIVITY_DEFAULT_VERB, kind: entry?.kind ?? ("checking" as ActivityVerbKind) }
-    })
-    // Ticket #77: queued work is real work and must be visible on its own,
-    // not only when something else is live. This is why a just-handoff'd
-    // recipient showed nothing until their answer — or a later live run —
-    // appeared: the old gate rendered queued labels only alongside live
-    // ones. Queued labels now always render, deduped against live and
-    // capped at the same budget.
-    const queuedShown = queued
-      .filter((label) => !shown.some((entry) => entry.label === label))
-      .slice(0, MAX_VISIBLE_ACTIVITY)
-    return {
-      shown,
-      queued: queuedShown,
-      overflow:
-        selected.overflow + Math.max(0, queued.length - queuedShown.length),
-    }
+    // Ticket #181: one aggregate line over every active entry. Cards hold the
+    // per-task detail, so carded work is never suppressed from the summary.
+    return activitySummary({ live: merged, queued: queuedEntries })
   })
   // Ticket #67 one author-color source: the transcript, activity lines, and
   // relays all resolve through unifiedAuthorColor (ID first, roster-name
@@ -1671,8 +1632,7 @@ export function EnsembleV2App() {
       liveInitJobs().length > 0 ||
       liveMessages().length > 0 ||
       completionMap().size > 0 ||
-      liveActivity().shown.length > 0 ||
-      liveActivity().queued.length > 0,
+      liveActivity().total > 0,
   )
   // Ticket #67 unified bubble header: every row keeps author attribution;
   // relayed answers head `Answer from $Answerer · for $Asker|you` via the #55
@@ -4372,8 +4332,8 @@ export function EnsembleV2App() {
   }
 
   // Slice B motion gate: the 8 fps clock runs only while something is in
-  // flight (busy, live streaming text, task-backed activity lines, the
-  // ephemeral WORK block, or an approval resolve RPC) or composing — and
+  // flight (busy, live streaming text, the active-work summary, the ephemeral
+  // WORK block, or an approval resolve RPC) or composing — and
   // never under reduced motion (`ENSEMBLE_REDUCED_MOTION`/`NO_COLOR`), where
   // every animated cell pins to its frame-0 glyph. Idle screens hold tick 0
   // with no interval.
@@ -4383,7 +4343,7 @@ export function EnsembleV2App() {
         busy: isBusy() || resolvingApprovalID() !== null,
         // Ticket #172: an empty Work pane must not keep the chrome clock
         // alive. Only actual work in either view is live chrome.
-        live: liveInitJobs().length > 0 || liveMessages().length > 0 || hasWorkZone() || liveActivity().shown.length > 0,
+        live: liveInitJobs().length > 0 || liveMessages().length > 0 || hasWorkZone() || liveActivity().total > 0,
         composerActive: composerActive() || composerValidation() !== null,
       },
       process.env,
@@ -6727,33 +6687,9 @@ export function EnsembleV2App() {
                                 }}</For>
                               </box>
                           </scrollbox>
-                          <Show when={liveActivity().shown.length > 0 || liveActivity().queued.length > 0 || liveActivity().overflow > 0}>
+                          <Show when={liveActivity().total > 0}>
                             <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1}>
-                              <For each={liveActivity().shown}>{(entry) => (
-                                <box flexDirection="row" width="100%">
-                                  <text fg={colors.muted} bg={colors.bg}>{`${activityFrameForKind(entry.kind, motionFrame(), process.env)} `}</text>
-                                  <Show when={entry.kind === "asking"} fallback={
-                                    <>
-                                      <text fg={authorColor({ agentID: entry.agentID, author: entry.label, role: "agent" })} bg={colors.bg}>{entry.label}</text>
-                                      <text fg={colors.faint} bg={colors.bg}>{` ${chromeSeparator()} `}</text>
-                                      <text fg={colors.muted} bg={colors.bg}>{entry.verb}</text>
-                                    </>
-                                  }>
-                                    <text fg={authorColor({ agentID: entry.agentID, author: entry.label, role: "agent" })} bg={colors.bg}>{entry.verb}</text>
-                                  </Show>
-                                </box>
-                              )}</For>
-                              <For each={liveActivity().queued}>{(label) => (
-                                <box flexDirection="row" width="100%">
-                                  <text fg={colors.muted} bg={colors.bg}>{`${queuedActivityFrame()} `}</text>
-                                  <text fg={authorColor({ author: label, role: "agent" })} bg={colors.bg}>{label}</text>
-                                  <text fg={colors.faint} bg={colors.bg}>{` ${chromeSeparator()} `}</text>
-                                  <text fg={colors.muted} bg={colors.bg}>queued</text>
-                                </box>
-                              )}</For>
-                              <Show when={liveActivity().overflow > 0}>
-                                <text fg={colors.faint} bg={colors.bg} width="100%" truncate>+{liveActivity().overflow} more</text>
-                              </Show>
+                              <ChromeText colors={colors} fg={colors.muted} bg={colors.bg} width="100%" truncate text={liveActivity().text} />
                             </box>
                           </Show>
                           <Show when={initRows().length > 0}>
