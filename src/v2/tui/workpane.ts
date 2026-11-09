@@ -29,6 +29,13 @@ export const SHELL_VIEW_INSET = 2
 export const WORK_PANE_HORIZONTAL_CHROME = 4
 
 /**
+ * Chat outer chrome: border (2), pane padding (2), transcript right padding
+ * (1), and one message row's left/right padding (2). The transcript text
+ * width is the pane width after this chrome; no extra scrollbar reserve.
+ */
+export const CHAT_CONTENT_CHROME = 7
+
+/**
  * Work pane rows outside the scrollable body: root padding and gaps, the app
  * header, the statusline, the pane border, the pane header, and the pager.
  */
@@ -49,7 +56,7 @@ export type ShellPaneWidths = {
   workChrome: number
   /** Work content width inside its border and padding. */
   workContentWidth: number
-  /** Conservative transcript text width while the Work pane shares the row. */
+  /** Transcript text width after the chat border/padding chrome while Work shares the row. */
   chatContentWidth: number
   /** Transcript text width when Work is absent (a DM or the closed drawer). */
   chatOnlyContentWidth: number
@@ -94,8 +101,8 @@ export function workspacePaneWidths(
       workWidth,
       workChrome,
       workContentWidth: Math.max(WORK_CARD_MIN_WIDTH - WORK_CARD_HORIZONTAL_CHROME, workWidth - workChrome),
-      chatContentWidth: Math.max(20, chatWidth - 9),
-      chatOnlyContentWidth: Math.max(20, chatOnlyWidth - 9),
+      chatContentWidth: Math.max(20, chatWidth - CHAT_CONTENT_CHROME),
+      chatOnlyContentWidth: Math.max(20, chatOnlyWidth - CHAT_CONTENT_CHROME),
     }
   }
   if (!right) {
@@ -109,8 +116,8 @@ export function workspacePaneWidths(
       workWidth: 0,
       workChrome,
       workContentWidth: 0,
-      chatContentWidth: Math.max(20, chatOnlyWidth - 9),
-      chatOnlyContentWidth: Math.max(20, chatOnlyWidth - 9),
+      chatContentWidth: Math.max(20, chatOnlyWidth - CHAT_CONTENT_CHROME),
+      chatOnlyContentWidth: Math.max(20, chatOnlyWidth - CHAT_CONTENT_CHROME),
     }
   }
   const ratio = terminal >= 140 ? 0.4 : 0.38
@@ -132,8 +139,8 @@ export function workspacePaneWidths(
     workWidth,
     workChrome,
     workContentWidth: Math.max(WORK_CARD_MIN_WIDTH - WORK_CARD_HORIZONTAL_CHROME, workWidth - workChrome),
-    chatContentWidth: Math.max(20, chatWidth - 9),
-    chatOnlyContentWidth: Math.max(20, chatOnlyWidth - 9),
+    chatContentWidth: Math.max(20, chatWidth - CHAT_CONTENT_CHROME),
+    chatOnlyContentWidth: Math.max(20, chatOnlyWidth - CHAT_CONTENT_CHROME),
   }
 }
 

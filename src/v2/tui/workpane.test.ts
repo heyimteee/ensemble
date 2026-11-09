@@ -119,6 +119,13 @@ test("ticket172: the card grid keeps an exact right edge at every pane width", (
   }
 })
 
+test("ticket190: chat content width subtracts only the border and padding chrome", () => {
+  const split = workspacePaneWidths(160)
+  assert.equal(split.chatContentWidth, split.chatWidth - 7)
+  const closed = workspacePaneWidths(160, { right: false })
+  assert.equal(closed.chatOnlyContentWidth, closed.chatWidth - 7)
+})
+
 test("ticket183: the one width memo consumes both durable side switches", () => {
   const full = workspacePaneWidths(160)
   assert.equal(full.railWidth + full.chatWidth + full.workWidth + full.gap * 2, full.viewWidth, "default tiles three panes")

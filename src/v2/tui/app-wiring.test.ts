@@ -231,6 +231,8 @@ test("ticket190: the plain transcript markdown follows the reactive chat width",
     "plain transcript markdown gets the reactive content width",
   )
   assert.ok(!has(app(), 'syntaxStyle={style()} width="100%"'), "no transcript markdown keeps a static 100% width")
+  assert.ok(has(app(), 'tableOptions={{ widthMode: "full" }}'), "transcript tables fill the message width")
+  assert.ok(!has(app(), 'tableOptions={{ widthMode: "content" }}'), "no transcript table keeps content-only width")
 })
 
 test("the Work layout reads the pane content width", () => {
