@@ -3,10 +3,11 @@ import { MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkS
 import { nextRetryAttempt } from "../retry.ts"
 import { isNeedsYouTask, orderedGroupTasks, taskNeedsYou } from "../work-groups.ts"
 import { TRANSCRIPT_WINDOW } from "../scoped-read.ts"
-import type { Subtask } from "../types.ts"
+import type { NativeSubagentRun, Subtask } from "../types.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
 import { chromeJoin } from "./separators.ts"
+import { nativeSubagentFocusID, nativeSubagentTitle, nativeSubagentWorkStatus } from "./nativecards.ts"
 import {
   flatTideLevels,
   flatTideStrip,
@@ -891,6 +892,72 @@ export function workCardForTask(task: Subtask, agentLabel: string, options: Work
     tideVariant: variant,
     width,
   }
+}
+
+/**
+ * Ticket #187: a native subagent renders through the same card design as a
+ * task. Its name is the parent agent, its title is the bounded instruction
+ * head, and its child session id owns a namespaced focus target. The card is
+ * read-only Ensemble work: no queue row, hop, retry, or cancel exists.
+ */
+export type NativeSubagentCardOptions = {
+  now: number
+  /** Card content width in terminal cells. */
+  width: number
+  /** Fixed variant override; callers with a stable assignment should use `variantFor`. */
+  variant?: TideVariant
+  /** Stable per-child-session tide assignment. */
+  variantFor?: (id: string) => TideVariant
+}
+
+export function workCardForNativeSubagent(
+  run: NativeSubagentRun,
+  agentLabel: string,
+  options: NativeSubagentCardOptions,
+): WorkCard {
+  const status = nativeSubagentWorkStatus(run.state)
+  const terminal = isTerminalWorkStatus(status)
+  const width = Math.max(16, Math.floor(options.width))
+  const textWidth = Math.max(8, width - 2)
+  const id = nativeSubagentFocusID(run.childSessionID)
+  const variant = options.variantFor?.(id) ?? options.variant ?? "current"
+  return {
+    id,
+    header: workCardHeaderLayout(agentLabel.toUpperCase(), workCardStateWord(status, false), width),
+    title: nativeSubagentTitle(run, textWidth),
+    detail: short(workCardDetail(status, { width: textWidth }), textWidth),
+    status,
+    needsYou: false,
+    terminal,
+    tones: workCardTones(status, false),
+    tideVariant: variant,
+    width,
+  }
+}
+
+/** Native cards share the task card identity cache, keyed by the namespaced focus id. */
+export function workCardForNativeSubagentCached(
+  cache: WorkCardCache,
+  run: NativeSubagentRun,
+  agentLabel: string,
+  options: NativeSubagentCardOptions,
+): WorkCard {
+  const next = workCardForNativeSubagent(run, agentLabel, options)
+  const prior = cache.cards.get(next.id)
+  const card = prior && sameWorkCard(prior, next) ? prior : next
+  cache.cards.set(card.id, card)
+  return card
+}
+
+/** The compact fallback keeps the same parent name, `Subagents:` title, and status word. */
+export function workCompactRowForNativeSubagent(
+  run: NativeSubagentRun,
+  agentLabel: string,
+  glyph: string,
+  width: number,
+): WorkCompactRow {
+  const status = nativeSubagentWorkStatus(run.state)
+  return workCompactRow(agentLabel, nativeSubagentTitle(run), glyph, workCardStateWord(status, false), width)
 }
 
 /** The animated Braille/state glyph; only this cell reads the 8 fps clock. */

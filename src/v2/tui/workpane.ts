@@ -1,6 +1,7 @@
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
+import { resolveDispatchGroupID } from "../dispatch-group.ts"
 import { allWorkGroupsForTasks, workFinishedAt, type WorkGroup, type WorkGroupOptions } from "../work-groups.ts"
-import type { Subtask } from "../types.ts"
+import type { NativeSubagentRun, Subtask } from "../types.ts"
 import type { PaneSideVisibility } from "./panefocus.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS, workCardContentWidth } from "./workrows.ts"
 import { workGroupLabel, workAgeLabel, workHistoryFinishedAt, workHistoryRollupLabel } from "./workgroups.ts"
@@ -164,13 +165,54 @@ export type WorkViewGroups = {
   history: WorkGroup[]
 }
 
+/**
+ * Ticket #187: one renderable Work item. A card row may mix task cards and
+ * native subagent cards without promoting the child run to a Subtask.
+ */
+export type WorkPaneItem =
+  | { kind: "task"; task: Subtask }
+  | { kind: "native"; run: NativeSubagentRun }
+
+const taskPaneItems = new WeakMap<Subtask, WorkPaneItem>()
+const nativePaneItems = new WeakMap<NativeSubagentRun, WorkPaneItem>()
+
+function taskPaneItem(task: Subtask): WorkPaneItem {
+  let item = taskPaneItems.get(task)
+  if (!item) {
+    item = { kind: "task", task }
+    taskPaneItems.set(task, item)
+  }
+  return item
+}
+
+function nativePaneItem(run: NativeSubagentRun): WorkPaneItem {
+  let item = nativePaneItems.get(run)
+  if (!item) {
+    item = { kind: "native", run }
+    nativePaneItems.set(run, item)
+  }
+  return item
+}
+
+function groupItems(group: WorkGroup): WorkPaneItem[] {
+  return [
+    ...group.tasks.map(taskPaneItem),
+    ...(group.native ?? []).map(nativePaneItem),
+  ]
+}
+
 function latestFinish(group: WorkGroup): number {
   // HISTORY orders by finish time, newest first. An approval resolution may
-  // be later than the task's finish, so it is only the fallback.
+  // be later than the task's finish, so it is only the fallback. A native
+  // subagent's finish counts like a task finish for its parent group.
   let latest: number | undefined
   for (const task of group.tasks) {
     const finished = workFinishedAt(task)
     if (finished !== undefined && (latest === undefined || finished > latest)) latest = finished
+  }
+  for (const run of group.native ?? []) {
+    const finished = run.finishedAt ?? run.startedAt
+    if (latest === undefined || finished > latest) latest = finished
   }
   return latest ?? group.latestTerminalAt ?? group.createdAt
 }
@@ -179,25 +221,94 @@ function newestFinish(left: Subtask, right: Subtask): number {
   return (workFinishedAt(right) ?? 0) - (workFinishedAt(left) ?? 0) || right.createdAt - left.createdAt || left.id.localeCompare(right.id)
 }
 
+/**
+ * Ticket #187: map each native child session to its parent's dispatch group.
+ * The parent task is the authority when it still exists (so legacy groups and
+ * continuation lineage resolve exactly like the parent card); the record's
+ * stored group id is the fallback. Child session ids dedupe the input.
+ */
+function nativeRunsByGroup(
+  tasks: readonly Subtask[],
+  subtasks: Record<string, Subtask>,
+  runs: readonly NativeSubagentRun[],
+): Map<string, NativeSubagentRun[]> {
+  const taskByID = new Map<string, Subtask>()
+  for (const task of tasks) taskByID.set(task.id, task)
+  const byGroup = new Map<string, Map<string, NativeSubagentRun>>()
+  for (const run of runs) {
+    // The durable record is authoritative; the workspace projection is the
+    // fallback for callers that pass tasks without their full record.
+    const parent = run.parentTaskID
+      ? subtasks[run.parentTaskID] ?? taskByID.get(run.parentTaskID)
+      : undefined
+    const groupID = (parent ? resolveDispatchGroupID(parent, subtasks) : undefined) ?? run.dispatchGroupID
+    if (!groupID) continue
+    let bucket = byGroup.get(groupID)
+    if (!bucket) {
+      bucket = new Map()
+      byGroup.set(groupID, bucket)
+    }
+    bucket.set(run.childSessionID, run)
+  }
+  return new Map([...byGroup].map(([id, bucket]) => [
+    id,
+    [...bucket.values()].sort(
+      (left, right) => left.startedAt - right.startedAt || left.childSessionID.localeCompare(right.childSessionID),
+    ),
+  ]))
+}
+
+function newestNativeFinish(left: NativeSubagentRun, right: NativeSubagentRun): number {
+  return (right.finishedAt ?? right.startedAt) - (left.finishedAt ?? left.startedAt)
+    || right.startedAt - left.startedAt
+    || left.childSessionID.localeCompare(right.childSessionID)
+}
+
 export function workViewGroups(
   tasks: Subtask[],
   subtasks: Record<string, Subtask>,
   options: WorkGroupOptions,
+  nativeRuns: readonly NativeSubagentRun[] = [],
 ): WorkViewGroups {
   const now = options.now
   const active: WorkGroup[] = []
   const history: WorkGroup[] = []
+  const nativeByGroup = nativeRunsByGroup(tasks, subtasks, nativeRuns)
   for (const group of allWorkGroupsForTasks(tasks, subtasks, options)) {
+    const runs = nativeByGroup.get(group.id) ?? []
+    const liveNative = runs.filter((run) => run.state === "working")
+    const doneNative = runs.filter((run) => run.state !== "working").sort(newestNativeFinish)
     const live = group.tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
     const finished = group.tasks.filter((task) => isTerminalWorkStatus(deriveWorkStatus(task, now)))
-    if (live.length > 0) active.push({ ...group, tasks: live })
-    if (finished.length > 0) {
+    const totalActive = group.active + liveNative.length
+    const totalDone = group.done + doneNative.length
+    // Native work is work: a group with a live child is not complete even when
+    // every task has terminalized. This also keeps the expiry timer honest.
+    const complete = totalActive === 0 && !group.needsYou
+    if (live.length > 0 || liveNative.length > 0) {
+      active.push({ ...group, tasks: live, native: liveNative, active: totalActive, done: totalDone, complete })
+    }
+    if (finished.length > 0 || doneNative.length > 0) {
+      const latestNative = doneNative.reduce<number | undefined>(
+        (latest, run) => {
+          const finishedAt = run.finishedAt ?? run.startedAt
+          return latest === undefined || finishedAt > latest ? finishedAt : latest
+        },
+        undefined,
+      )
       history.push({
         ...group,
         tasks: [...finished].sort(newestFinish),
+        native: doneNative,
         // The history subset owns only its finished cards; `active` stays the
         // group's live count so the rollup can say "active count when relevant".
-        done: finished.length,
+        done: finished.length + doneNative.length,
+        active: totalActive,
+        complete,
+        ...(latestNative !== undefined &&
+        (group.latestTerminalAt === undefined || latestNative > group.latestTerminalAt)
+          ? { latestTerminalAt: latestNative }
+          : {}),
       })
     }
   }
@@ -324,6 +435,10 @@ export type WorkPaneSection = {
   tone: "faint" | "warn"
   mode: "cards" | "rows" | "rollup"
   tasks: Subtask[]
+  /** Ticket #187: native subagent cards in this section, in render order after its tasks. */
+  native?: NativeSubagentRun[]
+  /** Ticket #187: the section's tasks and native cards in exact render order. */
+  items?: WorkPaneItem[]
   /** Ticket #184: the rolled-up history header row. */
   rollup?: WorkHistoryRollup
   /** Rows the section consumes, including its label but excluding `gapBefore`. */
@@ -352,6 +467,10 @@ export type WorkPanePage = {
   sections: WorkPaneSection[]
   /** Every task on this page, in reading order. */
   tasks: Subtask[]
+  /** Ticket #187: every native subagent card on this page, in reading order. */
+  native?: NativeSubagentRun[]
+  /** Ticket #187: every card on this page, in reading order. */
+  items?: WorkPaneItem[]
   /** Rows consumed including inter-group gaps. */
   height: number
 }
@@ -367,6 +486,10 @@ export type WorkPaneLayout = {
   pages: WorkPanePage[]
   /** Every task across all pages, in reading order. */
   tasks: Subtask[]
+  /** Ticket #187: every native subagent card across all pages, in reading order. */
+  native: NativeSubagentRun[]
+  /** Ticket #187: every card across all pages, in reading order. */
+  items: WorkPaneItem[]
   limit: number
 }
 
@@ -380,7 +503,7 @@ type SectionAtom = {
   fullLabel: string
   tone: "faint" | "warn"
   mode: "cards" | "rows" | "rollup"
-  tasks: Subtask[]
+  items: WorkPaneItem[]
   rollup?: WorkHistoryRollup
   /** Rows for the card row or compact rows, without a label. */
   bodyHeight: number
@@ -394,8 +517,10 @@ function emptyLayout(): WorkPaneLayout {
     columns: 0,
     cardWidth: 0,
     cardContentWidth: Math.max(12, 0),
-    pages: [{ number: 1, sections: [], tasks: [], height: 0 }],
+    pages: [{ number: 1, sections: [], tasks: [], native: [], items: [], height: 0 }],
     tasks: [],
+    native: [],
+    items: [],
     limit: 0,
   }
 }
@@ -430,7 +555,7 @@ export function paginateWorkGroups(
         fullLabel,
         tone,
         mode: "rollup",
-        tasks: [],
+        items: [],
         bodyHeight: 1,
         gapBefore: index > 0 && cards,
         rollup: {
@@ -446,14 +571,15 @@ export function paginateWorkGroups(
       })
       if (group.collapsed === true) return
     }
+    const items = groupItems(group)
     if (cards) {
-      for (let offset = 0; offset < group.tasks.length; offset += columns) {
+      for (let offset = 0; offset < items.length; offset += columns) {
         atoms.push({
           groupID: group.id,
           fullLabel,
           tone,
           mode: "cards",
-          tasks: group.tasks.slice(offset, offset + columns),
+          items: items.slice(offset, offset + columns),
           bodyHeight: WORK_CARD_ROWS,
           // A history group's focusable header already owns the separation row.
           gapBefore: !group.history && index > 0 && offset === 0,
@@ -461,13 +587,13 @@ export function paginateWorkGroups(
       }
       return
     }
-    for (const task of group.tasks) {
+    for (const item of items) {
       atoms.push({
         groupID: group.id,
         fullLabel,
         tone,
         mode: "rows",
-        tasks: [task],
+        items: [item],
         bodyHeight: 1,
         // Compact rows already have a header line between groups; no blank.
         gapBefore: false,
@@ -479,11 +605,22 @@ export function paginateWorkGroups(
   let sections: WorkPaneSection[] = []
   let pageHeight = 0
   let pageTasks: Subtask[] = []
+  let pageNative: NativeSubagentRun[] = []
+  let pageItems: WorkPaneItem[] = []
   const started = new Set<string>()
   const flush = () => {
-    pages.push({ number: pages.length + 1, sections, tasks: pageTasks, height: pageHeight })
+    pages.push({
+      number: pages.length + 1,
+      sections,
+      tasks: pageTasks,
+      native: pageNative,
+      items: pageItems,
+      height: pageHeight,
+    })
     sections = []
     pageTasks = []
+    pageNative = []
+    pageItems = []
     pageHeight = 0
   }
   for (const atom of atoms) {
@@ -504,19 +641,25 @@ export function paginateWorkGroups(
     }
     // A single whole row can never exceed the body in card mode (gated) or
     // compact mode, so a fresh page always fits it.
+    const tasks = atom.items.flatMap((item) => item.kind === "task" ? [item.task] : [])
+    const native = atom.items.flatMap((item) => item.kind === "native" ? [item.run] : [])
     sections.push({
       groupID: atom.groupID,
       label: header ? (groupStarted ? `${atom.fullLabel} · cont.` : atom.fullLabel) : null,
       tone: atom.tone,
       mode: atom.mode,
-      tasks: atom.tasks,
+      tasks,
+      native,
+      items: atom.items,
       ...(atom.rollup ? { rollup: atom.rollup } : {}),
       height: atom.bodyHeight + (header ? 1 : 0),
       continued: header && groupStarted,
       gapBefore: gap === 1,
     })
     pageHeight += cost
-    pageTasks.push(...atom.tasks)
+    pageTasks.push(...tasks)
+    pageNative.push(...native)
+    pageItems.push(...atom.items)
     if (header || rollup) started.add(atom.groupID)
   }
   flush()
@@ -527,7 +670,9 @@ export function paginateWorkGroups(
     cardContentWidth,
     pages,
     tasks: pages.flatMap((page) => page.tasks),
-    limit: pages.reduce((total, page) => total + page.tasks.length, 0),
+    native: pages.flatMap((page) => page.native ?? []),
+    items: pages.flatMap((page) => page.items ?? []),
+    limit: pages.reduce((total, page) => total + (page.items ?? page.tasks).length, 0),
   }
 }
 

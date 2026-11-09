@@ -1,7 +1,8 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import type { Subtask } from "../types.ts"
+import type { NativeSubagentRun, Subtask } from "../types.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_ROWS } from "./workrows.ts"
+import { nativeSubagentFocusID } from "./nativecards.ts"
 import { emptyHistoryViewState, historyGroupFocusID, historyPaneGroups, paginateWorkGroups, reconcileHistoryView, workPaneBodyHeight, workspacePaneWidths, type WorkPanePage, type WorkPaneSection } from "./workpane.ts"
 import { workViewGroups } from "./workpane.ts"
 import {
@@ -46,6 +47,21 @@ const replied = (patch: Partial<Subtask> = {}): Subtask =>
 
 const record = (...tasks: Subtask[]): Record<string, Subtask> =>
   Object.fromEntries(tasks.map((item) => [item.id, item]))
+
+const nativeRun = (patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
+  childSessionID: "child",
+  parentSessionID: "session",
+  parentTaskID: "t",
+  dispatchGroupID: "dispatch_1",
+  workspaceID: "w",
+  parentAgentID: "kakiko",
+  parentAgent: "Kakiko",
+  instruction: "Watch the CI",
+  state: "working",
+  startedAt: 2,
+  source: "session-created",
+  ...patch,
+})
 
 const rect = (id: string, x: number, y: number, page = 1, width = 10, height = 2): WorkCardRect => ({
   id,
@@ -341,4 +357,28 @@ test("ticket173: focus positions carry the same geometry as the selected rectang
   assert.deepEqual(workFocusPosition(target), { id: "a", page: 3, x: 2, y: 5, width: 10, height: 2 })
   assert.equal(workFocusPosition(undefined), undefined)
   assert.equal(navigateWorkFocus([pageRects(1, [rect("a", 0, 0)])], "missing", "down")?.id, "a", "a missing cursor starts at the first card")
+})
+
+test("ticket187: native subagent cards participate in Work focus geometry", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const child = nativeRun({ childSessionID: "child_live", startedAt: 2 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [child])
+  const layout = paginateWorkGroups(views.active, 59, 40, 5_000)
+  const pages = workLayoutRects(layout)
+  const ids = pages.flatMap((page) => page.rects.map((item) => item.id))
+  assert.deepEqual(ids, ["parent", nativeSubagentFocusID("child_live")], "the child card owns a namespaced focus target")
+  assert.equal(firstWorkFocus(pages)?.id, "parent")
+  assert.equal(navigateWorkFocus(pages, "parent", "right")?.id, nativeSubagentFocusID("child_live"))
+  assert.equal(navigateWorkFocus(pages, nativeSubagentFocusID("child_live"), "left")?.id, "parent")
+})
+
+test("ticket187: a compact native card still owns one focus row at drawer width", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const child = nativeRun({ childSessionID: "child_live", startedAt: 2 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [child])
+  const panes = workspacePaneWidths(80)
+  const layout = paginateWorkGroups(views.active, panes.workContentWidth, workPaneBodyHeight(24), 5_000)
+  assert.equal(layout.mode, "compact")
+  const rects = workLayoutRects(layout).flatMap((page) => page.rects)
+  assert.deepEqual(rects.map((item) => item.id), ["parent", nativeSubagentFocusID("child_live")])
 })

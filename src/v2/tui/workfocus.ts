@@ -1,5 +1,6 @@
 import { WORK_CARD_GAP_COLS, WORK_CARD_ROWS } from "./workrows.ts"
-import { historyGroupFocusID, type WorkPaneLayout, type WorkPanePage } from "./workpane.ts"
+import { historyGroupFocusID, type WorkPaneItem, type WorkPaneLayout, type WorkPanePage } from "./workpane.ts"
+import { nativeSubagentFocusID } from "./nativecards.ts"
 
 /**
  * Ticket #173: spatial Work-card focus.
@@ -64,10 +65,12 @@ export function workPageRects(page: WorkPanePage, layout: WorkPageGeometry): Wor
       continue
     }
     if (section.label !== null) y += 1
+    const items: WorkPaneItem[] = section.items
+      ?? section.tasks.map((task): WorkPaneItem => ({ kind: "task", task }))
     if (section.mode === "cards") {
-      section.tasks.forEach((task, index) => {
+      items.forEach((item, index) => {
         rects.push({
-          id: task.id,
+          id: workItemFocusID(item),
           page: page.number,
           x: index * (layout.cardWidth + WORK_CARD_GAP_COLS),
           y,
@@ -78,9 +81,9 @@ export function workPageRects(page: WorkPanePage, layout: WorkPageGeometry): Wor
       y += WORK_CARD_ROWS
       continue
     }
-    for (const task of section.tasks) {
+    for (const item of items) {
       rects.push({
-        id: task.id,
+        id: workItemFocusID(item),
         page: page.number,
         x: 0,
         y,
@@ -91,6 +94,11 @@ export function workPageRects(page: WorkPanePage, layout: WorkPageGeometry): Wor
     }
   }
   return rects
+}
+
+/** One focus id per renderable Work item; native child sessions stay namespaced. */
+function workItemFocusID(item: WorkPaneItem): string {
+  return item.kind === "task" ? item.task.id : nativeSubagentFocusID(item.run.childSessionID)
 }
 
 /** Every page's rectangles in page order. */

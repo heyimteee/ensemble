@@ -5,7 +5,7 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, NativeSubagentRun, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, WorkHistoryRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
@@ -181,11 +181,13 @@ import {
   createWorkCardCache,
   pruneWorkCardCache,
   workCardForTaskCached,
+  workCardForNativeSubagentCached,
   workCardGlyph,
   workCardStateWord,
   workCardTide,
   workCardTones,
   workCompactRow,
+  workCompactRowForNativeSubagent,
   workRowFrame,
   type ActivityEntry,
   type PendingWorkAction,
@@ -224,7 +226,8 @@ import {
   type WorkFocusPosition,
 } from "./workfocus.ts"
 import { workApprovalLimit, workApprovalSection } from "./workapprovals.ts"
-import { isWorkActionID, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
+import { nativeSubagentFocusChild, nativeSubagentFocusID, nativeSubagentWorkStatus } from "./nativecards.ts"
+import { isWorkActionID, nativeSubagentActions, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
 import {
   accumulateCompletions,
   BUBBLE_CHROME,
@@ -879,6 +882,24 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? Object.values(state()?.subtasks ?? {}).filter((task) => task.workspaceID === workspace.id) : []
   })
+  /**
+   * Ticket #187: durable native child sessions for this workspace. A record
+   * carries its workspace, with the parent task as fallback when the host
+   * event arrived before the parent binding was known.
+   */
+  const nativeSubagentRuns = createMemo(() => {
+    const workspace = activeWorkspace()
+    if (!workspace) return []
+    const subtasks = state()?.subtasks ?? {}
+    return Object.values(state()?.nativeSubagents ?? {}).filter(
+      (run) =>
+        run.workspaceID === workspace.id ||
+        (run.parentTaskID !== undefined && subtasks[run.parentTaskID]?.workspaceID === workspace.id),
+    )
+  })
+  /** The card name is the dispatching agent; the stored name survives roster removal. */
+  const nativeSubagentAgent = (run: NativeSubagentRun) =>
+    run.parentAgent?.trim() || agentName(state(), run.parentAgentID)
   const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
   onMount(() => {
     const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
@@ -1060,7 +1081,7 @@ export function EnsembleV2App() {
       nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
       resolvedAtForTask: approvalResolutionAt(state()?.approvals ?? {}),
       dispatchGroups: state()?.dispatchGroups ?? {},
-    })
+    }, nativeSubagentRuns())
     return { now, active: grouped.active, history: grouped.history }
   })
   const dismissedHistory = createMemo(() => new Set(dismissedHistoryGroups()))
@@ -1120,11 +1141,18 @@ export function EnsembleV2App() {
         agentNameFor: (agentID) => agentName(state(), agentID),
       }).verb,
     }
+    const nativeOptions = {
+      now,
+      width: Math.max(12, data.layout.cardContentWidth),
+      variantFor: (id: string) => tideVariantFor(tideAssignments, id, now),
+    }
     const sections: WorkPaneSection[] = current.sections.map((section) => ({
       ...section,
       cards: section.mode === "cards"
-        ? section.tasks.map((task) =>
-            workCardForTaskCached(workCardCache, task, agentName(state(), task.assigneeID), options),
+        ? (section.items ?? section.tasks.map((task) => ({ kind: "task" as const, task }))).map((item) =>
+            item.kind === "task"
+              ? workCardForTaskCached(workCardCache, item.task, agentName(state(), item.task.assigneeID), options)
+              : workCardForNativeSubagentCached(workCardCache, item.run, nativeSubagentAgent(item.run), nativeOptions),
           )
         : [],
     }))
@@ -1212,10 +1240,19 @@ export function EnsembleV2App() {
     // fall back to the first card in that state.
     return id === undefined ? tasks[0] : tasks.find((task) => task.id === id)
   })
+  /**
+   * Ticket #187: a focused native card is not a task. Its namespaced id
+   * resolves to the durable child record, which owns only `o`/Enter.
+   */
+  const selectedNativeSubagent = createMemo(() => {
+    const childSessionID = nativeSubagentFocusChild(workFocusID())
+    return childSessionID ? nativeSubagentRuns().find((run) => run.childSessionID === childSessionID) : undefined
+  })
   const selectedTaskActions = createMemo(() => {
     // Track the expiry revision so a stalled/retrying card's action set
     // settles without waiting for an unrelated snapshot.
     workRevision()
+    if (selectedNativeSubagent()) return nativeSubagentActions()
     return workTaskActions(selectedTask(), Date.now())
   })
   const selectedActionTask = (action: WorkActionID) => {
@@ -3966,9 +4003,19 @@ export function EnsembleV2App() {
    * Ticket #174: one `o` decision for every surface. A Direct conversation
    * opens its agent; Work focus opens the focused card's assignee; a group
    * chat asks which workspace member. A missing binding is a clear toast, not
-   * a silent dead key.
+   * a silent dead key. Ticket #187: a focused native subagent card opens its
+   * child session directly instead of the parent binding.
    */
+  const navigateToNativeSession = (sessionID: string) => {
+    clearInteractionForLeave()
+    context.ui.router.navigate({ type: "session", sessionID })
+  }
   const openNative = async () => {
+    const native = interaction().focus === "work" ? selectedNativeSubagent() : undefined
+    if (native) {
+      navigateToNativeSession(native.childSessionID)
+      return
+    }
     const workspace = activeWorkspace()
     const current = surface()
     const task = selectedTask()
@@ -3987,8 +4034,7 @@ export function EnsembleV2App() {
       return
     }
     if (route.kind === "navigate") {
-      clearInteractionForLeave()
-      context.ui.router.navigate({ type: "session", sessionID: route.sessionID })
+      navigateToNativeSession(route.sessionID)
       return
     }
     if (!workspace) {
@@ -4003,8 +4049,7 @@ export function EnsembleV2App() {
       showToast({ title: "Ensemble", message: missingNativeSessionMessage(agentName(state(), agentID)), tone: "warning" })
       return
     }
-    clearInteractionForLeave()
-    context.ui.router.navigate({ type: "session", sessionID })
+    navigateToNativeSession(sessionID)
   }
 
   const restoreSettingsFocus = () => {
@@ -4645,6 +4690,11 @@ export function EnsembleV2App() {
     "work.page.up": () => moveWorkPage(-1),
     "work.open": () => {
       if (toggleFocusedHistoryGroup()) return
+      const native = selectedNativeSubagent()
+      if (native) {
+        navigateToNativeSession(native.childSessionID)
+        return
+      }
       return openResult()
     },
     "work.delegate": () => delegateSelected(),
@@ -6650,9 +6700,19 @@ export function EnsembleV2App() {
     // Ticket #173: advertise only the focused card's valid actions, and the
     // approvals keys only while they can do something.
     const workHintFilter = (entry: KeyEntry) => {
-      if (entry.id === "work.cancel") return workView() === "history" || selectedTaskActions().has(entry.id)
+      const nativeFocused = selectedNativeSubagent() !== undefined
+      if (entry.id === "work.cancel") {
+        // Ticket #187: a native subagent card is read-only, so never advertise
+        // cancel even when the history view binds `x` to group dismissal.
+        if (nativeFocused) return false
+        return workView() === "history" || selectedTaskActions().has(entry.id)
+      }
       if (entry.id === "work.history.clear") return workView() === "history" && workViews().history.groups.length > 0
-      if (entry.id === "work.open") return workView() === "history" && historyGroupRowFocus() !== undefined ? true : selectedTaskActions().has(entry.id)
+      if (entry.id === "work.open") {
+        if (nativeFocused) return true
+        return workView() === "history" && historyGroupRowFocus() !== undefined ? true : selectedTaskActions().has(entry.id)
+      }
+      if (entry.id === "work.native") return nativeFocused || selectedTaskActions().has(entry.id)
       if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)
       if (entry.id === "work.approvals") return pendingApprovals().length > 0
       if (entry.id === "work.inbox") return inlineApprovals().overflow > 0
@@ -6967,7 +7027,25 @@ export function EnsembleV2App() {
                       <Show when={section.label}>
                         <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                       </Show>
-                      <For each={section.tasks}>{(task) => {
+                      <For each={section.items ?? section.tasks.map((task) => ({ kind: "task" as const, task }))}>{(item) => {
+                        if (item.kind === "native") {
+                          const run = item.run
+                          const rowStatus = nativeSubagentWorkStatus(run.state)
+                          const terminal = isTerminalWorkStatus(rowStatus)
+                          const glyph = workRowFrame(rowStatus, motionFrame(), process.env)
+                          const focusID = nativeSubagentFocusID(run.childSessionID)
+                          return (
+                            <WorkCompactRowView
+                              colors={colors}
+                              row={workCompactRowForNativeSubagent(run, nativeSubagentAgent(run), glyph, Math.max(1, workContentWidth() - 2))}
+                              tones={workCardTones(rowStatus, false)}
+                              selected={workCardsFocused(paneState()) && workFocusID() === focusID}
+                              terminal={terminal}
+                              onSelect={() => selectWorkCard(focusID)}
+                            />
+                          )
+                        }
+                        const task = item.task
                         // Ticket #142: compact rows are not Work cards, but the
                         // fallback still needs its own reactive view. A local
                         // memo keeps selection and glyph live without
@@ -7042,7 +7120,7 @@ export function EnsembleV2App() {
                                 now: Date.now(),
                               })}
                               width={workPane().layout.cardWidth}
-                              selected={workCardsFocused(paneState()) && selectedTask()?.id === card.id}
+                              selected={workCardsFocused(paneState()) && (workFocusID() === card.id || selectedTask()?.id === card.id)}
                               onSelect={() => selectWorkCard(card.id)}
                             />
                           )}</For>
