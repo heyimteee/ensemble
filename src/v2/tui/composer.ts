@@ -42,6 +42,21 @@ export function paletteRowTitle(label: string, flag: string | undefined): string
   return flag ? chromeJoin([flag, label]) : label
 }
 
+/**
+ * Prefix grammar at a glance (ticket #196). ADR 0001 keeps `$` for agents and
+ * `@` file-only, so the hint names `/` beside `@file` for commands and skills.
+ */
+export const COMPOSER_PLACEHOLDER = "Message…  $agent │ @file │ /command · /skill"
+
+/**
+ * File-palette header. The empty state keeps `@` file-only and points at `/`
+ * for skills; a non-empty palette shows the live query unchanged.
+ */
+export function filePaletteHeader(itemCount: number, query?: string): string {
+  const title = query ? chromeJoin(["@ files", query]) : "@ files"
+  return itemCount === 0 ? chromeJoin([title, "skills use /"]) : title
+}
+
 export type ComposerTrigger = "agent" | "file" | "command"
 
 export function composerTrigger(value: string): ComposerTrigger | undefined {

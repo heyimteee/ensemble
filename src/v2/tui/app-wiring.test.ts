@@ -40,6 +40,11 @@ test("the composer has no legacy slash-command path", () => {
   assert.ok(!has(app(), "slashCommands"))
 })
 
+test("the composer hint and empty file palette share the prefix helpers", () => {
+  assert.ok(has(app(), "placeholder={COMPOSER_PLACEHOLDER}"))
+  assert.ok(has(app(), "filePaletteHeader("))
+})
+
 test("file completion opens and filters through one token scanner", () => {
   assert.ok(has(app(), "fileReferenceTokenAt(value, cursor)"))
 })
