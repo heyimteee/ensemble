@@ -361,6 +361,36 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
       })
     }
   }
+  // Ticket #182: native child lifecycle only. The display instruction is
+  // deliberately never copied into the doctor seam.
+  let nativeSubagents: DoctorSnapshot["nativeSubagents"]
+  if (state.nativeSubagents !== undefined) {
+    if (!state.nativeSubagents || typeof state.nativeSubagents !== "object" || Array.isArray(state.nativeSubagents)) {
+      throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid nativeSubagents map.`)
+    }
+    nativeSubagents = {}
+    for (const [id, raw] of Object.entries<any>(state.nativeSubagents)) {
+      if (
+        !raw ||
+        typeof raw.childSessionID !== "string" ||
+        typeof raw.parentSessionID !== "string" ||
+        (raw.state !== "working" && raw.state !== "replied" && raw.state !== "failed" && raw.state !== "cancelled")
+      ) {
+        throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid native subagent entry: ${id}`)
+      }
+      nativeSubagents[id] = {
+        childSessionID: raw.childSessionID,
+        parentSessionID: raw.parentSessionID,
+        ...(typeof raw.parentTaskID === "string" ? { parentTaskID: raw.parentTaskID } : {}),
+        ...(typeof raw.dispatchGroupID === "string" ? { dispatchGroupID: raw.dispatchGroupID } : {}),
+        ...(typeof raw.workspaceID === "string" ? { workspaceID: raw.workspaceID } : {}),
+        state: raw.state,
+        ...(typeof raw.startedAt === "number" && Number.isFinite(raw.startedAt) ? { startedAt: raw.startedAt } : {}),
+        ...(typeof raw.finishedAt === "number" && Number.isFinite(raw.finishedAt) ? { finishedAt: raw.finishedAt } : {}),
+        ...(raw.source === "session-created" || raw.source === "idle-background" || raw.source === "tool-call" ? { source: raw.source } : {}),
+      }
+    }
+  }
   return {
     agents,
     workspaces,
@@ -368,6 +398,7 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
     ...(dispatchGroups ? { dispatchGroups } : {}),
     ...(subtasks ? { subtasks } : {}),
     ...(recoveries ? { recoveries } : {}),
+    ...(nativeSubagents ? { nativeSubagents } : {}),
   }
 }
 
