@@ -36,6 +36,21 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   a genuine native FAILED card next to a controlled-stop CANCELLED card, and
   doctor plus `logs:summary` artifacts. The long-run lifecycle case lives in
   `test:live:lifecycle`.
+- `npm run test:live:subagent`: ticket #188's real native-subagent probe. The
+  isolated OpenCode 2.2.6 host runs the worktree plugin against the fake
+  provider, then an Ensemble agent's fake turn calls the host's built-in
+  `subagent` tool in `background: true` mode. This creates a genuine child native
+  session while the parent turn has already finished. The probe checks the
+  durable `NativeSubagentRun` (parent task/group/workspace/agent, bounded
+  instruction, `session-created` source), the `Subagents: Watch the…` Work card
+  and parent agent name, the bounded parent barrier (parent stays `working`
+  with a live lease until the child's terminal event), the child
+  working→replied transition, HISTORY, cleanup with no queue row or hop spend,
+  no instruction content in diagnostics/logs, `experimental.idle` background
+  shape, and restart retention. Set `ENSEMBLE_SUBAGENT_EXPECT=early` to run the
+  pre-barrier baseline against an older tree; it records that the parent replies
+  before the child succeeds and stops before the post-barrier assertions. The
+  probe defaults `ENSEMBLE_LOG_LEVEL=debug` for its isolated service logs.
 - `npm run test:live:lifecycle`: a full wall-clock fake run that streams for
   about 5m40s across the old five-minute delivery deadline while the service
   heartbeat renews its 60-second lease. A second delivery sent immediately
@@ -209,7 +224,10 @@ batch with `ensemble_review`. The multi-location harness passes the isolated
 workspace's handoff directory. `fake-lease-hold` streams for about 5m40s for
 the lifecycle check; `fake-motion-static` streams once for the reduced-motion
 Work-card probe; `fake-native-error` returns a non-retried 4xx model error for
-the genuine FAILED card. A one-shot init pre-stream pause keeps the
+the genuine FAILED card. `fake-subagent-parent-fixture` emits one native
+`subagent` tool call in background mode with the child instruction
+`fake-subagent-child-hold-fixture`; the child stream holds long enough to observe
+the parent barrier and Work card. A one-shot init pre-stream pause keeps the
 indeterminate System Agent row observable, and a pre-stream turn pause keeps
 the transient `Asking $Name…` window observable on the narrower chat cell.
 

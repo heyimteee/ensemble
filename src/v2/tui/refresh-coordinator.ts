@@ -96,6 +96,8 @@ function validChange(value: any): value is EntityChange {
   switch (value.entity) {
     case "subtask":
       return upsert ? isRecord(value.task) && validID(value.task.id) : remove && validID(value.id)
+    case "dispatchGroup":
+      return upsert ? isRecord(value.group) && validID(value.group.id) : remove && validID(value.id)
     case "message":
       return upsert
         ? isRecord(value.message) && validID(value.message.id) && validID(value.message.workspaceID)
