@@ -78,6 +78,34 @@ test("a due retry stays retrying until the pump claims it", () => {
   assert.equal(deriveWorkStatus(task, 1000), "retrying")
 })
 
+test("ticket193: a delivery hold reads pending before and after its claim time", () => {
+  const task = base({ state: "pending", deliveryHoldUntil: 2000 })
+  assert.equal(deriveWorkStatus(task, 1000), "pending")
+  assert.equal(deriveWorkStatus(task, 3000), "pending")
+})
+
+test("ticket193: a delivery hold never reads retrying after an earlier claim", () => {
+  const task = base({ state: "pending", attempts: 2, deliveryHoldUntil: 2000 })
+  assert.equal(deriveWorkStatus(task, 1000), "pending")
+  assert.equal(deriveWorkStatus(task, 3000), "pending")
+})
+
+test("ticket193: a legacy zero-attempt row with only retryAfter reads pending", () => {
+  const task = base({ state: "pending", attempts: 0, retryAfter: 2000 })
+  assert.equal(deriveWorkStatus(task, 1000), "pending")
+  assert.equal(deriveWorkStatus(task, 3000), "pending")
+})
+
+test("ticket193: a real retry after an attempt still reads retrying with its ETA", () => {
+  const task = base({ state: "pending", attempts: 2, retryAfter: 2000 })
+  assert.equal(deriveWorkStatus(task, 1000), "retrying")
+})
+
+test("ticket193: a structured retry cause without an attempt still reads retrying", () => {
+  const task = base({ state: "pending", attempts: 0, retryAfter: 2000, failure: { kind: "delivery", reason: "deadline-exceeded" } })
+  assert.equal(deriveWorkStatus(task, 1000), "retrying")
+})
+
 test("a parent awaiting children reads waiting", () => {
   const task = base({ state: "working", attempts: 1, awaitingChildren: true })
   assert.equal(deriveWorkStatus(task, 1000), "waiting")

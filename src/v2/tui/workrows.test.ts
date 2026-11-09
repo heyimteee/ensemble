@@ -676,6 +676,24 @@ test("ticket144: retrying detail counts down, names the attempt, and yields to n
   assert.equal(blocked.detail, "waiting for you…")
 })
 
+test("ticket193: a delivery hold renders QUEUED without a retry countdown", () => {
+  const queued = cardWithMotion(task({ state: "pending", deliveryHoldUntil: 60_000 }), "Nova", { now: 1_000, tick: 0, width: 40 })
+  assert.equal(queued.header.status, "QUEUED")
+  assert.equal(queued.detail, "queued")
+
+  const heldAfterClaim = cardWithMotion(task({ state: "pending", attempts: 2, deliveryHoldUntil: 60_000 }), "Nova", { now: 1_000, tick: 0, width: 40 })
+  assert.equal(heldAfterClaim.header.status, "QUEUED")
+  assert.equal(heldAfterClaim.detail, "queued")
+
+  const legacy = cardWithMotion(task({ state: "pending", attempts: 0, retryAfter: 60_000 }), "Nova", { now: 1_000, tick: 0, width: 40 })
+  assert.equal(legacy.header.status, "QUEUED")
+  assert.equal(legacy.detail, "queued")
+
+  const retrying = cardWithMotion(task({ state: "pending", attempts: 1, retryAfter: 61_000 }), "Nova", { now: 1_000, tick: 0, width: 40 })
+  assert.equal(retrying.header.status, "RETRYING")
+  assert.equal(retrying.detail, "retry 60s · 2/5")
+})
+
 test("ticket115: needs-you cards carry the static marker and waiting detail", () => {
   const card = cardWithMotion(task({ interrupted: true }), "Nova", { now: 1000, tick: 3, width: 40 })
   assert.equal(card.header.glyph, NEEDS_YOU_MARK)

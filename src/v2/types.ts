@@ -334,6 +334,14 @@ export type Subtask = {
   /** Earliest wall-clock time the work may be claimed again after a retry. */
   retryAfter?: number
   /**
+   * Earliest wall-clock time a queued delivery may be claimed (ticket #193).
+   * A delivery hold is not a retry: no attempt failed. Completion quiet
+   * windows, batch consolidation, and native-permission holds park the work
+   * here so it reads QUEUED with no retry action. Distinct from
+   * `retryAfter`, which only a real failed attempt or lost lease sets.
+   */
+  deliveryHoldUntil?: number
+  /**
    * Structured terminal cause. Absent on live/queued rows and on legacy
    * terminal rows that never recorded one; those stay `failed` so a genuine
    * native error is never masked.

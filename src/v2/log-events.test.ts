@@ -60,6 +60,18 @@ test("task observer logs created, transition, completion, and ignores lease hear
   assert.equal(transition.attempts, 0)
 })
 
+test("ticket193: a delivery hold is a logged durable task update", async () => {
+  const { log, store } = setup()
+  await store.saveWorkspace(workspace())
+  await store.saveSubtask(subtask())
+  await store.saveSubtask(subtask({ deliveryHoldUntil: 500 }))
+
+  const transition = log.recent({ event: "task.updated" })[0] as any
+  assert.ok(transition)
+  assert.deepEqual(transition.changed, ["deliveryHoldUntil"])
+  assert.equal(transition.deliveryHoldUntil, 500)
+})
+
 test("task observer keeps failure and cancellation distinct", async () => {
   const { log, store } = setup()
   await store.saveWorkspace(workspace())

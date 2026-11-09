@@ -135,3 +135,21 @@ pending, unclaimed work solely because its queue timestamp had passed.
 | Work fields and recoveries across the diagnostic/CLI boundary | `src/v2/doctor-cli.test.ts` (`ticket170`) |
 | Failure record class, reason, and structured work cause | `src/v2/failure-record.test.ts` (`ticket170`) |
 | Incident replay of deadline, existing reply, late success, and placeholder repair | `src/v2/stream-settlement.test.ts`, `src/v2/service.test.ts` (`ticket169`) |
+
+## Amendment: delivery holds (ticket #193)
+
+A healthy delivery waiting for a quiet window, batch consolidation, or a busy
+native permission block is not a retry. Those paths set the additive
+`deliveryHoldUntil` field and derive `pending`/QUEUED with no retry action.
+`retryAfter` still means a real retry, and a legacy zero-attempt row carrying
+only `retryAfter` also reads queued. The scheduler, Work invalidation clock,
+terminal cleanup, doctor terminal contradiction, and log projection honor both
+timers; real retries keep their countdown and next attempt number.
+
+| Behavior | Test |
+|---|---|
+| Delivery hold vs retry derivation, including legacy zero-attempt rows | `src/v2/queue.test.ts` (`ticket193`) |
+| Queued card/action projection and retry countdown separation | `src/v2/tui/workrows.test.ts`, `src/v2/tui/workactions.test.ts` (`ticket193`) |
+| One-shot invalidation for a delivery hold | `src/v2/tui/workgroups.test.ts` (`ticket193`) |
+| Busy-recipient completion hop, batch hold, terminal cleanup | `src/v2/service.test.ts` (`ticket193`) |
+| Doctor terminal contradiction includes a delivery hold | `src/v2/doctor.test.ts`, `src/v2/doctor-cli.test.ts` (`ticket193`) |

@@ -259,8 +259,9 @@ function collectWorkGroups(
  * Ticket #142: the earliest wall-clock instant at which derived Work data can
  * change without a durable update. The app schedules one timer for it instead
  * of letting the animation clocks rebuild static cards. A task deadline wins
- * at `deadlineAt`; a working lease stops at `leaseUntil`; a complete group
- * closes after its shared hold. Pure.
+ * at `deadlineAt`; a working lease stops at `leaseUntil`; a delivery hold
+ * wakes once at `deliveryHoldUntil`; a complete group closes after its shared
+ * hold. Pure.
  */
 export function nextWorkInvalidation(
   tasks: ReadonlyArray<Subtask>,
@@ -286,6 +287,9 @@ export function nextWorkInvalidation(
         ? (task.retryAfter > now ? Math.min(task.retryAfter, now + 1_000) : now + 1_000)
         : task.retryAfter)
     }
+    // A delivery hold shows no countdown; one wake-up at its claim time is
+    // enough (ticket #193). Never schedule per-card polling for it.
+    if (task.deliveryHoldUntil !== undefined) consider(task.deliveryHoldUntil)
   }
   for (const group of groups) {
     if (!group.complete || group.latestTerminalAt === undefined) continue
