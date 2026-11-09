@@ -7435,6 +7435,8 @@ test("ticket182: instructions stay out of logs and diagnostics but remain in the
     const diagnostic = await (handlers as any).diagnostic({ directory })
     assert.ok(!JSON.stringify(diagnostic).includes(secret), "diagnostics never carry the instruction")
     assert.ok(!JSON.stringify(diagnostic).includes("CI watcher"), "diagnostics never carry the fallback instruction")
+    assert.equal(diagnostic.state.nativeSubagents.child_private.state, "working", "diagnostics still carry the structured lifecycle record")
+    assert.equal(diagnostic.state.nativeSubagents.child_private.instruction, "", "the diagnostic projection blanks the display instruction")
 
     for (const event of ["native.subagent.created", "native.subagent.updated", "native.subagent.finished"]) {
       const logs = await (handlers as any)["logs.recent"]({ directory, event, limit: 50 })
