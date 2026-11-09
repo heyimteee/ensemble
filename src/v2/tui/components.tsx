@@ -286,7 +286,8 @@ export function Rail(props: {
   /** Ticket #171: pure sections; the app owns grouping, counts, and collapse state. */
   sections: readonly RailSection[]
   cursor: number
-  focus: boolean
+  /** Ticket #180: only the focused Agents/Workspaces sub-pane is white. */
+  focusedSection: "agents" | "workspaces" | null
   cursorVisible: boolean
   pendingApprovals: number
   width: number
@@ -309,7 +310,8 @@ export function Rail(props: {
     }
     return parts
   }
-  const sectionBorder = () => props.focus ? props.colors.focus : props.colors.border
+  const sectionFocused = (section: "agents" | "workspaces") => props.focusedSection === section
+  const sectionBorder = (section: "agents" | "workspaces") => sectionFocused(section) ? props.colors.focus : props.colors.border
   const sectionOffset = (sectionIndex: number) =>
     props.sections.slice(0, sectionIndex).reduce((total, section) => total + section.rows.length, 0)
   return (
@@ -318,13 +320,13 @@ export function Rail(props: {
         <text fg={props.colors.warn} bg={props.colors.bg} width="100%" truncate>filter: {props.filter}</text>
       </Show>
       <For each={props.sections}>{(section, sectionIndex) => (
-        <box width="100%" flexGrow={section.id === "agents" ? 2 : 1} minHeight={0} border borderStyle="single" borderColor={sectionBorder()} backgroundColor={props.colors.bg} flexDirection="column" paddingLeft={1} paddingRight={1} overflow="hidden">
-          <text fg={props.colors.faint} bg={props.colors.bg} width="100%" truncate>{section.heading}</text>
+        <box width="100%" flexGrow={section.id === "agents" ? 2 : 1} minHeight={0} border borderStyle="single" borderColor={sectionBorder(section.id)} backgroundColor={props.colors.bg} flexDirection="column" paddingLeft={1} paddingRight={1} overflow="hidden">
+          <text fg={sectionFocused(section.id) ? props.colors.focus : props.colors.faint} bg={props.colors.bg} width="100%" truncate>{section.heading}</text>
           <For each={section.rows}>{(row, rowIndex) => {
             // Read the cursor inside the rendered expression: a plain const
             // here captures the value once per row and feels a tick late.
             const index = () => sectionOffset(sectionIndex()) + rowIndex()
-            const selected = () => props.cursor === index()
+            const selected = () => props.cursorVisible && sectionFocused(section.id) && props.cursor === index()
             if (row.kind === "group") {
               return (
                 <box flexDirection="row" width="100%" onMouseDown={(event: any) => {
@@ -335,7 +337,7 @@ export function Rail(props: {
                   props.onToggleGroup(row.id)
                 }}>
                   <text fg={selected() ? props.colors.good : props.colors.muted} bg={props.colors.bg} width="100%" wrapMode="none" truncate>
-                    {settingsCursorMark(selected() && props.cursorVisible)}{railGroupHeading(row)}
+                    {settingsCursorMark(selected())}{railGroupHeading(row)}
                   </text>
                 </box>
               )
@@ -348,7 +350,7 @@ export function Rail(props: {
                 <box flexDirection="column">
                   <box flexDirection="row" width="100%">
                     <text fg={rowTone()} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
-                      {"  "}{settingsCursorMark(selected() && props.cursorVisible)}{row.title}
+                      {"  "}{settingsCursorMark(selected())}{row.title}
                     </text>
                     <Show when={row.leader}>
                       <text fg={props.colors.faint} bg={props.colors.bg} flexShrink={0}> {chromeSeparator()} </text>
@@ -375,7 +377,7 @@ export function Rail(props: {
               <box flexDirection="column">
                 <box flexDirection="row" width="100%">
                   <text fg={rowTone()} bg={props.colors.bg} flexShrink={1} wrapMode="none" truncate>
-                    {"  "}{settingsCursorMark(selected() && props.cursorVisible)}#{row.title}
+                    {"  "}{settingsCursorMark(selected())}#{row.title}
                   </text>
                   <Show when={row.paused}><text fg={props.colors.warn} bg={props.colors.bg} flexShrink={0}> ⏸</text></Show>
                   <Show when={row.busy > 0}><text fg={props.colors.muted} bg={props.colors.bg} flexShrink={0}> {railBusyMark(row.busy, props.motionTick ?? 0, process.env)}</text></Show>
@@ -528,7 +530,10 @@ export function WorkCompactRowView(props: {
 export function WorkApprovalsView(props: {
   colors: Palette
   section: WorkApprovalSection
+  /** White border and heading whenever the Approvals pane is selected. */
   focused: boolean
+  /** Row cursor only while Approvals interaction is entered. */
+  interacting: boolean
   resolvingID: string | null
   motionTick?: number
   emphasized: ReadonlySet<string>
@@ -560,7 +565,7 @@ export function WorkApprovalsView(props: {
         />
       </box>
       <For each={props.section.rows}>{(row) => {
-        const selected = () => props.focused && props.section.cursor === row.index
+        const selected = () => props.interacting && props.section.cursor === row.index
         const emphasized = () => props.emphasized.has(row.approval.id)
         return (
           <box

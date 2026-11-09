@@ -16,6 +16,7 @@ import { MOUSE_GESTURES, type MouseGestureSpec } from "./mouse.ts"
 export type HelpSectionID =
   | "modes"
   | "global"
+  | "panes"
   | "roster"
   | "conversation"
   | "work"
@@ -36,6 +37,7 @@ export type HelpSectionSpec = { id: HelpSectionID; title: string }
 export const HELP_SECTION_ORDER: readonly HelpSectionSpec[] = [
   { id: "modes", title: "Modes and Esc ladder" },
   { id: "global", title: "Global keys" },
+  { id: "panes", title: "Panes and focus" },
   { id: "roster", title: "Roster" },
   { id: "conversation", title: "Group chat and Direct conversation" },
   { id: "work", title: "Work list" },
@@ -83,6 +85,7 @@ export type HelpCatalogInput = {
 
 const CONTEXT_SECTIONS: Record<KeyContext, HelpSectionID> = {
   global: "global",
+  pane: "panes",
   roster: "roster",
   chat: "conversation",
   work: "work",
@@ -132,21 +135,30 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
     info("mode.caret", "caret", "Every text editor shows a block caret in Normal and a line caret in Insert, Visual, and Command; an unfocused editor shows none."),
     info("escape.insert", "Esc", "Insert → Normal (composer or text field)."),
     info("escape.visual", "Esc", "Visual → Normal."),
-    info("escape.composer", "Esc", "Composer Normal → chat Normal."),
+    info("escape.composer", "Esc", "Composer Normal → chat interaction → pane selection."),
     info("escape.settings.field", "Esc", "Settings text field Normal → settings Normal."),
     info("escape.settings", "Esc", "Settings Normal → close settings."),
     info("escape.wizard.field", "Esc", "Wizard text field Insert → field Normal; field Normal → cancel the wizard (a dirty draft asks first)."),
     info("escape.wizard", "Esc", "Wizard step Normal → cancel the wizard. n next and N previous move between steps; Enter advances."),
     info("escape.dialog", "Esc", "Cancel the dialog, picker, confirm, result, or approval inbox."),
     info("escape.command", "Esc", "Command → Normal, restoring the previous filter."),
-    info("escape.chat", "Esc", "Clear a filter or committed search; otherwise a no-op."),
+    info("escape.chat", "Esc", "Chat interaction → pane selection; a select-mode Esc clears a filter or committed search first, otherwise it is a no-op."),
     info("escape.never", "Esc", "Esc never leaves Ensemble. Quit deliberately with :q or Space q."),
     info("escape.ctrl-g", "Ctrl+G", "Leave the focused composer, settings, wizard, or prompt text field immediately when the host consumes Esc."),
   ],
   global: [
-    info("focus.zones", "Tab / Shift+Tab", "Move focus zones between the roster, transcript, and work list. Enter the composer with i or Enter, not Tab."),
+    info("focus.panes", "Tab / Shift+Tab", "Cycle the visible panes; the cycle always lands in select mode."),
     info("esc", "Esc", "Go up one level. The full ladder is in Modes and Esc ladder."),
     info("quit", ":q / Space q", "Leave Ensemble deliberately; no other key quits."),
+  ],
+  panes: [
+    info("select", "h/l", "Select the column to the left or right; from chat, h selects Agents first and l selects Work."),
+    info("stack", "j/k", "Select the stacked pane below or above: Agents/Workspaces on the left, Work/Approvals on the right."),
+    info("enter", "Enter", "Enter the selected pane. Selecting a pane never starts content navigation or focuses the composer."),
+    info("escape", "Esc", "Leave interaction and return to pane selection."),
+    info("chat.enter", "Enter", "Chat Enter enters transcript navigation; it never focuses the composer."),
+    info("chat.compose", "i", "Focus the composer from chat. Esc then returns to chat interaction, and another Esc returns to selection."),
+    info("white", "white / grey", "The selected or interacting pane has a white border and heading. AGENTS/WORKSPACES headings follow their own sub-pane, and Work cards are white only in Work interaction."),
   ],
   roster: [
     info("destructive", "x / X", "x archives; X deletes and asks for confirmation."),
@@ -157,9 +169,9 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   work: [
     info("context", "d", "Delegates in the work list; inside a text buffer d is the delete operator."),
     info("spatial", "h/j/k/l", "Focus moves to the nearest card in that direction; h/l stay in the row, j/k page at an edge, gg/G jump first/last, and Ctrl+d/u step a half page."),
-    info("focus.border", "white / grey", "The focused card has a white border; unfocused cards keep the grey border. The pane border separately shows whether Work owns the keyboard."),
+    info("focus.border", "white / grey", "The selected Work pane has a white border; cards are white only after Enter enters Work interaction. The pane border and card focus stay separate."),
     info("actions", "d/t/r/R/x/o", "Only actions valid for the focused card are advertised: active cards delegate, reassign, restart, and cancel; stalled or retrying cards also retry; failed or cancelled history cards retry or restart; replied cards stay read-only. Enter opens the durable result when the card has one."),
-    info("approvals", "v / V", "Approvals are sticky at the bottom of the Work pane: v focuses them, j/k choose, Enter resolves, and Esc returns to the cards. V opens the full inbox only when the inline list overflows."),
+    info("approvals", "v / V", "Approvals are sticky at the bottom of the Work pane: v selects them, Enter enters their rows, j/k choose, Enter resolves, and Esc returns to pane selection. V opens the full inbox only when the inline list overflows."),
   ],
   "composer-insert": [
     info("typing", "text", "Type at the cursor. Enter sends and keeps Insert focus; Shift+Enter adds a line."),
@@ -203,7 +215,7 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   ],
   statusline: [
     info("mode", "mode", "Chip: NORMAL, INSERT, VISUAL, V-LINE, or COMMAND."),
-    info("context", "context", "Roster, Group chat, Direct conversation, Work list, Settings, Wizard, Dialog, Approvals, or Help."),
+    info("context", "context", "Agents, Workspaces, Group chat, Direct conversation, Work list, Settings, Wizard, Dialog, Approvals, or Help."),
     info("git", "git:(branch*)", "Branch, dirty mark, ahead ↑, and behind ↓ counts."),
     info("position", "position", "line:col in a text buffer, row/total in a list, or percent in the transcript."),
     info("chord", "chord", "Pending multi-key prefix, e.g. g."),

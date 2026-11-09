@@ -14,6 +14,7 @@
 import { chromeJoin } from "./separators.ts"
 
 export type KeyContext =
+  | "pane"
   | "roster"
   | "chat"
   | "work"
@@ -112,23 +113,41 @@ const LEADER: readonly KeyEntry[] = [
 ]
 
 /**
- * Roster and both conversation surfaces share the same j/k, gg/G, h/l,
- * Enter, Tab, /, and Space grammar. Chat/roster-specific entries are kept
- * separate so a later ticket can replace one surface without rewriting the
- * catalog.
+ * Ticket #180: select mode is a shell layer, not a pane's content grammar.
+ * h/l choose columns, j/k choose stacked panes, Enter enters the selected
+ * pane, and i is the one deliberate path into the chat composer.
+ */
+const PANE: readonly KeyEntry[] = [
+  { id: "pane.left", scope: "normal", contexts: ["pane"], keys: ["h"], title: "Select the pane to the left", group: "Focus", hint: "h/l column" },
+  { id: "pane.right", scope: "normal", contexts: ["pane"], keys: ["l"], title: "Select the pane to the right", group: "Focus" },
+  { id: "pane.down", scope: "normal", contexts: ["pane"], keys: ["j"], title: "Select the stacked pane below", group: "Focus", hint: "j/k pane" },
+  { id: "pane.up", scope: "normal", contexts: ["pane"], keys: ["k"], title: "Select the stacked pane above", group: "Focus" },
+  { id: "pane.enter", scope: "normal", contexts: ["pane"], keys: ["enter"], title: "Enter the selected pane", group: "Focus", hint: "enter enter" },
+  { id: "pane.escape", scope: "normal", contexts: ["pane"], keys: ["escape"], title: "Stay in pane selection", group: "Focus", listed: false },
+  { id: "pane.compose", scope: "normal", contexts: ["pane"], keys: ["i"], title: "Focus the composer from chat", group: "Focus", hint: "i compose" },
+  { id: "pane.approvals", scope: "normal", contexts: ["pane"], keys: ["v"], title: "Approvals", group: "Navigate" },
+  { id: "focus.tab", scope: "normal", contexts: ["pane"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["pane"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
+  { id: "leader", scope: "normal", contexts: ["pane"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
+]
+
+/**
+ * Roster and both conversation surfaces share the same j/k, gg/G, Enter, Tab,
+ * /, and Space grammar. Pane movement lives in the select layer, so an
+ * interact context never doubles as a column switch. Chat/roster-specific
+ * entries stay separate so a later ticket can replace one surface without
+ * rewriting the catalog.
  */
 const NORMAL: readonly KeyEntry[] = [
-  // Roster -----------------------------------------------------------------
+  // Roster interact (Agents or Workspaces selected + Entered) --------------
   { id: "nav.down", scope: "normal", contexts: ["roster"], keys: ["j"], title: "Move down", group: "Navigation", hint: "j/k move" },
   { id: "nav.up", scope: "normal", contexts: ["roster"], keys: ["k"], title: "Move up", group: "Navigation" },
   { id: "nav.top", scope: "normal", contexts: ["roster"], keys: ["g", "g"], title: "First item", group: "Navigation", listed: false },
   { id: "nav.bottom", scope: "normal", contexts: ["roster"], keys: ["shift+g"], title: "Last item", group: "Navigation", listed: false },
   { id: "nav.half.down", scope: "normal", contexts: ["roster"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
   { id: "nav.half.up", scope: "normal", contexts: ["roster"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
-  { id: "nav.left", scope: "normal", contexts: ["roster"], keys: ["h"], title: "Rail column", group: "Focus", hint: "h/l column" },
-  { id: "nav.right", scope: "normal", contexts: ["roster"], keys: ["l"], title: "Chat column", group: "Focus" },
-  { id: "focus.tab", scope: "normal", contexts: ["roster"], keys: ["tab"], title: "Chat column", group: "Focus", hint: "tab chat" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["roster"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
+  { id: "focus.tab", scope: "normal", contexts: ["roster"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["roster"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
   { id: "open", scope: "normal", contexts: ["roster"], keys: ["enter"], title: "Open the selected target", group: "Open", hint: "enter open" },
   { id: "new.agent", scope: "normal", contexts: ["roster"], keys: ["a"], title: "New agent", group: "Create" },
   { id: "new.workspace", scope: "normal", contexts: ["roster"], keys: ["n"], title: "New workspace", group: "Create" },
@@ -142,21 +161,19 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "filter", scope: "normal", contexts: ["roster"], keys: ["/"], title: "Filter roster", group: "Search", hint: "/ filter" },
   { id: "rail.collapse", scope: "normal", contexts: ["roster"], keys: ["z"], title: "Collapse or expand the workspace group", group: "Navigation" },
   { id: "leader", scope: "normal", contexts: ["roster"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
-  { id: "escape", scope: "normal", contexts: ["roster"], keys: ["escape"], title: "Clear filter", group: "Navigation", listed: false },
+  { id: "escape", scope: "normal", contexts: ["roster"], keys: ["escape"], title: "Return to pane selection", group: "Navigation", listed: false },
 
   // Group chat and Direct conversation -------------------------------------
   { id: "chat.scroll.down", scope: "normal", contexts: ["chat"], keys: ["j"], title: "Scroll transcript down", group: "Scroll", hint: "j/k scroll" },
   { id: "chat.scroll.up", scope: "normal", contexts: ["chat"], keys: ["k"], title: "Scroll transcript up", group: "Scroll" },
+  { id: "chat.enter", scope: "normal", contexts: ["chat"], keys: ["enter"], title: "Keep transcript navigation", group: "Navigation", listed: false },
   { id: "chat.top", scope: "normal", contexts: ["chat"], keys: ["g", "g"], title: "First message", group: "Scroll", listed: false },
   { id: "chat.bottom", scope: "normal", contexts: ["chat"], keys: ["shift+g"], title: "Last message", group: "Scroll", listed: false },
   { id: "chat.half.down", scope: "normal", contexts: ["chat"], keys: ["ctrl+d"], title: "Half page down", group: "Scroll", hint: "ctrl+d/u page" },
   { id: "chat.half.up", scope: "normal", contexts: ["chat"], keys: ["ctrl+u"], title: "Half page up", group: "Scroll" },
-  { id: "chat.nav.left", scope: "normal", contexts: ["chat"], keys: ["h"], title: "Rail column", group: "Focus", hint: "h/l column" },
-  { id: "chat.nav.right", scope: "normal", contexts: ["chat"], keys: ["l"], title: "Chat column", group: "Focus" },
-  { id: "focus.tab", scope: "normal", contexts: ["chat"], keys: ["tab"], title: "Work list", group: "Focus", hint: "tab work", emptyHint: "tab rail", requires: "work" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["chat"], keys: ["shift+tab"], title: "Roster", group: "Focus" },
-  { id: "compose", scope: "normal", contexts: ["chat"], keys: ["enter"], title: "Focus the composer", group: "Open", hint: "enter focus" },
-  { id: "compose.alt", scope: "normal", contexts: ["chat"], keys: ["i"], title: "Compose in Insert", group: "Open", hint: "i compose" },
+  { id: "focus.tab", scope: "normal", contexts: ["chat"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["chat"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
+  { id: "compose.alt", scope: "normal", contexts: ["chat"], keys: ["i"], title: "Focus the composer", group: "Open", hint: "i compose" },
   { id: "chat.new.agent", scope: "normal", contexts: ["chat"], keys: ["a"], title: "New agent", group: "Create" },
   { id: "chat.new.workspace", scope: "normal", contexts: ["chat"], keys: ["n"], title: "New workspace", group: "Create", availability: "no-transcript-search" },
   { id: "chat.settings", scope: "normal", contexts: ["chat"], keys: ["s"], title: "Agent settings", group: "Edit" },
@@ -201,18 +218,18 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.filter", scope: "normal", contexts: ["work"], keys: ["f"], title: "Toggle active and history", group: "View", hint: "f history" },
   { id: "work.page.up", scope: "normal", contexts: ["work"], keys: ["pageup"], title: "Previous Work page", group: "Navigation", listed: false },
   { id: "work.page.down", scope: "normal", contexts: ["work"], keys: ["pagedown"], title: "Next Work page", group: "Navigation", listed: false },
-  { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Next focus zone", group: "Focus", hint: "tab next" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
+  { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
   { id: "leader", scope: "normal", contexts: ["work"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
-  { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Back to transcript", group: "Navigation", listed: false },
+  { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Return to pane selection", group: "Navigation", listed: false },
 
   // Inline approvals zone (ticket #173) ------------------------------------
   { id: "workApprovals.down", scope: "normal", contexts: ["workApprovals"], keys: ["j"], title: "Next approval", group: "Navigation", hint: "j/k approvals" },
   { id: "workApprovals.up", scope: "normal", contexts: ["workApprovals"], keys: ["k"], title: "Previous approval", group: "Navigation" },
   { id: "workApprovals.resolve", scope: "normal", contexts: ["workApprovals"], keys: ["enter"], title: "Resolve the focused approval", group: "Approvals", hint: "enter resolve" },
-  { id: "focus.tab", scope: "normal", contexts: ["workApprovals"], keys: ["tab"], title: "Next focus zone", group: "Focus", hint: "tab next" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["workApprovals"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
-  { id: "workApprovals.back", scope: "normal", contexts: ["workApprovals"], keys: ["escape"], title: "Back to work cards", group: "Navigation", hint: "esc work" },
+  { id: "focus.tab", scope: "normal", contexts: ["workApprovals"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["workApprovals"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
+  { id: "workApprovals.back", scope: "normal", contexts: ["workApprovals"], keys: ["escape"], title: "Leave approvals interaction", group: "Navigation", hint: "esc select" },
 
   // Settings ---------------------------------------------------------------
   { id: "settings.tab.prev", scope: "normal", contexts: ["settings"], keys: ["h"], title: "Previous tab", group: "Tabs", hint: "h/l tabs" },
@@ -638,6 +655,7 @@ const COMPLETION_KEYS: readonly KeyEntry[] = [
 ]
 
 export const KEYMAP_CATALOG: readonly KeyEntry[] = [
+  ...PANE,
   ...NORMAL,
   ...LEADER,
   ...WIZARD,

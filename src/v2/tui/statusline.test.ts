@@ -37,7 +37,8 @@ test("each mode gets its own theme chip role, with a leader override", () => {
 })
 
 test("context names the active surface and overlay precedence", () => {
-  assert.equal(contextLabel({ focus: "rail", overlay: "none", surface: "none" }), "Roster")
+  assert.equal(contextLabel({ focus: "agents", overlay: "none", surface: "none" }), "Agents")
+  assert.equal(contextLabel({ focus: "workspaces", overlay: "none", surface: "none" }), "Workspaces")
   assert.equal(contextLabel({ focus: "chat", overlay: "none", surface: "workspace" }), "Group chat")
   assert.equal(contextLabel({ focus: "work", overlay: "none", surface: "workspace" }), "Work list")
   assert.equal(contextLabel({ focus: "approvals", overlay: "none", surface: "workspace" }), "Work approvals", "inline approvals are their own Work zone")

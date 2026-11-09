@@ -42,6 +42,8 @@ const OVERLAY_LABELS: Record<Exclude<InteractionOverlay, "none">, string> = {
 }
 
 const FOCUS_LABELS: Partial<Record<InteractionFocus, string>> = {
+  agents: "Agents",
+  workspaces: "Workspaces",
   settings: "Settings",
   wizard: "Wizard",
   dialog: "Dialog",
@@ -64,7 +66,6 @@ export function contextLabel(input: {
     if (input.surface === "workspace") return chromeJoin(["COMPOSER", "Group chat"])
     return "COMPOSER"
   }
-  if (input.focus === "rail") return "Roster"
   if (input.surface === "agent") return "Direct conversation"
   if (input.surface === "workspace") return "Group chat"
   return "Roster"

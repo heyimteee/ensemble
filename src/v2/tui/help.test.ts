@@ -19,6 +19,7 @@ test("help opens as the spec's sections in the documented order", () => {
     [
       "Modes and Esc ladder",
       "Global keys",
+      "Panes and focus",
       "Roster",
       "Group chat and Direct conversation",
       "Work list",
@@ -84,6 +85,7 @@ test("the completeness checker catches omissions, duplicates, and invented entri
 test("catalog contexts land in the correct help section", () => {
   const expected: Record<string, string> = {
     global: "global",
+    pane: "panes",
     roster: "roster",
     chat: "conversation",
     work: "work",
@@ -150,7 +152,7 @@ test("ticket173: Work help states spatial focus, the white card border, actions,
   assert.ok(/nearest card/i.test(text), "help names spatial focus")
   assert.ok(/white border/i.test(text), "help names the focused card border")
   assert.ok(/V opens the full inbox only when/i.test(text), "help scopes V to overflow")
-  assert.ok(/v focuses them/i.test(text), "help teaches inline approvals focus")
+  assert.ok(/v selects them/i.test(text), "help teaches inline approvals selection")
   const keys = work!.entries.map((entry) => entry.keys)
   assert.ok(keys.includes("v") && keys.includes("V"), "both approval keys are documented")
   assert.ok(keys.includes("h/j/k/l"), "spatial keys are documented")
