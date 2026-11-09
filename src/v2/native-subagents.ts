@@ -14,6 +14,21 @@ export const NATIVE_SUBAGENT_PENDING_LIMIT = 8
  * horizon and is far longer than a normal child turn.
  */
 export const NATIVE_SUBAGENT_BARRIER_MS = 5 * 60_000
+/**
+ * Ticket #197: the bounded wait for the host's post-child wake-up turn. The
+ * child barrier above holds until the child is terminal; this separate grace
+ * bounds how long the parent may then wait for its next idle before reading the
+ * post-child answer. It is deliberately shorter than the child barrier: a
+ * missing wake-up must not extend the parent's claim by another five minutes.
+ */
+export const NATIVE_SUBAGENT_WAKEUP_GRACE_MS = 60_000
+/**
+ * Ticket #197: a parent `task`/`subagent` tool call can be observed before the
+ * host creates the child session. Bound that discovery window so an
+ * event-delayed `session.created` cannot escape the barrier, without holding
+ * unrelated work when no subagent was dispatched.
+ */
+export const NATIVE_SUBAGENT_DISCOVERY_GRACE_MS = 2_000
 
 const SUBAGENT_TOOL_NAMES = new Set(["task", "subagent"])
 const INSTRUCTION_FIELDS = ["description", "instruction", "prompt", "message", "title", "command", "text"] as const

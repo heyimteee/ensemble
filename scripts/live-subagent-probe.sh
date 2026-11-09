@@ -4,14 +4,15 @@ if [[ "${ENSEMBLE_LIVE_TRACE_ERR:-0}" == "1" ]]; then
   trap 'printf "live: command failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 fi
 
-# Ticket #188: native subagent live probe.
+# Ticket #188/#197: native subagent live probe.
 #
 # This starts an isolated real OpenCode 2.2.6 host on the current worktree and
 # uses the deterministic fake provider so no real model or user credentials are
 # touched. The fake parent turn calls the host's built-in `subagent` tool with
 # `background: true`; OpenCode creates a genuine child session, and the child
 # streams a bounded hold. The probe then checks the durable NativeSubagentRun,
-# the Work card, the group mapping, lifecycle timing, cleanup, privacy, and
+# the Work card, the group mapping, lifecycle timing, the post-child wake-up
+# answer in the task result and completion handoff, cleanup, privacy, and
 # restart retention.
 #
 #   npm run test:live:subagent
@@ -44,9 +45,14 @@ ENSEMBLE_LIVE_TUI_WIDTH="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
 ENSEMBLE_LIVE_TUI_HEIGHT="${ENSEMBLE_LIVE_TUI_HEIGHT:-60}"
 
 PARENT_AGENT="Kakiko"
+LEADER_AGENT="Lead"
 WORKSPACE_NAME="SubagentProbe"
 PARENT_TEXT="fake-subagent-parent-fixture"
 CHILD_INSTRUCTION="Watch the CI pipeline"
+# Ticket #197: the pre-child and post-child answers carry distinct markers. The
+# final task result and completion hop must carry only the wake-up marker.
+PRE_CHILD_MARKER="fake-subagent-pre-child-marker"
+WAKEUP_MARKER="fake-subagent-wakeup-marker"
 # The card title is bounded and truncated to the actual card width, so the probe
 # asserts the stable prefix rather than the full instruction.
 CHILD_TITLE_PREFIX="Subagents: Watch the"
@@ -97,13 +103,39 @@ parent_replied_after_child() {
   native_probe_value 'run && task && run.state === "replied" && task.state === "replied" && task.outcome === "succeeded" && typeof task.finishedAt === "number"'
 }
 
+# Ticket #197: the parent is not the leader, so the normal completion handoff
+# creates one hop carrying the post-child answer. No second task, group, or hop.
+parent_result_text() {
+  live_snapshot_value "(() => { const task = output.state.subtasks[\"$TASK_ID\"]; const message = task && (output.state.messages[task.workspaceID] || []).find(function (item) { return item.id === task.resultMessageID }); return message ? message.text : \"\" })()" | tr -d '"'
+}
+
+completion_hop_count() {
+  live_snapshot_value "Object.values(output.state.subtasks).filter(function (task) { return task.workspaceID === \"$WS_ID\" && task.parentID === \"$TASK_ID\" && task.handoff && task.handoff.completion === true }).length" | tr -d '"'
+}
+
+completion_hop_count_is_one() {
+  [[ "$(completion_hop_count)" == "1" ]]
+}
+
+completion_hop_instruction() {
+  live_snapshot_value "(() => { const hop = Object.values(output.state.subtasks).find(function (task) { return task.workspaceID === \"$WS_ID\" && task.parentID === \"$TASK_ID\" && task.handoff && task.handoff.completion === true }); return hop ? hop.instruction : \"\" })()" | tr -d '"'
+}
+
+parent_result_has_wakeup_marker() {
+  grep -qF "$WAKEUP_MARKER" <<<"$(parent_result_text)"
+}
+
+completion_hop_has_wakeup_marker() {
+  grep -qF "$WAKEUP_MARKER" <<<"$(completion_hop_instruction)"
+}
+
 parent_group_unchanged() {
   native_probe_value 'run && task && run.dispatchGroupID === task.dispatchGroupID && run.workspaceID === task.workspaceID && run.parentAgent === "Kakiko" && run.instruction === "Watch the CI pipeline" && run.source === "session-created"'
 }
 
 one_task_only() {
   local tasks
-  tasks=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (task) { return task.workspaceID === \"$WS_ID\" }).length" | tr -d '"')
+  tasks=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (task) { return task.workspaceID === \"$WS_ID\" && task.assigneeID === \"$AGENT_ID\" }).length" | tr -d '"')
   [[ "$tasks" == "1" ]]
 }
 
@@ -243,7 +275,13 @@ live_invoke agent.create "{\"name\":\"$PARENT_AGENT\",\"title\":\"Subagent probe
 live_wait_for "$LIVE_STEP_TIMEOUT" "$PARENT_AGENT in the snapshot" live_snapshot_has_agent_named "$PARENT_AGENT" \
   || live_fail "subagent probe agent was not created"
 AGENT_ID=$(live_snapshot_value "Object.values(output.state.agents).find(function (agent) { return agent.name === \"$PARENT_AGENT\" }).id" | tr -d '"')
-live_invoke workspace.create "{\"name\":\"$WORKSPACE_NAME\",\"memberIDs\":[\"$AGENT_ID\"],\"leaderID\":\"$AGENT_ID\"}" >/dev/null
+# Ticket #197: a non-leader parent makes the normal completion handoff visible,
+# so the probe can assert the wake-up answer is the handoff content.
+live_invoke agent.create "{\"name\":\"$LEADER_AGENT\",\"title\":\"Subagent probe leader\",\"role\":\"Completion handoff owner.\",\"mainModel\":{\"providerID\":\"ensemble-fake\",\"modelID\":\"ensemble-fake-model\"}}" >/dev/null
+live_wait_for "$LIVE_STEP_TIMEOUT" "$LEADER_AGENT in the snapshot" live_snapshot_has_agent_named "$LEADER_AGENT" \
+  || live_fail "subagent probe leader was not created"
+LEADER_ID=$(live_snapshot_value "Object.values(output.state.agents).find(function (agent) { return agent.name === \"$LEADER_AGENT\" }).id" | tr -d '"')
+live_invoke workspace.create "{\"name\":\"$WORKSPACE_NAME\",\"memberIDs\":[\"$AGENT_ID\",\"$LEADER_ID\"],\"leaderID\":\"$LEADER_ID\"}" >/dev/null
 live_wait_for "$LIVE_STEP_TIMEOUT" "$WORKSPACE_NAME in the snapshot" live_snapshot_has_workspace_named "$WORKSPACE_NAME" \
   || live_fail "subagent probe workspace was not created"
 WS_ID=$(live_snapshot_value "Object.values(output.state.workspaces).find(function (workspace) { return workspace.name === \"$WORKSPACE_NAME\" }).id" | tr -d '"')
@@ -294,6 +332,20 @@ live_wait_for 20 "parent terminal after child" parent_replied_after_child \
 [[ -n "$(native_field finishedAt)" && "$(native_field finishedAt)" != "null" ]] || live_fail "child has no finishedAt"
 one_task_only || live_fail "the subagent created a queue row"
 hop_count_unchanged || live_fail "the subagent consumed a dispatch hop"
+# Ticket #197: the post-child answer is the task result and the completion
+# handoff content; the pre-child answer was replaced, not appended.
+live_wait_for 10 "one completion handoff for the finished parent" completion_hop_count_is_one \
+  || live_fail "the parent completion hop was not created exactly once"
+live_wait_for 10 "wake-up marker in the task result" parent_result_has_wakeup_marker \
+  || live_fail "the task result does not carry the post-child wake-up marker (got: $(parent_result_text))"
+live_wait_for 10 "wake-up marker in the completion handoff" completion_hop_has_wakeup_marker \
+  || live_fail "the completion handoff does not carry the post-child wake-up marker"
+if grep -qF "$PRE_CHILD_MARKER" <<<"$(parent_result_text)"; then
+  live_fail "the task result still carries the replaced pre-child answer"
+fi
+if grep -qF "$PRE_CHILD_MARKER" <<<"$(completion_hop_instruction)"; then
+  live_fail "the completion handoff still carries the replaced pre-child answer"
+fi
 verify_idle_hook_shape
 
 require_history_card "after completion"
@@ -328,11 +380,20 @@ if compgen -G "$LIVE_STATE/ensemble/logs/*" >/dev/null; then
   if grep -R -qF "$CHILD_INSTRUCTION" "$LIVE_STATE/ensemble/logs"; then
     live_fail "the service log files carried the subagent instruction"
   fi
+  # Ticket #197: the pre-child and wake-up answers are conversation content;
+  # the durable task/hop may carry them, but no service log may.
+  if grep -R -qF "$WAKEUP_MARKER" "$LIVE_STATE/ensemble/logs"; then
+    live_fail "the service log files carried the post-child wake-up answer"
+  fi
+  if grep -R -qF "$PRE_CHILD_MARKER" "$LIVE_STATE/ensemble/logs"; then
+    live_fail "the service log files carried the pre-child answer"
+  fi
 fi
 
 # Cleanup: remove the probe workspace and agent; no active child record remains.
 live_invoke workspace.delete "{\"id\":\"$WS_ID\",\"deleteNativeSessions\":true}" >/dev/null
 live_invoke agent.delete "{\"id\":\"$AGENT_ID\",\"deleteNativeSessions\":true}" >/dev/null
+live_invoke agent.delete "{\"id\":\"$LEADER_ID\",\"deleteNativeSessions\":true}" >/dev/null
 live_wait_for "$LIVE_STEP_TIMEOUT" "no native subagent records left" native_count_is 0 \
   || live_fail "native subagent records lingered after cleanup"
 live_log "native subagent probe passed ($EXPECT): child=$CHILD_ID parentTask=$TASK_ID group=$GROUP_ID"
