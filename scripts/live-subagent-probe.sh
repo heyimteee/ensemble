@@ -380,6 +380,14 @@ if compgen -G "$LIVE_STATE/ensemble/logs/*" >/dev/null; then
   if grep -R -qF "$CHILD_INSTRUCTION" "$LIVE_STATE/ensemble/logs"; then
     live_fail "the service log files carried the subagent instruction"
   fi
+  # Ticket #197: the pre-child and wake-up answers are conversation content;
+  # the durable task/hop may carry them, but no service log may.
+  if grep -R -qF "$WAKEUP_MARKER" "$LIVE_STATE/ensemble/logs"; then
+    live_fail "the service log files carried the post-child wake-up answer"
+  fi
+  if grep -R -qF "$PRE_CHILD_MARKER" "$LIVE_STATE/ensemble/logs"; then
+    live_fail "the service log files carried the pre-child answer"
+  fi
 fi
 
 # Cleanup: remove the probe workspace and agent; no active child record remains.
