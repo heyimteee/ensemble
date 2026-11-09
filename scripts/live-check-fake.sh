@@ -1288,7 +1288,7 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 15 "roster Enter opens the target and keeps Normal"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "chat Enter stays in transcript navigation"
-live_assert_text "$LIVE_TUI_SESSION" "j/k scroll" "chat interaction owns transcript scrolling"
+live_require_text "$LIVE_TUI_SESSION" "j/k scroll" 10 "chat interaction owns transcript scrolling"
 live_assert_absence "$LIVE_TUI_SESSION" "COMPOSER" "chat Enter never steals composer focus"
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "INSERT  │ COMPOSER" 10 "i enters the composer deliberately"
@@ -2809,7 +2809,8 @@ live_assert_grey_chat_text "$LIVE_TUI_SESSION" "#LiveSite" "unfocused chat headi
 assert_pane_borders work
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Enter enters the Work pane"
-live_assert_absence "$LIVE_TUI_SESSION" "h/l column" "Work interaction owns its content grammar"
+live_require_text "$LIVE_TUI_SESSION" "j/k cards" 10 "Work interaction owns its content grammar"
+live_assert_absence "$LIVE_TUI_SESSION" "h/l column" "Work interaction is not pane selection"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_pane_select "$LIVE_TUI_SESSION" 10 "Esc returns Work to select mode"
@@ -2927,8 +2928,8 @@ live_log "one-line Working/Asking activity summary verified with the Work pane o
 # modal/`V` are retired.
 # ---------------------------------------------------------------------------
 live_focus_chat "$LIVE_TUI_SESSION"
-live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-person\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "ask_person reaches the approvals pane"
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-person pane-approval-probe ask-key-pane-approval\",\"recipientIDs\":[\"$helper_id\"]}" >/dev/null
+live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 60 "ask_person reaches the approvals pane"
 live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ v open" 20 "small approvals summary under Work"
 live_assert_absence_rail "$LIVE_TUI_SESSION" "APPROVALS" "left rail no longer carries the approvals footer"
 live_focus_work_interact "$LIVE_TUI_SESSION"
@@ -2963,7 +2964,7 @@ live_focus_work_interact "$LIVE_TUI_SESSION"
 live_key "$LIVE_TUI_SESSION" "v"
 live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ 1/1" 10 "full approvals reopened for cleanup"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "FakeAgent needs your input" 10 "approval decision opens"
+live_require_text "$LIVE_TUI_SESSION" "Helper needs your input" 10 "approval decision opens"
 live_key "$LIVE_TUI_SESSION" Down
 live_key "$LIVE_TUI_SESSION" Enter
 # Full approvals stays mounted while the rejection settles; close it before
@@ -3022,11 +3023,23 @@ if live_try_text "$LIVE_TUI_SESSION" "Clear the history view?" 3; then
 fi
 live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │ none yet" 10 "history cleared before the rollup groups"
 live_key "$LIVE_TUI_SESSION" "f"
-live_focus_chat "$LIVE_TUI_SESSION"
-live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"history-older fake-queue\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_wait_for_subtask_status "history-older fake-queue" replied 90 || live_fail "older history group did not finish"
-live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"history-newer fake-queue\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_wait_for_subtask_status "history-newer fake-queue" replied 90 || live_fail "newer history group did not finish"
+# Two terminal groups with no provider round-trip or completion handoff:
+# delegate, then cancel each task before it can start a native run. A cancelled
+# task is still a durable terminal history card.
+delegate_terminal_group() {
+  local title="$1" id="" attempt
+  live_invoke task.delegate "{\"workspaceID\":\"$ws_id\",\"assigneeID\":\"$helper_id\",\"title\":\"$title\",\"instruction\":\"History fixture.\",\"mode\":\"research\"}" >/dev/null
+  for attempt in $(seq 1 40); do
+    id=$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (t) { return t.title === \"$title\" })[0]?.id" | tr -d '"')
+    [[ -n "$id" && "$id" != "null" ]] && break
+    sleep 0.2
+  done
+  [[ -n "$id" && "$id" != "null" ]] || live_fail "history fixture task $title was not created"
+  live_invoke task.cancel "{\"id\":\"$id\"}" >/dev/null
+  live_wait_for_subtask_status "$title" replied 30 || live_fail "history fixture $title did not terminalize"
+}
+delegate_terminal_group "history-older fake-queue"
+delegate_terminal_group "history-newer fake-queue"
 live_require_no_active_work "$LIVE_TUI_SESSION" 15 "history fixture groups settled"
 live_focus_work_interact "$LIVE_TUI_SESSION"
 live_key "$LIVE_TUI_SESSION" "f"

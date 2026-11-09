@@ -1180,17 +1180,14 @@ live_border_above_text_color() {
       const target = process.argv[1];
       const at = lines.findIndex((line) => line.visible.includes(target));
       if (at <= 0) process.exit(1);
+      const column = lines[at].visible.indexOf(target);
+      const glyphs = new Set(["┌", "╭", "─"]);
       for (let offset = 1; offset <= 3 && at - offset >= 0; offset += 1) {
         const above = lines[at - offset];
-        for (let index = 0; index < above.visible.length; index += 1) {
-          if (above.visible[index] === "┌" || above.visible[index] === "╭") {
-            process.stdout.write(above.colors[index] ?? "default");
-            return;
-          }
-        }
-        for (let index = 0; index < above.visible.length; index += 1) {
-          if (above.visible[index] === "─") {
-            process.stdout.write(above.colors[index] ?? "default");
+        for (const candidate of [column, column - 1, column - 2]) {
+          if (candidate < 0 || candidate >= above.visible.length) continue;
+          if (glyphs.has(above.visible[candidate])) {
+            process.stdout.write(above.colors[candidate] ?? "default");
             return;
           }
         }

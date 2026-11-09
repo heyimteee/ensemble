@@ -494,7 +494,12 @@ const server = createServer(async (request, response) => {
     const toolResult = lastUser >= 0 && messages.slice(lastUser + 1).some((message) => message?.role === "tool")
     const taskTitles = [...prompt.matchAll(/title="([^"]+)"/g)]
     const taskTitle = taskTitles.at(-1)?.[1] ?? ""
-    const askKey = taskTitle || latestUserText || prompt.slice(-200)
+    // One ask per distinct user request. The native session accumulates
+    // context, so a title parsed from older context can collide; an explicit
+    // ask-key marker gives the live harness a unique request identity while
+    // the task title still guards the follow-up tool-result request.
+    const askKeyMark = latestUserText.match(/\bask-key-[a-z0-9-]+/)
+    const askKey = askKeyMark ? askKeyMark[0] : (taskTitle || latestUserText || prompt.slice(-200))
     const askNew = askedThisTurn && !answered && !askedTasks.has(askKey)
     // Ticket #74 fix-up: the DM session accumulates every earlier trigger,
     // so precedence must follow the LATEST trigger, not a fixed order —
@@ -669,6 +674,7 @@ const server = createServer(async (request, response) => {
       if (askedThisTurn && body?.stream !== false) {
         if (askNew) {
           askedTasks.add(askKey)
+          if (taskTitle) askedTasks.add(taskTitle)
           await streamAskToolCall(response, requestID)
         } else await streamCompletion(response, QUEUE_HOLD_MARKDOWN, requestID)
       } else if (body?.stream === false) await nonStreamingCompletion(response, text, requestID)

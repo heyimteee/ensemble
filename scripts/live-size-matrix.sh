@@ -31,6 +31,10 @@ live_setup "sizes"
 
 SIZES="${ENSEMBLE_V6_SIZES:-80x24 100x30 120x40 160x50}"
 
+# The size matrix sends five two/one-task groups and then runs layout, focus,
+# and page-edge probes. The fixture's lease hold outlives those checks so a
+# task never terminalizes mid-measurement.
+
 live_start_fake_provider
 
 live_write_config <<EOF
@@ -120,12 +124,14 @@ send_group() {
 # Five dispatch groups, six tasks: one two-agent group plus four single-agent
 # groups. The long hold keeps every task active through a size's checks; the
 # rows are cancelled before the next size.
+# The size fixture uses the long lease hold so every task stays active across
+# the layout, focus, and page-edge probes; cancel_tasks settles each size.
 send_fixture() {
-  send_group "size-group-a fake-queue-hold-long" 0 1
-  send_group "size-group-b fake-queue-hold-long" 0
-  send_group "size-group-c fake-queue-hold-long" 0
-  send_group "size-group-d fake-queue-hold-long" 0
-  send_group "size-group-e fake-queue-hold-long" 0
+  send_group "size-group-a fake-lease-hold" 0 1
+  send_group "size-group-b fake-lease-hold" 0
+  send_group "size-group-c fake-lease-hold" 0
+  send_group "size-group-d fake-lease-hold" 0
+  send_group "size-group-e fake-lease-hold" 0
   wait_active 6 30
 }
 
@@ -395,8 +401,8 @@ check_spatial_focus() {
   live_require_text "$LIVE_TUI_SESSION" "1/1" 10 "l at the right page edge moves to the next page"
   live_require_text "$LIVE_TUI_SESSION" "page 2/2" 10 "l advanced the page indicator"
   live_key "$LIVE_TUI_SESSION" "h"
-  live_require_text "$LIVE_TUI_SESSION" "5/5" 10 "h at the left page edge returns to the previous page"
-  live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "h returned the page indicator"
+  live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "h at the left page edge returns to the previous page"
+  live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "h lands on the nearest card in the previous page"
   live_key "$LIVE_TUI_SESSION" "g"
   live_key "$LIVE_TUI_SESSION" "g"
   live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "gg returns to the first card before the border probe"
@@ -517,6 +523,20 @@ check_size_drawer() {
   live_key "$LIVE_TUI_SESSION" "g"
   for _ in $(seq 1 10); do live_key "$LIVE_TUI_SESSION" "j"; done
   live_require_text "$LIVE_TUI_SESSION" "page 2/2" 10 "drawer j crosses the page edge"
+  # Ticket #185: the full approvals surface works inside the narrow drawer.
+  live_focus_chat "$LIVE_TUI_SESSION"
+  live_invoke "message.send" "{\"workspaceID\":\"$WS_ID\",\"text\":\"fake-ask-person drawer-approval-probe\",\"recipientIDs\":[\"${AGENT_IDS[0]}\"]}" >/dev/null
+  live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 30 "drawer fixtures expose a pending approval"
+  live_key "$LIVE_TUI_SESSION" "v"
+  live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ 1/1" 10 "v opens full approvals in the drawer"
+  live_assert_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" "drawer full approvals cover Work"
+  live_assert_white_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending" "focused drawer approvals heading"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "SizeAgent1 needs your input" 10 "drawer approval decision opens"
+  live_key "$LIVE_TUI_SESSION" Down
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_key "$LIVE_TUI_SESSION" Escape
+  live_require_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 20 "drawer approval leaves after rejection"
   live_toggle_pane_side "$LIVE_TUI_SESSION" r
   live_require_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" 10 "Space b r closes the reopened drawer"
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "closing the drawer returns focus to the chat"
@@ -532,11 +552,13 @@ check_size() {
   height="${size#*x}"
   start_tui_at "$width" "$height"
   cancel_tasks
-  send_fixture
   IFS=' ' read -r WORK_START WORK_END < <(resolve_work_columns "$width")
+  # Read the pane chrome before the timing-sensitive fixture starts; the
+  # hold tasks must still be active when the functional checks begin.
   if (( width >= 96 )); then
     check_pane_chrome "$width"
   fi
+  send_fixture
   case "$size" in
     160x50) check_size_160x50 ;;
     120x40|100x30) check_size_compact "$size" "$width" "$height" ;;
