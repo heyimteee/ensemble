@@ -25,6 +25,9 @@ live_open_ensemble
 
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page"
 live_require_text "$LIVE_TUI_SESSION" "No currently opened session" 10 "empty chat state"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Agents" 10 "initial pane selection"
+live_assert_text "$LIVE_TUI_SESSION" "h/l column" "select mode teaches h/l columns"
+live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "I init" 10 "I init shortcut"
 live_require_text "$LIVE_TUI_SESSION" "git:(" 10 "git metadata"
 live_check_help

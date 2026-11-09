@@ -386,12 +386,14 @@ live_assert_text() {
 # transcript. Only use this on a group surface wide enough for the right Work
 # pane; the bounds are intentionally derived from the shared pane helper.
 LIVE_CHAT_COLUMNS=""
+LIVE_CHAT_COLUMNS_WIDTH=""
 live_chat_columns() {
-  if [[ -n "$LIVE_CHAT_COLUMNS" ]]; then
+  local width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
+  if [[ -n "$LIVE_CHAT_COLUMNS" && "$LIVE_CHAT_COLUMNS_WIDTH" == "$width" ]]; then
     printf '%s\n' "$LIVE_CHAT_COLUMNS"
     return 0
   fi
-  local width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}" start end
+  local start end
   read -r start end < <(
     "$LIVE_NODE_BIN" --experimental-strip-types -e '
       const { pathToFileURL } = require("node:url");
@@ -405,6 +407,7 @@ live_chat_columns() {
   )
   [[ -n "$start" && -n "$end" ]] || live_fail "could not resolve the chat column bounds"
   LIVE_CHAT_COLUMNS="$start $end"
+  LIVE_CHAT_COLUMNS_WIDTH="$width"
   printf '%s\n' "$LIVE_CHAT_COLUMNS"
 }
 
@@ -431,6 +434,126 @@ live_capture_chat_joined() {
 
 live_capture_contains_joined() {
   live_capture_chat_joined "$1" | grep -qF -- "$2"
+}
+
+# Work-column bounds from the same shared pane model. Used for Work-local
+# assertions so a transcript copy of a title cannot satisfy a card check.
+LIVE_WORK_COLUMNS=""
+LIVE_WORK_COLUMNS_WIDTH=""
+live_work_columns() {
+  local width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
+  if [[ -n "$LIVE_WORK_COLUMNS" && "$LIVE_WORK_COLUMNS_WIDTH" == "$width" ]]; then
+    printf '%s\n' "$LIVE_WORK_COLUMNS"
+    return 0
+  fi
+  local start end
+  read -r start end < <(
+    "$LIVE_NODE_BIN" --experimental-strip-types -e '
+      const { pathToFileURL } = require("node:url");
+      import(pathToFileURL(process.argv[1]).href).then((module) => {
+        const panes = module.workspacePaneWidths(Number(process.argv[2]));
+        const workStart = panes.mode === "drawer"
+          ? panes.terminalWidth - panes.workWidth
+          : 2 + panes.railWidth + 1 + panes.chatWidth + 1;
+        process.stdout.write(`${workStart + 2} ${panes.terminalWidth - 3}\n`);
+      });
+    ' "$LIVE_ROOT/src/v2/tui/workpane.ts" "$width"
+  )
+  [[ -n "$start" && -n "$end" ]] || live_fail "could not resolve the Work column bounds"
+  LIVE_WORK_COLUMNS="$start $end"
+  LIVE_WORK_COLUMNS_WIDTH="$width"
+  printf '%s\n' "$LIVE_WORK_COLUMNS"
+}
+
+live_capture_work_joined() {
+  local start end
+  read -r start end <<<"$(live_work_columns)"
+  live_capture "$1" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const start = Number(process.argv[1]) - 1;
+      const end = Number(process.argv[2]);
+      const rows = value.split("\n")
+        .map((line) => line.slice(start, end).replace(/[▁▂▃▄▅▆▇█]+\s*$/, "").trim())
+        .filter((line) => line.length > 0);
+      process.stdout.write(rows.join(" "));
+    });
+  ' "$start" "$end"
+}
+
+live_capture_work_contains() {
+  live_capture_work_joined "$1" | grep -qF -- "$2"
+}
+
+live_require_work_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  live_wait_for "$seconds" "$description" live_capture_work_contains "$session" "$text" \
+    || live_fail "Work pane did not show: $description"
+}
+
+live_assert_work_text() {
+  local session="$1" text="$2" description="${3:-$text}"
+  live_capture_work_contains "$session" "$text" || live_fail "Work pane does not show: $description"
+}
+
+live_assert_absence_work() {
+  local session="$1" text="$2" description="${3:-absence of $text}"
+  live_capture_work_contains "$session" "$text" && live_fail "Work pane unexpectedly shows: $description"
+  return 0
+}
+
+# Rail-column bounds from the same shared pane model. Used to prove the left
+# footer is gone without matching the right column's APPROVALS heading.
+LIVE_RAIL_COLUMNS=""
+LIVE_RAIL_COLUMNS_WIDTH=""
+live_rail_columns() {
+  local width="${ENSEMBLE_LIVE_TUI_WIDTH:-160}"
+  if [[ -n "$LIVE_RAIL_COLUMNS" && "$LIVE_RAIL_COLUMNS_WIDTH" == "$width" ]]; then
+    printf '%s\n' "$LIVE_RAIL_COLUMNS"
+    return 0
+  fi
+  local end
+  end=$(
+    "$LIVE_NODE_BIN" --experimental-strip-types -e '
+      const { pathToFileURL } = require("node:url");
+      import(pathToFileURL(process.argv[1]).href).then((module) => {
+        const panes = module.workspacePaneWidths(Number(process.argv[2]));
+        process.stdout.write(String(1 + panes.railWidth));
+      });
+    ' "$LIVE_ROOT/src/v2/tui/workpane.ts" "$width"
+  )
+  [[ -n "$end" ]] || live_fail "could not resolve the rail column bounds"
+  LIVE_RAIL_COLUMNS="1 $end"
+  LIVE_RAIL_COLUMNS_WIDTH="$width"
+  printf '%s\n' "$LIVE_RAIL_COLUMNS"
+}
+
+live_capture_rail_joined() {
+  local start end
+  read -r start end <<<"$(live_rail_columns)"
+  live_capture "$1" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const start = Number(process.argv[1]) - 1;
+      const end = Number(process.argv[2]);
+      const rows = value.split("\n").map((line) => line.slice(start, end).trim()).filter((line) => line.length > 0);
+      process.stdout.write(rows.join(" "));
+    });
+  ' "$start" "$end"
+}
+
+live_capture_rail_contains() {
+  live_capture_rail_joined "$1" | grep -qF -- "$2"
+}
+
+live_assert_absence_rail() {
+  local session="$1" text="$2" description="${3:-absence of $text}"
+  live_capture_rail_contains "$session" "$text" && live_fail "rail unexpectedly shows: $description"
+  return 0
 }
 
 live_capture_all_joined() {
@@ -465,6 +588,25 @@ live_require_joined_text() {
 live_assert_joined_text() {
   local session="$1" text="$2" description="${3:-$text}"
   live_capture_contains_joined "$session" "$text" || live_fail "TUI does not show: $description"
+}
+
+# Bounded wait for a transient label that must appear exactly once in the chat
+# column in the SAME frame. Work-card details live outside this slice, so the
+# aggregate chat line is measured without counting a card's matching detail.
+live_require_joined_single_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  local end value count
+  end=$(( $(date +%s%N) + seconds * 1000000000 ))
+  while true; do
+    value=$(live_capture_chat_joined "$session")
+    count=$(grep -oF -- "$text" <<<"$value" | wc -l | tr -d ' ')
+    if [[ "$count" == "1" ]]; then return 0; fi
+    if [[ "$count" != "0" ]]; then live_fail "expected one '$description' in chat, found $count in one frame"; fi
+    if (( $(date +%s%N) >= end )); then
+      live_fail "TUI did not show exactly one '$description' in chat within ${seconds}s"
+    fi
+    sleep "$LIVE_WAIT_INTERVAL"
+  done
 }
 
 live_count_joined_text() {
@@ -619,6 +761,450 @@ live_open_ensemble() {
   fi
 }
 
+# --- pane select/interact (ticket #180/#183) ------------------------------
+
+# The statusline row is the one text-observable pane model. The mode chip and
+# context are core segments, so they survive every width; hints are droppable.
+live_status_line() {
+  live_capture "$1" | grep -E '^ *((NORMAL|INSERT|COMMAND|VISUAL|V-LINE) +│)' | tail -n 1
+}
+
+# True while pane selection owns the keyboard: its shipped hint is present.
+live_capture_pane_select() {
+  live_capture "$1" | grep -qF "h/l column"
+}
+
+live_require_pane_select() {
+  local session="$1" seconds="${2:-10}" description="${3:-pane selection}"
+  live_wait_for "$seconds" "$description" live_capture_pane_select "$session" \
+    || live_fail "TUI did not show: $description"
+}
+
+# Esc always returns one level and is a no-op in select mode, so a bounded
+# ladder reaches pane selection from any ordinary normal/interact surface.
+live_escape_to_pane_select() {
+  local session="$1" attempt
+  for attempt in 1 2 3 4 5 6; do
+    live_capture_pane_select "$session" && return 0
+    live_key "$session" Escape
+    sleep 0.25
+  done
+  live_fail "could not return to pane selection"
+}
+
+# One of: agents, workspaces, chat, work, approvals, composer, other.
+live_pane_context() {
+  local line context
+  line=$(live_status_line "$1")
+  [[ -n "$line" ]] || { printf 'other\n'; return 0; }
+  context=$(awk -F'│' '{ if (NF >= 2) { value = $2; gsub(/^[ \t]+|[ \t]+$/, "", value); print value } }' <<<"$line")
+  case "$context" in
+    Agents) printf 'agents\n' ;;
+    Workspaces) printf 'workspaces\n' ;;
+    "Work list") printf 'work\n' ;;
+    Approvals|"Work approvals") printf 'approvals\n' ;;
+    "Group chat"|"Direct conversation") printf 'chat\n' ;;
+    COMPOSER) printf 'composer\n' ;;
+    *) printf 'other\n' ;;
+  esac
+}
+
+live_require_pane_context() {
+  local session="$1" expected="$2" seconds="${3:-10}" description="${4:-$2 pane}"
+  live_wait_for "$seconds" "$description" live_capture_pane_context "$session" "$expected" \
+    || live_fail "TUI did not show: $description (got $(live_pane_context "$session"))"
+}
+
+live_capture_pane_context() {
+  [[ "$(live_pane_context "$1")" == "$2" ]]
+}
+
+# True while the right column (Work or full approvals) is rendered.
+live_capture_right_pane() {
+  live_capture "$1" | grep -Eq 'WORK (ACTIVE|HISTORY) │|APPROVALS [0-9]+ pending │'
+}
+
+live_capture_left_pane() {
+  live_capture "$1" | grep -qE 'AGENTS \([0-9]+\)'
+}
+
+live_toggle_pane_side() {
+  local session="$1" side="$2"
+  live_key "$session" Space
+  sleep 0.2
+  live_key "$session" b
+  sleep 0.2
+  live_key "$session" "$side"
+  sleep 0.4
+}
+
+live_ensure_right_pane() {
+  local session="$1"
+  live_capture_right_pane "$session" && return 0
+  live_toggle_pane_side "$session" r
+  live_wait_for 10 "right pane visible" live_capture_right_pane "$session" \
+    || live_fail "right pane did not open"
+}
+
+live_ensure_left_pane() {
+  local session="$1"
+  live_capture_left_pane "$session" && return 0
+  live_toggle_pane_side "$session" l
+  live_wait_for 10 "left pane visible" live_capture_left_pane "$session" \
+    || live_fail "left pane did not open"
+}
+
+# Select a pane with the pure select-mode grammar. Every call first returns to
+# selection, so callers never depend on the previous interact depth.
+live_select_pane() {
+  local session="$1" target="$2" attempt current
+  live_escape_to_pane_select "$session"
+  for attempt in 1 2 3 4 5 6 7 8; do
+    current=$(live_pane_context "$session")
+    [[ "$current" == "$target" ]] && return 0
+    case "$target" in
+      chat)
+        case "$current" in
+          agents|workspaces) live_key "$session" l ;;
+          work|approvals) live_key "$session" h ;;
+          *) live_key "$session" Escape ;;
+        esac
+        ;;
+      work)
+        case "$current" in
+          agents|workspaces) live_key "$session" l; sleep 0.2; live_key "$session" l ;;
+          chat) live_key "$session" l ;;
+          approvals) live_key "$session" k ;;
+          *) live_key "$session" Escape ;;
+        esac
+        ;;
+      agents)
+        case "$current" in
+          workspaces) live_key "$session" k ;;
+          chat) live_key "$session" h ;;
+          work|approvals) live_key "$session" h; sleep 0.2; live_key "$session" h ;;
+          *) live_key "$session" Escape ;;
+        esac
+        ;;
+      workspaces)
+        case "$current" in
+          agents) live_key "$session" j ;;
+          chat) live_key "$session" h; sleep 0.2; live_key "$session" j ;;
+          work|approvals) live_key "$session" h; sleep 0.2; live_key "$session" h; sleep 0.2; live_key "$session" j ;;
+          *) live_key "$session" Escape ;;
+        esac
+        ;;
+      approvals)
+        case "$current" in
+          work) live_key "$session" j ;;
+          chat) live_key "$session" l; sleep 0.2; live_key "$session" j ;;
+          agents|workspaces) live_key "$session" l; sleep 0.2; live_key "$session" l; sleep 0.2; live_key "$session" j ;;
+          *) live_key "$session" Escape ;;
+        esac
+        ;;
+      *) live_fail "unsupported pane target: $target" ;;
+    esac
+    sleep 0.2
+  done
+  live_fail "could not select the $target pane (last context $(live_pane_context "$session"))"
+}
+
+live_enter_selected_pane() {
+  local session="$1"
+  live_key "$session" Enter
+  sleep 0.3
+}
+
+live_focus_chat() {
+  live_select_pane "$1" chat
+}
+
+live_focus_chat_interact() {
+  live_focus_chat "$1"
+  live_enter_selected_pane "$1"
+}
+
+live_focus_agents_interact() {
+  local session="$1"
+  live_ensure_left_pane "$session"
+  live_select_pane "$session" agents
+  live_enter_selected_pane "$session"
+}
+
+live_focus_workspaces_interact() {
+  local session="$1"
+  live_ensure_left_pane "$session"
+  live_select_pane "$session" workspaces
+  live_enter_selected_pane "$session"
+}
+
+live_focus_work_interact() {
+  local session="$1"
+  live_ensure_right_pane "$session"
+  live_select_pane "$session" work
+  live_enter_selected_pane "$session"
+}
+
+# --- ANSI colour probes ---------------------------------------------------
+
+# Read the active SGR foreground for a visible substring in a capture.
+live_sgr_fg_for_text() {
+  local session="$1" text="$2" occurrence="${3:-1}"
+  "$LIVE_TMUX_BIN" capture-pane -e -p -J -t "$session" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const target = process.argv[1];
+      const wanted = Number(process.argv[2]);
+      const sgr = /\x1b\[([0-9;]*)m/g;
+      const parse = (raw) => {
+        let fg = "default";
+        let visible = "";
+        const colors = [];
+        let index = 0;
+        while (index < raw.length) {
+          if (raw[index] === "\x1b") {
+            sgr.lastIndex = index;
+            const match = sgr.exec(raw);
+            if (match && match.index === index) {
+              const parts = match[1].split(";").map(Number);
+              if (parts.length === 1 && (parts[0] === 0 || parts[0] === 39)) fg = "default";
+              else if (parts[0] === 38) fg = parts.join(";");
+              else if (parts.includes(39)) fg = "default";
+              index = sgr.lastIndex;
+              continue;
+            }
+          }
+          colors.push(fg);
+          visible += raw[index];
+          index += 1;
+        }
+        return { visible, colors };
+      };
+      for (const raw of value.split("\n")) {
+        const { visible, colors } = parse(raw);
+        let index = -1;
+        let seen = 0;
+        while (true) {
+          index = visible.indexOf(target, index + 1);
+          if (index < 0) break;
+          seen += 1;
+          if (seen === wanted) {
+            process.stdout.write(colors[index] ?? "default");
+            return;
+          }
+        }
+      }
+      process.exit(1);
+    });
+  ' "$text" "$occurrence"
+}
+
+# Read the active SGR foreground for a visible substring whose first cell is
+# inside the given 1-based column range. Chat headings can share text with the
+# app header or rail, so the column slice is the pane authority.
+live_sgr_fg_for_text_in_columns() {
+  local session="$1" text="$2" start="$3" end="$4" occurrence="${5:-1}"
+  "$LIVE_TMUX_BIN" capture-pane -e -p -J -t "$session" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const target = process.argv[1];
+      const start = Number(process.argv[2]);
+      const end = Number(process.argv[3]);
+      const wanted = Number(process.argv[4]);
+      const sgr = /\x1b\[([0-9;]*)m/g;
+      for (const raw of value.split("\n")) {
+        let fg = "default";
+        let visible = "";
+        const colors = [];
+        let index = 0;
+        while (index < raw.length) {
+          if (raw[index] === "\x1b") {
+            sgr.lastIndex = index;
+            const match = sgr.exec(raw);
+            if (match && match.index === index) {
+              const parts = match[1].split(";").map(Number);
+              if (parts.length === 1 && (parts[0] === 0 || parts[0] === 39)) fg = "default";
+              else if (parts[0] === 38) fg = parts.join(";");
+              else if (parts.includes(39)) fg = "default";
+              index = sgr.lastIndex;
+              continue;
+            }
+          }
+          colors.push(fg);
+          visible += raw[index];
+          index += 1;
+        }
+        let at = -1;
+        let seen = 0;
+        while (true) {
+          at = visible.indexOf(target, at + 1);
+          if (at < 0) break;
+          const column = at + 1;
+          if (column < start || column > end) continue;
+          seen += 1;
+          if (seen === wanted) {
+            process.stdout.write(colors[at] ?? "default");
+            return;
+          }
+        }
+      }
+      process.exit(1);
+    });
+  ' "$text" "$start" "$end" "$occurrence"
+}
+
+live_assert_white_chat_text() {
+  local session="$1" text="$2" description="${3:-$text}" columns start end color
+  columns=$(live_chat_columns)
+  read -r start end <<<"$columns"
+  color=$(live_sgr_fg_for_text_in_columns "$session" "$text" "$start" "$end" 1) \
+    || live_fail "could not read the colour of $description"
+  live_color_is_white "$color" || live_fail "$description is not white (got $color)"
+}
+
+live_assert_grey_chat_text() {
+  local session="$1" text="$2" description="${3:-$text}" columns start end color
+  columns=$(live_chat_columns)
+  read -r start end <<<"$columns"
+  color=$(live_sgr_fg_for_text_in_columns "$session" "$text" "$start" "$end" 1) \
+    || live_fail "could not read the colour of $description"
+  live_color_is_grey "$color" || live_fail "$description is not grey (got $color)"
+}
+
+# Foreground colours of every top-left rounded corner on the first frame row
+# that carries two or more boxes, in left-to-right pane order.
+live_top_border_colors() {
+  local session="$1"
+  "$LIVE_TMUX_BIN" capture-pane -e -p -J -t "$session" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const sgr = /\x1b\[([0-9;]*)m/g;
+      for (const raw of value.split("\n")) {
+        let fg = "default";
+        let visible = "";
+        const colors = [];
+        let index = 0;
+        while (index < raw.length) {
+          if (raw[index] === "\x1b") {
+            sgr.lastIndex = index;
+            const match = sgr.exec(raw);
+            if (match && match.index === index) {
+              const parts = match[1].split(";").map(Number);
+              if (parts.length === 1 && (parts[0] === 0 || parts[0] === 39)) fg = "default";
+              else if (parts[0] === 38) fg = parts.join(";");
+              else if (parts.includes(39)) fg = "default";
+              index = sgr.lastIndex;
+              continue;
+            }
+          }
+          colors.push(fg);
+          visible += raw[index];
+          index += 1;
+        }
+        const corners = [];
+        for (let at = 0; at < visible.length; at += 1) {
+          if (visible[at] === "┌") corners.push(colors[at]);
+        }
+        if (corners.length >= 2) {
+          process.stdout.write(corners.join(","));
+          return;
+        }
+      }
+      process.exit(1);
+    });
+  '
+}
+
+# Foreground of the first top-left corner on the frame row immediately above
+# the row that contains `text`. Used for stacked rail/section borders.
+live_border_above_text_color() {
+  local session="$1" text="$2"
+  "$LIVE_TMUX_BIN" capture-pane -e -p -J -t "$session" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const sgr = /\x1b\[([0-9;]*)m/g;
+      const lines = value.split("\n").map((raw) => {
+        let fg = "default";
+        let visible = "";
+        const colors = [];
+        let index = 0;
+        while (index < raw.length) {
+          if (raw[index] === "\x1b") {
+            sgr.lastIndex = index;
+            const match = sgr.exec(raw);
+            if (match && match.index === index) {
+              const parts = match[1].split(";").map(Number);
+              if (parts.length === 1 && (parts[0] === 0 || parts[0] === 39)) fg = "default";
+              else if (parts[0] === 38) fg = parts.join(";");
+              else if (parts.includes(39)) fg = "default";
+              index = sgr.lastIndex;
+              continue;
+            }
+          }
+          colors.push(fg);
+          visible += raw[index];
+          index += 1;
+        }
+        return { visible, colors };
+      });
+      const target = process.argv[1];
+      const at = lines.findIndex((line) => line.visible.includes(target));
+      if (at <= 0) process.exit(1);
+      const above = lines[at - 1];
+      for (let index = 0; index < above.visible.length; index += 1) {
+        if (above.visible[index] === "┌") {
+          process.stdout.write(above.colors[index] ?? "default");
+          return;
+        }
+      }
+      for (let index = 0; index < above.visible.length; index += 1) {
+        if (above.visible[index] === "─") {
+          process.stdout.write(above.colors[index] ?? "default");
+          return;
+        }
+      }
+      process.exit(1);
+    });
+  ' "$text"
+}
+
+live_color_is_white() {
+  case "$1" in
+    38\;5\;15|38\;5\;231|38\;5\;255|38\;2\;255\;255\;255) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+live_color_is_grey() {
+  case "$1" in
+    38\;5\;8|38\;5\;140|38\;5\;232|38\;5\;236|38\;5\;238|38\;5\;240|38\;5\;242) return 0 ;;
+    38\;2\;*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+live_assert_white_text() {
+  local session="$1" text="$2" description="${3:-$text}" color
+  color=$(live_sgr_fg_for_text "$session" "$text" 1) \
+    || live_fail "could not read the colour of $description"
+  live_color_is_white "$color" || live_fail "$description is not white (got $color)"
+}
+
+live_assert_grey_text() {
+  local session="$1" text="$2" description="${3:-$text}" color
+  color=$(live_sgr_fg_for_text "$session" "$text" 1) \
+    || live_fail "could not read the colour of $description"
+  live_color_is_grey "$color" || live_fail "$description is not grey (got $color)"
+}
+
 # --- input ----------------------------------------------------------------
 
 live_type() {
@@ -655,7 +1241,8 @@ live_check_help() {
   live_require_text "$LIVE_TUI_SESSION" "Keyboard shortcuts" 15 "searchable shortcut help"
   live_require_text "$LIVE_TUI_SESSION" "Modes and Esc ladder" 10 "help is sectioned"
   live_key "$LIVE_TUI_SESSION" "/"
-  live_type "$LIVE_TUI_SESSION" "delete workspace"
+  # A full key+title phrase stays unique even as prose help entries grow.
+  live_type "$LIVE_TUI_SESSION" "Space W Delete workspace"
   live_require_text "$LIVE_TUI_SESSION" "Space W" 10 "leader delete-workspace chord"
   live_require_absence "$LIVE_TUI_SESSION" "Scroll transcript down" 10 "help filter hid unrelated shortcuts"
   live_key "$LIVE_TUI_SESSION" Enter

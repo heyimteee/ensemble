@@ -87,9 +87,10 @@ live_require_text "$LIVE_TUI_SESSION" "ProbeAgent" 15 "latency fixture agent row
 live_require_text "$LIVE_TUI_SESSION" "#LatencyProbe" 15 "latency fixture workspace row"
 
 # Own the rail cursor explicitly; depending on restored history the page can
-# open on chat. `h` is the Normal rail-column key in both roster and chat.
-live_key "$LIVE_TUI_SESSION" "h"
-live_require_text "$LIVE_TUI_SESSION" "ProbeAgent" 10 "rail visible before sampling"
+# open on chat. Ticket #180: h selects Agents, Enter starts row navigation, and
+# the cursor mark renders only while the Agents pane owns interaction.
+live_focus_agents_interact "$LIVE_TUI_SESSION"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Agents" 10 "Agents interaction before sampling"
 
 # Read the rail cursor marker from the TUI helper rather than restating its
 # literal here. It renders only on the surface that owns the focus border.
@@ -109,11 +110,9 @@ wait_for_marker() {
 }
 
 if ! wait_for_marker "$AGENT_MARK" 10; then
-  # Some hosts restore focus to the composer. Leave Insert/chat deliberately,
-  # then claim the rail once more before failing.
-  live_key "$LIVE_TUI_SESSION" C-g
-  sleep 0.25
-  live_key "$LIVE_TUI_SESSION" "h"
+  # Some hosts restore focus to the composer. Leave the composer and claim the
+  # Agents pane explicitly before failing.
+  live_focus_agents_interact "$LIVE_TUI_SESSION"
   wait_for_marker "$AGENT_MARK" 10 \
     || live_fail "could not observe the rail cursor before sampling"
 fi
@@ -177,7 +176,8 @@ live_log "measurement boundary: tmux send-keys -> first capture-pane showing the
 # This crosses the same tmux boundary as the rail probe and exercises the
 # durable patch path; it is a measurement, not a threshold. Each sample is a
 # separate dispatch group, cancelled and held out before the next sample.
-live_key "$LIVE_TUI_SESSION" "j"
+# Ticket #180: Workspaces is its own pane; Enter opens #LatencyProbe.
+live_focus_workspaces_interact "$LIVE_TUI_SESSION"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Message…" 15 "workspace surface for the card probe"
 CARD_SAMPLES="${ENSEMBLE_LATENCY_CARD_SAMPLES:-5}"
