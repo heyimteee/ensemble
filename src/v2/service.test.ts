@@ -8312,3 +8312,93 @@ test("ticket182: a tool instruction seen before its child session is applied whe
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("ticket191: releasing a terminal run claim clears queue and retry fields", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-191-claim-"))
+  const at = Date.now() - 1000
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveSubtask({
+    id: "t_terminal",
+    workspaceID: "w",
+    creatorType: "user",
+    assigneeID: "a",
+    title: "Terminal",
+    instruction: "Do",
+    mode: "research",
+    state: "replied",
+    stage: "initial",
+    outcome: "succeeded",
+    interrupted: false,
+    awaitingChildren: false,
+    attempts: 1,
+    repliedAt: at,
+    finishedAt: at,
+    claimedBy: "run_1",
+    activeRunID: "run_1",
+    leaseUntil: at + 60_000,
+    retryAfter: at + 1,
+    createdAt: at,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    await (service as any).releaseClaim("t_terminal", "run_1")
+    const task = (service as any).store.subtask("t_terminal")
+    assert.equal(task.claimedBy, undefined)
+    assert.equal(task.leaseUntil, undefined)
+    assert.equal(task.activeRunID, undefined)
+    assert.equal(task.retryAfter, undefined)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket191: shutdown release clears terminal retry fields", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-191-shutdown-"))
+  const at = Date.now() - 1000
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveSubtask({
+    id: "t_terminal",
+    workspaceID: "w",
+    creatorType: "user",
+    assigneeID: "a",
+    title: "Terminal",
+    instruction: "Do",
+    mode: "research",
+    state: "replied",
+    stage: "initial",
+    outcome: "succeeded",
+    interrupted: false,
+    awaitingChildren: false,
+    attempts: 1,
+    repliedAt: at,
+    finishedAt: at,
+    claimedBy: "run_1",
+    activeRunID: "run_1",
+    leaseUntil: at + 60_000,
+    retryAfter: at + 1,
+    createdAt: at,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    await (service as any).releaseLocalClaims(new Set(["run_1"]))
+    const task = (service as any).store.subtask("t_terminal")
+    assert.equal(task.claimedBy, undefined)
+    assert.equal(task.leaseUntil, undefined)
+    assert.equal(task.activeRunID, undefined)
+    assert.equal(task.retryAfter, undefined)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

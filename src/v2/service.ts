@@ -7717,6 +7717,10 @@ export class EnsembleV2Service {
     if (current && current.claimedBy === runID) {
       current.claimedBy = undefined
       current.leaseUntil = undefined
+      // Ticket #191: a terminal row must not retain fields from the queue
+      // lifecycle after its run releases the claim.
+      if (current.activeRunID === runID) current.activeRunID = undefined
+      if (current.state === "replied") current.retryAfter = undefined
       await this.store.saveSubtask(current)
     }
   }
@@ -7735,6 +7739,7 @@ export class EnsembleV2Service {
       task.claimedBy = undefined
       task.leaseUntil = undefined
       if (task.activeRunID !== undefined && runIDs.has(task.activeRunID)) task.activeRunID = undefined
+      if (task.state === "replied") task.retryAfter = undefined
       await this.store.saveSubtask(task)
     }
   }
