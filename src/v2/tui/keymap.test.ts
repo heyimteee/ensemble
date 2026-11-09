@@ -30,21 +30,47 @@ function entryId(context: KeyContext, keys: string): string | undefined {
 
 test("roster Normal grammar carries navigation, opening, actions, filter, and leader", () => {
   const keys = keysFor("roster")
-  for (const sequence of ["j", "k", "g g", "shift+g", "h", "l", "enter", "tab", "/", "a", "e", "s", "x", "shift+x", "space", "z"]) {
+  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "/", "a", "e", "s", "x", "shift+x", "space", "z"]) {
     assert.ok(keys.includes(sequence), `roster keeps ${sequence}`)
   }
   assert.equal(entryId("roster", "enter"), "open")
   assert.equal(entryId("roster", "z"), "rail.collapse", "z toggles the selected workspace group")
 })
 
+test("ticket180: select mode owns pane movement, Enter, and the chat composer key", () => {
+  const keys = keysFor("pane")
+  for (const sequence of ["h", "l", "j", "k", "enter", "i", "v", "tab", "shift+tab", "space"]) {
+    assert.ok(keys.includes(sequence), `pane select keeps ${sequence}`)
+  }
+  assert.equal(entryId("pane", "h"), "pane.left")
+  assert.equal(entryId("pane", "l"), "pane.right")
+  assert.equal(entryId("pane", "j"), "pane.down")
+  assert.equal(entryId("pane", "k"), "pane.up")
+  assert.equal(entryId("pane", "enter"), "pane.enter")
+  assert.equal(entryId("pane", "i"), "pane.compose")
+  assert.equal(entryId("pane", "v"), "pane.approvals")
+  assert.equal(entryId("pane", "tab"), "focus.tab")
+  assert.equal(entryId("pane", "escape"), "pane.escape", "select-mode Esc is a claimed no-op")
+  const hints = statuslineHints("pane")
+  for (const hint of ["h/l column", "j/k pane", "enter enter", "i compose", "tab next"]) {
+    assert.ok(hints.includes(hint), `pane hints include ${hint}: ${hints}`)
+  }
+})
+
+test("ticket180: pane movement lives only in select mode, not in pane content grammars", () => {
+  assert.equal(entryId("chat", "l"), undefined, "chat l selects Work only from select mode")
+  assert.equal(entryId("roster", "l"), undefined, "roster l selects the chat only from select mode")
+  assert.equal(entryId("roster", "h"), undefined, "roster h selects a pane only from select mode")
+})
+
 test("group chat and direct conversation scroll the transcript and never expose a message cursor", () => {
   const keys = keysFor("chat")
-  for (const sequence of ["j", "k", "g g", "shift+g", "ctrl+d", "ctrl+u", "enter", "i", "tab", "/", "space"]) {
+  for (const sequence of ["j", "k", "g g", "shift+g", "ctrl+d", "ctrl+u", "i", "tab", "/", "space"]) {
     assert.ok(keys.includes(sequence), `chat keeps ${sequence}`)
   }
   assert.equal(entryId("chat", "j"), "chat.scroll.down")
   assert.equal(entryId("chat", "k"), "chat.scroll.up")
-  assert.equal(entryId("chat", "enter"), "compose")
+  assert.equal(entryId("chat", "enter"), "chat.enter", "chat Enter keeps transcript navigation, never the composer")
   assert.equal(entryId("chat", "i"), "compose.alt")
   assert.ok(
     normalEntries("chat").every((entry) => !/message[ ._-]?cursor/i.test(`${entry.id} ${entry.title}`)),
@@ -148,7 +174,7 @@ test("ticket173: Work hints teach focus, history, approvals, overflow, and page 
     assert.ok(hints.includes(hint), `work hints include ${hint}: ${hints}`)
   }
   const approvals = statuslineHints("workApprovals")
-  for (const hint of ["j/k approvals", "enter resolve", "V inbox", "tab next", "esc work"]) {
+  for (const hint of ["j/k approvals", "enter resolve", "V inbox", "tab next", "esc select"]) {
     assert.ok(approvals.includes(hint), `approval hints include ${hint}: ${approvals}`)
   }
 })
@@ -156,8 +182,8 @@ test("ticket173: Work hints teach focus, history, approvals, overflow, and page 
 test("Esc and Tab move through the work zones without inventing a cursor", () => {
   const escape = normalEntries("work").find((entry) => entry.id === "escape")
   const tab = normalEntries("work").find((entry) => entry.id === "focus.tab")
-  assert.match(escape?.title ?? "", /transcript/i)
-  assert.match(tab?.title ?? "", /focus zone/i, "ticket173: Tab now cycles to approvals or the rail")
+  assert.match(escape?.title ?? "", /pane selection/i)
+  assert.match(tab?.title ?? "", /pane/i, "ticket180: Tab cycles visible panes")
   assert.equal(actionId(resolveNormalKey("work", ["g"], "g")), "work.top")
   assert.equal(actionId(resolveNormalKey("work", [], "shift+g")), "work.bottom")
   assert.equal(actionId(resolveNormalKey("work", [], "x")), "work.cancel")
@@ -345,10 +371,10 @@ test("statusline hints come from the same catalog and adapt to the work zone", (
 
   const chatWithWork = statuslineHints("chat", { hasWork: true })
   assert.ok(chatWithWork.includes("j/k scroll"), chatWithWork)
-  assert.ok(chatWithWork.includes("tab work"), chatWithWork)
+  assert.ok(chatWithWork.includes("tab next"), chatWithWork)
+  assert.ok(chatWithWork.includes("i compose"), chatWithWork)
   const chatIdle = statuslineHints("chat", { hasWork: false })
-  assert.ok(chatIdle.includes("tab rail"), chatIdle)
-  assert.ok(!chatIdle.includes("tab work"), "an empty work zone is never promised")
+  assert.ok(chatIdle.includes("tab next"), chatIdle)
 
   const work = statuslineHints("work")
   assert.ok(work.includes("enter result"), work)

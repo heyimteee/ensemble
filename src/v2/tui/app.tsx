@@ -128,6 +128,7 @@ import {
   initialInteractionState,
   insertWithoutTarget,
   interactionReducer,
+  paneFocusOf,
   visibleMessage,
   type InteractionEvent,
   type InteractionFocus,
@@ -136,6 +137,7 @@ import {
   type InteractionResult,
   type InteractionState,
 } from "./interaction.ts"
+import { chatPaneFocused, cyclePaneFocus, enterPane, movePaneFocus, paneOwnsFocus, railSectionFocused, workCardsFocused, workPaneFocused, type PaneID, type PaneVisibility } from "./panefocus.ts"
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
 import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
@@ -151,7 +153,7 @@ import { createLogger, type EnsembleLogger, type LogEntry } from "../logging.ts"
 import { formatLogEntry, formatLogStats, logEntryTone, logsRpcInput, logsTitle, parseLogsCommand, sortLogEntries, type LogsViewFilter } from "./logs.ts"
 import { createPageActivation } from "./page-activation.ts"
 import { chromeJoin, chromeSeparator } from "./separators.ts"
-import { focusWhenReady, halfPageCursor, nextFocusZone, type FocusZone } from "./focus.ts"
+import { focusWhenReady, halfPageCursor } from "./focus.ts"
 import { LEADER_POPUP_DELAY_MS } from "./leader.ts"
 import { createCommandHistory, recallHistory, rememberHistory, startHistory, type CommandHistory } from "./history.ts"
 import { matchIndexAfter, transcriptMatches, type TranscriptMatch } from "./search.ts"
@@ -618,11 +620,33 @@ export function EnsembleV2App() {
 
   // Focus/mode compatibility accessors: existing call sites keep reading
   // `focusArea()` and `composerActive()` while the reducer owns the values.
-  const focusArea = (): FocusArea => (interaction().focus === "rail" ? "rail" : "chat")
+  // Ticket #180: Agents and Workspaces are two panes inside the left column.
+  const paneState = () => paneFocusOf(interaction())
+  const focusArea = (): FocusArea => (interaction().pane === "agents" || interaction().pane === "workspaces" ? "rail" : "chat")
   const composerActive = () => interaction().focus === "composer"
   const interactionMode = (): InteractionMode => interaction().mode
   const commandActive = () => interaction().command !== null
-  const setFocusArea = (area: FocusArea) => { dispatchInteraction({ type: "focus.set", focus: area }) }
+  const setFocusArea = (area: FocusArea) => {
+    if (workPaneMode() === "drawer" && area === "chat") setWorkDrawerOpen(false)
+    dispatchInteraction({ type: "focus.set", focus: area === "rail" ? "agents" : "chat" })
+  }
+  const setPaneFocus = (pane: PaneID, mode: "select" | "interact" = "select") => {
+    // Below 96 columns the Work/Approvals column is a drawer. Selecting it is
+    // explicit, so open it; returning to the left/chat column releases it.
+    if (workPaneMode() === "drawer") setWorkDrawerOpen(pane === "work" || pane === "approvals")
+    dispatchInteraction({ type: "pane.set", pane, mode })
+  }
+  const paneMode = () => interaction().paneMode
+  const paneInteracting = (pane: PaneID) => paneOwnsFocus(paneState(), pane) && paneMode() === "interact"
+  // Ticket #180: live pane visibility. #183 owns the durable left/right
+  // toggles; this memo already skips closed or absent panes safely.
+  const paneVisibility = (): PaneVisibility => ({
+    agents: true,
+    workspaces: true,
+    chat: true,
+    work: showWorkPane(),
+    approvals: showWorkPane() && pendingApprovals().length > 0,
+  })
   const applyInteraction = (result: InteractionResult) => {
     setInteraction(result.state)
     for (const intent of result.intents) {
@@ -888,6 +912,21 @@ export function EnsembleV2App() {
   const initRows = createMemo(() => liveInitJobs().map((job) => initRowForJob(job, motionFrame(), process.env)))
   const initRowMessageIDs = createMemo(() => initJobMessageIDs(state()?.initJobs ?? {}, surface()?.kind === "workspace" ? activeWorkspace()?.id : undefined))
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
+  // Ticket #180: a pane that closes or disappears never traps focus; the
+  // pure machine returns selection to chat. #183 will toggle left/right.
+  createEffect(() => {
+    const visible = paneVisibility()
+    const current = paneState()
+    if (visible[current.pane] !== false) return
+    // An emptied Approvals pane is a sub-pane of Work, not a closed column:
+    // return to Work selection so the Work pane stays reachable. A closed
+    // left/right column still recovers to chat.
+    if (current.pane === "approvals" && visible.work !== false) {
+      dispatchInteraction({ type: "pane.set", pane: "work", mode: "select" })
+      return
+    }
+    dispatchInteraction({ type: "pane.recover", visible })
+  })
   // Ticket #173: the sticky approvals section reserves rows from the Work
   // body, so pagination keeps the cards above it visible. The header is one
   // row and the window is at most three rows.
@@ -1430,15 +1469,16 @@ export function EnsembleV2App() {
   // dump: no streamed body text anywhere. The motion tick keeps the hold
   // closing reactive while the work clock owns the repaint.
   const hasActiveWorkNow = () => hasActiveWork(activeTasks(), Date.now())
-  const workOwnsFocus = () => (interaction().focus === "work" || interaction().focus === "approvals") && !composerActive() && !overlayOpen()
-  /** Ticket #173: Work and inline approvals own their own pane border. */
-  const chatOwnsFocus = () => chromeOwnsFocus(chromeFocus(), "chat") && interaction().focus !== "work" && interaction().focus !== "approvals"
+  // Ticket #180: each pane owns its own border and heading; cards stay grey
+  // until Work is entered.
+  const workOwnsFocus = () => workPaneFocused(paneState()) && !composerActive() && !overlayOpen()
+  const chatOwnsFocus = () => chatPaneFocused(paneState()) && !overlayOpen()
   // A resize into the drawer breakpoint must not leave keyboard focus on a
   // hidden pane. Opening the drawer is explicit (Tab/F3); closing it returns
   // focus to the chat.
   createEffect(() => {
     if (workPaneMode() !== "drawer" || workDrawerOpen()) return
-    if (interaction().focus === "work" || interaction().focus === "approvals") setFocusArea("chat")
+    if (paneOwnsFocus(paneState(), "work") || paneOwnsFocus(paneState(), "approvals")) setFocusArea("chat")
   })
   // Slice C stop affordance (brief §2.5): while active work runs on the group
   // surface a run is abortable, so the composer names `Ctrl+C stop`; the hint
@@ -2205,14 +2245,18 @@ export function EnsembleV2App() {
     }
     if (isModal() || interaction().overlay !== "none") return null
     if (composerActive()) return null
-    switch (interaction().focus) {
-      case "rail": return "roster"
+    // Ticket #180: select mode is the shared shell grammar; only Enter moves
+    // into the pane's own content context. A closed pane owns no keys.
+    if (paneVisibility()[interaction().pane] === false) return null
+    if (paneMode() === "select") return "pane"
+    switch (interaction().pane) {
+      case "agents":
+      case "workspaces": return "roster"
       case "chat": return "chat"
       // Ticket #172: a DM has no Work pane; a hidden drawer has no keys.
       case "work": return showWorkPane() ? "work" : null
       // Ticket #173: inline approvals are their own keyboard zone.
       case "approvals": return showWorkPane() ? "workApprovals" : null
-      default: return null
     }
   }
   // Ticket #172: Work is reachable whenever either view holds work, even when
@@ -2691,21 +2735,20 @@ export function EnsembleV2App() {
   const openRailSelection = async () => {
     await enterRail()
   }
-  /**
-   * Chat Enter focuses the composer target but keeps the current mode. `i`
-   * remains the explicit Insert entry.
-   */
-  const focusComposerKeepingMode = () => {
-    if (!surface()) {
-      showToast({ title: "Ensemble", message: "Open an agent or workspace first.", tone: "warning" })
-      return
-    }
-    composerCache.buffer?.invalidate()
-    dispatchInteraction({ type: "focus.set", focus: "composer" })
-    focusComposer()
+  const listPage = () => Math.max(1, Math.floor(messageHeight() / 2))
+  /** Ticket #180: entering Agents or Workspaces starts row navigation there. */
+  const ensureRailSectionCursor = (section: "agents" | "workspaces") => {
+    const sections = railModel().sections
+    const index = sections.findIndex((entry) => entry.id === section)
+    if (index < 0) return
+    const start = sections.slice(0, index).reduce((total, entry) => total + entry.rows.length, 0)
+    const end = start + sections[index]!.rows.length
+    const cursor = railCursor()
+    if (cursor >= start && cursor < end) return
+    const local = firstSelectableRailRow(sections[index]!.rows)
+    setRailCursor(start + local)
   }
 
-  const listPage = () => Math.max(1, Math.floor(messageHeight() / 2))
   const moveRail = (delta: number) => {
     const length = railVisibleRows().length
     if (length === 0) return
@@ -2785,15 +2828,15 @@ export function EnsembleV2App() {
     setWorkFocusID(undefined)
     setWorkPage(1)
   }
-  /** Mouse selection: focus a card, never act on it. */
+  /** Mouse selection: enter Work interaction and focus that card. */
   const selectWorkCard = (id: string) => {
-    dispatchInteraction({ type: "focus.set", focus: "work" })
+    setPaneFocus("work", "interact")
     focusWorkTask(id)
   }
   const selectWorkPage = (page: number) => {
     const pages = Math.max(1, workPane().pages)
     const next = Math.max(1, Math.min(pages, Math.floor(page)))
-    dispatchInteraction({ type: "focus.set", focus: "work" })
+    setPaneFocus("work", "interact")
     const target = focusFirstOnPage(workFocusPages(), next)
     if (next !== workPage()) setWorkPage(next)
     if (target) {
@@ -2809,28 +2852,57 @@ export function EnsembleV2App() {
     if (workPaneMode() !== "drawer") return
     if (workDrawerOpen()) {
       setWorkDrawerOpen(false)
-      if (interaction().focus === "work" || interaction().focus === "approvals") setFocusArea("chat")
+      if (paneOwnsFocus(paneState(), "work") || paneOwnsFocus(paneState(), "approvals")) setFocusArea("chat")
     } else {
-      setWorkDrawerOpen(true)
-      dispatchInteraction({ type: "focus.set", focus: "work" })
+      // Ticket #180 keeps the legacy F3 drawer gesture untouched: it still
+      // lands on the cards. #183 replaces F3 with Space b r.
+      setPaneFocus("work", "interact")
+      if (workFocusID() === undefined) focusFirstWork()
     }
   }
-  const moveTask = (delta: number) => focusWorkDirection(delta < 0 ? "up" : "down")
+  const workFocusAtLast = () => {
+    const last = lastWorkCardFocus(workFocusPages())
+    return Boolean(last && last.id === workFocusID())
+  }
+  /**
+   * Ticket #180: interact-mode Work down on the last card hands focus to
+   * Approvals selection instead of stopping at a dead edge. Approvals up on
+   * the first row mirrors it. Moving inside a pane otherwise stays in it.
+   */
+  const moveSelectedPane = (direction: "left" | "right" | "up" | "down") => {
+    const next = movePaneFocus(paneState(), direction, {
+      visible: paneVisibility(),
+      workAtLast: workFocusAtLast(),
+      approvalsAtFirst: approvalCursor() === 0,
+    })
+    setPaneFocus(next.pane, next.mode)
+  }
+  const moveTask = (delta: number) => {
+    if (delta > 0 && workFocusAtLast() && pendingApprovals().length > 0) {
+      setPaneFocus("approvals", "select")
+      return
+    }
+    focusWorkDirection(delta < 0 ? "up" : "down")
+  }
   const moveTaskColumn = (delta: number) => focusWorkDirection(delta < 0 ? "left" : "right")
   const moveTaskHalf = (direction: 1 | -1) => focusWorkHalf(direction)
-  /** `v`: enter the sticky approvals zone without opening the modal inbox. */
+  /** `v`: select the sticky approvals pane without opening the modal inbox. */
   const focusWorkApprovals = () => {
     const total = pendingApprovals().length
     if (total === 0) {
       showToast({ title: "Approvals", message: "Nothing waits for you.", tone: "info" })
       return
     }
-    dispatchInteraction({ type: "focus.set", focus: "approvals" })
+    setPaneFocus("approvals", "select")
     setApprovalCursor((cursor) => Math.max(0, Math.min(total - 1, cursor)))
   }
   const moveInlineApproval = (delta: number) => {
     const total = pendingApprovals().length
     if (total === 0) return
+    if (delta < 0 && approvalCursor() === 0) {
+      moveSelectedPane("up")
+      return
+    }
     setApprovalCursor((cursor) => Math.max(0, Math.min(total - 1, cursor + delta)))
   }
   const resolveInlineApproval = () => {
@@ -2846,38 +2918,41 @@ export function EnsembleV2App() {
     openApprovals()
   }
   /**
-   * Mouse: the first click focuses an approval row; clicking the already
-   * focused row resolves it, matching Enter.
+   * Mouse: the first click enters Approvals interaction and selects the row;
+   * clicking the already focused row resolves it, matching Enter.
    */
   const selectInlineApproval = (index: number, approval: Approval) => {
-    if (interaction().focus === "approvals" && approvalCursor() === index) {
+    if (paneInteracting("approvals") && approvalCursor() === index) {
       void resolveApproval(approval).catch(showError)
       return
     }
-    dispatchInteraction({ type: "focus.set", focus: "approvals" })
+    setPaneFocus("approvals", "interact")
     setApprovalCursor(index)
   }
+  /** Enter on a selected pane: interaction starts, but never a card/composer. */
+  const enterSelectedPane = () => {
+    const next = enterPane(paneState())
+    if (next.pane === "agents" || next.pane === "workspaces") ensureRailSectionCursor(next.pane)
+    if (next.pane === "work" && workFocusID() === undefined) focusFirstWork()
+    if (next.pane === "approvals" && pendingApprovals().length > 0) {
+      setApprovalCursor((cursor) => Math.max(0, Math.min(pendingApprovals().length - 1, cursor)))
+    }
+    setPaneFocus(next.pane, next.mode)
+  }
+  /** `i` from chat selects the composer; every other pane ignores it. */
+  const composeFromPaneFocus = () => {
+    if (interaction().pane !== "chat") return
+    startCompose()
+  }
   /**
-   * Tab/Shift+Tab move focus zones: rail -> chat -> work -> approvals,
-   * skipping empty zones and wrapping to the rail. A group chat with no work
-   * or approvals still moves rail <-> chat. Direct conversations have no Work
-   * pane. The composer is entered with i/Enter, never Tab.
+   * Tab/Shift+Tab cycle the visible panes and land in select mode. Closed or
+   * absent panes are skipped by the pure pane machine; the drawer follows the
+   * selected column below 96 columns.
    */
   const cycleFocusZone = (direction: 1 | -1 = 1) => {
     clearPendingChord()
-    const focus = interaction().focus
-    if (focus !== "rail" && focus !== "chat" && focus !== "work" && focus !== "approvals") return
-    const approvals = pendingApprovals().length > 0
-    const next: FocusZone = nextFocusZone(focus, direction, hasWorkZone(), approvals)
-    // Below 96 columns the Work pane is a drawer: entering it opens the
-    // drawer, and leaving it releases the chat width again.
-    if (workPaneMode() === "drawer") {
-      if (next === "work" || next === "approvals") setWorkDrawerOpen(true)
-      else setWorkDrawerOpen(false)
-    }
-    if (next === "work" && !selectedTask()) focusFirstWork()
-    if (next === "approvals" && approvals) setApprovalCursor((cursor) => Math.max(0, Math.min(pendingApprovals().length - 1, cursor)))
-    dispatchInteraction({ type: "focus.set", focus: next })
+    const next = cyclePaneFocus(paneState(), direction, paneVisibility())
+    setPaneFocus(next.pane, next.mode)
   }
 
   const scrollTranscriptBy = (delta: number) => {
@@ -3230,10 +3305,9 @@ export function EnsembleV2App() {
   const surfaceEscape = () => {
     clearPendingChord()
     if (clearSearchAndFilter()) return
-    if (interaction().focus === "work") {
-      if (workPaneMode() === "drawer") setWorkDrawerOpen(false)
-      dispatchInteraction({ type: "escape" })
-    }
+    // Ticket #180: one Esc ladder for every pane. Interact returns to select;
+    // the reducer owns the composer/overlay precedence above this.
+    dispatchInteraction({ type: "escape" })
   }
 
   const startCompose = () => {
@@ -4417,8 +4491,21 @@ export function EnsembleV2App() {
     "nav.half.down": () => moveRailHalf(1),
     "nav.half.up": () => moveRailHalf(-1),
     "rail.collapse": () => toggleRailGroup(),
-    "nav.left": () => setFocusArea("rail"),
-    "nav.right": () => setFocusArea("chat"),
+    "pane.left": () => moveSelectedPane("left"),
+    "pane.right": () => moveSelectedPane("right"),
+    "pane.up": () => moveSelectedPane("up"),
+    "pane.down": () => moveSelectedPane("down"),
+    "pane.enter": () => enterSelectedPane(),
+    "pane.escape": () => dispatchInteraction({ type: "escape" }),
+    "pane.compose": () => composeFromPaneFocus(),
+    "pane.approvals": () => {
+      // Ticket #185 will make the right-pane approvals the only surface; until
+      // then Work/Approvals selection uses the inline pane and other panes
+      // keep the existing modal entry.
+      if (interaction().pane === "work" || interaction().pane === "approvals") focusWorkApprovals()
+      else openApprovals()
+    },
+    "chat.enter": () => undefined,
     "focus.tab": () => cycleFocusZone(1),
     "focus.shift.tab": () => cycleFocusZone(-1),
     open: () => openRailSelection(),
@@ -4440,9 +4527,6 @@ export function EnsembleV2App() {
     "chat.bottom": () => jumpToBottom(),
     "chat.half.down": () => scrollTranscriptHalf(1),
     "chat.half.up": () => scrollTranscriptHalf(-1),
-    "chat.nav.left": () => setFocusArea("rail"),
-    "chat.nav.right": () => setFocusArea("chat"),
-    compose: () => focusComposerKeepingMode(),
     "compose.alt": () => startCompose(),
     "chat.new.agent": () => createAgent(),
     "chat.new.workspace": () => createWorkspace(),
@@ -4487,7 +4571,7 @@ export function EnsembleV2App() {
     "workApprovals.down": () => moveInlineApproval(1),
     "workApprovals.up": () => moveInlineApproval(-1),
     "workApprovals.resolve": () => resolveInlineApproval(),
-    "workApprovals.back": () => dispatchInteraction({ type: "focus.set", focus: "work" }),
+    "workApprovals.back": () => dispatchInteraction({ type: "escape" }),
     // Settings grammar (#83): the keys live in the catalog; these handlers
     // only mutate the cursor or dispatch the row action.
     "settings.tab.prev": () => setSettingsTabTo(settingsTabStep(settingsTab(), -1)),
@@ -4874,7 +4958,7 @@ export function EnsembleV2App() {
         runKeyAction(entry.id)
       },
     })
-    const surfaceLayer = (keyContext: "roster" | "chat" | "work" | "workApprovals") => {
+    const surfaceLayer = (keyContext: "pane" | "roster" | "chat" | "work" | "workApprovals") => {
       const entries = layerEntries(keyContext)
       if (entries.length === 0) return
       const commands = entries.map((entry) => catalogCommand(entry, `ensemble.v2.key.${keyContext}.${entry.id}`))
@@ -4887,7 +4971,7 @@ export function EnsembleV2App() {
       })
       context.keymap.layer(factory)
     }
-    for (const keyContext of ["roster", "chat", "work", "workApprovals"] as const) {
+    for (const keyContext of ["pane", "roster", "chat", "work", "workApprovals"] as const) {
       surfaceLayer(keyContext)
     }
     // Ticket #83: settings is generated from its own catalog context. The
@@ -6351,9 +6435,9 @@ export function EnsembleV2App() {
     if (picker()) return listPosition(picker()!.cursor, pickerItems().length)
     const prompt = textPrompt()
     if (prompt) return composerPosition(String(textPromptRef?.plainText ?? prompt.value), Number(textPromptRef?.cursorOffset ?? 0))
-    if (interaction().focus === "rail") return listPosition(railCursor(), railVisibleRows().length)
-    if (interaction().focus === "work") return listPosition(taskCursorClamped(), visibleTasks().length)
-    if (interaction().focus === "approvals") return listPosition(approvalCursor(), pendingApprovals().length)
+    if (interaction().pane === "agents" || interaction().pane === "workspaces") return listPosition(railCursor(), railVisibleRows().length)
+    if (interaction().pane === "work") return listPosition(taskCursorClamped(), visibleTasks().length)
+    if (interaction().pane === "approvals") return listPosition(approvalCursor(), pendingApprovals().length)
     const metrics = transcriptScroll()
     return transcriptPosition(metrics.top, metrics.height, metrics.viewport)
   }
@@ -6459,12 +6543,19 @@ export function EnsembleV2App() {
       if (entry.id === "work.inbox") return inlineApprovals().overflow > 0
       return true
     }
-    if (interaction().focus === "work") return statuslineHints("work", { hasWork: hasWorkZone(), filter: workHintFilter })
-    if (interaction().focus === "approvals") {
+    if (paneMode() === "interact" && interaction().pane === "work") return statuslineHints("work", { hasWork: hasWorkZone(), filter: workHintFilter })
+    if (paneMode() === "interact" && interaction().pane === "approvals") {
       return statuslineHints("workApprovals", { filter: (entry) => entry.id !== "work.inbox" || inlineApprovals().overflow > 0 })
     }
     const keyContext = surfaceKeyContext()
-    if (keyContext) return statuslineHints(keyContext, { hasWork: hasWorkZone() })
+    if (keyContext) {
+      return statuslineHints(keyContext, {
+        hasWork: hasWorkZone(),
+        filter: keyContext === "pane"
+          ? (entry) => entry.id !== "pane.compose" || interaction().pane === "chat"
+          : undefined,
+      })
+    }
     return footerLine1({ focus: chromeFocus(), hasWork: hasWorkZone() })
   }
   const statusMessage = () => visibleMessage(interaction(), Date.now())?.text ?? null
@@ -6535,9 +6626,9 @@ export function EnsembleV2App() {
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} minHeight={0} gap={1} position="relative" opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focus={chromeOwnsFocus(chromeFocus(), "rail")} cursorVisible={chromeOwnsFocus(chromeFocus(), "rail")} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
+          <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focusedSection={railSectionFocused(paneState(), "agents") ? "agents" : railSectionFocused(paneState(), "workspaces") ? "workspaces" : null} cursorVisible={paneMode() === "interact" && (interaction().pane === "agents" || interaction().pane === "workspaces")} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chatOwnsFocus() ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
-            <ChromeText colors={colors} fg={(chromeFocus() === "chat" && interaction().focus !== "work" && interaction().focus !== "approvals") || chromeFocus() === "composer" ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
+            <ChromeText colors={colors} fg={chatOwnsFocus() || composerActive() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={limitsOpen()} fallback={
               <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
@@ -6788,7 +6879,7 @@ export function EnsembleV2App() {
                           const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
                           return {
                             terminal,
-                            selected: selectedTask()?.id === task.id,
+                            selected: workCardsFocused(paneState()) && selectedTask()?.id === task.id,
                             row: workCompactRow(
                               agentName(state(), task.assigneeID),
                               task.title || "(untitled)",
@@ -6837,7 +6928,7 @@ export function EnsembleV2App() {
                                 now: Date.now(),
                               })}
                               width={workPane().layout.cardWidth}
-                              selected={selectedTask()?.id === card.id}
+                              selected={workCardsFocused(paneState()) && selectedTask()?.id === card.id}
                               onSelect={() => selectWorkCard(card.id)}
                             />
                           )}</For>
@@ -6853,7 +6944,8 @@ export function EnsembleV2App() {
                 <WorkApprovalsView
                   colors={colors}
                   section={inlineApprovals()}
-                  focused={interaction().focus === "approvals" && !overlayOpen()}
+                  focused={paneOwnsFocus(paneState(), "approvals") && !overlayOpen()}
+                  interacting={paneInteracting("approvals") && !overlayOpen()}
                   resolvingID={resolvingApprovalID()}
                   motionTick={motionFrame()}
                   emphasized={approvalMotion().emphasized}

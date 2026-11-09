@@ -240,7 +240,11 @@ test("f toggles ACTIVE and HISTORY", () => {
 })
 
 test("focusing Work or approvals opens the drawer", () => {
-  assert.ok(has(app(), "setWorkDrawerOpen(true)"))
+  assert.ok(has(app(), 'setWorkDrawerOpen(pane === "work" || pane === "approvals")'))
+})
+
+test("ticket180: F3 keeps its legacy drawer-to-cards behavior", () => {
+  assert.ok(has(app(), 'setPaneFocus("work", "interact")'))
 })
 
 test("the Work page previous control pages", () => {
@@ -319,12 +323,12 @@ test("the pending label settles on the durable update", () => {
   assert.ok(has(app(), "pendingWorkSettled(pending"))
 })
 
-test("card selection is independent of pane focus", () => {
-  assert.ok(has(app(), "selected={selectedTask()?.id === card.id}"))
+test("card selection is gated by Work interaction, not pane selection", () => {
+  assert.ok(has(app(), "workCardsFocused(paneState()) && selectedTask()?.id === card.id"))
 })
 
-test("compact rows share the card focus identity", () => {
-  assert.ok(has(app(), "selectedTask()?.id === task.id"))
+test("compact rows share the card focus identity and interaction gate", () => {
+  assert.ok(has(app(), "workCardsFocused(paneState()) && selectedTask()?.id === task.id"))
 })
 
 test("the card border comes from the focus helper", () => {
@@ -367,8 +371,81 @@ test("the approval view forwards row clicks", () => {
   assert.ok(has(components(), "props.onSelect(row.index, row.approval)"))
 })
 
-test("Tab cycles through the shared focus zones", () => {
-  assert.ok(has(app(), "nextFocusZone("))
+test("Tab cycles the visible panes through the pure pane machine", () => {
+  assert.ok(has(app(), "cyclePaneFocus(paneState()"))
+})
+
+test("ticket180: chat l selects Work through the pure pane transition", () => {
+  const source = app()
+  assert.ok(has(source, "pane.right"))
+  assert.ok(has(source, 'moveSelectedPane("right")'))
+})
+
+test("ticket180: chat h selects Agents and Agents j selects Workspaces", () => {
+  const source = app()
+  assert.ok(has(source, 'moveSelectedPane("left")'))
+  assert.ok(has(source, 'moveSelectedPane("down")'))
+  assert.ok(has(source, "pane.left"))
+})
+
+test("ticket180: Work j at the last card selects Approvals", () => {
+  assert.ok(has(app(), 'setPaneFocus("approvals", "select")'))
+})
+
+test("ticket180: Approvals up at the first row returns Work selection", () => {
+  assert.ok(has(app(), 'moveSelectedPane("up")'))
+})
+
+test("ticket180: Enter enters the selected pane without starting card navigation in select mode", () => {
+  const source = app()
+  assert.ok(has(source, "enterPane(paneState())"))
+  assert.ok(has(source, "if (next.pane === \"work\" && workFocusID() === undefined) focusFirstWork()"))
+})
+
+test("ticket180: pane Esc returns to select through the interaction reducer", () => {
+  assert.ok(has(app(), 'dispatchInteraction({ type: "escape" })'))
+})
+
+test("ticket180: chat i is the only composer path", () => {
+  assert.ok(has(app(), "composeFromPaneFocus"))
+  assert.ok(has(app(), "if (interaction().pane !== \"chat\") return"))
+})
+
+test("ticket180: the rail receives its focused sub-pane", () => {
+  assert.ok(has(app(), 'focusedSection={railSectionFocused(paneState(), "agents")'))
+})
+
+test("ticket180: the chat border and heading are white when chat is selected", () => {
+  const source = app()
+  assert.ok(has(source, "chatOwnsFocus() ? colors.focus : colors.border"))
+  assert.ok(has(source, "chatOwnsFocus() || composerActive() ? colors.focus : colors.muted"))
+})
+
+test("ticket180: the Work border and heading are white when Work or Approvals is selected", () => {
+  const source = app()
+  assert.ok(has(source, "workOwnsFocus() ? colors.focus : colors.border"))
+  assert.ok(has(source, "workOwnsFocus() ? colors.focus : colors.muted"))
+})
+
+test("ticket180: a closed or absent pane recovers selection to chat", () => {
+  assert.ok(has(app(), 'dispatchInteraction({ type: "pane.recover", visible })'))
+})
+
+test("ticket180: the rail section border and heading follow the focused sub-pane", () => {
+  const source = components()
+  assert.ok(has(source, "sectionFocused(section.id) ? props.colors.focus : props.colors.faint"))
+  assert.ok(has(source, "sectionBorder(section.id)"))
+})
+
+test("ticket180: the rail row cursor stays inside the focused sub-pane", () => {
+  assert.ok(has(components(), "sectionFocused(section.id) && props.cursor === index()"))
+})
+
+test("ticket180: the Work approvals header is white when selected but rows wait for interaction", () => {
+  const source = app()
+  assert.ok(has(source, 'focused={paneOwnsFocus(paneState(), "approvals")'))
+  assert.ok(has(source, 'interacting={paneInteracting("approvals")'))
+  assert.ok(has(components(), "props.interacting && props.section.cursor === row.index"))
 })
 
 test("approvals join the focus cycle only while pending", () => {
