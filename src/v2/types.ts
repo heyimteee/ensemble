@@ -560,6 +560,11 @@ export type Snapshot = {
        * rail. Durable so the rail reopens the way the user left it.
        */
       collapsedRailGroups?: Id[]
+      /**
+       * Ticket #184: dispatch group ids hidden from the Work HISTORY view.
+       * Durable view state only; the terminal rows remain for 24h retention.
+       */
+      dismissedHistoryGroups?: Id[]
       history?: Record<string, {
         surface: "workspace" | "agent"
         workspaceID?: Id

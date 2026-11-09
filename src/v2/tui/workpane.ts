@@ -2,7 +2,7 @@ import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { allWorkGroupsForTasks, workFinishedAt, type WorkGroup, type WorkGroupOptions } from "../work-groups.ts"
 import type { Subtask } from "../types.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS, workCardContentWidth } from "./workrows.ts"
-import { workGroupLabel } from "./workgroups.ts"
+import { workGroupLabel, workAgeLabel, workHistoryFinishedAt, workHistoryRollupLabel } from "./workgroups.ts"
 
 /**
  * Ticket #172: one responsive shell model for the three-pane workspace.
@@ -125,13 +125,12 @@ export function workPaneColumns(contentWidth: number): number {
 }
 
 /**
- * Ticket #172: the Work pane's two views.
+ * Ticket #184: the Work pane's two views partition tasks, not groups.
  *
- * ACTIVE keeps only groups with non-terminal work and removes every terminal
- * card, including terminal members of an otherwise active group. HISTORY keeps
- * groups whose members are all terminal, newest latest-finish first, with the
- * tasks in chronological order. Partitioning by any non-terminal member means a
- * group can never appear in both views.
+ * ACTIVE keeps every non-terminal task; HISTORY keeps every terminal task,
+ * even when its group still has live work. A group can therefore appear in
+ * both views with disjoint cards. HISTORY groups order by their latest terminal
+ * finish, newest first, and cards inside a group order by finish, newest first.
  */
 export type WorkView = "active" | "history"
 
@@ -151,8 +150,8 @@ function latestFinish(group: WorkGroup): number {
   return latest ?? group.latestTerminalAt ?? group.createdAt
 }
 
-function chronological(left: Subtask, right: Subtask): number {
-  return left.createdAt - right.createdAt || left.id.localeCompare(right.id)
+function newestFinish(left: Subtask, right: Subtask): number {
+  return (workFinishedAt(right) ?? 0) - (workFinishedAt(left) ?? 0) || right.createdAt - left.createdAt || left.id.localeCompare(right.id)
 }
 
 export function workViewGroups(
@@ -164,13 +163,17 @@ export function workViewGroups(
   const active: WorkGroup[] = []
   const history: WorkGroup[] = []
   for (const group of allWorkGroupsForTasks(tasks, subtasks, options)) {
-    if (group.active > 0) {
-      active.push({
+    const live = group.tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
+    const finished = group.tasks.filter((task) => isTerminalWorkStatus(deriveWorkStatus(task, now)))
+    if (live.length > 0) active.push({ ...group, tasks: live })
+    if (finished.length > 0) {
+      history.push({
         ...group,
-        tasks: group.tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now))),
+        tasks: [...finished].sort(newestFinish),
+        // The history subset owns only its finished cards; `active` stays the
+        // group's live count so the rollup can say "active count when relevant".
+        done: finished.length,
       })
-    } else {
-      history.push({ ...group, tasks: [...group.tasks].sort(chronological) })
     }
   }
   active.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
@@ -184,6 +187,107 @@ export function workViewGroups(
 }
 
 /**
+ * Ticket #184: sticky history presentation state.
+ *
+ * `expanded` records the group's row state once seen: the newest group starts
+ * expanded, every other group starts rolled up, and Enter's decision survives
+ * later updates. `done` is the terminal-card count last rendered, so a finish
+ * in a collapsed group increments the count and sets `fresh` without moving the
+ * page or opening the group. `fresh` stays until the group is expanded or
+ * dismissed.
+ */
+export type HistoryViewState = {
+  expanded: Record<string, boolean>
+  done: Record<string, number>
+  fresh: Record<string, boolean>
+}
+
+export function emptyHistoryViewState(): HistoryViewState {
+  return { expanded: {}, done: {}, fresh: {} }
+}
+
+function sameHistoryView(left: HistoryViewState, right: HistoryViewState): boolean {
+  const keys = Object.keys(left.expanded)
+  if (keys.length !== Object.keys(right.expanded).length) return false
+  return keys.every(
+    (key) =>
+      left.expanded[key] === right.expanded[key] &&
+      left.done[key] === right.done[key] &&
+      left.fresh[key] === right.fresh[key],
+  )
+}
+
+/** Reconcile one history snapshot; an unchanged result keeps the previous object. */
+export function reconcileHistoryView(
+  groups: readonly WorkGroup[],
+  previous: HistoryViewState,
+): HistoryViewState {
+  const expanded: Record<string, boolean> = {}
+  const done: Record<string, number> = {}
+  const fresh: Record<string, boolean> = {}
+  groups.forEach((group, index) => {
+    const priorExpanded = previous.expanded[group.id]
+    const isExpanded = priorExpanded ?? index === 0
+    const priorDone = previous.done[group.id]
+    expanded[group.id] = isExpanded
+    done[group.id] = group.done
+    fresh[group.id] = isExpanded
+      ? false
+      : Boolean(previous.fresh[group.id] || (priorDone !== undefined && group.done > priorDone))
+  })
+  const next = { expanded, done, fresh }
+  return sameHistoryView(previous, next) ? previous : next
+}
+
+/** Enter on a history group row toggles only that group; expanding clears its marker. */
+export function toggleHistoryView(state: HistoryViewState, groupID: string): HistoryViewState {
+  const expanded = !(state.expanded[groupID] ?? false)
+  return {
+    expanded: { ...state.expanded, [groupID]: expanded },
+    done: state.done,
+    fresh: { ...state.fresh, [groupID]: expanded ? false : (state.fresh[groupID] ?? false) },
+  }
+}
+
+/** The pagination input for HISTORY: group data plus its rolled-up/expanded row state. */
+export type WorkPaneGroup = WorkGroup & {
+  /** Ticket #184: render a focusable history header row before any cards. */
+  history?: boolean
+  /** The group contributes one rolled-up row and no cards. */
+  collapsed?: boolean
+  /** A finish arrived while the group was rolled up. */
+  fresh?: boolean
+}
+
+/** Visible history groups in newest-first order with their row state applied. */
+export function historyPaneGroups(
+  groups: readonly WorkGroup[],
+  state: HistoryViewState,
+  dismissed: ReadonlySet<string> = new Set<string>(),
+): WorkPaneGroup[] {
+  return groups
+    .filter((group) => !dismissed.has(group.id))
+    .map((group, index) => ({
+      ...group,
+      history: true as const,
+      collapsed: !(state.expanded[group.id] ?? index === 0),
+      fresh: state.fresh[group.id] === true,
+    }))
+}
+
+/** Ticket #184: a history header row is a focus target distinct from task cards. */
+export const WORK_HISTORY_FOCUS_PREFIX = "history:"
+
+export function historyGroupFocusID(groupID: string): string {
+  return `${WORK_HISTORY_FOCUS_PREFIX}${groupID}`
+}
+
+export function historyGroupIDFromFocus(focusID: string | undefined): string | undefined {
+  if (focusID === undefined || !focusID.startsWith(WORK_HISTORY_FOCUS_PREFIX)) return undefined
+  return focusID.slice(WORK_HISTORY_FOCUS_PREFIX.length)
+}
+
+/**
  * Ticket #172: one paginated Work page section. Cards and compact rows keep
  * their ticket #137 design; pagination only decides which slice of a group is
  * visible and whether the group header repeats with `cont.`.
@@ -193,14 +297,28 @@ export type WorkPaneSection = {
   /** Full header on a group's first section of a page; null when the previous section on the page owns it. */
   label: string | null
   tone: "faint" | "warn"
-  mode: "cards" | "rows"
+  mode: "cards" | "rows" | "rollup"
   tasks: Subtask[]
+  /** Ticket #184: the rolled-up history header row. */
+  rollup?: WorkHistoryRollup
   /** Rows the section consumes, including its label but excluding `gapBefore`. */
   height: number
   /** The group began on an earlier page. */
   continued: boolean
   /** One separation row between groups in card mode. */
   gapBefore: boolean
+}
+
+/** Ticket #184: one rolled-up history group row. */
+export type WorkHistoryRollup = {
+  groupID: string
+  ordinal: number
+  done: number
+  active: number
+  collapsed: boolean
+  fresh: boolean
+  age: string
+  label: string
 }
 
 export type WorkPanePage = {
@@ -236,8 +354,9 @@ type SectionAtom = {
   groupID: string
   fullLabel: string
   tone: "faint" | "warn"
-  mode: "cards" | "rows"
+  mode: "cards" | "rows" | "rollup"
   tasks: Subtask[]
+  rollup?: WorkHistoryRollup
   /** Rows for the card row or compact rows, without a label. */
   bodyHeight: number
   /** First section of a group after another group; cards use one blank row. */
@@ -262,7 +381,7 @@ function emptyLayout(): WorkPaneLayout {
  * a group that simply starts on a new page keeps its normal header.
  */
 export function paginateWorkGroups(
-  groups: WorkGroup[],
+  groups: ReadonlyArray<WorkPaneGroup>,
   contentWidth: number,
   bodyHeight: number,
   now: number = Date.now(),
@@ -279,6 +398,29 @@ export function paginateWorkGroups(
   groups.forEach((group, index) => {
     const fullLabel = workGroupLabel(group, index + 1)
     const tone = sectionTone(group, now)
+    if (group.history) {
+      const age = workAgeLabel(now - workHistoryFinishedAt(group))
+      atoms.push({
+        groupID: group.id,
+        fullLabel,
+        tone,
+        mode: "rollup",
+        tasks: [],
+        bodyHeight: 1,
+        gapBefore: index > 0 && cards,
+        rollup: {
+          groupID: group.id,
+          ordinal: index + 1,
+          done: group.done,
+          active: group.active,
+          collapsed: group.collapsed === true,
+          fresh: group.fresh === true,
+          age,
+          label: workHistoryRollupLabel(group, index + 1, now),
+        },
+      })
+      if (group.collapsed === true) return
+    }
     if (cards) {
       for (let offset = 0; offset < group.tasks.length; offset += columns) {
         atoms.push({
@@ -288,7 +430,8 @@ export function paginateWorkGroups(
           mode: "cards",
           tasks: group.tasks.slice(offset, offset + columns),
           bodyHeight: WORK_CARD_ROWS,
-          gapBefore: index > 0 && offset === 0,
+          // A history group's focusable header already owns the separation row.
+          gapBefore: !group.history && index > 0 && offset === 0,
         })
       }
       return
@@ -319,8 +462,9 @@ export function paginateWorkGroups(
     pageHeight = 0
   }
   for (const atom of atoms) {
+    const rollup = atom.mode === "rollup"
     let groupStarted = started.has(atom.groupID)
-    let header = !sections.some((section) => section.groupID === atom.groupID)
+    let header = !rollup && !sections.some((section) => section.groupID === atom.groupID)
     let gap = atom.gapBefore && sections.length > 0 ? 1 : 0
     let cost = atom.bodyHeight + (header ? 1 : 0) + gap
     if (pageHeight + cost > body && sections.length > 0) {
@@ -329,9 +473,9 @@ export function paginateWorkGroups(
       // normal header because the user has not seen it yet.
       flush()
       groupStarted = started.has(atom.groupID)
-      header = true
+      header = !rollup
       gap = 0
-      cost = atom.bodyHeight + 1
+      cost = atom.bodyHeight + (header ? 1 : 0)
     }
     // A single whole row can never exceed the body in card mode (gated) or
     // compact mode, so a fresh page always fits it.
@@ -341,13 +485,14 @@ export function paginateWorkGroups(
       tone: atom.tone,
       mode: atom.mode,
       tasks: atom.tasks,
+      ...(atom.rollup ? { rollup: atom.rollup } : {}),
       height: atom.bodyHeight + (header ? 1 : 0),
       continued: header && groupStarted,
       gapBefore: gap === 1,
     })
     pageHeight += cost
     pageTasks.push(...atom.tasks)
-    if (header) started.add(atom.groupID)
+    if (header || rollup) started.add(atom.groupID)
   }
   flush()
   return {

@@ -45,7 +45,7 @@ test("store reloads settings, UI state, and bindings", async () => {
   await store.saveAgent(agent())
   await store.saveWorkspace(workspace())
   await store.updateSettings({ maxActiveRuns: 1, maxDepth: 2 })
-  await store.saveUi({ activeWorkspaceID: "w", collapsedRailGroups: ["w"] })
+  await store.saveUi({ activeWorkspaceID: "w", collapsedRailGroups: ["w"], dismissedHistoryGroups: ["dispatch_1"] })
   await store.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s", agentVersion: 1, updatedAt: 1 })
   const loaded = new V2Store(ctx)
   await loaded.load()
@@ -53,6 +53,7 @@ test("store reloads settings, UI state, and bindings", async () => {
   assert.equal(loaded.settings().maxDepth, 2)
   assert.equal(loaded.snapshot().ui.activeWorkspaceID, "w")
   assert.deepEqual(loaded.snapshot().ui.collapsedRailGroups, ["w"], "rail collapse state survives a restart")
+  assert.deepEqual(loaded.snapshot().ui.dismissedHistoryGroups, ["dispatch_1"], "history dismissal survives a restart without deleting rows")
   assert.equal(loaded.binding("w", "a")?.sessionID, "s")
 })
 

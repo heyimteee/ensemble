@@ -1,5 +1,5 @@
 import { WORK_CARD_GAP_COLS, WORK_CARD_ROWS } from "./workrows.ts"
-import type { WorkPaneLayout, WorkPanePage } from "./workpane.ts"
+import { historyGroupFocusID, type WorkPaneLayout, type WorkPanePage } from "./workpane.ts"
 
 /**
  * Ticket #173: spatial Work-card focus.
@@ -51,6 +51,18 @@ export function workPageRects(page: WorkPanePage, layout: WorkPageGeometry): Wor
   let y = 0
   for (const section of page.sections) {
     if (section.gapBefore) y += 1
+    if (section.mode === "rollup") {
+      rects.push({
+        id: historyGroupFocusID(section.groupID),
+        page: page.number,
+        x: 0,
+        y,
+        width: Math.max(1, layout.cardContentWidth),
+        height: 1,
+      })
+      y += 1
+      continue
+    }
     if (section.label !== null) y += 1
     if (section.mode === "cards") {
       section.tasks.forEach((task, index) => {
@@ -271,7 +283,9 @@ function nearestAtEdge(page: WorkPageRects, origin: WorkCardRect, direction: "up
 
 /**
  * `hjkl` movement. `j/k` cross a page edge to the adjacent page and pick the
- * card closest to the prior column; `h/l` never leave their page.
+ * card closest to the prior column. Ticket #184 also pages with `h/l` at the
+ * row's left/right edge, landing on the nearest card on the adjacent page so
+ * the pager and focus stay continuous.
  */
 export function navigateWorkFocus(
   pages: readonly WorkPageRects[],
@@ -283,11 +297,13 @@ export function navigateWorkFocus(
   const page = pages.find((candidate) => candidate.page === current.page)
   const within = page ? nextWorkCard(page.rects, focusedID, direction) : undefined
   if (within) return targetOf(within, current.page)
-  if (direction === "left" || direction === "right") return undefined
-  const adjacent = pages.find(
-    (candidate) => candidate.page === current.page + (direction === "down" ? 1 : -1),
-  )
+  const step = direction === "down" || direction === "right" ? 1 : -1
+  const adjacent = pages.find((candidate) => candidate.page === current.page + step)
   if (!adjacent || adjacent.rects.length === 0) return undefined
+  if (direction === "left" || direction === "right") {
+    const rect = nearestToPosition(adjacent.rects, current.rect)
+    return rect ? targetOf(rect, adjacent.page) : undefined
+  }
   return nearestAtEdge(adjacent, current.rect, direction)
 }
 
