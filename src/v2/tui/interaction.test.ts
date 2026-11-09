@@ -19,7 +19,7 @@ const reduce = (state: InteractionState, event: Parameters<typeof interactionRed
 test("interaction starts in Normal mode on the roster with no pending surface state", () => {
   const state = initialInteractionState()
   assert.equal(state.mode, "normal")
-  assert.equal(state.focus, "rail")
+  assert.equal(state.focus, "agents")
   assert.equal(state.overlay, "none")
   assert.equal(state.field, null)
   assert.equal(state.command, null)
@@ -47,8 +47,12 @@ test("the Esc ladder goes Insert -> composer Normal -> chat Normal, never quitti
   assert.equal(chatNormal.state.focus, "chat")
   assert.deepEqual(chatNormal.intents, [{ type: "blur-editor" }])
 
-  const idle = reduce(chatNormal.state, { type: "escape" })
-  assert.deepEqual(idle.state, chatNormal.state, "an idle Esc changes nothing")
+  const chatSelect = reduce(chatNormal.state, { type: "escape" })
+  assert.equal(chatSelect.state.focus, "chat")
+  assert.equal(chatSelect.state.paneMode, "select", "chat interaction returns to selection")
+
+  const idle = reduce(chatSelect.state, { type: "escape" })
+  assert.deepEqual(idle.state, chatSelect.state, "an idle Esc changes nothing")
   assert.deepEqual(idle.intents, [{ type: "noop" }])
   assert.ok(!idle.intents.some((intent) => String(intent.type).includes("quit")), "Esc never emits a quit intent")
 })
@@ -75,8 +79,9 @@ test("Ctrl+G leaves the editor immediately from Insert or composer Normal", () =
 
 test("focus changes outside the composer keep the current mode and blur the editor", () => {
   const insert = reduce(initialInteractionState(), { type: "insert.enter" })
-  const rail = reduce(insert.state, { type: "focus.set", focus: "rail" })
-  assert.equal(rail.state.focus, "rail")
+  const rail = reduce(insert.state, { type: "focus.set", focus: "agents" })
+  assert.equal(rail.state.focus, "agents")
+  assert.equal(rail.state.paneMode, "select")
   assert.equal(rail.state.mode, "insert", "moving focus never assigns Normal")
   assert.deepEqual(rail.intents, [{ type: "blur-editor" }])
 })
@@ -95,7 +100,7 @@ test("leaving the Ensemble route resets Normal and clears every transient field"
 
   const left = reduce(before, { type: "route.leave" })
   assert.equal(left.state.mode, "normal", "leaving always lands in Normal")
-  assert.equal(left.state.focus, "rail", "an overlay context never survives the leave")
+  assert.equal(left.state.focus, "agents", "an overlay context never survives the leave")
   assert.equal(left.state.overlay, "none")
   assert.equal(left.state.field, null)
   assert.equal(left.state.command, null)
@@ -105,21 +110,59 @@ test("leaving the Ensemble route resets Normal and clears every transient field"
   assert.deepEqual(left.intents, [{ type: "blur-editor" }], "the adapter blurs every editor")
 })
 
-test("Esc returns from the work-list zone to the transcript", () => {
-  const work = reduce(initialInteractionState(), { type: "focus.set", focus: "work" })
+test("ticket180: Esc returns Work interaction to Work selection, not the transcript", () => {
+  const work = reduce(initialInteractionState(), { type: "pane.set", pane: "work" })
   assert.equal(work.state.focus, "work")
-  assert.equal(work.state.mode, "normal")
-  const chat = reduce(work.state, { type: "escape" })
-  assert.equal(chat.state.focus, "chat")
-  assert.equal(chat.state.mode, "normal")
+  assert.equal(work.state.paneMode, "select")
+  const entered = reduce(work.state, { type: "pane.enter" })
+  assert.equal(entered.state.paneMode, "interact")
+  const select = reduce(entered.state, { type: "escape" })
+  assert.equal(select.state.focus, "work")
+  assert.equal(select.state.paneMode, "select")
+  const idle = reduce(select.state, { type: "escape" })
+  assert.equal(idle.state.paneMode, "select", "select-mode Esc never moves focus")
 })
 
-test("ticket173: Esc returns from inline approvals to the work cards", () => {
-  const approvals = reduce(initialInteractionState(), { type: "focus.set", focus: "approvals" })
+test("ticket180: Esc returns inline approvals interaction to Approvals selection", () => {
+  const approvals = reduce(initialInteractionState(), { type: "pane.set", pane: "approvals" })
   assert.equal(approvals.state.focus, "approvals")
-  const work = reduce(approvals.state, { type: "escape" })
+  assert.equal(approvals.state.paneMode, "select")
+  const entered = reduce(approvals.state, { type: "pane.enter" })
+  assert.equal(entered.state.paneMode, "interact")
+  const select = reduce(entered.state, { type: "escape" })
+  assert.equal(select.state.focus, "approvals")
+  assert.equal(select.state.paneMode, "select")
+})
+
+test("ticket180: pane events implement the select/interact transition table", () => {
+  const chat = initialInteractionState({ focus: "chat", pane: "chat" })
+  const work = reduce(chat, { type: "pane.move", direction: "right" })
   assert.equal(work.state.focus, "work")
-  assert.equal(work.state.mode, "normal")
+  assert.equal(work.state.paneMode, "select", "movement never enters a pane")
+  const entered = reduce(work.state, { type: "pane.enter" })
+  assert.equal(entered.state.paneMode, "interact", "Enter starts card navigation")
+  const approvals = reduce(entered.state, { type: "pane.move", direction: "down", workAtLast: true })
+  assert.equal(approvals.state.focus, "approvals")
+  assert.equal(approvals.state.paneMode, "select")
+  const back = reduce(approvals.state, { type: "pane.move", direction: "up" })
+  assert.equal(back.state.focus, "work")
+  assert.equal(back.state.paneMode, "select")
+})
+
+test("ticket180: the composer is chat-only and returns to chat interaction", () => {
+  const chat = initialInteractionState({ focus: "chat", pane: "chat" })
+  const composed = reduce(chat, { type: "pane.compose" })
+  assert.equal(composed.state.focus, "composer")
+  assert.equal(composed.state.paneMode, "interact")
+  assert.deepEqual(composed.intents, [{ type: "focus-editor", target: "composer" }])
+  const left = reduce(composed.state, { type: "escape" })
+  assert.equal(left.state.focus, "chat")
+  assert.equal(left.state.paneMode, "interact")
+
+  const agents = initialInteractionState()
+  const ignored = reduce(agents, { type: "pane.compose" })
+  assert.equal(ignored.state.focus, "agents")
+  assert.deepEqual(ignored.intents, [{ type: "noop" }])
 })
 
 test("an open dialog owns Esc first and closes via a typed intent", () => {
@@ -168,7 +211,7 @@ test("a dialog text field goes Insert -> field Normal -> cancel on the Esc ladde
 })
 
 test("help opens and closes without changing the underlying mode or focus", () => {
-  for (const focus of ["rail", "chat", "work", "composer"] as const) {
+  for (const focus of ["agents", "chat", "work", "composer"] as const) {
     const opened = reduce(initialInteractionState({ focus }), { type: "overlay.set", overlay: "help" })
     assert.equal(opened.state.overlay, "help")
     assert.equal(opened.state.mode, "normal", "help is a Normal-mode context")
@@ -317,7 +360,7 @@ test("visual.leave clears the selection; Insert or Command still replace Visual"
   assert.equal(left.state.mode, "normal")
   assert.equal(left.state.selection, null)
 
-  const rail = reduce(visual, { type: "focus.set", focus: "rail" })
+  const rail = reduce(visual, { type: "focus.set", focus: "agents" })
   assert.equal(rail.state.mode, "visual", "focus changes never end Visual")
   assert.deepEqual(rail.state.selection, { kind: "line", anchor: 0, cursor: 2 })
 
@@ -354,7 +397,7 @@ test("Ctrl+G leaves a prompt field by cancelling the prompt", () => {
 test("focus changes never assign a mode", () => {
   for (const mode of ["normal", "insert", "visual", "command"] as const) {
     const state = initialInteractionState({ mode, focus: "chat" })
-    for (const focus of ["rail", "chat", "work", "composer", "settings"] as const) {
+    for (const focus of ["agents", "chat", "work", "composer", "settings"] as const) {
       const result = reduce(state, { type: "focus.set", focus })
       assert.equal(result.state.mode, mode, `${mode} survives a move to ${focus}`)
     }
@@ -444,10 +487,10 @@ test("field focus and wizard step changes keep the mode", () => {
 })
 
 test("Insert without a text target is detectable on every non-editor surface", () => {
-  assert.equal(textTargetOf(initialInteractionState({ mode: "insert", focus: "rail" })), null)
-  assert.equal(insertWithoutTarget(initialInteractionState({ mode: "insert", focus: "rail" })), true)
+  assert.equal(textTargetOf(initialInteractionState({ mode: "insert", focus: "agents" })), null)
+  assert.equal(insertWithoutTarget(initialInteractionState({ mode: "insert", focus: "agents" })), true)
   assert.equal(insertWithoutTarget(initialInteractionState({ mode: "insert", focus: "chat" })), true)
-  assert.equal(insertWithoutTarget(initialInteractionState({ mode: "normal", focus: "rail" })), false, "Normal never shows the notice")
+  assert.equal(insertWithoutTarget(initialInteractionState({ mode: "normal", focus: "agents" })), false, "Normal never shows the notice")
 
   assert.equal(textTargetOf(initialInteractionState({ mode: "insert", focus: "composer" })), "composer")
   assert.equal(insertWithoutTarget(initialInteractionState({ mode: "insert", focus: "composer" })), false)
@@ -511,9 +554,9 @@ test("command records its return mode and restores it on close or Esc", () => {
 })
 
 test("Ctrl+G leaves an Insert with no editor focused by setting Normal", () => {
-  const left = reduce(initialInteractionState({ mode: "insert", focus: "rail" }), { type: "leave.editor" })
+  const left = reduce(initialInteractionState({ mode: "insert", focus: "agents" }), { type: "leave.editor" })
   assert.equal(left.state.mode, "normal")
-  assert.equal(left.state.focus, "rail")
+  assert.equal(left.state.focus, "agents")
   assert.deepEqual(left.intents, [{ type: "blur-editor" }])
 })
 
