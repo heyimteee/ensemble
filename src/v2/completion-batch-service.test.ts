@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
 import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
+import { REVIEW_INCOMPLETE_REASON } from "./types.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -352,7 +353,7 @@ test("two completions produce one batch review with per-item decisions", async (
     // grouped completions never race it as direct hops.
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      return (next.state.subtasks as any)[batch.id]?.handoff?.reviewIncomplete === "review-incomplete"
+      return (next.state.subtasks as any)[batch.id]?.handoff?.reviewIncomplete === REVIEW_INCOMPLETE_REASON
     }, 20000)
     const parked = await handlers.snapshot({ directory })
     assert.equal((parked.state.subtasks as any)[batch.id].status, "needs_you")
@@ -560,7 +561,7 @@ test("ticket198: a forgotten review gets one correction, then stays NEEDS YOU", 
   try {
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      return (next.state.subtasks as any)["batch-incomplete"]?.handoff?.reviewIncomplete === "review-incomplete"
+      return (next.state.subtasks as any)["batch-incomplete"]?.handoff?.reviewIncomplete === REVIEW_INCOMPLETE_REASON
     })
     const after = await handlers.snapshot({ directory })
     const rows = after.state.subtasks as any
@@ -568,7 +569,7 @@ test("ticket198: a forgotten review gets one correction, then stays NEEDS YOU", 
     assert.equal(batch.state, "pending", "an incomplete review stays open")
     assert.equal(batch.status, "needs_you", "an incomplete review asks for the user")
     assert.equal(batch.outcome, "pending")
-    assert.equal(batch.handoff.reviewIncomplete, "review-incomplete")
+    assert.equal(batch.handoff.reviewIncomplete, REVIEW_INCOMPLETE_REASON)
     assert.equal(batch.attempts, 1, "the correction never increments the native attempt budget")
     const corrections = prompts.filter((item) => item.text.includes("Review incomplete"))
     assert.equal(corrections.length, 1, "exactly one correction turn")

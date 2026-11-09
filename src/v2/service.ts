@@ -12,7 +12,8 @@ import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFa
 import { isSubstantiveReply, planLateSuccessRepair, settlementText, shouldInterruptSettledReply } from "./stream-settlement.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { decideTurnFinalization, type TurnFinalizationFacts } from "./turn-finalization.ts"
-import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, isTerminalWorkStatus, parseWorkKind, stableHash, workKey, type DerivedWorkStatus } from "./queue.ts"
+import { REVIEW_INCOMPLETE_REASON } from "./types.ts"
+import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, effectiveDeliveryHold, isDeliveryHoldRetry, isTerminalWorkStatus, parseWorkKind, stableHash, workKey, type DerivedWorkStatus } from "./queue.ts"
 import {
   activeContinuationGroup,
   continuationRefusalText,
@@ -60,6 +61,8 @@ import {
   nativeSubagentInstructionFromInput,
   nativeSubagentNextState,
   nativeSubagentToolName,
+  lateNativeFollowUpMessageID,
+  rememberBoundedMapEntry,
   rememberNativeSubagentActive,
 } from "./native-subagents.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
@@ -4548,7 +4551,7 @@ export class EnsembleV2Service {
     const workspaceID = found.workspace?.id ?? input.workspaceID
     const at = Date.now()
     const tasks = Object.values(state.subtasks).filter((task) => !workspaceID || task.workspaceID === workspaceID)
-    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, retryAfter: task.retryAfter, deliveryHoldUntil: task.deliveryHoldUntil, failure: task.failure, assignee: task.assigneeID, parent: task.parentID, dispatchGroupID: task.dispatchGroupID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
+    return { content: JSON.stringify(tasks.map((task) => ({ id: task.id, title: task.title, state: task.state, status: deriveWorkStatus(task, at), outcome: task.outcome, attempts: task.attempts, queueKey: task.queueKey, leaseUntil: task.leaseUntil, deadlineAt: task.deadlineAt, failure: task.failure, assignee: task.assigneeID, parent: task.parentID, dispatchGroupID: task.dispatchGroupID, resultMessageID: task.resultMessageID, workKind: task.workKind, handoff: task.handoff, turn: task.turn }))) }
   }
 
   private async toolSendMessage(input: Json, context: any): Promise<{ content: string }> {
@@ -4821,7 +4824,7 @@ export class EnsembleV2Service {
     if (suppliedAbsolute) {
       path = relative(workspace.directory, suppliedAbsolute)
     } else {
-      const fileName = inlineHandoffFileName({ task, from: sender.name, to: recipient.name, at })
+      const fileName = inlineHandoffFileName({ task, from: sender.name, to: recipient.name, at, nonce: newCorrelationID() })
       generatedAbsolute = writeHandoff(
         workspace.directory,
         fileName,
@@ -4914,26 +4917,14 @@ export class EnsembleV2Service {
     if (!admission.admitted) {
       // A serialized race can still refuse after the file exists; a refused
       // handoff leaves no new file behind.
-      if (generatedAbsolute) {
-        try {
-          unlinkSync(generatedAbsolute)
-        } catch {
-          // The file never landed or was already removed; the refusal stands.
-        }
-      }
+      this.discardGeneratedHandoff(generatedAbsolute)
       return this.refuseDispatch(workspace, "handoff", admission.refusal!, askingTask, this.store.dispatchGroup(dispatchGroupID), { log: false })
     }
     // Two concurrent identical handoffs: the serialized admission returns the
     // winner, which already queued the hop and posted its ack. The loser's
     // generated file is not referenced by any hop.
     if (admission.deduped) {
-      if (generatedAbsolute) {
-        try {
-          unlinkSync(generatedAbsolute)
-        } catch {
-          // The winning hop remains the only durable record.
-        }
-      }
+      this.discardGeneratedHandoff(generatedAbsolute)
       return { content: handoffDuplicateText(recipient.name, task) }
     }
     this.noteWorkChanged(hop)
@@ -4950,6 +4941,20 @@ export class EnsembleV2Service {
     this.schedule()
     const remaining = this.dispatchResultLine({ groupID: dispatchGroupID, task: askingTask, nextDepth: preflight.depth })
     return { content: `Handed to $${recipient.name} for ${task} (ref ${correlationID}). Your turn stays open until the answer arrives here — do not call ensemble_delegate after a handoff (leader-only; would double-queue).${remaining ? ` ${remaining}` : ""}` }
+  }
+
+  /**
+   * Ticket #195: a generated handoff file is written before admission so the
+   * hop can reference it. When admission refuses or dedupes the hop, no work
+   * references that file, so it is removed; a missing file is already clean.
+   */
+  private discardGeneratedHandoff(path: string | undefined): void {
+    if (!path) return
+    try {
+      unlinkSync(path)
+    } catch {
+      // The file never landed or was already removed.
+    }
   }
 
   /**
@@ -4989,11 +4994,11 @@ export class EnsembleV2Service {
       : []
     return {
       task: {
-        taskID: task.id,
-        workKind: task.workKind ?? "delegation",
-        completion: task.handoff?.completion === true,
         batch: task.handoff?.batch === true,
         leader: workspace !== undefined && task.assigneeID === workspace.leaderID,
+        // Ticket #200: the mandatory completion delivery is work for the
+        // leader even though its hop is created after this policy runs.
+        leaderMemberID: this.completionDeliveryLeader(task, children, state)?.id,
         explicitHandoff: children.some((child) => child.workKind === "handoff" && child.handoff?.completion !== true),
         batchCorrectionSent: task.handoff?.reviewCorrectionSent === true,
         mentionCorrectionSent: task.mentionCorrectionSent === true,
@@ -5026,85 +5031,99 @@ export class EnsembleV2Service {
    * contract-specific prompt and durable marker; this helper performs only
    * the prompt/wait/read cycle so #200 can reuse the same bounded path.
    */
-  private async runCorrectionTurn(
-    sessionID: string,
-    text: string,
-  ): Promise<{ text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any }> {
+  private async runCorrectionTurn(sessionID: string, text: string): Promise<{ text: string }> {
     const startedAt = now()
     try {
       await this.ctx.session.prompt({ sessionID, text, delivery: "steer" })
       await this.ctx.session.wait({ sessionID }).catch(() => undefined)
       const messages = listData(await this.ctx.session.context({ sessionID }))
-      return assistantResult(messages, startedAt)
+      return { text: assistantResult(messages, startedAt).text }
     } catch {
       // A failed correction turn is not an execution retry: the caller falls
       // through to its contract fallback with the original answer intact.
-      return { text: "", tools: [], toolOutcomes: [] }
+      return { text: "" }
     }
   }
 
   /**
-   * Ticket #198: spend the one batch-review correction turn. The durable
-   * marker is written before the prompt so a crash or restart cannot grant a
-   * second correction. The correction lists only remaining item ids and the
-   * required tool action; it never restates item content.
+   * Ticket #198/#200: spend one contract's bounded correction turn. The
+   * durable marker is written before the prompt so a crash, retry, or restart
+   * cannot grant a second correction. The caller supplies only its guard, its
+   * marker, and its prompt; the clone, save, change note, and log are shared.
+   */
+  private async runBoundedCorrection(input: {
+    task: Subtask
+    sessionID: string
+    event: string
+    guard: (task: Subtask) => boolean
+    mark: (task: Subtask) => void
+    log: Record<string, unknown>
+    prompt: string
+  }): Promise<{ text: string } | undefined> {
+    const current = this.store.cloneSubtask(input.task.id)
+    if (!current || !input.guard(current)) return undefined
+    input.mark(current)
+    await this.store.saveSubtask(current)
+    this.noteWorkChanged(current)
+    this.logger?.event("info", "task", input.event, {
+      workspaceID: current.workspaceID,
+      taskID: current.id,
+      dispatchGroupID: current.dispatchGroupID,
+      ...input.log,
+    })
+    return this.runCorrectionTurn(input.sessionID, input.prompt)
+  }
+
+  /**
+   * Ticket #198: spend the one batch-review correction turn. The correction
+   * lists only remaining item ids and the required tool action; it never
+   * restates item content.
    */
   private async correctBatchReview(
     task: Subtask,
     remainingIDs: Id[],
     sessionID: string,
   ): Promise<{ text: string } | undefined> {
-    const batch = this.store.cloneSubtask(task.id)
-    if (!batch?.handoff?.batch) return undefined
-    batch.handoff.reviewCorrectionSent = true
-    await this.store.saveSubtask(batch)
-    this.noteWorkChanged(batch)
-    this.logger?.event("info", "task", "task.batch.correction", {
-      workspaceID: batch.workspaceID,
-      taskID: batch.id,
-      dispatchGroupID: batch.dispatchGroupID,
-      remaining: remainingIDs.length,
-      remainingIDs,
-    })
     const prompt = [
       `Review incomplete: ${remainingIDs.length} batch item${remainingIDs.length === 1 ? "" : "s"} still need${remainingIDs.length === 1 ? "s" : ""} a disposition.`,
       `Remaining item ids: ${remainingIDs.join(", ")}.`,
-      `Call ensemble_review now for batch "${batch.id}" and decide every remaining item with action "delegate" (include an assignee and maxHops), "start", "end", or "dismiss". Do not finish with a plain reply.`,
+      `Call ensemble_review now for batch "${task.id}" and decide every remaining item with action "delegate" (include an assignee and maxHops), "start", "end", or "dismiss". Do not finish with a plain reply.`,
     ].join("\n")
-    const result = await this.runCorrectionTurn(sessionID, prompt)
-    return { text: result.text }
+    return this.runBoundedCorrection({
+      task,
+      sessionID,
+      event: "task.batch.correction",
+      guard: (current) => current.handoff?.batch === true,
+      mark: (current) => { current.handoff!.reviewCorrectionSent = true },
+      log: { remaining: remainingIDs.length, remainingIDs },
+      prompt,
+    })
   }
 
   /**
-   * Ticket #200: spend the one unbacked-mention correction turn. The durable
-   * marker is written before the prompt so a crash, retry, or restart cannot
-   * grant a second correction. The prompt names only members and the required
-   * tool action; it never restates the answer or creates work itself.
+   * Ticket #200: spend the one unbacked-mention correction turn. The prompt
+   * names only members and the required tool action; it never restates the
+   * answer or creates work itself.
    */
   private async correctUnbackedMentions(
     task: Subtask,
     memberIDs: Id[],
     sessionID: string,
   ): Promise<{ text: string } | undefined> {
-    const current = this.store.cloneSubtask(task.id)
-    if (!current) return undefined
-    current.mentionCorrectionSent = true
-    await this.store.saveSubtask(current)
-    this.noteWorkChanged(current)
-    this.logger?.event("info", "task", "task.mention.correction", {
-      workspaceID: current.workspaceID,
-      taskID: current.id,
-      dispatchGroupID: current.dispatchGroupID,
-      mentioned: memberIDs.length,
-      memberIDs,
-    })
     const names = memberIDs.map((memberID) => `$${this.agentName(memberID)}`).join(", ")
     const prompt = [
       `Mention correction: your answer names ${names}, but this run created no handoff, delegation, or peer turn for ${memberIDs.length === 1 ? "that member" : "them"}.`,
       `Call ensemble_handoff (or ensemble_delegate if you are the workspace leader) to create the work now, or remove the mention from your answer. A chat mention does not assign work.`,
     ].join("\n")
-    const result = await this.runCorrectionTurn(sessionID, prompt)
-    return { text: result.text }
+    return this.runBoundedCorrection({
+      task,
+      sessionID,
+      event: "task.mention.correction",
+      guard: () => true,
+      mark: (current) => { current.mentionCorrectionSent = true },
+      log: { mentioned: memberIDs.length, memberIDs },
+      prompt,
+    })
   }
 
   /**
@@ -5145,7 +5164,7 @@ export class EnsembleV2Service {
     workspaceEpoch: number,
   ): Promise<void> {
     const batch = this.store.cloneSubtask(task.id)
-    if (!batch?.handoff || batch.state === "replied") return
+    if (!batch?.handoff || isTerminalWorkStatus(deriveWorkStatus(batch, now()))) return
     batch.state = "pending"
     batch.outcome = "pending"
     batch.awaitingChildren = false
@@ -5154,7 +5173,7 @@ export class EnsembleV2Service {
     batch.leaseUntil = undefined
     batch.retryAfter = undefined
     batch.deliveryHoldUntil = undefined
-    batch.handoff.reviewIncomplete = "review-incomplete"
+    batch.handoff.reviewIncomplete = REVIEW_INCOMPLETE_REASON
     await this.store.saveSubtask(batch)
     this.noteWorkChanged(batch)
     const workspace = this.store.workspace(batch.workspaceID)
@@ -5186,6 +5205,27 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Ticket #71/#200: the leader who receives this turn's mandatory completion
+   * delivery, if one applies. One predicate feeds both the terminal-write
+   * decision and the policy's mention-backing rule so they cannot disagree.
+   */
+  private completionDeliveryLeader(
+    finished: Subtask,
+    children: Subtask[],
+    state: SnapshotState,
+  ): Agent | undefined {
+    const workspace = state.workspaces[finished.workspaceID]
+    if (!workspace || workspace.archived || workspace.paused) return undefined
+    const finisherID = finished.assigneeID
+    if (!finisherID || finisherID === workspace.leaderID) return undefined
+    if (finished.handoff?.completion === true || finished.handoff?.batch === true) return undefined
+    if (children.some((child) => child.workKind === "handoff" && child.handoff?.completion !== true)) return undefined
+    const leader = state.agents[workspace.leaderID]
+    if (!leader || leader.archived || !workspace.memberIDs.includes(leader.id)) return undefined
+    return leader
+  }
+
+  /**
    * Ticket #71 mandatory completion handoff (server-enforced). A non-leader
    * turn that reaches its success finalize without an explicit handoff hop
    * cannot finish silently: the server queues one completion hop carrying
@@ -5205,11 +5245,9 @@ export class EnsembleV2Service {
     const workspace = state.workspaces[finished.workspaceID]
     if (!workspace || workspace.archived || workspace.paused) return undefined
     const finisherID = finished.assigneeID
-    if (!finisherID || finisherID === workspace.leaderID) return undefined
-    if (finished.handoff?.completion === true || finished.handoff?.batch === true) return undefined
-    if (children.some((child) => child.workKind === "handoff" && child.handoff?.completion !== true)) return undefined
-    const leader = state.agents[workspace.leaderID]
-    if (!leader || leader.archived || !workspace.memberIDs.includes(leader.id)) return undefined
+    if (!finisherID) return undefined
+    const leader = this.completionDeliveryLeader(finished, children, state)
+    if (!leader) return undefined
     const finisher = state.agents[finisherID]
     const prior = finished.handoff?.chain ?? (finished.handoff ? [finished.handoff.senderID] : [])
     const route = checkCompletionRoute({ chain: prior, senderID: finisherID, candidateID: leader.id, leaderID: leader.id })
@@ -5382,13 +5420,13 @@ export class EnsembleV2Service {
       // Never run a review before the newest item's delivery hold; early
       // consolidation may have grouped an item that is still parked. Batch
       // reviews are deliveries, so their timer is a hold, never a retry.
-      if (batch.retryAfter !== undefined && batch.deliveryHoldUntil === undefined && batch.attempts === 0 && batch.failure === undefined) {
+      if (isDeliveryHoldRetry(batch)) {
         batch.deliveryHoldUntil = batch.retryAfter
         batch.retryAfter = undefined
       }
       for (const itemID of ids) {
         const item = this.store.subtask(itemID)
-        const hold = item?.deliveryHoldUntil ?? item?.retryAfter
+        const hold = item ? effectiveDeliveryHold(item) : undefined
         if (hold !== undefined) batch.deliveryHoldUntil = Math.max(batch.deliveryHoldUntil ?? 0, hold)
       }
       await this.store.saveSubtask(batch)
@@ -5434,7 +5472,7 @@ export class EnsembleV2Service {
       deadlineAt: at + DEADLINE_MS,
       // Early consolidation can group an item that is still inside its
       // delivery hold; the review itself waits for the newest item.
-      deliveryHoldUntil: Math.max(at, ...items.map((item) => item.deliveryHoldUntil ?? item.retryAfter ?? at)),
+      deliveryHoldUntil: Math.max(at, ...items.map((item) => effectiveDeliveryHold(item) ?? at)),
       handoff: {
         correlationID,
         senderID: items[0]?.handoff?.senderID ?? recipientID,
@@ -6894,12 +6932,10 @@ export class EnsembleV2Service {
     const current = this.store.cloneSubtask(task.id)
     if (!current) return
     const markersAfter = [...(current.lateNativeFollowUps ?? [])]
-    if (!markersAfter.some((marker) => marker.nativeMessageID === primary.messageID)) {
+    if (!markersAfter.some((marker) => lateNativeFollowUpMessageID(marker) === primary.messageID)) {
       markersAfter.push({
         messageIDs: late.map((item) => item.messageID),
-        nativeMessageID: primary.messageID,
         at: primary.createdAt,
-        messageRowID: row.id,
         ...(hop ? { hopID: hop.id } : {}),
       })
     }
@@ -6956,7 +6992,6 @@ export class EnsembleV2Service {
   private noteNativeSessionGeneration(sessionID: string, kind: "idle" | "execution", at = now()): void {
     if (!sessionID) return
     const current = this.nativeSessionGenerations.get(sessionID) ?? { idle: 0, execution: 0 }
-    this.nativeSessionGenerations.delete(sessionID)
     if (kind === "idle") {
       current.idle += 1
       current.lastIdleAt = at
@@ -6964,24 +6999,13 @@ export class EnsembleV2Service {
       current.execution += 1
       current.lastExecutionAt = at
     }
-    this.nativeSessionGenerations.set(sessionID, current)
-    while (this.nativeSessionGenerations.size > NATIVE_SUBAGENT_ACTIVE_LIMIT) {
-      const oldest = this.nativeSessionGenerations.keys().next().value
-      if (oldest === undefined) break
-      this.nativeSessionGenerations.delete(oldest)
-    }
+    rememberBoundedMapEntry(this.nativeSessionGenerations, sessionID, current)
   }
 
   /** Ticket #197: remember the last parent subagent tool call for discovery. */
   private noteNativeSubagentToolCall(sessionID: string, at = now()): void {
     if (!sessionID) return
-    this.nativeSubagentToolCalls.delete(sessionID)
-    this.nativeSubagentToolCalls.set(sessionID, at)
-    while (this.nativeSubagentToolCalls.size > NATIVE_SUBAGENT_ACTIVE_LIMIT) {
-      const oldest = this.nativeSubagentToolCalls.keys().next().value
-      if (oldest === undefined) break
-      this.nativeSubagentToolCalls.delete(oldest)
-    }
+    rememberNativeSubagentActive(this.nativeSubagentToolCalls, sessionID, at)
   }
 
   private notifyNativeSubagentWaiters(parentSessionID: string): void {
@@ -7177,6 +7201,65 @@ export class EnsembleV2Service {
       }
       await this.waitForNativeSubagentSignal(parentSessionID, remaining)
     }
+  }
+
+  /**
+   * Ticket #197: settle a successful answer against the task's native
+   * children. The first successful answer is captured before the barrier and
+   * is the fallback: only a substantive, non-failed post-child answer may
+   * replace it. A failed wake-up idle that is already in the post-barrier
+   * context read is contained here, with a structured warning, instead of
+   * becoming the run's failure and discarding the report.
+   */
+  private async settleNativeAnswer(input: {
+    sessionID: string
+    task: Subtask
+    globalEpoch: number
+    workspaceEpoch: number
+    since: number
+    firstAnswer: ReturnType<typeof assistantResult>
+    messages: any[]
+  }): Promise<{ result: ReturnType<typeof assistantResult>; messages: any[]; settled: boolean }> {
+    const native = await this.awaitNativeSubagentBarrier(
+      input.sessionID,
+      input.task,
+      input.globalEpoch,
+      input.workspaceEpoch,
+      input.since,
+    )
+    if (!native.settled || this.stopped) {
+      return { result: input.firstAnswer, messages: input.messages, settled: false }
+    }
+    const messages = listData(await this.ctx.session.context({ sessionID: input.sessionID }))
+    const afterBarrier = assistantResult(messages, input.since)
+    if (afterBarrier.failure) {
+      // A failed wake-up turn is not an execution failure. Keep the first
+      // successful answer; the structured warning carries IDs and reason only.
+      this.logger?.event("warn", "host", "native.subagent.wakeup.failed", {
+        parentSessionID: input.sessionID,
+        parentTaskID: input.task.id,
+        reason: String(afterBarrier.failure?.type ?? "wakeup-failed"),
+      })
+      return { result: input.firstAnswer, messages, settled: true }
+    }
+    let result = isSubstantiveReply(afterBarrier.text) ? afterBarrier : input.firstAnswer
+    const baselineReadAt = now()
+    this.logger?.event("debug", "host", "native.subagent.wakeup.wait", {
+      parentSessionID: input.sessionID,
+      parentTaskID: input.task.id,
+      childFinishedAt: native.finishedAt ?? now(),
+    })
+    const wakeup = await this.awaitNativeWakeup(
+      input.sessionID,
+      input.task,
+      input.globalEpoch,
+      input.workspaceEpoch,
+      input.since,
+      result.text,
+      baselineReadAt,
+    )
+    if (wakeup) result = wakeup
+    return { result, messages, settled: true }
   }
 
   /** Wake barriers whose parent session belongs to a retiring workspace. */
@@ -8156,6 +8239,10 @@ export class EnsembleV2Service {
       }
       const models = [agent.mainModel, ...agent.backupModels]
       let result: { text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any } | undefined
+      let messages: any[] = []
+      // Ticket #197/#194: a barrier that already timed out for a live child
+      // exhausted its bound; the policy's wait must not reset that clock.
+      let nativeHoldExhausted = false
       for (let index = 0; index < models.length; index++) {
         const model = models[index]
         failureContext.providerID = model.providerID
@@ -8181,46 +8268,28 @@ export class EnsembleV2Service {
         failureContext.startedAt = attemptStartedAt
         await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined), delivery: "steer" })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
-        let messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
+        messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)
         // Ticket #188/#197: background subagents return from the tool before
         // the child finishes, so the host can settle the parent turn early.
         // Hold the run on the existing heartbeat until its children are
         // terminal, then wait for the parent's next idle (the wake-up turn) and
         // prefer that answer. The wake-up grace is separate from the
-        // five-minute child barrier.
+        // five-minute child barrier. A failed wake-up keeps the first answer.
         if (!result.failure) {
-          const native = await this.awaitNativeSubagentBarrier(
-            binding.sessionID,
+          const settled = await this.settleNativeAnswer({
+            sessionID: binding.sessionID,
             task,
             globalEpoch,
             workspaceEpoch,
-            attemptStartedAt,
-          )
-          if (native.settled && !this.stopped) {
-            // Re-read everything written while the barrier held; a wake-up
-            // turn may already have answered before the child's terminal event.
-            messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
-            result = assistantResult(messages, attemptStartedAt)
-            if (!result.failure) {
-              const baselineReadAt = now()
-              this.logger?.event("debug", "host", "native.subagent.wakeup.wait", {
-                parentSessionID: binding.sessionID,
-                parentTaskID: task.id,
-                childFinishedAt: native.finishedAt ?? now(),
-              })
-              const wakeup = await this.awaitNativeWakeup(
-                binding.sessionID,
-                task,
-                globalEpoch,
-                workspaceEpoch,
-                attemptStartedAt,
-                result.text,
-                baselineReadAt,
-              )
-              if (wakeup) result = wakeup
-            }
-          }
+            since: attemptStartedAt,
+            firstAnswer: result,
+            messages,
+          })
+          result = settled.result
+          messages = settled.messages
+          nativeHoldExhausted = !settled.settled &&
+            this.nativeChildrenForTask(binding.sessionID, task.id, attemptStartedAt).some((run) => run.state === "working")
         }
         failureContext.toolOutcomes = result.toolOutcomes
         failureContext.cause = result.failure
@@ -8359,19 +8428,69 @@ export class EnsembleV2Service {
       let children = this.store.subtasks().filter((item) => item.parentID === task.id)
       // Ticket #194: the one turn-finalization policy sits at the existing
       // terminal-write boundary. Ticket #197 settles the native child and its
-      // post-child wake-up answer before this point, so the policy evaluates
-      // the final reply; no second finalization seam exists. #198/#200 add
-      // correction orchestration here rather than growing parallel checks
-      // elsewhere.
+      // post-child wake-up answer before this point; the policy still owns the
+      // native-child hold, so a child mapped after that first settle keeps the
+      // same turn open for one more bounded pass. #198/#200 add correction
+      // orchestration here rather than growing parallel checks elsewhere.
       let finalization = decideTurnFinalization(this.turnFinalizationFacts(currentTask, reply, children, current))
-      // Tickets #198/#200: each protocol contract may spend at most one
-      // correction turn in this same native session. The durable markers make
-      // the loop bounded even across retries and restarts: once a contract's
-      // marker is set the policy returns its warn fallback instead of another
+      // Tickets #197/#198/#200: each contract is bounded. A live native child
+      // gets one extra bounded hold (the barrier and wake-up grace are both
+      // bounded); each protocol correction may spend at most one turn in this
+      // same native session. The durable markers make the correction loop
+      // bounded even across retries and restarts: once a contract's marker is
+      // set the policy returns its warn fallback instead of another
       // correction, so a confused model can never wedge the queue.
-      while (finalization.action === "correct") {
+      let nativeWaitPasses = 0
+      for (;;) {
+        if (finalization.action === "wait") {
+          if (nativeWaitPasses >= 1 || nativeHoldExhausted || this.stopped) break
+          nativeWaitPasses += 1
+          const settled = await this.settleNativeAnswer({
+            sessionID: binding.sessionID,
+            task: currentTask,
+            globalEpoch,
+            workspaceEpoch,
+            since: attemptStartedAt,
+            firstAnswer: result ?? assistantResult(messages, attemptStartedAt),
+            messages,
+          })
+          if (this.stopped) return
+          if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return
+          result = settled.result
+          messages = settled.messages
+          const waitMention = normalizeAgentMentions(
+            result.text,
+            workspace.memberIDs.map((id) => current.agents[id]).filter((item): item is Agent => Boolean(item)),
+          )
+          if (waitMention.changed) await this.announceMentionNormalization(workspace, task.id, waitMention.names)
+          const waitReply = isFallbackReply(waitMention.text) ? "" : waitMention.text.trim()
+          // No new answer after the extra hold: the first answer stands and
+          // the run finalizes at the bound, exactly like a missing wake-up.
+          if (!waitReply || waitReply === reply) break
+          reply = waitReply
+          current = this.store.read()
+          const refreshed = this.store.cloneSubtask(task.id)
+          if (!refreshed) return
+          if (refreshed.activeRunID !== runID || isTerminalWorkStatus(deriveWorkStatus(refreshed, now()))) {
+            await this.recoverLateSuccess({
+              task: refreshed,
+              reply,
+              live,
+              runID,
+              agentID: agent.id,
+              globalEpoch,
+              workspaceEpoch,
+            })
+            return
+          }
+          currentTask = refreshed
+          children = this.store.subtasks().filter((item) => item.parentID === refreshed.id)
+          finalization = decideTurnFinalization(this.turnFinalizationFacts(refreshed, reply, children, current))
+          continue
+        }
+        if (finalization.action !== "correct") break
         let correction: { text: string } | undefined
-        if (finalization.reason === "review-incomplete") {
+        if (finalization.reason === REVIEW_INCOMPLETE_REASON) {
           correction = await this.correctBatchReview(
             currentTask,
             finalization.remainingIDs ?? [],
@@ -8422,7 +8541,7 @@ export class EnsembleV2Service {
       // The correction could not close the batch: keep it open as NEEDS YOU
       // with a durable reason. Its items stay parked behind the batch and the
       // row is never claimed for another automatic correction.
-      if (finalization.action === "warn" && finalization.reason === "review-incomplete") {
+      if (finalization.action === "warn" && finalization.reason === REVIEW_INCOMPLETE_REASON) {
         await this.holdIncompleteBatchReview(currentTask, finalization.remainingIDs ?? [], live, globalEpoch, workspaceEpoch)
         return
       }
@@ -8432,7 +8551,10 @@ export class EnsembleV2Service {
       if (finalization.action === "warn" && finalization.reason === "mention-unbacked") {
         await this.warnUnbackedMentions(currentTask, finalization.unbackedMemberIDs ?? [])
       }
-      if (finalization.action !== "accept" && !(finalization.action === "warn" && finalization.reason === "mention-unbacked")) {
+      // A wait that outlived its one extra bounded hold finalizes at the
+      // bound (the barrier already logged any timeout). Only a correction the
+      // loop could not route, or an unexpected warn reason, is unwired.
+      if (finalization.action === "correct" || (finalization.action === "warn" && finalization.reason !== "mention-unbacked")) {
         // IDs and reason only; an unexpected decision must not invent a
         // terminal write outside the contracts above.
         this.logger?.event("warn", "task", "task.finalization.unwired", {

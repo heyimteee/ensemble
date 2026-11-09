@@ -8340,6 +8340,178 @@ test("ticket197: a failed wake-up turn keeps the first answer and logs a structu
   }
 })
 
+test("ticket197: a failed wake-up already in the post-barrier read keeps the first answer", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-197-wakeup-failed-read-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 2_000,
+    nativeSubagentDiscoveryGraceMs: 500,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  let contextCalls = 0
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => {
+    contextCalls += 1
+    return { data: [...messages] }
+  }
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const task = Object.values(claimed.state.subtasks).find((item: any) => item.assigneeID === agent.result.id) as any
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    emitEvent({
+      id: "evt_197_failed_read_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_197_failed_read", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_failed_read?.state === "working")
+    const readsBeforeRelease = contextCalls
+    releaseWait?.()
+    // Wait for the first successful read before the barrier, then fail the
+    // wake-up while the barrier is still holding the child.
+    await waitFor(async () => contextCalls > readsBeforeRelease)
+    messages.push({
+      type: "idle",
+      time: { created: Date.now() },
+      outcome: "failed",
+      error: { type: "provider.internal", message: "PRIVATE wake failure detail" },
+    })
+    emitEvent({
+      id: "evt_197_failed_read_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_197_failed_read" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "replied", 3_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks[task.id].outcome, "succeeded", "the helper failure does not fail the job")
+    assert.equal(after.state.subtasks[task.id].attempts, 1, "the helper failure does not consume an attempt")
+    assert.equal(after.state.subtasks[task.id].retryAfter, undefined, "the helper failure is not a retry")
+    const result = (after.state.messages[workspace.result.id] ?? []).find((message: any) => message.id === after.state.subtasks[task.id].resultMessageID)
+    assert.equal(result?.text, "FIRST ANSWER", "the first successful answer stands")
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "native.subagent.wakeup.failed", limit: 20 })
+    assert.equal(logs.entries.length, 1, "the failed wake-up is audited once")
+    assert.equal(logs.entries[0].reason, "provider.internal", "the warning carries the structured reason")
+    assert.ok(!JSON.stringify(logs.entries).includes("PRIVATE wake failure detail"), "the warning carries no failure content")
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket194: a native child mapped after the barrier keeps the turn open", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-194-wait-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 150,
+    nativeSubagentDiscoveryGraceMs: 500,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const task = Object.values(claimed.state.subtasks).find((item: any) => item.assigneeID === agent.result.id) as any
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    emitEvent({
+      id: "evt_194_wait_child_one_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_194_wait_one", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_194_wait_one?.state === "working")
+    releaseWait?.()
+    emitEvent({
+      id: "evt_194_wait_child_one_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_194_wait_one" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_194_wait_one?.state === "replied")
+    // A second child appears while the wake-up grace is running. The policy
+    // must hold the turn for it instead of finalizing with the first answer.
+    emitEvent({
+      id: "evt_194_wait_child_two_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_194_wait_two", parentID: binding.sessionID, agent: "explore", title: "Check the results" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_194_wait_two?.state === "working")
+    // Past the wake-up grace: only the live child keeps the turn open.
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const during = await handlers.snapshot({ directory })
+    assert.equal(during.state.subtasks[task.id].state, "working", "a live child keeps the parent working")
+    emitEvent({
+      id: "evt_194_wait_child_two_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_194_wait_two" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "replied", 3_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks[task.id].attempts, 1, "the extra hold consumes no attempt")
+    const result = (after.state.messages[workspace.result.id] ?? []).find((message: any) => message.id === after.state.subtasks[task.id].resultMessageID)
+    assert.equal(result?.text, "FIRST ANSWER", "the first successful answer stands when no wake-up answer exists")
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket197: workspace archive aborts the wake-up wait", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-197-wakeup-archive-"))
   const { ctx, emitEvent } = fakeContext()
@@ -8787,7 +8959,7 @@ test("ticket199: a post-finalize native answer is reconciled into the group and 
     )
     const taskAfter = after.state.subtasks[task.id] as any
     assert.equal(taskAfter.lateNativeFollowUps?.length, 1, "the durable marker is recorded on the task")
-    assert.equal(taskAfter.lateNativeFollowUps[0].nativeMessageID, late.id)
+    assert.deepEqual(taskAfter.lateNativeFollowUps[0].messageIDs, [late.id], "the marker keeps the native message identity")
     const followUp = after.state.subtasks[taskAfter.lateNativeFollowUps[0].hopID] as any
     assert.ok(followUp, "the late answer creates a follow-up completion hop")
     assert.equal(followUp.assigneeID, leader.result.id)
@@ -8811,7 +8983,7 @@ test("ticket199: a post-finalize native answer is reconciled into the group and 
       "the follow-up creates no new dispatch group",
     )
     assert.equal(taskAfter.lateNativeFollowUps[0].hopID, followUp.id)
-    assert.equal(taskAfter.lateNativeFollowUps[0].messageRowID, row.id)
+    assert.deepEqual(taskAfter.lateNativeFollowUps[0].messageIDs, [late.id], "the marker's newest id identifies the group row")
     // Duplicate idles are safe after the durable marker exists.
     emitEvent({
       id: "evt_199_late_duplicate_one",
@@ -8932,7 +9104,7 @@ test("ticket199: a crash after the group row still resolves the same row and mar
   ctx.session.context = async () => ({ data: [...messages] })
   const { seed } = await seedLateNativeCase(ctx, directory)
   const lateText = "PRIVATE CRASH WINDOW ANSWER"
-  const existing = await seed.appendMessage("w", {
+  await seed.appendMessage("w", {
     id: "msg_crash_window",
     author: "agent",
     agentID: "a",
@@ -8962,7 +9134,7 @@ test("ticket199: a crash after the group row still resolves the same row and mar
       "the existing late row is reused, never appended twice",
     )
     const marker = after.state.subtasks.task_parent.lateNativeFollowUps![0]!
-    assert.equal(marker.messageRowID, existing.id, "the marker points at the durable row")
+    assert.deepEqual(marker.messageIDs, ["native_crash_window"], "the marker points at the durable native message")
     assert.ok(marker.hopID, "the missing follow-up hop is created")
   } finally {
     await stop()

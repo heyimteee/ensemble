@@ -1,5 +1,14 @@
 export type Id = string
 
+/**
+ * Ticket #198: durable reason carried by a batch review that replied without
+ * deciding every item after its one correction. The canonical token is shared
+ * by the policy, the service, the doctor, and tests so the persisted value and
+ * its readers can never drift.
+ */
+export const REVIEW_INCOMPLETE_REASON = "review-incomplete" as const
+export type ReviewIncompleteReason = typeof REVIEW_INCOMPLETE_REASON
+
 export type ModelRef = {
   providerID: string
   modelID: string
@@ -208,14 +217,14 @@ export type NativeSubagentRun = {
  * row or create a second follow-up completion hop.
  */
 export type LateNativeFollowUp = {
-  /** Native assistant message ids included in this reconciled answer. */
+  /**
+   * Native assistant message ids included in this reconciled answer, oldest
+   * first. The newest id keys the follow-up completion hop and finds the
+   * durable group row, so the marker never repeats either value.
+   */
   messageIDs: Id[]
-  /** Newest native message id; keys the follow-up completion hop. */
-  nativeMessageID: Id
   /** Newest native message time; bounds the next reconciliation scan. */
   at: number
-  /** Group transcript row carrying the late answer. */
-  messageRowID: Id
   /** Follow-up completion hop id, absent for a leader turn. */
   hopID?: Id
 }
@@ -286,7 +295,7 @@ export type HandoffInfo = {
    * correction. The row stays open and derives `needs_you` instead of closing
    * or silently running its items directly.
    */
-  reviewIncomplete?: string
+  reviewIncomplete?: ReviewIncompleteReason
 }
 
 export type TurnInfo = {

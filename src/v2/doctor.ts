@@ -1,6 +1,6 @@
 import { dispatchGroupState, dispatchHopCount, dispatchLedgerSummary, isRootGroup, type DispatchLedgerSummary } from "./dispatch-budget.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, deriveWorkStatus, isDerivedWorkStatus, type DerivedWorkStatus } from "./queue.ts"
-import type { DispatchGroup, NativeSubagentSource, NativeSubagentState, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
+import type { DispatchGroup, NativeSubagentSource, NativeSubagentState, ReviewIncompleteReason, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
 import type { WorkspaceConfig } from "./workspace-config.ts"
 
 export type ServiceIdentity = {
@@ -45,7 +45,7 @@ export type DoctorSubtask = {
   /** Missing legacy values are treated as user-created (never consuming). */
   creatorType: "user" | "agent"
   workKind?: WorkKind
-  handoff?: { completion?: boolean; batch?: boolean; reviewIncomplete?: string }
+  handoff?: { completion?: boolean; batch?: boolean; reviewIncomplete?: ReviewIncompleteReason }
   /**
    * Ticket #170 lifecycle facts. The service overlay already derives `status`;
    * the doctor repeats the canonical derivation when it is absent and uses the

@@ -1,4 +1,4 @@
-import type { HandoffDecision, Id, NativeSubagentState, WorkKind } from "./types.ts"
+import { REVIEW_INCOMPLETE_REASON, type HandoffDecision, type Id, type NativeSubagentState, type ReviewIncompleteReason, type WorkKind } from "./types.ts"
 
 /**
  * Ticket #194: the one pure turn-finalization policy.
@@ -15,22 +15,23 @@ import type { HandoffDecision, Id, NativeSubagentState, WorkKind } from "./types
 
 export type TurnFinalizationDecision =
   | { action: "accept" }
-  | { action: "wait"; reason: string }
-  | { action: "correct"; reason: string; remainingIDs?: Id[]; unbackedMemberIDs?: Id[] }
-  | { action: "warn"; reason: string; remainingIDs?: Id[]; unbackedMemberIDs?: Id[] }
+  | { action: "wait"; reason: "native-child-active" }
+  | { action: "correct"; reason: ReviewIncompleteReason | "mention-unbacked"; remainingIDs?: Id[]; unbackedMemberIDs?: Id[] }
+  | { action: "warn"; reason: ReviewIncompleteReason | "mention-unbacked"; remainingIDs?: Id[]; unbackedMemberIDs?: Id[] }
 
-/** Durable task and work-kind projection for one finishing turn. */
+/** Durable task projection for one finishing turn. */
 export type TurnTaskFacts = {
-  taskID: Id
-  /** `delegation`, `handoff`, or `turn`; legacy rows normalize to delegation. */
-  workKind: WorkKind
-  /** This hop delivers a finished turn to the workspace leader. */
-  completion: boolean
   /** This turn is a consolidated batch review. */
   batch: boolean
-  /** The finisher owns the workspace; leader turns may end normally. */
+  /** The finisher owns the workspace; no mandatory completion delivery applies. */
   leader: boolean
-  /** The run already handed off explicitly, satisfying the completion contract. */
+  /**
+   * Ticket #200: the workspace leader who receives this run's mandatory
+   * completion delivery. A mention of this member is backed by that delivery
+   * even though the hop is created after the policy runs.
+   */
+  leaderMemberID?: Id
+  /** An explicit handoff child already satisfied the completion contract. */
   explicitHandoff: boolean
   /**
    * Ticket #198: this batch has already spent its one correction turn.
@@ -85,31 +86,48 @@ export type TurnFinalizationFacts = {
 /**
  * Decide one managed turn's finalization.
  *
- * Ticket #194 introduced the seam; #198 adds the batch-review contract and
- * #200 adds unbacked member mentions. A batch review with any undecided item
- * gets one correction turn. If that correction still leaves items undecided,
- * the turn warns instead of finalizing as a successful reply, so the batch can
- * stay open for the user. A mentioned member with no work created by this run
- * gets one correction turn to create the work or remove the mention; if the
- * mention is still unbacked, the turn finalizes with a visible warning. The
- * decision is pure: the service performs the correction prompt and the durable
- * write.
+ * Ticket #194 introduced the seam; #197 adds the native-child hold, #198 the
+ * batch-review contract, and #200 unbacked member mentions. A live native
+ * child holds the turn: its post-child answer owns the result. A batch review
+ * with any undecided item gets one correction turn; if that correction still
+ * leaves items undecided, the turn warns instead of finalizing as a successful
+ * reply, so the batch can stay open for the user. A mentioned member with no
+ * work created by this run gets one correction turn to create the work or
+ * remove the mention; if the mention is still unbacked, the turn finalizes
+ * with a visible warning. The mandatory completion delivery to the leader
+ * counts as backing for that member because the service queues it immediately
+ * after this decision. The decision is pure: the service performs the
+ * correction prompt and the durable write.
  */
 export function decideTurnFinalization(facts: TurnFinalizationFacts): TurnFinalizationDecision {
+  // Ticket #197: a live child means the parent has not spoken after its
+  // child yet. The service holds the same turn for one bounded native pass
+  // and re-evaluates; accepting here would split the child report from the
+  // parent answer.
+  if (facts.nativeChildren.some((child) => child.state === "working")) {
+    return { action: "wait", reason: "native-child-active" }
+  }
   if (facts.task.batch) {
     const remainingIDs = facts.batchItems
       .filter((item) => item.decided === undefined)
       .map((item) => item.id)
     if (remainingIDs.length > 0) {
       return facts.task.batchCorrectionSent
-        ? { action: "warn", reason: "review-incomplete", remainingIDs }
-        : { action: "correct", reason: "review-incomplete", remainingIDs }
+        ? { action: "warn", reason: REVIEW_INCOMPLETE_REASON, remainingIDs }
+        : { action: "correct", reason: REVIEW_INCOMPLETE_REASON, remainingIDs }
     }
   }
-  // Ticket #200: a mentioned member is backed only by work this run created
-  // for them. The policy owns the backing rule; callers pass the members and
+  // Ticket #200: a mentioned member is backed by work this run created for
+  // them, or by the mandatory completion delivery that this run will queue
+  // for the leader right after the decision. Batch reviews and explicit
+  // handoffs do not create a completion delivery, so they do not back the
+  // leader. The policy owns the backing rule; callers pass the members and
   // the created work, never a precomputed backed/unbacked split.
+  const completionRecipientID = !facts.task.leader && !facts.task.batch && !facts.task.explicitHandoff
+    ? facts.task.leaderMemberID
+    : undefined
   const unbackedMemberIDs = facts.finalText.mentionedMemberIDs
+    .filter((memberID) => memberID !== completionRecipientID)
     .filter((memberID) => !facts.createdWork.some((work) => work.assigneeID === memberID))
   if (unbackedMemberIDs.length > 0) {
     return facts.task.mentionCorrectionSent

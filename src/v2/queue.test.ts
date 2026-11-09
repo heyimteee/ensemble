@@ -4,6 +4,7 @@ import {
   claimWon,
   correlationIDForKey,
   deriveWorkStatus,
+  effectiveDeliveryHold,
   isDerivedWorkStatus,
   isTerminalWorkStatus,
   parseWorkKind,
@@ -11,7 +12,7 @@ import {
   workKey,
   type DerivedWorkStatus,
 } from "./queue.ts"
-import type { Subtask } from "./types.ts"
+import { REVIEW_INCOMPLETE_REASON, type Subtask } from "./types.ts"
 
 const base = (patch: Partial<Subtask> = {}): Subtask => ({
   id: "t",
@@ -106,6 +107,17 @@ test("ticket193: a structured retry cause without an attempt still reads retryin
   assert.equal(deriveWorkStatus(task, 1000), "retrying")
 })
 
+test("ticket193: one canonical delivery-hold rule never treats a real retry as a hold", () => {
+  assert.equal(effectiveDeliveryHold(base({ attempts: 0, retryAfter: 2000 })), 2000, "legacy zero-attempt retryAfter is a hold")
+  assert.equal(effectiveDeliveryHold(base({ attempts: 2, retryAfter: 2000 })), undefined, "a real retry is not a hold")
+  assert.equal(
+    effectiveDeliveryHold(base({ attempts: 0, retryAfter: 2000, failure: { kind: "delivery", reason: "deadline-exceeded" } })),
+    undefined,
+    "a structured retry cause is not a hold",
+  )
+  assert.equal(effectiveDeliveryHold(base({ deliveryHoldUntil: 3000, retryAfter: 2000 })), 3000, "the explicit hold wins")
+})
+
 test("a parent awaiting children reads waiting", () => {
   const task = base({ state: "working", attempts: 1, awaitingChildren: true })
   assert.equal(deriveWorkStatus(task, 1000), "waiting")
@@ -138,7 +150,7 @@ test("ticket198: an incomplete batch review reads needs_you", () => {
       completion: true,
       batch: true,
       itemIDs: ["i1", "i2"],
-      reviewIncomplete: "review-incomplete",
+      reviewIncomplete: REVIEW_INCOMPLETE_REASON,
     },
   })
   assert.equal(deriveWorkStatus(task, 1000), "needs_you")
