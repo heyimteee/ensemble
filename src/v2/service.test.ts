@@ -7173,6 +7173,7 @@ test("ticket188: the barrier releases work after its bound and logs no instructi
     await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_188_timeout?.instruction === instruction)
     releaseWait?.()
     await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "replied", 2_000)
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_188_timeout?.state === "cancelled")
     const after = await handlers.snapshot({ directory })
     assert.equal(after.state.nativeSubagents.child_188_timeout.state, "cancelled", "a timed-out parent closes its live child record")
     const logs = await (handlers as any)["logs.recent"]({ directory, event: "native.subagent.barrier.timeout", limit: 20 })

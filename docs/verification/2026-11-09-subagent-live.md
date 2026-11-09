@@ -39,7 +39,7 @@ This record covers:
 
 | Command | Result |
 |---|---|
-| `npm run verify` | **Pass** — strict type check; **1514 tests passed, 0 failed, 0 skipped, 0 todo**, 44.0 s (post-merge tree including #185). |
+| `npm run verify` | **Pass** — strict type check; **1514 tests passed, 0 failed, 0 skipped, 0 todo**, 44.7 s (post-merge tree including #185). |
 | `node --test --experimental-strip-types --test-name-pattern 'ticket188' src/v2/service.test.ts src/v2/tui/change-feed.test.ts` | **Pass** — 4 ticket #188 tests: barrier hold/release, timeout + privacy, `experimental.idle` shape, dispatch-group patch validation. |
 | `ENSEMBLE_LIVE_REQUIRE=1 ENSEMBLE_LIVE_ARTIFACTS=/tmp/opencode/verification-188/barrier npm run test:live:subagent` | **Pass** — isolated real OpenCode 2.2.6 host + fake provider; real child session, card, barrier, HISTORY, cleanup, restart retention, privacy, `experimental.idle` shape. |
 | Pre-barrier baseline (`integration/workspace-interaction` archive at `ae039ce` + this probe/fixture only): `ENSEMBLE_SUBAGENT_EXPECT=early bash scripts/live-subagent-probe.sh` | **Pass as a baseline** — the parent task replied while the child record was not successful (`cancelled` by `task-terminal` cleanup at 388 ms), proving early finalization on the unbarriered tree. |
