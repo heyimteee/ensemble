@@ -2252,8 +2252,12 @@ export class EnsembleV2Service {
     if (!target || (target !== binding.sessionID && !history.includes(target))) {
       throw Object.assign(new Error("The target session is not part of this binding."), { code: "invalid_session" })
     }
+    if (target === binding.sessionID) return { ok: true, binding }
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === binding.sessionID) || this.directBusy.has(binding.sessionID)
     if (busy) throw Object.assign(new Error("The current session is busy."), { code: "session_busy" })
+    if (await this.nativeSessionMissing(target)) {
+      throw Object.assign(new Error("The target session no longer exists."), { code: "invalid_session" })
+    }
     const fromSessionID = binding.sessionID
     await this.applyAgentBehavior(target, agent)
     await this.clearPendingSettings(agent.id)

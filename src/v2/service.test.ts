@@ -154,6 +154,7 @@ async function seedRebindBinding(
   ctx: any,
   directory: string,
   binding: { workspaceID: string; sessionID: string; history?: string[]; kind?: "workspace" | "home" },
+  nativeSessions?: Map<string, any>,
 ): Promise<void> {
   const seed = new V2Store(ctx)
   await seed.load()
@@ -169,6 +170,9 @@ async function seedRebindBinding(
     agentVersion: 1,
     updatedAt: 1,
   })
+  for (const sessionID of new Set([binding.sessionID, ...(binding.history ?? [])])) {
+    nativeSessions?.set(sessionID, { id: sessionID })
+  }
 }
 
 async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<void> {
@@ -1642,8 +1646,8 @@ test("ticket189: agent updates audit changed field names without content", async
 
 test("ticket189: agent.rebindSession moves a workspace binding to a history entry", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-"))
-  const { ctx, modelSwitches, permissionUpdates, instructions } = fakeContext()
-  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old1", "session_old2"] })
+  const { ctx, nativeSessions, modelSwitches, permissionUpdates, instructions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old1", "session_old2"] }, nativeSessions)
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
@@ -1699,6 +1703,72 @@ test("ticket189: agent.rebindSession moves a workspace binding to a history entr
     assert.equal(latest.sessionID, "session_current")
     assert.equal(latest.fromSessionID, "session_old2")
     assert.ok(!JSON.stringify(logs.entries).includes("Rebind private role"), "rebind logs carry ids only")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: agent.rebindSession to the current session is a no-op", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-noop-"))
+  const { ctx, nativeSessions, modelSwitches, permissionUpdates, instructions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old"] }, nativeSessions)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const before = await handlers.snapshot({ directory })
+    const beforeBinding = Object.values(before.state.bindings)[0] as any
+    const result = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_current" },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.result.binding.sessionID, "session_current")
+    const after = await handlers.snapshot({ directory })
+    const afterBinding = Object.values(after.state.bindings)[0] as any
+    assert.deepEqual(afterBinding, beforeBinding, "the binding is returned and stored unchanged")
+    assert.deepEqual(afterBinding.history, ["session_old"], "the current session is not added to its own history")
+    assert.equal(afterBinding.updatedAt, 1)
+    assert.equal(modelSwitches.length, 0, "a no-op does not switch models")
+    assert.equal(permissionUpdates.length, 0, "a no-op does not apply permissions")
+    assert.equal(instructions.length, 0, "a no-op does not write identity")
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "agent.session.rebound", limit: 20 })
+    assert.equal(logs.entries.length, 0, "a no-op writes no rebind audit row")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket189: agent.rebindSession rejects a history session that no longer exists", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-missing-"))
+  const { ctx, nativeSessions, modelSwitches, permissionUpdates, instructions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old"] }, nativeSessions)
+  nativeSessions.delete("session_old")
+  ;(ctx.session as any).get = async ({ sessionID }: any) => nativeSessions.get(sessionID)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const before = await handlers.snapshot({ directory })
+    const beforeBinding = Object.values(before.state.bindings)[0] as any
+    const result = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", sessionID: "session_old" },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.error?.code, "invalid_session")
+    const after = await handlers.snapshot({ directory })
+    const afterBinding = Object.values(after.state.bindings)[0] as any
+    assert.deepEqual(afterBinding, beforeBinding, "a missing target leaves the binding untouched")
+    assert.equal(modelSwitches.length, 0)
+    assert.equal(permissionUpdates.length, 0)
+    assert.equal(instructions.length, 0)
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "agent.session.rebound", limit: 20 })
+    assert.equal(logs.entries.length, 0, "a rejected rebind writes no audit row")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -1775,8 +1845,8 @@ test("ticket189: agent.rebindSession rejects a busy current session", async () =
 
 test("ticket189: agent.rebindSession rebinds the home binding when workspaceID is omitted", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-189-rebind-home-"))
-  const { ctx } = fakeContext()
-  await seedRebindBinding(ctx, directory, { workspaceID: "home", sessionID: "session_home_current", history: ["session_home_old"], kind: "home" })
+  const { ctx, nativeSessions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "home", sessionID: "session_home_current", history: ["session_home_old"], kind: "home" }, nativeSessions)
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
