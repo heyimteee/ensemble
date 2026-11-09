@@ -232,12 +232,16 @@ function nativeRunsByGroup(
   subtasks: Record<string, Subtask>,
   runs: readonly NativeSubagentRun[],
 ): Map<string, NativeSubagentRun[]> {
-  const records: Record<string, Subtask> = { ...subtasks }
-  for (const task of tasks) records[task.id] = task
+  const taskByID = new Map<string, Subtask>()
+  for (const task of tasks) taskByID.set(task.id, task)
   const byGroup = new Map<string, Map<string, NativeSubagentRun>>()
   for (const run of runs) {
-    const parent = run.parentTaskID ? records[run.parentTaskID] : undefined
-    const groupID = (parent ? resolveDispatchGroupID(parent, records) : undefined) ?? run.dispatchGroupID
+    // The durable record is authoritative; the workspace projection is the
+    // fallback for callers that pass tasks without their full record.
+    const parent = run.parentTaskID
+      ? subtasks[run.parentTaskID] ?? taskByID.get(run.parentTaskID)
+      : undefined
+    const groupID = (parent ? resolveDispatchGroupID(parent, subtasks) : undefined) ?? run.dispatchGroupID
     if (!groupID) continue
     let bucket = byGroup.get(groupID)
     if (!bucket) {
