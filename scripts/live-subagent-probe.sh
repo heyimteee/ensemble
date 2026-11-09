@@ -4,18 +4,20 @@ if [[ "${ENSEMBLE_LIVE_TRACE_ERR:-0}" == "1" ]]; then
   trap 'printf "live: command failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 fi
 
-# Ticket #188/#197: native subagent live probe.
+# Ticket #188/#197/#201: native subagent live probe.
 #
 # This starts an isolated real OpenCode 2.2.6 host on the current worktree and
 # uses the deterministic fake provider so no real model or user credentials are
 # touched. The fake parent turn calls the host's built-in `subagent` tool with
 # `background: true`; OpenCode creates a genuine child session, and the child
 # streams a bounded hold. The probe then checks the durable NativeSubagentRun,
-# the Work card, the group mapping, lifecycle timing, the post-child wake-up
-# answer in the task result and completion handoff, cleanup, privacy, and
-# restart retention. Ticket #199 adds the no-duplicate guard: the captured
-# wake-up answer is never mirrored as a late follow-up, and a restart does not
-# duplicate the parent row or its completion hop.
+# the Work card, the group mapping, lifecycle timing, the delayed post-child
+# wake-up answer in the task result and completion handoff, cleanup, privacy,
+# and restart retention. Ticket #199/#201 add the durable backstop: after a
+# restart, one genuinely late native follow-up turn is reconciled into the group
+# exactly once with one follow-up hop, no new group, and no hop spend; a second
+# restart does not duplicate it, and the doctor reports no terminal delivery-hold
+# or retry contradiction.
 #
 #   npm run test:live:subagent
 #   ENSEMBLE_SUBAGENT_EXPECT=early npm run test:live:subagent
@@ -55,6 +57,16 @@ CHILD_INSTRUCTION="Watch the CI pipeline"
 # final task result and completion hop must carry only the wake-up marker.
 PRE_CHILD_MARKER="fake-subagent-pre-child-marker"
 WAKEUP_MARKER="fake-subagent-wakeup-marker"
+# Ticket #201: delay the fake wake-up answer for this run so the probe proves a
+# genuinely delayed post-child answer, not only the immediate happy path.
+WAKEUP_DELAY_MS="${ENSEMBLE_SUBAGENT_WAKEUP_DELAY_MS:-3000}"
+WAKEUP_DURATION_FLOOR_MS=2000
+# Ticket #201: after the host restart, one native follow-up turn produces a
+# genuinely late report. The trigger stays out of the answer marker so the
+# native pane and group assertions cannot match the user prompt.
+LATE_TRIGGER="fake-native-late-report-fixture"
+LATE_MARKER="fake-native-late-report-marker"
+NBSP=$'\u00a0'
 # The card title is bounded and truncated to the actual card width, so the probe
 # asserts the stable prefix rather than the full instruction.
 CHILD_TITLE_PREFIX="Subagents: Watch the"
@@ -129,6 +141,40 @@ parent_result_has_wakeup_marker() {
 
 completion_hop_has_wakeup_marker() {
   grep -qF "$WAKEUP_MARKER" <<<"$(completion_hop_instruction)"
+}
+
+# Ticket #201: the late report gets its own completion hop and group row.
+late_completion_hop_instruction() {
+  live_snapshot_value "(() => { const hop = Object.values(output.state.subtasks).find(function (task) { return task.workspaceID === \"$WS_ID\" && task.parentID === \"$TASK_ID\" && task.handoff && task.handoff.completion === true && task.instruction.indexOf(\"$LATE_MARKER\") >= 0 }); return hop ? hop.instruction : \"\" })()" | tr -d '"'
+}
+
+late_completion_hop_has_marker() {
+  grep -qF "$LATE_MARKER" <<<"$(late_completion_hop_instruction)"
+}
+
+parent_late_report_rows() {
+  live_snapshot_value "(() => { const task = output.state.subtasks[\"$TASK_ID\"]; if (!task) return -1; return (output.state.messages[task.workspaceID] || []).filter(function (message) { return message.taskID === task.id && message.author === \"agent\" && message.agentID === \"$AGENT_ID\" && message.kind === \"text\" && message.text.indexOf(\"$LATE_MARKER\") >= 0 }).length })()" | tr -d '"'
+}
+
+late_report_one() {
+  [[ "$(parent_late_followup_count)" == "1" && "$(parent_late_report_rows)" == "1" && "$(completion_hop_count)" == "2" ]]
+}
+
+all_completion_hops_terminal() {
+  [[ "$(live_snapshot_value "Object.values(output.state.subtasks).filter(function (task) { return task.workspaceID === \"$WS_ID\" && task.parentID === \"$TASK_ID\" && task.handoff && task.handoff.completion === true }).every(function (task) { return task.state === \"replied\" })" | tr -d '"')" == "true" ]]
+}
+
+dispatch_group_count() {
+  live_snapshot_value 'Object.keys(output.state.dispatchGroups).length' | tr -d '"'
+}
+
+# Ticket #201: the delayed wake-up answer is measured from the service log. The
+# duration floor proves the probe observed a real delay, not the happy path.
+native_wakeup_duration_ms() {
+  local task="$1" line
+  line=$(grep -h '"event":"native.subagent.wakeup.received"' "$LIVE_STATE"/ensemble/logs/service-*.jsonl 2>/dev/null | grep -F "\"parentTaskID\":\"$task\"" | tail -1)
+  [[ -n "$line" ]] || { printf '0'; return; }
+  sed -n 's/.*"durationMs":\([0-9][0-9]*\).*/\1/p' <<<"$line" | head -1
 }
 
 # Ticket #199: the captured wake-up answer is already the task result, so it
@@ -224,6 +270,7 @@ require_history_card() {
 }
 
 start_fixture_host() {
+  live_tmux_env_add "ENSEMBLE_FAKE_SUBAGENT_WAKEUP_DELAY_MS=$WAKEUP_DELAY_MS"
   live_start_fake_provider
   live_write_config <<EOF
 {
@@ -267,10 +314,51 @@ start_tui() {
 }
 
 open_group_chat() {
-  live_key "$LIVE_TUI_SESSION" "l"
-  sleep 0.35
-  live_key "$LIVE_TUI_SESSION" "w"
+  live_focus_chat "$LIVE_TUI_SESSION"
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "group chat surface"
+}
+
+# Ticket #201: open the parent's durable native session through the group-chat
+# picker. The session exists after the restart; no Ensemble run is created.
+open_parent_native_session() {
+  live_focus_chat_interact "$LIVE_TUI_SESSION"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "chat interaction before the native picker"
+  live_key "$LIVE_TUI_SESSION" "o"
+  live_require_text "$LIVE_TUI_SESSION" "Native${NBSP}session" 15 "native-session picker"
+  live_key "$LIVE_TUI_SESSION" "/"
+  live_type "$LIVE_TUI_SESSION" "$PARENT_AGENT"
+  live_require_text "$LIVE_TUI_SESSION" "1${NBSP}matches" 10 "parent-only native-session filter"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "j/k move" 10 "native-session filter committed"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "ctrl+p commands" 20 "parent native session opened"
+}
+
+# Ticket #201: no terminal delivery-hold or retry contradiction on the final
+# state. The doctor reads the same durable rows as the board.
+run_doctor() {
+  OPENCODE_PASSWORD="$LIVE_SERVER_PASSWORD" "$LIVE_NODE_BIN" --experimental-strip-types \
+    "$LIVE_ROOT/src/v2/doctor-cli.ts" --server "$LIVE_SERVER_URL" "$LIVE_PROJECT" \
+    >"$LIVE_LOGS/doctor.txt" 2>&1 || true
+  grep -q "Mismatches: none" "$LIVE_LOGS/doctor.txt" \
+    || live_fail "doctor reported a mismatch: $(grep -A3 'Mismatches:' "$LIVE_LOGS/doctor.txt" | tail -n +2 | head -n 2)"
+  OPENCODE_PASSWORD="$LIVE_SERVER_PASSWORD" "$LIVE_NODE_BIN" --experimental-strip-types \
+    "$LIVE_ROOT/src/v2/doctor-cli.ts" --json --server "$LIVE_SERVER_URL" "$LIVE_PROJECT" \
+    >"$LIVE_LOGS/doctor.json" 2>&1 || true
+  "$LIVE_NODE_BIN" -e '
+    const report = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+    const codes = (report.mismatches ?? []).map((mismatch) => mismatch.code);
+    const contradiction = codes.filter((code) => code === "work_terminal_contradiction");
+    if (contradiction.length > 0) {
+      console.error(`terminal contradictions: ${contradiction.join(",")}`);
+      process.exit(1);
+    }
+    if (report.summary?.mismatchCount !== 0) {
+      console.error(`unexpected mismatches: ${codes.join(",")}`);
+      process.exit(1);
+    }
+  ' "$LIVE_LOGS/doctor.json" || live_fail "doctor JSON reported terminal delivery-hold or retry contradictions"
+  live_log "doctor reports no terminal delivery-hold or retry contradictions"
 }
 
 copy_artifacts() {
@@ -310,6 +398,8 @@ TASK_ID=$(live_snapshot_value "Object.values(output.state.subtasks).find(functio
 GROUP_ID=$(live_snapshot_value "output.state.subtasks[\"$TASK_ID\"].dispatchGroupID" | tr -d '"')
 [[ -n "$GROUP_ID" && "$GROUP_ID" != "null" ]] || live_fail "parent dispatch group id is missing"
 HOPS_BEFORE=$(live_snapshot_value "output.state.dispatchGroups[\"$GROUP_ID\"].usedHops" | tr -d '"')
+GROUPS_BEFORE=$(dispatch_group_count)
+[[ -n "$GROUPS_BEFORE" && "$GROUPS_BEFORE" != "null" ]] || live_fail "dispatch group count is missing"
 
 wait_for_native_count 1 30 "native subagent record"
 live_wait_for "$LIVE_STEP_TIMEOUT" "native subagent working" native_working \
@@ -359,6 +449,18 @@ fi
 if grep -qF "$PRE_CHILD_MARKER" <<<"$(completion_hop_instruction)"; then
   live_fail "the completion handoff still carries the replaced pre-child answer"
 fi
+# Ticket #201: the fake provider held this answer for WAKEUP_DELAY_MS after the
+# host started the wake-up turn. The received duration proves the result came
+# from a genuinely delayed answer, not the immediate happy path.
+WAKEUP_OBSERVED_MS=0
+for _ in $(seq 1 40); do
+  WAKEUP_OBSERVED_MS=$(native_wakeup_duration_ms "$TASK_ID")
+  [[ "$WAKEUP_OBSERVED_MS" =~ ^[0-9]+$ && "$WAKEUP_OBSERVED_MS" -ge "$WAKEUP_DURATION_FLOOR_MS" ]] && break
+  sleep 0.25
+done
+[[ "$WAKEUP_OBSERVED_MS" =~ ^[0-9]+$ && "$WAKEUP_OBSERVED_MS" -ge "$WAKEUP_DURATION_FLOOR_MS" ]] \
+  || live_fail "the wake-up answer was not delayed (observed ${WAKEUP_OBSERVED_MS}ms, floor ${WAKEUP_DURATION_FLOOR_MS}ms)"
+live_log "delayed post-child wake-up answer captured after ${WAKEUP_OBSERVED_MS}ms"
 # Ticket #199: the wake-up answer was consumed by the task result. It must not
 # be mirrored a second time as a late follow-up, even after the restart below.
 [[ "$(parent_late_followup_count)" == "0" ]] || live_fail "the captured wake-up answer was mirrored as a late follow-up"
@@ -366,6 +468,10 @@ fi
 verify_idle_hook_shape
 
 require_history_card "after completion"
+# Ticket #201: let the first completion delivery settle before the restart so
+# the late-report restart proves reconciliation, not an interrupted hop.
+live_wait_for 60 "original completion delivery terminal before restart" all_completion_hops_terminal \
+  || live_fail "the original completion delivery did not settle before the restart"
 
 # Reopen the durable card under HISTORY, then restart the isolated host and TUI
 # with the same state root. The record must survive with terminal state.
@@ -385,6 +491,58 @@ require_history_card "after restart"
 [[ "$(parent_late_followup_count)" == "0" ]] || live_fail "restart created a spurious late follow-up"
 [[ "$(parent_agent_row_count)" == "1" ]] || live_fail "restart duplicated the parent agent row"
 [[ "$(completion_hop_count)" == "1" ]] || live_fail "restart duplicated the parent completion hop"
+live_log "restart retained the terminal child and parent state with no duplicate row or hop"
+
+# Ticket #201/#199: after the restart, one native follow-up turn produces a
+# genuinely late report with no active Ensemble run. The parent idle must
+# reconcile it into the group exactly once and create one follow-up hop in the
+# same dispatch group, spending no hop and minting no new group.
+live_key "$LIVE_TUI_SESSION" "Escape"
+open_group_chat
+open_parent_native_session
+live_type "$LIVE_TUI_SESSION" "$LATE_TRIGGER"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "$LATE_MARKER" 45 "late native follow-up answer in the native session"
+live_key "$LIVE_TUI_SESSION" F2
+live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 20 "F2 returns after the late native answer"
+open_group_chat
+live_wait_for 30 "late native report reconciled exactly once" late_report_one \
+  || live_fail "late native report did not reconcile once (followups $(parent_late_followup_count), rows $(parent_late_report_rows), hops $(completion_hop_count))"
+[[ "$(parent_late_report_rows)" == "1" ]] || live_fail "the late native report added $(parent_late_report_rows) group rows"
+[[ "$(completion_hop_count)" == "2" ]] || live_fail "the late native report created $(completion_hop_count) completion hops, expected 2"
+late_completion_hop_has_marker || live_fail "the late follow-up completion hop does not carry the native report"
+[[ "$(parent_agent_row_count)" == "2" ]] || live_fail "the parent task did not keep one row per captured answer (got $(parent_agent_row_count))"
+[[ "$(dispatch_group_count)" == "$GROUPS_BEFORE" ]] || live_fail "the late report minted a new dispatch group ($(dispatch_group_count) vs $GROUPS_BEFORE)"
+hop_count_unchanged || live_fail "the late report spent a dispatch hop"
+[[ "$(live_snapshot_value "output.state.subtasks[\"$TASK_ID\"].lateNativeFollowUps[0].hopID" | tr -d '"')" != "null" ]] \
+  || live_fail "the late follow-up marker records no hop"
+# The transcript may still be scrolled where it was before the native detour;
+# jump to the bottom rather than weakening the content assertion.
+live_focus_chat_interact "$LIVE_TUI_SESSION"
+live_key "$LIVE_TUI_SESSION" End
+live_require_joined_text "$LIVE_TUI_SESSION" "$LATE_MARKER" 20 "late native report visible in the group transcript"
+live_log "late native report reconciled once, attributed to the parent, with one follow-up hop and no new group"
+live_wait_for 30 "both completion deliveries terminal before diagnosis" all_completion_hops_terminal \
+  || live_fail "a completion delivery did not settle before the doctor check"
+
+# A further restart of the isolated host and TUI must not duplicate the late
+# group row or its follow-up hop: the durable marker is the authority.
+live_key "$LIVE_TUI_SESSION" "Escape"
+"$LIVE_TMUX_BIN" kill-session -t "$LIVE_TUI_SESSION" 2>/dev/null || true
+"$LIVE_TMUX_BIN" kill-session -t "$LIVE_SERVE_SESSION" 2>/dev/null || true
+sleep 0.5
+live_start_server
+live_check_plugin
+start_tui
+live_wait_for "$LIVE_STEP_TIMEOUT" "native record after the second restart" native_count_is 1 \
+  || live_fail "native subagent record did not survive the second service restart"
+live_wait_for 20 "late report remains exactly once after restart" late_report_one \
+  || live_fail "restart duplicated or dropped the late report (followups $(parent_late_followup_count), rows $(parent_late_report_rows), hops $(completion_hop_count))"
+[[ "$(parent_agent_row_count)" == "2" ]] || live_fail "restart duplicated the parent agent rows (got $(parent_agent_row_count))"
+[[ "$(dispatch_group_count)" == "$GROUPS_BEFORE" ]] || live_fail "restart minted a new dispatch group"
+hop_count_unchanged || live_fail "restart spent a dispatch hop"
+live_log "second restart retained the late report exactly once"
+run_doctor
 
 # Privacy: the display instruction is durable, but the service diagnostics and
 # every log entry carry IDs, agent, state, and counts only.
@@ -393,22 +551,32 @@ DIAG_JSON=$(live_rpc diagnostic "$DIAG_BODY")
 if grep -qF "$CHILD_INSTRUCTION" <<<"$DIAG_JSON"; then
   live_fail "diagnostics carried the subagent instruction"
 fi
+# `diagnostic` is the explicit full-state support surface: it carries the
+# durable transcript, including the late report. The content-free claim applies
+# to logs (below), not to this state dump.
 LOG_BODY=$("$LIVE_NODE_BIN" -e 'process.stdout.write(JSON.stringify({input:{directory:process.argv[1],limit:1000}}))' "$LIVE_PROJECT")
 LOG_JSON=$(live_rpc logs.recent "$LOG_BODY")
 if grep -qF "$CHILD_INSTRUCTION" <<<"$LOG_JSON"; then
   live_fail "logs.recent carried the subagent instruction"
 fi
+if grep -qF "$LATE_MARKER" <<<"$LOG_JSON"; then
+  live_fail "logs.recent carried the late native report"
+fi
 if compgen -G "$LIVE_STATE/ensemble/logs/*" >/dev/null; then
   if grep -R -qF "$CHILD_INSTRUCTION" "$LIVE_STATE/ensemble/logs"; then
     live_fail "the service log files carried the subagent instruction"
   fi
-  # Ticket #197: the pre-child and wake-up answers are conversation content;
-  # the durable task/hop may carry them, but no service log may.
+  # Ticket #197/#201: the pre-child, wake-up, and late-report answers are
+  # conversation content; the durable task/hop may carry them, but no service
+  # log may.
   if grep -R -qF "$WAKEUP_MARKER" "$LIVE_STATE/ensemble/logs"; then
     live_fail "the service log files carried the post-child wake-up answer"
   fi
   if grep -R -qF "$PRE_CHILD_MARKER" "$LIVE_STATE/ensemble/logs"; then
     live_fail "the service log files carried the pre-child answer"
+  fi
+  if grep -R -qF "$LATE_MARKER" "$LIVE_STATE/ensemble/logs"; then
+    live_fail "the service log files carried the late native report"
   fi
 fi
 
