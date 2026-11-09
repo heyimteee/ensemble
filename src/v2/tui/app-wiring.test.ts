@@ -209,6 +209,17 @@ test("entering a rail pane claims the row cursor for that section", () => {
   )
 })
 
+test("the which-key popup leaves a row for its header and one line per entry", () => {
+  assert.ok(
+    has(app(), "height={whichKeyLines(leaderMenuEntries(leaderKeys()), 2, leaderKeys().length).length + 3}"),
+    "the popup height must include the two border rows, the header row, and every which-key line",
+  )
+})
+
+test("a pending leader prefix yields the host layer to the raw key machine", () => {
+  assert.ok(has(app(), "leaderMode() && leaderKeys().length === 0 && !commandActive()"))
+})
+
 test("the transcript width follows the Work pane state", () => {
   assert.ok(has(app(), "panes().chatContentWidth"))
   assert.ok(has(app(), "panes().chatOnlyContentWidth"))

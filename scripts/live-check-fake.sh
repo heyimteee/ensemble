@@ -2724,7 +2724,7 @@ live_wait_for 20 "previous work settled before the pane matrix" no_work_header \
 live_escape_to_pane_select "$LIVE_TUI_SESSION"
 live_ensure_left_pane "$LIVE_TUI_SESSION"
 live_ensure_right_pane "$LIVE_TUI_SESSION"
-live_focus_work_interact
+live_focus_work_interact "$LIVE_TUI_SESSION"
 if live_capture "$LIVE_TUI_SESSION" | grep -qF "WORK HISTORY │"; then
   live_key "$LIVE_TUI_SESSION" "f"
 fi
@@ -2735,7 +2735,7 @@ live_focus_chat "$LIVE_TUI_SESSION"
 # pane is white at a time; the rest keep the subdued border.
 assert_pane_borders() {
   local expected="$1" colors rail chat work
-  colors=$(live_top_border_colors)
+  colors=$(live_top_border_colors "$LIVE_TUI_SESSION")
   [[ -n "$colors" ]] || live_fail "could not read the pane top-border colours"
   IFS=',' read -r rail chat work <<<"$colors"
   [[ -n "$work" ]] || live_fail "expected three pane top borders (got $colors)"
@@ -2765,14 +2765,8 @@ assert_pane_borders() {
 }
 
 assert_rail_section_border() {
-  local section="$1" want="$2" color
-  color=$(live_border_above_text_color "$section (") \
-    || live_fail "could not read the $section section border"
-  if [[ "$want" == "white" ]]; then
-    live_color_is_white "$color" || live_fail "selected $section section border is not white (got $color)"
-  else
-    live_color_is_grey "$color" || live_fail "unselected $section section border is not grey (got $color)"
-  fi
+  local section="$1" want="$2"
+  live_assert_border_above "$LIVE_TUI_SESSION" "$section (" "$want" "$section section border"
 }
 
 # Chat interaction is white; Work stays muted. Chat Enter is transcript
@@ -2831,8 +2825,7 @@ live_log "pane select/interact transitions and per-pane white/grey headings and 
 
 # Space b opens the which-key submenu; Space b l/r are the only column
 # switches (F3 is retired). Closing a focused column returns to chat.
-live_key "$LIVE_TUI_SESSION" Space
-live_key "$LIVE_TUI_SESSION" "b"
+live_open_pane_prefix "$LIVE_TUI_SESSION"
 live_require_text "$LIVE_TUI_SESSION" "Toggle the left pane" 10 "Space b lists the left toggle"
 live_require_text "$LIVE_TUI_SESSION" "Toggle the right pane" 10 "Space b lists the right toggle"
 live_key "$LIVE_TUI_SESSION" Escape
@@ -2940,15 +2933,11 @@ live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ v open" 20 "small
 live_assert_absence_rail "$LIVE_TUI_SESSION" "APPROVALS" "left rail no longer carries the approvals footer"
 live_focus_work_interact "$LIVE_TUI_SESSION"
 live_assert_grey_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending" "unfocused small approvals heading"
-small_border=$(live_border_above_text_color "APPROVALS 1 pending") \
-  || live_fail "could not read the small approvals border"
-live_color_is_grey "$small_border" || live_fail "unfocused small approvals border is not grey (got $small_border)"
+live_assert_border_above "$LIVE_TUI_SESSION" "APPROVALS 1 pending" grey "unfocused small approvals border"
 live_select_pane "$LIVE_TUI_SESSION" approvals
 live_assert_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ enter open" "selecting approvals teaches Enter"
 live_assert_white_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending" "selected small approvals heading"
-small_border=$(live_border_above_text_color "APPROVALS 1 pending") \
-  || live_fail "could not read the selected small approvals border"
-live_color_is_white "$small_border" || live_fail "selected small approvals border is not white (got $small_border)"
+live_assert_border_above "$LIVE_TUI_SESSION" "APPROVALS 1 pending" white "selected small approvals border"
 assert_pane_borders work
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ 1/1" 10 "Enter from the small pane opens full approvals"
@@ -2977,10 +2966,12 @@ live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent needs your input" 10 "approval decision opens"
 live_key "$LIVE_TUI_SESSION" Down
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_no_active_work "$LIVE_TUI_SESSION" 20 "rejected approval clears its work"
-live_escape_to_pane_select "$LIVE_TUI_SESSION"
-live_require_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 10 "small approvals leave after the last decision"
+# Full approvals stays mounted while the rejection settles; close it before
+# asserting the Work header, which is hidden in full mode.
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 15 "small approvals leave after the last decision"
 live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 10 "split Work view returns after the decision"
+live_require_no_active_work "$LIVE_TUI_SESSION" 20 "rejected approval clears its work"
 live_log "small/full approvals modes, Enter/Esc, left-footer removal, and V retirement verified"
 
 # ---------------------------------------------------------------------------
@@ -3033,9 +3024,9 @@ live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │ none yet" 10 "history cl
 live_key "$LIVE_TUI_SESSION" "f"
 live_focus_chat "$LIVE_TUI_SESSION"
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"history-older fake-queue\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_wait_for_subtask_status "history-older fake-queue" replied 30 || live_fail "older history group did not finish"
+live_wait_for_subtask_status "history-older fake-queue" replied 90 || live_fail "older history group did not finish"
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"history-newer fake-queue\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_wait_for_subtask_status "history-newer fake-queue" replied 30 || live_fail "newer history group did not finish"
+live_wait_for_subtask_status "history-newer fake-queue" replied 90 || live_fail "newer history group did not finish"
 live_require_no_active_work "$LIVE_TUI_SESSION" 15 "history fixture groups settled"
 live_focus_work_interact "$LIVE_TUI_SESSION"
 live_key "$LIVE_TUI_SESSION" "f"

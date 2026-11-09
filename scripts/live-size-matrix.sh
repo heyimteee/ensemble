@@ -409,7 +409,7 @@ check_pane_chrome() {
   live_focus_chat "$LIVE_TUI_SESSION"
   live_assert_white_chat_text "$LIVE_TUI_SESSION" "#SizeProbe" "chat heading at ${width}"
   live_assert_grey_text "$LIVE_TUI_SESSION" "WORK ACTIVE" "unfocused Work heading at ${width}"
-  colors=$(live_top_border_colors)
+  colors=$(live_top_border_colors "$LIVE_TUI_SESSION")
   [[ -n "$colors" ]] || live_fail "could not read pane borders at $width"
   IFS=',' read -r rail chat work <<<"$colors"
   [[ -n "$work" ]] || live_fail "expected three pane borders at $width (got $colors)"
@@ -422,16 +422,14 @@ check_pane_chrome() {
   live_select_pane "$LIVE_TUI_SESSION" agents
   live_assert_white_text "$LIVE_TUI_SESSION" "AGENTS (" "focused Agents heading at ${width}"
   live_assert_grey_text "$LIVE_TUI_SESSION" "WORKSPACES (" "unfocused Workspaces heading at ${width}"
-  live_color_is_white "$(live_border_above_text_color "AGENTS (")" \
-    || live_fail "focused Agents section border is not white at $width"
-  live_color_is_grey "$(live_border_above_text_color "WORKSPACES (")" \
-    || live_fail "unfocused Workspaces section border is not grey at $width"
+  live_assert_border_above "$LIVE_TUI_SESSION" "AGENTS (" white "focused Agents section border at ${width}"
+  live_assert_border_above "$LIVE_TUI_SESSION" "WORKSPACES (" grey "unfocused Workspaces section border at ${width}"
 
   # Work owns the white heading and right border when selected.
   live_focus_work_interact "$LIVE_TUI_SESSION"
   live_assert_white_text "$LIVE_TUI_SESSION" "WORK ACTIVE" "focused Work heading at ${width}"
   live_assert_grey_chat_text "$LIVE_TUI_SESSION" "#SizeProbe" "unfocused chat heading at ${width}"
-  colors=$(live_top_border_colors)
+  colors=$(live_top_border_colors "$LIVE_TUI_SESSION")
   IFS=',' read -r rail chat work <<<"$colors"
   live_color_is_grey "$rail" || live_fail "Work focus left the rail border non-grey at $width (got $rail)"
   live_color_is_grey "$chat" || live_fail "Work focus left the chat border non-grey at $width (got $chat)"

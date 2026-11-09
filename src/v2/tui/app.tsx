@@ -5194,7 +5194,10 @@ export function EnsembleV2App() {
     context.keymap.layer(() => ({
       mode: "global",
       priority: 120,
-      enabled: () => ownsRawKeys() && !isModal() && leaderMode() && !commandActive(),
+      // Ticket #183/#186: while a leader prefix is pending, the raw key
+      // machine owns every key. Otherwise the host's top-level `l`/`r`
+      // binding would fire instead of the `b l`/`b r` submenu action.
+      enabled: () => ownsRawKeys() && !isModal() && leaderMode() && leaderKeys().length === 0 && !commandActive(),
       commands: leaderCommands,
       bindings: leaderCommands.map((command) => command.id),
     }))
@@ -7377,7 +7380,7 @@ export function EnsembleV2App() {
           bottom={4}
           right={4}
           width={68}
-          height={whichKeyLines(leaderMenuEntries(leaderKeys()), 2, leaderKeys().length).length + 2}
+          height={whichKeyLines(leaderMenuEntries(leaderKeys()), 2, leaderKeys().length).length + 3}
           zIndex={90}
           border
           borderStyle="rounded"

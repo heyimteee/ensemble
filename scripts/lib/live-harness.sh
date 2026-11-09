@@ -828,14 +828,26 @@ live_capture_left_pane() {
   live_capture "$1" | grep -qE 'AGENTS \([0-9]+\)'
 }
 
+live_open_leader() {
+  local session="$1"
+  live_key "$session" Space
+  live_wait_for 5 "leader mode" live_capture_matches "$session" "chord space" \
+    || live_fail "Space did not open the leader"
+}
+
+live_open_pane_prefix() {
+  local session="$1"
+  live_open_leader "$session"
+  live_key "$session" b
+  live_wait_for 5 "pane prefix" live_capture_matches "$session" "chord space b" \
+    || live_fail "Space b did not open the pane submenu"
+}
+
 live_toggle_pane_side() {
   local session="$1" side="$2"
-  live_key "$session" Space
-  sleep 0.2
-  live_key "$session" b
-  sleep 0.2
+  live_open_pane_prefix "$session"
   live_key "$session" "$side"
-  sleep 0.4
+  sleep 0.5
 }
 
 live_ensure_right_pane() {
@@ -1058,21 +1070,31 @@ live_sgr_fg_for_text_in_columns() {
 }
 
 live_assert_white_chat_text() {
-  local session="$1" text="$2" description="${3:-$text}" columns start end color
+  local session="$1" text="$2" description="${3:-$text}" columns start end color=""
   columns=$(live_chat_columns)
   read -r start end <<<"$columns"
-  color=$(live_sgr_fg_for_text_in_columns "$session" "$text" "$start" "$end" 1) \
-    || live_fail "could not read the colour of $description"
-  live_color_is_white "$color" || live_fail "$description is not white (got $color)"
+  local deadline=$(( $(date +%s%N) + 3 * 1000000000 ))
+  while true; do
+    color=$(live_sgr_fg_for_text_in_columns "$session" "$text" "$start" "$end" 1 2>/dev/null || true)
+    live_color_is_white "$color" && return 0
+    (( $(date +%s%N) >= deadline )) && break
+    sleep 0.1
+  done
+  live_fail "$description is not white (got ${color:-unreadable})"
 }
 
 live_assert_grey_chat_text() {
-  local session="$1" text="$2" description="${3:-$text}" columns start end color
+  local session="$1" text="$2" description="${3:-$text}" columns start end color=""
   columns=$(live_chat_columns)
   read -r start end <<<"$columns"
-  color=$(live_sgr_fg_for_text_in_columns "$session" "$text" "$start" "$end" 1) \
-    || live_fail "could not read the colour of $description"
-  live_color_is_grey "$color" || live_fail "$description is not grey (got $color)"
+  local deadline=$(( $(date +%s%N) + 3 * 1000000000 ))
+  while true; do
+    color=$(live_sgr_fg_for_text_in_columns "$session" "$text" "$start" "$end" 1 2>/dev/null || true)
+    live_color_is_grey "$color" && return 0
+    (( $(date +%s%N) >= deadline )) && break
+    sleep 0.1
+  done
+  live_fail "$description is not grey (got ${color:-unreadable})"
 }
 
 # Foreground colours of every top-left rounded corner on the first frame row
@@ -1158,17 +1180,19 @@ live_border_above_text_color() {
       const target = process.argv[1];
       const at = lines.findIndex((line) => line.visible.includes(target));
       if (at <= 0) process.exit(1);
-      const above = lines[at - 1];
-      for (let index = 0; index < above.visible.length; index += 1) {
-        if (above.visible[index] === "┌") {
-          process.stdout.write(above.colors[index] ?? "default");
-          return;
+      for (let offset = 1; offset <= 3 && at - offset >= 0; offset += 1) {
+        const above = lines[at - offset];
+        for (let index = 0; index < above.visible.length; index += 1) {
+          if (above.visible[index] === "┌" || above.visible[index] === "╭") {
+            process.stdout.write(above.colors[index] ?? "default");
+            return;
+          }
         }
-      }
-      for (let index = 0; index < above.visible.length; index += 1) {
-        if (above.visible[index] === "─") {
-          process.stdout.write(above.colors[index] ?? "default");
-          return;
+        for (let index = 0; index < above.visible.length; index += 1) {
+          if (above.visible[index] === "─") {
+            process.stdout.write(above.colors[index] ?? "default");
+            return;
+          }
         }
       }
       process.exit(1);
@@ -1191,18 +1215,46 @@ live_color_is_grey() {
   esac
 }
 
+# Bounded read of the border above a heading; a pane repaint can expose the
+# heading one frame before its border settles.
+live_assert_border_above() {
+  local session="$1" text="$2" want="$3" description="${4:-$text border}" color=""
+  local deadline=$(( $(date +%s%N) + 3 * 1000000000 ))
+  while true; do
+    color=$(live_border_above_text_color "$session" "$text" 2>/dev/null || true)
+    if [[ "$want" == "white" ]]; then
+      live_color_is_white "$color" && return 0
+    else
+      live_color_is_grey "$color" && return 0
+    fi
+    (( $(date +%s%N) >= deadline )) && break
+    sleep 0.1
+  done
+  live_fail "$description is not $want (got ${color:-unreadable})"
+}
+
 live_assert_white_text() {
-  local session="$1" text="$2" description="${3:-$text}" color
-  color=$(live_sgr_fg_for_text "$session" "$text" 1) \
-    || live_fail "could not read the colour of $description"
-  live_color_is_white "$color" || live_fail "$description is not white (got $color)"
+  local session="$1" text="$2" description="${3:-$text}" color=""
+  local end=$(( $(date +%s%N) + 3 * 1000000000 ))
+  while true; do
+    color=$(live_sgr_fg_for_text "$session" "$text" 1 2>/dev/null || true)
+    live_color_is_white "$color" && return 0
+    (( $(date +%s%N) >= end )) && break
+    sleep 0.1
+  done
+  live_fail "$description is not white (got ${color:-unreadable})"
 }
 
 live_assert_grey_text() {
-  local session="$1" text="$2" description="${3:-$text}" color
-  color=$(live_sgr_fg_for_text "$session" "$text" 1) \
-    || live_fail "could not read the colour of $description"
-  live_color_is_grey "$color" || live_fail "$description is not grey (got $color)"
+  local session="$1" text="$2" description="${3:-$text}" color=""
+  local end=$(( $(date +%s%N) + 3 * 1000000000 ))
+  while true; do
+    color=$(live_sgr_fg_for_text "$session" "$text" 1 2>/dev/null || true)
+    live_color_is_grey "$color" && return 0
+    (( $(date +%s%N) >= end )) && break
+    sleep 0.1
+  done
+  live_fail "$description is not grey (got ${color:-unreadable})"
 }
 
 # --- input ----------------------------------------------------------------

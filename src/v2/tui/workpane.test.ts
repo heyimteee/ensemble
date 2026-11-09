@@ -289,20 +289,37 @@ test("ticket184: a finish in a collapsed group updates its count and marks it wi
   )
   const later = [
     ...newest,
-    replied({ id: "b2", dispatchGroupID: "dispatch_b", createdAt: 3, finishedAt: 7_000, repliedAt: 7_000 }),
+    replied({ id: "b2", dispatchGroupID: "dispatch_b", createdAt: 3, finishedAt: 4_000, repliedAt: 4_000 }),
   ]
   const groups = workViewGroups(later, record(...later), { now: 8_000 }).history
   const next = reconcileHistoryView(groups, initial)
   assert.equal(next.expanded.dispatch_b, false, "the collapsed group stays collapsed")
   assert.equal(next.done.dispatch_b, 2, "its done count follows the new finish")
   assert.equal(next.fresh.dispatch_b, true, "the collapsed group carries a new marker")
-  assert.equal(next.expanded.dispatch_a, true, "the previously expanded group is not disturbed")
+  assert.equal(next.expanded.dispatch_a, true, "the newest group is still expanded")
   const rows = historyPaneGroups(groups, next)
   assert.deepEqual(rows.map((group) => [group.id, group.collapsed, group.fresh]), [
-    ["dispatch_b", true, true],
     ["dispatch_a", false, false],
+    ["dispatch_b", true, true],
   ])
   assert.equal(reconcileHistoryView(groups, next), next, "an unchanged reconcile keeps the same state")
+})
+
+test("ticket184/#186: a former auto-expanded newest rolls up unless the user expanded it", () => {
+  const older = replied({ id: "a", dispatchGroupID: "dispatch_a", createdAt: 1, finishedAt: 5_000, repliedAt: 5_000 })
+  const first = reconcileHistoryView(
+    workViewGroups([older], record(older), { now: 6_000 }).history,
+    emptyHistoryViewState(),
+  )
+  assert.equal(first.expanded.dispatch_a, true, "the only group starts expanded")
+  const newer = replied({ id: "b", dispatchGroupID: "dispatch_b", createdAt: 2, finishedAt: 7_000, repliedAt: 7_000 })
+  const both = [older, newer]
+  const rolled = reconcileHistoryView(workViewGroups(both, record(...both), { now: 8_000 }).history, first)
+  assert.equal(rolled.expanded.dispatch_a, false, "a former auto-expanded newest rolls up")
+
+  const manual = toggleHistoryView(rolled, "dispatch_a")
+  const kept = reconcileHistoryView(workViewGroups(both, record(...both), { now: 8_000 }).history, manual)
+  assert.equal(kept.expanded.dispatch_a, true, "a user-expanded older group stays expanded")
 })
 
 test("ticket184: dismissed history groups leave the view but keep their data", () => {
