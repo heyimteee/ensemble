@@ -83,6 +83,27 @@ export function isTerminalWorkStatus(status: DerivedWorkStatus): boolean {
 }
 
 /**
+ * Ticket #193: one canonical rule for the legacy zero-attempt delivery row
+ * that stored its queued-delivery timer in `retryAfter`. It has no failed
+ * attempt and no structured failure, so it is a hold, never a retry. The
+ * status derivation, batch consolidation, and scheduler conversions all read
+ * this helper so a genuine retrying item can never contribute as a hold in
+ * one place and as a retry in another.
+ */
+export function isDeliveryHoldRetry(
+  task: Pick<Subtask, "retryAfter" | "deliveryHoldUntil" | "attempts" | "failure">,
+): boolean {
+  return task.retryAfter !== undefined && task.deliveryHoldUntil === undefined && task.attempts === 0 && task.failure === undefined
+}
+
+/** The queued-delivery hold for a row, including a legacy `retryAfter` hold. */
+export function effectiveDeliveryHold(
+  task: Pick<Subtask, "retryAfter" | "deliveryHoldUntil" | "attempts" | "failure">,
+): number | undefined {
+  return task.deliveryHoldUntil ?? (isDeliveryHoldRetry(task) ? task.retryAfter : undefined)
+}
+
+/**
  * One needs-you rule shared by the service, grouping, and the TUI. A task
  * needs the user when its run was interrupted, when its batch review could
  * not close after its one correction (ticket #198), when its linked approval
@@ -153,7 +174,7 @@ export function deriveWorkStatus(task: WorkLifecycle, now: number, context?: Wor
   // claims the row; only clearing `retryAfter` ends the backoff. A retry needs
   // real failure evidence: a legacy completion row written before ticket #193
   // carries only `retryAfter` with zero attempts and must still read queued.
-  const scheduledRetry = task.retryAfter !== undefined && (task.attempts > 0 || task.failure !== undefined)
+  const scheduledRetry = task.retryAfter !== undefined && !isDeliveryHoldRetry(task)
   if (lostLease || scheduledRetry) return "retrying"
   // A delivery hold is queued work, never a retry. The row reads pending
   // before and after the hold's claim time; the scheduler honors the timer.

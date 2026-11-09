@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import type { NativeSubagentRun, Subtask } from "../types.ts"
+import { REVIEW_INCOMPLETE_REASON, type NativeSubagentRun, type Subtask } from "../types.ts"
 import { TIDE_GLYPHS, createTideFreezeState, type TideFreezeState } from "./tide.ts"
 import { nativeSubagentFocusID } from "./nativecards.ts"
 import {
@@ -714,7 +714,7 @@ test("ticket198: an incomplete batch review card says why it needs the user", ()
       completion: true,
       batch: true,
       itemIDs: ["i1", "i2"],
-      reviewIncomplete: "review-incomplete",
+      reviewIncomplete: REVIEW_INCOMPLETE_REASON,
     },
   }), "Sage", { now: 1000, tick: 3, width: 40 })
   assert.equal(card.header.status, "NEEDS YOU")

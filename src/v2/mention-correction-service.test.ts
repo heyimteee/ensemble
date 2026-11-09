@@ -221,6 +221,48 @@ test("ticket200: a mention backed by work created in the run needs no correction
   }
 })
 
+// A non-leader answer that names the leader is backed by the mandatory
+// completion delivery the task creates immediately after the answer. It must
+// not get a correction or a warning for a member who is already receiving the
+// turn through the completion hop.
+test("ticket200: a mention of the leader is backed by the mandatory completion delivery", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-mention-"))
+  const { ctx } = fakeContext()
+  const prompts: Array<{ sessionID: string; text: string }> = []
+  ;(ctx.session as any).context = async ({ sessionID }: any) => {
+    if (sessionID !== "sess_sage") return assistant("Finished the work.")
+    return assistant("$Nova, please review the draft.")
+  }
+  ;(ctx.session as any).prompt = async (input: any) => {
+    prompts.push({ sessionID: input.sessionID, text: input.text })
+  }
+  await seedDelegatedTask(ctx, directory, "task_leader_mention")
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks as any).task_leader_mention?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const rows = after.state.subtasks as any
+    assert.equal(correctionPrompts(prompts).length, 0, "the leader mention is backed by the completion delivery")
+    assert.equal(rows.task_leader_mention.mentionCorrectionSent, undefined, "no correction marker is spent")
+    const texts = ((after.state.messages.w ?? []) as any[]).map((message: any) => message.text)
+    assert.equal(texts.some((text) => text.includes("Unbacked mention")), false, "the leader mention never warns")
+    const completion = Object.values(rows).find(
+      (task: any) => task.parentID === "task_leader_mention" && task.handoff?.completion === true,
+    ) as any
+    assert.ok(completion, "the mandatory completion hop is still created")
+    assert.equal(completion.assigneeID, "nova", "the completion hop goes to the leader")
+    assert.match(completion.instruction, /\$Nova, please review the draft\./, "the hop carries the answer")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 // A durable marker survives a fresh service run: the contract does not grant
 // a second correction after a crash or restart, it only warns.
 test("ticket200: a durable correction marker prevents a second correction after restart", async () => {

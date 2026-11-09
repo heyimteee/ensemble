@@ -103,7 +103,7 @@ export function completionFollowUpWorkKey(input: {
   recipientID: string
   nativeMessageID: string
 }): string {
-  return `completion:${input.workspaceID}:${input.finishedTaskID}:${input.recipientID}:late:${stableHash(input.nativeMessageID)}`
+  return `${completionWorkKey(input)}:late:${stableHash(input.nativeMessageID)}`
 }
 
 export type CompletionCandidate = {
@@ -320,19 +320,19 @@ function fileSegment(value: string, fallback: string): string {
 /**
  * Ticket #195: safe generated handoff filename. The result is one flat
  * basename under `.ensemble/handoffs/` — no separator, no dot segment, and
- * no caller-supplied path can escape the handoff directory. Timestamp and
- * nonce keep concurrent asks distinct. Pure.
+ * no caller-supplied path can escape the handoff directory. The caller
+ * supplies the timestamp and nonce, so concurrent asks stay distinct without
+ * the helper reading the clock or randomness. Pure.
  */
 export function inlineHandoffFileName(input: {
   task: string
   from: string
   to: string
-  at?: number
-  nonce?: string
+  at: number
+  nonce: string
 }): string {
-  const stamp = Number.isFinite(input.at) ? Math.max(0, Math.trunc(input.at as number)) : Date.now()
-  const rawNonce = input.nonce ?? Math.random().toString(36).slice(2)
-  const nonce = rawNonce.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12) || Math.random().toString(36).replace(/[^a-z0-9]/g, "").slice(0, 12)
+  const stamp = Math.max(0, Math.trunc(input.at))
+  const nonce = input.nonce.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12) || "nonce"
   return `handoff-${fileSegment(input.task, "task")}-${fileSegment(input.from, "sender")}-${fileSegment(input.to, "recipient")}-${stamp}-${nonce}.md`
 }
 

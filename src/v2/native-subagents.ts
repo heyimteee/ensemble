@@ -1,5 +1,5 @@
 import { stableHash } from "./queue.ts"
-import type { NativeSubagentState } from "./types.ts"
+import type { LateNativeFollowUp, NativeSubagentState } from "./types.ts"
 
 /** Longest display instruction head kept in a durable subagent record. */
 export const NATIVE_SUBAGENT_INSTRUCTION_LIMIT = 120
@@ -106,6 +106,23 @@ export function nativeSubagentNextState(current: NativeSubagentState, next: Nati
   return current
 }
 
+/** Keep an insertion-ordered map bounded, refreshing the key's position. */
+export function rememberBoundedMapEntry<T>(
+  map: Map<string, T>,
+  key: string,
+  value: T,
+  limit = NATIVE_SUBAGENT_ACTIVE_LIMIT,
+): void {
+  map.delete(key)
+  map.set(key, value)
+  const bounded = Math.max(1, limit)
+  while (map.size > bounded) {
+    const oldest = map.keys().next().value
+    if (oldest === undefined) break
+    map.delete(oldest)
+  }
+}
+
 /** Keep the service's active child index insertion-ordered and bounded. */
 export function rememberNativeSubagentActive(
   active: Map<string, number>,
@@ -113,14 +130,12 @@ export function rememberNativeSubagentActive(
   startedAt: number,
   limit = NATIVE_SUBAGENT_ACTIVE_LIMIT,
 ): void {
-  active.delete(childSessionID)
-  active.set(childSessionID, startedAt)
-  const bounded = Math.max(1, limit)
-  while (active.size > bounded) {
-    const oldest = active.keys().next().value
-    if (oldest === undefined) break
-    active.delete(oldest)
-  }
+  rememberBoundedMapEntry(active, childSessionID, startedAt, limit)
+}
+
+/** The native message that keys one late follow-up marker. Pure. */
+export function lateNativeFollowUpMessageID(marker: Pick<LateNativeFollowUp, "messageIDs">): string | undefined {
+  return marker.messageIDs[marker.messageIDs.length - 1]
 }
 
 /** One late native assistant answer that may enter the group transcript. */
