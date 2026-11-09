@@ -28,13 +28,35 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   picker, and atomic validation errors that preserve the draft. Ticket #177
   adds the three-pane shell: split rail grouping with durable collapse across a
   TUI restart, ACTIVE/HISTORY movement and retention, the native-session
-  picker and its missing-binding message, aligned member columns, sticky
-  inline approvals resolved with `v`/Enter/Esc, Work-card action validity and
-  focus borders, untracked/spaced/suffixed composer file references with a
+  picker and its missing-binding message, aligned member columns, right-pane
+  approvals opened with `v`/Enter and resolved with Enter/Esc, Work-card action
+  validity and focus borders, untracked/spaced/suffixed composer file
+  references with a
   cached index (a counting `fd` wrapper proves filtering spawns no discovery),
   a genuine native FAILED card next to a controlled-stop CANCELLED card, and
-  doctor plus `logs:summary` artifacts. The long-run lifecycle case lives in
-  `test:live:lifecycle`.
+  doctor plus `logs:summary` artifacts. Ticket #186 adds the pane-interaction
+  delivery: the select/interact focus matrix, chat Enter versus `i`, Agents-first
+  `h`, Work via `l`, `Space b l/r` toggles with durable visibility and F3
+  removal, ANSI evidence for focused white / unfocused grey pane headings and
+  borders, task-level HISTORY with rollup/expand/dismiss/clear, the one-line
+  aggregate activity summary with Work open, and the small/full approvals modes
+  with the left footer, chat modal, and `V` retired. The long-run lifecycle case
+  lives in `test:live:lifecycle`.
+- `npm run test:live:subagent`: ticket #188's real native-subagent probe. The
+  isolated OpenCode 2.2.6 host runs the worktree plugin against the fake
+  provider, then an Ensemble agent's fake turn calls the host's built-in
+  `subagent` tool in `background: true` mode. This creates a genuine child native
+  session while the parent turn has already finished. The probe checks the
+  durable `NativeSubagentRun` (parent task/group/workspace/agent, bounded
+  instruction, `session-created` source), the `Subagents: Watch the…` Work card
+  and parent agent name, the bounded parent barrier (parent stays `working`
+  with a live lease until the child's terminal event), the child
+  working→replied transition, HISTORY, cleanup with no queue row or hop spend,
+  no instruction content in diagnostics/logs, `experimental.idle` background
+  shape, and restart retention. Set `ENSEMBLE_SUBAGENT_EXPECT=early` to run the
+  pre-barrier baseline against an older tree; it records that the parent replies
+  before the child succeeds and stops before the post-barrier assertions. The
+  probe defaults `ENSEMBLE_LOG_LEVEL=debug` for its isolated service logs.
 - `npm run test:live:lifecycle`: a full wall-clock fake run that streams for
   about 5m40s across the old five-minute delivery deadline while the service
   heartbeat renews its 60-second lease. A second delivery sent immediately
@@ -208,7 +230,10 @@ batch with `ensemble_review`. The multi-location harness passes the isolated
 workspace's handoff directory. `fake-lease-hold` streams for about 5m40s for
 the lifecycle check; `fake-motion-static` streams once for the reduced-motion
 Work-card probe; `fake-native-error` returns a non-retried 4xx model error for
-the genuine FAILED card. A one-shot init pre-stream pause keeps the
+the genuine FAILED card. `fake-subagent-parent-fixture` emits one native
+`subagent` tool call in background mode with the child instruction
+`fake-subagent-child-hold-fixture`; the child stream holds long enough to observe
+the parent barrier and Work card. A one-shot init pre-stream pause keeps the
 indeterminate System Agent row observable, and a pre-stream turn pause keeps
 the transient `Asking $Name…` window observable on the narrower chat cell.
 
@@ -222,15 +247,18 @@ starts a fresh five-group fixture (one two-task group and four single-task
 groups), then checks:
 
 - 160×50: three panes, six tasks in two-column cards across two pages, the
-  Work header and group labels, spatial `hjkl`, `gg`/`G`, page-edge `j`/`k`,
-  the exact right edge, and the focused white / unfocused grey card borders
-  read from `tmux capture-pane -e`.
+  Work header and group labels, spatial `hjkl`, `gg`/`G`, page-edge `j`/`k`
+  and `h`/`l`, the exact right edge, and the focused white / unfocused grey
+  card borders read from `tmux capture-pane -e`. It also reads pane headings
+  and borders from ANSI capture: the selected Agents/Workspaces section, chat,
+  and Work are white while the rest stay grey.
 - 120×40 and 100×30: three panes with compact Work rows, group labels, the
-  dispatch budget label, focus movement, the page indicator, and the exact
-  right edge.
-- 80×24: the Work drawer starts closed, `F3` opens and focuses it, compact rows
-  and the drawer page indicator are checked, the page edge advances by
-  keyboard, and `F3` closes it back to the chat.
+  dispatch budget label, focus movement, the page indicator, the exact right
+  edge, and the same per-pane white/grey heading and border contract.
+- 80×24: the Work drawer starts open with durable visibility (ticket #183),
+  `Space b r` closes and reopens it, `F3` is proven retired, the closed drawer
+  survives a TUI restart, compact rows and the drawer page indicator are
+  checked, and the page edge advances by keyboard.
 - `NO_COLOR=1` restarts at 120×40 and proves frame-0 motion plus the state
   word while work is live.
 

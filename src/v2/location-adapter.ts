@@ -16,6 +16,9 @@ const LOCATION_EVENT_TYPES: string[][] = [
   // `input.started` carries the tool name; `called` carries its input head.
   ["session.tool.input.started", "session.tool.called", "session.tool.progress", "session.tool.success", "session.tool.failed"],
   ["session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
+  // Ticket #182: host child sessions are the durable identity for native
+  // subagent records. The tracker maps them to their parent task and group.
+  ["session.created", "session.deleted"],
 ]
 
 /**
@@ -35,6 +38,7 @@ export class LocationAttachment {
   private rpcRegistration: HostRegistration | undefined
   private toolRegistration: HostRegistration | undefined
   private hookRegistration: HostRegistration | undefined
+  private idleHookRegistration: HostRegistration | undefined
   private eventAbort: AbortController | undefined
   private disposal: Promise<void> | undefined
   private readonly releaseReference: () => Promise<void>
@@ -57,6 +61,7 @@ export class LocationAttachment {
       this.service.attach(this.rpcRegistration)
       this.toolRegistration = await this.service.installToolsFor(this.ctx)
       this.hookRegistration = await this.service.installRetryHook(this.ctx)
+      this.idleHookRegistration = await this.service.installIdleHook(this.ctx)
       this.service.trackLocation(this.ctx, this.directory)
       this.startEventSubscriptions()
       return this
@@ -76,7 +81,8 @@ export class LocationAttachment {
     if (this.disposal) return this.disposal
     this.disposal = (async () => {
       this.eventAbort?.abort()
-      this.service.untrackLocation(this.ctx)
+      await this.service.untrackLocation(this.ctx)
+      await this.disposeRegistration(this.idleHookRegistration)
       await this.disposeRegistration(this.hookRegistration)
       await this.disposeRegistration(this.toolRegistration)
       if (this.rpcRegistration) this.service.detach(this.rpcRegistration)

@@ -57,6 +57,18 @@ export function workTaskActions(task: Subtask | undefined, now: number): Readonl
   return actions
 }
 
+const NO_NATIVE_ACTIONS: ReadonlySet<WorkActionID> = new Set<WorkActionID>()
+
+/**
+ * Ticket #187: a native subagent card is read-only Ensemble work. It has no
+ * queue row, hop budget, result, or child-session control, so no retry,
+ * cancel, delegate, reassign, or restart action is offered. `o`/Enter open the
+ * child's native session through the app's own route, not this action set.
+ */
+export function nativeSubagentActions(): ReadonlySet<WorkActionID> {
+  return NO_NATIVE_ACTIONS
+}
+
 /**
  * The durable lifecycle fields a pending action changes. A pending label is
  * cleared by the update that carries the action's outcome, not by the RPC

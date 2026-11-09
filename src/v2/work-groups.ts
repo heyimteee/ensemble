@@ -1,7 +1,7 @@
 import { deriveWorkStatus, isTerminalWorkStatus, workNeedsYou } from "./queue.ts"
 import { dispatchBudgetSummary, dispatchGroupExhausted, dispatchGroupState, type DispatchBudgetSummary, type DispatchGroupState } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
-import type { Approval, DispatchCloseReason, DispatchGroup, Id, Subtask } from "./types.ts"
+import type { Approval, DispatchCloseReason, DispatchGroup, Id, NativeSubagentRun, Subtask } from "./types.ts"
 
 /**
  * Ticket #136 dispatch-group Work lifecycle, shared by the TUI pane #141's
@@ -65,6 +65,12 @@ export type WorkGroup = {
   exhausted?: boolean
   /** Ticket #162: controlled-stop reason. */
   closeReason?: DispatchCloseReason
+  /**
+   * Ticket #187: native subagent child sessions rendered as Work cards under
+   * this parent dispatch group. They are never Subtasks and never enter the
+   * queue; the group's active/done counts include them.
+   */
+  native?: NativeSubagentRun[]
 }
 
 export type WorkGroupOptions = {

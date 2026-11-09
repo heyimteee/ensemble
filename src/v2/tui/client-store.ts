@@ -55,6 +55,8 @@ function entityChangeKey(change: EntityChange): string | undefined {
       return `memory\u0000${change.op === "upsert" ? change.memory.id : change.id}`
     case "initJob":
       return `initJob\u0000${change.op === "upsert" ? change.job.id : change.id}`
+    case "nativeSubagent":
+      return `nativeSubagent\u0000${change.op === "upsert" ? change.run.childSessionID : change.id}`
     case "settings":
     case "ui":
       return undefined
@@ -198,6 +200,18 @@ function reduceEntityChanges(state: SnapshotState, changes: EntityChange[]): Sna
         }
         break
       }
+      case "nativeSubagent": {
+        if (change.op === "upsert") {
+          if (next.nativeSubagents[change.run.childSessionID] === change.run) break
+          copy().nativeSubagents = { ...next.nativeSubagents, [change.run.childSessionID]: change.run }
+        } else {
+          if (!(change.id in next.nativeSubagents)) break
+          const nativeSubagents = { ...next.nativeSubagents }
+          delete nativeSubagents[change.id]
+          copy().nativeSubagents = nativeSubagents
+        }
+        break
+      }
       case "settings": {
         if (next.settings === change.settings) break
         copy().settings = change.settings
@@ -275,6 +289,7 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
         workspaces: shell.workspaces,
         dispatchGroups: shell.dispatchGroups ?? state.dispatchGroups,
         initJobs: shell.initJobs,
+        nativeSubagents: shell.nativeSubagents ?? state.nativeSubagents,
         bindings: shell.bindings,
         memories: shell.memories,
         approvals: shell.approvals,

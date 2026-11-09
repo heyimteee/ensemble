@@ -81,7 +81,8 @@ The [doctor reference](../../README.md#runtime-diagnosis) and `npm run doctor --
 `workspacePaneWidths`, `workPaneBodyHeight`, ACTIVE/HISTORY filtering, and
 pagination; [railmodel.ts](../../src/v2/tui/railmodel.ts) owns rail grouping;
 [workfocus.ts](../../src/v2/tui/workfocus.ts) owns spatial navigation;
-[workapprovals.ts](../../src/v2/tui/workapprovals.ts) owns the inline window;
+[workapprovals.ts](../../src/v2/tui/workapprovals.ts) owns the approvals
+modes, workspace scope, and window budgets;
 [picker.ts](../../src/v2/tui/picker.ts) owns native-session routing; and
 [format.ts](../../src/v2/tui/format.ts) owns `alignedDetailRows`. The decision
 and trade-offs are recorded in [ADR 0006](../adr/0006-three-pane-workspace-shell.md).
@@ -96,21 +97,40 @@ and trade-offs are recorded in [ADR 0006](../adr/0006-three-pane-workspace-shell
   Homeless), each appears once, the subline is role only, and `z` or a header
   click toggles a durable collapse group. The Workspaces section is a separate
   pane. One cursor traverses the visible rows.
-- Work starts in ACTIVE and hides terminal cards. HISTORY contains only
-  all-terminal groups, ordered by latest finish descending with tasks
-  chronological inside a group; a page-split group repeats its header with
-  `cont.`. The card design is unchanged; only container width/height and the
-  focus border adapt.
+- Ticket #180 owns one pane select/interact state machine
+  ([panefocus.ts](../../src/v2/tui/panefocus.ts)). Select chooses a pane with
+  `h`/`l`/`j`/`k`; `Enter` enters it; `Esc` returns to select and never quits.
+  Chat `Enter` is transcript navigation and `i` focuses the composer. `h` from
+  chat selects Agents first, `j` selects Workspaces, and `l` reaches Work.
+  Ticket #183 makes `Space b l`/`Space b r` the only column switches (durable
+  UI state); `F3` is retired. Closing a focused column returns to chat
+  selection, reopening selects the column's first pane without entering it.
+- Ticket #184 partitions Work by **task**: ACTIVE keeps non-terminal tasks and
+  HISTORY keeps terminal tasks, so one group can appear in both views with
+  disjoint cards. HISTORY orders groups by latest finish, expands the newest
+  group, rolls up older groups (`N done`, active count, age), and supports
+  `Enter` expand, `x` dismiss, and `D` clear as a durable view filter. `h`/`l`
+  at a row edge cross pages like `j`/`k`. A page-split group repeats its header
+  with `cont.`.
 - `workfocus.ts` emits card rectangles from the rendered sections and picks
   the nearest card in a direction with perpendicular tie-breaking. `j`/`k`
   at a page edge auto-page and preserve the horizontal column. Focus is keyed
-  by task id; updates, pagination, and filter changes keep it until the card
-  disappears, then settle to the nearest prior position.
+  by task id or history-group id; updates, pagination, and filter changes keep
+  it until the target disappears, then settle to the nearest prior position.
 - A focused card uses the white `cardFocus` token; unfocused cards use the
-  grey border token. Pane focus is a separate border state.
-- Approvals are sticky at the bottom of the Work pane. `v` focuses, `j`/`k`
-  moves, `Enter` resolves, `Esc` returns, and `V` opens the full inbox only
-  when rows overflow. Approvals join the Tab cycle only while pending.
+  grey border token. The selected/interacting pane's border and heading are
+  white, unselected panes stay grey, and `AGENTS`/`WORKSPACES` follow their own
+  sub-pane. Pane focus and card focus are separate states.
+- Approvals live only in the right column. Split mode pins a small summary
+  under Work; `v` opens the full-height inbox from any pane (opening the right
+  column first when needed), Enter from the small selection opens the same
+  inbox, `j`/`k` move, `Enter` resolves, and `Esc` returns to split. Full
+  approvals hide Work; closing the right pane hides both. Approvals are
+  workspace-scoped and join the Tab cycle only while visible. The left footer,
+  chat approvals modal, and `V` are retired.
+- Chat keeps one aggregate activity line (`Asking $Name…`, `Working…`,
+  `Retrying…`, `Queued…`, `+N more`) even while Work is open; there are no
+  per-agent activity rows.
 - Group-chat `o` opens the workspace-member native picker; Work `o` opens the
   focused card's assignee; DM `o` keeps the current agent. A missing binding
   toasts instead of doing nothing.
@@ -233,7 +253,7 @@ Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` insta
 | `npm run test:live:fake:all` | Fake then empty-catalog scenarios in order; fails fast and prints a compact `PASS`/`FAIL`/`SKIP` summary. Deterministic fake-and-empty suite. |
 | `npm run test:live:all` | The full local matrix: fake, empty catalog, then real host catalog. Same fail-fast summary; the real scenario is not deterministic and stays local. |
 | `npm run test:live:latency` | Reproducible keypress-to-repaint probe on the isolated fake host: grouped rail `j`/`k` from `tmux send-keys` to the first capture showing the moved cursor, plus right-pane delegation-card appearance from `task.delegate` to the first capture showing the card title. Reports samples and percentiles; no threshold gate. |
-| `npm run test:live:sizes` | Three-pane shell size matrix at 80×24, 100×30, 120×40, and 160×50 on the isolated fake host. Checks the right pane and 80×24 drawer, card/compact layout, ACTIVE pagination, spatial `hjkl` and page edges, the exact right edge, white/grey card focus borders from ANSI capture, and compact focus; records idle TUI CPU and CPU for one to three working cards, and runs a `NO_COLOR=1` still-motion check. Linux/tmux only. |
+| `npm run test:live:sizes` | Three-pane shell size matrix at 80×24, 100×30, 120×40, and 160×50 on the isolated fake host. Checks the right pane and the open-by-default 80×24 drawer with durable `Space b r` visibility and F3 removal, card/compact layout, ACTIVE pagination, spatial `hjkl` and page-edge `j`/`k`/`h`/`l`, the exact right edge, white/grey card focus borders, and per-pane heading/border focus from ANSI capture; records idle TUI CPU and CPU for one to three working cards, and runs a `NO_COLOR=1` still-motion check. Linux/tmux only. |
 | `npm run test:live:lifecycle` | Full wall-clock fake lifecycle run: a ~5m40s stream crosses the old five-minute delivery deadline while heartbeats keep the 60s lease live, and an immediate backlog delivery stays pending past its own deadline before running. Also captures the doctor and structured log summary. Late-success, genuine interruption, and stalled/retrying labels remain service/TUI-seam tests (logged as skips). About six minutes. |
 | `npm run test:live:preflight` | Resolve and print the live Node/OpenCode/tmux versions; pass `all` to include the real scenario's `fd`. Missing tools follow the [skip-versus-fail contract](../../scripts/README.md#skip-versus-fail). |
 | `ENSEMBLE_LIVE_KEEP=1 npm run test:live:fake` | Preserve this run's processes/files **on failure** for inspection; also works with `test:live`. Success still cleans up. |

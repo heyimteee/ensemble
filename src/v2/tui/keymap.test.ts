@@ -4,9 +4,11 @@ import {
   KEYMAP_CATALOG,
   duplicateBindings,
   commandStatusHints,
+  globalEntries,
   keyChordLabel,
   layerEntries,
   leaderHints,
+  leaderMenuEntries,
   singleKeyEntry,
   leaderEntries,
   leaderLayerEntries,
@@ -30,21 +32,47 @@ function entryId(context: KeyContext, keys: string): string | undefined {
 
 test("roster Normal grammar carries navigation, opening, actions, filter, and leader", () => {
   const keys = keysFor("roster")
-  for (const sequence of ["j", "k", "g g", "shift+g", "h", "l", "enter", "tab", "/", "a", "e", "s", "x", "shift+x", "space", "z"]) {
+  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "/", "a", "e", "s", "x", "shift+x", "space", "z"]) {
     assert.ok(keys.includes(sequence), `roster keeps ${sequence}`)
   }
   assert.equal(entryId("roster", "enter"), "open")
   assert.equal(entryId("roster", "z"), "rail.collapse", "z toggles the selected workspace group")
 })
 
+test("ticket180: select mode owns pane movement, Enter, and the chat composer key", () => {
+  const keys = keysFor("pane")
+  for (const sequence of ["h", "l", "j", "k", "enter", "i", "v", "tab", "shift+tab", "space"]) {
+    assert.ok(keys.includes(sequence), `pane select keeps ${sequence}`)
+  }
+  assert.equal(entryId("pane", "h"), "pane.left")
+  assert.equal(entryId("pane", "l"), "pane.right")
+  assert.equal(entryId("pane", "j"), "pane.down")
+  assert.equal(entryId("pane", "k"), "pane.up")
+  assert.equal(entryId("pane", "enter"), "pane.enter")
+  assert.equal(entryId("pane", "i"), "pane.compose")
+  assert.equal(entryId("pane", "v"), "pane.approvals")
+  assert.equal(entryId("pane", "tab"), "focus.tab")
+  assert.equal(entryId("pane", "escape"), "pane.escape", "select-mode Esc is a claimed no-op")
+  const hints = statuslineHints("pane")
+  for (const hint of ["h/l column", "j/k pane", "enter enter", "i compose", "tab next"]) {
+    assert.ok(hints.includes(hint), `pane hints include ${hint}: ${hints}`)
+  }
+})
+
+test("ticket180: pane movement lives only in select mode, not in pane content grammars", () => {
+  assert.equal(entryId("chat", "l"), undefined, "chat l selects Work only from select mode")
+  assert.equal(entryId("roster", "l"), undefined, "roster l selects the chat only from select mode")
+  assert.equal(entryId("roster", "h"), undefined, "roster h selects a pane only from select mode")
+})
+
 test("group chat and direct conversation scroll the transcript and never expose a message cursor", () => {
   const keys = keysFor("chat")
-  for (const sequence of ["j", "k", "g g", "shift+g", "ctrl+d", "ctrl+u", "enter", "i", "tab", "/", "space"]) {
+  for (const sequence of ["j", "k", "g g", "shift+g", "ctrl+d", "ctrl+u", "i", "tab", "/", "space"]) {
     assert.ok(keys.includes(sequence), `chat keeps ${sequence}`)
   }
   assert.equal(entryId("chat", "j"), "chat.scroll.down")
   assert.equal(entryId("chat", "k"), "chat.scroll.up")
-  assert.equal(entryId("chat", "enter"), "compose")
+  assert.equal(entryId("chat", "enter"), "chat.enter", "chat Enter keeps transcript navigation, never the composer")
   assert.equal(entryId("chat", "i"), "compose.alt")
   assert.ok(
     normalEntries("chat").every((entry) => !/message[ ._-]?cursor/i.test(`${entry.id} ${entry.title}`)),
@@ -99,31 +127,31 @@ test("settings lists expose no Visual, yank, or paste and no per-tab filter chor
 
 test("the work zone is reachable with Tab and keeps spatial list navigation", () => {
   const keys = keysFor("work")
-  for (const sequence of ["j", "k", "h", "l", "g g", "shift+g", "ctrl+d", "ctrl+u", "enter", "tab", "escape", "v", "shift+v"]) {
+  for (const sequence of ["j", "k", "h", "l", "g g", "shift+g", "ctrl+d", "ctrl+u", "enter", "tab", "escape", "v"]) {
     assert.ok(keys.includes(sequence), `work keeps ${sequence}`)
   }
   assert.equal(entryId("work", "f"), "work.filter", "ticket172: f toggles ACTIVE/HISTORY")
   assert.equal(entryId("work", "pageup"), "work.page.up")
   assert.equal(entryId("work", "pagedown"), "work.page.down")
-  assert.equal(entryId("work", "v"), "work.approvals", "ticket173: v focuses inline approvals")
-  assert.equal(entryId("work", "shift+v"), "work.inbox", "ticket173: V opens the overflow inbox")
+  assert.equal(entryId("work", "v"), "work.approvals", "ticket185: v opens full approvals")
+  assert.equal(resolveNormalKey("work", [], "shift+v").type, "none", "ticket185: V is retired")
 })
 
-test("ticket173: the inline approvals zone owns j/k, Enter, V, Esc, and Tab", () => {
-  const keys = keysFor("workApprovals")
-  for (const sequence of ["j", "k", "enter", "shift+v", "tab", "shift+tab", "escape"]) {
-    assert.ok(keys.includes(sequence), `approvals keeps ${sequence}`)
+test("ticket185: full approvals own j/k, Enter, Esc, and Tab", () => {
+  const keys = keysFor("approvals")
+  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "shift+tab", "space", "escape"]) {
+    assert.ok(keys.includes(sequence), `full approvals keep ${sequence}`)
   }
-  assert.equal(entryId("workApprovals", "j"), "workApprovals.down")
-  assert.equal(entryId("workApprovals", "k"), "workApprovals.up")
-  assert.equal(entryId("workApprovals", "enter"), "workApprovals.resolve")
-  assert.equal(entryId("workApprovals", "escape"), "workApprovals.back")
-  assert.equal(entryId("workApprovals", "shift+v"), "work.inbox")
+  assert.equal(entryId("approvals", "j"), "approvals.down")
+  assert.equal(entryId("approvals", "k"), "approvals.up")
+  assert.equal(entryId("approvals", "enter"), "approvals.resolve")
+  assert.equal(entryId("approvals", "escape"), "approvals.close")
+  assert.equal(resolveNormalKey("approvals", [], "shift+v").type, "none", "V is retired")
 })
 
 test("the work list carries the shared task actions on their Normal keys", () => {
   const keys = keysFor("work")
-  for (const sequence of ["x", "r", "shift+r", "d", "t", "o"]) {
+  for (const sequence of ["x", "r", "shift+r", "d", "t", "o", "shift+d"]) {
     assert.ok(keys.includes(sequence), `work keeps ${sequence}`)
   }
   assert.equal(entryId("work", "enter"), "work.open")
@@ -133,6 +161,7 @@ test("the work list carries the shared task actions on their Normal keys", () =>
   assert.equal(entryId("work", "d"), "work.delegate")
   assert.equal(entryId("work", "t"), "work.reassign")
   assert.equal(entryId("work", "o"), "work.native")
+  assert.equal(entryId("work", "shift+d"), "work.history.clear", "ticket184: D clears the history view")
 })
 
 test("d delegates in the work list instead of invoking the text delete operator", () => {
@@ -142,22 +171,23 @@ test("d delegates in the work list instead of invoking the text delete operator"
   assert.ok(!/delete/i.test(`${delegate?.id} ${delegate?.title}`), "work d never binds delete")
 })
 
-test("ticket173: Work hints teach focus, history, approvals, overflow, and page keys", () => {
+test("ticket185: Work hints teach focus, history, approvals, and page keys without V", () => {
   const hints = statuslineHints("work")
-  for (const hint of ["j/k cards", "h/l row", "ctrl+d/u page", "v approvals", "V inbox", "f history", "tab next"]) {
+  for (const hint of ["j/k cards", "h/l row", "ctrl+d/u page", "v approvals", "f history", "tab next"]) {
     assert.ok(hints.includes(hint), `work hints include ${hint}: ${hints}`)
   }
-  const approvals = statuslineHints("workApprovals")
-  for (const hint of ["j/k approvals", "enter resolve", "V inbox", "tab next", "esc work"]) {
-    assert.ok(approvals.includes(hint), `approval hints include ${hint}: ${approvals}`)
+  assert.ok(!hints.includes("V inbox"), "V is retired")
+  const approvals = statuslineHints("approvals")
+  for (const hint of ["j/k move", "enter resolve", "esc split", "tab next"]) {
+    assert.ok(approvals.includes(hint), `full approval hints include ${hint}: ${approvals}`)
   }
 })
 
 test("Esc and Tab move through the work zones without inventing a cursor", () => {
   const escape = normalEntries("work").find((entry) => entry.id === "escape")
   const tab = normalEntries("work").find((entry) => entry.id === "focus.tab")
-  assert.match(escape?.title ?? "", /transcript/i)
-  assert.match(tab?.title ?? "", /focus zone/i, "ticket173: Tab now cycles to approvals or the rail")
+  assert.match(escape?.title ?? "", /pane selection/i)
+  assert.match(tab?.title ?? "", /pane/i, "ticket180: Tab cycles visible panes")
   assert.equal(actionId(resolveNormalKey("work", ["g"], "g")), "work.top")
   assert.equal(actionId(resolveNormalKey("work", [], "shift+g")), "work.bottom")
   assert.equal(actionId(resolveNormalKey("work", [], "x")), "work.cancel")
@@ -313,7 +343,7 @@ test("dialog hints come from the catalog and stay truthful about variants", () =
   assert.ok(statuslineHints("confirm").includes("n/esc no"))
   assert.ok(statuslineHints("result").includes("enter/esc close"))
   assert.ok(statuslineHints("approvals").includes("enter resolve"))
-  assert.ok(statuslineHints("approvals").includes("esc close"))
+  assert.ok(statuslineHints("approvals").includes("esc split"))
 })
 
 test("text-field hints share the dialog ladder vocabulary", () => {
@@ -331,9 +361,60 @@ test("text-field hints share the dialog ladder vocabulary", () => {
 })
 
 test("leader keys resolve and Esc cancels the leader", () => {
-  assert.equal(actionId(resolveLeaderKey("?")), "leader.help")
-  assert.equal(actionId(resolveLeaderKey("escape")), "leader.cancel")
-  assert.equal(resolveLeaderKey("~").type, "none")
+  assert.equal(actionId(resolveLeaderKey([], "?")), "leader.help")
+  assert.equal(actionId(resolveLeaderKey([], "escape")), "leader.cancel")
+  assert.equal(resolveLeaderKey([], "~").type, "none")
+})
+
+test("ticket183: Space b is a prefix and Space l/r stay direct", () => {
+  const pending = resolveLeaderKey([], "b")
+  assert.equal(pending.type, "pending")
+  assert.deepEqual(pending.type === "pending" ? pending.prefix : [], ["b"], "b waits for the pane key")
+  assert.deepEqual(
+    pending.type === "pending" ? pending.entries.map((entry) => entry.id).sort() : [],
+    ["leader.pane.left", "leader.pane.right"],
+    "the submenu offers the two pane toggles",
+  )
+  assert.equal(actionId(resolveLeaderKey(["b"], "l")), "leader.pane.left")
+  assert.equal(actionId(resolveLeaderKey(["b"], "r")), "leader.pane.right")
+  assert.equal(actionId(resolveLeaderKey([], "l")), "leader.limits", "Space l still opens limits")
+  assert.equal(actionId(resolveLeaderKey([], "r")), "leader.retry", "Space r still retries")
+  assert.equal(actionId(resolveLeaderKey(["b"], "escape")), "leader.cancel", "Esc cancels the pending prefix")
+  assert.equal(resolveLeaderKey(["b"], "x").type, "none", "an unrelated key never resolves the submenu")
+  assert.equal(resolveLeaderKey([], "x").type, "action", "a direct leader key still resolves at the top level")
+})
+
+test("ticket183: which-key shows the pane submenu at each depth", () => {
+  const top = leaderMenuEntries([])
+  assert.ok(top.some((entry) => entry.id === "leader.pane"), "the top level names the pane submenu")
+  assert.ok(!top.some((entry) => entry.id === "leader.pane.left"), "nested keys wait for the prefix")
+  const topLines = whichKeyLines(top)
+  assert.ok(topLines.join("\n").includes("b Pane visibility"), topLines.join("\n"))
+
+  const submenu = leaderMenuEntries(["b"])
+  assert.deepEqual(submenu.map((entry) => entry.id), ["leader.pane.left", "leader.pane.right"])
+  const submenuLines = whichKeyLines(submenu, 2, 1)
+  const text = submenuLines.join("\n")
+  assert.ok(text.includes("l Toggle the left pane"), text)
+  assert.ok(text.includes("r Toggle the right pane"), text)
+})
+
+test("ticket183: the leader layer binds only immediate, non-prefix actions", () => {
+  const ids = leaderLayerEntries().map((entry) => entry.id)
+  assert.ok(ids.includes("leader.limits"))
+  assert.ok(ids.includes("leader.retry"))
+  assert.ok(!ids.includes("leader.pane"), "the b prefix is resolved by the raw key machine, not a host binding")
+  assert.ok(!ids.includes("leader.pane.left"))
+  assert.ok(!ids.includes("leader.pane.right"))
+})
+
+test("ticket183: leader hints teach the pane prefix and its submenu", () => {
+  const top = leaderHints()
+  assert.ok(top.includes("b panes"), top)
+  const submenu = leaderHints(["b"])
+  assert.ok(submenu.includes("l left"), submenu)
+  assert.ok(submenu.includes("r right"), submenu)
+  assert.ok(submenu.includes("esc cancel"), submenu)
 })
 
 test("statusline hints come from the same catalog and adapt to the work zone", () => {
@@ -345,10 +426,10 @@ test("statusline hints come from the same catalog and adapt to the work zone", (
 
   const chatWithWork = statuslineHints("chat", { hasWork: true })
   assert.ok(chatWithWork.includes("j/k scroll"), chatWithWork)
-  assert.ok(chatWithWork.includes("tab work"), chatWithWork)
+  assert.ok(chatWithWork.includes("tab next"), chatWithWork)
+  assert.ok(chatWithWork.includes("i compose"), chatWithWork)
   const chatIdle = statuslineHints("chat", { hasWork: false })
-  assert.ok(chatIdle.includes("tab rail"), chatIdle)
-  assert.ok(!chatIdle.includes("tab work"), "an empty work zone is never promised")
+  assert.ok(chatIdle.includes("tab next"), chatIdle)
 
   const work = statuslineHints("work")
   assert.ok(work.includes("enter result"), work)
@@ -433,7 +514,7 @@ test("raw keypresses normalize to catalog tokens", () => {
   assert.equal(normalizeKeyToken({ name: "return", shift: true }), "shift+enter")
   assert.equal(normalizeKeyToken({ name: "escape" }), "escape")
   assert.equal(normalizeKeyToken({ name: "tab" }), "tab")
-  assert.equal(normalizeKeyToken({ name: "F3", sequence: "\u001bOR" }), "f3", "ticket172: function keys normalize for the drawer")
+  assert.equal(normalizeKeyToken({ name: "F3", sequence: "\u001bOR" }), "f3", "function keys still normalize")
   assert.equal(normalizeKeyToken({ name: "g", shift: true }), "shift+g")
   assert.equal(normalizeKeyToken({ name: "G", sequence: "G" }), "shift+g")
   assert.equal(normalizeKeyToken({ name: "d", ctrl: true }), "ctrl+d")
@@ -524,7 +605,8 @@ test("the catalog covers every app-level key the handlers consume", () => {
   for (const [context, token, id] of required) {
     assert.equal(singleKeyEntry(context, token)?.id, id, `${context} resolves ${token} to ${id}`)
   }
-  assert.equal(KEYMAP_CATALOG.find((entry) => entry.id === "global.work")?.keys.join(" "), "f3", "ticket172: F3 owns the drawer toggle")
+  assert.equal(KEYMAP_CATALOG.find((entry) => entry.id === "global.work"), undefined, "ticket183: F3 is retired")
+  assert.ok(!globalEntries().some((entry) => entry.keys.includes("f3")), "no global binding claims F3")
   // Multi-key chords resolve through the same pending machine.
   assert.equal(actionId(resolveNormalKey("wizardText", ["g"], "g")), "wizardText.motion.gg")
   assert.equal(actionId(resolveNormalKey("wizardText", ["y"], "y")), "wizardText.yy")

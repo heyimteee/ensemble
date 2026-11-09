@@ -14,7 +14,7 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **Agents group by workspace.** Each agent appears once under its primary workspace group (active workspace, then most recent membership, then Homeless). Group headers collapse with `z` or a click and the state survives restarts; the subline shows only the role.
 - **New agents start with no workspace.** Creating an agent opens a direct chat in its own `.ensemble` home. Add it to a workspace with `e` on the workspace; you can move its no-workspace session into the workspace.
 - **The leader coordinates.** Unaddressed messages go to the workspace leader, who can answer or delegate typed subtasks.
-- **Work has an honest lifecycle:** pending, working, waiting, retrying, needs you, replied, failed, stalled, or cancelled. `Failed` is a real native execution error; `Stalled` is a delivery or lease problem and stays visible until retry, cancel, or dismissal. The Work pane starts in ACTIVE, hides finished cards, and moves completed groups to HISTORY (`f`). See [ADR 0005](docs/adr/0005-work-status-and-delivery-lease-separation.md).
+- **Work has an honest lifecycle:** pending, working, waiting, retrying, needs you, replied, failed, stalled, or cancelled. `Failed` is a real native execution error; `Stalled` is a delivery or lease problem and stays visible until retry, cancel, or dismissal. The Work pane starts in ACTIVE; each finished card moves to HISTORY as it finishes (`f`), even while its group still has live work. See [ADR 0005](docs/adr/0005-work-status-and-delivery-lease-separation.md).
 - **Work is one spatial surface.** `hjkl` moves to the nearest card rather than a fixed column, and `j`/`k` at a page edge pages while keeping the column. Focus follows the task id across streaming, pagination, and filter changes. The focused card has a white border; unfocused cards stay grey, and the pane border is a separate focus state. Approvals stay sticky at the bottom of the pane (`v`), with the full inbox only for overflow (`V`). On a group chat, `o` asks which workspace member's native session to open; on a focused Work card it opens that card's assignee directly. See [ADR 0006](docs/adr/0006-three-pane-workspace-shell.md).
 - **Replies stream and stay readable.** Group and direct replies stream token by token, then settle into rich colored Markdown with author lines, tables, fenced code, headings, quotes, and links. The transcript keeps a stable scroll position, scrolls with `PageUp` / `PageDown`, and jumps to the newest reply with `End`.
 - **Workspace config is human-editable.** `<workspace>/.ensemble/config.json` is authoritative for its name, leader, members, synthesis, and pause state. History stays in OpenCode storage, not the repository.
@@ -66,26 +66,26 @@ Visual, and Command; an unfocused editor shows no caret.
 |---|---|
 | `j` / `k`, `gg` / `G` | Move rows or scroll; `Ctrl+d` / `Ctrl+u` move a half page |
 | `h` / `l` | Move between the rail and the chat, move spatially between Work cards, or switch settings tabs |
-| `Enter` | Open the selection or focused Work result, resolve the focused approval, send, or confirm |
-| `Tab` / `Shift+Tab` | Cycle rail → chat → work → approvals, skipping absent zones; `Enter` focuses the composer without changing mode, and `i` enters Insert |
+| `Enter` | Enter the selected pane; inside it open the focused result, resolve the focused approval, send, or confirm |
+| `Tab` / `Shift+Tab` | Cycle visible panes (rail → chat → work → approvals), skipping absent or closed ones; selection never enters content, and `i` focuses the composer |
 | `Esc` | Go up one level; it never quits |
 | `Ctrl+G` | Leave the focused editor and set Normal |
 | `i` | Focus the composer or current text field in Insert |
 | `Space` | Leader key: which-key menu for create, edit, archive, delete, settings, approvals, pause/resume, init, native, delegate, reassign, retry, restart, cancel, leave, and help |
+| `Space b l` / `Space b r` | Toggle the left rail / right Work column at every width; visibility survives restarts |
 | `Space q` or `:q` | Leave Ensemble deliberately; the native prompt owns keys immediately, including `/`, and `F2` returns |
 | `/` | Search the transcript or filter the focused list |
 | `:` | Command line with completion and history |
 | `?` | Full, searchable keyboard help |
 | `n` / `N` | Next / previous search match |
 | `F2` | Return to Ensemble from a native session |
-| `F3` | Toggle the Work drawer below 96 columns |
 | `a` / `n` | New agent / new workspace |
 | `e` / `s` | Edit selection / agent settings |
 | `x` / `X` | Archive / delete the selection (destructive actions confirm) |
 | `p` / `I` | Pause or resume / init workspace files |
 | `z` | Collapse or expand the focused rail group |
 | `f` | Toggle the Work pane between ACTIVE and HISTORY |
-| `v` / `V` | Focus inline approvals / open the overflow inbox |
+| `v` | Open full-height right-column approvals from any pane; Enter from the small summary opens the same view, and `Esc` returns to split |
 | `d` / `t` / `r` / `R` / `x` / `o` | Focused Work card: delegate / reassign / retry / restart / cancel / native session |
 
 In the **composer**, Insert mode sends with `Enter`, adds a line with

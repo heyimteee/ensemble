@@ -57,6 +57,12 @@ export function hostEventKey(event: any): string | undefined {
     case "session.execution.failed":
     case "session.execution.interrupted":
       return sessionID && created !== undefined ? `${type}:${sessionID}:${created}` : undefined
+    case "session.created":
+      return sessionID
+        ? `${type}:${sessionID}:${String(data?.parentID ?? "")}:${String(created ?? "")}`
+        : undefined
+    case "session.deleted":
+      return sessionID ? `${type}:${sessionID}:${String(created ?? "")}` : undefined
     case "config.updated":
       return created !== undefined ? `${type}:${created}` : undefined
     case "skill.updated":

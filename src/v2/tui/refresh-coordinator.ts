@@ -96,6 +96,8 @@ function validChange(value: any): value is EntityChange {
   switch (value.entity) {
     case "subtask":
       return upsert ? isRecord(value.task) && validID(value.task.id) : remove && validID(value.id)
+    case "dispatchGroup":
+      return upsert ? isRecord(value.group) && validID(value.group.id) : remove && validID(value.id)
     case "message":
       return upsert
         ? isRecord(value.message) && validID(value.message.id) && validID(value.message.workspaceID)
@@ -114,6 +116,8 @@ function validChange(value: any): value is EntityChange {
       return upsert ? isRecord(value.memory) && validID(value.memory.id) : remove && validID(value.id)
     case "initJob":
       return upsert ? isRecord(value.job) && validID(value.job.id) : remove && validID(value.id)
+    case "nativeSubagent":
+      return upsert ? isRecord(value.run) && validID(value.run.childSessionID) : remove && validID(value.id)
     case "settings":
       return upsert && isRecord(value.settings)
     case "ui":

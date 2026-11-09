@@ -36,12 +36,13 @@ const OVERLAY_LABELS: Record<Exclude<InteractionOverlay, "none">, string> = {
   settings: "Settings",
   wizard: "Wizard",
   dialog: "Dialog",
-  approvals: "Approvals",
   help: "Help",
   logs: "Logs",
 }
 
 const FOCUS_LABELS: Partial<Record<InteractionFocus, string>> = {
+  agents: "Agents",
+  workspaces: "Workspaces",
   settings: "Settings",
   wizard: "Wizard",
   dialog: "Dialog",
@@ -55,8 +56,11 @@ export function contextLabel(input: {
   focus: InteractionFocus
   overlay: InteractionOverlay
   surface: StatuslineSurface
+  /** Ticket #185: full approvals replace Work instead of sitting beneath it. */
+  approvals?: "split" | "full"
 }): string {
   if (input.overlay !== "none") return OVERLAY_LABELS[input.overlay]
+  if (input.focus === "approvals" && input.approvals === "full") return "Approvals"
   const focused = FOCUS_LABELS[input.focus]
   if (focused) return focused
   if (input.focus === "composer") {
@@ -64,7 +68,6 @@ export function contextLabel(input: {
     if (input.surface === "workspace") return chromeJoin(["COMPOSER", "Group chat"])
     return "COMPOSER"
   }
-  if (input.focus === "rail") return "Roster"
   if (input.surface === "agent") return "Direct conversation"
   if (input.surface === "workspace") return "Group chat"
   return "Roster"

@@ -4,7 +4,7 @@
 - **Date:** 2026-11-09
 - **Tickets:** #166 (parent), #171, #172, #173, #174
 - **Supersedes:** none
-- **Related:** ADR 0005, `src/v2/tui/workpane.ts`, `src/v2/tui/railmodel.ts`, `src/v2/tui/workfocus.ts`, `src/v2/tui/workapprovals.ts`, `src/v2/tui/picker.ts`
+- **Related:** ADR 0005, ADR 0008, `src/v2/tui/workpane.ts`, `src/v2/tui/railmodel.ts`, `src/v2/tui/workfocus.ts`, `src/v2/tui/workapprovals.ts`, `src/v2/tui/picker.ts`
 
 ## Context
 
@@ -25,7 +25,8 @@ rendered `name | role` without one label column, so separators did not align.
    function. `messageWidth` subtracts the rail and Work width and uses the same
    value as the transcript and composer. Breakpoints are ≥118 columns (full
    three panes), 96–117 (three panes with compact Work), and <96 (Work becomes
-   a right drawer toggled by the Work focus key or `F3`). The Work card design
+   a right drawer toggled by `Space b r`; ticket #183 made both column
+   switches durable). The Work card design
    is unchanged; only container width/height and the focus border adapt.
 
 2. **Rail is two panes, grouped by primary workspace.**
@@ -38,14 +39,17 @@ rendered `name | role` without one label column, so separators did not align.
    the visible rows.
 
 3. **Work is a filtered, paginated grid.**
-   ACTIVE is the default and hides every terminal card, including terminal
-   members of an otherwise active group. HISTORY contains only all-terminal
-   groups, ordered by latest finish descending, with tasks chronological
-   inside a group. A group appears in only one view. Pagination is pure and
-   sized by the Work pane body; a group that spans pages repeats its header
-   with `cont.`. Completed groups leave ACTIVE immediately and remain in
-   HISTORY after the shared hold; the pane does not add a second retention
-   policy.
+   ACTIVE is the default and keeps only non-terminal tasks. HISTORY keeps
+   terminal tasks, even while their group still has live work, so a group may
+   appear in both views with disjoint cards. HISTORY groups order by latest
+   finish descending and cards inside a group order by finish, newest first.
+   The newest history group expands, older groups roll up, and a seen group
+   keeps its row when later finishes reorder it. Pagination is pure and sized
+   by the Work pane body; a group that spans pages repeats its header with
+   `cont.`. Completed cards leave ACTIVE immediately and remain in HISTORY
+   under the existing retention; the pane does not add a second retention
+   policy. See [ADR 0008](0008-task-level-history-and-rollup.md); ticket #184
+   replaced this ADR's original all-terminal-group contract.
 
 4. **Spatial focus and honest actions.**
    The layout emits card rectangles; `nextWorkCard` selects the nearest card
@@ -68,11 +72,12 @@ rendered `name | role` without one label column, so separators did not align.
    distinct.
 
 6. **Approvals are sticky, not modal.**
-   Pending approvals render as a sticky bottom section of the Work pane with a
-   header, a short row window, and an overflow count. `v` focuses approvals,
-   `j`/`k` moves, `Enter` resolves, and `Esc` returns to Work. `V` opens the
-   full inbox only on overflow. The focus cycle includes approvals only while
-   pending.
+   Pending approvals render as a small summary pinned under Work, with the
+   full-height right-column inbox opened by `v` or Enter from the small
+   selection; Esc returns to split. The old chat modal and `V` overflow
+   binding are retired. The focus cycle includes approvals only while pending.
+   Update (#185): the right-column split/full surface replaced the original
+   inline/overflow-only contract; see [implementation notes](../implementation.md#workspace-shell).
 
 7. **One native-session decision per surface.**
    Group chat with chat focus, `o`: open a picker of workspace members showing

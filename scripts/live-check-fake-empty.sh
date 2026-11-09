@@ -49,6 +49,9 @@ live_open_ensemble
 live_require_text "$LIVE_TUI_SESSION" "ENSEMBLE" 15 "Ensemble page"
 live_assert_text "$LIVE_TUI_SESSION" "○───○───○" "one-shot empty-state mark"
 live_assert_absence "$LIVE_TUI_SESSION" "SUBTASKS" "right-hand task board retired"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Agents" 10 "initial pane selection"
+live_key "$LIVE_TUI_SESSION" Enter
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Agents" 10 "Agents interaction before the wizard"
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "Agent name" 10 "agent wizard"
 live_key "$LIVE_TUI_SESSION" "i"
@@ -101,7 +104,7 @@ live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "discard draft?" 10 "cancel confirm reopened"
 live_key "$LIVE_TUI_SESSION" "y"
 live_require_absence "$LIVE_TUI_SESSION" "Agent name" 10 "y cancelled the wizard"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Roster" 10 "cancel restored Normal mode"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Agents" 10 "cancel restored Normal mode"
 
 # v5.8 init routing with an empty catalog: `:init` is an Ensemble System Agent
 # command, not a host skill, and extra mentions are rejected instead of being

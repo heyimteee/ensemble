@@ -14,10 +14,10 @@
 import { chromeJoin } from "./separators.ts"
 
 export type KeyContext =
+  | "pane"
   | "roster"
   | "chat"
   | "work"
-  | "workApprovals"
   | "composer"
   | "settings"
   /** Settings text field in Insert mode. */
@@ -101,6 +101,10 @@ const LEADER: readonly KeyEntry[] = [
   { id: "leader.archive.agent", scope: "leader", contexts: SURFACES, keys: ["shift+a"], title: "Archive agent", group: "Archive" },
   { id: "leader.delete.agent", scope: "leader", contexts: SURFACES, keys: ["shift+d"], title: "Delete agent", group: "Delete" },
   { id: "leader.approvals", scope: "leader", contexts: SURFACES, keys: ["v"], title: "Approvals", group: "Navigate" },
+  // Ticket #183: `Space b` is a nested prefix; Space l/r below stay direct.
+  { id: "leader.pane", scope: "leader", contexts: SURFACES, keys: ["b"], title: "Pane visibility", group: "View", hint: "b panes" },
+  { id: "leader.pane.left", scope: "leader", contexts: SURFACES, keys: ["b", "l"], title: "Toggle the left pane", group: "View", hint: "l left" },
+  { id: "leader.pane.right", scope: "leader", contexts: SURFACES, keys: ["b", "r"], title: "Toggle the right pane", group: "View", hint: "r right" },
   { id: "leader.pause", scope: "leader", contexts: SURFACES, keys: ["p"], title: "Pause / resume", group: "State" },
   { id: "leader.init", scope: "leader", contexts: SURFACES, keys: ["i"], title: "Init workspace files", group: "State" },
   { id: "leader.native", scope: "leader", contexts: SURFACES, keys: ["o"], title: "Native session", group: "Navigate" },
@@ -112,23 +116,41 @@ const LEADER: readonly KeyEntry[] = [
 ]
 
 /**
- * Roster and both conversation surfaces share the same j/k, gg/G, h/l,
- * Enter, Tab, /, and Space grammar. Chat/roster-specific entries are kept
- * separate so a later ticket can replace one surface without rewriting the
- * catalog.
+ * Ticket #180: select mode is a shell layer, not a pane's content grammar.
+ * h/l choose columns, j/k choose stacked panes, Enter enters the selected
+ * pane, and i is the one deliberate path into the chat composer.
+ */
+const PANE: readonly KeyEntry[] = [
+  { id: "pane.left", scope: "normal", contexts: ["pane"], keys: ["h"], title: "Select the pane to the left", group: "Focus", hint: "h/l column" },
+  { id: "pane.right", scope: "normal", contexts: ["pane"], keys: ["l"], title: "Select the pane to the right", group: "Focus" },
+  { id: "pane.down", scope: "normal", contexts: ["pane"], keys: ["j"], title: "Select the stacked pane below", group: "Focus", hint: "j/k pane" },
+  { id: "pane.up", scope: "normal", contexts: ["pane"], keys: ["k"], title: "Select the stacked pane above", group: "Focus" },
+  { id: "pane.enter", scope: "normal", contexts: ["pane"], keys: ["enter"], title: "Enter the selected pane", group: "Focus", hint: "enter enter" },
+  { id: "pane.escape", scope: "normal", contexts: ["pane"], keys: ["escape"], title: "Stay in pane selection", group: "Focus", listed: false },
+  { id: "pane.compose", scope: "normal", contexts: ["pane"], keys: ["i"], title: "Focus the composer from chat", group: "Focus", hint: "i compose" },
+  { id: "pane.approvals", scope: "normal", contexts: ["pane"], keys: ["v"], title: "Open full approvals", group: "Navigate" },
+  { id: "focus.tab", scope: "normal", contexts: ["pane"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["pane"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
+  { id: "leader", scope: "normal", contexts: ["pane"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
+]
+
+/**
+ * Roster and both conversation surfaces share the same j/k, gg/G, Enter, Tab,
+ * /, and Space grammar. Pane movement lives in the select layer, so an
+ * interact context never doubles as a column switch. Chat/roster-specific
+ * entries stay separate so a later ticket can replace one surface without
+ * rewriting the catalog.
  */
 const NORMAL: readonly KeyEntry[] = [
-  // Roster -----------------------------------------------------------------
+  // Roster interact (Agents or Workspaces selected + Entered) --------------
   { id: "nav.down", scope: "normal", contexts: ["roster"], keys: ["j"], title: "Move down", group: "Navigation", hint: "j/k move" },
   { id: "nav.up", scope: "normal", contexts: ["roster"], keys: ["k"], title: "Move up", group: "Navigation" },
   { id: "nav.top", scope: "normal", contexts: ["roster"], keys: ["g", "g"], title: "First item", group: "Navigation", listed: false },
   { id: "nav.bottom", scope: "normal", contexts: ["roster"], keys: ["shift+g"], title: "Last item", group: "Navigation", listed: false },
   { id: "nav.half.down", scope: "normal", contexts: ["roster"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
   { id: "nav.half.up", scope: "normal", contexts: ["roster"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
-  { id: "nav.left", scope: "normal", contexts: ["roster"], keys: ["h"], title: "Rail column", group: "Focus", hint: "h/l column" },
-  { id: "nav.right", scope: "normal", contexts: ["roster"], keys: ["l"], title: "Chat column", group: "Focus" },
-  { id: "focus.tab", scope: "normal", contexts: ["roster"], keys: ["tab"], title: "Chat column", group: "Focus", hint: "tab chat" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["roster"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
+  { id: "focus.tab", scope: "normal", contexts: ["roster"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["roster"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
   { id: "open", scope: "normal", contexts: ["roster"], keys: ["enter"], title: "Open the selected target", group: "Open", hint: "enter open" },
   { id: "new.agent", scope: "normal", contexts: ["roster"], keys: ["a"], title: "New agent", group: "Create" },
   { id: "new.workspace", scope: "normal", contexts: ["roster"], keys: ["n"], title: "New workspace", group: "Create" },
@@ -136,31 +158,29 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "settings", scope: "normal", contexts: ["roster"], keys: ["s"], title: "Agent settings", group: "Edit" },
   { id: "archive", scope: "normal", contexts: ["roster"], keys: ["x"], title: "Archive selection", group: "Archive" },
   { id: "delete", scope: "normal", contexts: ["roster"], keys: ["shift+x"], title: "Delete selection", group: "Delete" },
-  { id: "approvals", scope: "normal", contexts: ["roster"], keys: ["v"], title: "Approvals", group: "Navigate" },
+  { id: "approvals", scope: "normal", contexts: ["roster"], keys: ["v"], title: "Open full approvals", group: "Navigate" },
   { id: "init", scope: "normal", contexts: ["roster"], keys: ["shift+i"], title: "Init workspace files", group: "State", hint: "I init" },
   { id: "pause", scope: "normal", contexts: ["roster"], keys: ["p"], title: "Pause / resume workspace", group: "State" },
   { id: "filter", scope: "normal", contexts: ["roster"], keys: ["/"], title: "Filter roster", group: "Search", hint: "/ filter" },
   { id: "rail.collapse", scope: "normal", contexts: ["roster"], keys: ["z"], title: "Collapse or expand the workspace group", group: "Navigation" },
   { id: "leader", scope: "normal", contexts: ["roster"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
-  { id: "escape", scope: "normal", contexts: ["roster"], keys: ["escape"], title: "Clear filter", group: "Navigation", listed: false },
+  { id: "escape", scope: "normal", contexts: ["roster"], keys: ["escape"], title: "Return to pane selection", group: "Navigation", listed: false },
 
   // Group chat and Direct conversation -------------------------------------
   { id: "chat.scroll.down", scope: "normal", contexts: ["chat"], keys: ["j"], title: "Scroll transcript down", group: "Scroll", hint: "j/k scroll" },
   { id: "chat.scroll.up", scope: "normal", contexts: ["chat"], keys: ["k"], title: "Scroll transcript up", group: "Scroll" },
+  { id: "chat.enter", scope: "normal", contexts: ["chat"], keys: ["enter"], title: "Keep transcript navigation", group: "Navigation", listed: false },
   { id: "chat.top", scope: "normal", contexts: ["chat"], keys: ["g", "g"], title: "First message", group: "Scroll", listed: false },
   { id: "chat.bottom", scope: "normal", contexts: ["chat"], keys: ["shift+g"], title: "Last message", group: "Scroll", listed: false },
   { id: "chat.half.down", scope: "normal", contexts: ["chat"], keys: ["ctrl+d"], title: "Half page down", group: "Scroll", hint: "ctrl+d/u page" },
   { id: "chat.half.up", scope: "normal", contexts: ["chat"], keys: ["ctrl+u"], title: "Half page up", group: "Scroll" },
-  { id: "chat.nav.left", scope: "normal", contexts: ["chat"], keys: ["h"], title: "Rail column", group: "Focus", hint: "h/l column" },
-  { id: "chat.nav.right", scope: "normal", contexts: ["chat"], keys: ["l"], title: "Chat column", group: "Focus" },
-  { id: "focus.tab", scope: "normal", contexts: ["chat"], keys: ["tab"], title: "Work list", group: "Focus", hint: "tab work", emptyHint: "tab rail", requires: "work" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["chat"], keys: ["shift+tab"], title: "Roster", group: "Focus" },
-  { id: "compose", scope: "normal", contexts: ["chat"], keys: ["enter"], title: "Focus the composer", group: "Open", hint: "enter focus" },
-  { id: "compose.alt", scope: "normal", contexts: ["chat"], keys: ["i"], title: "Compose in Insert", group: "Open", hint: "i compose" },
+  { id: "focus.tab", scope: "normal", contexts: ["chat"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["chat"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
+  { id: "compose.alt", scope: "normal", contexts: ["chat"], keys: ["i"], title: "Focus the composer", group: "Open", hint: "i compose" },
   { id: "chat.new.agent", scope: "normal", contexts: ["chat"], keys: ["a"], title: "New agent", group: "Create" },
   { id: "chat.new.workspace", scope: "normal", contexts: ["chat"], keys: ["n"], title: "New workspace", group: "Create", availability: "no-transcript-search" },
   { id: "chat.settings", scope: "normal", contexts: ["chat"], keys: ["s"], title: "Agent settings", group: "Edit" },
-  { id: "chat.approvals", scope: "normal", contexts: ["chat"], keys: ["v"], title: "Approvals", group: "Navigate" },
+  { id: "chat.approvals", scope: "normal", contexts: ["chat"], keys: ["v"], title: "Open full approvals", group: "Navigate" },
   { id: "chat.init", scope: "normal", contexts: ["chat"], keys: ["shift+i"], title: "Init workspace files", group: "State", hint: "I init" },
   { id: "chat.pause", scope: "normal", contexts: ["chat"], keys: ["p"], title: "Pause / resume workspace", group: "State" },
   { id: "chat.native", scope: "normal", contexts: ["chat"], keys: ["o"], title: "Native session", group: "Navigate" },
@@ -185,34 +205,26 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.bottom", scope: "normal", contexts: ["work"], keys: ["shift+g"], title: "Last work card", group: "Navigation", listed: false },
   { id: "work.half.down", scope: "normal", contexts: ["work"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
   { id: "work.half.up", scope: "normal", contexts: ["work"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
-  { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result", group: "Open", hint: "enter result" },
+  { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result or toggle a history group", group: "Open", hint: "enter result/toggle" },
   // `d` is contextual: delegate here, never the text-buffer delete operator.
   { id: "work.delegate", scope: "normal", contexts: ["work"], keys: ["d"], title: "Delegate work", group: "Work", hint: "d delegate" },
   { id: "work.reassign", scope: "normal", contexts: ["work"], keys: ["t"], title: "Reassign work", group: "Work", hint: "t reassign" },
   { id: "work.retry", scope: "normal", contexts: ["work"], keys: ["r"], title: "Retry failed or stalled work", group: "Work", hint: "r retry" },
   { id: "work.restart", scope: "normal", contexts: ["work"], keys: ["shift+r"], title: "Restart work", group: "Work", hint: "R restart" },
-  { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work", group: "Work", hint: "x cancel" },
+  { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work or dismiss the focused history group", group: "Work", hint: "x cancel/dismiss" },
+  { id: "work.history.clear", scope: "normal", contexts: ["work"], keys: ["shift+d"], title: "Clear the history view", group: "History", hint: "D clear history" },
   { id: "work.native", scope: "normal", contexts: ["work"], keys: ["o"], title: "Native session", group: "Navigate", hint: "o native" },
-  // Ticket #173: `v` focuses the sticky approvals section; `V` opens the full
-  // inbox only when the inline list overflows. Chat/roster keep the modal.
-  { id: "work.approvals", scope: "normal", contexts: ["work"], keys: ["v"], title: "Focus approvals", group: "Approvals", hint: "v approvals" },
-  { id: "work.inbox", scope: "normal", contexts: ["work", "workApprovals"], keys: ["shift+v"], title: "Open the approvals overflow inbox", group: "Approvals", hint: "V inbox" },
+  // Ticket #185: one approvals surface. `v` opens the full-height inbox over
+  // Work; the small summary below Work opens it with Enter.
+  { id: "work.approvals", scope: "normal", contexts: ["work"], keys: ["v"], title: "Open full approvals", group: "Approvals", hint: "v approvals" },
   // Ticket #172: the filter is a Work-pane view switch, not the rail filter.
   { id: "work.filter", scope: "normal", contexts: ["work"], keys: ["f"], title: "Toggle active and history", group: "View", hint: "f history" },
   { id: "work.page.up", scope: "normal", contexts: ["work"], keys: ["pageup"], title: "Previous Work page", group: "Navigation", listed: false },
   { id: "work.page.down", scope: "normal", contexts: ["work"], keys: ["pagedown"], title: "Next Work page", group: "Navigation", listed: false },
-  { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Next focus zone", group: "Focus", hint: "tab next" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
+  { id: "focus.tab", scope: "normal", contexts: ["work"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
   { id: "leader", scope: "normal", contexts: ["work"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
-  { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Back to transcript", group: "Navigation", listed: false },
-
-  // Inline approvals zone (ticket #173) ------------------------------------
-  { id: "workApprovals.down", scope: "normal", contexts: ["workApprovals"], keys: ["j"], title: "Next approval", group: "Navigation", hint: "j/k approvals" },
-  { id: "workApprovals.up", scope: "normal", contexts: ["workApprovals"], keys: ["k"], title: "Previous approval", group: "Navigation" },
-  { id: "workApprovals.resolve", scope: "normal", contexts: ["workApprovals"], keys: ["enter"], title: "Resolve the focused approval", group: "Approvals", hint: "enter resolve" },
-  { id: "focus.tab", scope: "normal", contexts: ["workApprovals"], keys: ["tab"], title: "Next focus zone", group: "Focus", hint: "tab next" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["workApprovals"], keys: ["shift+tab"], title: "Previous focus zone", group: "Focus" },
-  { id: "workApprovals.back", scope: "normal", contexts: ["workApprovals"], keys: ["escape"], title: "Back to work cards", group: "Navigation", hint: "esc work" },
+  { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Return to pane selection", group: "Navigation", listed: false },
 
   // Settings ---------------------------------------------------------------
   { id: "settings.tab.prev", scope: "normal", contexts: ["settings"], keys: ["h"], title: "Previous tab", group: "Tabs", hint: "h/l tabs" },
@@ -299,15 +311,18 @@ const DIALOG: readonly KeyEntry[] = [
   { id: "result.close.enter", scope: "normal", contexts: ["result"], keys: ["enter"], title: "Close", group: "Navigation", listed: false },
   { id: "result.close.escape", scope: "normal", contexts: ["result"], keys: ["escape"], title: "Close", group: "Navigation", hint: "enter/esc close" },
 
-  // Approvals -------------------------------------------------------------
+  // Full approvals inbox (ticket #185) ------------------------------------
   { id: "approvals.down", scope: "normal", contexts: ["approvals"], keys: ["j"], title: "Next approval", group: "Navigation", hint: "j/k move" },
   { id: "approvals.up", scope: "normal", contexts: ["approvals"], keys: ["k"], title: "Previous approval", group: "Navigation" },
   { id: "approvals.down.arrow", scope: "normal", contexts: ["approvals"], keys: ["down"], title: "Next approval", group: "Navigation", listed: false },
   { id: "approvals.up.arrow", scope: "normal", contexts: ["approvals"], keys: ["up"], title: "Previous approval", group: "Navigation", listed: false },
   { id: "approvals.top", scope: "normal", contexts: ["approvals"], keys: ["g", "g"], title: "First approval", group: "Navigation", listed: false },
   { id: "approvals.bottom", scope: "normal", contexts: ["approvals"], keys: ["shift+g"], title: "Last approval", group: "Navigation", listed: false },
-  { id: "approvals.resolve", scope: "normal", contexts: ["approvals"], keys: ["enter"], title: "Resolve", group: "Open", hint: "enter resolve" },
-  { id: "approvals.close", scope: "normal", contexts: ["approvals"], keys: ["escape"], title: "Close", group: "Navigation", hint: "esc close" },
+  { id: "approvals.resolve", scope: "normal", contexts: ["approvals"], keys: ["enter"], title: "Resolve the focused approval", group: "Approvals", hint: "enter resolve" },
+  { id: "focus.tab", scope: "normal", contexts: ["approvals"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["approvals"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
+  { id: "leader", scope: "normal", contexts: ["approvals"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
+  { id: "approvals.close", scope: "normal", contexts: ["approvals"], keys: ["escape"], title: "Close full approvals and return to split", group: "Navigation", hint: "esc split" },
 ]
 
 /**
@@ -587,8 +602,6 @@ const TEXT_FIELDS: readonly KeyEntry[] = [
 const GLOBAL: readonly KeyEntry[] = [
   { id: "global.help", scope: "normal", contexts: ["global"], keys: ["?"], title: "Open help", group: "Global", hint: "? help" },
   { id: "global.native", scope: "normal", contexts: ["global"], keys: ["f2"], title: "Open Ensemble from a native session", group: "Global" },
-  // Ticket #172: below 96 columns the Work pane is a drawer; F3 toggles it.
-  { id: "global.work", scope: "normal", contexts: ["global"], keys: ["f3"], title: "Toggle the Work drawer", group: "Global", hint: "F3 work" },
 ]
 
 /** Help overlay grammar: the same dialog grammar used by every other list. */
@@ -638,6 +651,7 @@ const COMPLETION_KEYS: readonly KeyEntry[] = [
 ]
 
 export const KEYMAP_CATALOG: readonly KeyEntry[] = [
+  ...PANE,
   ...NORMAL,
   ...LEADER,
   ...WIZARD,
@@ -674,7 +688,20 @@ export function layerEntries(context: KeyContext): readonly KeyEntry[] {
 }
 
 export function leaderLayerEntries(): readonly KeyEntry[] {
-  return leaderEntries().filter((entry) => entry.keys.length === 1)
+  const catalog = leaderEntries()
+  // Ticket #183: a prefix such as `b` waits for its next key in the raw key
+  // machine. Binding it as a host action would execute the prefix early.
+  return catalog.filter((entry) => entry.keys.length === 1 && !catalog.some((other) =>
+    other.keys.length > entry.keys.length && isPrefix(entry.keys, other.keys)))
+}
+
+/**
+ * The immediate which-key/help menu for a leader prefix. An empty prefix shows
+ * the top-level keys; `["b"]` shows only the pane toggles.
+ */
+export function leaderMenuEntries(pending: readonly string[] = []): readonly KeyEntry[] {
+  return leaderEntries().filter((entry) =>
+    entry.keys.length === pending.length + 1 && isPrefix(pending, entry.keys))
 }
 
 function sameKeys(left: readonly string[], right: readonly string[]): boolean {
@@ -714,10 +741,24 @@ export function singleKeyEntry(context: KeyContext, token: string): KeyEntry | n
   return resolution.type === "action" ? resolution.entry : null
 }
 
-/** Leader keys are a single chord level; no further pending state exists. */
-export function resolveLeaderKey(token: string): KeyResolution {
-  const entry = leaderEntries().find((candidate) => candidate.keys.length === 1 && candidate.keys[0] === token)
-  return entry ? { type: "action", entry } : { type: "none" }
+/** Leader keys resolve through the same pending-prefix machine as Normal. */
+export function resolveLeaderKey(pending: readonly string[], token: string): KeyResolution {
+  const entries = leaderEntries()
+  const sequence = [...pending, token]
+  // Esc always cancels the open leader, including a pending prefix.
+  if (token === "escape") {
+    const cancel = entries.find((entry) => entry.id === "leader.cancel")
+    return cancel ? { type: "action", entry: cancel } : { type: "none" }
+  }
+  // A prefix always wins over an exact entry: `b` must wait for `l`/`r`.
+  if (entries.some((entry) => isPrefix(sequence, entry.keys))) {
+    return { type: "pending", prefix: sequence, entries: leaderMenuEntries(sequence) }
+  }
+  const exact = entries.find((entry) => sameKeys(entry.keys, sequence))
+  if (exact) return { type: "action", entry: exact }
+  // An unknown key inside an explicit leader submenu is never reinterpreted as
+  // a top-level destructive action (b, x must not cancel work).
+  return { type: "none" }
 }
 
 export type DuplicateBinding = { scope: KeyScope; context: string; keys: string; ids: string[] }
@@ -775,10 +816,11 @@ export function statuslineHints(
  * Leader statusline hints, generated from the same leader table as the
  * which-key popup and layer. Only teaching entries carry a hint.
  */
-export function leaderHints(): string {
-  const hints = leaderEntries()
+export function leaderHints(pending: readonly string[] = []): string {
+  const hints = leaderMenuEntries(pending)
     .flatMap((entry) => entry.hint && entry.listed !== false ? [entry.hint] : [])
     .filter((hint, index, all) => all.indexOf(hint) === index)
+  if (pending.length > 0 && !hints.includes("esc cancel")) hints.push("esc cancel")
   return chromeJoin(hints)
 }
 
@@ -850,7 +892,7 @@ function modifierLabel(key: string): string {
  * Which-key rows: column-major cells so a short list reads top-to-bottom in
  * each column. Pure text; the popup only adds the border.
  */
-export function whichKeyLines(entries: readonly KeyEntry[], columns = 2): string[] {
+export function whichKeyLines(entries: readonly KeyEntry[], columns = 2, keyOffset = 0): string[] {
   const listed = entries.filter((entry) => entry.listed !== false)
   if (listed.length === 0) return []
   const columnCount = Math.max(1, Math.min(columns, listed.length))
@@ -862,7 +904,7 @@ export function whichKeyLines(entries: readonly KeyEntry[], columns = 2): string
     for (let column = 0; column < columnCount; column++) {
       const entry = listed[row + column * rows]
       if (!entry) continue
-      const cell = `${keyChordLabel(entry.keys)} ${entry.title}`
+      const cell = `${keyChordLabel(entry.keys.slice(keyOffset))} ${entry.title}`
       cells.push(column < columnCount - 1 ? cell.padEnd(width) : cell)
     }
     const line = cells.join("").trimEnd()

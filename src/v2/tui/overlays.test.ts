@@ -62,7 +62,7 @@ test("overlay presence treats negative and non-finite elapsed time as the mount 
   assert.equal(overlayPresenceOpacity(Number.POSITIVE_INFINITY, {}), 1)
 })
 
-test("ticket126: presence keys cover help, approvals, and leader which-key without changing dialog precedence", () => {
+test("ticket126: presence keys cover help and leader which-key without changing dialog precedence", () => {
   const closed = {
     picker: false,
     prompt: false,
@@ -71,27 +71,25 @@ test("ticket126: presence keys cover help, approvals, and leader which-key witho
     wizard: false,
     logs: false,
     help: false,
-    approvals: false,
     leader: false,
   }
   assert.equal(overlayPresenceKey(closed), "none")
   assert.equal(overlayPresenceKey({ ...closed, logs: true }), "logs")
   assert.equal(overlayPresenceKey({ ...closed, help: true }), "help")
-  assert.equal(overlayPresenceKey({ ...closed, approvals: true }), "approvals")
   assert.equal(overlayPresenceKey({ ...closed, leader: true }), "leader")
   assert.equal(
-    overlayPresenceKey({ ...closed, help: true, approvals: true, leader: true }),
+    overlayPresenceKey({ ...closed, help: true, leader: true }),
     "help",
     "the surface rendered first owns the settle",
   )
   assert.equal(
     overlayPresenceKey({ ...closed, picker: true, help: true }),
     "picker",
-    "a dialog panel keeps precedence over the inbox surfaces",
+    "a dialog panel keeps precedence over the help surface",
   )
   assert.equal(
-    overlayPresenceKey({ ...closed, wizard: true, approvals: true }),
+    overlayPresenceKey({ ...closed, wizard: true, help: true }),
     "wizard",
-    "the wizard keeps precedence over the inbox surfaces",
+    "the wizard keeps precedence over the help surface",
   )
 })

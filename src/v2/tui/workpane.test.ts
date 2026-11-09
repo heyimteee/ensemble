@@ -1,10 +1,15 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import type { Subtask } from "../types.ts"
+import type { NativeSubagentRun, Subtask } from "../types.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
 import {
+  emptyHistoryViewState,
+  historyGroupFocusID,
+  historyPaneGroups,
   paginateWorkGroups,
+  reconcileHistoryView,
   settleWorkFocus,
+  toggleHistoryView,
   workPaneBodyHeight,
   workPaneColumns,
   workPaneHeader,
@@ -39,6 +44,21 @@ const replied = (patch: Partial<Subtask> = {}): Subtask =>
 
 const record = (...tasks: Subtask[]): Record<string, Subtask> =>
   Object.fromEntries(tasks.map((item) => [item.id, item]))
+
+const nativeRun = (patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
+  childSessionID: "child",
+  parentSessionID: "session",
+  parentTaskID: "t",
+  dispatchGroupID: "dispatch_1",
+  workspaceID: "w",
+  parentAgentID: "kakiko",
+  parentAgent: "Kakiko",
+  instruction: "Watch the CI",
+  state: "working",
+  startedAt: 2,
+  source: "session-created",
+  ...patch,
+})
 
 /**
  * Ticket #172: the shell has one pane-width source of truth. The chat, the
@@ -99,6 +119,39 @@ test("ticket172: the card grid keeps an exact right edge at every pane width", (
   }
 })
 
+test("ticket183: the one width memo consumes both durable side switches", () => {
+  const full = workspacePaneWidths(160)
+  assert.equal(full.railWidth + full.chatWidth + full.workWidth + full.gap * 2, full.viewWidth, "default tiles three panes")
+
+  const leftHidden = workspacePaneWidths(160, { left: false })
+  assert.equal(leftHidden.railWidth, 0, "a hidden left column claims no width")
+  assert.equal(leftHidden.chatWidth + leftHidden.workWidth + leftHidden.gap, leftHidden.viewWidth, "chat and Work tile the reclaimed row")
+  assert.equal(leftHidden.workWidth, full.workWidth, "the right pane keeps its readable share")
+  assert.ok(leftHidden.chatContentWidth > full.chatContentWidth, "chat expands into reclaimed rail width")
+
+  const rightHidden = workspacePaneWidths(160, { right: false })
+  assert.equal(rightHidden.railWidth, full.railWidth)
+  assert.equal(rightHidden.railWidth + rightHidden.chatWidth + rightHidden.gap, rightHidden.viewWidth, "chat reclaims the whole right column")
+  assert.equal(rightHidden.chatContentWidth, rightHidden.chatOnlyContentWidth, "no unused three-pane transcript width remains")
+  assert.ok(rightHidden.chatContentWidth > full.chatContentWidth, "chat expands into reclaimed Work width")
+
+  const bothHidden = workspacePaneWidths(160, { left: false, right: false })
+  assert.equal(bothHidden.railWidth, 0)
+  assert.equal(bothHidden.chatWidth, bothHidden.viewWidth, "chat owns the whole row")
+  assert.equal(bothHidden.chatContentWidth, bothHidden.chatOnlyContentWidth)
+})
+
+test("ticket183: the narrow drawer uses the same right switch without shrinking chat", () => {
+  const open = workspacePaneWidths(80)
+  const closed = workspacePaneWidths(80, { right: false })
+  const leftHidden = workspacePaneWidths(80, { left: false })
+  assert.equal(closed.mode, "drawer")
+  assert.equal(closed.chatWidth, open.chatWidth, "the drawer overlays chat; closing it never changes the chat column")
+  assert.equal(closed.chatContentWidth, open.chatContentWidth)
+  assert.equal(leftHidden.railWidth, 0)
+  assert.equal(leftHidden.chatWidth, leftHidden.viewWidth, "closing the left column widens the drawer-mode chat")
+})
+
 test("ticket172: the size matrix reserves a non-empty Work body", () => {
   const matrix: Array<[number, number]> = [[80, 24], [100, 30], [120, 40], [160, 50]]
   for (const [width, height] of matrix) {
@@ -110,33 +163,55 @@ test("ticket172: the size matrix reserves a non-empty Work body", () => {
 })
 
 /**
- * Ticket #172: ACTIVE is the default view. It hides every terminal card, even
- * when its dispatch group still has live work. HISTORY is terminal-only and
- * ordered by the group's latest finish time, newest first.
+ * Ticket #184: ACTIVE and HISTORY partition tasks, not groups. ACTIVE keeps
+ * non-terminal cards; HISTORY keeps terminal cards even while their group still
+ * has live work. Both views can hold the same group with disjoint cards.
  */
-test("ticket172: ACTIVE hides terminal cards inside an otherwise active group", () => {
+test("ticket184: ACTIVE and HISTORY split a mixed group into disjoint cards", () => {
   const items = [
-    working({ id: "live", dispatchGroupID: "dispatch_1", createdAt: 1 }),
-    replied({ id: "done", dispatchGroupID: "dispatch_1", createdAt: 2 }),
+    working({ id: "live-1", dispatchGroupID: "dispatch_1", createdAt: 1 }),
+    replied({ id: "done-1", dispatchGroupID: "dispatch_1", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
+    working({ id: "live-2", dispatchGroupID: "dispatch_1", createdAt: 3 }),
+    replied({ id: "done-2", dispatchGroupID: "dispatch_1", createdAt: 4, finishedAt: 2_000, repliedAt: 2_000 }),
   ]
   const views = workViewGroups(items, record(...items), { now: 5_000 })
-  assert.equal(views.active.length, 1)
-  assert.deepEqual(views.active[0]?.tasks.map((item) => item.id), ["live"])
-  assert.equal(views.active[0]?.active, 1)
-  assert.equal(views.active[0]?.done, 1, "the group still counts its hidden terminal member")
-  assert.equal(views.history.length, 0, "a group with live work never appears in HISTORY")
+  assert.deepEqual(views.active.map((group) => group.id), ["dispatch_1"])
+  assert.deepEqual(views.active[0]?.tasks.map((item) => item.id), ["live-1", "live-2"])
+  assert.equal(views.active[0]?.active, 2)
+  assert.equal(views.active[0]?.done, 2, "the active label still counts the group's finished work")
+  assert.deepEqual(views.history.map((group) => group.id), ["dispatch_1"])
+  assert.deepEqual(views.history[0]?.tasks.map((item) => item.id), ["done-2", "done-1"], "history cards order by finish, newest first")
+  assert.equal(views.history[0]?.active, 2, "the history rollup knows the group still has live work")
+  assert.equal(views.history[0]?.done, 2)
+  const activeIDs = new Set(views.active.flatMap((group) => group.tasks.map((item) => item.id)))
+  const historyIDs = new Set(views.history.flatMap((group) => group.tasks.map((item) => item.id)))
+  assert.equal([...activeIDs].some((id) => historyIDs.has(id)), false, "the two views never duplicate a card")
 })
 
-test("ticket172: HISTORY holds terminal-only groups and both views never share a group", () => {
+test("ticket184: HISTORY updates card by card while the group stays active", () => {
+  const live = working({ id: "live", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const firstDone = replied({ id: "done-1", dispatchGroupID: "dispatch_1", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 })
+  const secondDone = replied({ id: "done-2", dispatchGroupID: "dispatch_1", createdAt: 3, finishedAt: 2_000, repliedAt: 2_000 })
+  const none = workViewGroups([live], record(live), { now: 5_000 })
+  const one = workViewGroups([live, firstDone], record(live, firstDone), { now: 5_000 })
+  const two = workViewGroups([live, firstDone, secondDone], record(live, firstDone, secondDone), { now: 5_000 })
+  assert.equal(none.history.length, 0)
+  assert.deepEqual(one.history[0]?.tasks.map((item) => item.id), ["done-1"])
+  assert.deepEqual(two.history[0]?.tasks.map((item) => item.id), ["done-2", "done-1"], "each finish appears without waiting for the group")
+  assert.deepEqual(two.active[0]?.tasks.map((item) => item.id), ["live"])
+})
+
+test("ticket172/ticket184: a group with live work appears in both views", () => {
   const items = [
     working({ id: "live", dispatchGroupID: "dispatch_live", createdAt: 1 }),
-    replied({ id: "done", dispatchGroupID: "dispatch_done", createdAt: 2, finishedAt: 2_000, repliedAt: 2_000 }),
+    replied({ id: "done", dispatchGroupID: "dispatch_live", createdAt: 2, finishedAt: 2_000, repliedAt: 2_000 }),
+    replied({ id: "closed", dispatchGroupID: "dispatch_closed", createdAt: 3, finishedAt: 3_000, repliedAt: 3_000 }),
   ]
   const views = workViewGroups(items, record(...items), { now: 9_999_999 })
   assert.deepEqual(views.active.map((group) => group.id), ["dispatch_live"])
-  assert.deepEqual(views.history.map((group) => group.id), ["dispatch_done"])
-  assert.equal(views.history[0]?.active, 0)
-  assert.equal(views.history[0]?.done, 1)
+  assert.deepEqual(views.active[0]?.tasks.map((item) => item.id), ["live"])
+  assert.deepEqual(views.history.map((group) => group.id), ["dispatch_closed", "dispatch_live"])
+  assert.deepEqual(views.history.find((group) => group.id === "dispatch_live")?.tasks.map((item) => item.id), ["done"])
 })
 
 test("ticket172: HISTORY orders groups by latest finish descending", () => {
@@ -149,17 +224,203 @@ test("ticket172: HISTORY orders groups by latest finish descending", () => {
   assert.deepEqual(views.history.map((group) => group.id), ["dispatch_new", "dispatch_mid", "dispatch_old"])
 })
 
-test("ticket172: HISTORY keeps tasks chronological inside a group", () => {
+test("ticket184: a mixed group sorts by its latest finish, not its active work", () => {
+  const items = [
+    working({ id: "live", dispatchGroupID: "dispatch_mixed", createdAt: 1 }),
+    replied({ id: "late", dispatchGroupID: "dispatch_mixed", createdAt: 2, finishedAt: 5_000, repliedAt: 5_000 }),
+    replied({ id: "other", dispatchGroupID: "dispatch_other", createdAt: 3, finishedAt: 3_000, repliedAt: 3_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 9_999_999 })
+  assert.deepEqual(views.history.map((group) => group.id), ["dispatch_mixed", "dispatch_other"])
+})
+
+test("ticket184: HISTORY cards order by finish, newest first", () => {
   const items = [
     replied({ id: "late", dispatchGroupID: "dispatch_1", createdAt: 30, finishedAt: 4_000, repliedAt: 4_000 }),
     replied({ id: "early", dispatchGroupID: "dispatch_1", createdAt: 10, finishedAt: 5_000, repliedAt: 5_000 }),
     replied({ id: "middle", dispatchGroupID: "dispatch_1", createdAt: 20, finishedAt: 6_000, repliedAt: 6_000 }),
   ]
   const views = workViewGroups(items, record(...items), { now: 9_999_999 })
-  assert.deepEqual(views.history[0]?.tasks.map((item) => item.id), ["early", "middle", "late"])
+  assert.deepEqual(views.history[0]?.tasks.map((item) => item.id), ["middle", "early", "late"])
 })
 
-test("ticket172: a completed group leaves ACTIVE immediately and stays in HISTORY after the hold", () => {
+test("ticket184/#187: HISTORY cards mix tasks and native subagents by finish, newest first", () => {
+  const items = [
+    replied({ id: "older-task", dispatchGroupID: "dispatch_1", createdAt: 1, finishedAt: 2_000, repliedAt: 2_000 }),
+    replied({ id: "newer-task", dispatchGroupID: "dispatch_1", createdAt: 2, finishedAt: 6_000, repliedAt: 6_000 }),
+  ]
+  const runs = [
+    nativeRun({ childSessionID: "middle-child", state: "replied", startedAt: 3, finishedAt: 4_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 9_999_999 }, runs)
+  const state = reconcileHistoryView(views.history, emptyHistoryViewState())
+  const rows = historyPaneGroups(views.history, state)
+  const layout = paginateWorkGroups(rows, 59, 40, 9_999_999)
+  assert.deepEqual(
+    layout.items.map((item) => item.kind === "task" ? item.task.id : item.run.childSessionID),
+    ["newer-task", "middle-child", "older-task"],
+    "a newer native finish sits above an older task and below a newer task",
+  )
+})
+
+test("ticket184: the newest history group expands and older groups roll up", () => {
+  const items = [
+    replied({ id: "old", dispatchGroupID: "dispatch_old", createdAt: 1, finishedAt: 1_000, repliedAt: 1_000 }),
+    replied({ id: "new", dispatchGroupID: "dispatch_new", createdAt: 2, finishedAt: 5_000, repliedAt: 5_000 }),
+    replied({ id: "mid", dispatchGroupID: "dispatch_mid", createdAt: 3, finishedAt: 3_000, repliedAt: 3_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 6_000 })
+  const state = reconcileHistoryView(views.history, emptyHistoryViewState())
+  assert.equal(state.expanded.dispatch_new, true)
+  assert.equal(state.expanded.dispatch_mid, false)
+  assert.equal(state.expanded.dispatch_old, false)
+  const rows = historyPaneGroups(views.history, state)
+  assert.deepEqual(rows.map((group) => [group.id, group.collapsed]), [
+    ["dispatch_new", false],
+    ["dispatch_mid", true],
+    ["dispatch_old", true],
+  ])
+})
+
+test("ticket184: Enter toggles one history group and keeps the others", () => {
+  const items = [
+    replied({ id: "a", dispatchGroupID: "dispatch_a", createdAt: 1, finishedAt: 1_000, repliedAt: 1_000 }),
+    replied({ id: "b", dispatchGroupID: "dispatch_b", createdAt: 2, finishedAt: 2_000, repliedAt: 2_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 6_000 })
+  const initial = reconcileHistoryView(views.history, emptyHistoryViewState())
+  const expanded = toggleHistoryView(initial, "dispatch_a")
+  assert.equal(expanded.expanded.dispatch_a, true, "an older rolled-up group expands")
+  assert.equal(expanded.expanded.dispatch_b, true, "the newest group keeps its state")
+  const collapsed = toggleHistoryView(expanded, "dispatch_b")
+  assert.equal(collapsed.expanded.dispatch_b, false, "the newest group collapses")
+  assert.equal(collapsed.expanded.dispatch_a, true)
+})
+
+test("ticket184: a finish in a collapsed group updates its count and marks it without expanding", () => {
+  const newest = [
+    replied({ id: "a", dispatchGroupID: "dispatch_a", createdAt: 1, finishedAt: 5_000, repliedAt: 5_000 }),
+    replied({ id: "b1", dispatchGroupID: "dispatch_b", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
+  ]
+  const initial = reconcileHistoryView(
+    workViewGroups(newest, record(...newest), { now: 6_000 }).history,
+    emptyHistoryViewState(),
+  )
+  const later = [
+    ...newest,
+    replied({ id: "b2", dispatchGroupID: "dispatch_b", createdAt: 3, finishedAt: 4_000, repliedAt: 4_000 }),
+  ]
+  const groups = workViewGroups(later, record(...later), { now: 8_000 }).history
+  const next = reconcileHistoryView(groups, initial)
+  assert.equal(next.expanded.dispatch_b, false, "the collapsed group stays collapsed")
+  assert.equal(next.done.dispatch_b, 2, "its done count follows the new finish")
+  assert.equal(next.fresh.dispatch_b, true, "the collapsed group carries a new marker")
+  assert.equal(next.expanded.dispatch_a, true, "the newest group is still expanded")
+  const rows = historyPaneGroups(groups, next)
+  assert.deepEqual(rows.map((group) => [group.id, group.collapsed, group.fresh]), [
+    ["dispatch_a", false, false],
+    ["dispatch_b", true, true],
+  ])
+  assert.equal(reconcileHistoryView(groups, next), next, "an unchanged reconcile keeps the same state")
+})
+
+test("ticket184: a later finish that promotes a collapsed group keeps it collapsed and fresh", () => {
+  const newest = [
+    replied({ id: "a", dispatchGroupID: "dispatch_a", createdAt: 1, finishedAt: 5_000, repliedAt: 5_000 }),
+    replied({ id: "b1", dispatchGroupID: "dispatch_b", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
+  ]
+  const initial = reconcileHistoryView(
+    workViewGroups(newest, record(...newest), { now: 6_000 }).history,
+    emptyHistoryViewState(),
+  )
+  assert.equal(initial.expanded.dispatch_a, true, "the newest group starts expanded")
+  assert.equal(initial.expanded.dispatch_b, false, "the older group starts rolled up")
+  const later = [
+    ...newest,
+    replied({ id: "b2", dispatchGroupID: "dispatch_b", createdAt: 3, finishedAt: 7_000, repliedAt: 7_000 }),
+  ]
+  const groups = workViewGroups(later, record(...later), { now: 8_000 }).history
+  assert.deepEqual(groups.map((group) => group.id), ["dispatch_b", "dispatch_a"], "the later finish promotes B")
+  const next = reconcileHistoryView(groups, initial)
+  assert.equal(next.expanded.dispatch_b, false, "the promoted group stays collapsed at index 0")
+  assert.equal(next.fresh.dispatch_b, true, "the promoted group carries the new marker")
+  assert.equal(next.done.dispatch_b, 2, "its done count follows the new finish")
+  assert.equal(next.expanded.dispatch_a, false, "the former auto-expanded newest rolls up")
+  const rows = historyPaneGroups(groups, next)
+  assert.deepEqual(rows.map((group) => [group.id, group.collapsed, group.fresh]), [
+    ["dispatch_b", true, true],
+    ["dispatch_a", true, false],
+  ])
+})
+
+test("ticket184/#186: a former auto-expanded newest rolls up unless the user expanded it", () => {
+  const older = replied({ id: "a", dispatchGroupID: "dispatch_a", createdAt: 1, finishedAt: 5_000, repliedAt: 5_000 })
+  const first = reconcileHistoryView(
+    workViewGroups([older], record(older), { now: 6_000 }).history,
+    emptyHistoryViewState(),
+  )
+  assert.equal(first.expanded.dispatch_a, true, "the only group starts expanded")
+  const newer = replied({ id: "b", dispatchGroupID: "dispatch_b", createdAt: 2, finishedAt: 7_000, repliedAt: 7_000 })
+  const both = [older, newer]
+  const rolled = reconcileHistoryView(workViewGroups(both, record(...both), { now: 8_000 }).history, first)
+  assert.equal(rolled.expanded.dispatch_a, false, "a former auto-expanded newest rolls up")
+
+  const manual = toggleHistoryView(rolled, "dispatch_a")
+  const kept = reconcileHistoryView(workViewGroups(both, record(...both), { now: 8_000 }).history, manual)
+  assert.equal(kept.expanded.dispatch_a, true, "a user-expanded older group stays expanded")
+})
+
+test("ticket184: dismissed history groups leave the view but keep their data", () => {
+  const items = [
+    replied({ id: "a", dispatchGroupID: "dispatch_a", createdAt: 1, finishedAt: 2_000, repliedAt: 2_000 }),
+    replied({ id: "b", dispatchGroupID: "dispatch_b", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 5_000 })
+  const state = reconcileHistoryView(views.history, emptyHistoryViewState())
+  const rows = historyPaneGroups(views.history, state, new Set(["dispatch_b"]))
+  assert.deepEqual(rows.map((group) => group.id), ["dispatch_a"])
+  assert.deepEqual(views.history.map((group) => group.tasks.map((item) => item.id)), [["a"], ["b"]], "the partition still holds the dismissed cards")
+})
+
+test("ticket184: history pagination gives every group a focusable row", () => {
+  const items = [
+    replied({ id: "old-1", dispatchGroupID: "dispatch_old", createdAt: 1, finishedAt: 1_000, repliedAt: 1_000 }),
+    replied({ id: "old-2", dispatchGroupID: "dispatch_old", createdAt: 2, finishedAt: 1_500, repliedAt: 1_500 }),
+    replied({ id: "new-1", dispatchGroupID: "dispatch_new", createdAt: 3, finishedAt: 5_000, repliedAt: 5_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 6_000 })
+  const state = reconcileHistoryView(views.history, emptyHistoryViewState())
+  const layout = paginateWorkGroups(historyPaneGroups(views.history, state), 59, 40, 6_000)
+  assert.deepEqual(layout.pages.flatMap((page) => page.sections.map((section) => section.mode)), ["rollup", "cards", "rollup"])
+  const header = layout.pages[0]?.sections[0]
+  assert.equal(header?.rollup?.collapsed, false)
+  assert.equal(header?.rollup?.done, 1)
+  assert.equal(header?.rollup?.age, "1s", "the row age is computed once from the latest finish")
+  const rollup = layout.pages[0]?.sections[2]
+  assert.equal(rollup?.groupID, "dispatch_old")
+  assert.equal(rollup?.rollup?.collapsed, true)
+  assert.equal(rollup?.rollup?.done, 2)
+  assert.match(rollup?.rollup?.label ?? "", /2 done/)
+  assert.deepEqual(layout.tasks.map((task) => task.id), ["new-1"], "collapsed groups contribute no cards")
+  assert.equal(historyGroupFocusID("dispatch_old"), "history:dispatch_old")
+})
+
+test("ticket184: a history group that still has active work shows that count on its row", () => {
+  const items = [
+    working({ id: "live", dispatchGroupID: "dispatch_1", createdAt: 1 }),
+    replied({ id: "done", dispatchGroupID: "dispatch_1", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 6_000 })
+  const state = reconcileHistoryView(views.history, emptyHistoryViewState())
+  const layout = paginateWorkGroups(historyPaneGroups(views.history, state), 59, 40, 6_000)
+  const row = layout.pages[0]?.sections[0]?.rollup
+  assert.equal(row?.done, 1)
+  assert.equal(row?.active, 1)
+  assert.match(row?.label ?? "", /1 done · 1 active/)
+})
+
+
+test("ticket184: a completed group leaves ACTIVE immediately and stays in HISTORY after the hold", () => {
   const items = [replied({ id: "done", dispatchGroupID: "dispatch_1", finishedAt: 1_000, repliedAt: 1_000 })]
   const atHold = workViewGroups(items, record(...items), { now: 1_500 })
   const afterHold = workViewGroups(items, record(...items), { now: 9_999_999 })
@@ -332,4 +593,119 @@ test("ticket172: the 80x24/100x30/120x40/160x50 matrix picks a valid pane and la
     }
     assert.deepEqual(layout.tasks.map((item) => item.id), items.map((item) => item.id), `${width}x${height} keeps every task reachable`)
   }
+})
+
+/**
+ * Ticket #187: a native subagent run is durable Work but not a Subtask. It
+ * joins its parent dispatch group, contributes to that group's active/done
+ * counts, and partitions into ACTIVE or HISTORY by its own state.
+ */
+test("ticket187: native subagent runs join the parent group and its counts", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const liveChild = nativeRun({ childSessionID: "child_live", startedAt: 3 })
+  const doneChild = nativeRun({ childSessionID: "child_done", state: "replied", startedAt: 2, finishedAt: 1_000 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [liveChild, doneChild])
+
+  assert.deepEqual(views.active.map((group) => group.id), ["dispatch_1"])
+  assert.deepEqual(views.active[0]?.tasks.map((item) => item.id), ["parent"], "the parent task card coexists")
+  assert.deepEqual(views.active[0]?.native?.map((item) => item.childSessionID), ["child_live"])
+  assert.equal(views.active[0]?.active, 2, "the live child is active work")
+  assert.equal(views.active[0]?.done, 1, "the finished child is done work")
+  assert.deepEqual(views.history.map((group) => group.id), ["dispatch_1"], "a terminal child is history")
+  assert.deepEqual(views.history[0]?.tasks, [], "the group's task subset remains task-only")
+  assert.deepEqual(views.history[0]?.native?.map((item) => item.childSessionID), ["child_done"])
+  assert.equal(views.history[0]?.active, 2, "the history rollup sees the still-active group")
+  assert.equal(views.history[0]?.done, 1)
+})
+
+test("ticket187: a finished parent and a live child appear in different views", () => {
+  const parent = replied({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1, finishedAt: 2_000, repliedAt: 2_000 })
+  const liveChild = nativeRun({ childSessionID: "child_live", startedAt: 1_500 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [liveChild])
+
+  assert.deepEqual(views.active.map((group) => group.id), ["dispatch_1"], "the live child keeps the group active")
+  assert.deepEqual(views.active[0]?.tasks, [], "the parent task has already left ACTIVE")
+  assert.deepEqual(views.active[0]?.native?.map((item) => item.childSessionID), ["child_live"])
+  assert.deepEqual(views.history[0]?.tasks.map((item) => item.id), ["parent"])
+  assert.deepEqual(views.history[0]?.native, [], "the live child never duplicates into history")
+  assert.equal(views.history[0]?.active, 1)
+  assert.equal(views.history[0]?.done, 1)
+})
+
+test("ticket187: a native run uses its stored group when the parent task is already gone", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const detached = nativeRun({ childSessionID: "child_detached", parentTaskID: "missing" })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [detached])
+  assert.deepEqual(views.active[0]?.native?.map((item) => item.childSessionID), ["child_detached"])
+  assert.equal(views.active[0]?.active, 2)
+})
+
+test("ticket187: native runs with no resolvable group are not cards", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const orphan = nativeRun({ childSessionID: "child_orphan", parentTaskID: "missing", dispatchGroupID: "dispatch_unknown" })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [orphan])
+  assert.deepEqual(views.active[0]?.native, [])
+  assert.equal(views.active[0]?.active, 1, "an orphaned record cannot inflate a group")
+})
+
+test("ticket187: native cards join pagination without changing task reachability", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const liveChild = nativeRun({ childSessionID: "child_live", startedAt: 3 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [liveChild])
+  const layout = paginateWorkGroups(views.active, 59, 40, 5_000)
+  assert.deepEqual(layout.tasks.map((item) => item.id), ["parent"])
+  assert.deepEqual(layout.native.map((item) => item.childSessionID), ["child_live"])
+  assert.deepEqual(layout.items.map((item) => item.kind === "task" ? item.task.id : item.run.childSessionID), ["parent", "child_live"])
+  assert.equal(layout.pages[0]?.sections[0]?.tasks.length, 1)
+  assert.equal(layout.pages[0]?.sections[0]?.native?.length, 1)
+})
+
+test("ticket187: native cards page like task cards without duplicating", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const children = [2, 3, 4, 5, 6].map((startedAt) =>
+    nativeRun({ childSessionID: `child_${startedAt}`, startedAt }),
+  )
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, children)
+  const body = WORK_CARD_ROWS + 2
+  const layout = paginateWorkGroups(views.active, 59, body, 5_000)
+  assert.equal(layout.mode, "cards")
+  assert.ok(layout.pages.length > 1, "the group spreads across pages")
+  assert.deepEqual(
+    layout.native.map((run) => run.childSessionID),
+    children.map((run) => run.childSessionID),
+    "every native card stays reachable exactly once",
+  )
+  assert.equal(layout.items.length, 6)
+  for (const page of layout.pages) assert.ok(page.height <= body, `page ${page.number} fits`)
+})
+
+test("ticket187: native cards never become task rows or consume hop budget", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const ledger = {
+    dispatch_1: {
+      id: "dispatch_1",
+      workspaceID: "w",
+      rootID: "dispatch_1",
+      continuationIndex: 0,
+      maxHops: 8,
+      usedHops: 2,
+      depthMax: 3,
+      createdAt: 1,
+    },
+  }
+  const child = nativeRun({ childSessionID: "child_live", startedAt: 3 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000, dispatchGroups: ledger }, [child])
+  assert.deepEqual(views.active[0]?.tasks.map((item) => item.id), ["parent"], "the child is not a queue row")
+  assert.equal(ledger.dispatch_1.usedHops, 2, "native work consumes no hop budget")
+  assert.equal(views.active[0]?.budget?.usedHops, 2)
+})
+
+test("ticket187: the work header counts native subagents", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const liveChild = nativeRun({ childSessionID: "child_live", startedAt: 3 })
+  const doneChild = nativeRun({ childSessionID: "child_done", state: "failed", startedAt: 2, finishedAt: 1_000 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [liveChild, doneChild])
+  const counts = views.active[0]!
+  const header = workPaneHeader("active", views.active.length, counts.active, counts.done, 1, 1)
+  assert.match(header, /2 active · 1 done/, "native work is visible in the pane header counts")
 })

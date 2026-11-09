@@ -19,6 +19,7 @@ test("help opens as the spec's sections in the documented order", () => {
     [
       "Modes and Esc ladder",
       "Global keys",
+      "Panes and focus",
       "Roster",
       "Group chat and Direct conversation",
       "Work list",
@@ -84,10 +85,10 @@ test("the completeness checker catches omissions, duplicates, and invented entri
 test("catalog contexts land in the correct help section", () => {
   const expected: Record<string, string> = {
     global: "global",
+    pane: "panes",
     roster: "roster",
     chat: "conversation",
     work: "work",
-    workApprovals: "work",
     composerInsert: "composer-insert",
     composerNormal: "composer-normal",
     composerVisual: "composer-visual",
@@ -143,16 +144,18 @@ test("command names and mouse gestures are generated from their catalogs", () =>
   }
 })
 
-test("ticket173: Work help states spatial focus, the white card border, actions, and inline approvals", () => {
+test("ticket185: Work help states spatial focus, the white card border, actions, and right-column approvals", () => {
   const work = helpSections().find((section) => section.id === "work")
   assert.ok(work, "the Work section exists")
   const text = work!.entries.map((entry) => `${entry.id} ${entry.title}`).join(" ")
   assert.ok(/nearest card/i.test(text), "help names spatial focus")
   assert.ok(/white border/i.test(text), "help names the focused card border")
-  assert.ok(/V opens the full inbox only when/i.test(text), "help scopes V to overflow")
-  assert.ok(/v focuses them/i.test(text), "help teaches inline approvals focus")
+  assert.ok(/v opens the full-height inbox/i.test(text), "help teaches v")
+  assert.ok(/Esc returns to split mode/i.test(text), "help teaches the full-to-split exit")
+  assert.ok(!/V opens the full inbox only when/i.test(text), "the overflow-only inbox is retired")
   const keys = work!.entries.map((entry) => entry.keys)
-  assert.ok(keys.includes("v") && keys.includes("V"), "both approval keys are documented")
+  assert.ok(keys.includes("v / Enter"), "the one approvals entry is documented")
+  assert.ok(!keys.includes("V"), "V is retired")
   assert.ok(keys.includes("h/j/k/l"), "spatial keys are documented")
   assert.ok(keys.includes("gg") && keys.includes("G"), "first/last keys are documented")
   assert.ok(keys.includes("Ctrl+D") && keys.includes("Ctrl+U"), "half-page keys are documented")
@@ -165,6 +168,18 @@ test("help retires stale hand-written Settings and wizard chords", () => {
   assert.ok(!keys.includes("Ctrl+N"), "the old wizard next key is gone")
   assert.ok(!keys.some((key) => key.includes("~")), "the tilde leader is retired")
   assert.ok(keys.includes("p"), "promote stays documented under the settings syntax")
+})
+
+test("ticket183: the leader help documents the pane submenu and retires F3", () => {
+  const leader = helpSections().find((section) => section.id === "leader")
+  assert.ok(leader, "the leader section exists")
+  const keys = leader!.entries.map((entry) => entry.keys)
+  assert.ok(keys.includes("Space b l"), `left toggle is documented: ${keys.join(", ")}`)
+  assert.ok(keys.includes("Space b r"), `right toggle is documented: ${keys.join(", ")}`)
+  assert.ok(keys.includes("Space b"), "the prefix itself is discoverable")
+  assert.ok(!keys.includes("F3"), "the retired drawer key never appears in help")
+  const all = helpSections().flatMap((section) => section.entries.map((entry) => entry.keys))
+  assert.ok(!all.includes("F3"), "no section teaches the retired F3 drawer")
 })
 
 test("v5.7 help states the persistent-mode, caret, native, separator, badge, and memory contract", () => {

@@ -22,6 +22,25 @@ const FAKE_ASK_PROMPT = "fake-ask-person"
 // observable on frame 0 without making the trigger sticky in session history.
 const FAKE_MOTION_PROMPT = "fake-motion-static"
 const FAKE_NATIVE_ERROR_PROMPT = "fake-native-error"
+// Ticket #188: a real native subagent fixture. The parent turn calls the host's
+// built-in `subagent` tool in background mode; the child prompt carries the
+// child marker so it streams a bounded hold instead of answering immediately.
+// The host finalizes the parent's first turn while the child is still running,
+// which is exactly the early-finalization condition the barrier must cover.
+const FAKE_SUBAGENT_PROMPT = "fake-subagent-parent-fixture"
+const FAKE_SUBAGENT_CHILD_PROMPT = "fake-subagent-child-hold-fixture"
+const SUBAGENT_CHILD_DELAY_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_SUBAGENT_CHILD_DELAY_MS ?? "120"))
+const SUBAGENT_CHILD_MARKDOWN = [
+  "# Subagent child fixture",
+  "",
+  "SUBAGENT_CHILD_HOLD_MARKER",
+  ...Array.from(
+    { length: 15 },
+    (_, index) => `subagent child line ${index + 1} keeps the real child session working.`,
+  ),
+  "",
+  "",
+].join("\n")
 // Ticket #165/#177: a stream that deliberately outlives the old five-minute
 // delivery deadline while the service heartbeat keeps its lease alive. The
 // provider splits text into 24-character chunks, so 170 lines at 700 ms is a
@@ -467,13 +486,20 @@ const server = createServer(async (request, response) => {
       if (messages[index]?.role === "user") lastUser = index
     }
     const latestUserText = lastUser >= 0 ? textOf(messages[lastUser]?.content) : ""
+    const subagentChild = latestUserText.includes(FAKE_SUBAGENT_CHILD_PROMPT)
+    const subagentParent = latestUserText.includes(FAKE_SUBAGENT_PROMPT)
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
     const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
     const answered = /User answer:/i.test(latestUserText)
     const toolResult = lastUser >= 0 && messages.slice(lastUser + 1).some((message) => message?.role === "tool")
     const taskTitles = [...prompt.matchAll(/title="([^"]+)"/g)]
     const taskTitle = taskTitles.at(-1)?.[1] ?? ""
-    const askKey = taskTitle || latestUserText || prompt.slice(-200)
+    // One ask per distinct user request. The native session accumulates
+    // context, so a title parsed from older context can collide; an explicit
+    // ask-key marker gives the live harness a unique request identity while
+    // the task title still guards the follow-up tool-result request.
+    const askKeyMark = latestUserText.match(/\bask-key-[a-z0-9-]+/)
+    const askKey = askKeyMark ? askKeyMark[0] : (taskTitle || latestUserText || prompt.slice(-200))
     const askNew = askedThisTurn && !answered && !askedTasks.has(askKey)
     // Ticket #74 fix-up: the DM session accumulates every earlier trigger,
     // so precedence must follow the LATEST trigger, not a fixed order —
@@ -486,7 +512,9 @@ const server = createServer(async (request, response) => {
     const motion = latestUserText.includes(FAKE_MOTION_PROMPT) && !motionReplies.has(latestUserText)
     if (motion) motionReplies.add(latestUserText)
     const latest = Math.max(richAt, bubbleAt, holdAt, holdLongAt)
-    const text = leaseHold
+    const text = subagentChild
+      ? SUBAGENT_CHILD_MARKDOWN
+      : leaseHold
       ? LEASE_HOLD_MARKDOWN
       : motion
       ? QUEUE_HOLD_MARKDOWN
@@ -523,6 +551,8 @@ const server = createServer(async (request, response) => {
       init,
       turnStart,
       leaseHold,
+      subagentParent,
+      subagentChild,
       motion,
       answered,
       toolResult,
@@ -542,6 +572,29 @@ const server = createServer(async (request, response) => {
       return
     }
     try {
+      if (body?.stream !== false && subagentChild) {
+        // The real child session streams long enough that the parent's first
+        // turn has already reached idle before this reply completes.
+        await streamCompletion(response, SUBAGENT_CHILD_MARKDOWN, requestID, SUBAGENT_CHILD_DELAY_MS)
+        return
+      }
+      if (body?.stream !== false && subagentParent && !toolResult) {
+        // Background mode is the host shape that finalizes the parent before
+        // the child: the tool returns an ack immediately, then the child runs.
+        await streamToolCall(
+          response,
+          requestID,
+          "subagent",
+          {
+            agent: "explore",
+            description: "Watch the CI pipeline",
+            prompt: `Check the CI pipeline from start to finish. ${FAKE_SUBAGENT_CHILD_PROMPT}`,
+            background: true,
+          },
+          "subagent_tool_call",
+        )
+        return
+      }
       if (body?.stream !== false && budget && !toolResult) {
         const key = latestTaskID(prompt) ?? `${budget.chain}:${budget.consumed}`
         if (!budgetHandoffDir) {
@@ -621,6 +674,7 @@ const server = createServer(async (request, response) => {
       if (askedThisTurn && body?.stream !== false) {
         if (askNew) {
           askedTasks.add(askKey)
+          if (taskTitle) askedTasks.add(taskTitle)
           await streamAskToolCall(response, requestID)
         } else await streamCompletion(response, QUEUE_HOLD_MARKDOWN, requestID)
       } else if (body?.stream === false) await nonStreamingCompletion(response, text, requestID)

@@ -126,9 +126,13 @@ test("result lookup returns the stored reply", () => {
 })
 
 test("age labels use compact units", () => {
-  assert.match(ageLabel(Date.now() - 5_000), /^\d+s$/)
-  assert.match(ageLabel(Date.now() - 120_000), /^\d+m$/)
-  assert.match(ageLabel(Date.now() - 7_200_000), /^\d+h$/)
+  const now = 10_000_000
+  assert.equal(ageLabel(now - 5_000, now), "5s")
+  assert.equal(ageLabel(now - 59_999, now), "59s")
+  assert.equal(ageLabel(now - 60_000, now), "1m")
+  assert.equal(ageLabel(now - 120_000, now), "2m")
+  assert.equal(ageLabel(now - 7_200_000, now), "2h")
+  assert.equal(ageLabel(now + 5_000, now), "0s", "a future timestamp clamps to zero")
 })
 
 

@@ -7,24 +7,46 @@
  * adapter intents, so tests never render OpenTUI and the adapter stays thin.
  */
 
+import {
+  cyclePaneFocus,
+  composeFromPane,
+  enterPane,
+  leaveComposerToPane,
+  leavePaneInteraction,
+  movePaneFocus,
+  PANE_ORDER,
+  recoverPaneFocus,
+  type PaneFocus,
+  type PaneID,
+  type PaneMode,
+  type PaneMove,
+  type PaneVisibility,
+} from "./panefocus.ts"
+
 export type InteractionMode = "normal" | "insert" | "visual" | "command"
 
 /**
- * Focus is separate from mode. Settings, wizards, dialogs, approvals, and
- * help are contexts, not extra modes; they reuse the same Normal grammar.
+ * Focus is separate from mode. Settings, wizards, dialogs, and help are
+ * contexts, not extra modes; they reuse the same Normal grammar. The five
+ * shell panes own select/interact; the composer is the one text target that
+ * chat exposes deliberately with `i`.
  */
 export type InteractionFocus =
-  | "rail"
-  | "chat"
-  | "work"
+  | PaneID
   | "composer"
   | "settings"
   | "wizard"
   | "dialog"
-  | "approvals"
   | "help"
 
-export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "approvals" | "help" | "logs"
+const PANE_IDS: ReadonlySet<string> = new Set(PANE_ORDER)
+
+/** True for the five shell panes; false for composer and overlay contexts. */
+export function isPaneFocus(focus: InteractionFocus): focus is PaneID {
+  return PANE_IDS.has(focus)
+}
+
+export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "help" | "logs"
 
 export type CommandInput = { kind: ":" | "/"; text: string; cursor: number; returnMode: InteractionMode }
 
@@ -47,6 +69,10 @@ export type TransientMessage = { text: string; tone: TransientTone; at: number }
 export type InteractionState = {
   mode: InteractionMode
   focus: InteractionFocus
+  /** Selected shell pane, independent of overlay/composer focus. */
+  pane: PaneID
+  /** Select chooses a pane; interact acts inside it. */
+  paneMode: PaneMode
   overlay: InteractionOverlay
   field: InteractionField
   command: CommandInput | null
@@ -71,6 +97,13 @@ export type InteractionEvent =
   | { type: "settings.field.open" }
   | { type: "settings.field.close" }
   | { type: "focus.set"; focus: InteractionFocus }
+  | { type: "pane.move"; direction: PaneMove; visible?: PaneVisibility; workAtLast?: boolean; approvalsAtFirst?: boolean }
+  | { type: "pane.enter" }
+  | { type: "pane.escape" }
+  | { type: "pane.compose" }
+  | { type: "pane.cycle"; direction: 1 | -1; visible?: PaneVisibility }
+  | { type: "pane.set"; pane: PaneID; mode?: PaneMode }
+  | { type: "pane.recover"; visible?: PaneVisibility }
   | { type: "overlay.set"; overlay: InteractionOverlay; returnEditor?: InteractionEditor }
   | { type: "command.open"; kind: CommandInput["kind"]; text?: string; cursor?: number }
   | { type: "command.update"; text: string; cursor?: number }
@@ -100,7 +133,9 @@ export const TRANSIENT_MESSAGE_MS = 3_000
 export function initialInteractionState(overrides: Partial<InteractionState> = {}): InteractionState {
   return {
     mode: "normal",
-    focus: "rail",
+    focus: "agents",
+    pane: "agents",
+    paneMode: "select",
     overlay: "none",
     field: null,
     command: null,
@@ -109,6 +144,24 @@ export function initialInteractionState(overrides: Partial<InteractionState> = {
     message: null,
     overlayReturnEditor: null,
     ...overrides,
+  }
+}
+
+/** The pure pane state embedded in the interaction state. */
+export function paneFocusOf(state: InteractionState): PaneFocus {
+  return { pane: state.pane, mode: state.paneMode }
+}
+
+/** Apply one pure pane transition and mirror the focused pane into `focus`. */
+function applyPaneFocus(state: InteractionState, next: PaneFocus): InteractionState {
+  return { ...state, pane: next.pane, paneMode: next.mode, focus: next.pane }
+}
+
+/** A pane focus move blurs any editor and lands in select or interact as given. */
+function setPane(state: InteractionState, next: PaneFocus): InteractionResult {
+  return {
+    state: applyPaneFocus(state, next),
+    intents: [{ type: "blur-editor" }],
   }
 }
 
@@ -207,16 +260,24 @@ function escape(state: InteractionState): InteractionResult {
       intents: [{ type: "close-overlay", overlay: state.overlay }],
     }
   }
-  if (state.focus === "approvals") {
-    return { state: { ...state, focus: "work" }, intents: [{ type: "blur-editor" }] }
-  }
-  if (state.focus === "work") {
-    return { state: { ...state, focus: "chat" }, intents: [{ type: "blur-editor" }] }
-  }
+  // Ticket #180: the composer first returns to chat interaction; a pane in
+  // interact returns to select. A select-mode Esc never moves focus.
   if (state.focus === "composer") {
-    return { state: { ...state, focus: "chat" }, intents: [{ type: "blur-editor" }] }
+    return {
+      state: { ...state, ...paneFocusShell(leaveComposerToPane()), focus: "chat" },
+      intents: [{ type: "blur-editor" }],
+    }
+  }
+  if (isPaneFocus(state.focus)) {
+    const next = leavePaneInteraction(paneFocusOf(state))
+    if (next.mode === state.paneMode) return { state, intents: [{ type: "noop" }] }
+    return { state: applyPaneFocus(state, next), intents: [{ type: "blur-editor" }] }
   }
   return { state, intents: [{ type: "noop" }] }
+}
+
+function paneFocusShell(next: PaneFocus): Pick<InteractionState, "pane" | "paneMode"> {
+  return { pane: next.pane, paneMode: next.mode }
 }
 
 /** Close the one-line command input and restore the mode it interrupted. */
@@ -239,6 +300,8 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
           ...state,
           mode: "insert",
           focus: target === "composer" ? "composer" : target === "settings" ? "settings" : state.focus,
+          // The composer only lives in chat; entering it is chat interaction.
+          ...(target === "composer" ? { pane: "chat" as const, paneMode: "interact" as const } : {}),
           overlay: target === "settings" ? "settings" : state.overlay,
           field: target === "composer" ? null : target,
           selection: null,
@@ -267,9 +330,9 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
         state: {
           ...state,
           mode: "normal",
-          focus: state.focus === "rail" || state.focus === "chat" || state.focus === "work" || state.focus === "composer"
-            ? state.focus
-            : "rail",
+          focus: "agents",
+          pane: "agents",
+          paneMode: "select",
           overlay: "none",
           field: null,
           command: null,
@@ -304,7 +367,14 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
       }
       if (state.focus === "composer") {
         return {
-          state: { ...state, mode: "normal", focus: "chat", field: null, selection: null },
+          state: {
+            ...state,
+            mode: "normal",
+            focus: "chat",
+            ...paneFocusShell(leaveComposerToPane()),
+            field: null,
+            selection: null,
+          },
           intents: [{ type: "blur-editor" }],
         }
       }
@@ -335,11 +405,52 @@ export function interactionReducer(state: InteractionState, event: InteractionEv
     case "focus.set": {
       // Mode is global: moving focus never assigns it. The editor focus moves
       // with the target; leaving an editor blurs it but keeps the mode.
-      const target = event.focus === "composer" ? "composer" : null
+      // Ticket #180: focus.set reaches a pane in select mode; Enter is the
+      // only path into interaction, and composer focus is chat interaction.
+      if (isPaneFocus(event.focus)) {
+        return setPane(state, { pane: event.focus, mode: "select" })
+      }
+      if (event.focus === "composer") {
+        return {
+          state: { ...state, focus: "composer", pane: "chat", paneMode: "interact" },
+          intents: [{ type: "focus-editor", target: "composer" }],
+        }
+      }
       return {
         state: { ...state, focus: event.focus },
-        intents: target ? [{ type: "focus-editor", target }] : [{ type: "blur-editor" }],
+        intents: [{ type: "blur-editor" }],
       }
+    }
+    case "pane.move": {
+      const next = movePaneFocus(paneFocusOf(state), event.direction, {
+        visible: event.visible,
+        workAtLast: event.workAtLast,
+        approvalsAtFirst: event.approvalsAtFirst,
+      })
+      return setPane(state, next)
+    }
+    case "pane.enter":
+      return setPane(state, enterPane(paneFocusOf(state)))
+    case "pane.escape": {
+      const next = leavePaneInteraction(paneFocusOf(state))
+      return setPane(state, next)
+    }
+    case "pane.compose": {
+      const next = composeFromPane(paneFocusOf(state))
+      if (!next.composer) return { state, intents: [{ type: "noop" }] }
+      return {
+        state: { ...applyPaneFocus(state, next.state), focus: "composer" },
+        intents: [{ type: "focus-editor", target: "composer" }],
+      }
+    }
+    case "pane.cycle":
+      return setPane(state, cyclePaneFocus(paneFocusOf(state), event.direction, event.visible))
+    case "pane.set":
+      return setPane(state, { pane: event.pane, mode: event.mode ?? "select" })
+    case "pane.recover": {
+      const current = paneFocusOf(state)
+      const next = recoverPaneFocus(current, event.visible)
+      return next.pane === current.pane && next.mode === current.mode ? { state, intents: [] } : setPane(state, next)
     }
     case "overlay.set": {
       const opening = state.overlay !== event.overlay

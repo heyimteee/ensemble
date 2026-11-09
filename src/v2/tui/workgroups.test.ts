@@ -6,6 +6,7 @@ import {
   workGroupCounts,
   workGroupLabel,
   workGroupsForTasks,
+  workHistoryRollupLabel,
 } from "./workgroups.ts"
 import { paginateWorkGroups, workViewGroups } from "./workpane.ts"
 
@@ -188,6 +189,22 @@ test("ticket136: group labels appear only when more than one group is visible", 
   const group = { id: "g1", active: 2, done: 1 } as any
   assert.equal(workGroupLabel(group, 1), "GROUP 1 · 2 active · 1 done")
   assert.equal(workGroupLabel(group, 2), "GROUP 2 · 2 active · 1 done")
+})
+
+test("ticket184: a history row names done, active when relevant, and the age", () => {
+  const items = [
+    working({ id: "live", dispatchGroupID: "dispatch_1", createdAt: 1 }),
+    replied({ id: "done", dispatchGroupID: "dispatch_1", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
+  ]
+  const groups = workGroupsForTasks(items, record(...items), { now: 6_000, holdMs: 60_000 })
+  assert.equal(workHistoryRollupLabel(groups[0], 1, "5s"), "GROUP 1 · 1 done · 1 active · 5s")
+  const finished = replied({ id: "done", dispatchGroupID: "dispatch_1", finishedAt: 1_000, repliedAt: 1_000 })
+  const doneOnly = workGroupsForTasks(
+    [finished],
+    record(finished),
+    { now: 3_601_000, holdMs: 4_000_000 },
+  )
+  assert.equal(workHistoryRollupLabel(doneOnly[0], 2, "1h"), "GROUP 2 · 1 done · 1h", "an inactive group omits the active count")
 })
 
 test("ticket142: Work invalidation targets status and group-hold expiry without an animation clock", () => {

@@ -191,15 +191,33 @@ test("the Work pane receives the dispatch ledger", () => {
 })
 
 test("the Work pane pages its active view by its own body", () => {
-  assert.ok(has(app(), "paginateWorkGroups(grouped.active, width, body, now)"))
+  assert.ok(has(app(), "paginateWorkGroups(partition.active, width, body, partition.now)"))
 })
 
 test("the Work pane pages its history view by its own body", () => {
-  assert.ok(has(app(), "paginateWorkGroups(grouped.history, width, body, now)"))
+  assert.ok(has(app(), "paginateWorkGroups(historyPaneRows(), width, body, partition.now)"))
 })
 
 test("the shell widths come from the one pane-width helper", () => {
-  assert.ok(has(app(), "workspacePaneWidths(renderSize().width)"))
+  assert.ok(has(app(), "workspacePaneWidths(renderSize().width, paneSides())"))
+})
+
+test("entering a rail pane claims the row cursor for that section", () => {
+  assert.match(
+    app(),
+    /const ensureRailSectionCursor[\s\S]*?railCursorMoved = true[\s\S]*?setRailCursor\(start \+ local\)/,
+  )
+})
+
+test("the which-key popup leaves a row for its header and one line per entry", () => {
+  assert.ok(
+    has(app(), "height={whichKeyLines(leaderMenuEntries(leaderKeys()), 2, leaderKeys().length).length + 3}"),
+    "the popup height must include the two border rows, the header row, and every which-key line",
+  )
+})
+
+test("a pending leader prefix yields the host layer to the raw key machine", () => {
+  assert.ok(has(app(), "leaderMode() && leaderKeys().length === 0 && !commandActive()"))
 })
 
 test("the transcript width follows the Work pane state", () => {
@@ -228,7 +246,50 @@ test("the Work cursor settles by task identity and position", () => {
 })
 
 test("Work actions target the focused visible task", () => {
-  assert.ok(has(app(), "visibleTasks()[taskCursorClamped()]"))
+  assert.ok(has(app(), "tasks.find((task) => task.id === id)"))
+})
+
+test("ticket187: native subagent records join the Work view model", () => {
+  assert.ok(has(app(), "nativeSubagentRuns()"))
+  assert.ok(has(app(), "workViewGroups(activeTasks(), state()?.subtasks ?? {}, {"))
+})
+
+test("ticket187: native cards render through the same card and compact views", () => {
+  const source = app()
+  assert.ok(has(source, "workCardForNativeSubagentCached(workCardCache"))
+  assert.ok(has(source, "workCompactRowForNativeSubagent("))
+  assert.ok(has(source, "section.items"))
+})
+
+test("ticket187: native focus opens the child session and offers no task actions", () => {
+  const source = app()
+  assert.ok(has(source, "selectedNativeSubagent()"))
+  assert.ok(has(source, "nativeSubagentFocusChild("))
+  assert.ok(has(source, "childSessionID"))
+  assert.ok(has(source, "nativeSubagentActions()"))
+})
+
+test("ticket184: HISTORY groups carry task-level rollup state", () => {
+  assert.ok(has(app(), "historyPaneGroups("))
+  assert.ok(has(app(), "reconcileHistoryView("))
+})
+
+test("ticket184: Enter toggles a focused history group", () => {
+  assert.ok(has(app(), "toggleFocusedHistoryGroup()"))
+})
+
+test("ticket184: x dismisses a focused history group", () => {
+  assert.ok(has(app(), "dismissFocusedHistoryGroup()"))
+})
+
+test("ticket184: D clears the history view with confirmation", () => {
+  assert.ok(has(app(), '"work.history.clear"'))
+  assert.ok(has(app(), "clearHistoryView()"))
+})
+
+test("ticket184: rolled-up history rows reuse the Work row design", () => {
+  assert.ok(has(app(), "<WorkHistoryRowView"))
+  assert.ok(has(components(), "export function WorkHistoryRowView"))
 })
 
 test("completed groups remain available to HISTORY", () => {
@@ -239,8 +300,32 @@ test("f toggles ACTIVE and HISTORY", () => {
   assert.ok(has(app(), '"work.filter"'))
 })
 
-test("focusing Work or approvals opens the drawer", () => {
-  assert.ok(has(app(), "setWorkDrawerOpen(true)"))
+test("ticket183: the right pane visibility is the one drawer switch", () => {
+  assert.ok(has(app(), "paneSides().right && (surface()?.kind === \"workspace\" || approvalsMode() === \"full\")"))
+  assert.ok(has(app(), "<Show when={paneSides().left}>"), "the rail renders only while the left switch is on")
+  assert.ok(!has(app(), "workDrawerOpen"), "no second drawer state exists")
+})
+
+test("ticket183: Space b l/r run one focus-recovering toggle", () => {
+  const source = app()
+  assert.ok(has(source, '"leader.pane.left": () => togglePane("left")'))
+  assert.ok(has(source, '"leader.pane.right": () => togglePane("right")'))
+  assert.ok(has(source, "togglePaneSide(paneSides(), side)"))
+  assert.ok(has(source, "focusForPaneToggle(current, side, visibility)"))
+  assert.ok(has(source, "if (focus.pane !== current.pane || focus.mode !== current.mode)"), "an unchanged focus never blurs the composer")
+})
+
+test("ticket183: pane visibility persists through the UI RPC and hydrates", () => {
+  const source = app()
+  assert.ok(has(source, 'invoke(context, "ui.save", { paneVisibility: next })'))
+  assert.ok(has(source, "paneSideVisibility(stored)"))
+})
+
+test("ticket183: F3 is gone from the global layer", () => {
+  const source = app()
+  assert.ok(!has(source, "global.work"))
+  assert.ok(!has(source, "toggleWorkDrawer"))
+  assert.ok(!has(source, "F3"))
 })
 
 test("the Work page previous control pages", () => {
@@ -319,12 +404,12 @@ test("the pending label settles on the durable update", () => {
   assert.ok(has(app(), "pendingWorkSettled(pending"))
 })
 
-test("card selection is independent of pane focus", () => {
-  assert.ok(has(app(), "selected={selectedTask()?.id === card.id}"))
+test("card selection is gated by Work interaction, not pane selection", () => {
+  assert.ok(has(app(), "workCardsFocused(paneState()) && (workFocusID() === card.id"))
 })
 
-test("compact rows share the card focus identity", () => {
-  assert.ok(has(app(), "selectedTask()?.id === task.id"))
+test("compact rows share the card focus identity and interaction gate", () => {
+  assert.ok(has(app(), "workCardsFocused(paneState()) && selectedTask()?.id === task.id"))
 })
 
 test("the card border comes from the focus helper", () => {
@@ -332,43 +417,169 @@ test("the card border comes from the focus helper", () => {
 })
 
 test("the pane border stays a separate focus state", () => {
-  assert.ok(has(app(), "workOwnsFocus() ? colors.focus : colors.border"))
+  assert.ok(has(app(), "workColumnFocused() ? colors.focus : colors.border"))
 })
 
-test("the sticky approvals section mounts in the Work pane", () => {
-  assert.ok(has(app(), "<WorkApprovalsView"))
+test("ticket185: the small approvals summary mounts at the bottom of Work", () => {
+  const source = app()
+  assert.ok(has(source, "<WorkApprovalsView"))
+  assert.ok(has(source, "section={inlineApprovals()}"))
 })
 
-test("v focuses approvals", () => {
-  assert.ok(has(app(), '"work.approvals"'))
+test("ticket185: the full approvals inbox mounts in the same right column", () => {
+  const source = app()
+  const right = source.indexOf("<Show when={showWorkPane()}>")
+  const full = source.indexOf("<FullApprovalsView", right)
+  assert.ok(right >= 0 && full > right, "full approvals render inside the right-pane column, not a chat modal")
+  assert.ok(has(source, 'approvalsMode() === "full"'))
 })
 
-test("V opens the overflow inbox", () => {
-  assert.ok(has(app(), '"work.inbox"'))
+test("ticket185: v opens full approvals from every pane", () => {
+  const source = app()
+  for (const binding of ['"pane.approvals": () => openApprovalsFull()', 'approvals: () => openApprovalsFull()', '"chat.approvals": () => openApprovalsFull()', '"work.approvals": () => openApprovalsFull()', '"leader.approvals": () => openApprovalsFull()']) {
+    assert.ok(has(source, binding), `${binding} opens the one approvals surface`)
+  }
 })
 
-test("Enter resolves the focused inline approval", () => {
-  assert.ok(has(app(), '"workApprovals.resolve"'))
+test("ticket185: v opens the right column first when it is closed", () => {
+  const source = app()
+  assert.ok(has(source, "if (!paneSides().right)"), "the open path checks the column switch")
+  assert.ok(has(source, "persistPaneSides({ ...paneSides(), right: true })"))
+  assert.ok(has(source, "setApprovalsFull(openFullApprovals({ full: approvalsFull() }).full)"))
 })
 
-test("Esc returns from approvals to Work", () => {
-  assert.ok(has(app(), 'focus: "work"'))
+test("ticket185: Enter from the small approvals selection opens full approvals", () => {
+  const source = app()
+  const enter = source.indexOf("const enterSelectedPane = () => {")
+  const guard = source.indexOf('if (paneState().pane === "approvals")', enter)
+  assert.ok(enter >= 0 && guard > enter)
+  assert.ok(has(source, "openApprovalsFull()"))
 })
 
-test("V is advertised only for overflow", () => {
-  assert.ok(has(app(), "inlineApprovals().overflow === 0"))
+test("ticket185: Esc returns full approvals to split", () => {
+  const source = app()
+  assert.ok(has(source, '"approvals.close": () => closeApprovalsFull()'))
+  assert.ok(has(source, "setApprovalsFull(false)"))
+  assert.ok(has(source, 'setPaneFocus("approvals", "select")'), "the small pane remains selected at the bottom")
 })
 
-test("an approval row click selects it", () => {
-  assert.ok(has(app(), "onSelect={selectInlineApproval}"))
+test("ticket185: the full inbox reuses the existing resolution flow", () => {
+  const source = app()
+  assert.ok(has(source, '"approvals.resolve": () => resolveFocusedApproval()'))
+  assert.ok(has(source, "await invoke(context, \"approval.resolve\""))
 })
 
-test("the approval view forwards row clicks", () => {
-  assert.ok(has(components(), "props.onSelect(row.index, row.approval)"))
+test("ticket185: the full inbox moves its one cursor with j/k, arrows, gg, and G", () => {
+  const source = app()
+  assert.ok(has(source, '"approvals.down": () => moveApprovalCursor(1)'))
+  assert.ok(has(source, '"approvals.down.arrow": () => moveApprovalCursor(1)'))
+  assert.ok(has(source, '"approvals.up": () => moveApprovalCursor(-1)'))
+  assert.ok(has(source, '"approvals.top": () => setApprovalCursor(0)'))
+  assert.ok(has(source, '"approvals.bottom": () => setApprovalCursor(Math.max(0, pendingApprovals().length - 1))'))
 })
 
-test("Tab cycles through the shared focus zones", () => {
-  assert.ok(has(app(), "nextFocusZone("))
+test("ticket185: the chat approvals modal and V are retired", () => {
+  const source = app()
+  assert.ok(!has(source, "approvalsOpen"))
+  assert.ok(!has(source, "ApprovalList"))
+  assert.ok(!has(source, '"work.inbox"'))
+  assert.ok(!has(source, "openApprovalsOverflow"))
+  assert.ok(!has(source, "approvals.inbox"), "no second inbox action survives")
+})
+
+test("ticket185: the left rail no longer renders approvals or its hint", () => {
+  const source = components()
+  assert.ok(!has(source, "APPROVALS"))
+  assert.ok(!has(source, "v opens inbox"))
+  assert.ok(!has(source, "pendingApprovals"))
+  assert.ok(!has(app(), "pendingApprovals={pendingApprovals().length}"))
+})
+
+test("an approval row click opens the full inbox at that row", () => {
+  assert.ok(has(app(), "onOpen={openApprovalsAt}"))
+  assert.ok(has(components(), "props.onOpen(row.index)"))
+})
+
+test("Tab cycles the visible panes through the pure pane machine", () => {
+  assert.ok(has(app(), "cyclePaneFocus(paneState()"))
+})
+
+test("ticket180: chat l selects Work through the pure pane transition", () => {
+  const source = app()
+  assert.ok(has(source, "pane.right"))
+  assert.ok(has(source, 'moveSelectedPane("right")'))
+})
+
+test("ticket180: chat h selects Agents and Agents j selects Workspaces", () => {
+  const source = app()
+  assert.ok(has(source, 'moveSelectedPane("left")'))
+  assert.ok(has(source, 'moveSelectedPane("down")'))
+  assert.ok(has(source, "pane.left"))
+})
+
+test("ticket180: Work j at the last card selects Approvals", () => {
+  assert.ok(has(app(), 'setPaneFocus("approvals", "select")'))
+})
+
+test("ticket180: Approvals up at the first row returns Work selection", () => {
+  assert.ok(has(app(), 'moveSelectedPane("up")'))
+})
+
+test("ticket180: Enter enters the selected pane without starting card navigation in select mode", () => {
+  const source = app()
+  assert.ok(has(source, "enterPane(paneState())"))
+  assert.ok(has(source, "if (next.pane === \"work\" && workFocusID() === undefined) focusFirstWork()"))
+})
+
+test("ticket180: pane Esc returns to select through the interaction reducer", () => {
+  assert.ok(has(app(), 'dispatchInteraction({ type: "escape" })'))
+})
+
+test("ticket180: chat i is the only composer path", () => {
+  assert.ok(has(app(), "composeFromPaneFocus"))
+  assert.ok(has(app(), "if (interaction().pane !== \"chat\") return"))
+})
+
+test("ticket180: the rail receives its focused sub-pane", () => {
+  assert.ok(has(app(), 'focusedSection={railSectionFocused(paneState(), "agents")'))
+})
+
+test("ticket180: the chat border and heading are white when chat is selected", () => {
+  const source = app()
+  assert.ok(has(source, "chatOwnsFocus() ? colors.focus : colors.border"))
+  assert.ok(has(source, "chatOwnsFocus() || composerActive() ? colors.focus : colors.muted"))
+})
+
+test("ticket178: the right-column border and Work heading use separate focus helpers", () => {
+  const source = app()
+  assert.ok(has(source, "rightColumnFocused(paneState(), approvalsMode() === \"full\")"))
+  assert.ok(has(source, "approvalsMode() === \"full\" ? approvalsPaneFocused(paneState()) : workPaneFocused(paneState())"))
+})
+
+test("ticket183: which-key/statusline read the pending leader submenu", () => {
+  const source = app()
+  assert.ok(has(source, "leaderMenuEntries(leaderKeys())"))
+  assert.ok(has(source, "leaderHints(leaderKeys())"))
+})
+
+test("ticket183: a closed or absent pane recovers selection to chat", () => {
+  assert.ok(has(app(), 'dispatchInteraction({ type: "pane.recover", visible })'))
+})
+
+test("ticket180: the rail section border and heading follow the focused sub-pane", () => {
+  const source = components()
+  assert.ok(has(source, "sectionFocused(section.id) ? props.colors.focus : props.colors.faint"))
+  assert.ok(has(source, "sectionBorder(section.id)"))
+})
+
+test("ticket180: the rail row cursor stays inside the focused sub-pane", () => {
+  assert.ok(has(components(), "sectionFocused(section.id) && props.cursor === index()"))
+})
+
+test("ticket185: the small approvals summary is white when its pane is selected", () => {
+  const source = app()
+  assert.ok(has(source, "focused={approvalsPaneFocused(paneState())"))
+  assert.ok(has(components(), "props.focused ? props.colors.focus : props.colors.muted"))
 })
 
 test("approvals join the focus cycle only while pending", () => {
@@ -461,6 +672,39 @@ test("picker rows keep one name column", () => {
 
 // ---- Settings, limits, and activity ----
 
+test("chat renders one aggregate activity summary line", () => {
+  const source = app()
+  assert.ok(has(source, "activitySummary("))
+  assert.ok(has(source, "text={liveActivity().text}"))
+})
+
+test("per-agent activity rows are gone", () => {
+  const source = app()
+  assert.ok(!has(source, "liveActivity().shown"))
+  assert.ok(!has(source, "liveActivity().queued"))
+  assert.ok(!has(source, "<For each={liveActivity()}"))
+  assert.ok(!has(source, "activityFrameForKind(entry.kind"))
+})
+
+test("carded work is not suppressed from the summary", () => {
+  const source = app()
+  assert.ok(!has(source, "suppressCardedActivity("))
+  assert.ok(!has(source, "cardedTaskIDs"))
+})
+
+test("the activity summary is not gated on the Work pane", () => {
+  const source = app()
+  const start = source.indexOf("const liveActivity = createMemo(")
+  const end = source.indexOf("const hasChatContent", start)
+  assert.ok(start >= 0 && end > start, "activity summary memo exists")
+  const memo = source.slice(start, end)
+  assert.ok(!has(memo, "showWorkPane"), "the summary ignores Work-pane visibility")
+  assert.ok(!has(memo, "cardedTaskIDs"), "the summary ignores card suppression")
+  const render = source.indexOf("text={liveActivity().text}")
+  const workPane = source.indexOf("<Show when={showWorkPane()}>")
+  assert.ok(render >= 0 && workPane > render, "the summary renders in chat before the Work pane sibling")
+})
+
 test("the System Agent init guard runs before slash-command fallthrough", () => {
   const source = app()
   const guard = source.indexOf("const initIssue = initComposerIssue(text)")
@@ -474,6 +718,10 @@ test("the workspace Limits panel opens from the command line", () => {
 
 test("saving Limits invokes settings.update with the validated patch", () => {
   assert.ok(has(app(), '"settings.update"'))
+})
+
+test("closing settings restores the prior pane select/interact mode", () => {
+  assert.match(app(), /isPaneFocus\(target\)[\s\S]*?setPaneFocus\(target, settingsReturnPaneMode\)/)
 })
 
 test("the Limits key trap owns keys before page handlers", () => {

@@ -1,7 +1,8 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import type { Subtask } from "../types.ts"
+import type { NativeSubagentRun, Subtask } from "../types.ts"
 import { TIDE_GLYPHS, createTideFreezeState, type TideFreezeState } from "./tide.ts"
+import { nativeSubagentFocusID } from "./nativecards.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -9,6 +10,7 @@ import {
   activityDetailForTask,
   activityFrameForKind,
   activityLine,
+  activitySummary,
   activityVerb,
   createWorkCardCache,
   hasActiveWork,
@@ -27,6 +29,8 @@ import {
   workCardDetail,
   workCardForTask,
   workCardForTaskCached,
+  workCardForNativeSubagent,
+  workCardForNativeSubagentCached,
   workCardGlyph,
   workCardHeader,
   workCardHeaderText,
@@ -35,6 +39,7 @@ import {
   workCardTide,
   workCardTones,
   workCompactRow,
+  workCompactRowForNativeSubagent,
   workCompactRowText,
   workCardsForTasks,
   workGlyph,
@@ -60,6 +65,30 @@ const task = (patch: Partial<Subtask> = {}): Subtask => ({
   awaitingChildren: false,
   attempts: 0,
   createdAt: 1,
+  ...patch,
+})
+
+const activityEntry = (patch: Partial<Parameters<typeof activitySummary>[0]["live"][number]> = {}) => ({
+  key: "k",
+  label: "Clark",
+  createdAt: 1,
+  verb: "Asking $Clark…",
+  kind: "asking" as const,
+  ...patch,
+})
+
+const nativeRun = (patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
+  childSessionID: "child",
+  parentSessionID: "session",
+  parentTaskID: "t",
+  dispatchGroupID: "dispatch_1",
+  workspaceID: "w",
+  parentAgentID: "kakiko",
+  parentAgent: "Kakiko",
+  instruction: "Watch the CI",
+  state: "working",
+  startedAt: 2,
+  source: "session-created",
   ...patch,
 })
 
@@ -210,6 +239,112 @@ test("activity lines name the agent with the default verb", () => {
   assert.equal(activityVerb("waiting", "Ana"), "waiting on Ana…")
   assert.equal(activityVerb("wrapping"), "wrapping up…")
   assert.equal(activityVerb("reading"), ACTIVITY_DEFAULT_VERB)
+})
+
+test("activity summary names one in-flight ask", () => {
+  const summary = activitySummary({ live: [activityEntry()], queued: [] })
+  assert.equal(summary.text, "Asking $Clark…")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 1)
+})
+
+test("activity summary falls back to Retrying when only retries remain", () => {
+  const summary = activitySummary({
+    live: [
+      activityEntry({ key: "r1", label: "Ana", verb: "retrying…", kind: "retrying" }),
+      activityEntry({ key: "r2", label: "Bo", verb: "retrying…", kind: "retrying" }),
+    ],
+    queued: [],
+  })
+  assert.equal(summary.text, "Retrying…")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 2)
+})
+
+test("activity summary falls back to Queued when only queued work remains", () => {
+  const summary = activitySummary({
+    live: [],
+    queued: [
+      activityEntry({ key: "q1", label: "Ana", verb: "queued", kind: "checking" }),
+      activityEntry({ key: "q2", label: "Bo", verb: "queued", kind: "checking" }),
+    ],
+  })
+  assert.equal(summary.text, "Queued…")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 2)
+})
+
+test("activity summary is empty while nothing is active", () => {
+  const summary = activitySummary({ live: [], queued: [] })
+  assert.equal(summary.text, "")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 0)
+})
+
+test("activity summary collapses other live work into Working", () => {
+  const summary = activitySummary({
+    live: [
+      activityEntry({ key: "w1", label: "Ana", verb: "working…", kind: "working" }),
+      activityEntry({ key: "w2", label: "Bo", verb: "checking the details…", kind: "checking" }),
+    ],
+    queued: [],
+  })
+  assert.equal(summary.text, "Working…")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 2)
+})
+
+test("activity summary names the ask, works the rest, and overflows queued work", () => {
+  const summary = activitySummary({
+    live: [
+      activityEntry({ key: "a1" }),
+      activityEntry({ key: "w1", label: "Ana", verb: "working…", kind: "working" }),
+    ],
+    queued: [
+      activityEntry({ key: "q1", label: "Bo", verb: "queued", kind: "checking" }),
+      activityEntry({ key: "q2", label: "Dee", verb: "queued", kind: "checking" }),
+      activityEntry({ key: "q3", label: "Eli", verb: "queued", kind: "checking" }),
+    ],
+  })
+  assert.equal(summary.text, "Asking $Clark… │ Working… │ +3 more")
+  assert.equal(summary.overflow, 3)
+  assert.equal(summary.total, 5)
+})
+
+test("activity summary overflows queued work behind a retrying line", () => {
+  const summary = activitySummary({
+    live: [activityEntry({ key: "r1", label: "Ana", verb: "retrying…", kind: "retrying" })],
+    queued: [
+      activityEntry({ key: "q1", label: "Bo", verb: "queued", kind: "checking" }),
+      activityEntry({ key: "q2", label: "Dee", verb: "queued", kind: "checking" }),
+    ],
+  })
+  assert.equal(summary.text, "Retrying… │ +2 more")
+  assert.equal(summary.overflow, 2)
+  assert.equal(summary.total, 3)
+})
+
+test("activity summary names one ask and overflows the rest", () => {
+  const summary = activitySummary({
+    live: [
+      activityEntry({ key: "a1" }),
+      activityEntry({ key: "a2", label: "Bo" }),
+    ],
+    queued: [],
+  })
+  assert.equal(summary.text, "Asking $Clark… │ +1 more")
+  assert.equal(summary.overflow, 1)
+  assert.equal(summary.total, 2)
+})
+
+test("activity summary counts carded task entries", () => {
+  const summary = activitySummary({
+    live: [activityEntry({ key: "carded-live", taskID: "carded-live" })],
+    queued: [activityEntry({ key: "carded-queued", taskID: "carded-queued", label: "Bo", verb: "queued", kind: "checking" })],
+  })
+  assert.equal(summary.text, "Asking $Clark… │ +1 more")
+  assert.equal(summary.overflow, 1)
+  assert.equal(summary.total, 2)
 })
 
 test("activity selection dedups agents oldest-first and caps with overflow", () => {
@@ -989,4 +1124,63 @@ test("ticket162: exhausted group budgets keep the card and compact right edge", 
     assert.equal(text.trimEnd().length, width)
     if (row.budget) assert.ok(row.budget.includes("8/8"), `width ${width} keeps the exhausted count`)
   }
+})
+
+test("ticket187: a native subagent maps onto a normal Work card with the parent's name", () => {
+  const card = workCardForNativeSubagent(nativeRun(), "Kakiko", { now: 5_000, width: 40, variant: "current" })
+  assert.equal(card.id, nativeSubagentFocusID("child"))
+  assert.equal(card.header.name, "KAKIKO", "the card name is the parent agent")
+  assert.equal(card.header.status, "WORKING")
+  assert.equal(card.title, "Subagents: Watch the CI")
+  assert.equal(card.status, "working")
+  assert.equal(card.needsYou, false)
+  assert.equal(card.terminal, false)
+  assert.deepEqual(card.tones, workCardTones("working", false), "native cards share the task card tones")
+  assert.equal(card.tideVariant, "current")
+  assert.equal(card.width, 40)
+})
+
+test("ticket187: native terminal states keep the shared card status grammar", () => {
+  const cards = [
+    workCardForNativeSubagent(nativeRun({ state: "replied", finishedAt: 3 }), "Kakiko", { now: 5_000, width: 40 }),
+    workCardForNativeSubagent(nativeRun({ state: "failed", finishedAt: 3 }), "Kakiko", { now: 5_000, width: 40 }),
+    workCardForNativeSubagent(nativeRun({ state: "cancelled", finishedAt: 3 }), "Kakiko", { now: 5_000, width: 40 }),
+  ]
+  assert.deepEqual(cards.map((card) => card.header.status), ["REPLIED", "FAILED", "CANCELLED"])
+  assert.deepEqual(cards.map((card) => card.terminal), [true, true, true])
+  assert.deepEqual(cards.map((card) => card.tones), [
+    workCardTones("replied", false),
+    workCardTones("failed", false),
+    workCardTones("cancelled", false),
+  ])
+})
+
+test("ticket187: a long native instruction truncates inside the card", () => {
+  const card = workCardForNativeSubagent(nativeRun({ instruction: "Watch the CI ".repeat(30) }), "Kakiko", { now: 5_000, width: 24 })
+  assert.ok(card.title.length <= 22, "the title fits inside the card's text width")
+  assert.match(card.title, /^Subagents: /)
+  assert.ok(card.title.endsWith("…"))
+})
+
+test("ticket187: the compact native row uses the same name-title-status grammar", () => {
+  const row = workCompactRowForNativeSubagent(nativeRun(), "Kakiko", "⠋", 48)
+  assert.equal(row.name, "Kakiko")
+  assert.equal(row.title, "Subagents: Watch the CI")
+  assert.equal(row.status, "WORKING")
+  assert.equal(workCompactRowText(row).length, 48, "the row keeps the pane's exact width")
+  const long = workCompactRowForNativeSubagent(nativeRun({ instruction: "Watch the CI ".repeat(20) }), "Kakiko", "⠋", 32)
+  assert.ok(long.title.endsWith("…"))
+  assert.equal(long.status, "WORKING")
+  assert.equal(workCompactRowText(long).length, 32)
+})
+
+test("ticket187: native card identity is cached and rebuilt on state changes", () => {
+  const cache = createWorkCardCache()
+  const options = { now: 5_000, width: 40, variant: "current" as const }
+  const first = workCardForNativeSubagentCached(cache, nativeRun(), "Kakiko", options)
+  const again = workCardForNativeSubagentCached(cache, nativeRun(), "Kakiko", options)
+  assert.equal(first, again, "an unchanged native card keeps its identity")
+  const settled = workCardForNativeSubagentCached(cache, nativeRun({ state: "replied", finishedAt: 3 }), "Kakiko", options)
+  assert.notEqual(first, settled, "a lifecycle change rebuilds the card")
+  assert.equal(settled.status, "replied")
 })

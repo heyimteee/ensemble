@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
-import type { Agent, Approval, InitJob, Memory, Message, PatchBatch, SessionBinding, Subtask, Workspace } from "./types.ts"
+import type { Agent, Approval, InitJob, Memory, Message, NativeSubagentRun, PatchBatch, SessionBinding, Subtask, Workspace } from "./types.ts"
 
 function fakeContext(values = new Map<string, unknown>()) {
   const writes: string[] = []
@@ -101,6 +101,21 @@ const initJob = (patch: Partial<InitJob> = {}): InitJob => ({
   state: "running",
   previousAgentsMD: null,
   startedAt: 1,
+  ...patch,
+})
+
+const nativeSubagent = (patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
+  childSessionID: "child_1",
+  parentSessionID: "parent_1",
+  parentTaskID: "t1",
+  dispatchGroupID: "dispatch_1",
+  workspaceID: "w",
+  parentAgentID: "a",
+  parentAgent: "Nova",
+  instruction: "watch the CI",
+  state: "working",
+  startedAt: 2,
+  source: "session-created",
   ...patch,
 })
 
@@ -212,6 +227,23 @@ test("shell entity mutations publish full-entity upserts without a snapshot fall
   }
 })
 
+test("native subagent records publish full-entity upserts and removes", async () => {
+  const ctx = fakeContext()
+  const batches: PatchBatch[] = []
+  const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
+  await store.saveNativeSubagent(nativeSubagent())
+  store.publishPending()
+  const upsert = batches.flatMap((batch) => batch.entries)
+  assert.equal(upsert.length, 1)
+  assert.equal(upsert[0]!.other, true, "protocol-2 clients take the snapshot fallback")
+  assert.deepEqual(upsert[0]!.entities, [{ entity: "nativeSubagent", op: "upsert", run: nativeSubagent() }])
+
+  await store.removeNativeSubagent("child_1")
+  store.publishPending()
+  const remove = batches.at(-1)!.entries.at(-1)!
+  assert.deepEqual(remove.entities, [{ entity: "nativeSubagent", op: "remove", id: "child_1" }])
+})
+
 test("shell removals publish explicit remove changes", async () => {
   const ctx = fakeContext()
   const batches: PatchBatch[] = []
@@ -247,6 +279,7 @@ test("pruning a workspace publishes message removals and every removed shell ent
   await store.saveApproval(approval())
   await store.saveMemory(memory())
   await store.saveInitJob(initJob())
+  await store.saveNativeSubagent(nativeSubagent())
   await store.saveBinding(binding())
   store.publishPending()
   await store.pruneWorkspace("w")
@@ -258,7 +291,7 @@ test("pruning a workspace publishes message removals and every removed shell ent
   assert.equal(entry.nonEntity, undefined, "protocol-3 clients remove patches without a snapshot")
   assert.deepEqual(
     changes.map((change) => `${change.entity}:${change.op}`).sort(),
-    ["approval:remove", "binding:remove", "initJob:remove", "memory:remove", "message:remove", "subtask:remove", "workspace:remove"],
+    ["approval:remove", "binding:remove", "initJob:remove", "memory:remove", "message:remove", "nativeSubagent:remove", "subtask:remove", "workspace:remove"],
   )
   assert.deepEqual(changes.find((change) => change.entity === "message"), { entity: "message", op: "remove", workspaceID: "w", id: "m" })
 })

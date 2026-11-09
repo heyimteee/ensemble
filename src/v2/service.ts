@@ -45,9 +45,21 @@ import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
 import { RecentHostEvents, retryEventKey } from "./host-events.ts"
+import {
+  NATIVE_SUBAGENT_ACTIVE_LIMIT,
+  NATIVE_SUBAGENT_BARRIER_MS,
+  NATIVE_SUBAGENT_PENDING_LIMIT,
+  boundNativeSubagentInstruction,
+  nativeSubagentChildID,
+  nativeSubagentFallbackInstruction,
+  nativeSubagentInstructionFromInput,
+  nativeSubagentNextState,
+  nativeSubagentToolName,
+  rememberNativeSubagentActive,
+} from "./native-subagents.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
-import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey } from "./store.ts"
+import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type StoreObserver } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
 import { createLogRateLimiter, createLogger, defaultLogDirectory, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
@@ -70,6 +82,9 @@ import type {
   Message,
   MessageStream,
   ModelRef,
+  NativeSubagentRun,
+  NativeSubagentSource,
+  NativeSubagentState,
   PatchBatch,
   Revision,
   ScopeName,
@@ -106,6 +121,16 @@ type Ctx = {
 }
 type Json = Record<string, any>
 type HostRegistration = { dispose?: () => Promise<void> | void }
+
+/** Ticket #182: one child session's resolved Ensemble parent. */
+type NativeParentContext = {
+  sessionID: string
+  binding?: SessionBinding
+  task?: Subtask
+  workspaceID?: string
+  agentID?: string
+  agentName?: string
+}
 
 /**
  * Protocol version advertised by the snapshot and the revision heartbeat.
@@ -407,6 +432,8 @@ export class EnsembleV2Service {
   private readonly toolRegistrations = new Map<any, HostRegistration>()
   /** Per-location retry hooks, keyed by the plugin context that owns them. */
   private readonly retryHooks = new Map<any, HostRegistration>()
+  /** Per-location idle hooks, keyed by the plugin context that owns them. */
+  private readonly idleHooks = new Map<any, HostRegistration>()
   /** Attached plugin locations, keyed by the context that owns their surfaces. */
   private readonly locations = new Map<any, string | undefined>()
   /** Session -> the location whose host permission API owns its request. */
@@ -460,6 +487,21 @@ export class EnsembleV2Service {
    * name; the host's `session.tool.input.started` event supplies it.
    */
   private readonly toolCalls = new Map<string, { name?: string; input?: Json }>()
+  /** Ticket #182: bounded child-session parent chain for nested host sessions. */
+  private readonly nativeSubagentParents = new Map<string, string>()
+  /** Ticket #182: bounded active child index; the durable store owns records. */
+  private readonly nativeSubagentActive = new Map<string, number>()
+  /** Ticket #182: instructions seen before their child session was announced. */
+  private readonly nativeSubagentPending = new Map<string, Array<{ instruction: string; at: number }>>()
+  /** Ticket #182: lifecycle seen before its child session was announced. */
+  private readonly nativeSubagentPendingStates = new Map<string, { state: NativeSubagentState; at: number }>()
+  /** Ticket #182: durable instructions that still use the child-title fallback. */
+  private readonly nativeSubagentFallbacks = new Set<string>()
+  /**
+   * Ticket #188: parent-session wakeups for the bounded background-child
+   * barrier. One set per parent session; terminal child transitions release it.
+   */
+  private readonly nativeSubagentWaiters = new Map<string, Set<() => void>>()
   /** Ticket #155: one bounded, version-neutral activity update per task/window. */
   private readonly workActivity = createStreamCoalescer<WorkActivity>((updates) => {
     for (const activity of updates.values()) this.emitWorkActivity(activity)
@@ -497,10 +539,13 @@ export class EnsembleV2Service {
   private startedAtMs = now()
   /** Heartbeat cadence; overridable only to exercise multi-heartbeat leases quickly. */
   private readonly heartbeatMs: number
+  /** Ticket #188: how long a parent run may hold for missing child terminal events. */
+  private readonly nativeSubagentBarrierMs: number
 
-  constructor(ctx: Ctx, options: { heartbeatMs?: number } = {}) {
+  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number } = {}) {
     this.ctx = ctx
     this.heartbeatMs = Math.max(10, Math.floor(options.heartbeatMs ?? HEARTBEAT_MS))
+    this.nativeSubagentBarrierMs = Math.max(1, Math.floor(options.nativeSubagentBarrierMs ?? NATIVE_SUBAGENT_BARRIER_MS))
     this.catalog = new Catalog(ctx, () => {
       this.publishFeedMetaIfChanged()
     })
@@ -529,11 +574,12 @@ export class EnsembleV2Service {
     }, {
       epoch: this.epochValue,
       onPatch: (batch) => this.emitPatches(this.withReadMeta(batch)),
-      observer: createStoreObserver(this.logger),
+      observer: this.createStoreObserver(),
     })
     await this.store.load()
     this.refreshDmClock()
     await this.reconcileInitJobs()
+    await this.reconcileLoadedNativeSubagents()
     // Ticket #148: restart recovery is lease-safe. Load leaves `working` rows
     // untouched; reapAndRetire() requeues only an expired/missing lease with
     // no live local run, and reconcileWaitingWork() repairs a working row
@@ -568,6 +614,12 @@ export class EnsembleV2Service {
       this.pendingStreams.clear()
       this.workActivity.dispose()
       this.toolCalls.clear()
+      this.nativeSubagentParents.clear()
+      this.nativeSubagentActive.clear()
+      this.nativeSubagentPending.clear()
+      this.nativeSubagentPendingStates.clear()
+      this.nativeSubagentFallbacks.clear()
+      this.releaseNativeSubagentWaiters()
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
       await this.maintenanceRun?.catch(() => undefined)
@@ -657,11 +709,15 @@ export class EnsembleV2Service {
     if (ctx) this.locations.set(ctx, directory)
   }
 
-  untrackLocation(ctx: any): void {
+  async untrackLocation(ctx: any): Promise<void> {
+    const directory = this.locations.get(ctx)
     if (!this.locations.delete(ctx)) return
     for (const [sessionID, owner] of this.permissionLocations) {
       if (owner === ctx) this.permissionLocations.delete(sessionID)
     }
+    // Ticket #182: a disposed host location can no longer drive its child
+    // sessions, so its active native subagent records close but stay durable.
+    if (directory) await this.closeNativeSubagentsForLocation(directory)
   }
 
   /**
@@ -680,8 +736,25 @@ export class EnsembleV2Service {
       void this.catalog.refresh(location)
       return
     }
-    if (type === "session.text.delta" || type === "session.idle") {
+    if (type === "session.idle") {
+      // Ticket #182: an idle parent may still own background subagent work.
+      // Reconcile those children before clearing the task's live activity.
+      await this.handleNativeSubagentIdle(event)
       await this.handleStreamEvent(event)
+      return
+    }
+    if (type === "session.text.delta") {
+      await this.handleStreamEvent(event)
+      return
+    }
+    // Ticket #182: child sessions are the durable identity for native
+    // subagent records. `parentID` maps a child to its Ensemble parent task.
+    if (type === "session.created") {
+      await this.handleNativeSubagentCreated(event)
+      return
+    }
+    if (type === "session.deleted") {
+      await this.handleNativeSubagentDeleted(event)
       return
     }
     // Ticket #155: native tool and execution lifecycle feed the Work-card
@@ -694,7 +767,7 @@ export class EnsembleV2Service {
       type === "session.tool.success" ||
       type === "session.tool.failed"
     ) {
-      this.handleToolActivityEvent(event)
+      await this.handleToolActivityEvent(event)
       return
     }
     if (
@@ -703,6 +776,7 @@ export class EnsembleV2Service {
       type === "session.execution.failed" ||
       type === "session.execution.interrupted"
     ) {
+      await this.handleNativeSubagentExecution(event)
       this.handleExecutionActivityEvent(event)
       return
     }
@@ -1592,6 +1666,9 @@ export class EnsembleV2Service {
     const state = this.store.snapshot()
     state.runs = Object.fromEntries(this.activeRuns)
     this.overlayWorkStatus(state)
+    // Ticket #182: the doctor reads structured lifecycle facts only. Durable
+    // display instructions never travel through diagnostics.
+    for (const run of Object.values(state.nativeSubagents)) run.instruction = ""
     // Ticket #170: recovery audit rows for the doctor's consistency check.
     // IDs, states, reason codes, and timestamps only; never answer content.
     const recoveries = (this.logger?.recent({ event: "task.recovered", limit: 200 }) ?? []).flatMap((entry) => {
@@ -1679,6 +1756,7 @@ export class EnsembleV2Service {
     switch (action) {
       case "agent.create": return this.createAgent(payload)
       case "agent.update": return this.updateAgent(payload)
+      case "agent.rebindSession": return this.rebindAgentSession(payload)
       case "agent.archive": return this.archiveAgent(payload.id, payload.replacementLeaderID)
       case "agent.delete": return this.deleteAgent(payload.id, payload.replacementLeaderID, Boolean(payload.deleteNativeSessions))
       case "agent.moveHome": return this.moveHomeSession(payload.agentID, payload.workspaceID)
@@ -1732,7 +1810,10 @@ export class EnsembleV2Service {
 
   private async ensureHomeBinding(agent: Agent): Promise<{ sessionID: string; directory: string }> {
     const existing = this.store.binding("home", agent.id)
-    if (existing?.kind === "home") return { sessionID: existing.sessionID, directory: existing.directory ?? agent.homeDirectory ?? homedir() }
+    if (existing?.kind === "home" && !(await this.nativeSessionMissing(existing.sessionID))) {
+      await this.refreshAgentSession(existing, agent)
+      return { sessionID: existing.sessionID, directory: existing.directory ?? agent.homeDirectory ?? homedir() }
+    }
     const inFlight = this.homeBindingPromises.get(agent.id)
     if (inFlight) return inFlight
     const promise = this.createHomeBinding(agent)
@@ -1741,6 +1822,7 @@ export class EnsembleV2Service {
   }
 
   private async createHomeBinding(agent: Agent): Promise<{ sessionID: string; directory: string }> {
+    const existing = this.store.binding("home", agent.id)
     const directory = agent.homeDirectory ?? join(homedir(), ".ensemble", "agents", agent.id)
     mkdirSync(directory, { recursive: true })
     const created = unwrap<any>(await this.ctx.session.create({
@@ -1751,8 +1833,18 @@ export class EnsembleV2Service {
       location: { directory },
     }))
     if (!created?.id) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
-    const binding = { workspaceID: "home", agentID: agent.id, sessionID: created.id, kind: "home" as const, directory, agentVersion: agent.version, updatedAt: now() }
+    const binding = {
+      workspaceID: "home",
+      agentID: agent.id,
+      sessionID: created.id,
+      history: existing ? [...(existing.history ?? []), existing.sessionID] : [],
+      kind: "home" as const,
+      directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
     await this.store.saveBinding(binding)
+    if (existing && existing.sessionID !== created.id) await this.settleNativeForSession(existing.sessionID, "Session ended before the permission was answered.")
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
     const current = this.store.cloneAgent(agent.id)
     if (current) {
@@ -1760,6 +1852,7 @@ export class EnsembleV2Service {
       current.homeDirectory = directory
       await this.store.saveAgent(current)
     }
+    await this.clearPendingSettings(agent.id)
     return { sessionID: created.id, directory }
   }
 
@@ -1794,11 +1887,101 @@ export class EnsembleV2Service {
     }
   }
 
+  /**
+   * The bound native session may have been removed outside Ensemble (archived
+   * by the user, deleted by a cleanup, or lost with a profile). Rotation is
+   * only safe when the host proves absence. A context that does not expose
+   * `session.get` cannot prove it, so keep the binding rather than replace a
+   * conversation on an unavailable API.
+   */
+  private async nativeSessionMissing(sessionID: string): Promise<boolean> {
+    const get = this.ctx.session?.get
+    if (typeof get !== "function") return false
+    try {
+      const info = unwrap<any>(await get.call(this.ctx.session, { sessionID }))
+      return !info || (typeof info === "object" && !info.id)
+    } catch (error: any) {
+      const reason = String(error?._tag ?? error?.code ?? error?.type ?? "")
+      const status = Number(error?.status ?? error?.statusCode ?? 0)
+      return reason === "SessionNotFoundError" || reason === "session_not_found" || reason === "not_found" || status === 404
+    }
+  }
+
+  /**
+   * Ticket #189: apply the agent's current behavior to a native session in
+   * place. These are the same host surfaces runTask and the identity poll
+   * already use; none of them requires a new session. Returns true only when
+   * every part applied, so the binding advances its version only after a
+   * complete apply; a failure leaves the old version for the next message or
+   * DM to retry.
+   */
+  private async applyAgentBehavior(sessionID: string, agent: Agent): Promise<boolean> {
+    try {
+      await this.ctx.session.instructions.entry.put({
+        sessionID,
+        key: "ensemble.v2.identity",
+        value: this.identityForAgent(agent),
+      })
+      this.identityVersions.set(sessionID, agent.version)
+    } catch {
+      return false
+    }
+    try {
+      await this.ctx.session.switchModel({
+        sessionID,
+        model: {
+          providerID: agent.mainModel.providerID,
+          id: agent.mainModel.modelID,
+          ...(agent.mainModel.variant ? { variant: agent.mainModel.variant } : {}),
+        },
+      })
+    } catch {
+      return false
+    }
+    try {
+      await this.ctx.session.update({
+        sessionID,
+        permissions: skillPermissions(agent.skillbox),
+      })
+    } catch {
+      return false
+    }
+    return true
+  }
+
+  /**
+   * Refresh a stored binding whose native session is still alive. Returns true
+   * when the behavior was applied (and the binding saved) this call. A failed
+   * apply leaves `agentVersion` and `pendingSettings` untouched so the next
+   * task or DM retries on the same session.
+   */
+  private async refreshAgentSession(binding: SessionBinding, agent: Agent): Promise<boolean> {
+    if (binding.agentVersion === agent.version) return false
+    if (!(await this.applyAgentBehavior(binding.sessionID, agent))) return false
+    binding.agentVersion = agent.version
+    binding.updatedAt = now()
+    await this.store.saveBinding(binding)
+    await this.clearPendingSettings(agent.id)
+    return true
+  }
+
+  /** Clear the deferred-settings flag from the store's current row, never a run's snapshot. */
+  private async clearPendingSettings(agentID: string): Promise<void> {
+    const current = this.store.cloneAgent(agentID)
+    if (!current?.pendingSettings) return
+    current.pendingSettings = false
+    await this.store.saveAgent(current)
+  }
+
   private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number }> {
     const target = this.chatSession(agent, workspaceID)
     if (target.sessionID) {
-      await this.ensureIdentity(target.sessionID, agent, target.bindingVersion)
-      return target
+      const binding = this.store.binding(target.bindingKeyID, agent.id)
+      if (binding && !(await this.nativeSessionMissing(binding.sessionID))) {
+        await this.refreshAgentSession(binding, agent)
+        await this.ensureIdentity(binding.sessionID, agent, binding.agentVersion)
+        return { ...target, sessionID: binding.sessionID, bindingVersion: binding.agentVersion }
+      }
     }
     if (target.workspace) {
       const binding = await this.ensureBinding(target.workspace, agent)
@@ -2010,29 +2193,40 @@ export class EnsembleV2Service {
     const agent = this.store.cloneAgent(payload.id)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     let behavioral = false
+    // Ticket #189: the audit names only changed fields, never their values.
+    const changed: string[] = []
     if (payload.name !== undefined) {
       const nextName = String(payload.name).trim() || agent.name
       if (Object.values(state.agents).some((item) => item.id !== agent.id && !item.archived && item.name.toLowerCase() === nextName.toLowerCase())) {
         throw Object.assign(new Error(`Agent name already exists: ${nextName}`), { code: "duplicate_name" })
       }
+      if (nextName !== agent.name) changed.push("name")
       agent.name = nextName
     }
-    if (payload.title !== undefined) agent.title = String(payload.title)
-    if (payload.role !== undefined && String(payload.role) !== agent.role) { agent.role = String(payload.role); behavioral = true }
-    if (payload.color !== undefined) agent.color = String(payload.color)
+    if (payload.title !== undefined) {
+      const nextTitle = String(payload.title)
+      if (nextTitle !== agent.title) changed.push("title")
+      agent.title = nextTitle
+    }
+    if (payload.role !== undefined && String(payload.role) !== agent.role) { agent.role = String(payload.role); behavioral = true; changed.push("role") }
+    if (payload.color !== undefined) {
+      const nextColor = String(payload.color)
+      if (nextColor !== agent.color) changed.push("color")
+      agent.color = nextColor
+    }
     if (payload.mainModel !== undefined) {
       this.catalog.validate(payload.mainModel)
-      if (!sameModel(agent.mainModel, payload.mainModel)) behavioral = true
+      if (!sameModel(agent.mainModel, payload.mainModel)) { behavioral = true; changed.push("mainModel") }
       agent.mainModel = payload.mainModel
     }
     if (payload.backupModels !== undefined) {
       for (const model of payload.backupModels) this.catalog.validate(model)
-      if (!sameModels(agent.backupModels, payload.backupModels)) behavioral = true
+      if (!sameModels(agent.backupModels, payload.backupModels)) { behavioral = true; changed.push("backupModels") }
       agent.backupModels = payload.backupModels
     }
     if (payload.skillbox !== undefined) {
       const next = stringList(payload.skillbox, "skillbox")
-      if (next.length !== agent.skillbox.length || next.some((skill) => !agent.skillbox.includes(skill))) behavioral = true
+      if (next.length !== agent.skillbox.length || next.some((skill) => !agent.skillbox.includes(skill))) { behavioral = true; changed.push("skillbox") }
       agent.skillbox = next
     }
     if (behavioral) {
@@ -2041,11 +2235,63 @@ export class EnsembleV2Service {
     }
     agent.updatedAt = now()
     await this.store.saveAgent(agent)
+    this.logger?.event("info", "service", "agent.updated", {
+      agentID: agent.id,
+      version: agent.version,
+      changed,
+    })
     const synced = this.store.read()
     for (const workspace of Object.values(synced.workspaces)) {
       if (workspace.memberIDs.includes(agent.id)) writeWorkspaceConfig(workspace, synced.agents)
     }
     return agent
+  }
+
+  /**
+   * Ticket #189 maintenance action: point a binding at a session it already
+   * owns. Only history/current sessions are selectable so a stale or foreign
+   * id can never hijack an agent. IDs only reach the audit log.
+   */
+  private async rebindAgentSession(payload: Json): Promise<any> {
+    const agent = this.store.agent(payload.agentID)
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    const rawWorkspaceID = payload.workspaceID
+    const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null || String(rawWorkspaceID).length === 0
+      ? "home"
+      : String(rawWorkspaceID)
+    const binding = this.store.binding(workspaceID, agent.id)
+    if (!binding) throw Object.assign(new Error("Session binding not found."), { code: "not_found" })
+    const target = String(payload.sessionID ?? "").trim()
+    const history = binding.history ?? []
+    if (!target || (target !== binding.sessionID && !history.includes(target))) {
+      throw Object.assign(new Error("The target session is not part of this binding."), { code: "invalid_session" })
+    }
+    if (target === binding.sessionID) return { ok: true, binding }
+    const busy = [...this.activeRuns.values()].some((run) => run.sessionID === binding.sessionID) || this.directBusy.has(binding.sessionID)
+    if (busy) throw Object.assign(new Error("The current session is busy."), { code: "session_busy" })
+    if (await this.nativeSessionMissing(target)) {
+      throw Object.assign(new Error("The target session no longer exists."), { code: "invalid_session" })
+    }
+    const fromSessionID = binding.sessionID
+    if (!(await this.applyAgentBehavior(target, agent))) {
+      throw Object.assign(new Error("Could not apply the agent settings to the target session."), { code: "session_apply_failed" })
+    }
+    await this.clearPendingSettings(agent.id)
+    const next: SessionBinding = {
+      ...binding,
+      sessionID: target,
+      history: [fromSessionID, ...history.filter((sessionID) => sessionID !== target)],
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
+    await this.store.saveBinding(next)
+    this.logger?.event("info", "service", "agent.session.rebound", {
+      agentID: agent.id,
+      workspaceID: binding.workspaceID,
+      fromSessionID,
+      sessionID: target,
+    })
+    return { ok: true, binding: next }
   }
 
   private async archiveAgent(agentID: string, replacementLeaderID?: string): Promise<any> {
@@ -2627,6 +2873,7 @@ export class EnsembleV2Service {
     this.globalEpoch++
     this.epochValue++
     this.workspaceEpoch.clear()
+    this.releaseNativeSubagentWaiters()
     await this.cancelActiveInitJobs(undefined, "Ensemble was reset.")
     await this.waitForInitRuns()
     for (const run of this.activeRuns.values()) await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
@@ -2669,6 +2916,7 @@ export class EnsembleV2Service {
     workspace.archived = true
     workspace.lastActiveAt = now()
     this.workspaceEpoch.set(workspaceID, (this.workspaceEpoch.get(workspaceID) ?? 0) + 1)
+    this.wakeNativeSubagentWaitersForWorkspace(workspaceID)
     await this.cancelActiveInitJobs(workspaceID, "Workspace archived.")
     await this.store.saveWorkspace(workspace)
     try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
@@ -2685,6 +2933,7 @@ export class EnsembleV2Service {
     const workspace = this.store.workspace(workspaceID)
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     this.workspaceEpoch.set(workspaceID, (this.workspaceEpoch.get(workspaceID) ?? 0) + 1)
+    this.wakeNativeSubagentWaitersForWorkspace(workspaceID)
     await this.cancelActiveInitJobs(workspaceID, "Workspace deleted.")
     await this.cancelWorkspaceSubtasks(workspaceID, "Workspace deleted.")
     for (const run of this.activeRuns.values()) {
@@ -4069,6 +4318,39 @@ export class EnsembleV2Service {
     return handle
   }
 
+  /**
+   * Ticket #182: the host's experimental idle hook carries `background` work
+   * (including subagent children) that the bus event does not always include.
+   * Forward it into the same tracker path; disposal is per location.
+   */
+  async installIdleHook(ctx: any): Promise<HostRegistration> {
+    const existing = this.idleHooks.get(ctx)
+    if (existing) return existing
+    const registration = await ctx.session.hook("experimental.idle", (event: any) => {
+      if (!event || typeof event.sessionID !== "string" || event.sessionID.length === 0) return
+      const background = Array.isArray(event.background) ? event.background : []
+      // Ticket #188: prove the host delivered the documented background shape
+      // without logging shell commands, image paths, or subagent descriptions.
+      this.logger?.event("debug", "host", "native.subagent.idle-hook", {
+        sessionID: event.sessionID,
+        count: background.length,
+        background: background.map((entry: any) => {
+          if (entry?.kind === "subagent") {
+            return { kind: "subagent", sessionID: entry.sessionID, childSessionID: entry.childSessionID }
+          }
+          return { kind: String(entry?.kind ?? "unknown"), sessionID: entry?.sessionID }
+        }),
+      })
+      void this.handleNativeSubagentIdle({
+        type: "session.idle",
+        data: { sessionID: event.sessionID, background },
+      }).catch(() => undefined)
+    })
+    const handle = this.hostRegistration(registration, this.idleHooks, ctx)
+    this.idleHooks.set(ctx, handle)
+    return handle
+  }
+
   private toolHandlers(): EnsembleToolHandlers {
     return {
       workspaceInfo: (context) => this.toolWorkspaceInfo(context),
@@ -4104,7 +4386,7 @@ export class EnsembleV2Service {
 
   /** Stop-time cleanup for a service used without location attachments (tests). */
   private async disposeHostRegistrations(): Promise<void> {
-    for (const registration of [...this.toolRegistrations.values(), ...this.retryHooks.values()]) {
+    for (const registration of [...this.toolRegistrations.values(), ...this.retryHooks.values(), ...this.idleHooks.values()]) {
       try {
         await registration.dispose?.()
       } catch {
@@ -4113,6 +4395,7 @@ export class EnsembleV2Service {
     }
     this.toolRegistrations.clear()
     this.retryHooks.clear()
+    this.idleHooks.clear()
     this.locations.clear()
     this.permissionLocations.clear()
     this.recentHostEvents.clear()
@@ -5639,6 +5922,7 @@ export class EnsembleV2Service {
       if (finished === undefined || at - finished < FINISHED_RETENTION_MS) continue
       await this.store.removeSubtask(task.id)
     }
+    await this.purgeFinishedNativeSubagents(at)
   }
 
   /**
@@ -5878,6 +6162,575 @@ export class EnsembleV2Service {
     })()
   }
 
+  /** Ticket #182: close live child records when their owner task ends. */
+  private createStoreObserver(): StoreObserver {
+    const base = createStoreObserver(this.logger!)
+    return {
+      ...base,
+      subtask: (next, previous) => {
+        base.subtask?.(next, previous)
+        if (next.state === "replied" && previous?.state !== "replied") {
+          void this.closeNativeSubagentsForTask(next.id, "task-terminal")
+        }
+      },
+      subtaskRemoved: (previous) => {
+        base.subtaskRemoved?.(previous)
+        void this.removeNativeSubagentsForTask(previous.id)
+      },
+    }
+  }
+
+  /**
+   * Ticket #182: resolve a host session to the nearest Ensemble-bound parent
+   * session, its task, and its dispatch group. A nested child walks the
+   * bounded parent chain; direct chats with no binding stay untracked.
+   */
+  private nativeParentContext(sessionID: string): NativeParentContext {
+    let current: string | undefined = sessionID
+    const seen = new Set<string>()
+    let binding: SessionBinding | undefined
+    for (let depth = 0; current && depth < 8 && !seen.has(current); depth++) {
+      seen.add(current)
+      const candidate = this.store.bindingForSession(current)
+      if (candidate) {
+        binding = candidate
+        break
+      }
+      current = this.nativeSubagentParents.get(current)
+    }
+    const resolvedSessionID = current ?? sessionID
+    let task: Subtask | undefined
+    const runID = this.runBySession.get(resolvedSessionID)
+    if (runID) {
+      const run = this.activeRuns.get(runID)
+      task = run ? this.store.subtask(run.subtaskID) : undefined
+    }
+    if (!task && binding) {
+      const candidates = this.store.subtasks()
+        .filter((candidate) => candidate.workspaceID === binding!.workspaceID && candidate.assigneeID === binding!.agentID)
+        .sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id))
+      task = candidates.find((candidate) => candidate.state !== "replied") ?? candidates[0]
+    }
+    const agent = binding ? this.store.agent(binding.agentID) : undefined
+    return {
+      sessionID: resolvedSessionID,
+      ...(binding ? { binding } : {}),
+      ...(task ? { task } : {}),
+      ...(binding ? { workspaceID: binding.workspaceID } : {}),
+      ...(binding ? { agentID: binding.agentID } : {}),
+      ...(agent?.name ? { agentName: agent.name } : {}),
+    }
+  }
+
+  private rememberNativeSubagentParent(childSessionID: string, parentSessionID: string): void {
+    this.nativeSubagentParents.delete(childSessionID)
+    this.nativeSubagentParents.set(childSessionID, parentSessionID)
+    while (this.nativeSubagentParents.size > NATIVE_SUBAGENT_ACTIVE_LIMIT) {
+      const oldest = this.nativeSubagentParents.keys().next().value
+      if (oldest === undefined) break
+      this.nativeSubagentParents.delete(oldest)
+    }
+  }
+
+  private rememberNativeSubagentPending(parentSessionID: string, instruction: string): void {
+    if (!instruction) return
+    const list = this.nativeSubagentPending.get(parentSessionID) ?? []
+    if (list.at(-1)?.instruction === instruction) return
+    list.push({ instruction, at: now() })
+    while (list.length > NATIVE_SUBAGENT_PENDING_LIMIT) list.shift()
+    this.nativeSubagentPending.delete(parentSessionID)
+    this.nativeSubagentPending.set(parentSessionID, list)
+    while (this.nativeSubagentPending.size > NATIVE_SUBAGENT_ACTIVE_LIMIT) {
+      const oldest = this.nativeSubagentPending.keys().next().value
+      if (oldest === undefined) break
+      this.nativeSubagentPending.delete(oldest)
+    }
+  }
+
+  private takeNativeSubagentPending(parentSessionID: string): string | undefined {
+    const list = this.nativeSubagentPending.get(parentSessionID)
+    if (!list || list.length === 0) return undefined
+    const instruction = list.pop()?.instruction
+    if (list.length === 0) this.nativeSubagentPending.delete(parentSessionID)
+    return instruction
+  }
+
+  private rememberNativeSubagentPendingState(sessionID: string, state: NativeSubagentState, at: number): void {
+    if (!sessionID) return
+    this.nativeSubagentPendingStates.delete(sessionID)
+    this.nativeSubagentPendingStates.set(sessionID, { state, at })
+    while (this.nativeSubagentPendingStates.size > NATIVE_SUBAGENT_ACTIVE_LIMIT) {
+      const oldest = this.nativeSubagentPendingStates.keys().next().value
+      if (oldest === undefined) break
+      this.nativeSubagentPendingStates.delete(oldest)
+    }
+  }
+
+  private takeNativeSubagentPendingState(sessionID: string): { state: NativeSubagentState; at: number } | undefined {
+    const pending = this.nativeSubagentPendingStates.get(sessionID)
+    if (!pending) return undefined
+    this.nativeSubagentPendingStates.delete(sessionID)
+    return pending
+  }
+
+  /** Apply lifecycle observed before the child record existed. */
+  private async applyNativeSubagentPendingState(childSessionID: string): Promise<void> {
+    const pending = this.takeNativeSubagentPendingState(childSessionID)
+    if (!pending) return
+    await this.transitionNativeSubagent(childSessionID, pending.state, "late-host-event")
+  }
+
+  private nativeSubagentRecord(input: {
+    childSessionID: string
+    parentSessionID: string
+    context: NativeParentContext
+    instruction: string
+    source: NativeSubagentSource
+    startedAt: number
+  }): NativeSubagentRun {
+    const { context } = input
+    return {
+      childSessionID: input.childSessionID,
+      parentSessionID: input.parentSessionID,
+      ...(context.task?.id ? { parentTaskID: context.task.id } : {}),
+      ...(context.task?.dispatchGroupID ? { dispatchGroupID: context.task.dispatchGroupID } : {}),
+      ...(context.workspaceID ? { workspaceID: context.workspaceID } : {}),
+      ...(context.agentID ? { parentAgentID: context.agentID } : {}),
+      ...(context.agentName ? { parentAgent: context.agentName } : {}),
+      instruction: input.instruction,
+      state: "working",
+      startedAt: input.startedAt,
+      source: input.source,
+    }
+  }
+
+  /**
+   * Ticket #188: a background subagent can outlive the parent's first turn.
+   * The host's `subagent` tool returns immediately in background mode, so the
+   * parent prompt finishes while the child still streams. Hold the parent run
+   * (the existing heartbeat keeps its lease live) until every child mapped to
+   * this task is terminal, or until the bound expires. Event-driven: terminal
+   * transitions wake the waiter, and the bound covers missing host events.
+   * Returns true only when active children actually existed and finished, so
+   * the caller knows a host wake-up turn may still need settling.
+   */
+  private activeNativeChildrenForTask(parentSessionID: string, taskID: string): NativeSubagentRun[] {
+    return this.store.nativeSubagents().filter(
+      (run) => run.state === "working" && run.parentSessionID === parentSessionID && run.parentTaskID === taskID,
+    )
+  }
+
+  private notifyNativeSubagentWaiters(parentSessionID: string): void {
+    const waiters = this.nativeSubagentWaiters.get(parentSessionID)
+    if (!waiters) return
+    this.nativeSubagentWaiters.delete(parentSessionID)
+    for (const wake of [...waiters]) wake()
+  }
+
+  private releaseNativeSubagentWaiters(): void {
+    for (const parentSessionID of [...this.nativeSubagentWaiters.keys()]) {
+      this.notifyNativeSubagentWaiters(parentSessionID)
+    }
+  }
+
+  private waitForNativeSubagentSignal(parentSessionID: string, timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let set = this.nativeSubagentWaiters.get(parentSessionID)
+      if (!set) {
+        set = new Set()
+        this.nativeSubagentWaiters.set(parentSessionID, set)
+      }
+      const waiters = set
+      let settled = false
+      const wake = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        waiters.delete(wake)
+        if (waiters.size === 0 && this.nativeSubagentWaiters.get(parentSessionID) === waiters) {
+          this.nativeSubagentWaiters.delete(parentSessionID)
+        }
+        resolve()
+      }
+      const timer = setTimeout(wake, Math.max(1, timeoutMs))
+      if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
+        ;(timer as unknown as { unref: () => void }).unref()
+      }
+      waiters.add(wake)
+    })
+  }
+
+  private async awaitNativeSubagentBarrier(
+    parentSessionID: string,
+    task: Subtask,
+    globalEpoch: number,
+    workspaceEpoch: number,
+  ): Promise<boolean> {
+    const startedAt = now()
+    let waited = false
+    for (;;) {
+      // Reset, workspace delete/archive, and service stop already changed the
+      // run's lifecycle identity. Never hold a run the rest of the system has
+      // retired; the caller's existing epoch/ownership checks take over.
+      if (this.stopped || this.globalEpoch !== globalEpoch) return false
+      if ((this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return false
+      const active = this.activeNativeChildrenForTask(parentSessionID, task.id)
+      if (active.length === 0) {
+        if (waited) {
+          this.logger?.event("info", "host", "native.subagent.barrier.released", {
+            parentSessionID,
+            parentTaskID: task.id,
+            durationMs: now() - startedAt,
+          })
+        }
+        return waited
+      }
+      waited = true
+      const remaining = this.nativeSubagentBarrierMs - (now() - startedAt)
+      if (remaining <= 0) {
+        // IDs, states, and counts only: the instruction never enters a log.
+        this.logger?.event("warn", "host", "native.subagent.barrier.timeout", {
+          parentSessionID,
+          parentTaskID: task.id,
+          childSessionIDs: active.map((run) => run.childSessionID),
+          count: active.length,
+          durationMs: now() - startedAt,
+        })
+        return false
+      }
+      await this.waitForNativeSubagentSignal(parentSessionID, remaining)
+    }
+  }
+
+  /** Wake barriers whose parent session belongs to a retiring workspace. */
+  private wakeNativeSubagentWaitersForWorkspace(workspaceID: string): void {
+    const taskIDs = new Set(
+      this.store.subtasks().filter((task) => task.workspaceID === workspaceID).map((task) => task.id),
+    )
+    const sessions = new Set<string>()
+    for (const run of this.store.nativeSubagents()) {
+      if (run.workspaceID === workspaceID || (run.parentTaskID !== undefined && taskIDs.has(run.parentTaskID))) {
+        sessions.add(run.parentSessionID)
+      }
+    }
+    for (const sessionID of sessions) this.notifyNativeSubagentWaiters(sessionID)
+  }
+
+  /** IDs, names, states, and durations only. Instructions never enter a log. */
+  private logNativeSubagent(event: string, run: NativeSubagentRun, extra: Record<string, unknown> = {}): void {
+    this.logger?.event("info", "host", event, {
+      childSessionID: run.childSessionID,
+      parentSessionID: run.parentSessionID,
+      ...(run.parentTaskID ? { parentTaskID: run.parentTaskID } : {}),
+      ...(run.dispatchGroupID ? { dispatchGroupID: run.dispatchGroupID } : {}),
+      ...(run.workspaceID ? { workspaceID: run.workspaceID } : {}),
+      ...(run.parentAgentID ? { parentAgentID: run.parentAgentID } : {}),
+      ...(run.parentAgent ? { parentAgent: run.parentAgent } : {}),
+      state: run.state,
+      source: run.source,
+      ...(run.finishedAt !== undefined ? { durationMs: Math.max(0, run.finishedAt - run.startedAt) } : {}),
+      ...extra,
+    })
+  }
+
+  private async createNativeSubagent(run: NativeSubagentRun, event: string): Promise<void> {
+    await this.store.saveNativeSubagent(run)
+    rememberNativeSubagentActive(this.nativeSubagentActive, run.childSessionID, run.startedAt)
+    this.logNativeSubagent(event, run, { activeCount: this.nativeSubagentActive.size })
+  }
+
+  private async updateNativeSubagent(
+    run: NativeSubagentRun,
+    reason: string,
+    patch: Partial<NativeSubagentRun>,
+  ): Promise<NativeSubagentRun> {
+    const next: NativeSubagentRun = { ...run, ...patch }
+    await this.store.saveNativeSubagent(next)
+    if (next.state === "working") {
+      rememberNativeSubagentActive(this.nativeSubagentActive, next.childSessionID, next.startedAt)
+    } else {
+      this.nativeSubagentActive.delete(next.childSessionID)
+      this.nativeSubagentFallbacks.delete(next.childSessionID)
+    }
+    this.logNativeSubagent("native.subagent.updated", next, { reason, fromState: run.state })
+    return next
+  }
+
+  /**
+   * Ticket #182 review: fill only the parent task, dispatch group, workspace,
+   * and parent agent fields an existing record is still missing. The
+   * session-created and idle-background paths must apply exactly this patch.
+   */
+  private parentPatch(existing: NativeSubagentRun, context: NativeParentContext): Partial<NativeSubagentRun> {
+    const patch: Partial<NativeSubagentRun> = {}
+    if (!existing.parentTaskID && context.task?.id) patch.parentTaskID = context.task.id
+    if (!existing.dispatchGroupID && context.task?.dispatchGroupID) patch.dispatchGroupID = context.task.dispatchGroupID
+    if (!existing.workspaceID && context.workspaceID) patch.workspaceID = context.workspaceID
+    if (!existing.parentAgentID && context.agentID) patch.parentAgentID = context.agentID
+    if (!existing.parentAgent && context.agentName) patch.parentAgent = context.agentName
+    return patch
+  }
+
+  private async handleNativeSubagentCreated(event: any): Promise<void> {
+    const data = event?.data ?? event
+    const childSessionID = typeof data?.sessionID === "string" ? data.sessionID : ""
+    const parentID = typeof data?.parentID === "string" ? data.parentID : ""
+    if (!childSessionID || !parentID) return
+    this.rememberNativeSubagentParent(childSessionID, parentID)
+    const context = this.nativeParentContext(parentID)
+    const fallback = nativeSubagentFallbackInstruction({ title: data?.title, agent: data?.agent })
+    const existing = this.store.nativeSubagent(childSessionID)
+    if (existing) {
+      const patch = this.parentPatch(existing, context)
+      const isFallback = this.nativeSubagentFallbacks.has(childSessionID)
+      const pending = isFallback ? this.takeNativeSubagentPending(context.sessionID) : undefined
+      if (pending) {
+        patch.instruction = pending
+        this.nativeSubagentFallbacks.delete(childSessionID)
+      }
+      if (Object.keys(patch).length > 0) {
+        await this.updateNativeSubagent(existing, "session-created", patch)
+      } else if (existing.state === "working") {
+        rememberNativeSubagentActive(this.nativeSubagentActive, existing.childSessionID, existing.startedAt)
+      }
+      await this.applyNativeSubagentPendingState(childSessionID)
+      return
+    }
+    const pending = this.takeNativeSubagentPending(context.sessionID)
+    const startedAt = typeof event?.created === "number" && Number.isFinite(event.created) ? event.created : now()
+    const instruction = pending ?? fallback
+    const run = this.nativeSubagentRecord({
+      childSessionID,
+      parentSessionID: context.sessionID,
+      context,
+      instruction,
+      source: "session-created",
+      startedAt,
+    })
+    if (!pending) this.nativeSubagentFallbacks.add(childSessionID)
+    await this.createNativeSubagent(run, "native.subagent.created")
+    // The tool event may have landed while this record was being persisted;
+    // consume its pending instruction now that the fallback record exists.
+    const late = this.takeNativeSubagentPending(context.sessionID)
+    if (late && this.nativeSubagentFallbacks.has(childSessionID)) {
+      const saved = this.store.nativeSubagent(childSessionID)
+      if (saved) {
+        await this.updateNativeSubagent(saved, "tool-call", { instruction: late })
+        this.nativeSubagentFallbacks.delete(childSessionID)
+      }
+    }
+    await this.applyNativeSubagentPendingState(childSessionID)
+  }
+
+  private async handleNativeSubagentDeleted(event: any): Promise<void> {
+    const data = event?.data ?? event
+    const sessionID = typeof data?.sessionID === "string" ? data.sessionID : ""
+    if (!sessionID) return
+    this.nativeSubagentParents.delete(sessionID)
+    this.nativeSubagentFallbacks.delete(sessionID)
+    this.nativeSubagentActive.delete(sessionID)
+    await this.transitionNativeSubagent(sessionID, "cancelled", "session-deleted")
+    const children = this.store.nativeSubagents().filter(
+      (run) => run.parentSessionID === sessionID && run.state === "working",
+    )
+    for (const child of children) {
+      await this.transitionNativeSubagent(child.childSessionID, "cancelled", "parent-session-deleted")
+    }
+  }
+
+  private async handleNativeSubagentExecution(event: any): Promise<void> {
+    const data = event?.data ?? event
+    const sessionID = typeof data?.sessionID === "string" ? data.sessionID : ""
+    if (!sessionID) return
+    const type = String(event?.type ?? "")
+    const target: NativeSubagentState = type === "session.execution.started"
+      ? "working"
+      : type === "session.execution.succeeded"
+        ? "replied"
+        : "failed"
+    if (!this.store.nativeSubagent(sessionID)) {
+      // A separate subscription can deliver lifecycle before `session.created`.
+      // Remember the terminal fact so the record does not stay working forever.
+      this.rememberNativeSubagentPendingState(sessionID, target, now())
+      return
+    }
+    if (type === "session.execution.started") {
+      await this.transitionNativeSubagent(sessionID, "working", "execution-started")
+    } else if (type === "session.execution.succeeded") {
+      await this.transitionNativeSubagent(sessionID, "replied", "execution-succeeded")
+    } else if (type === "session.execution.failed" || type === "session.execution.interrupted") {
+      await this.transitionNativeSubagent(sessionID, "failed", type)
+    }
+  }
+
+  private nativeSubagentBackground(event: any): any[] {
+    const data = event?.data ?? event
+    const raw = data?.background ?? event?.background
+    if (!Array.isArray(raw)) return []
+    return raw.filter((entry: any) => entry && typeof entry === "object")
+  }
+
+  private async handleNativeSubagentIdle(event: any): Promise<void> {
+    const data = event?.data ?? event
+    const sessionID = typeof data?.sessionID === "string" ? data.sessionID : ""
+    const background = this.nativeSubagentBackground(event)
+    // A session whose own background work is still running is idle for now but
+    // not finished; keep its record live until the next idle.
+    const ownBackground = background.some((entry: any) => String(entry?.sessionID ?? "") === sessionID)
+    if (sessionID && !ownBackground) {
+      if (this.store.nativeSubagent(sessionID)) {
+        await this.transitionNativeSubagent(sessionID, "replied", "idle")
+      } else if (!this.store.bindingForSession(sessionID)) {
+        this.rememberNativeSubagentPendingState(sessionID, "replied", now())
+      }
+    }
+    for (const entry of background) {
+      if (entry?.kind !== "subagent") continue
+      const childSessionID = typeof entry.childSessionID === "string" ? entry.childSessionID : ""
+      const ownerSessionID = typeof entry.sessionID === "string" && entry.sessionID
+        ? entry.sessionID
+        : sessionID
+      if (!childSessionID || !ownerSessionID) continue
+      this.rememberNativeSubagentParent(childSessionID, ownerSessionID)
+      const context = this.nativeParentContext(ownerSessionID)
+      const description = boundNativeSubagentInstruction(entry.description)
+      const existing = this.store.nativeSubagent(childSessionID)
+      if (existing) {
+        const patch = this.parentPatch(existing, context)
+        if (description && this.nativeSubagentFallbacks.has(childSessionID)) {
+          patch.instruction = description
+          this.nativeSubagentFallbacks.delete(childSessionID)
+        }
+        if (Object.keys(patch).length > 0) {
+          await this.updateNativeSubagent(existing, "idle-background", patch)
+        }
+        await this.applyNativeSubagentPendingState(childSessionID)
+        continue
+      }
+      if (!context.binding && !context.task) continue
+      const instruction = description || nativeSubagentFallbackInstruction({ agent: entry.agent })
+      const startedAt = typeof event?.created === "number" && Number.isFinite(event.created) ? event.created : now()
+      const run = this.nativeSubagentRecord({
+        childSessionID,
+        parentSessionID: context.sessionID,
+        context,
+        instruction,
+        source: "idle-background",
+        startedAt,
+      })
+      if (!description) this.nativeSubagentFallbacks.add(childSessionID)
+      await this.createNativeSubagent(run, "native.subagent.reconciled")
+      await this.applyNativeSubagentPendingState(childSessionID)
+    }
+  }
+
+  private async transitionNativeSubagent(
+    childSessionID: string,
+    target: NativeSubagentState,
+    reason: string,
+  ): Promise<void> {
+    const existing = this.store.nativeSubagent(childSessionID)
+    if (!existing) return
+    const state = nativeSubagentNextState(existing.state, target)
+    if (state === existing.state) {
+      if (state === "working") {
+        rememberNativeSubagentActive(this.nativeSubagentActive, existing.childSessionID, existing.startedAt)
+      }
+      return
+    }
+    const next: NativeSubagentRun = { ...existing, state }
+    if (state === "working") delete next.finishedAt
+    else next.finishedAt = existing.finishedAt ?? now()
+    await this.store.saveNativeSubagent(next)
+    if (state === "working") {
+      rememberNativeSubagentActive(this.nativeSubagentActive, next.childSessionID, next.startedAt)
+    } else {
+      this.nativeSubagentActive.delete(next.childSessionID)
+      this.nativeSubagentFallbacks.delete(next.childSessionID)
+    }
+    this.logNativeSubagent("native.subagent.finished", next, { fromState: existing.state, reason })
+    this.notifyNativeSubagentWaiters(next.parentSessionID)
+  }
+
+  private async closeNativeSubagentsForTask(taskID: string, reason: string): Promise<void> {
+    const children = this.store.nativeSubagents().filter(
+      (run) => run.parentTaskID === taskID && run.state === "working",
+    )
+    for (const child of children) {
+      await this.transitionNativeSubagent(child.childSessionID, "cancelled", reason)
+    }
+    if (children.length > 0) {
+      this.logger?.event("info", "host", "native.subagent.cleanup", {
+        reason,
+        taskID,
+        count: children.length,
+      })
+    }
+  }
+
+  private async removeNativeSubagentsForTask(taskID: string): Promise<void> {
+    const children = this.store.nativeSubagents().filter((run) => run.parentTaskID === taskID)
+    for (const child of children) {
+      await this.store.removeNativeSubagent(child.childSessionID)
+      this.nativeSubagentActive.delete(child.childSessionID)
+      this.nativeSubagentFallbacks.delete(child.childSessionID)
+      this.nativeSubagentParents.delete(child.childSessionID)
+      this.notifyNativeSubagentWaiters(child.parentSessionID)
+    }
+    if (children.length > 0) {
+      this.logger?.event("debug", "host", "native.subagent.removed", { reason: "task-removed", taskID, count: children.length })
+    }
+  }
+
+  private async closeNativeSubagentsForLocation(directory: string): Promise<void> {
+    const workspaceIDs = new Set<string>()
+    for (const workspace of this.store.workspaces()) {
+      if (workspace.directory === directory) workspaceIDs.add(workspace.id)
+    }
+    for (const binding of this.store.bindings()) {
+      if (binding.directory === directory) workspaceIDs.add(binding.workspaceID)
+    }
+    if (workspaceIDs.size === 0) return
+    const children = this.store.nativeSubagents().filter(
+      (run) => run.workspaceID !== undefined && workspaceIDs.has(run.workspaceID) && run.state === "working",
+    )
+    for (const child of children) {
+      await this.transitionNativeSubagent(child.childSessionID, "cancelled", "location-dispose")
+    }
+    if (children.length > 0) {
+      this.logger?.event("info", "host", "native.subagent.cleanup", {
+        reason: "location-dispose",
+        directory,
+        count: children.length,
+      })
+    }
+  }
+
+  /** Restart reconciliation: a terminal parent cannot own a live child. */
+  private async reconcileLoadedNativeSubagents(): Promise<void> {
+    const at = now()
+    for (const run of this.store.nativeSubagents()) {
+      if (run.state !== "working") continue
+      rememberNativeSubagentActive(this.nativeSubagentActive, run.childSessionID, run.startedAt)
+      const task = run.parentTaskID ? this.store.subtask(run.parentTaskID) : undefined
+      if (task && isTerminalWorkStatus(deriveWorkStatus(task, at))) {
+        await this.transitionNativeSubagent(run.childSessionID, "cancelled", "task-terminal")
+      }
+    }
+  }
+
+  private async purgeFinishedNativeSubagents(at: number): Promise<void> {
+    for (const run of this.store.nativeSubagents()) {
+      if (run.state === "working") continue
+      if (run.finishedAt === undefined || at - run.finishedAt < FINISHED_RETENTION_MS) continue
+      await this.store.removeNativeSubagent(run.childSessionID)
+      this.nativeSubagentActive.delete(run.childSessionID)
+      this.nativeSubagentFallbacks.delete(run.childSessionID)
+      this.nativeSubagentParents.delete(run.childSessionID)
+      this.nativeSubagentPendingStates.delete(run.childSessionID)
+    }
+  }
+
   /**
    * Ticket #155: the one live run that owns a native session. Only
    * Ensemble-bound task runs carry a Work card; direct chats and the System
@@ -5986,21 +6839,80 @@ export class EnsembleV2Service {
     }))
   }
 
-  private handleToolActivityEvent(event: any): void {
+  /**
+   * Ticket #182: match a parent `task`/`subagent` tool call to its child
+   * record. A child announced first carries the title fallback; a tool call
+   * announced first waits in a bounded pending list for its child.
+   */
+  private async captureNativeSubagentInstruction(
+    parentSessionID: string,
+    call: { name?: string; input?: Json } | undefined,
+    input?: unknown,
+  ): Promise<void> {
+    if (!parentSessionID || !call || !nativeSubagentToolName(call.name)) return
+    const instruction = nativeSubagentInstructionFromInput(input)
+    const childHint = nativeSubagentChildID(input)
+    if (!instruction && !childHint) return
+    const context = this.nativeParentContext(parentSessionID)
+    if (!context.binding && !context.task) return
+    // Another subscription may be persisting a just-announced child. Waiting
+    // for the serialized write tail keeps the tool call and child in one
+    // deterministic order instead of leaving a fallback instruction behind.
+    await this.store.settled()
+    if (childHint) {
+      const existing = this.store.nativeSubagent(childHint)
+      if (existing) {
+        if (instruction && existing.instruction !== instruction) {
+          await this.updateNativeSubagent(existing, "tool-call", { instruction })
+          this.nativeSubagentFallbacks.delete(childHint)
+        }
+        return
+      }
+      if (instruction) {
+        const run = this.nativeSubagentRecord({
+          childSessionID: childHint,
+          parentSessionID: context.sessionID,
+          context,
+          instruction,
+          source: "tool-call",
+          startedAt: now(),
+        })
+        await this.createNativeSubagent(run, "native.subagent.created")
+        return
+      }
+    }
+    if (!instruction) return
+    const children = this.store.nativeSubagents()
+      .filter((run) => run.parentSessionID === context.sessionID && run.state === "working")
+      .sort((a, b) => b.startedAt - a.startedAt || a.childSessionID.localeCompare(b.childSessionID))
+    const fallback = children.find((run) => this.nativeSubagentFallbacks.has(run.childSessionID))
+    if (fallback) {
+      await this.updateNativeSubagent(fallback, "tool-call", { instruction })
+      this.nativeSubagentFallbacks.delete(fallback.childSessionID)
+      return
+    }
+    this.rememberNativeSubagentPending(context.sessionID, instruction)
+  }
+
+  private async handleToolActivityEvent(event: any): Promise<void> {
     const type = String(event?.type ?? "")
     const data = event?.data ?? event
     const sessionID = String(data?.sessionID ?? "")
+    if (type === "session.tool.input.started") {
+      const call = this.rememberToolCall(event)
+      await this.captureNativeSubagentInstruction(sessionID, call, data?.input)
+      return
+    }
+    const call = this.rememberToolCall(event)
+    // Ticket #182: the parent task/subagent call is captured even when the
+    // Work activity bridge has no card target of its own.
+    if (type === "session.tool.called") await this.captureNativeSubagentInstruction(sessionID, call, data?.input)
     // Only an active Ensemble task run has a Work card. Direct chats and the
     // System Agent never enter the bounded tool registry.
     if (!this.activityTarget(sessionID)) {
       this.forgetToolCall(event)
       return
     }
-    if (type === "session.tool.input.started") {
-      this.rememberToolCall(event)
-      return
-    }
-    const call = this.rememberToolCall(event)
     if (type === "session.tool.success" || type === "session.tool.failed") {
       this.forgetToolCall(event)
       // The call settled; the next visible step is model thinking until text
@@ -6412,7 +7324,6 @@ export class EnsembleV2Service {
     if (registration.orphaned) {
       await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || registration.orphaned.message.text || REPLY_INTERRUPTED, true, globalEpoch, workspaceEpoch, task.workspaceID)
     }
-    await this.store.saveAgent(agent)
     let live: Message | undefined
     let attemptStartedAt = now()
     let granted = false
@@ -6472,8 +7383,20 @@ export class EnsembleV2Service {
         failureContext.startedAt = attemptStartedAt
         await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined), delivery: "steer" })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
-        const messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
+        let messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)
+        // Ticket #188: background subagents return from the tool before the
+        // child finishes, so the host can settle the parent turn early. Hold
+        // the run on the existing heartbeat until its children are terminal;
+        // then let a host wake-up turn settle and use its latest answer.
+        if (!result.failure) {
+          const released = await this.awaitNativeSubagentBarrier(binding.sessionID, task, globalEpoch, workspaceEpoch)
+          if (released && !this.stopped) {
+            await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
+            messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
+            result = assistantResult(messages, attemptStartedAt)
+          }
+        }
         failureContext.toolOutcomes = result.toolOutcomes
         failureContext.cause = result.failure
         if (!result.failure) break
@@ -6740,16 +7663,17 @@ export class EnsembleV2Service {
 
   private async ensureBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string } | undefined> {
     const existing = this.store.binding(workspace.id, agent.id)
-    if (existing && existing.agentVersion === agent.version) {
-      if (existing.kind !== "workspace" || existing.directory !== workspace.directory) {
-        await this.store.saveBinding({
-          ...existing,
-          kind: "workspace",
-          directory: workspace.directory,
-          updatedAt: now(),
-        })
+    if (existing) {
+      const normalized = existing.kind !== "workspace" || existing.directory !== workspace.directory
+        ? { ...existing, kind: "workspace" as const, directory: workspace.directory, updatedAt: now() }
+        : existing
+      // Ticket #189: a behavior version bump applies in place on the current
+      // session. Only a missing native session retires the binding.
+      if (!(await this.nativeSessionMissing(normalized.sessionID))) {
+        const saved = await this.refreshAgentSession(normalized, agent)
+        if (!saved && normalized !== existing) await this.store.saveBinding(normalized)
+        return { sessionID: normalized.sessionID }
       }
-      return { sessionID: existing.sessionID }
     }
     const key = bindingKey(workspace.id, agent.id)
     const inFlight = this.bindingPromises.get(key)
@@ -6784,11 +7708,7 @@ export class EnsembleV2Service {
     // answered by the host, so settle it instead of lingering.
     if (existing && existing.sessionID !== created.id) await this.settleNativeForSession(existing.sessionID, "Session ended before the permission was answered.")
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-    const current = this.store.cloneAgent(agent.id)
-    if (current?.pendingSettings) {
-      current.pendingSettings = false
-      await this.store.saveAgent(current)
-    }
+    await this.clearPendingSettings(agent.id)
     return { sessionID: created.id }
   }
 
