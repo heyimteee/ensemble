@@ -506,6 +506,46 @@ export function WorkCompactRowView(props: {
 }
 
 /**
+ * Ticket #184: a rolled-up HISTORY group. It reuses the compact Work row
+ * grammar: an optional focus caret, an expand/collapse caret, a new-finish
+ * marker, and one truncated group line with done/active counts and age.
+ */
+export function WorkHistoryRowView(props: {
+  colors: Palette
+  rollup: { collapsed: boolean; fresh: boolean; label: string }
+  tone?: "faint" | "warn"
+  selected: boolean
+  onSelect?: () => void
+}) {
+  const parts = (): StyledLinePart[] => [
+    { text: props.selected ? "› " : "  ", fg: props.selected ? props.colors.cardFocus : props.colors.faint },
+    { text: props.rollup.collapsed ? "▸ " : "▾ ", fg: props.selected ? props.colors.focus : props.colors.muted },
+    ...(props.rollup.fresh ? [{ text: "● ", fg: props.colors.good }] : []),
+    { text: props.rollup.label, fg: props.tone === "warn" ? props.colors.warn : props.colors.paleBlue },
+  ]
+  return (
+    <box
+      width="100%"
+      flexShrink={0}
+      onMouseDown={(event: any) => {
+        if (Number(event?.button) !== 0) return
+        event?.preventDefault?.()
+        props.onSelect?.()
+      }}
+    >
+      <StyledLineText
+        parts={parts}
+        fg={props.colors.text}
+        bg={props.colors.bg}
+        width="100%"
+        wrapMode="none"
+        flexShrink={0}
+      />
+    </box>
+  )
+}
+
+/**
  * Ticket #185: the small approvals summary pinned under Work in split mode.
  * It is a preview, not a second cursor: the pane selection owns the highlight
  * and Enter opens the full inbox; clicking a row opens the inbox at that row.

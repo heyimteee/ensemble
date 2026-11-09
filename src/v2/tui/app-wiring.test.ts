@@ -191,11 +191,11 @@ test("the Work pane receives the dispatch ledger", () => {
 })
 
 test("the Work pane pages its active view by its own body", () => {
-  assert.ok(has(app(), "paginateWorkGroups(grouped.active, width, body, now)"))
+  assert.ok(has(app(), "paginateWorkGroups(partition.active, width, body, partition.now)"))
 })
 
 test("the Work pane pages its history view by its own body", () => {
-  assert.ok(has(app(), "paginateWorkGroups(grouped.history, width, body, now)"))
+  assert.ok(has(app(), "paginateWorkGroups(historyPaneRows(), width, body, partition.now)"))
 })
 
 test("the shell widths come from the one pane-width helper", () => {
@@ -228,7 +228,55 @@ test("the Work cursor settles by task identity and position", () => {
 })
 
 test("Work actions target the focused visible task", () => {
-  assert.ok(has(app(), "visibleTasks()[taskCursorClamped()]"))
+  assert.ok(has(app(), "tasks.find((task) => task.id === id)"))
+})
+
+test("ticket187: native subagent records join the Work view model", () => {
+  assert.ok(has(app(), "nativeSubagentRuns()"))
+  assert.ok(has(app(), "workViewGroups(activeTasks(), state()?.subtasks ?? {}, {"))
+})
+
+test("ticket187: native cards render through the same card and compact views", () => {
+  const source = app()
+  assert.ok(has(source, "workCardForNativeSubagentCached(workCardCache"))
+  assert.ok(has(source, "workCompactRowForNativeSubagent("))
+  assert.ok(has(source, "section.items"))
+})
+
+test("ticket187: native focus opens the child session and offers no task actions", () => {
+  const source = app()
+  assert.ok(has(source, "selectedNativeSubagent()"))
+  assert.ok(has(source, "nativeSubagentFocusChild("))
+  assert.ok(has(source, "childSessionID"))
+  assert.ok(has(source, "nativeSubagentActions()"))
+})
+
+test("ticket184: HISTORY groups carry task-level rollup state", () => {
+  assert.ok(has(app(), "historyPaneGroups("))
+  assert.ok(has(app(), "reconcileHistoryView("))
+})
+
+test("ticket184: Enter toggles a focused history group", () => {
+  assert.ok(has(app(), "toggleFocusedHistoryGroup()"))
+})
+
+test("ticket184: x dismisses a focused history group", () => {
+  assert.ok(has(app(), "dismissFocusedHistoryGroup()"))
+})
+
+test("ticket184: D clears the history view with confirmation", () => {
+  assert.ok(has(app(), '"work.history.clear"'))
+  assert.ok(has(app(), "clearHistoryView()"))
+})
+
+test("ticket184: dismissed history groups hydrate and persist as UI state", () => {
+  assert.ok(has(app(), "dismissedHistoryGroups"))
+  assert.ok(has(app(), "historyDismissedKey"))
+})
+
+test("ticket184: rolled-up history rows reuse the Work row design", () => {
+  assert.ok(has(app(), "<WorkHistoryRowView"))
+  assert.ok(has(components(), "export function WorkHistoryRowView"))
 })
 
 test("completed groups remain available to HISTORY", () => {
@@ -345,7 +393,7 @@ test("the pending label settles on the durable update", () => {
 })
 
 test("card selection is gated by Work interaction, not pane selection", () => {
-  assert.ok(has(app(), "workCardsFocused(paneState()) && selectedTask()?.id === card.id"))
+  assert.ok(has(app(), "workCardsFocused(paneState()) && (workFocusID() === card.id"))
 })
 
 test("compact rows share the card focus identity and interaction gate", () => {

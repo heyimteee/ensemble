@@ -593,6 +593,11 @@ export type Snapshot = {
        */
       collapsedRailGroups?: Id[]
       /**
+       * Ticket #184: dispatch group ids hidden from the Work HISTORY view.
+       * Durable view state only; the terminal rows remain for 24h retention.
+       */
+      dismissedHistoryGroups?: Id[]
+      /**
        * Ticket #183: durable left/right pane visibility. Missing means both
        * columns are open; the TUI writes the switches through `ui.save`.
        */

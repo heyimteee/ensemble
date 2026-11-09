@@ -1,9 +1,10 @@
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
+import { resolveDispatchGroupID } from "../dispatch-group.ts"
 import { allWorkGroupsForTasks, workFinishedAt, type WorkGroup, type WorkGroupOptions } from "../work-groups.ts"
-import type { Subtask } from "../types.ts"
+import type { NativeSubagentRun, Subtask } from "../types.ts"
 import type { PaneSideVisibility } from "./panefocus.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS, workCardContentWidth } from "./workrows.ts"
-import { workGroupLabel } from "./workgroups.ts"
+import { workGroupLabel, workAgeLabel, workHistoryFinishedAt, workHistoryRollupLabel } from "./workgroups.ts"
 
 /**
  * Ticket #172: one responsive shell model for the three-pane workspace.
@@ -150,13 +151,12 @@ export function workPaneColumns(contentWidth: number): number {
 }
 
 /**
- * Ticket #172: the Work pane's two views.
+ * Ticket #184: the Work pane's two views partition tasks, not groups.
  *
- * ACTIVE keeps only groups with non-terminal work and removes every terminal
- * card, including terminal members of an otherwise active group. HISTORY keeps
- * groups whose members are all terminal, newest latest-finish first, with the
- * tasks in chronological order. Partitioning by any non-terminal member means a
- * group can never appear in both views.
+ * ACTIVE keeps every non-terminal task; HISTORY keeps every terminal task,
+ * even when its group still has live work. A group can therefore appear in
+ * both views with disjoint cards. HISTORY groups order by their latest terminal
+ * finish, newest first, and cards inside a group order by finish, newest first.
  */
 export type WorkView = "active" | "history"
 
@@ -165,37 +165,151 @@ export type WorkViewGroups = {
   history: WorkGroup[]
 }
 
+/**
+ * Ticket #187: one renderable Work item. A card row may mix task cards and
+ * native subagent cards without promoting the child run to a Subtask.
+ */
+export type WorkPaneItem =
+  | { kind: "task"; task: Subtask }
+  | { kind: "native"; run: NativeSubagentRun }
+
+const taskPaneItems = new WeakMap<Subtask, WorkPaneItem>()
+const nativePaneItems = new WeakMap<NativeSubagentRun, WorkPaneItem>()
+
+function taskPaneItem(task: Subtask): WorkPaneItem {
+  let item = taskPaneItems.get(task)
+  if (!item) {
+    item = { kind: "task", task }
+    taskPaneItems.set(task, item)
+  }
+  return item
+}
+
+function nativePaneItem(run: NativeSubagentRun): WorkPaneItem {
+  let item = nativePaneItems.get(run)
+  if (!item) {
+    item = { kind: "native", run }
+    nativePaneItems.set(run, item)
+  }
+  return item
+}
+
+function groupItems(group: WorkGroup): WorkPaneItem[] {
+  return [
+    ...group.tasks.map(taskPaneItem),
+    ...(group.native ?? []).map(nativePaneItem),
+  ]
+}
+
 function latestFinish(group: WorkGroup): number {
   // HISTORY orders by finish time, newest first. An approval resolution may
-  // be later than the task's finish, so it is only the fallback.
+  // be later than the task's finish, so it is only the fallback. A native
+  // subagent's finish counts like a task finish for its parent group.
   let latest: number | undefined
   for (const task of group.tasks) {
     const finished = workFinishedAt(task)
     if (finished !== undefined && (latest === undefined || finished > latest)) latest = finished
   }
+  for (const run of group.native ?? []) {
+    const finished = run.finishedAt ?? run.startedAt
+    if (latest === undefined || finished > latest) latest = finished
+  }
   return latest ?? group.latestTerminalAt ?? group.createdAt
 }
 
-function chronological(left: Subtask, right: Subtask): number {
-  return left.createdAt - right.createdAt || left.id.localeCompare(right.id)
+function newestFinish(left: Subtask, right: Subtask): number {
+  return (workFinishedAt(right) ?? 0) - (workFinishedAt(left) ?? 0) || right.createdAt - left.createdAt || left.id.localeCompare(right.id)
+}
+
+/**
+ * Ticket #187: map each native child session to its parent's dispatch group.
+ * The parent task is the authority when it still exists (so legacy groups and
+ * continuation lineage resolve exactly like the parent card); the record's
+ * stored group id is the fallback. Child session ids dedupe the input.
+ */
+function nativeRunsByGroup(
+  tasks: readonly Subtask[],
+  subtasks: Record<string, Subtask>,
+  runs: readonly NativeSubagentRun[],
+): Map<string, NativeSubagentRun[]> {
+  const taskByID = new Map<string, Subtask>()
+  for (const task of tasks) taskByID.set(task.id, task)
+  const byGroup = new Map<string, Map<string, NativeSubagentRun>>()
+  for (const run of runs) {
+    // The durable record is authoritative; the workspace projection is the
+    // fallback for callers that pass tasks without their full record.
+    const parent = run.parentTaskID
+      ? subtasks[run.parentTaskID] ?? taskByID.get(run.parentTaskID)
+      : undefined
+    const groupID = (parent ? resolveDispatchGroupID(parent, subtasks) : undefined) ?? run.dispatchGroupID
+    if (!groupID) continue
+    let bucket = byGroup.get(groupID)
+    if (!bucket) {
+      bucket = new Map()
+      byGroup.set(groupID, bucket)
+    }
+    bucket.set(run.childSessionID, run)
+  }
+  return new Map([...byGroup].map(([id, bucket]) => [
+    id,
+    [...bucket.values()].sort(
+      (left, right) => left.startedAt - right.startedAt || left.childSessionID.localeCompare(right.childSessionID),
+    ),
+  ]))
+}
+
+function newestNativeFinish(left: NativeSubagentRun, right: NativeSubagentRun): number {
+  return (right.finishedAt ?? right.startedAt) - (left.finishedAt ?? left.startedAt)
+    || right.startedAt - left.startedAt
+    || left.childSessionID.localeCompare(right.childSessionID)
 }
 
 export function workViewGroups(
   tasks: Subtask[],
   subtasks: Record<string, Subtask>,
   options: WorkGroupOptions,
+  nativeRuns: readonly NativeSubagentRun[] = [],
 ): WorkViewGroups {
   const now = options.now
   const active: WorkGroup[] = []
   const history: WorkGroup[] = []
+  const nativeByGroup = nativeRunsByGroup(tasks, subtasks, nativeRuns)
   for (const group of allWorkGroupsForTasks(tasks, subtasks, options)) {
-    if (group.active > 0) {
-      active.push({
+    const runs = nativeByGroup.get(group.id) ?? []
+    const liveNative = runs.filter((run) => run.state === "working")
+    const doneNative = runs.filter((run) => run.state !== "working").sort(newestNativeFinish)
+    const live = group.tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
+    const finished = group.tasks.filter((task) => isTerminalWorkStatus(deriveWorkStatus(task, now)))
+    const totalActive = group.active + liveNative.length
+    const totalDone = group.done + doneNative.length
+    // Native work is work: a group with a live child is not complete even when
+    // every task has terminalized. This also keeps the expiry timer honest.
+    const complete = totalActive === 0 && !group.needsYou
+    if (live.length > 0 || liveNative.length > 0) {
+      active.push({ ...group, tasks: live, native: liveNative, active: totalActive, done: totalDone, complete })
+    }
+    if (finished.length > 0 || doneNative.length > 0) {
+      const latestNative = doneNative.reduce<number | undefined>(
+        (latest, run) => {
+          const finishedAt = run.finishedAt ?? run.startedAt
+          return latest === undefined || finishedAt > latest ? finishedAt : latest
+        },
+        undefined,
+      )
+      history.push({
         ...group,
-        tasks: group.tasks.filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now))),
+        tasks: [...finished].sort(newestFinish),
+        native: doneNative,
+        // The history subset owns only its finished cards; `active` stays the
+        // group's live count so the rollup can say "active count when relevant".
+        done: finished.length + doneNative.length,
+        active: totalActive,
+        complete,
+        ...(latestNative !== undefined &&
+        (group.latestTerminalAt === undefined || latestNative > group.latestTerminalAt)
+          ? { latestTerminalAt: latestNative }
+          : {}),
       })
-    } else {
-      history.push({ ...group, tasks: [...group.tasks].sort(chronological) })
     }
   }
   active.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
@@ -209,6 +323,107 @@ export function workViewGroups(
 }
 
 /**
+ * Ticket #184: sticky history presentation state.
+ *
+ * `expanded` records the group's row state once seen: the newest group starts
+ * expanded, every other group starts rolled up, and Enter's decision survives
+ * later updates. `done` is the terminal-card count last rendered, so a finish
+ * in a collapsed group increments the count and sets `fresh` without moving the
+ * page or opening the group. `fresh` stays until the group is expanded or
+ * dismissed.
+ */
+export type HistoryViewState = {
+  expanded: Record<string, boolean>
+  done: Record<string, number>
+  fresh: Record<string, boolean>
+}
+
+export function emptyHistoryViewState(): HistoryViewState {
+  return { expanded: {}, done: {}, fresh: {} }
+}
+
+function sameHistoryView(left: HistoryViewState, right: HistoryViewState): boolean {
+  const keys = Object.keys(left.expanded)
+  if (keys.length !== Object.keys(right.expanded).length) return false
+  return keys.every(
+    (key) =>
+      left.expanded[key] === right.expanded[key] &&
+      left.done[key] === right.done[key] &&
+      left.fresh[key] === right.fresh[key],
+  )
+}
+
+/** Reconcile one history snapshot; an unchanged result keeps the previous object. */
+export function reconcileHistoryView(
+  groups: readonly WorkGroup[],
+  previous: HistoryViewState,
+): HistoryViewState {
+  const expanded: Record<string, boolean> = {}
+  const done: Record<string, number> = {}
+  const fresh: Record<string, boolean> = {}
+  groups.forEach((group, index) => {
+    const priorExpanded = previous.expanded[group.id]
+    const isExpanded = priorExpanded ?? index === 0
+    const priorDone = previous.done[group.id]
+    expanded[group.id] = isExpanded
+    done[group.id] = group.done
+    fresh[group.id] = isExpanded
+      ? false
+      : Boolean(previous.fresh[group.id] || (priorDone !== undefined && group.done > priorDone))
+  })
+  const next = { expanded, done, fresh }
+  return sameHistoryView(previous, next) ? previous : next
+}
+
+/** Enter on a history group row toggles only that group; expanding clears its marker. */
+export function toggleHistoryView(state: HistoryViewState, groupID: string): HistoryViewState {
+  const expanded = !(state.expanded[groupID] ?? false)
+  return {
+    expanded: { ...state.expanded, [groupID]: expanded },
+    done: state.done,
+    fresh: { ...state.fresh, [groupID]: expanded ? false : (state.fresh[groupID] ?? false) },
+  }
+}
+
+/** The pagination input for HISTORY: group data plus its rolled-up/expanded row state. */
+export type WorkPaneGroup = WorkGroup & {
+  /** Ticket #184: render a focusable history header row before any cards. */
+  history?: boolean
+  /** The group contributes one rolled-up row and no cards. */
+  collapsed?: boolean
+  /** A finish arrived while the group was rolled up. */
+  fresh?: boolean
+}
+
+/** Visible history groups in newest-first order with their row state applied. */
+export function historyPaneGroups(
+  groups: readonly WorkGroup[],
+  state: HistoryViewState,
+  dismissed: ReadonlySet<string> = new Set<string>(),
+): WorkPaneGroup[] {
+  return groups
+    .filter((group) => !dismissed.has(group.id))
+    .map((group, index) => ({
+      ...group,
+      history: true as const,
+      collapsed: !(state.expanded[group.id] ?? index === 0),
+      fresh: state.fresh[group.id] === true,
+    }))
+}
+
+/** Ticket #184: a history header row is a focus target distinct from task cards. */
+export const WORK_HISTORY_FOCUS_PREFIX = "history:"
+
+export function historyGroupFocusID(groupID: string): string {
+  return `${WORK_HISTORY_FOCUS_PREFIX}${groupID}`
+}
+
+export function historyGroupIDFromFocus(focusID: string | undefined): string | undefined {
+  if (focusID === undefined || !focusID.startsWith(WORK_HISTORY_FOCUS_PREFIX)) return undefined
+  return focusID.slice(WORK_HISTORY_FOCUS_PREFIX.length)
+}
+
+/**
  * Ticket #172: one paginated Work page section. Cards and compact rows keep
  * their ticket #137 design; pagination only decides which slice of a group is
  * visible and whether the group header repeats with `cont.`.
@@ -218,8 +433,14 @@ export type WorkPaneSection = {
   /** Full header on a group's first section of a page; null when the previous section on the page owns it. */
   label: string | null
   tone: "faint" | "warn"
-  mode: "cards" | "rows"
+  mode: "cards" | "rows" | "rollup"
   tasks: Subtask[]
+  /** Ticket #187: native subagent cards in this section, in render order after its tasks. */
+  native?: NativeSubagentRun[]
+  /** Ticket #187: the section's tasks and native cards in exact render order. */
+  items?: WorkPaneItem[]
+  /** Ticket #184: the rolled-up history header row. */
+  rollup?: WorkHistoryRollup
   /** Rows the section consumes, including its label but excluding `gapBefore`. */
   height: number
   /** The group began on an earlier page. */
@@ -228,12 +449,28 @@ export type WorkPaneSection = {
   gapBefore: boolean
 }
 
+/** Ticket #184: one rolled-up history group row. */
+export type WorkHistoryRollup = {
+  groupID: string
+  ordinal: number
+  done: number
+  active: number
+  collapsed: boolean
+  fresh: boolean
+  age: string
+  label: string
+}
+
 export type WorkPanePage = {
   /** 1-based page number. */
   number: number
   sections: WorkPaneSection[]
   /** Every task on this page, in reading order. */
   tasks: Subtask[]
+  /** Ticket #187: every native subagent card on this page, in reading order. */
+  native?: NativeSubagentRun[]
+  /** Ticket #187: every card on this page, in reading order. */
+  items?: WorkPaneItem[]
   /** Rows consumed including inter-group gaps. */
   height: number
 }
@@ -249,6 +486,10 @@ export type WorkPaneLayout = {
   pages: WorkPanePage[]
   /** Every task across all pages, in reading order. */
   tasks: Subtask[]
+  /** Ticket #187: every native subagent card across all pages, in reading order. */
+  native: NativeSubagentRun[]
+  /** Ticket #187: every card across all pages, in reading order. */
+  items: WorkPaneItem[]
   limit: number
 }
 
@@ -261,8 +502,9 @@ type SectionAtom = {
   groupID: string
   fullLabel: string
   tone: "faint" | "warn"
-  mode: "cards" | "rows"
-  tasks: Subtask[]
+  mode: "cards" | "rows" | "rollup"
+  items: WorkPaneItem[]
+  rollup?: WorkHistoryRollup
   /** Rows for the card row or compact rows, without a label. */
   bodyHeight: number
   /** First section of a group after another group; cards use one blank row. */
@@ -275,8 +517,10 @@ function emptyLayout(): WorkPaneLayout {
     columns: 0,
     cardWidth: 0,
     cardContentWidth: Math.max(12, 0),
-    pages: [{ number: 1, sections: [], tasks: [], height: 0 }],
+    pages: [{ number: 1, sections: [], tasks: [], native: [], items: [], height: 0 }],
     tasks: [],
+    native: [],
+    items: [],
     limit: 0,
   }
 }
@@ -287,7 +531,7 @@ function emptyLayout(): WorkPaneLayout {
  * a group that simply starts on a new page keeps its normal header.
  */
 export function paginateWorkGroups(
-  groups: WorkGroup[],
+  groups: ReadonlyArray<WorkPaneGroup>,
   contentWidth: number,
   bodyHeight: number,
   now: number = Date.now(),
@@ -304,27 +548,52 @@ export function paginateWorkGroups(
   groups.forEach((group, index) => {
     const fullLabel = workGroupLabel(group, index + 1)
     const tone = sectionTone(group, now)
+    if (group.history) {
+      const age = workAgeLabel(now - workHistoryFinishedAt(group))
+      atoms.push({
+        groupID: group.id,
+        fullLabel,
+        tone,
+        mode: "rollup",
+        items: [],
+        bodyHeight: 1,
+        gapBefore: index > 0 && cards,
+        rollup: {
+          groupID: group.id,
+          ordinal: index + 1,
+          done: group.done,
+          active: group.active,
+          collapsed: group.collapsed === true,
+          fresh: group.fresh === true,
+          age,
+          label: workHistoryRollupLabel(group, index + 1, now),
+        },
+      })
+      if (group.collapsed === true) return
+    }
+    const items = groupItems(group)
     if (cards) {
-      for (let offset = 0; offset < group.tasks.length; offset += columns) {
+      for (let offset = 0; offset < items.length; offset += columns) {
         atoms.push({
           groupID: group.id,
           fullLabel,
           tone,
           mode: "cards",
-          tasks: group.tasks.slice(offset, offset + columns),
+          items: items.slice(offset, offset + columns),
           bodyHeight: WORK_CARD_ROWS,
-          gapBefore: index > 0 && offset === 0,
+          // A history group's focusable header already owns the separation row.
+          gapBefore: !group.history && index > 0 && offset === 0,
         })
       }
       return
     }
-    for (const task of group.tasks) {
+    for (const item of items) {
       atoms.push({
         groupID: group.id,
         fullLabel,
         tone,
         mode: "rows",
-        tasks: [task],
+        items: [item],
         bodyHeight: 1,
         // Compact rows already have a header line between groups; no blank.
         gapBefore: false,
@@ -336,16 +605,28 @@ export function paginateWorkGroups(
   let sections: WorkPaneSection[] = []
   let pageHeight = 0
   let pageTasks: Subtask[] = []
+  let pageNative: NativeSubagentRun[] = []
+  let pageItems: WorkPaneItem[] = []
   const started = new Set<string>()
   const flush = () => {
-    pages.push({ number: pages.length + 1, sections, tasks: pageTasks, height: pageHeight })
+    pages.push({
+      number: pages.length + 1,
+      sections,
+      tasks: pageTasks,
+      native: pageNative,
+      items: pageItems,
+      height: pageHeight,
+    })
     sections = []
     pageTasks = []
+    pageNative = []
+    pageItems = []
     pageHeight = 0
   }
   for (const atom of atoms) {
+    const rollup = atom.mode === "rollup"
     let groupStarted = started.has(atom.groupID)
-    let header = !sections.some((section) => section.groupID === atom.groupID)
+    let header = !rollup && !sections.some((section) => section.groupID === atom.groupID)
     let gap = atom.gapBefore && sections.length > 0 ? 1 : 0
     let cost = atom.bodyHeight + (header ? 1 : 0) + gap
     if (pageHeight + cost > body && sections.length > 0) {
@@ -354,25 +635,32 @@ export function paginateWorkGroups(
       // normal header because the user has not seen it yet.
       flush()
       groupStarted = started.has(atom.groupID)
-      header = true
+      header = !rollup
       gap = 0
-      cost = atom.bodyHeight + 1
+      cost = atom.bodyHeight + (header ? 1 : 0)
     }
     // A single whole row can never exceed the body in card mode (gated) or
     // compact mode, so a fresh page always fits it.
+    const tasks = atom.items.flatMap((item) => item.kind === "task" ? [item.task] : [])
+    const native = atom.items.flatMap((item) => item.kind === "native" ? [item.run] : [])
     sections.push({
       groupID: atom.groupID,
       label: header ? (groupStarted ? `${atom.fullLabel} · cont.` : atom.fullLabel) : null,
       tone: atom.tone,
       mode: atom.mode,
-      tasks: atom.tasks,
+      tasks,
+      native,
+      items: atom.items,
+      ...(atom.rollup ? { rollup: atom.rollup } : {}),
       height: atom.bodyHeight + (header ? 1 : 0),
       continued: header && groupStarted,
       gapBefore: gap === 1,
     })
     pageHeight += cost
-    pageTasks.push(...atom.tasks)
-    if (header) started.add(atom.groupID)
+    pageTasks.push(...tasks)
+    pageNative.push(...native)
+    pageItems.push(...atom.items)
+    if (header || rollup) started.add(atom.groupID)
   }
   flush()
   return {
@@ -382,7 +670,9 @@ export function paginateWorkGroups(
     cardContentWidth,
     pages,
     tasks: pages.flatMap((page) => page.tasks),
-    limit: pages.reduce((total, page) => total + page.tasks.length, 0),
+    native: pages.flatMap((page) => page.native ?? []),
+    items: pages.flatMap((page) => page.items ?? []),
+    limit: pages.reduce((total, page) => total + (page.items ?? page.tasks).length, 0),
   }
 }
 

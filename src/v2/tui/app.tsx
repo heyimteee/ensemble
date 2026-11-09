@@ -5,9 +5,9 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, NativeSubagentRun, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
-import { ChromeText, FullApprovalsView, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
+import { ChromeText, FullApprovalsView, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, WorkHistoryRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, paletteRowTitle, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
@@ -181,11 +181,13 @@ import {
   createWorkCardCache,
   pruneWorkCardCache,
   workCardForTaskCached,
+  workCardForNativeSubagentCached,
   workCardGlyph,
   workCardStateWord,
   workCardTide,
   workCardTones,
   workCompactRow,
+  workCompactRowForNativeSubagent,
   workRowFrame,
   type ActivityEntry,
   type PendingWorkAction,
@@ -194,12 +196,19 @@ import {
 } from "./workrows.ts"
 import { nextWorkInvalidation, workGroupCounts } from "./workgroups.ts"
 import {
+  emptyHistoryViewState,
+  historyGroupFocusID,
+  historyGroupIDFromFocus,
+  historyPaneGroups,
   paginateWorkGroups,
+  reconcileHistoryView,
+  toggleHistoryView,
   workPaneBodyHeight,
   workPaneHeader,
   workTaskPage,
   workViewGroups,
   workspacePaneWidths,
+  type HistoryViewState,
   type WorkPaneSection as WorkLayoutSection,
   type WorkView,
 } from "./workpane.ts"
@@ -217,7 +226,8 @@ import {
   type WorkFocusPosition,
 } from "./workfocus.ts"
 import { approvalsColumnMode, approvalsPaneLayout, closeFullApprovals, fullApprovalsHeader, fullApprovalsSection, openFullApprovals, workApprovalSection } from "./workapprovals.ts"
-import { isWorkActionID, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
+import { nativeSubagentFocusChild, nativeSubagentFocusID, nativeSubagentWorkStatus } from "./nativecards.ts"
+import { isWorkActionID, nativeSubagentActions, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
 import {
   accumulateCompletions,
   BUBBLE_CHROME,
@@ -434,6 +444,12 @@ export function EnsembleV2App() {
   // suppresses the hydration echo after an optimistic local toggle.
   const [collapsedRailGroups, setCollapsedRailGroups] = createSignal<string[]>([])
   let railCollapsedKey = ""
+  // Ticket #184: HISTORY is a task-level view with durable dismissal. Group
+  // expansion and finish markers are local presentation state; dismissal is
+  // persisted through `ui.save` and never deletes terminal rows.
+  const [dismissedHistoryGroups, setDismissedHistoryGroups] = createSignal<string[]>([])
+  const [historyViewState, setHistoryViewState] = createSignal<HistoryViewState>(emptyHistoryViewState())
+  let historyDismissedKey = ""
   // Ticket #172: Work is a dedicated pane. Focus is task identity, the view
   // owns ACTIVE/HISTORY, and the pane pages its own body instead of sharing
   // the chat column. The drawer only exists below the 96-column breakpoint.
@@ -874,6 +890,24 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? Object.values(state()?.subtasks ?? {}).filter((task) => task.workspaceID === workspace.id) : []
   })
+  /**
+   * Ticket #187: durable native child sessions for this workspace. A record
+   * carries its workspace, with the parent task as fallback when the host
+   * event arrived before the parent binding was known.
+   */
+  const nativeSubagentRuns = createMemo(() => {
+    const workspace = activeWorkspace()
+    if (!workspace) return []
+    const subtasks = state()?.subtasks ?? {}
+    return Object.values(state()?.nativeSubagents ?? {}).filter(
+      (run) =>
+        run.workspaceID === workspace.id ||
+        (run.parentTaskID !== undefined && subtasks[run.parentTaskID]?.workspaceID === workspace.id),
+    )
+  })
+  /** The card name is the dispatching agent; the stored name survives roster removal. */
+  const nativeSubagentAgent = (run: NativeSubagentRun) =>
+    run.parentAgent?.trim() || agentName(state(), run.parentAgentID)
   const [renderSize, setRenderSize] = createSignal({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
   onMount(() => {
     const update = () => setRenderSize({ width: context.renderer.width ?? 120, height: context.renderer.height ?? 40 })
@@ -1071,31 +1105,47 @@ export function EnsembleV2App() {
   // previous reference across unrelated snapshot polls.
   const workCardCache = createWorkCardCache()
   type WorkPaneSection = WorkLayoutSection & { cards: WorkCard[] }
-  const workViews = createMemo(() => {
+  // Ticket #184: partition tasks first, then derive rollup state from the
+  // visible HISTORY groups. The reconcile effect owns only expansion/counts;
+  // workViews never feeds back into it, so updates cannot loop.
+  const workPartition = createMemo(() => {
     // Track the dedicated expiry revision; a durable state change re-runs the
     // memo through activeTasks/state/approvals below.
     workRevision()
     const now = Date.now()
-    const active = activeTasks()
-    const grouped = workViewGroups(active, state()?.subtasks ?? {}, {
+    const grouped = workViewGroups(activeTasks(), state()?.subtasks ?? {}, {
       now,
       pendingApprovalIDs: pendingApprovalIDs(),
       nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
       resolvedAtForTask: approvalResolutionAt(state()?.approvals ?? {}),
       dispatchGroups: state()?.dispatchGroups ?? {},
-    })
+    }, nativeSubagentRuns())
+    return { now, active: grouped.active, history: grouped.history }
+  })
+  const dismissedHistory = createMemo(() => new Set(dismissedHistoryGroups()))
+  const visibleHistoryGroups = createMemo(() =>
+    workPartition().history.filter((group) => !dismissedHistory().has(group.id)),
+  )
+  createEffect(() => {
+    const groups = visibleHistoryGroups()
+    setHistoryViewState((previous) => reconcileHistoryView(groups, previous))
+  })
+  const historyPaneRows = createMemo(() => historyPaneGroups(visibleHistoryGroups(), historyViewState()))
+  const workViews = createMemo(() => {
+    const partition = workPartition()
     const width = workContentWidth()
     const body = workBodyHeight()
+    const history = visibleHistoryGroups()
     return {
       active: {
-        groups: grouped.active,
-        layout: paginateWorkGroups(grouped.active, width, body, now),
-        counts: workGroupCounts(grouped.active),
+        groups: partition.active,
+        layout: paginateWorkGroups(partition.active, width, body, partition.now),
+        counts: workGroupCounts(partition.active),
       },
       history: {
-        groups: grouped.history,
-        layout: paginateWorkGroups(grouped.history, width, body, now),
-        counts: workGroupCounts(grouped.history),
+        groups: history,
+        layout: paginateWorkGroups(historyPaneRows(), width, body, partition.now),
+        counts: workGroupCounts(history),
       },
     }
   })
@@ -1129,11 +1179,18 @@ export function EnsembleV2App() {
         agentNameFor: (agentID) => agentName(state(), agentID),
       }).verb,
     }
+    const nativeOptions = {
+      now,
+      width: Math.max(12, data.layout.cardContentWidth),
+      variantFor: (id: string) => tideVariantFor(tideAssignments, id, now),
+    }
     const sections: WorkPaneSection[] = current.sections.map((section) => ({
       ...section,
       cards: section.mode === "cards"
-        ? section.tasks.map((task) =>
-            workCardForTaskCached(workCardCache, task, agentName(state(), task.assigneeID), options),
+        ? (section.items ?? section.tasks.map((task) => ({ kind: "task" as const, task }))).map((item) =>
+            item.kind === "task"
+              ? workCardForTaskCached(workCardCache, item.task, agentName(state(), item.task.assigneeID), options)
+              : workCardForNativeSubagentCached(workCardCache, item.run, nativeSubagentAgent(item.run), nativeOptions),
           )
         : [],
     }))
@@ -1214,11 +1271,26 @@ export function EnsembleV2App() {
     const index = focused ? tasks.findIndex((task) => task.id === focused) : -1
     return index >= 0 ? index : 0
   }
-  const selectedTask = createMemo(() => visibleTasks()[taskCursorClamped()])
+  const selectedTask = createMemo(() => {
+    const id = workFocusID()
+    const tasks = visibleTasks()
+    // A history header row owns focus without owning a task; actions must not
+    // fall back to the first card in that state.
+    return id === undefined ? tasks[0] : tasks.find((task) => task.id === id)
+  })
+  /**
+   * Ticket #187: a focused native card is not a task. Its namespaced id
+   * resolves to the durable child record, which owns only `o`/Enter.
+   */
+  const selectedNativeSubagent = createMemo(() => {
+    const childSessionID = nativeSubagentFocusChild(workFocusID())
+    return childSessionID ? nativeSubagentRuns().find((run) => run.childSessionID === childSessionID) : undefined
+  })
   const selectedTaskActions = createMemo(() => {
     // Track the expiry revision so a stalled/retrying card's action set
     // settles without waiting for an unrelated snapshot.
     workRevision()
+    if (selectedNativeSubagent()) return nativeSubagentActions()
     return workTaskActions(selectedTask(), Date.now())
   })
   const selectedActionTask = (action: WorkActionID) => {
@@ -1352,6 +1424,16 @@ export function EnsembleV2App() {
     setCollapsedRailGroups(next)
     void invoke(context, "ui.save", { collapsedRailGroups: next }).catch(() => undefined)
   }
+  // Ticket #184: hydrate durable history dismissal, then keep local dismiss
+  // actions optimistic. The serialized key suppresses the save echo.
+  createEffect(() => {
+    const stored = state()?.ui.dismissedHistoryGroups
+    if (!stored) return
+    const key = JSON.stringify(stored)
+    if (key === historyDismissedKey) return
+    historyDismissedKey = key
+    setDismissedHistoryGroups([...stored])
+  })
   /** `z` and a header click share this: toggle the header or the selected agent's group. */
   const toggleRailGroup = (groupID?: string) => {
     const target = groupID ?? railCollapseTarget(railVisibleRows(), railCursor())
@@ -2248,8 +2330,9 @@ export function EnsembleV2App() {
   // renders at all times. Precedence is dialog, then composer, then the
   // column — `focusArea` stays the persisted rail/chat column while the
   // composer focus state derives from `composerActive`, so the two can never
-  // drift apart. Help/settings/approvals render inside the chat surface and
-  // inherit its border; only true overlays steal it.
+  // drift apart. Help/settings render inside the chat surface and inherit its
+  // border; approvals own the right column instead; only true overlays steal
+  // the focus border.
   const chromeFocus = () => resolveChromeFocus({ focusArea: focusArea(), composerActive: composerActive(), overlayOpen: overlayOpen() })
 
   // v5.6 T3/T5: the generated Normal keymap layers are enabled for exactly
@@ -2286,7 +2369,7 @@ export function EnsembleV2App() {
   const hasWorkZone = () => {
     if (surface()?.kind !== "workspace") return false
     const views = workViews()
-    return views.active.groups.length > 0 || views.history.groups.length > 0
+    return views.active.groups.length > 0 || visibleHistoryGroups().length > 0
   }
 
   const run = async (label: string, action: () => Promise<void>): Promise<boolean> => {
@@ -2827,6 +2910,19 @@ export function EnsembleV2App() {
       else { setWorkPage(historyPage); setWorkFocusID(taskID) }
       return
     }
+    // Ticket #184: a restored terminal task may live in a rolled-up group.
+    // Expand it before settling focus so #170's persisted selection survives.
+    const historyGroup = views.history.groups.find((group) => group.tasks.some((task) => task.id === taskID))
+    if (historyGroup) {
+      setWorkView("history")
+      setHistoryViewState((state) =>
+        state.expanded[historyGroup.id] ? state : toggleHistoryView(state, historyGroup.id),
+      )
+      workFocusIntent = "first"
+      lastWorkFocus = undefined
+      setWorkFocusID(taskID)
+      return
+    }
     workFocusIntent = "first"
     lastWorkFocus = undefined
     setWorkFocusID(undefined)
@@ -2854,6 +2950,57 @@ export function EnsembleV2App() {
   const selectWorkCard = (id: string) => {
     setPaneFocus("work", "interact")
     focusWorkTask(id)
+  }
+  // Ticket #184: Enter on a history group row expands or collapses it; `x`
+  // dismisses the focused group; `D` clears the whole history view. Dismissal
+  // is a bounded, durable view filter, never a terminal-row deletion.
+  const historyGroupRowFocus = () => workView() === "history" ? historyGroupIDFromFocus(workFocusID()) : undefined
+  const focusedHistoryGroup = createMemo(() => {
+    if (workView() !== "history") return undefined
+    const row = historyGroupRowFocus()
+    if (row !== undefined) return row
+    const taskID = selectedTask()?.id
+    if (taskID === undefined) return undefined
+    return workViews().history.groups.find((group) => group.tasks.some((task) => task.id === taskID))?.id
+  })
+  const toggleFocusedHistoryGroup = () => {
+    const groupID = historyGroupRowFocus()
+    if (groupID === undefined) return false
+    setHistoryViewState((state) => toggleHistoryView(state, groupID))
+    return true
+  }
+  const persistDismissedHistory = (next: string[]) => {
+    // Group ids are per dispatch action; cap the durable filter so it stays
+    // bounded long after 24h retention drops the underlying rows.
+    const unique = [...new Set(next)].slice(-200)
+    historyDismissedKey = JSON.stringify(unique)
+    setDismissedHistoryGroups(unique)
+    void invoke(context, "ui.save", { dismissedHistoryGroups: unique }).catch(() => undefined)
+  }
+  const dismissFocusedHistoryGroup = () => {
+    if (workView() !== "history") return false
+    const groupID = focusedHistoryGroup()
+    if (groupID === undefined) return false
+    persistDismissedHistory([...dismissedHistoryGroups(), groupID])
+    return true
+  }
+  const clearHistoryView = async () => {
+    const groups = workViews().history.groups
+    if (groups.length === 0) {
+      showToast({ title: "History", message: "The history view is already clear.", tone: "info" })
+      return
+    }
+    const ok = await openConfirm(
+      "Clear the history view?",
+      `${groups.length} finished ${groups.length === 1 ? "group" : "groups"} will be hidden. Terminal rows are retained; this only filters the view.`,
+    )
+    if (!ok) return
+    persistDismissedHistory([...dismissedHistoryGroups(), ...groups.map((group) => group.id)])
+  }
+  /** Ticket #184: a rolled-up history row is a focusable group target. */
+  const selectHistoryGroup = (groupID: string) => {
+    setPaneFocus("work", "interact")
+    focusWorkTask(historyGroupFocusID(groupID))
   }
   const selectWorkPage = (page: number) => {
     const pages = Math.max(1, workPane().pages)
@@ -3877,9 +4024,19 @@ export function EnsembleV2App() {
    * Ticket #174: one `o` decision for every surface. A Direct conversation
    * opens its agent; Work focus opens the focused card's assignee; a group
    * chat asks which workspace member. A missing binding is a clear toast, not
-   * a silent dead key.
+   * a silent dead key. Ticket #187: a focused native subagent card opens its
+   * child session directly instead of the parent binding.
    */
+  const navigateToNativeSession = (sessionID: string) => {
+    clearInteractionForLeave()
+    context.ui.router.navigate({ type: "session", sessionID })
+  }
   const openNative = async () => {
+    const native = interaction().focus === "work" ? selectedNativeSubagent() : undefined
+    if (native) {
+      navigateToNativeSession(native.childSessionID)
+      return
+    }
     const workspace = activeWorkspace()
     const current = surface()
     const task = selectedTask()
@@ -3898,8 +4055,7 @@ export function EnsembleV2App() {
       return
     }
     if (route.kind === "navigate") {
-      clearInteractionForLeave()
-      context.ui.router.navigate({ type: "session", sessionID: route.sessionID })
+      navigateToNativeSession(route.sessionID)
       return
     }
     if (!workspace) {
@@ -3914,8 +4070,7 @@ export function EnsembleV2App() {
       showToast({ title: "Ensemble", message: missingNativeSessionMessage(agentName(state(), agentID)), tone: "warning" })
       return
     }
-    clearInteractionForLeave()
-    context.ui.router.navigate({ type: "session", sessionID })
+    navigateToNativeSession(sessionID)
   }
 
   const restoreSettingsFocus = () => {
@@ -4548,12 +4703,24 @@ export function EnsembleV2App() {
     "work.filter": () => toggleWorkView(),
     "work.page.down": () => moveWorkPage(1),
     "work.page.up": () => moveWorkPage(-1),
-    "work.open": () => openResult(),
+    "work.open": () => {
+      if (toggleFocusedHistoryGroup()) return
+      const native = selectedNativeSubagent()
+      if (native) {
+        navigateToNativeSession(native.childSessionID)
+        return
+      }
+      return openResult()
+    },
     "work.delegate": () => delegateSelected(),
     "work.reassign": () => reassignSelected(),
     "work.retry": () => retrySelected(),
     "work.restart": () => restartSelected(),
-    "work.cancel": () => cancelSelected(),
+    "work.cancel": () => {
+      if (dismissFocusedHistoryGroup()) return
+      return cancelSelected()
+    },
+    "work.history.clear": () => { void clearHistoryView() },
     "work.native": () => openNative(),
     // Ticket #185: one approvals surface; the full inbox owns resolution.
     "work.approvals": () => openApprovalsFull(),
@@ -6580,6 +6747,19 @@ export function EnsembleV2App() {
     // Ticket #173: advertise only the focused card's valid actions, and the
     // approvals keys only while they can do something.
     const workHintFilter = (entry: KeyEntry) => {
+      const nativeFocused = selectedNativeSubagent() !== undefined
+      if (entry.id === "work.cancel") {
+        // Ticket #187: a native subagent card is read-only, so never advertise
+        // cancel even when the history view binds `x` to group dismissal.
+        if (nativeFocused) return false
+        return workView() === "history" || selectedTaskActions().has(entry.id)
+      }
+      if (entry.id === "work.history.clear") return workView() === "history" && workViews().history.groups.length > 0
+      if (entry.id === "work.open") {
+        if (nativeFocused) return true
+        return workView() === "history" && historyGroupRowFocus() !== undefined ? true : selectedTaskActions().has(entry.id)
+      }
+      if (entry.id === "work.native") return nativeFocused || selectedTaskActions().has(entry.id)
       if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)
       if (entry.id === "work.approvals") return pendingApprovals().length > 0
       return true
@@ -6876,10 +7056,37 @@ export function EnsembleV2App() {
                 <Show when={workPane().layout.mode === "cards"} fallback={
                   <For each={workPane().sections}>{(section) => (
                     <box flexDirection="column" width="100%" marginTop={section.gapBefore ? 1 : 0}>
+                      <Show when={section.rollup}>
+                        <WorkHistoryRowView
+                          colors={colors}
+                          rollup={section.rollup!}
+                          tone={section.tone}
+                          selected={workCardsFocused(paneState()) && workFocusID() === historyGroupFocusID(section.groupID)}
+                          onSelect={() => selectHistoryGroup(section.groupID)}
+                        />
+                      </Show>
                       <Show when={section.label}>
                         <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                       </Show>
-                      <For each={section.tasks}>{(task) => {
+                      <For each={section.items ?? section.tasks.map((task) => ({ kind: "task" as const, task }))}>{(item) => {
+                        if (item.kind === "native") {
+                          const run = item.run
+                          const rowStatus = nativeSubagentWorkStatus(run.state)
+                          const terminal = isTerminalWorkStatus(rowStatus)
+                          const glyph = workRowFrame(rowStatus, motionFrame(), process.env)
+                          const focusID = nativeSubagentFocusID(run.childSessionID)
+                          return (
+                            <WorkCompactRowView
+                              colors={colors}
+                              row={workCompactRowForNativeSubagent(run, nativeSubagentAgent(run), glyph, Math.max(1, workContentWidth() - 2))}
+                              tones={workCardTones(rowStatus, false)}
+                              selected={workCardsFocused(paneState()) && workFocusID() === focusID}
+                              terminal={terminal}
+                              onSelect={() => selectWorkCard(focusID)}
+                            />
+                          )
+                        }
+                        const task = item.task
                         // Ticket #142: compact rows are not Work cards, but the
                         // fallback still needs its own reactive view. A local
                         // memo keeps selection and glyph live without
@@ -6921,8 +7128,20 @@ export function EnsembleV2App() {
                 }>
                   <For each={workPane().sections}>{(section) => (
                     <Show when={section.mode === "cards"} fallback={
-                      <Show when={section.label}>
-                        <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                      <Show when={section.rollup} fallback={
+                        <Show when={section.label}>
+                          <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                        </Show>
+                      }>
+                        <box flexDirection="column" width="100%" marginTop={section.gapBefore ? 1 : 0}>
+                          <WorkHistoryRowView
+                            colors={colors}
+                            rollup={section.rollup!}
+                            tone={section.tone}
+                            selected={workCardsFocused(paneState()) && workFocusID() === historyGroupFocusID(section.groupID)}
+                            onSelect={() => selectHistoryGroup(section.groupID)}
+                          />
+                        </box>
                       </Show>
                     }>
                       <box flexDirection="column" width="100%" marginTop={section.gapBefore ? 1 : 0}>
@@ -6942,7 +7161,7 @@ export function EnsembleV2App() {
                                 now: Date.now(),
                               })}
                               width={workPane().layout.cardWidth}
-                              selected={workCardsFocused(paneState()) && selectedTask()?.id === card.id}
+                              selected={workCardsFocused(paneState()) && (workFocusID() === card.id || selectedTask()?.id === card.id)}
                               onSelect={() => selectWorkCard(card.id)}
                             />
                           )}</For>

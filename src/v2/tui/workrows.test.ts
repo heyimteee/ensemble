@@ -1,7 +1,8 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import type { Subtask } from "../types.ts"
+import type { NativeSubagentRun, Subtask } from "../types.ts"
 import { TIDE_GLYPHS, createTideFreezeState, type TideFreezeState } from "./tide.ts"
+import { nativeSubagentFocusID } from "./nativecards.ts"
 import {
   ACTIVITY_DEFAULT_VERB,
   MAX_VISIBLE_ACTIVITY,
@@ -28,6 +29,8 @@ import {
   workCardDetail,
   workCardForTask,
   workCardForTaskCached,
+  workCardForNativeSubagent,
+  workCardForNativeSubagentCached,
   workCardGlyph,
   workCardHeader,
   workCardHeaderText,
@@ -36,6 +39,7 @@ import {
   workCardTide,
   workCardTones,
   workCompactRow,
+  workCompactRowForNativeSubagent,
   workCompactRowText,
   workCardsForTasks,
   workGlyph,
@@ -70,6 +74,21 @@ const activityEntry = (patch: Partial<Parameters<typeof activitySummary>[0]["liv
   createdAt: 1,
   verb: "Asking $Clark…",
   kind: "asking" as const,
+  ...patch,
+})
+
+const nativeRun = (patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
+  childSessionID: "child",
+  parentSessionID: "session",
+  parentTaskID: "t",
+  dispatchGroupID: "dispatch_1",
+  workspaceID: "w",
+  parentAgentID: "kakiko",
+  parentAgent: "Kakiko",
+  instruction: "Watch the CI",
+  state: "working",
+  startedAt: 2,
+  source: "session-created",
   ...patch,
 })
 
@@ -1105,4 +1124,63 @@ test("ticket162: exhausted group budgets keep the card and compact right edge", 
     assert.equal(text.trimEnd().length, width)
     if (row.budget) assert.ok(row.budget.includes("8/8"), `width ${width} keeps the exhausted count`)
   }
+})
+
+test("ticket187: a native subagent maps onto a normal Work card with the parent's name", () => {
+  const card = workCardForNativeSubagent(nativeRun(), "Kakiko", { now: 5_000, width: 40, variant: "current" })
+  assert.equal(card.id, nativeSubagentFocusID("child"))
+  assert.equal(card.header.name, "KAKIKO", "the card name is the parent agent")
+  assert.equal(card.header.status, "WORKING")
+  assert.equal(card.title, "Subagents: Watch the CI")
+  assert.equal(card.status, "working")
+  assert.equal(card.needsYou, false)
+  assert.equal(card.terminal, false)
+  assert.deepEqual(card.tones, workCardTones("working", false), "native cards share the task card tones")
+  assert.equal(card.tideVariant, "current")
+  assert.equal(card.width, 40)
+})
+
+test("ticket187: native terminal states keep the shared card status grammar", () => {
+  const cards = [
+    workCardForNativeSubagent(nativeRun({ state: "replied", finishedAt: 3 }), "Kakiko", { now: 5_000, width: 40 }),
+    workCardForNativeSubagent(nativeRun({ state: "failed", finishedAt: 3 }), "Kakiko", { now: 5_000, width: 40 }),
+    workCardForNativeSubagent(nativeRun({ state: "cancelled", finishedAt: 3 }), "Kakiko", { now: 5_000, width: 40 }),
+  ]
+  assert.deepEqual(cards.map((card) => card.header.status), ["REPLIED", "FAILED", "CANCELLED"])
+  assert.deepEqual(cards.map((card) => card.terminal), [true, true, true])
+  assert.deepEqual(cards.map((card) => card.tones), [
+    workCardTones("replied", false),
+    workCardTones("failed", false),
+    workCardTones("cancelled", false),
+  ])
+})
+
+test("ticket187: a long native instruction truncates inside the card", () => {
+  const card = workCardForNativeSubagent(nativeRun({ instruction: "Watch the CI ".repeat(30) }), "Kakiko", { now: 5_000, width: 24 })
+  assert.ok(card.title.length <= 22, "the title fits inside the card's text width")
+  assert.match(card.title, /^Subagents: /)
+  assert.ok(card.title.endsWith("…"))
+})
+
+test("ticket187: the compact native row uses the same name-title-status grammar", () => {
+  const row = workCompactRowForNativeSubagent(nativeRun(), "Kakiko", "⠋", 48)
+  assert.equal(row.name, "Kakiko")
+  assert.equal(row.title, "Subagents: Watch the CI")
+  assert.equal(row.status, "WORKING")
+  assert.equal(workCompactRowText(row).length, 48, "the row keeps the pane's exact width")
+  const long = workCompactRowForNativeSubagent(nativeRun({ instruction: "Watch the CI ".repeat(20) }), "Kakiko", "⠋", 32)
+  assert.ok(long.title.endsWith("…"))
+  assert.equal(long.status, "WORKING")
+  assert.equal(workCompactRowText(long).length, 32)
+})
+
+test("ticket187: native card identity is cached and rebuilt on state changes", () => {
+  const cache = createWorkCardCache()
+  const options = { now: 5_000, width: 40, variant: "current" as const }
+  const first = workCardForNativeSubagentCached(cache, nativeRun(), "Kakiko", options)
+  const again = workCardForNativeSubagentCached(cache, nativeRun(), "Kakiko", options)
+  assert.equal(first, again, "an unchanged native card keeps its identity")
+  const settled = workCardForNativeSubagentCached(cache, nativeRun({ state: "replied", finishedAt: 3 }), "Kakiko", options)
+  assert.notEqual(first, settled, "a lifecycle change rebuilds the card")
+  assert.equal(settled.status, "replied")
 })

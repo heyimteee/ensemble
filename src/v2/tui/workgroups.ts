@@ -1,5 +1,5 @@
 import { dispatchBudgetLabel, dispatchGroupContinued } from "../dispatch-budget.ts"
-import type { WorkGroup } from "../work-groups.ts"
+import { workFinishedAt, type WorkGroup } from "../work-groups.ts"
 
 /**
  * Ticket #136: dispatch-group labels shared by the Work pane and its compact
@@ -43,5 +43,46 @@ export function workGroupLabel(
   // prefix stays stable for readers and live anchors.
   parts.push(`${group.active} active`, `${group.done} done`)
   if (group.budget) parts.push(dispatchBudgetLabel(group.budget, "full"))
+  return parts.join(" · ")
+}
+
+/** Ticket #184: a short, pure age for a rolled-up history row. */
+export function workAgeLabel(ageMs: number): string {
+  const seconds = Math.max(0, Math.floor(ageMs / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.floor(minutes / 60)}h`
+}
+
+/** The latest terminal finish in a history group, with the recorded hold origin as fallback. */
+export function workHistoryFinishedAt(
+  group: Pick<WorkGroup, "tasks" | "latestTerminalAt" | "createdAt"> & { native?: WorkGroup["native"] },
+): number {
+  let latest: number | undefined
+  for (const task of group.tasks) {
+    const finished = workFinishedAt(task)
+    if (finished !== undefined && (latest === undefined || finished > latest)) latest = finished
+  }
+  // Ticket #187: a finished native subagent ages the same as a task card.
+  for (const run of group.native ?? []) {
+    const finished = run.finishedAt ?? run.startedAt
+    if (latest === undefined || finished > latest) latest = finished
+  }
+  return latest ?? group.latestTerminalAt ?? group.createdAt
+}
+
+/**
+ * Ticket #184: the one-line grammar for a rolled-up history group. Done count
+ * first, active count only while the group still has live work, then age.
+ */
+export function workHistoryRollupLabel(
+  group: Pick<WorkGroup, "active" | "done" | "tasks" | "latestTerminalAt" | "createdAt">,
+  ordinal: number,
+  now: number,
+): string {
+  const parts = [`GROUP ${Math.max(1, Math.floor(ordinal))}`, `${Math.max(0, group.done)} done`]
+  if (group.active > 0) parts.push(`${group.active} active`)
+  parts.push(workAgeLabel(now - workHistoryFinishedAt(group)))
   return parts.join(" · ")
 }

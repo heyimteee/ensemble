@@ -151,7 +151,7 @@ test("ticket185: full approvals own j/k, Enter, Esc, and Tab", () => {
 
 test("the work list carries the shared task actions on their Normal keys", () => {
   const keys = keysFor("work")
-  for (const sequence of ["x", "r", "shift+r", "d", "t", "o"]) {
+  for (const sequence of ["x", "r", "shift+r", "d", "t", "o", "shift+d"]) {
     assert.ok(keys.includes(sequence), `work keeps ${sequence}`)
   }
   assert.equal(entryId("work", "enter"), "work.open")
@@ -161,6 +161,7 @@ test("the work list carries the shared task actions on their Normal keys", () =>
   assert.equal(entryId("work", "d"), "work.delegate")
   assert.equal(entryId("work", "t"), "work.reassign")
   assert.equal(entryId("work", "o"), "work.native")
+  assert.equal(entryId("work", "shift+d"), "work.history.clear", "ticket184: D clears the history view")
 })
 
 test("d delegates in the work list instead of invoking the text delete operator", () => {
