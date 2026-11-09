@@ -104,6 +104,39 @@ test("ticket172: the card grid keeps an exact right edge at every pane width", (
   }
 })
 
+test("ticket183: the one width memo consumes both durable side switches", () => {
+  const full = workspacePaneWidths(160)
+  assert.equal(full.railWidth + full.chatWidth + full.workWidth + full.gap * 2, full.viewWidth, "default tiles three panes")
+
+  const leftHidden = workspacePaneWidths(160, { left: false })
+  assert.equal(leftHidden.railWidth, 0, "a hidden left column claims no width")
+  assert.equal(leftHidden.chatWidth + leftHidden.workWidth + leftHidden.gap, leftHidden.viewWidth, "chat and Work tile the reclaimed row")
+  assert.equal(leftHidden.workWidth, full.workWidth, "the right pane keeps its readable share")
+  assert.ok(leftHidden.chatContentWidth > full.chatContentWidth, "chat expands into reclaimed rail width")
+
+  const rightHidden = workspacePaneWidths(160, { right: false })
+  assert.equal(rightHidden.railWidth, full.railWidth)
+  assert.equal(rightHidden.railWidth + rightHidden.chatWidth + rightHidden.gap, rightHidden.viewWidth, "chat reclaims the whole right column")
+  assert.equal(rightHidden.chatContentWidth, rightHidden.chatOnlyContentWidth, "no unused three-pane transcript width remains")
+  assert.ok(rightHidden.chatContentWidth > full.chatContentWidth, "chat expands into reclaimed Work width")
+
+  const bothHidden = workspacePaneWidths(160, { left: false, right: false })
+  assert.equal(bothHidden.railWidth, 0)
+  assert.equal(bothHidden.chatWidth, bothHidden.viewWidth, "chat owns the whole row")
+  assert.equal(bothHidden.chatContentWidth, bothHidden.chatOnlyContentWidth)
+})
+
+test("ticket183: the narrow drawer uses the same right switch without shrinking chat", () => {
+  const open = workspacePaneWidths(80)
+  const closed = workspacePaneWidths(80, { right: false })
+  const leftHidden = workspacePaneWidths(80, { left: false })
+  assert.equal(closed.mode, "drawer")
+  assert.equal(closed.chatWidth, open.chatWidth, "the drawer overlays chat; closing it never changes the chat column")
+  assert.equal(closed.chatContentWidth, open.chatContentWidth)
+  assert.equal(leftHidden.railWidth, 0)
+  assert.equal(leftHidden.chatWidth, leftHidden.viewWidth, "closing the left column widens the drawer-mode chat")
+})
+
 test("ticket172: the size matrix reserves a non-empty Work body", () => {
   const matrix: Array<[number, number]> = [[80, 24], [100, 30], [120, 40], [160, 50]]
   for (const [width, height] of matrix) {

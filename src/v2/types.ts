@@ -597,6 +597,14 @@ export type Snapshot = {
        * Durable view state only; the terminal rows remain for 24h retention.
        */
       dismissedHistoryGroups?: Id[]
+      /**
+       * Ticket #183: durable left/right pane visibility. Missing means both
+       * columns are open; the TUI writes the switches through `ui.save`.
+       */
+      paneVisibility?: {
+        left?: boolean
+        right?: boolean
+      }
       history?: Record<string, {
         surface: "workspace" | "agent"
         workspaceID?: Id

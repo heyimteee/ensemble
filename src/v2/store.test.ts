@@ -71,6 +71,15 @@ test("store reloads settings, UI state, and bindings", async () => {
   assert.equal(loaded.binding("w", "a")?.sessionID, "s")
 })
 
+test("ticket183: pane visibility survives a restart", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.saveUi({ paneVisibility: { left: false, right: true } })
+  const loaded = new V2Store(ctx)
+  await loaded.load()
+  assert.deepEqual(loaded.snapshot().ui.paneVisibility, { left: false, right: true }, "column switches are durable UI state")
+})
+
 test("native subagent records are durable by child session and removable", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)

@@ -199,7 +199,7 @@ test("the Work pane pages its history view by its own body", () => {
 })
 
 test("the shell widths come from the one pane-width helper", () => {
-  assert.ok(has(app(), "workspacePaneWidths(renderSize().width)"))
+  assert.ok(has(app(), "workspacePaneWidths(renderSize().width, paneSides())"))
 })
 
 test("the transcript width follows the Work pane state", () => {
@@ -267,12 +267,33 @@ test("f toggles ACTIVE and HISTORY", () => {
   assert.ok(has(app(), '"work.filter"'))
 })
 
-test("focusing Work or approvals opens the drawer", () => {
-  assert.ok(has(app(), 'setWorkDrawerOpen(pane === "work" || pane === "approvals")'))
+test("ticket183: the right pane visibility is the one drawer switch", () => {
+  assert.ok(has(app(), "surface()?.kind === \"workspace\" && paneSides().right"))
+  assert.ok(has(app(), "<Show when={paneSides().left}>"), "the rail renders only while the left switch is on")
+  assert.ok(!has(app(), "workDrawerOpen"), "no second drawer state exists")
 })
 
-test("ticket180: F3 keeps its legacy drawer-to-cards behavior", () => {
-  assert.ok(has(app(), 'setPaneFocus("work", "interact")'))
+test("ticket183: Space b l/r run one focus-recovering toggle", () => {
+  const source = app()
+  assert.ok(has(source, '"leader.pane.left": () => togglePane("left")'))
+  assert.ok(has(source, '"leader.pane.right": () => togglePane("right")'))
+  assert.ok(has(source, "togglePaneSide(paneSides(), side)"))
+  assert.ok(has(source, "focusForPaneToggle(current, side, visibility)"))
+  assert.ok(has(source, "if (focus.pane !== current.pane || focus.mode !== current.mode)"), "an unchanged focus never blurs the composer")
+})
+
+test("ticket183: pane visibility persists through the UI RPC and hydrates", () => {
+  const source = app()
+  assert.ok(has(source, 'invoke(context, "ui.save", { paneVisibility: next })'))
+  assert.ok(has(source, "paneSideVisibility(stored)"))
+  assert.ok(has(source, "const [paneSides, setPaneSides]"))
+})
+
+test("ticket183: F3 is gone from the global layer", () => {
+  const source = app()
+  assert.ok(!has(source, "global.work"))
+  assert.ok(!has(source, "toggleWorkDrawer"))
+  assert.ok(!has(source, "F3"))
 })
 
 test("the Work page previous control pages", () => {
@@ -455,7 +476,13 @@ test("ticket180: the Work border and heading are white when Work or Approvals is
   assert.ok(has(source, "workOwnsFocus() ? colors.focus : colors.muted"))
 })
 
-test("ticket180: a closed or absent pane recovers selection to chat", () => {
+test("ticket183: which-key/statusline read the pending leader submenu", () => {
+  const source = app()
+  assert.ok(has(source, "leaderMenuEntries(leaderKeys())"))
+  assert.ok(has(source, "leaderHints(leaderKeys())"))
+})
+
+test("ticket183: a closed or absent pane recovers selection to chat", () => {
   assert.ok(has(app(), 'dispatchInteraction({ type: "pane.recover", visible })'))
 })
 
