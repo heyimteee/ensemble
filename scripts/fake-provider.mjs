@@ -25,6 +25,11 @@ const FAKE_NATIVE_ERROR_PROMPT = "fake-native-error"
 // Ticket #195: one-step inline handoff fixture. The sender omits `path`; the
 // service must write the handoff file and queue the same durable hop.
 const FAKE_INLINE_HANDOFF_PROMPT = "inline-handoff-probe"
+// Ticket #201: a batch review whose first reply deliberately forgets
+// ensemble_review. The marker rides the completed task titles into the batch
+// instruction, so only this fixture pays a correction turn; the existing
+// #71/#164 batch fixtures keep their normal text reply.
+const FAKE_BATCH_CORRECTION_PROMPT = "fake-batch-correction-fixture"
 // Ticket #188: a real native subagent fixture. The parent turn calls the host's
 // built-in `subagent` tool in background mode; the child prompt carries the
 // child marker so it streams a bounded hold instead of answering immediately.
@@ -38,6 +43,13 @@ const FAKE_SUBAGENT_PRE_CHILD_MARKER = "fake-subagent-pre-child-marker"
 const FAKE_SUBAGENT_WAKEUP_MARKER = "fake-subagent-wakeup-marker"
 const FAKE_SUBAGENT_PRE_CHILD_REPLY = `The background child is still running. ${FAKE_SUBAGENT_PRE_CHILD_MARKER}.`
 const FAKE_SUBAGENT_WAKEUP_REPLY = `The child finished and I reported the result. ${FAKE_SUBAGENT_WAKEUP_MARKER}.`
+// Ticket #201: the isolated real-host probe restarts the host after the parent
+// finalized, then sends one genuinely late native follow-up turn. The trigger
+// and the answer marker stay distinct so the assertion cannot match the user
+// prompt in the native transcript.
+const FAKE_NATIVE_LATE_REPORT_PROMPT = "fake-native-late-report-fixture"
+const FAKE_NATIVE_LATE_REPORT_MARKER = "fake-native-late-report-marker"
+const FAKE_NATIVE_LATE_REPORT_REPLY = `The native follow-up report arrived after the run.\n\n${FAKE_NATIVE_LATE_REPORT_MARKER}.`
 const SUBAGENT_CHILD_DELAY_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_SUBAGENT_CHILD_DELAY_MS ?? "120"))
 const SUBAGENT_CHILD_MARKDOWN = [
   "# Subagent child fixture",
@@ -76,6 +88,9 @@ const MODEL_ID = "ensemble-fake-model"
 const askedTasks = new Set()
 const budgetToolCalls = new Set()
 const reviewToolCalls = new Set()
+// Ticket #201: batch fixture ids that must ignore their first review turn and
+// close through the service's one correction turn.
+const batchCorrectionPending = new Set()
 
 const RICH_MARKDOWN = [
   "# Rich Markdown Fixture",
@@ -235,6 +250,9 @@ const chunkDelay = Math.max(0, Number(argValue("--chunk-delay-ms", process.env.E
 const initialDelay = Math.max(0, Number(argValue("--initial-delay-ms", process.env.ENSEMBLE_FAKE_INITIAL_DELAY_MS ?? "250")))
 const initDelay = Math.max(0, Number(argValue("--init-delay-ms", process.env.ENSEMBLE_FAKE_INIT_DELAY_MS ?? "1200")))
 const turnStartDelay = Math.max(0, Number(argValue("--turn-start-delay-ms", process.env.ENSEMBLE_FAKE_TURN_START_DELAY_MS ?? "800")))
+// Ticket #201: hold the host's post-child wake-up answer long enough that the
+// live probe proves a delayed answer, not just the immediate happy path.
+const subagentWakeupDelayMs = Math.max(0, Number(argValue("--subagent-wakeup-delay-ms", process.env.ENSEMBLE_FAKE_SUBAGENT_WAKEUP_DELAY_MS ?? "0")))
 // Required only for the budget fixture: the fake model cannot call
 // ensemble_handoff without a real typed file inside the target workspace.
 const budgetHandoffDir = argValue("--handoff-dir", process.env.ENSEMBLE_FAKE_HANDOFF_DIR ?? "")
@@ -540,6 +558,20 @@ const server = createServer(async (request, response) => {
     // in the accumulated prompt (`</subagent>`), unlike the immediate tool-result
     // turn. Only this turn returns the wake-up marker.
     const subagentWakeup = !subagentChild && prompt.includes("</subagent>")
+    // Ticket #201: one late native follow-up turn against an already-finalized
+    // parent task. It must win over the sticky wake-up trigger in history.
+    const nativeLateReport = latestUserText.includes(FAKE_NATIVE_LATE_REPORT_PROMPT)
+    const batchReviewPrompt = latestUserText.includes("before continuing") && latestUserText.includes("ensemble_review")
+    const batchReviewID = batchReviewPrompt ? latestTaskID(prompt) : undefined
+    // Only the #201 fixture pays a correction turn. The correction prompt names
+    // the batch and its remaining item ids, so the fake reviewer can close the
+    // same batch on the second turn without touching other batch fixtures.
+    if (batchReviewPrompt && batchReviewID && latestUserText.includes(FAKE_BATCH_CORRECTION_PROMPT)) {
+      batchCorrectionPending.add(batchReviewID)
+    }
+    const batchCorrectionID = latestUserText.match(/Call ensemble_review now for batch "(task_[A-Za-z0-9]+)"/)?.[1]
+    const remainingLine = latestUserText.match(/Remaining item ids: ([^\n]+)/)?.[1] ?? ""
+    const remainingReviewIDs = [...remainingLine.matchAll(/task_[A-Za-z0-9]+/g)].map((match) => match[0])
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
     const inlineHandoff = latestUserText.includes(FAKE_INLINE_HANDOFF_PROMPT)
     const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
@@ -614,6 +646,10 @@ const server = createServer(async (request, response) => {
       leaseHold,
       subagentParent,
       subagentChild,
+      subagentWakeup,
+      nativeLateReport,
+      batchReviewPrompt,
+      batchCorrection: batchCorrectionID ? remainingReviewIDs.length : 0,
       motion,
       answered,
       toolResult,
@@ -633,6 +669,33 @@ const server = createServer(async (request, response) => {
       return
     }
     try {
+      // Ticket #201: ignore the first batch review turn for the dedicated
+      // fixture. The service appends one correction turn naming the remaining
+      // item ids; the next request closes those items with ensemble_review.
+      if (body?.stream !== false && batchReviewPrompt && batchReviewID && latestUserText.includes(FAKE_BATCH_CORRECTION_PROMPT) && !toolResult) {
+        log("batch_correction_ignore", { request: requestID, batch: batchReviewID })
+        await streamCompletion(response, SHORT_REPLY, requestID)
+        return
+      }
+      if (body?.stream !== false && batchCorrectionID && batchCorrectionPending.has(batchCorrectionID)) {
+        if (toolResult) {
+          log("batch_correction_closed", { request: requestID, batch: batchCorrectionID })
+          await streamCompletion(response, SHORT_REPLY, requestID)
+          return
+        }
+        if (remainingReviewIDs.length > 0) {
+          log("batch_correction_review", { request: requestID, batch: batchCorrectionID, items: remainingReviewIDs.length })
+          await streamToolCall(
+            response,
+            requestID,
+            "ensemble_review",
+            { batch: batchCorrectionID, decisions: remainingReviewIDs.map((item) => ({ item, action: "end" })) },
+            "batch_correction_tool_call",
+            { batch: batchCorrectionID, items: remainingReviewIDs.length },
+          )
+          return
+        }
+      }
       // Ticket #195: emit the one-step handoff with no path. The service
       // resolves FakeAgent, validates the typed budget, writes the file under
       // .ensemble/handoffs, and queues the durable hop.
@@ -658,9 +721,20 @@ const server = createServer(async (request, response) => {
         await streamCompletion(response, SUBAGENT_CHILD_MARKDOWN, requestID, SUBAGENT_CHILD_DELAY_MS)
         return
       }
+      if (body?.stream !== false && nativeLateReport) {
+        // Ticket #201: a genuinely late native follow-up after the parent run
+        // finalized. The durable reconciler, not the run, owns this answer.
+        await streamCompletion(response, FAKE_NATIVE_LATE_REPORT_REPLY, requestID)
+        return
+      }
       if (body?.stream !== false && subagentWakeup) {
         // The real post-child wake-up turn: its answer must become the task
-        // result and the completion-handoff content.
+        // result and the completion-handoff content. Ticket #201 delays it so
+        // the probe proves the wait, not just the immediate happy path.
+        if (subagentWakeupDelayMs > 0) {
+          log("subagent_wakeup_delay", { request: requestID, delayMs: subagentWakeupDelayMs })
+          await delay(subagentWakeupDelayMs)
+        }
         await streamCompletion(response, FAKE_SUBAGENT_WAKEUP_REPLY, requestID)
         return
       }

@@ -40,8 +40,11 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   removal, ANSI evidence for focused white / unfocused grey pane headings and
   borders, task-level HISTORY with rollup/expand/dismiss/clear, the one-line
   aggregate activity summary with Work open, and the small/full approvals modes
-  with the left footer, chat modal, and `V` retired. The long-run lifecycle case
-  lives in `test:live:lifecycle`.
+  with the left footer, chat modal, and `V` retired. Ticket #201 adds a
+  busy-recipient completion that must stay `QUEUED` with no retry timer, count,
+  or action, and a batch-review fixture that forgets `ensemble_review` once and
+  closes through the correction turn. The long-run lifecycle case lives in
+  `test:live:lifecycle`.
 - `npm run test:live:subagent`: ticket #188's real native-subagent probe. The
   isolated OpenCode 2.2.6 host runs the worktree plugin against the fake
   provider, then an Ensemble agent's fake turn calls the host's built-in
@@ -53,10 +56,17 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   with a live lease until the child's terminal event), the child
   working→replied transition, HISTORY, cleanup with no queue row or hop spend,
   no instruction content in diagnostics/logs, `experimental.idle` background
-  shape, and restart retention. Set `ENSEMBLE_SUBAGENT_EXPECT=early` to run the
-  pre-barrier baseline against an older tree; it records that the parent replies
-  before the child succeeds and stops before the post-barrier assertions. The
-  probe defaults `ENSEMBLE_LOG_LEVEL=debug` for its isolated service logs.
+  shape, and restart retention. Ticket #201 delays the fake wake-up answer so
+  the probe proves a delayed post-child answer still becomes the task result and
+  completion-handoff content, then restarts the host, drives one genuinely late
+  native follow-up turn, and requires exactly one attributed group row and one
+  follow-up hop with no new group or hop spend. A second restart proves the
+  durable marker does not duplicate them, the doctor reports no terminal
+  delivery-hold or retry contradiction, and logs carry no answer content. Set
+  `ENSEMBLE_SUBAGENT_EXPECT=early` to run the pre-barrier baseline against an
+  older tree; it records that the parent replies before the child succeeds and
+  stops before the post-barrier assertions. The probe defaults
+  `ENSEMBLE_LOG_LEVEL=debug` for its isolated service logs.
 - `npm run test:live:lifecycle`: a full wall-clock fake run that streams for
   about 5m40s across the old five-minute delivery deadline while the service
   heartbeat renews its 60-second lease. A second delivery sent immediately
@@ -233,9 +243,14 @@ Work-card probe; `fake-native-error` returns a non-retried 4xx model error for
 the genuine FAILED card. `fake-subagent-parent-fixture` emits one native
 `subagent` tool call in background mode with the child instruction
 `fake-subagent-child-hold-fixture`; the child stream holds long enough to observe
-the parent barrier and Work card. A one-shot init pre-stream pause keeps the
-indeterminate System Agent row observable, and a pre-stream turn pause keeps
-the transient `Asking $Name…` window observable on the narrower chat cell.
+the parent barrier and Work card, and `ENSEMBLE_FAKE_SUBAGENT_WAKEUP_DELAY_MS`
+delays the post-child wake-up answer for the #201 probe.
+`fake-native-late-report-fixture` produces one late native follow-up answer after
+a restart, and `fake-batch-correction-fixture` makes only the #201 batch ignore
+its first review turn and close through the service's correction turn. A
+one-shot init pre-stream pause keeps the indeterminate System Agent row
+observable, and a pre-stream turn pause keeps the transient `Asking $Name…`
+window observable on the narrower chat cell.
 
 ## Size matrix
 

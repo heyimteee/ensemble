@@ -3084,6 +3084,146 @@ live_key "$LIVE_TUI_SESSION" "f"
 live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │" 10 "ACTIVE view restored after the history probes"
 live_log "task-level HISTORY split, expansion, rollup, dismiss, clear, and retention verified"
 
+# ---------------------------------------------------------------------------
+# Ticket #201/#193: a completion delivery waiting for a busy recipient is
+# QUEUED, never RETRYING, and offers no retry action. A fresh temporary leader
+# owns the long hold fixture so the FakeAgent session used by later turns is
+# not polluted by a sticky fake-provider trigger.
+# ---------------------------------------------------------------------------
+live_invoke "agent.create" '{"name":"BusyLead"}' >/dev/null
+busy_lead_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "BusyLead" }).id' | tr -d '"')
+[[ -n "$busy_lead_id" && "$busy_lead_id" != "null" ]] || live_fail "busy-recipient leader was not created"
+# A fresh peer keeps its native session free of earlier sticky hold fixtures.
+live_invoke "agent.create" '{"name":"BusyPeer"}' >/dev/null
+busy_peer_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "BusyPeer" }).id' | tr -d '"')
+[[ -n "$busy_peer_id" && "$busy_peer_id" != "null" ]] || live_fail "busy-recipient peer was not created"
+busy_original_members=$(live_snapshot_value "output.state.workspaces['$ws_id'].memberIDs")
+busy_members=$(live_snapshot_value "output.state.workspaces['$ws_id'].memberIDs.concat(['$busy_lead_id','$busy_peer_id'])")
+live_invoke "workspace.update" "{\"id\":\"$ws_id\",\"memberIDs\":$busy_members,\"leaderID\":\"$busy_lead_id\"}" >/dev/null
+live_focus_chat "$LIVE_TUI_SESSION"
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"busy-recipient-hold fake-lease-hold\",\"recipientIDs\":[\"$busy_lead_id\"]}" >/dev/null
+busy_hold_id=""
+for _ in $(seq 1 100); do
+  busy_hold_id=$(live_snapshot_value "(() => { const task = Object.values(output.state.subtasks).find(function (t) { return t.assigneeID === \"$busy_lead_id\" && t.title.indexOf(\"busy-recipient-hold\") >= 0 && t.state === \"working\" }); return task ? task.id : \"\" })()" | tr -d '"')
+  [[ -n "$busy_hold_id" && "$busy_hold_id" != "null" ]] && break
+  sleep 0.25
+done
+[[ -n "$busy_hold_id" && "$busy_hold_id" != "null" ]] || live_fail "busy-recipient hold task never started"
+# A fast non-leader completion while the leader streams: the mandatory
+# completion delivery is parked by the quiet window, then the busy agent keeps
+# it queued without any failed attempt.
+live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"busy-recipient-completion\",\"recipientIDs\":[\"$busy_peer_id\"]}" >/dev/null
+live_wait_for_subtask_status "busy-recipient-completion" replied 45 || live_fail "busy-recipient completion task did not finish"
+busy_completion_task_id=$(live_snapshot_value "Object.values(output.state.subtasks).find(function (t) { return t.title === \"busy-recipient-completion\" && t.assigneeID === \"$busy_peer_id\" }).id" | tr -d '"')
+[[ -n "$busy_completion_task_id" && "$busy_completion_task_id" != "null" ]] || live_fail "busy-recipient completion task id is missing"
+busy_hop_id=""
+for _ in $(seq 1 60); do
+  busy_hop_id=$(live_snapshot_value "(() => { const hop = Object.values(output.state.subtasks).find(function (t) { return t.parentID === \"$busy_completion_task_id\" && t.handoff && t.handoff.completion === true }); return hop ? hop.id : \"\" })()" | tr -d '"')
+  [[ -n "$busy_hop_id" && "$busy_hop_id" != "null" ]] && break
+  sleep 0.25
+done
+[[ -n "$busy_hop_id" && "$busy_hop_id" != "null" ]] || live_fail "busy-recipient completion hop was not created"
+busy_field() {
+  local field="$1"
+  live_snapshot_value "output.state.subtasks[\"$busy_hop_id\"][\"$field\"]" | tr -d '"'
+}
+[[ "$(busy_field assigneeID)" == "$busy_lead_id" ]] || live_fail "completion hop was not addressed to the busy leader"
+[[ "$(busy_field state)" == "pending" ]] || live_fail "completion hop left pending before the hold expired"
+[[ "$(busy_field attempts)" == "0" ]] || live_fail "completion hop recorded a failed attempt (got $(busy_field attempts))"
+[[ "$(busy_field retryAfter)" == "null" ]] || live_fail "completion hop carried a retry timer: $(busy_field retryAfter)"
+busy_hold_until=$(busy_field deliveryHoldUntil)
+[[ "$busy_hold_until" != "null" ]] || live_fail "completion hop carried no delivery hold"
+# Wait for the quiet window itself to pass. The busy recipient is the only
+# reason the hop is still queued, so the scheduler must keep it pending with no
+# retry marker and no failed attempt.
+for _ in $(seq 1 80); do
+  hop_state=$(busy_field state)
+  hop_hold=$(busy_field deliveryHoldUntil)
+  hop_retry=$(busy_field retryAfter)
+  now_ms=$(date +%s%3N)
+  [[ "$hop_state" == "pending" && "$hop_hold" != "null" && "$hop_hold" -le "$now_ms" && "$hop_retry" == "null" ]] && break
+  sleep 0.25
+done
+[[ "$(busy_field state)" == "pending" ]] || live_fail "completion hop stopped being pending while the recipient stayed busy"
+[[ "$(busy_field attempts)" == "0" ]] || live_fail "completion hop gained a failed attempt while waiting for a busy recipient"
+[[ "$(busy_field retryAfter)" == "null" ]] || live_fail "completion hop became a retry while waiting for a busy recipient"
+[[ "$(busy_field deliveryHoldUntil)" != "null" ]] || live_fail "completion hop lost its delivery hold after the quiet window"
+[[ "$(live_snapshot_value "output.state.subtasks[\"$busy_hold_id\"].state" | tr -d '"')" == "working" ]] || live_fail "busy leader stopped working before the queued-delivery check"
+live_focus_work "$LIVE_TUI_SESSION"
+live_require_work_text "$LIVE_TUI_SESSION" "QUEUED" 15 "busy-recipient completion card reads QUEUED"
+live_assert_absence_work "$LIVE_TUI_SESSION" "RETRYING" "busy-recipient completion never reads RETRYING"
+live_assert_absence "$LIVE_TUI_SESSION" "RETRYING" "no RETRYING label anywhere while only a delivery hold and a live run exist"
+live_assert_absence "$LIVE_TUI_SESSION" "r retry" "a delivery hold offers no retry action"
+if compgen -G "$LIVE_STATE/ensemble/logs/*" >/dev/null; then
+  if grep -R -h "\"taskID\":\"$busy_hop_id\"" "$LIVE_STATE/ensemble/logs" | grep -q '"event":"retry.scheduled"'; then
+    live_fail "the busy-recipient delivery hold logged a retry"
+  fi
+  if grep -R -h "\"taskID\":\"$busy_hop_id\"" "$LIVE_STATE/ensemble/logs" | grep -q '"event":"task.recovered".*from=retrying'; then
+    live_fail "the busy-recipient delivery hold recovered from a retry it never had"
+  fi
+fi
+live_log "ticket #201 busy-recipient completion stayed QUEUED with no retry attempt or action ($busy_hop_id)"
+
+# Settle the probe and restore the real leader before later turns.
+live_invoke "task.cancel" "{\"id\":\"$busy_hop_id\"}" >/dev/null
+live_invoke "task.cancel" "{\"id\":\"$busy_hold_id\"}" >/dev/null
+live_wait_for_subtask_status "busy-recipient-hold fake-lease-hold" replied 30 || true
+live_invoke "workspace.update" "{\"id\":\"$ws_id\",\"memberIDs\":$busy_original_members,\"leaderID\":\"$fake_id\"}" >/dev/null
+live_focus_chat "$LIVE_TUI_SESSION"
+live_require_no_active_work "$LIVE_TUI_SESSION" 25 "busy-recipient probe settled"
+
+# ---------------------------------------------------------------------------
+# Ticket #201/#198: a batch review that replies without ensemble_review gets
+# one correction turn naming the remaining items. The fixture reviewer closes
+# the same batch on that turn; the batch never closes silently. Fresh peers
+# keep earlier sticky hold fixtures out of this batch's completion replies.
+# ---------------------------------------------------------------------------
+live_invoke "agent.create" '{"name":"BatchA"}' >/dev/null
+live_invoke "agent.create" '{"name":"BatchB"}' >/dev/null
+batch_a_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "BatchA" }).id' | tr -d '"')
+batch_b_id=$(live_snapshot_value 'Object.values(output.state.agents).find(function (a) { return a.name === "BatchB" }).id' | tr -d '"')
+[[ -n "$batch_a_id" && "$batch_a_id" != "null" && -n "$batch_b_id" && "$batch_b_id" != "null" ]] || live_fail "batch-correction peers were not created"
+batch_members=$(live_snapshot_value "output.state.workspaces['$ws_id'].memberIDs.concat(['$batch_a_id','$batch_b_id'])")
+live_invoke "workspace.update" "{\"id\":\"$ws_id\",\"memberIDs\":$batch_members}" >/dev/null
+clear_composer_text
+live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for the batch-correction fixture"
+live_type "$LIVE_TUI_SESSION" "!BatchA !BatchB fake-batch-correction-fixture"
+live_key "$LIVE_TUI_SESSION" Enter
+sleep 0.25
+live_key "$LIVE_TUI_SESSION" Escape
+batch_correction_id=""
+for _ in $(seq 1 120); do
+  batch_correction_id=$(live_snapshot_value "(() => { const batch = Object.values(output.state.subtasks).find(function (t) { return t.handoff && t.handoff.batch === true && t.instruction.indexOf(\"fake-batch-correction-fixture\") >= 0 }); return batch ? batch.id : \"\" })()" | tr -d '"')
+  [[ -n "$batch_correction_id" && "$batch_correction_id" != "null" ]] && break
+  sleep 0.25
+done
+[[ -n "$batch_correction_id" && "$batch_correction_id" != "null" ]] || live_fail "batch-correction fixture never consolidated"
+batch_correction_item_count=$(live_snapshot_value "output.state.subtasks[\"$batch_correction_id\"].handoff.itemIDs.length" | tr -d '"')
+[[ "$batch_correction_item_count" == "2" ]] || live_fail "batch-correction fixture did not consolidate both completions (got $batch_correction_item_count)"
+batch_correction_closed() {
+  local state decided
+  state=$(live_snapshot_value "output.state.subtasks[\"$batch_correction_id\"].state" | tr -d '"')
+  decided=$(live_snapshot_value "(() => { const batch = output.state.subtasks[\"$batch_correction_id\"]; return (batch.handoff.itemIDs || []).map(function (id) { const item = output.state.subtasks[id]; return item && item.handoff ? item.handoff.decided : undefined }).join(\",\") })()" | tr -d '"')
+  [[ "$state" == "replied" && "$decided" == "ended,ended" ]]
+}
+live_wait_for 90 "batch correction closed every item" batch_correction_closed \
+  || live_fail "batch correction did not close the batch (state $(live_snapshot_value "output.state.subtasks[\"$batch_correction_id\"].state") items $(live_snapshot_value "JSON.stringify(output.state.subtasks[\"$batch_correction_id\"].handoff.itemIDs)") decisions $(live_snapshot_value "(output.state.subtasks[\"$batch_correction_id\"].handoff.itemIDs || []).map(function (id) { return output.state.subtasks[id]?.handoff?.decided })")"
+[[ "$(live_snapshot_value "output.state.subtasks[\"$batch_correction_id\"].handoff.reviewCorrectionSent" | tr -d '"')" == "true" ]] \
+  || live_fail "the batch never spent its one correction turn"
+[[ "$(live_snapshot_value "output.state.subtasks[\"$batch_correction_id\"].handoff.reviewIncomplete" | tr -d '"')" == "null" ]] \
+  || live_fail "the corrected batch kept a review-incomplete reason"
+[[ "$(live_snapshot_value "output.state.subtasks[\"$batch_correction_id\"].attempts" | tr -d '"')" == "1" ]] \
+  || live_fail "the correction turn incremented the batch attempt budget"
+live_require_joined_text "$LIVE_TUI_SESSION" "Review closed: Review 2 completions — 2 decided." 20 "batch correction closed visibly"
+if compgen -G "$LIVE_STATE/ensemble/logs/*" >/dev/null; then
+  grep -R -h "\"taskID\":\"$batch_correction_id\"" "$LIVE_STATE/ensemble/logs" | grep -q '"event":"task.batch.correction"' \
+    || live_fail "the batch correction turn was not audited"
+  if grep -R -h "\"taskID\":\"$batch_correction_id\"" "$LIVE_STATE/ensemble/logs" | grep -q '"event":"task.batch.incomplete"'; then
+    live_fail "the corrected batch was marked incomplete"
+  fi
+fi
+live_log "ticket #201 batch correction spent one turn and closed 2 items ($batch_correction_id)"
+
 # Ticket #195: the fake sender supplies no handoff path. The service writes a
 # valid file under the workspace handoff directory and queues the same durable
 # hop; one call, one file, one hop.
@@ -3121,6 +3261,9 @@ OPENCODE_PASSWORD="$LIVE_SERVER_PASSWORD" "$LIVE_NODE_BIN" --experimental-strip-
   >"$LIVE_LOGS/doctor.txt" 2>&1 || true
 grep -q "Mismatches: none" "$LIVE_LOGS/doctor.txt" \
   || live_fail "doctor reported a work mismatch: $(grep -A3 'Mismatches:' "$LIVE_LOGS/doctor.txt" | tail -n +2 | head -n 2)"
+if grep -q "work_terminal_contradiction\|terminal-with-queue-fields" "$LIVE_LOGS/doctor.txt"; then
+  live_fail "doctor reported a terminal delivery-hold or retry contradiction"
+fi
 "$LIVE_NODE_BIN" "$LIVE_ROOT/scripts/log-summary.mjs" --dir "$LIVE_STATE/ensemble/logs" --json \
   >"$LIVE_LOGS/log-summary.json"
 failed_tasks=$("$LIVE_NODE_BIN" -e '
