@@ -4934,6 +4934,20 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Ticket #200: a correction answer is a final answer too, so it keeps the
+   * existing `@KnownAgent` -> `$KnownAgent` normalization and its no-dispatch
+   * notice. The correction prompt never re-enables `@` as an agent prefix.
+   */
+  private async announceMentionNormalization(workspace: Workspace, taskID: Id, names: string[]): Promise<void> {
+    await this.appendMessage(workspace, {
+      author: "system",
+      text: `Mention syntax normalized: ${names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; leaders assign with ensemble_delegate, peers with ensemble_handoff.`,
+      kind: "system",
+      taskID,
+    })
+  }
+
+  /**
    * Ticket #194: project durable facts for the one turn-finalization policy.
    * This is data gathering only — every decision and every side effect belongs
    * to the policy function and the caller's existing terminal-write path.
@@ -4951,6 +4965,9 @@ export class EnsembleV2Service {
           decided: state.subtasks[itemID]?.handoff?.decided,
         }))
       : []
+    const mentionedMemberIDs = workspace
+      ? parseMentions(reply, workspace, state.agents).filter((memberID) => memberID !== task.assigneeID)
+      : []
     return {
       task: {
         taskID: task.id,
@@ -4960,6 +4977,7 @@ export class EnsembleV2Service {
         leader: workspace !== undefined && task.assigneeID === workspace.leaderID,
         explicitHandoff: children.some((child) => child.workKind === "handoff" && child.handoff?.completion !== true),
         batchCorrectionSent: task.handoff?.reviewCorrectionSent === true,
+        mentionCorrectionSent: task.mentionCorrectionSent === true,
       },
       nativeChildren: Object.values(state.nativeSubagents)
         .filter((run) => run.parentTaskID === task.id)
@@ -4973,7 +4991,7 @@ export class EnsembleV2Service {
       batchItems,
       finalText: {
         text: reply,
-        mentionedMemberIDs: workspace ? parseMentions(reply, workspace, state.agents) : [],
+        mentionedMemberIDs,
       },
       createdWork: children.map((child) => ({
         workID: child.id,
@@ -5036,6 +5054,62 @@ export class EnsembleV2Service {
     ].join("\n")
     const result = await this.runCorrectionTurn(sessionID, prompt)
     return { text: result.text }
+  }
+
+  /**
+   * Ticket #200: spend the one unbacked-mention correction turn. The durable
+   * marker is written before the prompt so a crash, retry, or restart cannot
+   * grant a second correction. The prompt names only members and the required
+   * tool action; it never restates the answer or creates work itself.
+   */
+  private async correctUnbackedMentions(
+    task: Subtask,
+    memberIDs: Id[],
+    sessionID: string,
+  ): Promise<{ text: string } | undefined> {
+    const current = this.store.cloneSubtask(task.id)
+    if (!current) return undefined
+    current.mentionCorrectionSent = true
+    await this.store.saveSubtask(current)
+    this.noteWorkChanged(current)
+    this.logger?.event("info", "task", "task.mention.correction", {
+      workspaceID: current.workspaceID,
+      taskID: current.id,
+      dispatchGroupID: current.dispatchGroupID,
+      mentioned: memberIDs.length,
+      memberIDs,
+    })
+    const names = memberIDs.map((memberID) => `$${this.agentName(memberID)}`).join(", ")
+    const prompt = [
+      `Mention correction: your answer names ${names}, but this run created no handoff, delegation, or peer turn for ${memberIDs.length === 1 ? "that member" : "them"}.`,
+      `Call ensemble_handoff (or ensemble_delegate if you are the workspace leader) to create the work now, or remove the mention from your answer. A chat mention does not assign work.`,
+    ].join("\n")
+    const result = await this.runCorrectionTurn(sessionID, prompt)
+    return { text: result.text }
+  }
+
+  /**
+   * Ticket #200: after the one correction, a still-unbacked mention finalizes
+   * with a visible warning instead of looping or dropping the answer. Logs
+   * carry member ids and counts only; the answer never enters a log.
+   */
+  private async warnUnbackedMentions(task: Subtask, memberIDs: Id[]): Promise<void> {
+    const workspace = this.store.workspace(task.workspaceID)
+    if (!workspace || memberIDs.length === 0) return
+    const names = memberIDs.map((memberID) => `$${this.agentName(memberID)}`).join(", ")
+    await this.appendMessage(workspace, {
+      author: "system",
+      text: `Unbacked mention: ${names} ${memberIDs.length === 1 ? "was" : "were"} named but no handoff, delegation, or peer turn was created. No work was created automatically.`,
+      kind: "system",
+      taskID: task.id,
+    })
+    this.logger?.event("warn", "task", "task.mention.unbacked", {
+      workspaceID: task.workspaceID,
+      taskID: task.id,
+      dispatchGroupID: task.dispatchGroupID,
+      mentioned: memberIDs.length,
+      memberIDs,
+    })
   }
 
   /**
@@ -8020,7 +8094,7 @@ export class EnsembleV2Service {
         })
         return
       }
-      if (mention.changed) await this.appendMessage(workspace, { author: "system", text: `Mention syntax normalized: ${mention.names.map((name) => `@${name} → $${name}`).join(", ")}. Chat mentions do not assign work; leaders assign with ensemble_delegate, peers with ensemble_handoff.`, kind: "system", taskID: task.id })
+      if (mention.changed) await this.announceMentionNormalization(workspace, task.id, mention.names)
       if (currentTask.approvalID) {
         const linked = current.approvals[currentTask.approvalID]
         if (linked?.status === "pending") {
@@ -8065,18 +8139,35 @@ export class EnsembleV2Service {
       // correction orchestration here rather than growing parallel checks
       // elsewhere.
       let finalization = decideTurnFinalization(this.turnFinalizationFacts(currentTask, reply, children, current))
-      // Ticket #198: a batch review may not finalize as a successful reply
-      // while any item lacks a disposition. Spend the one correction turn in
-      // the same native session; it is not an execution retry, so the attempt
-      // budget and dispatch group are untouched.
-      if (finalization.action === "correct" && finalization.reason === "review-incomplete") {
-        const correction = await this.correctBatchReview(
-          currentTask,
-          finalization.remainingIDs ?? [],
-          binding.sessionID,
-        )
+      // Tickets #198/#200: each protocol contract may spend at most one
+      // correction turn in this same native session. The durable markers make
+      // the loop bounded even across retries and restarts: once a contract's
+      // marker is set the policy returns its warn fallback instead of another
+      // correction, so a confused model can never wedge the queue.
+      while (finalization.action === "correct") {
+        let correction: { text: string } | undefined
+        if (finalization.reason === "review-incomplete") {
+          correction = await this.correctBatchReview(
+            currentTask,
+            finalization.remainingIDs ?? [],
+            binding.sessionID,
+          )
+        } else if (finalization.reason === "mention-unbacked") {
+          correction = await this.correctUnbackedMentions(
+            currentTask,
+            finalization.unbackedMemberIDs ?? [],
+            binding.sessionID,
+          )
+        } else {
+          break
+        }
         if (!correction) return
-        const correctionReply = isFallbackReply(correction.text) ? "" : correction.text.trim()
+        const corrected = normalizeAgentMentions(
+          correction.text,
+          workspace.memberIDs.map((id) => current.agents[id]).filter((item): item is Agent => Boolean(item)),
+        )
+        if (corrected.changed) await this.announceMentionNormalization(workspace, task.id, corrected.names)
+        const correctionReply = isFallbackReply(corrected.text) ? "" : corrected.text.trim()
         current = this.store.read()
         const refreshed = this.store.cloneSubtask(task.id)
         if (!refreshed) return
@@ -8084,8 +8175,9 @@ export class EnsembleV2Service {
         // write this run's contract result into the new epoch.
         if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return
         currentTask = refreshed
-        // The correction itself may have closed the batch through
-        // ensemble_review, or a user action may have settled it meanwhile.
+        // The correction itself may have settled the row (the batch closed
+        // through ensemble_review, the agent created the work, or a user
+        // action settled it meanwhile).
         if (refreshed.activeRunID !== runID || refreshed.state === "replied") {
           await this.recoverLateSuccess({
             task: refreshed,
@@ -8109,7 +8201,13 @@ export class EnsembleV2Service {
         await this.holdIncompleteBatchReview(currentTask, finalization.remainingIDs ?? [], live, globalEpoch, workspaceEpoch)
         return
       }
-      if (finalization.action !== "accept") {
+      // A corrected answer still names a member with no work for them: the
+      // turn still finalizes, but the transcript carries an honest warning.
+      // Nothing is dispatched from prose and the marker prevents a loop.
+      if (finalization.action === "warn" && finalization.reason === "mention-unbacked") {
+        await this.warnUnbackedMentions(currentTask, finalization.unbackedMemberIDs ?? [])
+      }
+      if (finalization.action !== "accept" && !(finalization.action === "warn" && finalization.reason === "mention-unbacked")) {
         // IDs and reason only; an unexpected decision must not invent a
         // terminal write outside the contracts above.
         this.logger?.event("warn", "task", "task.finalization.unwired", {

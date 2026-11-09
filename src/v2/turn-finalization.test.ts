@@ -3,7 +3,9 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { decideTurnFinalization, type TurnFinalizationFacts } from "./turn-finalization.ts"
 
-function facts(patch: Partial<TurnFinalizationFacts> = {}): TurnFinalizationFacts {
+function facts(
+  patch: Partial<Omit<TurnFinalizationFacts, "task">> & { task?: Partial<TurnFinalizationFacts["task"]> } = {},
+): TurnFinalizationFacts {
   return {
     task: {
       taskID: "task_1",
@@ -13,6 +15,7 @@ function facts(patch: Partial<TurnFinalizationFacts> = {}): TurnFinalizationFact
       leader: false,
       explicitHandoff: false,
       batchCorrectionSent: false,
+      mentionCorrectionSent: false,
       ...patch.task,
     },
     nativeChildren: patch.nativeChildren ?? [],
@@ -35,10 +38,10 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
- * Ticket #194/#198: the single turn-finalization policy must decide every
- * managed turn shape. #194 wired the accept path; #198 adds the batch-review
- * contract, so the matrix pins the decision for each shape rather than
- * growing parallel finalization checks.
+ * Ticket #194/#198/#200: the single turn-finalization policy must decide every
+ * managed turn shape. #194 wired the accept path, #198 added the batch-review
+ * contract, and #200 adds unbacked member mentions, so the matrix pins the
+ * decision for each shape rather than growing parallel finalization checks.
  */
 const matrix: Array<{ name: string; input: TurnFinalizationFacts; expected: ReturnType<typeof decideTurnFinalization> }> = [
   {
@@ -115,7 +118,15 @@ const matrix: Array<{ name: string; input: TurnFinalizationFacts; expected: Retu
     input: facts({
       finalText: { text: "Done. $Sage can pick this up next.", mentionedMemberIDs: ["agent_sage"] },
     }),
-    expected: { action: "accept" },
+    expected: { action: "correct", reason: "mention-unbacked", unbackedMemberIDs: ["agent_sage"] },
+  },
+  {
+    name: "mention-bearing answer after its one correction",
+    input: facts({
+      task: { mentionCorrectionSent: true },
+      finalText: { text: "Done. $Sage can pick this up next.", mentionedMemberIDs: ["agent_sage"] },
+    }),
+    expected: { action: "warn", reason: "mention-unbacked", unbackedMemberIDs: ["agent_sage"] },
   },
   {
     name: "mention-bearing answer backed by created work",
@@ -133,6 +144,14 @@ const matrix: Array<{ name: string; input: TurnFinalizationFacts; expected: Retu
     }),
     expected: { action: "accept" },
   },
+  {
+    name: "partly backed mentions only correct the unbacked member",
+    input: facts({
+      finalText: { text: "Done. $Sage has work; $Echo should too.", mentionedMemberIDs: ["agent_sage", "agent_echo"] },
+      createdWork: [{ workID: "task_child", workKind: "handoff", assigneeID: "agent_sage" }],
+    }),
+    expected: { action: "correct", reason: "mention-unbacked", unbackedMemberIDs: ["agent_echo"] },
+  },
 ]
 
 test("ticket194: the turn-finalization decision matrix covers every managed turn shape", async (t) => {
@@ -141,6 +160,26 @@ test("ticket194: the turn-finalization decision matrix covers every managed turn
       assert.deepEqual(decideTurnFinalization(scenario.input), scenario.expected)
     })
   }
+})
+
+test("ticket200: an unbacked mention gets exactly one correction before an honest warning", () => {
+  const first = facts({
+    finalText: { text: "Done. $Sage can pick this up next.", mentionedMemberIDs: ["agent_sage"] },
+  })
+  assert.deepEqual(decideTurnFinalization(first), {
+    action: "correct",
+    reason: "mention-unbacked",
+    unbackedMemberIDs: ["agent_sage"],
+  })
+  const corrected = facts({
+    task: { mentionCorrectionSent: true },
+    finalText: { text: "Done. $Sage can pick this up next.", mentionedMemberIDs: ["agent_sage"] },
+  })
+  assert.deepEqual(decideTurnFinalization(corrected), {
+    action: "warn",
+    reason: "mention-unbacked",
+    unbackedMemberIDs: ["agent_sage"],
+  })
 })
 
 test("ticket198: a batch review gets exactly one correction before an honest warning", () => {

@@ -368,6 +368,12 @@ export type Subtask = {
   /** Peer-turn record (ticket #57). Present only on workKind "turn". */
   turn?: TurnInfo
   /**
+   * Ticket #200: the turn has spent its one correction turn for unbacked
+   * member mentions. Durable so a retry or restart cannot loop the correction;
+   * one correction per contract.
+   */
+  mentionCorrectionSent?: boolean
+  /**
    * General-skill leader triage (ticket #103): the turn must read and either
    * use or delegate the listed skills. This is the single triage source of
    * truth: a non-empty grant identifies a leader triage task. The host session
