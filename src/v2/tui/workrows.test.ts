@@ -9,6 +9,7 @@ import {
   activityDetailForTask,
   activityFrameForKind,
   activityLine,
+  activitySummary,
   activityVerb,
   createWorkCardCache,
   hasActiveWork,
@@ -60,6 +61,15 @@ const task = (patch: Partial<Subtask> = {}): Subtask => ({
   awaitingChildren: false,
   attempts: 0,
   createdAt: 1,
+  ...patch,
+})
+
+const activityEntry = (patch: Partial<Parameters<typeof activitySummary>[0]["live"][number]> = {}) => ({
+  key: "k",
+  label: "Clark",
+  createdAt: 1,
+  verb: "Asking $Clark…",
+  kind: "asking" as const,
   ...patch,
 })
 
@@ -210,6 +220,112 @@ test("activity lines name the agent with the default verb", () => {
   assert.equal(activityVerb("waiting", "Ana"), "waiting on Ana…")
   assert.equal(activityVerb("wrapping"), "wrapping up…")
   assert.equal(activityVerb("reading"), ACTIVITY_DEFAULT_VERB)
+})
+
+test("activity summary names one in-flight ask", () => {
+  const summary = activitySummary({ live: [activityEntry()], queued: [] })
+  assert.equal(summary.text, "Asking $Clark…")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 1)
+})
+
+test("activity summary falls back to Retrying when only retries remain", () => {
+  const summary = activitySummary({
+    live: [
+      activityEntry({ key: "r1", label: "Ana", verb: "retrying…", kind: "retrying" }),
+      activityEntry({ key: "r2", label: "Bo", verb: "retrying…", kind: "retrying" }),
+    ],
+    queued: [],
+  })
+  assert.equal(summary.text, "Retrying…")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 2)
+})
+
+test("activity summary falls back to Queued when only queued work remains", () => {
+  const summary = activitySummary({
+    live: [],
+    queued: [
+      activityEntry({ key: "q1", label: "Ana", verb: "queued", kind: "checking" }),
+      activityEntry({ key: "q2", label: "Bo", verb: "queued", kind: "checking" }),
+    ],
+  })
+  assert.equal(summary.text, "Queued…")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 2)
+})
+
+test("activity summary is empty while nothing is active", () => {
+  const summary = activitySummary({ live: [], queued: [] })
+  assert.equal(summary.text, "")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 0)
+})
+
+test("activity summary collapses other live work into Working", () => {
+  const summary = activitySummary({
+    live: [
+      activityEntry({ key: "w1", label: "Ana", verb: "working…", kind: "working" }),
+      activityEntry({ key: "w2", label: "Bo", verb: "checking the details…", kind: "checking" }),
+    ],
+    queued: [],
+  })
+  assert.equal(summary.text, "Working…")
+  assert.equal(summary.overflow, 0)
+  assert.equal(summary.total, 2)
+})
+
+test("activity summary names the ask, works the rest, and overflows queued work", () => {
+  const summary = activitySummary({
+    live: [
+      activityEntry({ key: "a1" }),
+      activityEntry({ key: "w1", label: "Ana", verb: "working…", kind: "working" }),
+    ],
+    queued: [
+      activityEntry({ key: "q1", label: "Bo", verb: "queued", kind: "checking" }),
+      activityEntry({ key: "q2", label: "Dee", verb: "queued", kind: "checking" }),
+      activityEntry({ key: "q3", label: "Eli", verb: "queued", kind: "checking" }),
+    ],
+  })
+  assert.equal(summary.text, "Asking $Clark… │ Working… │ +3 more")
+  assert.equal(summary.overflow, 3)
+  assert.equal(summary.total, 5)
+})
+
+test("activity summary overflows queued work behind a retrying line", () => {
+  const summary = activitySummary({
+    live: [activityEntry({ key: "r1", label: "Ana", verb: "retrying…", kind: "retrying" })],
+    queued: [
+      activityEntry({ key: "q1", label: "Bo", verb: "queued", kind: "checking" }),
+      activityEntry({ key: "q2", label: "Dee", verb: "queued", kind: "checking" }),
+    ],
+  })
+  assert.equal(summary.text, "Retrying… │ +2 more")
+  assert.equal(summary.overflow, 2)
+  assert.equal(summary.total, 3)
+})
+
+test("activity summary names one ask and overflows the rest", () => {
+  const summary = activitySummary({
+    live: [
+      activityEntry({ key: "a1" }),
+      activityEntry({ key: "a2", label: "Bo" }),
+    ],
+    queued: [],
+  })
+  assert.equal(summary.text, "Asking $Clark… │ +1 more")
+  assert.equal(summary.overflow, 1)
+  assert.equal(summary.total, 2)
+})
+
+test("activity summary counts carded task entries", () => {
+  const summary = activitySummary({
+    live: [activityEntry({ key: "carded-live", taskID: "carded-live" })],
+    queued: [activityEntry({ key: "carded-queued", taskID: "carded-queued", label: "Bo", verb: "queued", kind: "checking" })],
+  })
+  assert.equal(summary.text, "Asking $Clark… │ +1 more")
+  assert.equal(summary.overflow, 1)
+  assert.equal(summary.total, 2)
 })
 
 test("activity selection dedups agents oldest-first and caps with overflow", () => {

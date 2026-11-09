@@ -384,6 +384,63 @@ export function selectActivityAgents(
   return { shown: ordered.slice(0, limit).map((entry) => entry.label), overflow: Math.max(0, ordered.length - limit) }
 }
 
+export type ActivitySummary = {
+  /** The one rendered line; empty when no work is active. */
+  text: string
+  /** Active entries represented across live and queued groups. */
+  total: number
+  /** Active entries not represented by a named summary segment. */
+  overflow: number
+}
+
+/**
+ * One aggregate activity line for chat (ticket #181, spec #178). Replaces the
+ * per-agent rows: `Asking $Name… │ Working… │ +N more`.
+ *
+ * Priority follows the spec: the oldest in-flight ask is named first, any
+ * other live work collapses into `Working…`, and `Retrying…`/`Queued…` appear
+ * only when nothing above them is active. `Working…`/`Retrying…`/`Queued…`
+ * represent their whole bucket, so overflow counts only entries no segment
+ * covers (additional asks, lower-priority live states, and queued work when a
+ * live segment already speaks). Carded tasks are ordinary entries — aggregate
+ * detail never suppresses them. Pure; one pass over the groups.
+ */
+export function activitySummary(groups: { live: ActivityEntry[]; queued: ActivityEntry[] }): ActivitySummary {
+  let asking: ActivityEntry | undefined
+  let working = 0
+  let retrying = 0
+  for (const entry of groups.live) {
+    if (entry.kind === "asking") {
+      if (!asking) asking = entry
+    } else if (entry.kind === "retrying") {
+      retrying += 1
+    } else {
+      working += 1
+    }
+  }
+  const queued = groups.queued.length
+  const total = groups.live.length + queued
+  const parts: string[] = []
+  let represented = 0
+  if (asking) {
+    parts.push(asking.verb)
+    represented += 1
+  }
+  if (working > 0) {
+    parts.push("Working…")
+    represented += working
+  } else if (!asking && retrying > 0) {
+    parts.push("Retrying…")
+    represented += retrying
+  } else if (!asking && retrying === 0 && queued > 0) {
+    parts.push("Queued…")
+    represented += queued
+  }
+  const overflow = total - represented
+  if (overflow > 0) parts.push(`+${overflow} more`)
+  return { text: chromeJoin(parts), total, overflow }
+}
+
 /**
  * Split active agents into live (working/retrying/waiting) and queued-only
  * (pending with no wait), oldest first, deduplicated. Terminal work
