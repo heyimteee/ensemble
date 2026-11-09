@@ -336,15 +336,22 @@ export type HistoryViewState = {
   expanded: Record<string, boolean>
   done: Record<string, number>
   fresh: Record<string, boolean>
+  /**
+   * Explicit user expansion choices. A group without an entry follows the
+   * newest-first default: only the newest group expands, and a former newest
+   * rolls up when a newer group arrives.
+   */
+  manual: Record<string, boolean>
 }
 
 export function emptyHistoryViewState(): HistoryViewState {
-  return { expanded: {}, done: {}, fresh: {} }
+  return { expanded: {}, done: {}, fresh: {}, manual: {} }
 }
 
 function sameHistoryView(left: HistoryViewState, right: HistoryViewState): boolean {
   const keys = Object.keys(left.expanded)
   if (keys.length !== Object.keys(right.expanded).length) return false
+  if (keys.some((key) => left.manual[key] !== right.manual[key])) return false
   return keys.every(
     (key) =>
       left.expanded[key] === right.expanded[key] &&
@@ -361,17 +368,19 @@ export function reconcileHistoryView(
   const expanded: Record<string, boolean> = {}
   const done: Record<string, number> = {}
   const fresh: Record<string, boolean> = {}
+  const manual: Record<string, boolean> = {}
   groups.forEach((group, index) => {
-    const priorExpanded = previous.expanded[group.id]
+    const priorExpanded = previous.manual[group.id]
     const isExpanded = priorExpanded ?? index === 0
     const priorDone = previous.done[group.id]
     expanded[group.id] = isExpanded
     done[group.id] = group.done
+    if (priorExpanded !== undefined) manual[group.id] = priorExpanded
     fresh[group.id] = isExpanded
       ? false
       : Boolean(previous.fresh[group.id] || (priorDone !== undefined && group.done > priorDone))
   })
-  const next = { expanded, done, fresh }
+  const next = { expanded, done, fresh, manual }
   return sameHistoryView(previous, next) ? previous : next
 }
 
@@ -382,6 +391,7 @@ export function toggleHistoryView(state: HistoryViewState, groupID: string): His
     expanded: { ...state.expanded, [groupID]: expanded },
     done: state.done,
     fresh: { ...state.fresh, [groupID]: expanded ? false : (state.fresh[groupID] ?? false) },
+    manual: { ...state.manual, [groupID]: expanded },
   }
 }
 

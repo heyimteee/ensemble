@@ -34,8 +34,14 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   references with a
   cached index (a counting `fd` wrapper proves filtering spawns no discovery),
   a genuine native FAILED card next to a controlled-stop CANCELLED card, and
-  doctor plus `logs:summary` artifacts. The long-run lifecycle case lives in
-  `test:live:lifecycle`.
+  doctor plus `logs:summary` artifacts. Ticket #186 adds the pane-interaction
+  delivery: the select/interact focus matrix, chat Enter versus `i`, Agents-first
+  `h`, Work via `l`, `Space b l/r` toggles with durable visibility and F3
+  removal, ANSI evidence for focused white / unfocused grey pane headings and
+  borders, task-level HISTORY with rollup/expand/dismiss/clear, the one-line
+  aggregate activity summary with Work open, and the small/full approvals modes
+  with the left footer, chat modal, and `V` retired. The long-run lifecycle case
+  lives in `test:live:lifecycle`.
 - `npm run test:live:subagent`: ticket #188's real native-subagent probe. The
   isolated OpenCode 2.2.6 host runs the worktree plugin against the fake
   provider, then an Ensemble agent's fake turn calls the host's built-in
@@ -241,15 +247,18 @@ starts a fresh five-group fixture (one two-task group and four single-task
 groups), then checks:
 
 - 160×50: three panes, six tasks in two-column cards across two pages, the
-  Work header and group labels, spatial `hjkl`, `gg`/`G`, page-edge `j`/`k`,
-  the exact right edge, and the focused white / unfocused grey card borders
-  read from `tmux capture-pane -e`.
+  Work header and group labels, spatial `hjkl`, `gg`/`G`, page-edge `j`/`k`
+  and `h`/`l`, the exact right edge, and the focused white / unfocused grey
+  card borders read from `tmux capture-pane -e`. It also reads pane headings
+  and borders from ANSI capture: the selected Agents/Workspaces section, chat,
+  and Work are white while the rest stay grey.
 - 120×40 and 100×30: three panes with compact Work rows, group labels, the
-  dispatch budget label, focus movement, the page indicator, and the exact
-  right edge.
-- 80×24: the Work drawer starts closed, `F3` opens and focuses it, compact rows
-  and the drawer page indicator are checked, the page edge advances by
-  keyboard, and `F3` closes it back to the chat.
+  dispatch budget label, focus movement, the page indicator, the exact right
+  edge, and the same per-pane white/grey heading and border contract.
+- 80×24: the Work drawer starts open with durable visibility (ticket #183),
+  `Space b r` closes and reopens it, `F3` is proven retired, the closed drawer
+  survives a TUI restart, compact rows and the drawer page indicator are
+  checked, and the page edge advances by keyboard.
 - `NO_COLOR=1` restarts at 120×40 and proves frame-0 motion plus the state
   word while work is live.
 

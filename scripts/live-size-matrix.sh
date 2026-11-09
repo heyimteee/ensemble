@@ -31,6 +31,10 @@ live_setup "sizes"
 
 SIZES="${ENSEMBLE_V6_SIZES:-80x24 100x30 120x40 160x50}"
 
+# The size matrix sends five two/one-task groups and then runs layout, focus,
+# and page-edge probes. The fixture's lease hold outlives those checks so a
+# task never terminalizes mid-measurement.
+
 live_start_fake_provider
 
 live_write_config <<EOF
@@ -120,12 +124,14 @@ send_group() {
 # Five dispatch groups, six tasks: one two-agent group plus four single-agent
 # groups. The long hold keeps every task active through a size's checks; the
 # rows are cancelled before the next size.
+# The size fixture uses the long lease hold so every task stays active across
+# the layout, focus, and page-edge probes; cancel_tasks settles each size.
 send_fixture() {
-  send_group "size-group-a fake-queue-hold-long" 0 1
-  send_group "size-group-b fake-queue-hold-long" 0
-  send_group "size-group-c fake-queue-hold-long" 0
-  send_group "size-group-d fake-queue-hold-long" 0
-  send_group "size-group-e fake-queue-hold-long" 0
+  send_group "size-group-a fake-lease-hold" 0 1
+  send_group "size-group-b fake-lease-hold" 0
+  send_group "size-group-c fake-lease-hold" 0
+  send_group "size-group-d fake-lease-hold" 0
+  send_group "size-group-e fake-lease-hold" 0
   wait_active 6 30
 }
 
@@ -139,21 +145,11 @@ start_tui_at() {
   live_require_text "$LIVE_TUI_SESSION" "#SizeProbe" 20 "SizeProbe workspace surface at ${width}x${height}"
 }
 
-# Focus the Work zone from any Normal surface, including restored history.
+# Focus the Work pane from any Normal surface with the ticket #180 model.
+# The right column may be the closed drawer; Space b r reopens it.
 focus_work() {
-  local attempt pane
-  for attempt in 1 2 3 4 5 6; do
-    pane=$(live_capture "$LIVE_TUI_SESSION")
-    if grep -qF "NORMAL  │ Work list" <<<"$pane"; then return 0; fi
-    if grep -qF "│ Work list" <<<"$pane" || grep -qF "│ Approvals" <<<"$pane"; then
-      live_key "$LIVE_TUI_SESSION" Escape
-      sleep 0.35
-      continue
-    fi
-    live_key "$LIVE_TUI_SESSION" Tab
-    sleep 0.35
-  done
-  live_fail "could not focus the Work list"
+  live_focus_work_interact "$LIVE_TUI_SESSION"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Work list interaction"
 }
 
 ensure_active_view() {
@@ -398,10 +394,53 @@ check_spatial_focus() {
   live_key "$LIVE_TUI_SESSION" "k"
   live_require_text "$LIVE_TUI_SESSION" "5/5" 10 "k at the page edge returns to the previous page"
   live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "page edge returned to page one"
+  # Ticket #184: h/l also cross a page edge at the row's edge. The last card on
+  # page one is alone in its row; l lands on the nearest card of page two and h
+  # returns to the same card instead of a dead key.
+  live_key "$LIVE_TUI_SESSION" "l"
+  live_require_text "$LIVE_TUI_SESSION" "1/1" 10 "l at the right page edge moves to the next page"
+  live_require_text "$LIVE_TUI_SESSION" "page 2/2" 10 "l advanced the page indicator"
+  live_key "$LIVE_TUI_SESSION" "h"
+  live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "h at the left page edge returns to the previous page"
+  live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "h lands on the nearest card in the previous page"
   live_key "$LIVE_TUI_SESSION" "g"
   live_key "$LIVE_TUI_SESSION" "g"
   live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "gg returns to the first card before the border probe"
   sleep 0.3
+}
+
+check_pane_chrome() {
+  local width="$1" colors rail chat work
+  # Chat owns the white heading and border; Work and the rail stay muted.
+  live_focus_chat "$LIVE_TUI_SESSION"
+  live_assert_white_chat_text "$LIVE_TUI_SESSION" "#SizeProbe" "chat heading at ${width}"
+  live_assert_grey_text "$LIVE_TUI_SESSION" "WORK ACTIVE" "unfocused Work heading at ${width}"
+  colors=$(live_top_border_colors "$LIVE_TUI_SESSION")
+  [[ -n "$colors" ]] || live_fail "could not read pane borders at $width"
+  IFS=',' read -r rail chat work <<<"$colors"
+  [[ -n "$work" ]] || live_fail "expected three pane borders at $width (got $colors)"
+  live_color_is_grey "$rail" || live_fail "chat focus left the rail border non-grey at $width (got $rail)"
+  live_color_is_white "$chat" || live_fail "focused chat border is not white at $width (got $chat)"
+  live_color_is_grey "$work" || live_fail "unfocused Work border is not grey at $width (got $work)"
+
+  # Agents is its own sub-pane: white heading and section border only when it
+  # owns selection.
+  live_select_pane "$LIVE_TUI_SESSION" agents
+  live_assert_white_text "$LIVE_TUI_SESSION" "AGENTS (" "focused Agents heading at ${width}"
+  live_assert_grey_text "$LIVE_TUI_SESSION" "WORKSPACES (" "unfocused Workspaces heading at ${width}"
+  live_assert_border_above "$LIVE_TUI_SESSION" "AGENTS (" white "focused Agents section border at ${width}"
+  live_assert_border_above "$LIVE_TUI_SESSION" "WORKSPACES (" grey "unfocused Workspaces section border at ${width}"
+
+  # Work owns the white heading and right border when selected.
+  live_focus_work_interact "$LIVE_TUI_SESSION"
+  live_assert_white_text "$LIVE_TUI_SESSION" "WORK ACTIVE" "focused Work heading at ${width}"
+  live_assert_grey_chat_text "$LIVE_TUI_SESSION" "#SizeProbe" "unfocused chat heading at ${width}"
+  colors=$(live_top_border_colors "$LIVE_TUI_SESSION")
+  IFS=',' read -r rail chat work <<<"$colors"
+  live_color_is_grey "$rail" || live_fail "Work focus left the rail border non-grey at $width (got $rail)"
+  live_color_is_grey "$chat" || live_fail "Work focus left the chat border non-grey at $width (got $chat)"
+  live_color_is_white "$work" || live_fail "focused Work border is not white at $width (got $work)"
+  live_log "size matrix: ${width}-column pane headings and borders are white focused / grey unfocused"
 }
 
 check_size_160x50() {
@@ -449,12 +488,29 @@ check_size_compact() {
 }
 
 check_size_drawer() {
-  # Work is a closed drawer at 80 columns; the chat owns the row until F3.
-  live_assert_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" "Work drawer is closed at 80x24"
+  # Ticket #183: at 80 columns the right pane is a drawer that starts open and
+  # its visibility is durable. F3 is retired; Space b r is the only switch.
+  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 5 groups · 6 active" 20 "drawer starts open at 80x24"
+  live_focus_chat "$LIVE_TUI_SESSION"
+  live_toggle_pane_side "$LIVE_TUI_SESSION" r
+  live_require_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" 10 "Space b r closes the Work drawer"
   live_assert_text "$LIVE_TUI_SESSION" "Message…" "chat and composer fill the closed drawer row"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "closing the drawer returns to chat selection"
   live_key "$LIVE_TUI_SESSION" F3
-  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 5 groups · 6 active" 20 "F3 opens the Work drawer"
-  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "F3 focuses the open drawer"
+  sleep 0.5
+  live_assert_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" "F3 no longer opens the Work drawer"
+
+  # Durability: the closed drawer survives a TUI restart; reopening returns to
+  # select mode, then Enter starts card navigation.
+  start_tui_at 80 24
+  live_require_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" 20 "closed drawer persisted across restart"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "restored drawer layout keeps chat selected"
+  live_toggle_pane_side "$LIVE_TUI_SESSION" r
+  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 5 groups · 6 active" 20 "Space b r reopens the Work drawer"
+  live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "reopened drawer selects Work without entering"
+  live_assert_text "$LIVE_TUI_SESSION" "h/l column" "reopened drawer stays in select mode"
+  live_assert_white_text "$LIVE_TUI_SESSION" "WORK ACTIVE" "focused drawer heading at 80"
+  live_key "$LIVE_TUI_SESSION" Enter
   live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "drawer pages its compact body"
   [[ "$(work_card_border_count)" == "0" ]] || live_fail "drawer rendered card borders at 80x24"
   [[ "$(work_row_count)" == "5" ]] || live_fail "expected five drawer rows on page one at 80x24, got $(work_row_count)"
@@ -462,15 +518,29 @@ check_size_drawer() {
   live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "first drawer row owns the cursor"
   live_key "$LIVE_TUI_SESSION" "j"
   live_require_text "$LIVE_TUI_SESSION" "2/5" 10 "j moves between drawer rows"
-  # A page edge advances the drawer by keyboard, not only by F3.
+  # A page edge advances the drawer by keyboard.
   live_key "$LIVE_TUI_SESSION" "g"
   live_key "$LIVE_TUI_SESSION" "g"
   for _ in $(seq 1 10); do live_key "$LIVE_TUI_SESSION" "j"; done
   live_require_text "$LIVE_TUI_SESSION" "page 2/2" 10 "drawer j crosses the page edge"
-  live_key "$LIVE_TUI_SESSION" F3
-  live_require_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" 10 "F3 closes the Work drawer"
+  # Ticket #185/#186: the full approvals surface uses the same right column in
+  # the narrow drawer. Pending resolution is exercised at 160×80; here the
+  # drawer geometry, full-height replacement, and focus colour are proven on
+  # the empty inbox so the active size fixture cannot queue the ask.
+  live_focus_chat "$LIVE_TUI_SESSION"
+  live_key "$LIVE_TUI_SESSION" "v"
+  live_require_text "$LIVE_TUI_SESSION" "APPROVALS 0 pending" 10 "v opens full approvals in the drawer"
+  live_assert_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" "drawer full approvals cover Work"
+  live_assert_white_text "$LIVE_TUI_SESSION" "APPROVALS 0 pending" "focused drawer approvals heading"
+  live_key "$LIVE_TUI_SESSION" Escape
+  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE" 10 "Esc returns the drawer to split mode"
+  live_toggle_pane_side "$LIVE_TUI_SESSION" r
+  live_require_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" 10 "Space b r closes the reopened drawer"
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "closing the drawer returns focus to the chat"
-  live_log "size matrix: 80x24 drawer closed/open/close, rows, page edge, and focus passed"
+  # Leave the durable switch open for the wider sizes in the same run.
+  live_toggle_pane_side "$LIVE_TUI_SESSION" r
+  live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE" 10 "drawer reopened for the remaining sizes"
+  live_log "size matrix: 80x24 drawer open-by-default, Space b r, F3 removal, durability, rows, page edge, and focus passed"
 }
 
 check_size() {
@@ -479,8 +549,13 @@ check_size() {
   height="${size#*x}"
   start_tui_at "$width" "$height"
   cancel_tasks
-  send_fixture
   IFS=' ' read -r WORK_START WORK_END < <(resolve_work_columns "$width")
+  # Read the pane chrome before the timing-sensitive fixture starts; the
+  # hold tasks must still be active when the functional checks begin.
+  if (( width >= 96 )); then
+    check_pane_chrome "$width"
+  fi
+  send_fixture
   case "$size" in
     160x50) check_size_160x50 ;;
     120x40|100x30) check_size_compact "$size" "$width" "$height" ;;

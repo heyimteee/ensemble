@@ -216,7 +216,7 @@ test("ticket184: a finish in a collapsed group keeps focus and page on the selec
   assert.equal(focus?.page, 1)
   const laterItems = [
     ...initialItems,
-    replied({ id: "older-2", dispatchGroupID: "dispatch_old", createdAt: 3, finishedAt: 7_000, repliedAt: 7_000 }),
+    replied({ id: "older-2", dispatchGroupID: "dispatch_old", createdAt: 3, finishedAt: 4_000, repliedAt: 4_000 }),
   ]
   const laterViews = workViewGroups(laterItems, record(...laterItems), { now: 8_000 })
   const later = reconcileHistoryView(laterViews.history, initial)

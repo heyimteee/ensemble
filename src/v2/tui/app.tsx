@@ -128,6 +128,7 @@ import {
   initialInteractionState,
   insertWithoutTarget,
   interactionReducer,
+  isPaneFocus,
   paneFocusOf,
   visibleMessage,
   type InteractionEvent,
@@ -612,8 +613,10 @@ export function EnsembleV2App() {
   // v5.6 T9: pane where the current mouse drag started. Set on the left
   // button down (the renderer's selection event fires later, on release).
   let mouseSelectionPane: string | null = null
-  // Remember where settings was opened so closing returns to the same column.
+  // Remember where settings was opened so closing returns to the same column
+  // and the same select/interact mode (ticket #180/#186).
   let settingsReturnFocus: InteractionFocus = "chat"
+  let settingsReturnPaneMode: "select" | "interact" = "select"
   let messageTimer: ReturnType<typeof setTimeout> | undefined
   let wizardSettleTimer: ReturnType<typeof setTimeout> | undefined
   let wizardSettledKey = ""
@@ -2848,6 +2851,10 @@ export function EnsembleV2App() {
     const cursor = railCursor()
     if (cursor >= start && cursor < end) return
     const local = firstSelectableRailRow(sections[index]!.rows)
+    // Ticket #180: entering a rail pane is a deliberate cursor context move.
+    // Without this, the initial-cursor effect snaps back to the first agent
+    // and the next Enter opens an agent while Workspaces owns the pane.
+    railCursorMoved = true
     setRailCursor(start + local)
   }
 
@@ -4072,6 +4079,12 @@ export function EnsembleV2App() {
 
   const restoreSettingsFocus = () => {
     const target = settingsReturnFocus
+    // Ticket #180/#186: a pane restoration keeps the select/interact mode it
+    // had before the overlay. `focus.set` alone always lands in select mode.
+    if (isPaneFocus(target)) {
+      setPaneFocus(target, settingsReturnPaneMode)
+      return
+    }
     dispatchInteraction({ type: "focus.set", focus: target })
   }
 
@@ -4093,7 +4106,10 @@ export function EnsembleV2App() {
   const openSettings = (agent?: Agent) => {
     const target = agent ?? selectedAgent() ?? rosterAgents()[0]
     if (!target) return
-    if (interaction().focus !== "settings") settingsReturnFocus = interaction().focus
+    if (interaction().focus !== "settings") {
+      settingsReturnFocus = interaction().focus
+      settingsReturnPaneMode = paneMode()
+    }
     // Ticket #141: target may be a Solid store node; unwrap before the draft
     // clone so scoped-resync proxies can never make settings unopenable.
     setSettingsAgentID(target.id); setSettingsTab("general"); setDraft(structuredClone(unwrap(target))); setDirty(false)
@@ -5178,7 +5194,10 @@ export function EnsembleV2App() {
     context.keymap.layer(() => ({
       mode: "global",
       priority: 120,
-      enabled: () => ownsRawKeys() && !isModal() && leaderMode() && !commandActive(),
+      // Ticket #183/#186: while a leader prefix is pending, the raw key
+      // machine owns every key. Otherwise the host's top-level `l`/`r`
+      // binding would fire instead of the `b l`/`b r` submenu action.
+      enabled: () => ownsRawKeys() && !isModal() && leaderMode() && leaderKeys().length === 0 && !commandActive(),
       commands: leaderCommands,
       bindings: leaderCommands.map((command) => command.id),
     }))
@@ -7361,7 +7380,7 @@ export function EnsembleV2App() {
           bottom={4}
           right={4}
           width={68}
-          height={whichKeyLines(leaderMenuEntries(leaderKeys()), 2, leaderKeys().length).length + 2}
+          height={whichKeyLines(leaderMenuEntries(leaderKeys()), 2, leaderKeys().length).length + 3}
           zIndex={90}
           border
           borderStyle="rounded"
