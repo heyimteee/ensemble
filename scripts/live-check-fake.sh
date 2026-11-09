@@ -336,7 +336,7 @@ sleep 0.2
 live_type "$LIVE_TUI_SESSION" " v2"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "edit Enter saves and keeps the field"
-live_assert_count "$LIVE_TUI_SESSION" "Likes deterministic fixtures v2" 2 "edited text is in the field and the list"
+live_require_count "$LIVE_TUI_SESSION" "Likes deterministic fixtures v2" 2 10 "edited text is in the field and the list"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "memories: 2" 10 "the edit field returned to the list"
 sleep 0.25
@@ -1476,7 +1476,7 @@ done
 [[ "$memory_edited" == '["fake-live-memory v2"]' ]] || live_fail "memory edit did not persist (got $memory_edited)"
 live_require_text "$LIVE_TUI_SESSION" "Edit memory │ INSERT" 10 "edit Enter saves and keeps the field open"
 sleep 0.25
-live_assert_count "$LIVE_TUI_SESSION" "fake-live-memory v2" 2 "the edit kept the field text and updated the row"
+live_require_count "$LIVE_TUI_SESSION" "fake-live-memory v2" 2 10 "the edit kept the field text and updated the row"
 memory_rows=$(live_snapshot_value 'Object.values(output.state.memories).filter(function (m) { return !m.deletedAt }).length')
 [[ "$memory_rows" == '1' ]] || live_fail "edit re-added instead of updating in place (got $memory_rows rows)"
 memory_prov=$(live_snapshot_value '(function () { var m = Object.values(output.state.memories).filter(function (x) { return !x.deletedAt })[0]; return m.origin + "|" + m.scope + "|" + m.history.map(function (h) { return h.action }).join(",") })()')

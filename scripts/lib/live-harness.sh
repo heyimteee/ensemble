@@ -644,6 +644,22 @@ live_assert_count() {
     || live_fail "expected $expected occurrence(s) of '$description' in the TUI, found $actual"
 }
 
+# Wait for an asynchronous list/field pair to settle on the expected count,
+# instead of racing a store patch that lands a frame after the field update.
+live_require_count() {
+  local session="$1" text="$2" expected="$3" seconds="${4:-$LIVE_STEP_TIMEOUT}" description="${5:-$text}"
+  local end actual
+  end=$(( $(date +%s%N) + seconds * 1000000000 ))
+  while true; do
+    actual=$(live_count_text "$session" "$text")
+    [[ "$actual" == "$expected" ]] && return 0
+    if (( $(date +%s%N) >= end )); then
+      live_fail "expected $expected occurrence(s) of '$description' in the TUI, found $actual"
+    fi
+    sleep "$LIVE_WAIT_INTERVAL"
+  done
+}
+
 # Bounded wait for a transient label that must appear exactly once in the SAME
 # frame. A follow-up count would race the next state; this polls and counts one
 # capture, so a fast streaming transition cannot hide or double the label.
