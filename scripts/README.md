@@ -28,9 +28,10 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   picker, and atomic validation errors that preserve the draft. Ticket #177
   adds the three-pane shell: split rail grouping with durable collapse across a
   TUI restart, ACTIVE/HISTORY movement and retention, the native-session
-  picker and its missing-binding message, aligned member columns, sticky
-  inline approvals resolved with `v`/Enter/Esc, Work-card action validity and
-  focus borders, untracked/spaced/suffixed composer file references with a
+  picker and its missing-binding message, aligned member columns, right-pane
+  approvals opened with `v`/Enter and resolved with Enter/Esc, Work-card action
+  validity and focus borders, untracked/spaced/suffixed composer file
+  references with a
   cached index (a counting `fd` wrapper proves filtering spawns no discovery),
   a genuine native FAILED card next to a controlled-stop CANCELLED card, and
   doctor plus `logs:summary` artifacts. The long-run lifecycle case lives in

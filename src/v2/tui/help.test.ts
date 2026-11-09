@@ -89,7 +89,6 @@ test("catalog contexts land in the correct help section", () => {
     roster: "roster",
     chat: "conversation",
     work: "work",
-    workApprovals: "work",
     composerInsert: "composer-insert",
     composerNormal: "composer-normal",
     composerVisual: "composer-visual",
@@ -145,16 +144,18 @@ test("command names and mouse gestures are generated from their catalogs", () =>
   }
 })
 
-test("ticket173: Work help states spatial focus, the white card border, actions, and inline approvals", () => {
+test("ticket185: Work help states spatial focus, the white card border, actions, and right-column approvals", () => {
   const work = helpSections().find((section) => section.id === "work")
   assert.ok(work, "the Work section exists")
   const text = work!.entries.map((entry) => `${entry.id} ${entry.title}`).join(" ")
   assert.ok(/nearest card/i.test(text), "help names spatial focus")
   assert.ok(/white border/i.test(text), "help names the focused card border")
-  assert.ok(/V opens the full inbox only when/i.test(text), "help scopes V to overflow")
-  assert.ok(/v selects them/i.test(text), "help teaches inline approvals selection")
+  assert.ok(/v opens the full-height inbox/i.test(text), "help teaches v")
+  assert.ok(/Esc returns to split mode/i.test(text), "help teaches the full-to-split exit")
+  assert.ok(!/V opens the full inbox only when/i.test(text), "the overflow-only inbox is retired")
   const keys = work!.entries.map((entry) => entry.keys)
-  assert.ok(keys.includes("v") && keys.includes("V"), "both approval keys are documented")
+  assert.ok(keys.includes("v / Enter"), "the one approvals entry is documented")
+  assert.ok(!keys.includes("V"), "V is retired")
   assert.ok(keys.includes("h/j/k/l"), "spatial keys are documented")
   assert.ok(keys.includes("gg") && keys.includes("G"), "first/last keys are documented")
   assert.ok(keys.includes("Ctrl+D") && keys.includes("Ctrl+U"), "half-page keys are documented")

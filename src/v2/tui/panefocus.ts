@@ -32,12 +32,23 @@ export function paneSideVisibility(input?: Partial<Record<PaneSide, boolean>> | 
 /**
  * Expand the two column switches into the per-pane map the focus machine
  * reads. `available` carries surface facts the layout cannot know: a DM has no
- * Work pane and an empty approvals list has no approvals sub-pane.
+ * Work pane and an empty approvals list has no approvals sub-pane. Ticket #185:
+ * full approvals hide Work but keep the approvals pane visible, so Tab skips
+ * the covered pane instead of landing on it.
  */
 export function paneVisibilityFor(
   sides: PaneSideVisibility,
-  available: { work?: boolean; approvals?: boolean } = {},
+  available: { work?: boolean; approvals?: boolean; fullApprovals?: boolean } = {},
 ): PaneVisibility {
+  if (available.fullApprovals) {
+    return {
+      agents: sides.left,
+      workspaces: sides.left,
+      chat: true,
+      work: false,
+      approvals: sides.right && available.approvals !== false,
+    }
+  }
   const work = sides.right && available.work !== false
   return {
     agents: sides.left,
@@ -230,7 +241,7 @@ export function chatPaneFocused(state: PaneFocus): boolean {
   return state.pane === "chat"
 }
 
-/** The right column (Work plus the inline approvals section) is one border. */
+/** The right column (Work or the approvals surface) is one border. */
 export function workPaneFocused(state: PaneFocus): boolean {
   return state.pane === "work" || state.pane === "approvals"
 }

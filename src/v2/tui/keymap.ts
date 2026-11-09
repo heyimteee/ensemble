@@ -18,7 +18,6 @@ export type KeyContext =
   | "roster"
   | "chat"
   | "work"
-  | "workApprovals"
   | "composer"
   | "settings"
   /** Settings text field in Insert mode. */
@@ -129,7 +128,7 @@ const PANE: readonly KeyEntry[] = [
   { id: "pane.enter", scope: "normal", contexts: ["pane"], keys: ["enter"], title: "Enter the selected pane", group: "Focus", hint: "enter enter" },
   { id: "pane.escape", scope: "normal", contexts: ["pane"], keys: ["escape"], title: "Stay in pane selection", group: "Focus", listed: false },
   { id: "pane.compose", scope: "normal", contexts: ["pane"], keys: ["i"], title: "Focus the composer from chat", group: "Focus", hint: "i compose" },
-  { id: "pane.approvals", scope: "normal", contexts: ["pane"], keys: ["v"], title: "Approvals", group: "Navigate" },
+  { id: "pane.approvals", scope: "normal", contexts: ["pane"], keys: ["v"], title: "Open full approvals", group: "Navigate" },
   { id: "focus.tab", scope: "normal", contexts: ["pane"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
   { id: "focus.shift.tab", scope: "normal", contexts: ["pane"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
   { id: "leader", scope: "normal", contexts: ["pane"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
@@ -159,7 +158,7 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "settings", scope: "normal", contexts: ["roster"], keys: ["s"], title: "Agent settings", group: "Edit" },
   { id: "archive", scope: "normal", contexts: ["roster"], keys: ["x"], title: "Archive selection", group: "Archive" },
   { id: "delete", scope: "normal", contexts: ["roster"], keys: ["shift+x"], title: "Delete selection", group: "Delete" },
-  { id: "approvals", scope: "normal", contexts: ["roster"], keys: ["v"], title: "Approvals", group: "Navigate" },
+  { id: "approvals", scope: "normal", contexts: ["roster"], keys: ["v"], title: "Open full approvals", group: "Navigate" },
   { id: "init", scope: "normal", contexts: ["roster"], keys: ["shift+i"], title: "Init workspace files", group: "State", hint: "I init" },
   { id: "pause", scope: "normal", contexts: ["roster"], keys: ["p"], title: "Pause / resume workspace", group: "State" },
   { id: "filter", scope: "normal", contexts: ["roster"], keys: ["/"], title: "Filter roster", group: "Search", hint: "/ filter" },
@@ -181,7 +180,7 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "chat.new.agent", scope: "normal", contexts: ["chat"], keys: ["a"], title: "New agent", group: "Create" },
   { id: "chat.new.workspace", scope: "normal", contexts: ["chat"], keys: ["n"], title: "New workspace", group: "Create", availability: "no-transcript-search" },
   { id: "chat.settings", scope: "normal", contexts: ["chat"], keys: ["s"], title: "Agent settings", group: "Edit" },
-  { id: "chat.approvals", scope: "normal", contexts: ["chat"], keys: ["v"], title: "Approvals", group: "Navigate" },
+  { id: "chat.approvals", scope: "normal", contexts: ["chat"], keys: ["v"], title: "Open full approvals", group: "Navigate" },
   { id: "chat.init", scope: "normal", contexts: ["chat"], keys: ["shift+i"], title: "Init workspace files", group: "State", hint: "I init" },
   { id: "chat.pause", scope: "normal", contexts: ["chat"], keys: ["p"], title: "Pause / resume workspace", group: "State" },
   { id: "chat.native", scope: "normal", contexts: ["chat"], keys: ["o"], title: "Native session", group: "Navigate" },
@@ -214,10 +213,9 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.restart", scope: "normal", contexts: ["work"], keys: ["shift+r"], title: "Restart work", group: "Work", hint: "R restart" },
   { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work", group: "Work", hint: "x cancel" },
   { id: "work.native", scope: "normal", contexts: ["work"], keys: ["o"], title: "Native session", group: "Navigate", hint: "o native" },
-  // Ticket #173: `v` focuses the sticky approvals section; `V` opens the full
-  // inbox only when the inline list overflows. Chat/roster keep the modal.
-  { id: "work.approvals", scope: "normal", contexts: ["work"], keys: ["v"], title: "Focus approvals", group: "Approvals", hint: "v approvals" },
-  { id: "work.inbox", scope: "normal", contexts: ["work", "workApprovals"], keys: ["shift+v"], title: "Open the approvals overflow inbox", group: "Approvals", hint: "V inbox" },
+  // Ticket #185: one approvals surface. `v` opens the full-height inbox over
+  // Work; the small summary below Work opens it with Enter.
+  { id: "work.approvals", scope: "normal", contexts: ["work"], keys: ["v"], title: "Open full approvals", group: "Approvals", hint: "v approvals" },
   // Ticket #172: the filter is a Work-pane view switch, not the rail filter.
   { id: "work.filter", scope: "normal", contexts: ["work"], keys: ["f"], title: "Toggle active and history", group: "View", hint: "f history" },
   { id: "work.page.up", scope: "normal", contexts: ["work"], keys: ["pageup"], title: "Previous Work page", group: "Navigation", listed: false },
@@ -226,14 +224,6 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "focus.shift.tab", scope: "normal", contexts: ["work"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
   { id: "leader", scope: "normal", contexts: ["work"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
   { id: "escape", scope: "normal", contexts: ["work"], keys: ["escape"], title: "Return to pane selection", group: "Navigation", listed: false },
-
-  // Inline approvals zone (ticket #173) ------------------------------------
-  { id: "workApprovals.down", scope: "normal", contexts: ["workApprovals"], keys: ["j"], title: "Next approval", group: "Navigation", hint: "j/k approvals" },
-  { id: "workApprovals.up", scope: "normal", contexts: ["workApprovals"], keys: ["k"], title: "Previous approval", group: "Navigation" },
-  { id: "workApprovals.resolve", scope: "normal", contexts: ["workApprovals"], keys: ["enter"], title: "Resolve the focused approval", group: "Approvals", hint: "enter resolve" },
-  { id: "focus.tab", scope: "normal", contexts: ["workApprovals"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
-  { id: "focus.shift.tab", scope: "normal", contexts: ["workApprovals"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
-  { id: "workApprovals.back", scope: "normal", contexts: ["workApprovals"], keys: ["escape"], title: "Leave approvals interaction", group: "Navigation", hint: "esc select" },
 
   // Settings ---------------------------------------------------------------
   { id: "settings.tab.prev", scope: "normal", contexts: ["settings"], keys: ["h"], title: "Previous tab", group: "Tabs", hint: "h/l tabs" },
@@ -320,15 +310,17 @@ const DIALOG: readonly KeyEntry[] = [
   { id: "result.close.enter", scope: "normal", contexts: ["result"], keys: ["enter"], title: "Close", group: "Navigation", listed: false },
   { id: "result.close.escape", scope: "normal", contexts: ["result"], keys: ["escape"], title: "Close", group: "Navigation", hint: "enter/esc close" },
 
-  // Approvals -------------------------------------------------------------
+  // Full approvals inbox (ticket #185) ------------------------------------
   { id: "approvals.down", scope: "normal", contexts: ["approvals"], keys: ["j"], title: "Next approval", group: "Navigation", hint: "j/k move" },
   { id: "approvals.up", scope: "normal", contexts: ["approvals"], keys: ["k"], title: "Previous approval", group: "Navigation" },
   { id: "approvals.down.arrow", scope: "normal", contexts: ["approvals"], keys: ["down"], title: "Next approval", group: "Navigation", listed: false },
   { id: "approvals.up.arrow", scope: "normal", contexts: ["approvals"], keys: ["up"], title: "Previous approval", group: "Navigation", listed: false },
   { id: "approvals.top", scope: "normal", contexts: ["approvals"], keys: ["g", "g"], title: "First approval", group: "Navigation", listed: false },
   { id: "approvals.bottom", scope: "normal", contexts: ["approvals"], keys: ["shift+g"], title: "Last approval", group: "Navigation", listed: false },
-  { id: "approvals.resolve", scope: "normal", contexts: ["approvals"], keys: ["enter"], title: "Resolve", group: "Open", hint: "enter resolve" },
-  { id: "approvals.close", scope: "normal", contexts: ["approvals"], keys: ["escape"], title: "Close", group: "Navigation", hint: "esc close" },
+  { id: "approvals.resolve", scope: "normal", contexts: ["approvals"], keys: ["enter"], title: "Resolve the focused approval", group: "Approvals", hint: "enter resolve" },
+  { id: "focus.tab", scope: "normal", contexts: ["approvals"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
+  { id: "focus.shift.tab", scope: "normal", contexts: ["approvals"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
+  { id: "approvals.close", scope: "normal", contexts: ["approvals"], keys: ["escape"], title: "Close full approvals and return to split", group: "Navigation", hint: "esc split" },
 ]
 
 /**

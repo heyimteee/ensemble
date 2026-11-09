@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { StyledText, TextAttributes, bg as bgStyle, fg as fgStyle } from "@opentui/core"
-import type { Agent, Approval, Memory, SkillOption, SnapshotState } from "../types.ts"
+import type { Agent, Memory, SkillOption } from "../types.ts"
 import { approvalSource } from "../types.ts"
 import type { DispatchLimits } from "../dispatch-budget.ts"
 import { limitsPanelFooter, limitsPanelRows, limitsPanelSubtitle, limitsPanelTitle } from "./limits.ts"
@@ -289,27 +289,14 @@ export function Rail(props: {
   /** Ticket #180: only the focused Agents/Workspaces sub-pane is white. */
   focusedSection: "agents" | "workspaces" | null
   cursorVisible: boolean
-  pendingApprovals: number
   width: number
   filter: string
   motionTick?: number
-  /** One-shot unread/approval pulses and quiet row arrivals from ticket #121. */
+  /** One-shot unread pulses and quiet row arrivals from ticket #121. */
   emphasis?: RailEmphasis
   /** Mouse and keyboard both route through this; a group header toggles its rows. */
   onToggleGroup: (groupID: string) => void
 }) {
-  const approvalCountParts = (): StyledLinePart[] => {
-    const parts: StyledLinePart[] = [{ text: "APPROVALS", fg: props.colors.accent }]
-    if (props.pendingApprovals > 0) {
-      const pulse = Boolean(props.emphasis?.approval)
-      parts.push({
-        text: ` (${props.pendingApprovals})`,
-        fg: pulse ? props.colors.warn : props.colors.accent,
-        attributes: pulse ? TextAttributes.BOLD : undefined,
-      })
-    }
-    return parts
-  }
   const sectionFocused = (section: "agents" | "workspaces") => props.focusedSection === section
   const sectionBorder = (section: "agents" | "workspaces") => sectionFocused(section) ? props.colors.focus : props.colors.border
   const sectionOffset = (sectionIndex: number) =>
@@ -397,9 +384,6 @@ export function Rail(props: {
           </Show>
         </box>
       )}</For>
-      <text> </text>
-      <StyledLineText parts={approvalCountParts} fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate />
-      <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>v opens inbox</text>
     </box>
   )
 }
@@ -522,23 +506,20 @@ export function WorkCompactRowView(props: {
 }
 
 /**
- * Ticket #173: the sticky approvals section at the bottom of the Work pane.
- * It keeps the existing inbox grammar in one compact row per approval; the
- * header carries the overflow count and the V-only full inbox. Clicking a row
- * focuses it; clicking the focused row resolves it.
+ * Ticket #185: the small approvals summary pinned under Work in split mode.
+ * It is a preview, not a second cursor: the pane selection owns the highlight
+ * and Enter opens the full inbox; clicking a row opens the inbox at that row.
  */
 export function WorkApprovalsView(props: {
   colors: Palette
   section: WorkApprovalSection
   /** White border and heading whenever the Approvals pane is selected. */
   focused: boolean
-  /** Row cursor only while Approvals interaction is entered. */
-  interacting: boolean
   resolvingID: string | null
   motionTick?: number
   emphasized: ReadonlySet<string>
   onFocus: () => void
-  onSelect: (index: number, approval: Approval) => void
+  onOpen: (index: number) => void
 }) {
   return (
     <box
@@ -565,24 +546,23 @@ export function WorkApprovalsView(props: {
         />
       </box>
       <For each={props.section.rows}>{(row) => {
-        const selected = () => props.interacting && props.section.cursor === row.index
         const emphasized = () => props.emphasized.has(row.approval.id)
         return (
           <box
             onMouseDown={(event: any) => {
               if (Number(event?.button) !== 0) return
               event?.preventDefault?.()
-              props.onSelect(row.index, row.approval)
+              props.onOpen(row.index)
             }}
           >
             <text
-              fg={selected() ? props.colors.good : emphasized() ? props.colors.accent : props.colors.warn}
+              fg={emphasized() ? props.colors.accent : props.colors.warn}
               bg={props.colors.bg}
               width="100%"
               truncate
               attributes={emphasized() ? TextAttributes.BOLD : undefined}
             >
-              {selected() ? "› " : "  "}[{approvalSourceTag(approvalSource(row.approval))}] {short(row.approval.title, 80)}{approvalResolvingSuffix(props.resolvingID === row.approval.id, props.motionTick ?? 0, process.env)}
+              {"  "}[{approvalSourceTag(approvalSource(row.approval))}] {short(row.approval.title, 80)}{approvalResolvingSuffix(props.resolvingID === row.approval.id, props.motionTick ?? 0, process.env)}
             </text>
           </box>
         )
@@ -612,28 +592,31 @@ export function InitRowView(props: { colors: Palette; row: InitRow }) {
   )
 }
 
-export function ApprovalList(props: {
+/**
+ * Ticket #185: the full-height approvals inbox. It covers the whole right
+ * column instead of Work, keeps the shared cursor window in view, and reuses
+ * the one-shot arrival/resolution tones from ticket #126.
+ */
+export function FullApprovalsView(props: {
   colors: Palette
-  approvals: Approval[]
-  cursor: number
+  section: WorkApprovalSection
   resolvingID: string | null
-  state: SnapshotState | null
-  onResolve: (approval: Approval) => Promise<void>
   motionTick?: number
   emphasized: ReadonlySet<string>
   resolved: readonly ApprovalResolvedSettle[]
 }) {
   return (
-    <box flexDirection="column">
-      <text fg={props.colors.accent} bg={props.colors.bg} width="100%" truncate>Approvals inbox</text>
-      <Show when={props.approvals.length === 0 && props.resolved.length === 0}><text fg={props.colors.muted}>{approvalsEmptyLine()}</text></Show>
-      <For each={props.approvals}>{(approval, index) => {
-        const selected = () => props.cursor === index()
-        const emphasized = () => props.emphasized.has(approval.id)
+    <box flexGrow={1} minHeight={0} width="100%" flexDirection="column" overflow="hidden">
+      <Show when={props.section.total === 0 && props.resolved.length === 0}>
+        <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{approvalsEmptyLine()}</text>
+      </Show>
+      <For each={props.section.rows}>{(row) => {
+        const selected = () => props.section.cursor === row.index
+        const emphasized = () => props.emphasized.has(row.approval.id)
         return (
           <box flexDirection="column">
-            <text fg={selected() ? props.colors.good : emphasized() ? props.colors.accent : props.colors.warn} bg={props.colors.bg} width="100%" truncate attributes={emphasized() ? TextAttributes.BOLD : undefined}>{selected() ? "› " : "  "}[{approvalSourceTag(approvalSource(approval))}] {approval.title}{approvalResolvingSuffix(props.resolvingID === approval.id, props.motionTick ?? 0, process.env)}</text>
-            <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(approval.detail, 80)}</text>
+            <text fg={selected() ? props.colors.good : emphasized() ? props.colors.accent : props.colors.warn} bg={props.colors.bg} width="100%" truncate attributes={emphasized() ? TextAttributes.BOLD : undefined}>{selected() ? "› " : "  "}[{approvalSourceTag(approvalSource(row.approval))}] {row.approval.title}{approvalResolvingSuffix(props.resolvingID === row.approval.id, props.motionTick ?? 0, process.env)}</text>
+            <text fg={props.colors.muted} bg={props.colors.bg} width="100%" truncate>{short(row.approval.detail, 80)}</text>
           </box>
         )
       }}</For>

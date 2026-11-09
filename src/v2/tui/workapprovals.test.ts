@@ -2,7 +2,17 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import type { Approval } from "../types.ts"
 import { chromeJoin } from "./separators.ts"
-import { workApprovalLimit, workApprovalSection, workApprovalsHeader } from "./workapprovals.ts"
+import {
+  approvalsColumnMode,
+  approvalsPaneLayout,
+  closeFullApprovals,
+  fullApprovalsHeader,
+  openFullApprovals,
+  workApprovalLimit,
+  workApprovalSection,
+  workApprovalsHeader,
+} from "./workapprovals.ts"
+import { workPaneBodyHeight, workspacePaneWidths } from "./workpane.ts"
 
 const approval = (index: number, patch: Partial<Approval> = {}): Approval => ({
   id: `ap-${index}`,
@@ -49,12 +59,57 @@ test("ticket173: an empty approvals section advertises nothing", () => {
   assert.equal(section.cursor, undefined)
 })
 
-test("ticket173: the approvals header names the count, overflow, and the V-only inbox", () => {
+test("ticket185: the small approvals summary names the count, the +N more overflow, and the open key", () => {
   const compact = workApprovalSection([approval(0), approval(1)], 0, 3)
-  assert.equal(workApprovalsHeader(compact, false), chromeJoin(["APPROVALS 2 pending", "v focus"]))
-  assert.equal(workApprovalsHeader(compact, true), chromeJoin(["APPROVALS 2 pending", "j/k select", "enter resolve", "esc work"]))
+  assert.equal(workApprovalsHeader(compact, false), chromeJoin(["APPROVALS 2 pending", "v open"]))
+  assert.equal(workApprovalsHeader(compact, true), chromeJoin(["APPROVALS 2 pending", "enter open"]))
 
   const overflow = workApprovalSection([approval(0), approval(1), approval(2), approval(3)], 0, 3)
-  assert.equal(workApprovalsHeader(overflow, false), chromeJoin(["APPROVALS 4 pending", "1 more", "V inbox", "v focus"]))
-  assert.equal(workApprovalsHeader(overflow, true), chromeJoin(["APPROVALS 4 pending", "1 more", "V inbox", "j/k select", "enter resolve", "esc work"]))
+  assert.equal(workApprovalsHeader(overflow, false), chromeJoin(["APPROVALS 4 pending", "+1 more", "v open"]))
+  assert.equal(workApprovalsHeader(overflow, true), chromeJoin(["APPROVALS 4 pending", "+1 more", "enter open"]))
+})
+
+test("ticket185: the right column is closed, split, or full", () => {
+  assert.equal(approvalsColumnMode({ full: false }, false), "closed")
+  assert.equal(approvalsColumnMode({ full: true }, false), "closed")
+  assert.equal(approvalsColumnMode({ full: false }, true), "split")
+  assert.equal(approvalsColumnMode({ full: true }, true), "full")
+})
+
+test("ticket185: v opens full, Esc returns to split, and closing the column hides approvals", () => {
+  const full = openFullApprovals({ full: false })
+  assert.equal(approvalsColumnMode(full, true), "full")
+  const split = closeFullApprovals(full)
+  assert.equal(approvalsColumnMode(split, true), "split", "Esc lands back in split mode")
+  assert.equal(approvalsColumnMode(split, false), "closed", "closing the right pane hides approvals")
+})
+
+test("ticket185: split reserves a small approvals window while full replaces Work", () => {
+  const split = approvalsPaneLayout("split", 10, 5)
+  assert.equal(split.approvalRows, 3)
+  assert.ok(split.workBodyHeight > 0, "split keeps a Work body above the small pane")
+  assert.ok(split.workBodyHeight < 10, "the small pane reserves rows from Work")
+
+  const full = approvalsPaneLayout("full", 10, 5)
+  assert.equal(full.workBodyHeight, 0, "full approvals hide Work")
+  assert.ok(full.approvalRows > split.approvalRows, "full shows more of the inbox")
+  assert.equal(approvalsPaneLayout("split", 10, 0).approvalRows, 0, "an empty list has no small pane")
+  assert.equal(approvalsPaneLayout("split", 10, 0).workBodyHeight, 10, "Work reclaims the body when nothing is pending")
+})
+
+test("ticket185: full approvals fills the 80-column right drawer", () => {
+  const widths = workspacePaneWidths(80)
+  assert.equal(widths.mode, "drawer")
+  assert.ok(widths.workWidth >= 30, "the drawer remains wide enough for approval rows")
+  const layout = approvalsPaneLayout("full", workPaneBodyHeight(24), 5)
+  assert.equal(layout.workBodyHeight, 0)
+  assert.ok(layout.approvalRows >= 2, "the drawer body still shows approval rows")
+})
+
+test("ticket185: the full inbox header teaches resolve and returns to split", () => {
+  const section = workApprovalSection([approval(0), approval(1), approval(2), approval(3)], 1, 4)
+  assert.equal(
+    fullApprovalsHeader(section),
+    chromeJoin(["APPROVALS 4 pending", "2/4", "j/k move", "enter resolve", "esc split"]),
+  )
 })

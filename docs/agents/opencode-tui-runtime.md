@@ -108,9 +108,12 @@ and trade-offs are recorded in [ADR 0006](../adr/0006-three-pane-workspace-shell
   disappears, then settle to the nearest prior position.
 - A focused card uses the white `cardFocus` token; unfocused cards use the
   grey border token. Pane focus is a separate border state.
-- Approvals are sticky at the bottom of the Work pane. `v` focuses, `j`/`k`
-  moves, `Enter` resolves, `Esc` returns, and `V` opens the full inbox only
-  when rows overflow. Approvals join the Tab cycle only while pending.
+- Approvals live only in the right column. Split mode pins a small summary
+  under Work; `v` opens the full-height inbox from any pane (opening the right
+  column first when needed), Enter from the small selection opens the same
+  inbox, `j`/`k` move, `Enter` resolves, and `Esc` returns to split. Full
+  approvals hide Work; closing the right pane hides both. Approvals are
+  workspace-scoped and join the Tab cycle only while visible.
 - Group-chat `o` opens the workspace-member native picker; Work `o` opens the
   focused card's assignee; DM `o` keeps the current agent. A missing binding
   toasts instead of doing nothing.

@@ -2,14 +2,37 @@ import type { Approval } from "../types.ts"
 import { chromeJoin } from "./separators.ts"
 
 /**
- * Ticket #173: approvals are a sticky bottom section of the Work pane.
+ * Ticket #173/#185: approvals are the right column's second surface.
  *
- * The section is a view over the existing pending memo: a short window of
- * rows, a bounded overflow count, and a header that teaches the inline grammar.
- * The full inbox stays available with `V` only when the inline rows overflow.
+ * In split mode a small summary sits at the bottom of the Work pane; `v` or
+ * Enter opens the full-height inbox over Work. The full pane reuses the same
+ * pending memo and cursor as the old inline section, so there is exactly one
+ * approval surface and one resolution flow.
  */
 
 export const MAX_INLINE_APPROVALS = 3
+
+/** The three right-column modes; closed is owned by the #183 column switch. */
+export type ApprovalsColumnMode = "closed" | "split" | "full"
+
+/** The only durable approval-mode bit: whether the inbox is opened over Work. */
+export type ApprovalsModeState = { full: boolean }
+
+/** `v` opens the full inbox; the right column is opened first by the caller. */
+export function openFullApprovals(state: ApprovalsModeState): ApprovalsModeState {
+  return state.full ? state : { full: true }
+}
+
+/** Esc closes the inbox back to split mode; the small summary remains. */
+export function closeFullApprovals(_state: ApprovalsModeState): ApprovalsModeState {
+  return { full: false }
+}
+
+/** Derive the rendered mode from the explicit bit and the durable column switch. */
+export function approvalsColumnMode(state: ApprovalsModeState, rightVisible: boolean): ApprovalsColumnMode {
+  if (!rightVisible) return "closed"
+  return state.full ? "full" : "split"
+}
 
 export type InlineApprovalRow = {
   approval: Approval
@@ -22,7 +45,7 @@ export type WorkApprovalSection = {
   total: number
   /** The visible window, in pending order. */
   rows: InlineApprovalRow[]
-  /** Pending approvals the inline section cannot show. */
+  /** Pending approvals the small section cannot show. */
   overflow: number
   /** The focused row's pending index; undefined when the list is empty. */
   cursor: number | undefined
@@ -65,16 +88,67 @@ export function workApprovalSection(
   }
 }
 
-/** Sticky header: count, overflow, the V-only inbox, and the focused grammar. */
+/**
+ * The full inbox spends two rows per approval (title and detail), so its
+ * window is smaller than the raw body row count. One row stays reserved for
+ * the empty line and the scroll margin.
+ */
+export function fullApprovalLimit(bodyHeight: number): number {
+  const body = Math.max(2, Math.floor(bodyHeight) || 2)
+  return Math.max(1, Math.floor((body - 1) / 2))
+}
+
+/** The full inbox window: same pending list and cursor, a taller limit. */
+export function fullApprovalsSection(
+  approvals: readonly Approval[],
+  cursor: number,
+  bodyHeight: number,
+): WorkApprovalSection {
+  return workApprovalSection(approvals, cursor, fullApprovalLimit(bodyHeight))
+}
+
+export type ApprovalsPaneLayout = {
+  /** Work body rows; zero in full mode because the inbox covers the column. */
+  workBodyHeight: number
+  /** Pending rows the approval pane can show. */
+  approvalRows: number
+}
+
+/**
+ * One layout for both modes. Split reserves the small pane's rows (header and
+ * border are the +2) from Work; full gives the whole body to the inbox and
+ * leaves Work with no rows. An empty list never reserves a small pane.
+ */
+export function approvalsPaneLayout(
+  mode: "split" | "full",
+  bodyHeight: number,
+  pending: number,
+): ApprovalsPaneLayout {
+  const body = Math.max(2, Math.floor(bodyHeight) || 2)
+  if (mode === "full") return { workBodyHeight: 0, approvalRows: fullApprovalLimit(body) }
+  const total = Math.max(0, Math.floor(pending) || 0)
+  if (total === 0) return { workBodyHeight: body, approvalRows: 0 }
+  const rows = workApprovalLimit(body)
+  return { workBodyHeight: Math.max(2, body - rows - 2), approvalRows: rows }
+}
+
+/** Small-header: count, `+N more`, and the key that opens the inbox. */
 export function workApprovalsHeader(
   section: Pick<WorkApprovalSection, "total" | "overflow">,
   focused: boolean,
 ): string {
   const count = `${Math.max(0, Math.floor(section.total))} pending`
   const parts = [`APPROVALS ${count}`]
-  if (section.overflow > 0) {
-    parts.push(`${section.overflow} more`, "V inbox")
-  }
-  parts.push(...(focused ? ["j/k select", "enter resolve", "esc work"] : ["v focus"]))
+  if (section.overflow > 0) parts.push(`+${section.overflow} more`)
+  parts.push(focused ? "enter open" : "v open")
+  return chromeJoin(parts)
+}
+
+/** Full-header: the inbox grammar; Esc returns to split mode. */
+export function fullApprovalsHeader(section: Pick<WorkApprovalSection, "total" | "cursor">): string {
+  const total = Math.max(0, Math.floor(section.total))
+  const parts = [`APPROVALS ${total} pending`]
+  if (total > 0) parts.push(`${Math.max(0, Math.min(total - 1, Math.floor(section.cursor ?? 0))) + 1}/${total}`)
+  parts.push("j/k move", "enter resolve", "esc split")
   return chromeJoin(parts)
 }

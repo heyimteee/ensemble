@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
-import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
+import { ChromeText, FullApprovalsView, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, paletteRowTitle, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
@@ -137,7 +137,7 @@ import {
   type InteractionResult,
   type InteractionState,
 } from "./interaction.ts"
-import { chatPaneFocused, cyclePaneFocus, enterPane, focusForPaneToggle, movePaneFocus, paneOwnsFocus, paneSideVisibility, paneVisibilityFor, railSectionFocused, togglePaneSide, workCardsFocused, workPaneFocused, type PaneID, type PaneSide, type PaneSideVisibility, type PaneVisibility } from "./panefocus.ts"
+import { chatPaneFocused, cyclePaneFocus, enterPane, focusForPaneToggle, movePaneFocus, paneOwnsFocus, paneSideVisibility, paneVisibilityFor, railSectionFocused, togglePaneSide, workCardsFocused, workPaneFocused, type PaneFocus, type PaneID, type PaneSide, type PaneSideVisibility, type PaneVisibility } from "./panefocus.ts"
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
 import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
@@ -216,7 +216,7 @@ import {
   type WorkDirection,
   type WorkFocusPosition,
 } from "./workfocus.ts"
-import { workApprovalLimit, workApprovalSection } from "./workapprovals.ts"
+import { approvalsColumnMode, approvalsPaneLayout, closeFullApprovals, fullApprovalsHeader, fullApprovalsSection, openFullApprovals, workApprovalSection } from "./workapprovals.ts"
 import { isWorkActionID, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
 import {
   accumulateCompletions,
@@ -473,7 +473,12 @@ export function EnsembleV2App() {
   const [helpMatch, setHelpMatch] = createSignal(0)
   const helpCatalogSections = helpSections()
   let helpPendingKeys: string[] = []
-  const [approvalsOpen, setApprovalsOpen] = createSignal(false)
+  // Ticket #185: one durable approval mode bit. The right column renders
+  // closed/split/full from this bit plus the #183 right switch.
+  const [approvalsFull, setApprovalsFull] = createSignal(false)
+  // Esc from full approvals restores the pane and mode that opened it when the
+  // small pane no longer exists; the focus is never stranded on hidden Work.
+  const [approvalsReturn, setApprovalsReturn] = createSignal<PaneFocus>({ pane: "chat", mode: "select" })
   const [logsOpen, setLogsOpen] = createSignal(false)
   const [logsFilter, setLogsFilter] = createSignal<LogsViewFilter>({ kind: "all" })
   const [logsEntries, setLogsEntries] = createSignal<LogEntry[]>([])
@@ -634,13 +639,17 @@ export function EnsembleV2App() {
     dispatchInteraction({ type: "pane.set", pane, mode })
   }
   const paneMode = () => interaction().paneMode
-  const paneInteracting = (pane: PaneID) => paneOwnsFocus(paneState(), pane) && paneMode() === "interact"
+  // Ticket #185: the right column has three modes. Closed comes from the #183
+  // switch; full is the explicit inbox bit; split is everything else.
+  const approvalsMode = () => approvalsColumnMode({ full: approvalsFull() }, paneSides().right)
   // Ticket #183: the two durable column switches expand into the per-pane
   // map every focus transition reads. A DM has no Work pane, and an empty
-  // approvals list has no approvals sub-pane.
+  // approvals list has no approvals sub-pane. Ticket #185: full approvals hide
+  // Work but stay visible themselves.
   const paneVisibility = (): PaneVisibility => paneVisibilityFor(paneSides(), {
     work: surface()?.kind === "workspace",
-    approvals: pendingApprovals().length > 0,
+    approvals: approvalsMode() === "full" || pendingApprovals().length > 0,
+    fullApprovals: approvalsMode() === "full",
   })
   const applyInteraction = (result: InteractionResult) => {
     setInteraction(result.state)
@@ -806,7 +815,6 @@ export function EnsembleV2App() {
     if (picker() || textPrompt() || confirm() || result()) return "dialog"
     if (logsOpen()) return "logs"
     if (helpOpen()) return "help"
-    if (approvalsOpen()) return "approvals"
     if (settingsAgentID()) return "settings"
     return "none"
   }
@@ -883,9 +891,11 @@ export function EnsembleV2App() {
   const panes = createMemo(() => workspacePaneWidths(renderSize().width, paneSides()))
   // Ticket #172/#183: the Work pane is a sibling of the chat only on a
   // workspace surface. At every width the same right switch owns it; below 96
-  // columns it renders as a right drawer over the chat.
+  // columns it renders as a right drawer over the chat. Ticket #185: the full
+  // approvals inbox may also open the right column from a direct chat, where
+  // there is no Work body to split against.
   const showWorkPane = createMemo(
-    () => surface()?.kind === "workspace" && paneSides().right,
+    () => paneSides().right && (surface()?.kind === "workspace" || approvalsMode() === "full"),
   )
   const railWidth = () => panes().railWidth
   const messageWidth = () => showWorkPane() ? panes().chatContentWidth : panes().chatOnlyContentWidth
@@ -906,7 +916,22 @@ export function EnsembleV2App() {
   })
   const initRows = createMemo(() => liveInitJobs().map((job) => initRowForJob(job, motionFrame(), process.env)))
   const initRowMessageIDs = createMemo(() => initJobMessageIDs(state()?.initJobs ?? {}, surface()?.kind === "workspace" ? activeWorkspace()?.id : undefined))
-  const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
+  // Ticket #185: approvals stay workspace-scoped. A direct conversation uses
+  // its member workspace; the active workspace is the fallback. Unattributed
+  // rows are kept only when no workspace is in view, so another workspace's
+  // inbox can never leak into this right column.
+  const approvalWorkspaceID = () => {
+    const current = surface()
+    if (current?.kind === "agent" && current.workspaceID) return current.workspaceID
+    return activeWorkspace()?.id
+  }
+  const workspaceApprovals = createMemo(() => {
+    const workspaceID = approvalWorkspaceID()
+    return Object.values(state()?.approvals ?? {}).filter((approval) =>
+      approval.workspaceID === undefined ? workspaceID === undefined : approval.workspaceID === workspaceID,
+    )
+  })
+  const pendingApprovals = createMemo(() => workspaceApprovals().filter((approval) => approval.status === "pending"))
   // Ticket #183: hydrate the column switches from durable UI state, then keep
   // local toggles optimistic. The serialized key suppresses the echo of our
   // own save, exactly like the rail collapse state above.
@@ -927,10 +952,14 @@ export function EnsembleV2App() {
   /** Space b l / Space b r share one toggle and one focus-recovery rule. */
   const togglePane = (side: PaneSide) => {
     const next = togglePaneSide(paneSides(), side)
+    // Closing the right column hides full approvals with it; reopening starts
+    // in split mode instead of restoring a stale inbox.
+    if (side === "right" && !next.right) setApprovalsFull(false)
     persistPaneSides(next)
     const visibility = paneVisibilityFor(next, {
       work: surface()?.kind === "workspace",
       approvals: pendingApprovals().length > 0,
+      fullApprovals: side === "right" && next.right && approvalsFull(),
     })
     const current = paneState()
     const focus = focusForPaneToggle(current, side, visibility)
@@ -938,6 +967,11 @@ export function EnsembleV2App() {
     // current pane; only a real focus change dispatches a pane transition.
     if (focus.pane !== current.pane || focus.mode !== current.mode) setPaneFocus(focus.pane, focus.mode)
   }
+  // A durable right-column close hides approvals; the explicit full bit must
+  // not survive it, or reopening the column would restore a stale inbox.
+  createEffect(() => {
+    if (approvalsFull() && !paneSides().right) setApprovalsFull(false)
+  })
   // Ticket #180: a pane that closes or disappears never traps focus; the
   // pure machine returns selection to chat. Ticket #183 owns the column
   // switches and the focus recovery on close.
@@ -954,17 +988,21 @@ export function EnsembleV2App() {
     }
     dispatchInteraction({ type: "pane.recover", visible })
   })
-  // Ticket #173: the sticky approvals section reserves rows from the Work
-  // body, so pagination keeps the cards above it visible. The header is one
-  // row and the window is at most three rows.
-  const inlineApprovalLimit = createMemo(() =>
-    pendingApprovals().length > 0 ? workApprovalLimit(workFullBodyHeight()) : 0,
-  )
+  // Ticket #173/#185: split mode reserves a small approvals window from the
+  // Work body; full mode gives the entire body to the inbox. One pure layout
+  // owns both row budgets, so pagination and the approval window cannot drift.
+  const approvalsLayout = createMemo(() => {
+    const mode = approvalsMode() === "full" ? "full" as const : "split" as const
+    return approvalsPaneLayout(mode, workFullBodyHeight(), pendingApprovals().length)
+  })
+  const inlineApprovalLimit = () => approvalsLayout().approvalRows
   const inlineApprovals = createMemo(() =>
     workApprovalSection(pendingApprovals(), approvalCursor(), Math.max(1, inlineApprovalLimit())),
   )
-  const workBodyHeight = () =>
-    Math.max(2, workFullBodyHeight() - (inlineApprovalLimit() > 0 ? inlineApprovalLimit() + 2 : 0))
+  const fullApprovals = createMemo(() =>
+    fullApprovalsSection(pendingApprovals(), approvalCursor(), workFullBodyHeight()),
+  )
+  const workBodyHeight = () => approvalsLayout().workBodyHeight
   // Ticket #126: one-shot inbox transitions. The first snapshot is the
   // baseline; later arrivals emphasize once and resolved rows settle once.
   // A short app-owned cadence repaints only while one of those windows is
@@ -982,7 +1020,7 @@ export function EnsembleV2App() {
       stopApprovalMotion()
       return
     }
-    const view = updateApprovalInboxMotion(approvalTrack, Object.values(current.approvals), Date.now(), process.env)
+    const view = updateApprovalInboxMotion(approvalTrack, workspaceApprovals(), Date.now(), process.env)
     setApprovalMotion(view)
     if (!view.active) {
       stopApprovalMotion()
@@ -1233,10 +1271,9 @@ export function EnsembleV2App() {
     const pane = workPane()
     return workPaneHeader(pane.view, pane.counts.groups, pane.counts.active, pane.counts.done, pane.page, pane.pages)
   }
-  const selectedApproval = createMemo(() => pendingApprovals()[approvalCursor()])
-  // Ticket #173: inline approvals own a cursor over the pending list. Keep it
-  // in range, and leave the approvals zone when the last row resolves so the
-  // keyboard never stays on an empty section.
+  // Ticket #173/#185: the full inbox owns a cursor over the pending list.
+  // Keep it in range; the visibility effect above recovers focus when a split
+  // pane disappears, while full mode stays open for its resolution settle.
   createEffect(() => {
     const total = pendingApprovals().length
     if (total === 0) {
@@ -1245,12 +1282,9 @@ export function EnsembleV2App() {
     }
     if (approvalCursor() > total - 1) setApprovalCursor(total - 1)
   })
-  createEffect(() => {
-    if (interaction().focus !== "approvals") return
-    if (pendingApprovals().length > 0) return
-    if (interaction().overlay !== "none") return
-    dispatchInteraction({ type: "focus.set", focus: "work" })
-  })
+  // The approvals pane stays visible in full mode even after the last row
+  // resolves, so its resolution settle can finish; Esc is the way back to
+  // split. The visibility effect above handles an emptied split pane.
   // Ticket #171: one rail model for the split Agents / Workspaces panes. The
   // app supplies recency-ordered workspaces and server-derived counts; the
   // pure model owns primary-workspace grouping, filtering, labels, and
@@ -1857,7 +1891,7 @@ export function EnsembleV2App() {
   // keys. The newest mount alone is not enough; the Ensemble route must be
   // visible too.
   const ownsRawKeys = () => pageActivation.ownsRawKeys(pageToken, isOurRoute())
-  const isModal = () => modal() || helpOpen() || approvalsOpen() || logsOpen() || limitsOpen() || Boolean(settingsAgentID())
+  const isModal = () => modal() || helpOpen() || logsOpen() || limitsOpen() || Boolean(settingsAgentID())
   // Ticket #119: feedback raised while a dialog owns the surface goes to the
   // statusline; the toast never paints over a modal. The host toast remains a
   // fallback only when this page is not the visible route.
@@ -1925,7 +1959,6 @@ export function EnsembleV2App() {
     wizard: wizard() !== null,
     logs: logsOpen(),
     help: helpOpen(),
-    approvals: approvalsOpen(),
     leader: leaderPopup(),
   }))
   let overlayPresenceTimer: ReturnType<typeof setInterval> | undefined
@@ -2029,7 +2062,7 @@ export function EnsembleV2App() {
   }
   const canOpenCommand = () =>
     !leaderMode() && !wizard() && !picker() && !textPrompt() && !confirm() && !result() &&
-    !helpOpen() && !approvalsOpen() && settingsField() === null
+    !helpOpen() && settingsField() === null
 
   const applySearchPreview = (target: CommandTarget, text: string) => {
     if (target === "roster") { setTranscriptSearch(null); setWorkspaceFilter(text); return }
@@ -2092,7 +2125,7 @@ export function EnsembleV2App() {
     switch (command.name) {
       case "settings": openSettings(); return
       case "limits": openLimits(); return
-      case "approvals": openApprovals(); return
+      case "approvals": openApprovalsFull(); return
       case "workspace": await pickWorkspace(); return
       case "agent": await pickAgent(); return
       case "new-agent": await createAgent(); return
@@ -2231,6 +2264,9 @@ export function EnsembleV2App() {
     }
     if (isModal() || interaction().overlay !== "none") return null
     if (composerActive()) return null
+    // Ticket #185: the full inbox is a right-column surface, not an overlay.
+    // It owns its list grammar whenever its pane holds the keyboard.
+    if (approvalsMode() === "full" && interaction().pane === "approvals") return "approvals"
     // Ticket #180: select mode is the shared shell grammar; only Enter moves
     // into the pane's own content context. A closed pane owns no keys.
     if (paneVisibility()[interaction().pane] === false) return null
@@ -2241,8 +2277,8 @@ export function EnsembleV2App() {
       case "chat": return "chat"
       // Ticket #172: a DM has no Work pane; a hidden drawer has no keys.
       case "work": return showWorkPane() ? "work" : null
-      // Ticket #173: inline approvals are their own keyboard zone.
-      case "approvals": return showWorkPane() ? "workApprovals" : null
+      // The small approvals summary is pane selection; Enter opens full.
+      case "approvals": return null
     }
   }
   // Ticket #172: Work is reachable whenever either view holds work, even when
@@ -2860,57 +2896,41 @@ export function EnsembleV2App() {
   }
   const moveTaskColumn = (delta: number) => focusWorkDirection(delta < 0 ? "left" : "right")
   const moveTaskHalf = (direction: 1 | -1) => focusWorkHalf(direction)
-  /** `v`: select the sticky approvals pane without opening the modal inbox. */
-  const focusWorkApprovals = () => {
+  /** Small summary header click selects the Approvals pane; Enter opens full. */
+  const focusApprovalsPane = () => {
+    setApprovalCursor((cursor) => Math.max(0, Math.min(Math.max(0, pendingApprovals().length - 1), cursor)))
+    setPaneFocus("approvals", "select")
+  }
+  /** Clicking a summary row opens the one inbox at that pending row. */
+  const openApprovalsAt = (index: number) => {
+    setApprovalCursor(index)
+    openApprovalsFull()
+  }
+  const moveApprovalCursor = (delta: number) => {
     const total = pendingApprovals().length
     if (total === 0) {
-      showToast({ title: "Approvals", message: "Nothing waits for you.", tone: "info" })
-      return
-    }
-    setPaneFocus("approvals", "select")
-    setApprovalCursor((cursor) => Math.max(0, Math.min(total - 1, cursor)))
-  }
-  const moveInlineApproval = (delta: number) => {
-    const total = pendingApprovals().length
-    if (total === 0) return
-    if (delta < 0 && approvalCursor() === 0) {
-      moveSelectedPane("up")
+      if (approvalCursor() !== 0) setApprovalCursor(0)
       return
     }
     setApprovalCursor((cursor) => Math.max(0, Math.min(total - 1, cursor + delta)))
   }
-  const resolveInlineApproval = () => {
+  /** The full inbox Enter action reuses the one resolution flow. */
+  const resolveFocusedApproval = () => {
     const approval = pendingApprovals()[approvalCursor()]
     if (approval) void resolveApproval(approval).catch(showError)
   }
-  /** `V`: the full inbox is an overflow affordance, never the common path. */
-  const openApprovalsOverflow = () => {
-    if (inlineApprovals().overflow === 0) {
-      showToast({ title: "Approvals", message: "No inline overflow — resolve approvals in the Work pane.", tone: "info" })
-      return
-    }
-    openApprovals()
-  }
   /**
-   * Mouse: the first click enters Approvals interaction and selects the row;
-   * clicking the already focused row resolves it, matching Enter.
+   * Enter on a selected pane: Work starts card navigation; the small approvals
+   * selection opens the same full inbox as `v` instead of a second sub-mode.
    */
-  const selectInlineApproval = (index: number, approval: Approval) => {
-    if (paneInteracting("approvals") && approvalCursor() === index) {
-      void resolveApproval(approval).catch(showError)
+  const enterSelectedPane = () => {
+    if (paneState().pane === "approvals") {
+      openApprovalsFull()
       return
     }
-    setPaneFocus("approvals", "interact")
-    setApprovalCursor(index)
-  }
-  /** Enter on a selected pane: interaction starts, but never a card/composer. */
-  const enterSelectedPane = () => {
     const next = enterPane(paneState())
     if (next.pane === "agents" || next.pane === "workspaces") ensureRailSectionCursor(next.pane)
     if (next.pane === "work" && workFocusID() === undefined) focusFirstWork()
-    if (next.pane === "approvals" && pendingApprovals().length > 0) {
-      setApprovalCursor((cursor) => Math.max(0, Math.min(pendingApprovals().length - 1, cursor)))
-    }
     setPaneFocus(next.pane, next.mode)
   }
   /** `i` from chat selects the composer; every other pane ignores it. */
@@ -3255,7 +3275,7 @@ export function EnsembleV2App() {
     if (limitsOpen()) closeLimits()
     if (logsOpen()) closeLogs()
     if (helpOpen()) closeHelp()
-    setApprovalsOpen(false)
+    setApprovalsFull(false)
     setModal(false)
     setCompletion(null)
     clearComposerValidation()
@@ -3555,7 +3575,7 @@ export function EnsembleV2App() {
       case "agent": mention(); return
       case "settings": openSettings(); return
       case "limits": openLimits(); return
-      case "approvals": openApprovals(); return
+      case "approvals": openApprovalsFull(); return
       case "pause": await togglePause(true); return
       case "resume": await togglePause(false); return
       case "help": openHelp(); return
@@ -4474,13 +4494,7 @@ export function EnsembleV2App() {
     "pane.enter": () => enterSelectedPane(),
     "pane.escape": () => dispatchInteraction({ type: "escape" }),
     "pane.compose": () => composeFromPaneFocus(),
-    "pane.approvals": () => {
-      // Ticket #185 will make the right-pane approvals the only surface; until
-      // then Work/Approvals selection uses the inline pane and other panes
-      // keep the existing modal entry.
-      if (interaction().pane === "work" || interaction().pane === "approvals") focusWorkApprovals()
-      else openApprovals()
-    },
+    "pane.approvals": () => openApprovalsFull(),
     "chat.enter": () => undefined,
     "focus.tab": () => cycleFocusZone(1),
     "focus.shift.tab": () => cycleFocusZone(-1),
@@ -4491,7 +4505,7 @@ export function EnsembleV2App() {
     settings: () => openSettings(railAgent()),
     archive: () => archiveRailSelection(),
     delete: () => deleteRailSelection(),
-    approvals: () => openApprovals(),
+    approvals: () => openApprovalsFull(),
     init: () => initEnsemble(),
     pause: () => togglePause(),
     filter: () => openCommandLine("/"),
@@ -4507,7 +4521,7 @@ export function EnsembleV2App() {
     "chat.new.agent": () => createAgent(),
     "chat.new.workspace": () => createWorkspace(),
     "chat.settings": () => openSettings(),
-    "chat.approvals": () => openApprovals(),
+    "chat.approvals": () => openApprovalsFull(),
     "chat.init": () => initEnsemble(),
     "chat.pause": () => togglePause(),
     "chat.native": () => openNative(),
@@ -4541,13 +4555,16 @@ export function EnsembleV2App() {
     "work.restart": () => restartSelected(),
     "work.cancel": () => cancelSelected(),
     "work.native": () => openNative(),
-    // Ticket #173: inline approvals stay in the pane; V is the overflow inbox.
-    "work.approvals": () => focusWorkApprovals(),
-    "work.inbox": () => openApprovalsOverflow(),
-    "workApprovals.down": () => moveInlineApproval(1),
-    "workApprovals.up": () => moveInlineApproval(-1),
-    "workApprovals.resolve": () => resolveInlineApproval(),
-    "workApprovals.back": () => dispatchInteraction({ type: "escape" }),
+    // Ticket #185: one approvals surface; the full inbox owns resolution.
+    "work.approvals": () => openApprovalsFull(),
+    "approvals.down": () => moveApprovalCursor(1),
+    "approvals.down.arrow": () => moveApprovalCursor(1),
+    "approvals.up": () => moveApprovalCursor(-1),
+    "approvals.up.arrow": () => moveApprovalCursor(-1),
+    "approvals.top": () => setApprovalCursor(0),
+    "approvals.bottom": () => setApprovalCursor(Math.max(0, pendingApprovals().length - 1)),
+    "approvals.resolve": () => resolveFocusedApproval(),
+    "approvals.close": () => closeApprovalsFull(),
     // Settings grammar (#83): the keys live in the catalog; these handlers
     // only mutate the cursor or dispatch the row action.
     "settings.tab.prev": () => setSettingsTabTo(settingsTabStep(settingsTab(), -1)),
@@ -4585,7 +4602,7 @@ export function EnsembleV2App() {
     "leader.delete.workspace": () => deleteWorkspace(),
     "leader.archive.agent": () => archiveSelectedAgent(),
     "leader.delete.agent": () => deleteSelectedAgent(),
-    "leader.approvals": () => openApprovals(),
+    "leader.approvals": () => openApprovalsFull(),
     "leader.pane.left": () => togglePane("left"),
     "leader.pane.right": () => togglePane("right"),
     "leader.pause": () => togglePause(),
@@ -4809,8 +4826,10 @@ export function EnsembleV2App() {
       // Ticket #160: the workspace Limits panel traps its own keys while open.
       if (limitsOpen()) { handleLimitsKey(event); return }
       // v5.6 T6: one catalog-driven handler owns wizards, pickers, prompts,
-      // confirms, results, and the approval inbox. It traps every key while a
-      // dialog is open so `:`/Space never leak to the surface underneath.
+      // confirms, and results. It traps every key while a dialog is open so
+      // `:`/Space never leak to the surface underneath. Ticket #185 moved
+      // approvals out of this overlay path and into the right column's
+      // surface key context.
       if (dialogDescriptor()) { handleDialogKey(event); return }
       // Ticket #83: a settings field owns every raw key. Insert lets the
       // input renderable type; field Normal runs the shared Vim adapter.
@@ -4954,7 +4973,7 @@ export function EnsembleV2App() {
         runKeyAction(entry.id)
       },
     })
-    const surfaceLayer = (keyContext: "pane" | "roster" | "chat" | "work" | "workApprovals") => {
+    const surfaceLayer = (keyContext: "pane" | "roster" | "chat" | "work" | "approvals") => {
       const entries = layerEntries(keyContext)
       if (entries.length === 0) return
       const commands = entries.map((entry) => catalogCommand(entry, `ensemble.v2.key.${keyContext}.${entry.id}`))
@@ -4967,7 +4986,7 @@ export function EnsembleV2App() {
       })
       context.keymap.layer(factory)
     }
-    for (const keyContext of ["pane", "roster", "chat", "work", "workApprovals"] as const) {
+    for (const keyContext of ["pane", "roster", "chat", "work", "approvals"] as const) {
       surfaceLayer(keyContext)
     }
     // Ticket #83: settings is generated from its own catalog context. The
@@ -5256,10 +5275,36 @@ export function EnsembleV2App() {
     try { resultScrollRef?.scrollBy?.(delta) } catch {}
   }
 
-  const openApprovals = () => {
-    setApprovalCursor(0)
-    setApprovalsOpen(true)
-    dispatchInteraction({ type: "overlay.set", overlay: "approvals" })
+  /**
+   * Ticket #185: the one approval entry point. Opens the full-height inbox on
+   * the right, opening the right column first when #183 has it closed. The
+   * inbox may legitimately be empty; Esc still returns to split mode.
+   */
+  const openApprovalsFull = () => {
+    if (approvalsMode() !== "full") setApprovalsReturn(paneState())
+    if (!paneSides().right) persistPaneSides({ ...paneSides(), right: true })
+    setApprovalsFull(openFullApprovals({ full: approvalsFull() }).full)
+    setApprovalCursor((cursor) => Math.max(0, Math.min(Math.max(0, pendingApprovals().length - 1), cursor)))
+    setPaneFocus("approvals", "interact")
+  }
+  /** Esc from full approvals returns to split, keeping the small pane selected. */
+  const closeApprovalsFull = () => {
+    const restore = approvalsReturn()
+    setApprovalsFull(closeFullApprovals({ full: approvalsFull() }).full)
+    const visibility = paneVisibility()
+    if (pendingApprovals().length > 0 && visibility.approvals !== false) {
+      setPaneFocus("approvals", "select")
+      return
+    }
+    if (restore.pane !== "approvals" && visibility[restore.pane] !== false) {
+      setPaneFocus(restore.pane, restore.mode)
+      return
+    }
+    if (surface()?.kind === "workspace" && visibility.work !== false) {
+      setPaneFocus("work", "select")
+      return
+    }
+    setPaneFocus("chat", "select")
   }
 
   // v5.6 T10: help navigation is local to the overlay. It never dispatches
@@ -5455,7 +5500,6 @@ export function EnsembleV2App() {
     }
     if (overlay === "wizard") { wizardCancel(); return }
     if (overlay === "logs") { closeLogs(); return }
-    if (overlay === "approvals") { setApprovalsOpen(false); return }
     if (overlay === "help") { closeHelp(); return }
     if (overlay === "settings") void closeSettings()
   }
@@ -6154,7 +6198,6 @@ export function EnsembleV2App() {
     | { surface: "prompt"; field: "insert" | "normal" }
     | { surface: "confirm" }
     | { surface: "result" }
-    | { surface: "approvals" }
 
   const dialogDescriptor = (): DialogDescriptor | null => {
     if (wizard()) {
@@ -6167,7 +6210,6 @@ export function EnsembleV2App() {
     if (textPrompt()) return { surface: "prompt", field: interaction().mode === "insert" ? "insert" : "normal" }
     if (confirm()) return { surface: "confirm" }
     if (result()) return { surface: "result" }
-    if (approvalsOpen() && !helpOpen() && !settingsAgentID()) return { surface: "approvals" }
     return null
   }
 
@@ -6209,12 +6251,6 @@ export function EnsembleV2App() {
       case "result.page.down": return resultScroll(messageHeight())
       case "result.page.up": return resultScroll(-messageHeight())
       case "result.close.enter": case "result.close.escape": return finishResultModal()
-      case "approvals.down": case "approvals.down.arrow": return setApprovalCursor((cursor) => Math.min(Math.max(0, pendingApprovals().length - 1), cursor + 1))
-      case "approvals.up": case "approvals.up.arrow": return setApprovalCursor((cursor) => Math.max(0, cursor - 1))
-      case "approvals.top": return setApprovalCursor(0)
-      case "approvals.bottom": return setApprovalCursor(Math.max(0, pendingApprovals().length - 1))
-      case "approvals.resolve": { const approval = selectedApproval(); if (approval) void resolveApproval(approval).catch(showError); return }
-      case "approvals.close": dispatchInteraction({ type: "escape" }); return
     }
   }
 
@@ -6379,7 +6415,7 @@ export function EnsembleV2App() {
       dispatchInteraction({ type: "escape" })
       return true
     }
-    const context: KeyContext = dialog.surface === "approvals" ? "approvals" : dialogKeyContext({ surface: dialog.surface })
+    const context: KeyContext = dialogKeyContext({ surface: dialog.surface })
     const resolved = resolveNormalKey(context, pendingKeys, token)
     if (resolved.type === "pending") {
       setPendingChord([...resolved.prefix])
@@ -6416,7 +6452,12 @@ export function EnsembleV2App() {
   }
 
   const statusSurface = (): StatuslineSurface => surface()?.kind ?? "none"
-  const statusContext = () => contextLabel({ focus: interaction().focus, overlay: interaction().overlay, surface: statusSurface() })
+  const statusContext = () => contextLabel({
+    focus: interaction().focus,
+    overlay: interaction().overlay,
+    surface: statusSurface(),
+    approvals: approvalsMode() === "full" ? "full" : "split",
+  })
   const statusPosition = () => {
     if (settingsField()) return composerPosition(settingsFieldText(), settingsFieldCursor())
     if (composerActive()) return composerPosition(composerDraft(), composerCursor())
@@ -6433,7 +6474,8 @@ export function EnsembleV2App() {
     if (prompt) return composerPosition(String(textPromptRef?.plainText ?? prompt.value), Number(textPromptRef?.cursorOffset ?? 0))
     if (interaction().pane === "agents" || interaction().pane === "workspaces") return listPosition(railCursor(), railVisibleRows().length)
     if (interaction().pane === "work") return listPosition(taskCursorClamped(), visibleTasks().length)
-    if (interaction().pane === "approvals") return listPosition(approvalCursor(), pendingApprovals().length)
+    if (interaction().pane === "approvals" && approvalsMode() === "full") return listPosition(approvalCursor(), pendingApprovals().length)
+    if (interaction().pane === "approvals") return listPosition(0, pendingApprovals().length)
     const metrics = transcriptScroll()
     return transcriptPosition(metrics.top, metrics.height, metrics.viewport)
   }
@@ -6498,7 +6540,6 @@ export function EnsembleV2App() {
     if (interaction().mode === "visual") return visualHint
     if (wizard()) return wizardHint()
     if (picker() || textPrompt() || confirm() || result()) return dialogHint()
-    if (approvalsOpen() && !helpOpen() && !settingsAgentID()) return statuslineHints("approvals")
     if (interaction().overlay === "none") {
       const search = transcriptSearch()
       if (search) {
@@ -6531,18 +6572,19 @@ export function EnsembleV2App() {
         filter: (entry) => entry.id !== "composerInsert.stop" || stoppable(),
       })
     }
+    // Ticket #185: the full inbox advertises its own list grammar unless a
+    // higher overlay (handled above) owns the keyboard.
+    if (approvalsMode() === "full" && interaction().pane === "approvals" && interaction().overlay === "none") {
+      return statuslineHints("approvals")
+    }
     // Ticket #173: advertise only the focused card's valid actions, and the
     // approvals keys only while they can do something.
     const workHintFilter = (entry: KeyEntry) => {
       if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)
       if (entry.id === "work.approvals") return pendingApprovals().length > 0
-      if (entry.id === "work.inbox") return inlineApprovals().overflow > 0
       return true
     }
     if (paneMode() === "interact" && interaction().pane === "work") return statuslineHints("work", { hasWork: hasWorkZone(), filter: workHintFilter })
-    if (paneMode() === "interact" && interaction().pane === "approvals") {
-      return statuslineHints("workApprovals", { filter: (entry) => entry.id !== "work.inbox" || inlineApprovals().overflow > 0 })
-    }
     const keyContext = surfaceKeyContext()
     if (keyContext) {
       return statuslineHints(keyContext, {
@@ -6623,21 +6665,20 @@ export function EnsembleV2App() {
       </box>
         <box flexDirection="row" flexGrow={1} minHeight={0} gap={1} position="relative" opacity={overlayOpen() ? 0.35 : 1}>
           <Show when={paneSides().left}>
-            <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focusedSection={railSectionFocused(paneState(), "agents") ? "agents" : railSectionFocused(paneState(), "workspaces") ? "workspaces" : null} cursorVisible={paneMode() === "interact" && (interaction().pane === "agents" || interaction().pane === "workspaces")} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
+            <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focusedSection={railSectionFocused(paneState(), "agents") ? "agents" : railSectionFocused(paneState(), "workspaces") ? "workspaces" : null} cursorVisible={paneMode() === "interact" && (interaction().pane === "agents" || interaction().pane === "workspaces")} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
           </Show>
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chatOwnsFocus() ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chatOwnsFocus() || composerActive() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={limitsOpen()} fallback={
               <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
-                <Show when={approvalsOpen()} fallback={
-                  <Show when={surface()} fallback={
-                    <box flexDirection="column" padding={1} flexGrow={1}>
-                      <text fg={colors.accent} bg={colors.bg} width="100%" truncate>No currently opened session</text>
-                      <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">Select an agent for a direct chat or a workspace for the group chat. Use j/k then Enter.</text>
-                      <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{EMPTY_MARK}</text>
-                    </box>
-                  }>
+                <Show when={surface()} fallback={
+                  <box flexDirection="column" padding={1} flexGrow={1}>
+                    <text fg={colors.accent} bg={colors.bg} width="100%" truncate>No currently opened session</text>
+                    <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">Select an agent for a direct chat or a workspace for the group chat. Use j/k then Enter.</text>
+                    <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{EMPTY_MARK}</text>
+                  </box>
+                }>
                     <>
                       <Show when={hasChatContent()} fallback={
                         <box flexDirection="column" padding={1} flexGrow={1}>
@@ -6772,11 +6813,6 @@ export function EnsembleV2App() {
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
                     </>
                   </Show>
-                }>
-                  <box flexDirection="column" opacity={overlayOpacity()}>
-                    <ApprovalList colors={colors} approvals={pendingApprovals()} cursor={approvalCursor()} resolvingID={resolvingApprovalID()} state={state()} onResolve={resolveApproval} motionTick={motionFrame()} emphasized={approvalMotion().emphasized} resolved={approvalMotion().resolved} />
-                  </box>
-                </Show>
               }>
                 <box flexGrow={1} minHeight={0} flexDirection="column" opacity={overlayOpacity()}>
                   <HelpView
@@ -6798,7 +6834,8 @@ export function EnsembleV2App() {
           </box>
           {/* Ticket #172: the Work pane is a sibling of the chat, not part of
               the transcript column. Below 96 columns it becomes a right
-              drawer over the chat; approvals keep their existing surface. */}
+              drawer over the chat; ticket #185 gives that same column the
+              split summary and the full-height approvals inbox. */}
           <Show when={showWorkPane()}>
             <box
               id={MOUSE_PANE_IDS.work}
@@ -6824,11 +6861,14 @@ export function EnsembleV2App() {
                 onMouseDown={(event: any) => {
                   if (Number(event?.button) !== 0) return
                   event?.preventDefault?.()
-                  dispatchInteraction({ type: "focus.set", focus: "work" })
+                  if (approvalsMode() === "full") setPaneFocus("approvals", "interact")
+                  else dispatchInteraction({ type: "focus.set", focus: "work" })
                 }}
               >
-                <ChromeText colors={colors} fg={workOwnsFocus() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate text={workHeader()} />
+                <ChromeText colors={colors} fg={workOwnsFocus() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate text={approvalsMode() === "full" ? fullApprovalsHeader(fullApprovals()) : workHeader()} />
               </box>
+              <Show when={approvalsMode() === "full"} fallback={
+                <>
               <box flexGrow={1} minHeight={0} width="100%" flexDirection="column" overflow="hidden">
                 <Show when={workPane().sections.length === 0}>
                   <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{workPane().view === "active" ? "No active work." : "No finished work yet."}</text>
@@ -6912,19 +6952,18 @@ export function EnsembleV2App() {
                   )}</For>
                 </Show>
               </box>
-              {/* Ticket #173: approvals stay stuck to the pane bottom, above
-                  the pager, in both ACTIVE and HISTORY. */}
+              {/* Ticket #185: split mode pins the small summary under Work,
+                  above the pager. Full mode replaces this whole fallback. */}
               <Show when={pendingApprovals().length > 0}>
                 <WorkApprovalsView
                   colors={colors}
                   section={inlineApprovals()}
                   focused={paneOwnsFocus(paneState(), "approvals") && !overlayOpen()}
-                  interacting={paneInteracting("approvals") && !overlayOpen()}
                   resolvingID={resolvingApprovalID()}
                   motionTick={motionFrame()}
                   emphasized={approvalMotion().emphasized}
-                  onFocus={focusWorkApprovals}
-                  onSelect={selectInlineApproval}
+                  onFocus={focusApprovalsPane}
+                  onOpen={openApprovalsAt}
                 />
               </Show>
               <box flexShrink={0} width="100%" flexDirection="row" justifyContent="space-between">
@@ -6948,6 +6987,17 @@ export function EnsembleV2App() {
                   <text fg={workPane().page < workPane().pages ? colors.focus : colors.faint} bg={colors.bg}>›</text>
                 </box>
               </box>
+                </>
+              }>
+                <FullApprovalsView
+                  colors={colors}
+                  section={fullApprovals()}
+                  resolvingID={resolvingApprovalID()}
+                  motionTick={motionFrame()}
+                  emphasized={approvalMotion().emphasized}
+                  resolved={approvalMotion().resolved}
+                />
+              </Show>
             </box>
           </Show>
         </box>

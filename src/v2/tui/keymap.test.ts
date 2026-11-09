@@ -127,26 +127,26 @@ test("settings lists expose no Visual, yank, or paste and no per-tab filter chor
 
 test("the work zone is reachable with Tab and keeps spatial list navigation", () => {
   const keys = keysFor("work")
-  for (const sequence of ["j", "k", "h", "l", "g g", "shift+g", "ctrl+d", "ctrl+u", "enter", "tab", "escape", "v", "shift+v"]) {
+  for (const sequence of ["j", "k", "h", "l", "g g", "shift+g", "ctrl+d", "ctrl+u", "enter", "tab", "escape", "v"]) {
     assert.ok(keys.includes(sequence), `work keeps ${sequence}`)
   }
   assert.equal(entryId("work", "f"), "work.filter", "ticket172: f toggles ACTIVE/HISTORY")
   assert.equal(entryId("work", "pageup"), "work.page.up")
   assert.equal(entryId("work", "pagedown"), "work.page.down")
-  assert.equal(entryId("work", "v"), "work.approvals", "ticket173: v focuses inline approvals")
-  assert.equal(entryId("work", "shift+v"), "work.inbox", "ticket173: V opens the overflow inbox")
+  assert.equal(entryId("work", "v"), "work.approvals", "ticket185: v opens full approvals")
+  assert.equal(resolveNormalKey("work", [], "shift+v").type, "none", "ticket185: V is retired")
 })
 
-test("ticket173: the inline approvals zone owns j/k, Enter, V, Esc, and Tab", () => {
-  const keys = keysFor("workApprovals")
-  for (const sequence of ["j", "k", "enter", "shift+v", "tab", "shift+tab", "escape"]) {
-    assert.ok(keys.includes(sequence), `approvals keeps ${sequence}`)
+test("ticket185: full approvals own j/k, Enter, Esc, and Tab", () => {
+  const keys = keysFor("approvals")
+  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "shift+tab", "escape"]) {
+    assert.ok(keys.includes(sequence), `full approvals keep ${sequence}`)
   }
-  assert.equal(entryId("workApprovals", "j"), "workApprovals.down")
-  assert.equal(entryId("workApprovals", "k"), "workApprovals.up")
-  assert.equal(entryId("workApprovals", "enter"), "workApprovals.resolve")
-  assert.equal(entryId("workApprovals", "escape"), "workApprovals.back")
-  assert.equal(entryId("workApprovals", "shift+v"), "work.inbox")
+  assert.equal(entryId("approvals", "j"), "approvals.down")
+  assert.equal(entryId("approvals", "k"), "approvals.up")
+  assert.equal(entryId("approvals", "enter"), "approvals.resolve")
+  assert.equal(entryId("approvals", "escape"), "approvals.close")
+  assert.equal(resolveNormalKey("approvals", [], "shift+v").type, "none", "V is retired")
 })
 
 test("the work list carries the shared task actions on their Normal keys", () => {
@@ -170,14 +170,15 @@ test("d delegates in the work list instead of invoking the text delete operator"
   assert.ok(!/delete/i.test(`${delegate?.id} ${delegate?.title}`), "work d never binds delete")
 })
 
-test("ticket173: Work hints teach focus, history, approvals, overflow, and page keys", () => {
+test("ticket185: Work hints teach focus, history, approvals, and page keys without V", () => {
   const hints = statuslineHints("work")
-  for (const hint of ["j/k cards", "h/l row", "ctrl+d/u page", "v approvals", "V inbox", "f history", "tab next"]) {
+  for (const hint of ["j/k cards", "h/l row", "ctrl+d/u page", "v approvals", "f history", "tab next"]) {
     assert.ok(hints.includes(hint), `work hints include ${hint}: ${hints}`)
   }
-  const approvals = statuslineHints("workApprovals")
-  for (const hint of ["j/k approvals", "enter resolve", "V inbox", "tab next", "esc select"]) {
-    assert.ok(approvals.includes(hint), `approval hints include ${hint}: ${approvals}`)
+  assert.ok(!hints.includes("V inbox"), "V is retired")
+  const approvals = statuslineHints("approvals")
+  for (const hint of ["j/k move", "enter resolve", "esc split", "tab next"]) {
+    assert.ok(approvals.includes(hint), `full approval hints include ${hint}: ${approvals}`)
   }
 })
 
@@ -341,7 +342,7 @@ test("dialog hints come from the catalog and stay truthful about variants", () =
   assert.ok(statuslineHints("confirm").includes("n/esc no"))
   assert.ok(statuslineHints("result").includes("enter/esc close"))
   assert.ok(statuslineHints("approvals").includes("enter resolve"))
-  assert.ok(statuslineHints("approvals").includes("esc close"))
+  assert.ok(statuslineHints("approvals").includes("esc split"))
 })
 
 test("text-field hints share the dialog ladder vocabulary", () => {
