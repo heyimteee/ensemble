@@ -231,6 +231,26 @@ test("Work actions target the focused visible task", () => {
   assert.ok(has(app(), "tasks.find((task) => task.id === id)"))
 })
 
+test("ticket187: native subagent records join the Work view model", () => {
+  assert.ok(has(app(), "nativeSubagentRuns()"))
+  assert.ok(has(app(), "workViewGroups(activeTasks(), state()?.subtasks ?? {}, {"))
+})
+
+test("ticket187: native cards render through the same card and compact views", () => {
+  const source = app()
+  assert.ok(has(source, "workCardForNativeSubagentCached(workCardCache"))
+  assert.ok(has(source, "workCompactRowForNativeSubagent("))
+  assert.ok(has(source, "section.items"))
+})
+
+test("ticket187: native focus opens the child session and offers no task actions", () => {
+  const source = app()
+  assert.ok(has(source, "selectedNativeSubagent()"))
+  assert.ok(has(source, "nativeSubagentFocusChild("))
+  assert.ok(has(source, "childSessionID"))
+  assert.ok(has(source, "nativeSubagentActions()"))
+})
+
 test("ticket184: HISTORY groups carry task-level rollup state", () => {
   assert.ok(has(app(), "historyPaneGroups("))
   assert.ok(has(app(), "reconcileHistoryView("))
@@ -373,7 +393,7 @@ test("the pending label settles on the durable update", () => {
 })
 
 test("card selection is gated by Work interaction, not pane selection", () => {
-  assert.ok(has(app(), "workCardsFocused(paneState()) && selectedTask()?.id === card.id"))
+  assert.ok(has(app(), "workCardsFocused(paneState()) && (workFocusID() === card.id"))
 })
 
 test("compact rows share the card focus identity and interaction gate", () => {

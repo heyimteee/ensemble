@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
-import { WORK_CARD_ACTIONS, isWorkActionID, pendingWorkSettled, workLifecycleSignature, workTaskActions } from "./workactions.ts"
+import { WORK_CARD_ACTIONS, isWorkActionID, nativeSubagentActions, pendingWorkSettled, workLifecycleSignature, workTaskActions } from "./workactions.ts"
 
 const task = (patch: Partial<Subtask> = {}): Subtask => ({
   id: "t",
@@ -84,4 +84,8 @@ test("ticket173: a pending action settles on the durable update, never the RPC r
   const requeued = task({ ...stalled, state: "pending", outcome: "pending", attempts: 0, failure: undefined })
   assert.equal(pendingWorkSettled(pending, requeued), true, "the requeued row settles the label")
   assert.equal(pendingWorkSettled(pending, undefined), true, "a disappeared row never sticks")
+})
+
+test("ticket187: a native subagent card is read-only Ensemble work", () => {
+  assert.deepEqual([...nativeSubagentActions()], [], "no retry, cancel, delegate, reassign, restart, or result opens")
 })

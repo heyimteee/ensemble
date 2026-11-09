@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import type { Subtask } from "../types.ts"
+import type { NativeSubagentRun, Subtask } from "../types.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
 import {
   emptyHistoryViewState,
@@ -44,6 +44,21 @@ const replied = (patch: Partial<Subtask> = {}): Subtask =>
 
 const record = (...tasks: Subtask[]): Record<string, Subtask> =>
   Object.fromEntries(tasks.map((item) => [item.id, item]))
+
+const nativeRun = (patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
+  childSessionID: "child",
+  parentSessionID: "session",
+  parentTaskID: "t",
+  dispatchGroupID: "dispatch_1",
+  workspaceID: "w",
+  parentAgentID: "kakiko",
+  parentAgent: "Kakiko",
+  instruction: "Watch the CI",
+  state: "working",
+  startedAt: 2,
+  source: "session-created",
+  ...patch,
+})
 
 /**
  * Ticket #172: the shell has one pane-width source of truth. The chat, the
@@ -512,4 +527,119 @@ test("ticket172: the 80x24/100x30/120x40/160x50 matrix picks a valid pane and la
     }
     assert.deepEqual(layout.tasks.map((item) => item.id), items.map((item) => item.id), `${width}x${height} keeps every task reachable`)
   }
+})
+
+/**
+ * Ticket #187: a native subagent run is durable Work but not a Subtask. It
+ * joins its parent dispatch group, contributes to that group's active/done
+ * counts, and partitions into ACTIVE or HISTORY by its own state.
+ */
+test("ticket187: native subagent runs join the parent group and its counts", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const liveChild = nativeRun({ childSessionID: "child_live", startedAt: 3 })
+  const doneChild = nativeRun({ childSessionID: "child_done", state: "replied", startedAt: 2, finishedAt: 1_000 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [liveChild, doneChild])
+
+  assert.deepEqual(views.active.map((group) => group.id), ["dispatch_1"])
+  assert.deepEqual(views.active[0]?.tasks.map((item) => item.id), ["parent"], "the parent task card coexists")
+  assert.deepEqual(views.active[0]?.native?.map((item) => item.childSessionID), ["child_live"])
+  assert.equal(views.active[0]?.active, 2, "the live child is active work")
+  assert.equal(views.active[0]?.done, 1, "the finished child is done work")
+  assert.deepEqual(views.history.map((group) => group.id), ["dispatch_1"], "a terminal child is history")
+  assert.deepEqual(views.history[0]?.tasks, [], "the group's task subset remains task-only")
+  assert.deepEqual(views.history[0]?.native?.map((item) => item.childSessionID), ["child_done"])
+  assert.equal(views.history[0]?.active, 2, "the history rollup sees the still-active group")
+  assert.equal(views.history[0]?.done, 1)
+})
+
+test("ticket187: a finished parent and a live child appear in different views", () => {
+  const parent = replied({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1, finishedAt: 2_000, repliedAt: 2_000 })
+  const liveChild = nativeRun({ childSessionID: "child_live", startedAt: 1_500 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [liveChild])
+
+  assert.deepEqual(views.active.map((group) => group.id), ["dispatch_1"], "the live child keeps the group active")
+  assert.deepEqual(views.active[0]?.tasks, [], "the parent task has already left ACTIVE")
+  assert.deepEqual(views.active[0]?.native?.map((item) => item.childSessionID), ["child_live"])
+  assert.deepEqual(views.history[0]?.tasks.map((item) => item.id), ["parent"])
+  assert.deepEqual(views.history[0]?.native, [], "the live child never duplicates into history")
+  assert.equal(views.history[0]?.active, 1)
+  assert.equal(views.history[0]?.done, 1)
+})
+
+test("ticket187: a native run uses its stored group when the parent task is already gone", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const detached = nativeRun({ childSessionID: "child_detached", parentTaskID: "missing" })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [detached])
+  assert.deepEqual(views.active[0]?.native?.map((item) => item.childSessionID), ["child_detached"])
+  assert.equal(views.active[0]?.active, 2)
+})
+
+test("ticket187: native runs with no resolvable group are not cards", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const orphan = nativeRun({ childSessionID: "child_orphan", parentTaskID: "missing", dispatchGroupID: "dispatch_unknown" })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [orphan])
+  assert.deepEqual(views.active[0]?.native, [])
+  assert.equal(views.active[0]?.active, 1, "an orphaned record cannot inflate a group")
+})
+
+test("ticket187: native cards join pagination without changing task reachability", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const liveChild = nativeRun({ childSessionID: "child_live", startedAt: 3 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [liveChild])
+  const layout = paginateWorkGroups(views.active, 59, 40, 5_000)
+  assert.deepEqual(layout.tasks.map((item) => item.id), ["parent"])
+  assert.deepEqual(layout.native.map((item) => item.childSessionID), ["child_live"])
+  assert.deepEqual(layout.items.map((item) => item.kind === "task" ? item.task.id : item.run.childSessionID), ["parent", "child_live"])
+  assert.equal(layout.pages[0]?.sections[0]?.tasks.length, 1)
+  assert.equal(layout.pages[0]?.sections[0]?.native?.length, 1)
+})
+
+test("ticket187: native cards page like task cards without duplicating", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const children = [2, 3, 4, 5, 6].map((startedAt) =>
+    nativeRun({ childSessionID: `child_${startedAt}`, startedAt }),
+  )
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, children)
+  const body = WORK_CARD_ROWS + 2
+  const layout = paginateWorkGroups(views.active, 59, body, 5_000)
+  assert.equal(layout.mode, "cards")
+  assert.ok(layout.pages.length > 1, "the group spreads across pages")
+  assert.deepEqual(
+    layout.native.map((run) => run.childSessionID),
+    children.map((run) => run.childSessionID),
+    "every native card stays reachable exactly once",
+  )
+  assert.equal(layout.items.length, 6)
+  for (const page of layout.pages) assert.ok(page.height <= body, `page ${page.number} fits`)
+})
+
+test("ticket187: native cards never become task rows or consume hop budget", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const ledger = {
+    dispatch_1: {
+      id: "dispatch_1",
+      workspaceID: "w",
+      rootID: "dispatch_1",
+      continuationIndex: 0,
+      maxHops: 8,
+      usedHops: 2,
+      depthMax: 3,
+      createdAt: 1,
+    },
+  }
+  const child = nativeRun({ childSessionID: "child_live", startedAt: 3 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000, dispatchGroups: ledger }, [child])
+  assert.deepEqual(views.active[0]?.tasks.map((item) => item.id), ["parent"], "the child is not a queue row")
+  assert.equal(ledger.dispatch_1.usedHops, 2, "native work consumes no hop budget")
+  assert.equal(views.active[0]?.budget?.usedHops, 2)
+})
+
+test("ticket187: the work header counts native subagents", () => {
+  const parent = working({ id: "parent", dispatchGroupID: "dispatch_1", createdAt: 1 })
+  const liveChild = nativeRun({ childSessionID: "child_live", startedAt: 3 })
+  const doneChild = nativeRun({ childSessionID: "child_done", state: "failed", startedAt: 2, finishedAt: 1_000 })
+  const views = workViewGroups([parent], record(parent), { now: 5_000 }, [liveChild, doneChild])
+  const counts = views.active[0]!
+  const header = workPaneHeader("active", views.active.length, counts.active, counts.done, 1, 1)
+  assert.match(header, /2 active · 1 done/, "native work is visible in the pane header counts")
 })

@@ -57,12 +57,17 @@ export function workAgeLabel(ageMs: number): string {
 
 /** The latest terminal finish in a history group, with the recorded hold origin as fallback. */
 export function workHistoryFinishedAt(
-  group: Pick<WorkGroup, "tasks" | "latestTerminalAt" | "createdAt">,
+  group: Pick<WorkGroup, "tasks" | "latestTerminalAt" | "createdAt"> & { native?: WorkGroup["native"] },
 ): number {
   let latest: number | undefined
   for (const task of group.tasks) {
     const finished = workFinishedAt(task)
     if (finished !== undefined && (latest === undefined || finished > latest)) latest = finished
+  }
+  // Ticket #187: a finished native subagent ages the same as a task card.
+  for (const run of group.native ?? []) {
+    const finished = run.finishedAt ?? run.startedAt
+    if (latest === undefined || finished > latest) latest = finished
   }
   return latest ?? group.latestTerminalAt ?? group.createdAt
 }
