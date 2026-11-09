@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
-import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
+import { ApprovalList, ChromeText, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, WorkHistoryRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, paletteRowTitle, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
@@ -194,12 +194,19 @@ import {
 } from "./workrows.ts"
 import { nextWorkInvalidation, workGroupCounts } from "./workgroups.ts"
 import {
+  emptyHistoryViewState,
+  historyGroupFocusID,
+  historyGroupIDFromFocus,
+  historyPaneGroups,
   paginateWorkGroups,
+  reconcileHistoryView,
+  toggleHistoryView,
   workPaneBodyHeight,
   workPaneHeader,
   workTaskPage,
   workViewGroups,
   workspacePaneWidths,
+  type HistoryViewState,
   type WorkPaneSection as WorkLayoutSection,
   type WorkView,
 } from "./workpane.ts"
@@ -434,6 +441,12 @@ export function EnsembleV2App() {
   // suppresses the hydration echo after an optimistic local toggle.
   const [collapsedRailGroups, setCollapsedRailGroups] = createSignal<string[]>([])
   let railCollapsedKey = ""
+  // Ticket #184: HISTORY is a task-level view with durable dismissal. Group
+  // expansion and finish markers are local presentation state; dismissal is
+  // persisted through `ui.save` and never deletes terminal rows.
+  const [dismissedHistoryGroups, setDismissedHistoryGroups] = createSignal<string[]>([])
+  const [historyViewState, setHistoryViewState] = createSignal<HistoryViewState>(emptyHistoryViewState())
+  let historyDismissedKey = ""
   // Ticket #172: Work is a dedicated pane. Focus is task identity, the view
   // owns ACTIVE/HISTORY, and the pane pages its own body instead of sharing
   // the chat column. The drawer only exists below the 96-column breakpoint.
@@ -1033,31 +1046,47 @@ export function EnsembleV2App() {
   // previous reference across unrelated snapshot polls.
   const workCardCache = createWorkCardCache()
   type WorkPaneSection = WorkLayoutSection & { cards: WorkCard[] }
-  const workViews = createMemo(() => {
+  // Ticket #184: partition tasks first, then derive rollup state from the
+  // visible HISTORY groups. The reconcile effect owns only expansion/counts;
+  // workViews never feeds back into it, so updates cannot loop.
+  const workPartition = createMemo(() => {
     // Track the dedicated expiry revision; a durable state change re-runs the
     // memo through activeTasks/state/approvals below.
     workRevision()
     const now = Date.now()
-    const active = activeTasks()
-    const grouped = workViewGroups(active, state()?.subtasks ?? {}, {
+    const grouped = workViewGroups(activeTasks(), state()?.subtasks ?? {}, {
       now,
       pendingApprovalIDs: pendingApprovalIDs(),
       nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
       resolvedAtForTask: approvalResolutionAt(state()?.approvals ?? {}),
       dispatchGroups: state()?.dispatchGroups ?? {},
     })
+    return { now, active: grouped.active, history: grouped.history }
+  })
+  const dismissedHistory = createMemo(() => new Set(dismissedHistoryGroups()))
+  const visibleHistoryGroups = createMemo(() =>
+    workPartition().history.filter((group) => !dismissedHistory().has(group.id)),
+  )
+  createEffect(() => {
+    const groups = visibleHistoryGroups()
+    setHistoryViewState((previous) => reconcileHistoryView(groups, previous))
+  })
+  const historyPaneRows = createMemo(() => historyPaneGroups(visibleHistoryGroups(), historyViewState()))
+  const workViews = createMemo(() => {
+    const partition = workPartition()
     const width = workContentWidth()
     const body = workBodyHeight()
+    const history = visibleHistoryGroups()
     return {
       active: {
-        groups: grouped.active,
-        layout: paginateWorkGroups(grouped.active, width, body, now),
-        counts: workGroupCounts(grouped.active),
+        groups: partition.active,
+        layout: paginateWorkGroups(partition.active, width, body, partition.now),
+        counts: workGroupCounts(partition.active),
       },
       history: {
-        groups: grouped.history,
-        layout: paginateWorkGroups(grouped.history, width, body, now),
-        counts: workGroupCounts(grouped.history),
+        groups: history,
+        layout: paginateWorkGroups(historyPaneRows(), width, body, partition.now),
+        counts: workGroupCounts(history),
       },
     }
   })
@@ -1176,7 +1205,13 @@ export function EnsembleV2App() {
     const index = focused ? tasks.findIndex((task) => task.id === focused) : -1
     return index >= 0 ? index : 0
   }
-  const selectedTask = createMemo(() => visibleTasks()[taskCursorClamped()])
+  const selectedTask = createMemo(() => {
+    const id = workFocusID()
+    const tasks = visibleTasks()
+    // A history header row owns focus without owning a task; actions must not
+    // fall back to the first card in that state.
+    return id === undefined ? tasks[0] : tasks.find((task) => task.id === id)
+  })
   const selectedTaskActions = createMemo(() => {
     // Track the expiry revision so a stalled/retrying card's action set
     // settles without waiting for an unrelated snapshot.
@@ -1318,6 +1353,16 @@ export function EnsembleV2App() {
     setCollapsedRailGroups(next)
     void invoke(context, "ui.save", { collapsedRailGroups: next }).catch(() => undefined)
   }
+  // Ticket #184: hydrate durable history dismissal, then keep local dismiss
+  // actions optimistic. The serialized key suppresses the save echo.
+  createEffect(() => {
+    const stored = state()?.ui.dismissedHistoryGroups
+    if (!stored) return
+    const key = JSON.stringify(stored)
+    if (key === historyDismissedKey) return
+    historyDismissedKey = key
+    setDismissedHistoryGroups([...stored])
+  })
   /** `z` and a header click share this: toggle the header or the selected agent's group. */
   const toggleRailGroup = (groupID?: string) => {
     const target = groupID ?? railCollapseTarget(railVisibleRows(), railCursor())
@@ -2250,7 +2295,7 @@ export function EnsembleV2App() {
   const hasWorkZone = () => {
     if (surface()?.kind !== "workspace") return false
     const views = workViews()
-    return views.active.groups.length > 0 || views.history.groups.length > 0
+    return views.active.groups.length > 0 || visibleHistoryGroups().length > 0
   }
 
   const run = async (label: string, action: () => Promise<void>): Promise<boolean> => {
@@ -2791,6 +2836,19 @@ export function EnsembleV2App() {
       else { setWorkPage(historyPage); setWorkFocusID(taskID) }
       return
     }
+    // Ticket #184: a restored terminal task may live in a rolled-up group.
+    // Expand it before settling focus so #170's persisted selection survives.
+    const historyGroup = views.history.groups.find((group) => group.tasks.some((task) => task.id === taskID))
+    if (historyGroup) {
+      setWorkView("history")
+      setHistoryViewState((state) =>
+        state.expanded[historyGroup.id] ? state : toggleHistoryView(state, historyGroup.id),
+      )
+      workFocusIntent = "first"
+      lastWorkFocus = undefined
+      setWorkFocusID(taskID)
+      return
+    }
     workFocusIntent = "first"
     lastWorkFocus = undefined
     setWorkFocusID(undefined)
@@ -2818,6 +2876,57 @@ export function EnsembleV2App() {
   const selectWorkCard = (id: string) => {
     setPaneFocus("work", "interact")
     focusWorkTask(id)
+  }
+  // Ticket #184: Enter on a history group row expands or collapses it; `x`
+  // dismisses the focused group; `D` clears the whole history view. Dismissal
+  // is a bounded, durable view filter, never a terminal-row deletion.
+  const historyGroupRowFocus = () => workView() === "history" ? historyGroupIDFromFocus(workFocusID()) : undefined
+  const focusedHistoryGroup = createMemo(() => {
+    if (workView() !== "history") return undefined
+    const row = historyGroupRowFocus()
+    if (row !== undefined) return row
+    const taskID = selectedTask()?.id
+    if (taskID === undefined) return undefined
+    return workViews().history.groups.find((group) => group.tasks.some((task) => task.id === taskID))?.id
+  })
+  const toggleFocusedHistoryGroup = () => {
+    const groupID = historyGroupRowFocus()
+    if (groupID === undefined) return false
+    setHistoryViewState((state) => toggleHistoryView(state, groupID))
+    return true
+  }
+  const persistDismissedHistory = (next: string[]) => {
+    // Group ids are per dispatch action; cap the durable filter so it stays
+    // bounded long after 24h retention drops the underlying rows.
+    const unique = [...new Set(next)].slice(-200)
+    historyDismissedKey = JSON.stringify(unique)
+    setDismissedHistoryGroups(unique)
+    void invoke(context, "ui.save", { dismissedHistoryGroups: unique }).catch(() => undefined)
+  }
+  const dismissFocusedHistoryGroup = () => {
+    if (workView() !== "history") return false
+    const groupID = focusedHistoryGroup()
+    if (groupID === undefined) return false
+    persistDismissedHistory([...dismissedHistoryGroups(), groupID])
+    return true
+  }
+  const clearHistoryView = async () => {
+    const groups = workViews().history.groups
+    if (groups.length === 0) {
+      showToast({ title: "History", message: "The history view is already clear.", tone: "info" })
+      return
+    }
+    const ok = await openConfirm(
+      "Clear the history view?",
+      `${groups.length} finished ${groups.length === 1 ? "group" : "groups"} will be hidden. Terminal rows are retained; this only filters the view.`,
+    )
+    if (!ok) return
+    persistDismissedHistory([...dismissedHistoryGroups(), ...groups.map((group) => group.id)])
+  }
+  /** Ticket #184: a rolled-up history row is a focusable group target. */
+  const selectHistoryGroup = (groupID: string) => {
+    setPaneFocus("work", "interact")
+    focusWorkTask(historyGroupFocusID(groupID))
   }
   const selectWorkPage = (page: number) => {
     const pages = Math.max(1, workPane().pages)
@@ -4534,12 +4643,19 @@ export function EnsembleV2App() {
     "work.filter": () => toggleWorkView(),
     "work.page.down": () => moveWorkPage(1),
     "work.page.up": () => moveWorkPage(-1),
-    "work.open": () => openResult(),
+    "work.open": () => {
+      if (toggleFocusedHistoryGroup()) return
+      return openResult()
+    },
     "work.delegate": () => delegateSelected(),
     "work.reassign": () => reassignSelected(),
     "work.retry": () => retrySelected(),
     "work.restart": () => restartSelected(),
-    "work.cancel": () => cancelSelected(),
+    "work.cancel": () => {
+      if (dismissFocusedHistoryGroup()) return
+      return cancelSelected()
+    },
+    "work.history.clear": () => { void clearHistoryView() },
     "work.native": () => openNative(),
     // Ticket #173: inline approvals stay in the pane; V is the overflow inbox.
     "work.approvals": () => focusWorkApprovals(),
@@ -6534,6 +6650,9 @@ export function EnsembleV2App() {
     // Ticket #173: advertise only the focused card's valid actions, and the
     // approvals keys only while they can do something.
     const workHintFilter = (entry: KeyEntry) => {
+      if (entry.id === "work.cancel") return workView() === "history" || selectedTaskActions().has(entry.id)
+      if (entry.id === "work.history.clear") return workView() === "history" && workViews().history.groups.length > 0
+      if (entry.id === "work.open") return workView() === "history" && historyGroupRowFocus() !== undefined ? true : selectedTaskActions().has(entry.id)
       if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)
       if (entry.id === "work.approvals") return pendingApprovals().length > 0
       if (entry.id === "work.inbox") return inlineApprovals().overflow > 0
@@ -6836,6 +6955,15 @@ export function EnsembleV2App() {
                 <Show when={workPane().layout.mode === "cards"} fallback={
                   <For each={workPane().sections}>{(section) => (
                     <box flexDirection="column" width="100%" marginTop={section.gapBefore ? 1 : 0}>
+                      <Show when={section.rollup}>
+                        <WorkHistoryRowView
+                          colors={colors}
+                          rollup={section.rollup!}
+                          tone={section.tone}
+                          selected={workCardsFocused(paneState()) && workFocusID() === historyGroupFocusID(section.groupID)}
+                          onSelect={() => selectHistoryGroup(section.groupID)}
+                        />
+                      </Show>
                       <Show when={section.label}>
                         <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                       </Show>
@@ -6881,8 +7009,20 @@ export function EnsembleV2App() {
                 }>
                   <For each={workPane().sections}>{(section) => (
                     <Show when={section.mode === "cards"} fallback={
-                      <Show when={section.label}>
-                        <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                      <Show when={section.rollup} fallback={
+                        <Show when={section.label}>
+                          <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
+                        </Show>
+                      }>
+                        <box flexDirection="column" width="100%" marginTop={section.gapBefore ? 1 : 0}>
+                          <WorkHistoryRowView
+                            colors={colors}
+                            rollup={section.rollup!}
+                            tone={section.tone}
+                            selected={workCardsFocused(paneState()) && workFocusID() === historyGroupFocusID(section.groupID)}
+                            onSelect={() => selectHistoryGroup(section.groupID)}
+                          />
+                        </box>
                       </Show>
                     }>
                       <box flexDirection="column" width="100%" marginTop={section.gapBefore ? 1 : 0}>

@@ -2,9 +2,10 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import type { Subtask } from "../types.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_ROWS } from "./workrows.ts"
-import { paginateWorkGroups, workPaneBodyHeight, workspacePaneWidths, type WorkPanePage, type WorkPaneSection } from "./workpane.ts"
+import { emptyHistoryViewState, historyGroupFocusID, historyPaneGroups, paginateWorkGroups, reconcileHistoryView, workPaneBodyHeight, workspacePaneWidths, type WorkPanePage, type WorkPaneSection } from "./workpane.ts"
 import { workViewGroups } from "./workpane.ts"
 import {
+  findWorkFocus,
   firstWorkFocus,
   focusFirstOnPage,
   halfPageWorkFocus,
@@ -39,6 +40,9 @@ const task = (patch: Partial<Subtask> = {}): Subtask => ({
 
 const working = (patch: Partial<Subtask> = {}): Subtask =>
   task({ state: "working", claimedBy: "run", leaseUntil: 99_000, attempts: 1, ...patch })
+
+const replied = (patch: Partial<Subtask> = {}): Subtask =>
+  task({ state: "replied", outcome: "succeeded", finishedAt: 1_000, repliedAt: 1_000, ...patch })
 
 const record = (...tasks: Subtask[]): Record<string, Subtask> =>
   Object.fromEntries(tasks.map((item) => [item.id, item]))
@@ -156,7 +160,7 @@ test("ticket173: j/k at a page edge auto-page and preserve the horizontal positi
   assert.equal(navigateWorkFocus(pages, "b", "down")?.id, "d")
   assert.equal(navigateWorkFocus(pages, "d", "up")?.id, "b")
   assert.equal(navigateWorkFocus(pages, "a", "up"), undefined, "the first page has no previous page")
-  assert.equal(navigateWorkFocus(pages, "c", "left"), undefined, "h/l stay on the page")
+  assert.equal(navigateWorkFocus(pages, "c", "left")?.id, "a", "left at the left edge pages back to the nearest card")
 
   // A narrower next page still preserves the nearest column.
   const uneven = [
@@ -165,6 +169,65 @@ test("ticket173: j/k at a page edge auto-page and preserve the horizontal positi
   ]
   assert.equal(navigateWorkFocus(uneven, "b", "down")?.id, "c")
   assert.equal(navigateWorkFocus(uneven, "c", "up")?.id, "b")
+})
+
+test("ticket184: h/l at a page edge pages and lands on the nearest card", () => {
+  const pages = [
+    pageRects(1, [rect("a", 0, 0), rect("b", 12, 0)]),
+    pageRects(2, [rect("c", 0, 0), rect("d", 12, 0)]),
+  ]
+  assert.deepEqual(navigateWorkFocus(pages, "b", "right"), { id: "d", page: 2, rect: pages[1]!.rects[1] }, "rightmost l pages forward to the nearest column")
+  assert.equal(navigateWorkFocus(pages, "c", "left")?.id, "a", "leftmost h pages back to the nearest card")
+  assert.equal(navigateWorkFocus(pages, "a", "left"), undefined, "the first page has no previous page")
+  assert.equal(navigateWorkFocus(pages, "d", "right"), undefined, "the last page has no next page")
+  // An uneven next page still lands on the nearest card, not merely column zero.
+  const uneven = [
+    pageRects(1, [rect("a", 0, 0), rect("b", 12, 0), rect("c", 24, 0)]),
+    pageRects(2, [rect("d", 0, 4), rect("e", 12, 0)]),
+  ]
+  assert.equal(navigateWorkFocus(uneven, "c", "right")?.id, "e")
+})
+
+test("ticket184: a finish in a collapsed group keeps focus and page on the selected card", () => {
+  const initialItems = [
+    replied({ id: "newest", dispatchGroupID: "dispatch_new", createdAt: 1, finishedAt: 5_000, repliedAt: 5_000 }),
+    replied({ id: "older", dispatchGroupID: "dispatch_old", createdAt: 2, finishedAt: 1_000, repliedAt: 1_000 }),
+  ]
+  const initialViews = workViewGroups(initialItems, record(...initialItems), { now: 6_000 })
+  const initial = reconcileHistoryView(initialViews.history, emptyHistoryViewState())
+  const initialLayout = paginateWorkGroups(historyPaneGroups(initialViews.history, initial), 59, 40, 6_000)
+  const focus = findWorkFocus(workLayoutRects(initialLayout), "newest")
+  assert.equal(focus?.page, 1)
+  const laterItems = [
+    ...initialItems,
+    replied({ id: "older-2", dispatchGroupID: "dispatch_old", createdAt: 3, finishedAt: 7_000, repliedAt: 7_000 }),
+  ]
+  const laterViews = workViewGroups(laterItems, record(...laterItems), { now: 8_000 })
+  const later = reconcileHistoryView(laterViews.history, initial)
+  assert.equal(later.expanded.dispatch_old, false, "the reordered group stays rolled up")
+  assert.equal(later.fresh.dispatch_old, true)
+  const laterLayout = paginateWorkGroups(historyPaneGroups(laterViews.history, later), 59, 40, 8_000)
+  const settled = settleWorkFocusByPosition(workLayoutRects(laterLayout), workFocusPosition(focus))
+  assert.equal(settled?.id, "newest", "the selected card keeps focus across the update")
+  assert.equal(settled?.page, focus?.page, "the page does not jump for a finish in a collapsed group")
+})
+
+test("ticket184: rolled-up history rows are focus targets between groups", () => {
+  const items = [
+    replied({ id: "old", dispatchGroupID: "dispatch_old", createdAt: 1, finishedAt: 1_000, repliedAt: 1_000 }),
+    replied({ id: "new", dispatchGroupID: "dispatch_new", createdAt: 2, finishedAt: 5_000, repliedAt: 5_000 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 6_000 })
+  const state = reconcileHistoryView(views.history, emptyHistoryViewState())
+  const layout = paginateWorkGroups(historyPaneGroups(views.history, state), 59, 40, 6_000)
+  const pages = workLayoutRects(layout)
+  const newest = historyGroupFocusID("dispatch_new")
+  const oldest = historyGroupFocusID("dispatch_old")
+  assert.equal(firstWorkFocus(pages)?.id, newest, "the expanded group's header is the first focus target")
+  assert.equal(navigateWorkFocus(pages, newest, "down")?.id, "new")
+  assert.equal(navigateWorkFocus(pages, "new", "down")?.id, oldest, "the next group's rollup row is reachable")
+  assert.equal(findWorkFocus(pages, oldest)?.page, 1)
+  assert.equal(navigateWorkFocus(pages, oldest, "up")?.id, "new")
 })
 
 test("ticket173: gg/G reach the first and last card across pages", () => {

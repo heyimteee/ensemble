@@ -206,13 +206,14 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.bottom", scope: "normal", contexts: ["work"], keys: ["shift+g"], title: "Last work card", group: "Navigation", listed: false },
   { id: "work.half.down", scope: "normal", contexts: ["work"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
   { id: "work.half.up", scope: "normal", contexts: ["work"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
-  { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result", group: "Open", hint: "enter result" },
+  { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result or toggle a history group", group: "Open", hint: "enter result/toggle" },
   // `d` is contextual: delegate here, never the text-buffer delete operator.
   { id: "work.delegate", scope: "normal", contexts: ["work"], keys: ["d"], title: "Delegate work", group: "Work", hint: "d delegate" },
   { id: "work.reassign", scope: "normal", contexts: ["work"], keys: ["t"], title: "Reassign work", group: "Work", hint: "t reassign" },
   { id: "work.retry", scope: "normal", contexts: ["work"], keys: ["r"], title: "Retry failed or stalled work", group: "Work", hint: "r retry" },
   { id: "work.restart", scope: "normal", contexts: ["work"], keys: ["shift+r"], title: "Restart work", group: "Work", hint: "R restart" },
-  { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work", group: "Work", hint: "x cancel" },
+  { id: "work.cancel", scope: "normal", contexts: ["work"], keys: ["x"], title: "Cancel work or dismiss the focused history group", group: "Work", hint: "x cancel/dismiss" },
+  { id: "work.history.clear", scope: "normal", contexts: ["work"], keys: ["shift+d"], title: "Clear the history view", group: "History", hint: "D clear history" },
   { id: "work.native", scope: "normal", contexts: ["work"], keys: ["o"], title: "Native session", group: "Navigate", hint: "o native" },
   // Ticket #173: `v` focuses the sticky approvals section; `V` opens the full
   // inbox only when the inline list overflows. Chat/roster keep the modal.
