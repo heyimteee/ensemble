@@ -80,7 +80,7 @@ finishes while the child is still working. The probe asserts:
 | HISTORY | After completion, `f` on the entered Work list shows `WORK HISTORY │` with the `Subagents: Watch the…` card. |
 | Restart retention | The isolated server and TUI are killed and restarted on the same state root; the record is still `replied` and HISTORY shows the card. |
 | Cleanup | Deleting the probe workspace/agent leaves zero native records; no queue row, no hop spend. |
-| No instruction content | `diagnostic`, `logs.recent`, and every isolated service JSONL entry contain no `Watch the CI pipeline`; the durable record still carries it for display. |
+| No instruction content | `diagnostic`, `logs.recent`, and every isolated service JSONL entry contain no `Watch the CI pipeline`; the durable record still carries it for display. (`fake.log` is fake-provider test infrastructure and records request tails; it is not an Ensemble log and is excluded from this assertion.) |
 | `experimental.idle` shape | Debug entry `native.subagent.idle-hook` at `04:42:32.608Z`: `count:1`, `background:[{kind:"subagent", sessionID, childSessionID}]`; no `description`, shell `command`, or image `path`. |
 
 The probe needs no API key and no external model. It is Linux/tmux only, like
