@@ -6919,7 +6919,7 @@ export function EnsembleV2App() {
                                       <Show when={message.role === "agent" && syntaxStyle} fallback={
                                         <text fg={message.role === "system" || message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                       }>
-                                        {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={Math.max(16, messageWidth())} fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "content" }} />}
+                                        {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={Math.max(16, messageWidth())} fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "full" }} />}
                                       </Show>
                                     </box>
                                     )
@@ -6954,7 +6954,7 @@ export function EnsembleV2App() {
                                         <Show when={syntaxStyle} fallback={
                                           <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
                                         }>
-                                          {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={wrapWidth} fg={colors.text} bg={colors.panel} conceal tableOptions={{ widthMode: "content" }} />}
+                                          {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={wrapWidth} fg={colors.text} bg={colors.panel} conceal tableOptions={{ widthMode: "full" }} />}
                                         </Show>
                                       }>
                                         <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth).join("\n")}</text>
