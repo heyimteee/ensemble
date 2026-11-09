@@ -197,6 +197,18 @@ finished with `Mismatches: none`.
 | The which-key popup allocated two border rows but not the header, clipping its body. | Height is `lines + 3`. | `app-wiring`: popup row budget. |
 | A former auto-expanded newest HISTORY group stayed expanded when a newer group arrived. | Track explicit user expansion separately; only manual choices persist, otherwise the newest group owns the default expansion. | `workpane.test`: former auto-expanded newest rolls up; user-expanded older group stays open. |
 
+## Post-merge deterministic rerun
+
+The first CI run on `eb3ebd3` failed in the fake suite after the #189
+session-continuity merge: the reused FakeAgent session queued the rejection ask
+behind the previous compaction, and the fake provider's short reply did not
+match the host's structured compaction template, so compaction retried and
+blocked later probes. The harness now waits for the queued rejection task, and
+the fake provider returns the host's required summary template. The post-merge
+run `ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:fake:all` passed: fake 457s,
+fake-empty 9s, **2 passed, 0 failed, 0 skipped**. No product code changed for
+this rerun; the deterministic fake + empty suite is the post-merge gate.
+
 ## Skips
 
 - **Pending approvals in the 80×24 drawer** are not automated in the size

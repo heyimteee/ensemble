@@ -2470,8 +2470,13 @@ live_log "v7 needs-you approval persisted and resolved through the sticky Work s
 # with one canonical failure row. This proves the live failed transition, the
 # FAILED card treatment, and the absence of the old duplicate generic line.
 live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-person-reject\",\"recipientIDs\":[\"$fake_id\"]}" >/dev/null
-live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "rejected ask reaches the approvals surface"
-live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 30 "rejected ask starts as needs-you"
+# The FakeAgent session may still be settling the previous ask/compaction, so
+# the rejection task is queued behind it. Wait for the new task to appear
+# before matching the needs-you handoff; the previous approval copy can still
+# be in the transcript.
+live_require_text "$LIVE_TUI_SESSION" "fake-ask-person-reject" 90 "rejected ask task is visible"
+live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 90 "rejected ask reaches the approvals surface"
+live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 90 "rejected ask starts as needs-you"
 live_focus_work
 live_key "$LIVE_TUI_SESSION" "v"
 live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ 1/1" 10 "rejected ask is in the full inbox"
@@ -2760,6 +2765,11 @@ assert_pane_borders() {
       live_color_is_grey "$chat" || live_fail "unselected chat border is not grey (got $chat)"
       live_color_is_white "$work" || live_fail "selected Work border is not white (got $work)"
       ;;
+    approvals)
+      live_color_is_grey "$rail" || live_fail "unselected rail border is not grey (got $rail)"
+      live_color_is_grey "$chat" || live_fail "unselected chat border is not grey (got $chat)"
+      live_color_is_grey "$work" || live_fail "split approvals left the Work border white (got $work)"
+      ;;
     *) live_fail "unknown pane border expectation: $expected" ;;
   esac
 }
@@ -2939,7 +2949,8 @@ live_select_pane "$LIVE_TUI_SESSION" approvals
 live_assert_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ enter open" "selecting approvals teaches Enter"
 live_assert_white_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending" "selected small approvals heading"
 live_assert_border_above "$LIVE_TUI_SESSION" "APPROVALS 1 pending" white "selected small approvals border"
-assert_pane_borders work
+live_assert_grey_text "$LIVE_TUI_SESSION" "WORK ACTIVE" "selected small approvals leaves the Work heading muted"
+assert_pane_borders approvals
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ 1/1" 10 "Enter from the small pane opens full approvals"
 live_assert_absence "$LIVE_TUI_SESSION" "WORK ACTIVE" "full approvals cover Work"

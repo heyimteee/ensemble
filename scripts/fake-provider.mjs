@@ -107,6 +107,38 @@ const RICH_MARKDOWN = [
 
 const SHORT_REPLY = "Onboarding complete. I am ready.\n"
 
+// The host validates compaction responses against its structured-summary
+// template. A short non-template reply is rejected and retried, which blocks
+// the long-lived fake session between live probes.
+const COMPACTION_SUMMARY = [
+  "## Objective",
+  "- Run the deterministic live TUI fixtures.",
+  "",
+  "## Requirements",
+  "- Keep the fixture replies deterministic and bounded.",
+  "",
+  "## Decisions",
+  "- Use a compact summary between live probes.",
+  "",
+  "## Work State",
+  "### Completed",
+  "- Earlier live probes.",
+  "### Active",
+  "- (none)",
+  "### Blocked",
+  "- (none)",
+  "",
+  "## Next Move",
+  "1. Continue with the next live probe.",
+  "",
+  "## Relevant Files",
+  "- (none)",
+  "",
+  "## Important Context",
+  "- This is a fake-provider compaction fixture.",
+  "",
+].join("\n")
+
 // A deterministic long stream for the parked-message live probe. The queued
 // line only exists while the preceding turn streams, so a fixed-duration rich
 // reply made the assertion race the queue transition. At 36 lines and the
@@ -511,8 +543,16 @@ const server = createServer(async (request, response) => {
     const holdLongAt = prompt.lastIndexOf(FAKE_QUEUE_HOLD_LONG_PROMPT)
     const motion = latestUserText.includes(FAKE_MOTION_PROMPT) && !motionReplies.has(latestUserText)
     if (motion) motionReplies.add(latestUserText)
+    // A long-lived session compacts between probes; the compaction prompt is
+    // a summary template, not another queue-hold fixture. Never let an older
+    // trigger in the accumulated prompt stream the long hold for it.
+    const summaryRequest =
+      /structured summary|summary template|exact section headings/i.test(latestUserText) ||
+      /Return only the structured summary|exact section headings from the template/i.test(prompt.slice(-2000))
     const latest = Math.max(richAt, bubbleAt, holdAt, holdLongAt)
-    const text = subagentChild
+    const text = summaryRequest
+      ? COMPACTION_SUMMARY
+      : subagentChild
       ? SUBAGENT_CHILD_MARKDOWN
       : leaseHold
       ? LEASE_HOLD_MARKDOWN
