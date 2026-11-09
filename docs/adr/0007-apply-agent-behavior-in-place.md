@@ -90,11 +90,15 @@ values are never logged.
 different session than the current binding: payload
 `{ agentID, workspaceID?, sessionID }`, with omitted `workspaceID` meaning
 `home`. The target must be the current session or a member of
-`binding.history`; a foreign or stale id is rejected. The action rejects while
-the current session has an active run or is direct-busy. On success it applies
-the current behavior to the target, prepends the previous current session to
-`history` (removing the target from that list), sets `agentVersion` and
-`updatedAt`, saves, and logs `agent.session.rebound` with IDs only.
+`binding.history`; a foreign or stale id is rejected. Asking for the current
+session is a no-op: no behavior apply, history mutation, or audit row. A
+history target must still exist natively (`session.get`); if it is gone, the
+action rejects with `invalid_session` before mutating anything. The action
+rejects while the current session has an active run or is direct-busy. On
+success it applies the current behavior to the target, prepends the previous
+current session to `history` (removing the target from that list), sets
+`agentVersion` and `updatedAt`, saves, and logs `agent.session.rebound` with
+IDs only.
 
 The one-run General-skill grant flow is unchanged: the baseline is applied
 before the prompt, the grant extends it, and `finally` restores the baseline.
