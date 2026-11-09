@@ -86,6 +86,40 @@ async function setupPair(directory: string, handlers: Handlers) {
   return { nova: nova.result, sage: sage.result, workspace: workspace.result }
 }
 
+/**
+ * Ticket #198: seed an open completion batch and two undecided items so the
+ * service pump runs the review turn without a live completion-hop fan-out.
+ */
+async function seedReviewBatch(
+  ctx: any,
+  directory: string,
+  input: { batchID: string; assigneeID: "nova" | "sage"; sessionID: string; itemIDs: [string, string]; senderID: "nova" | "sage" },
+): Promise<void> {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  for (const [id, name] of [["nova", "Nova"], ["sage", "Sage"]] as const) {
+    await seed.saveAgent({ id, name, title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" }, backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1, createdAt: 1, updatedAt: 1 })
+  }
+  await seed.saveWorkspace({ id: "w", name: "site", directory, leaderID: "nova", memberIDs: ["nova", "sage"], synthesis: true, archived: false, paused: false, nextSeq: 1, createdAt: 1, lastActiveAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: input.assigneeID, sessionID: input.sessionID, kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveSubtask({
+    id: input.batchID, workspaceID: "w", creatorType: "agent", creatorAgentID: input.senderID, assigneeID: input.assigneeID,
+    title: `Review ${input.itemIDs.length} completions`, instruction: "Review the completions with ensemble_review.", mode: "research", state: "pending",
+    stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+    attempts: 0, createdAt: 1, workKind: "handoff", queueKey: `batch:w:${input.assigneeID}:${input.batchID}`, dispatchGroupID: `dispatch_${input.batchID}`,
+    handoff: { correlationID: `batch_${input.batchID}`, senderID: input.senderID, recipientID: input.assigneeID, depth: 1, completion: true, batch: true, chain: [input.senderID], itemIDs: [...input.itemIDs] },
+  })
+  for (const [index, id] of input.itemIDs.entries()) {
+    await seed.saveSubtask({
+      id, workspaceID: "w", parentID: input.batchID, creatorType: "agent", creatorAgentID: input.senderID, assigneeID: input.assigneeID,
+      title: `Finished work ${index + 1}`, instruction: `Finished work ${index + 1}`, mode: "research", state: "pending",
+      stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false,
+      attempts: 0, createdAt: 1, workKind: "handoff", queueKey: `completion:w:fin:${id}`, dispatchGroupID: `dispatch_${input.batchID}`,
+      handoff: { correlationID: `corr_${id}`, senderID: input.senderID, recipientID: input.assigneeID, depth: 1, parentID: input.batchID, completion: true, chain: [input.senderID], batchedIn: input.batchID },
+    })
+  }
+}
+
 async function bindingSessionID(handlers: Handlers, directory: string, agentID: string): Promise<string> {
   let sessionID = ""
   await waitFor(async () => {
@@ -313,15 +347,18 @@ test("two completions produce one batch review with per-item decisions", async (
       assert.equal(item.handoff?.batchedIn, batch.id)
       assert.equal(item.dispatchGroupID, batch.dispatchGroupID)
     }
-    // Grouped completions never race the batch as direct hops: the batch
-    // presentation parks in awaitingChildren while the items stay pending.
+    // Ticket #198: a reviewer turn that replied without ensemble_review gets
+    // one correction; still forgotten, the batch stays open as NEEDS YOU and
+    // grouped completions never race it as direct hops.
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      return (next.state.subtasks as any)[batch.id]?.awaitingChildren === true
-    })
+      return (next.state.subtasks as any)[batch.id]?.handoff?.reviewIncomplete === "review-incomplete"
+    }, 20000)
     const parked = await handlers.snapshot({ directory })
+    assert.equal((parked.state.subtasks as any)[batch.id].status, "needs_you")
     for (const item of batch.handoff.itemIDs) {
       assert.equal((parked.state.subtasks as any)[item].state, "pending")
+      assert.equal((parked.state.subtasks as any)[item].handoff?.batchedIn, batch.id)
     }
     // Partial disposition keeps the batch open; full disposition closes it.
     const [first, secondItem, third] = batch.handoff.itemIDs
@@ -501,6 +538,137 @@ test("ticket162: review delegation requires an explicit maxHops budget", async (
     assert.ok(delegated)
     assert.equal(delegated.taskMaxHops, 0, "the review decision's explicit budget reaches the work item")
     assert.equal(delegated.dispatchGroupID, "dispatch_budget")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+// Ticket #198: a reviewer that replies without ensemble_review gets exactly
+// one correction turn naming the remaining ids. A still-undecided batch never
+// closes silently: it stays open as NEEDS YOU, its items stay parked behind
+// it, and no further run is claimed.
+test("ticket198: a forgotten review gets one correction, then stays NEEDS YOU", async () => {
+  const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
+  const { ctx, tools } = fakeContext()
+  const prompts: Array<{ sessionID: string; text: string }> = []
+  ;(ctx.session as any).prompt = async (input: any) => { prompts.push({ sessionID: input.sessionID, text: input.text }) }
+  await seedReviewBatch(ctx, directory, { batchID: "batch-incomplete", assigneeID: "nova", sessionID: "sess_nova", itemIDs: ["i1", "i2"], senderID: "sage" })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks as any)["batch-incomplete"]?.handoff?.reviewIncomplete === "review-incomplete"
+    })
+    const after = await handlers.snapshot({ directory })
+    const rows = after.state.subtasks as any
+    const batch = rows["batch-incomplete"]
+    assert.equal(batch.state, "pending", "an incomplete review stays open")
+    assert.equal(batch.status, "needs_you", "an incomplete review asks for the user")
+    assert.equal(batch.outcome, "pending")
+    assert.equal(batch.handoff.reviewIncomplete, "review-incomplete")
+    assert.equal(batch.attempts, 1, "the correction never increments the native attempt budget")
+    const corrections = prompts.filter((item) => item.text.includes("Review incomplete"))
+    assert.equal(corrections.length, 1, "exactly one correction turn")
+    assert.equal(corrections[0].sessionID, "sess_nova", "the correction reuses the reviewer's native session")
+    assert.ok(corrections[0].text.includes("batch-incomplete"))
+    assert.ok(corrections[0].text.includes("i1") && corrections[0].text.includes("i2"))
+    assert.ok(corrections[0].text.includes("ensemble_review"))
+    for (const itemID of ["i1", "i2"]) {
+      assert.equal(rows[itemID].state, "pending")
+      assert.equal(rows[itemID].handoff?.batchedIn, "batch-incomplete", "items stay parked behind the open batch")
+      assert.equal(rows[itemID].handoff?.decided, undefined)
+    }
+    const texts = ((after.state.messages.w ?? []) as any[]).map((message: any) => message.text)
+    assert.ok(texts.some((text) => text.includes("Review incomplete") && text.includes("i1") && text.includes("i2")))
+    // No correction loop: the parked row is never claimed again automatically.
+    const promptCount = prompts.length
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const settled = await handlers.snapshot({ directory })
+    assert.equal(prompts.length, promptCount, "no second correction turn")
+    assert.equal((settled.state.subtasks as any)["batch-incomplete"].attempts, 1, "no second native execution")
+    // The user can still finish the review by hand: partial decisions stay
+    // open, full disposition closes the batch normally.
+    const partial = await tools.get("review").execute(
+      { batch: "batch-incomplete", decisions: [{ item: "i1", action: "end" }] },
+      { sessionID: "sess_nova" },
+    )
+    assert.match(partial.content, /Batch stays open: 1 of 2 decided/)
+    const mid = await handlers.snapshot({ directory })
+    assert.equal((mid.state.subtasks as any)["batch-incomplete"].status, "needs_you")
+    assert.notEqual((mid.state.subtasks as any)["batch-incomplete"].state, "replied")
+    const full = await tools.get("review").execute(
+      { batch: "batch-incomplete", decisions: [{ item: "i2", action: "dismiss" }] },
+      { sessionID: "sess_nova" },
+    )
+    assert.match(full.content, /Batch closed: every item decided/)
+    const done = await handlers.snapshot({ directory })
+    assert.equal((done.state.subtasks as any)["batch-incomplete"].state, "replied")
+    assert.equal((done.state.subtasks as any)["batch-incomplete"].status, "replied")
+    assert.equal((done.state.subtasks as any)["batch-incomplete"].handoff.reviewIncomplete, undefined)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+// Ticket #198: a partial first turn gets one correction naming only the
+// remaining item; when the correction decides it, the existing close and
+// onward-handoff paths run unchanged.
+test("ticket198: a correction that decides every item closes the batch normally", async () => {
+  const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
+  const { ctx, tools } = fakeContext()
+  const prompts: Array<{ sessionID: string; text: string }> = []
+  let first = true
+  ;(ctx.session as any).prompt = async (input: any) => {
+    prompts.push({ sessionID: input.sessionID, text: input.text })
+    if (input.text.includes("Review incomplete")) {
+      await tools.get("review").execute(
+        { batch: "batch-corrected", decisions: [{ item: "i2", action: "dismiss" }] },
+        { sessionID: "sess_sage" },
+      )
+      return
+    }
+    if (input.text.includes("ensemble_review") && first) {
+      first = false
+      await tools.get("review").execute(
+        { batch: "batch-corrected", decisions: [{ item: "i1", action: "end" }] },
+        { sessionID: "sess_sage" },
+      )
+    }
+  }
+  await seedReviewBatch(ctx, directory, { batchID: "batch-corrected", assigneeID: "sage", sessionID: "sess_sage", itemIDs: ["i1", "i2"], senderID: "nova" })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks as any)["batch-corrected"]?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const rows = after.state.subtasks as any
+    assert.equal(rows["batch-corrected"].state, "replied")
+    assert.equal(rows["batch-corrected"].outcome, "succeeded")
+    assert.equal(rows["batch-corrected"].attempts, 1, "the correction is not an execution retry")
+    assert.equal(rows["i1"].handoff?.decided, "ended")
+    assert.equal(rows["i2"].handoff?.decided, "dismissed")
+    const reviewerPrompts = prompts.filter((item) => item.sessionID === "sess_sage")
+    assert.equal(reviewerPrompts.length, 2, "one review turn plus one correction")
+    const corrections = reviewerPrompts.filter((item) => item.text.includes("Review incomplete"))
+    assert.equal(corrections.length, 1)
+    assert.ok(corrections[0].text.includes("i2"), "the correction names the remaining item")
+    assert.ok(!corrections[0].text.includes("i1"), "the correction omits items already decided")
+    // A non-leader batch close still hands onward to the leader.
+    const onward = Object.values(rows).find(
+      (task: any) => task.workKind === "handoff" && task.handoff?.completion === true && task.handoff?.batch !== true && task.assigneeID === "nova" && task.parentID === "batch-corrected",
+    ) as any
+    assert.ok(onward, "the existing onward handoff runs after a corrected close")
+    assert.ok(onward.instruction.includes("Decided by $Sage"))
+    const texts = ((after.state.messages.w ?? []) as any[]).map((message: any) => message.text)
+    assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

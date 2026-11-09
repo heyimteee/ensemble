@@ -45,7 +45,7 @@ export type DoctorSubtask = {
   /** Missing legacy values are treated as user-created (never consuming). */
   creatorType: "user" | "agent"
   workKind?: WorkKind
-  handoff?: { completion?: boolean; batch?: boolean }
+  handoff?: { completion?: boolean; batch?: boolean; reviewIncomplete?: string }
   /**
    * Ticket #170 lifecycle facts. The service overlay already derives `status`;
    * the doctor repeats the canonical derivation when it is absent and uses the
@@ -408,6 +408,7 @@ function doctorWorkStatus(task: DoctorSubtask, now: number): DerivedWorkStatus |
     ...(task.retryAfter !== undefined ? { retryAfter: task.retryAfter } : {}),
     ...(task.deliveryHoldUntil !== undefined ? { deliveryHoldUntil: task.deliveryHoldUntil } : {}),
     ...(task.failure !== undefined ? { failure: task.failure } : {}),
+    ...(task.handoff !== undefined ? { handoff: task.handoff } : {}),
   }, now)
 }
 
