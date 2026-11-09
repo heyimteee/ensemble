@@ -288,7 +288,7 @@ test("f toggles ACTIVE and HISTORY", () => {
 })
 
 test("ticket183: the right pane visibility is the one drawer switch", () => {
-  assert.ok(has(app(), "surface()?.kind === \"workspace\" && paneSides().right"))
+  assert.ok(has(app(), "paneSides().right && (surface()?.kind === \"workspace\" || approvalsMode() === \"full\")"))
   assert.ok(has(app(), "<Show when={paneSides().left}>"), "the rail renders only while the left switch is on")
   assert.ok(!has(app(), "workDrawerOpen"), "no second drawer state exists")
 })
@@ -408,36 +408,84 @@ test("the pane border stays a separate focus state", () => {
   assert.ok(has(app(), "workOwnsFocus() ? colors.focus : colors.border"))
 })
 
-test("the sticky approvals section mounts in the Work pane", () => {
-  assert.ok(has(app(), "<WorkApprovalsView"))
+test("ticket185: the small approvals summary mounts at the bottom of Work", () => {
+  const source = app()
+  assert.ok(has(source, "<WorkApprovalsView"))
+  assert.ok(has(source, "section={inlineApprovals()}"))
 })
 
-test("v focuses approvals", () => {
-  assert.ok(has(app(), '"work.approvals"'))
+test("ticket185: the full approvals inbox mounts in the same right column", () => {
+  const source = app()
+  const right = source.indexOf("<Show when={showWorkPane()}>")
+  const full = source.indexOf("<FullApprovalsView", right)
+  assert.ok(right >= 0 && full > right, "full approvals render inside the right-pane column, not a chat modal")
+  assert.ok(has(source, 'approvalsMode() === "full"'))
 })
 
-test("V opens the overflow inbox", () => {
-  assert.ok(has(app(), '"work.inbox"'))
+test("ticket185: v opens full approvals from every pane", () => {
+  const source = app()
+  for (const binding of ['"pane.approvals": () => openApprovalsFull()', 'approvals: () => openApprovalsFull()', '"chat.approvals": () => openApprovalsFull()', '"work.approvals": () => openApprovalsFull()', '"leader.approvals": () => openApprovalsFull()']) {
+    assert.ok(has(source, binding), `${binding} opens the one approvals surface`)
+  }
 })
 
-test("Enter resolves the focused inline approval", () => {
-  assert.ok(has(app(), '"workApprovals.resolve"'))
+test("ticket185: v opens the right column first when it is closed", () => {
+  const source = app()
+  assert.ok(has(source, "if (!paneSides().right)"), "the open path checks the column switch")
+  assert.ok(has(source, "persistPaneSides({ ...paneSides(), right: true })"))
+  assert.ok(has(source, "setApprovalsFull(openFullApprovals({ full: approvalsFull() }).full)"))
 })
 
-test("Esc returns from approvals to Work", () => {
-  assert.ok(has(app(), 'focus: "work"'))
+test("ticket185: Enter from the small approvals selection opens full approvals", () => {
+  const source = app()
+  const enter = source.indexOf("const enterSelectedPane = () => {")
+  const guard = source.indexOf('if (paneState().pane === "approvals")', enter)
+  assert.ok(enter >= 0 && guard > enter)
+  assert.ok(has(source, "openApprovalsFull()"))
 })
 
-test("V is advertised only for overflow", () => {
-  assert.ok(has(app(), "inlineApprovals().overflow === 0"))
+test("ticket185: Esc returns full approvals to split", () => {
+  const source = app()
+  assert.ok(has(source, '"approvals.close": () => closeApprovalsFull()'))
+  assert.ok(has(source, "setApprovalsFull(false)"))
+  assert.ok(has(source, 'setPaneFocus("approvals", "select")'), "the small pane remains selected at the bottom")
 })
 
-test("an approval row click selects it", () => {
-  assert.ok(has(app(), "onSelect={selectInlineApproval}"))
+test("ticket185: the full inbox reuses the existing resolution flow", () => {
+  const source = app()
+  assert.ok(has(source, '"approvals.resolve": () => resolveFocusedApproval()'))
+  assert.ok(has(source, "await invoke(context, \"approval.resolve\""))
 })
 
-test("the approval view forwards row clicks", () => {
-  assert.ok(has(components(), "props.onSelect(row.index, row.approval)"))
+test("ticket185: the full inbox moves its one cursor with j/k, arrows, gg, and G", () => {
+  const source = app()
+  assert.ok(has(source, '"approvals.down": () => moveApprovalCursor(1)'))
+  assert.ok(has(source, '"approvals.down.arrow": () => moveApprovalCursor(1)'))
+  assert.ok(has(source, '"approvals.up": () => moveApprovalCursor(-1)'))
+  assert.ok(has(source, '"approvals.top": () => setApprovalCursor(0)'))
+  assert.ok(has(source, '"approvals.bottom": () => setApprovalCursor(Math.max(0, pendingApprovals().length - 1))'))
+})
+
+test("ticket185: the chat approvals modal and V are retired", () => {
+  const source = app()
+  assert.ok(!has(source, "approvalsOpen"))
+  assert.ok(!has(source, "ApprovalList"))
+  assert.ok(!has(source, '"work.inbox"'))
+  assert.ok(!has(source, "openApprovalsOverflow"))
+  assert.ok(!has(source, "approvals.inbox"), "no second inbox action survives")
+})
+
+test("ticket185: the left rail no longer renders approvals or its hint", () => {
+  const source = components()
+  assert.ok(!has(source, "APPROVALS"))
+  assert.ok(!has(source, "v opens inbox"))
+  assert.ok(!has(source, "pendingApprovals"))
+  assert.ok(!has(app(), "pendingApprovals={pendingApprovals().length}"))
+})
+
+test("an approval row click opens the full inbox at that row", () => {
+  assert.ok(has(app(), "onOpen={openApprovalsAt}"))
+  assert.ok(has(components(), "props.onOpen(row.index)"))
 })
 
 test("Tab cycles the visible panes through the pure pane machine", () => {
@@ -516,11 +564,10 @@ test("ticket180: the rail row cursor stays inside the focused sub-pane", () => {
   assert.ok(has(components(), "sectionFocused(section.id) && props.cursor === index()"))
 })
 
-test("ticket180: the Work approvals header is white when selected but rows wait for interaction", () => {
+test("ticket185: the small approvals summary is white when its pane is selected", () => {
   const source = app()
   assert.ok(has(source, 'focused={paneOwnsFocus(paneState(), "approvals")'))
-  assert.ok(has(source, 'interacting={paneInteracting("approvals")'))
-  assert.ok(has(components(), "props.interacting && props.section.cursor === row.index"))
+  assert.ok(has(components(), "props.focused ? props.colors.focus : props.colors.muted"))
 })
 
 test("approvals join the focus cycle only while pending", () => {

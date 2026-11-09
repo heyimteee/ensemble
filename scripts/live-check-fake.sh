@@ -78,7 +78,7 @@ live_focus_work() {
     # An approval/prompt can leave the Work zone in Insert with no text target;
     # Esc restores Normal without leaving the zone, and the next Tab/Esc reaches
     # the cards.
-    if grep -qF "│ Work list" <<<"$pane" || grep -qF "│ Work approvals" <<<"$pane"; then
+    if grep -qF "│ Work list" <<<"$pane" || grep -qF "│ Approvals" <<<"$pane"; then
       live_key "$LIVE_TUI_SESSION" Escape
       sleep 0.35
       continue
@@ -559,9 +559,10 @@ sleep 0.25
 live_type "$LIVE_TUI_SESSION" ":"
 live_type "$LIVE_TUI_SESSION" "approvals"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "Approvals inbox" 15 "command opened approvals"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 0 pending" 15 "command opened full approvals"
+live_require_text "$LIVE_TUI_SESSION" "Nothing waits for you." 10 "the empty inbox names no waiting decision"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals closed"
+live_require_absence "$LIVE_TUI_SESSION" "APPROVALS 0 pending" 10 "approvals returned to split"
 live_log "ticket #80 command line, completion, history, and transcript search verified"
 
 # Workspace wizard: list steps use j/k, gg/G, Enter, Space multi-select, /,
@@ -1341,15 +1342,14 @@ sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed"
 
-# Slice E approvals: the empty inbox names that no action is needed. The
-# `Resolving…` pending row is unit-covered (no live fixture produces a
-# pending approval in the fake catalog); the inbox open/close path is live.
+# Slice E approvals: v opens the full-height right column even when the inbox
+# is empty; the small summary only exists while rows are pending.
 live_key "$LIVE_TUI_SESSION" "v"
-live_require_text "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals inbox opens"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 0 pending" 10 "v opens the full approvals surface"
 live_require_text "$LIVE_TUI_SESSION" "Nothing waits for you." 10 "approvals empty state"
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals closed"
+live_require_absence "$LIVE_TUI_SESSION" "APPROVALS 0 pending" 10 "Esc returns full approvals to split"
 live_log "slice E help/settings/approvals chrome verified"
 
 # In-house pickers and confirms still back model choices and destructive
@@ -1496,9 +1496,9 @@ promotion=$(live_snapshot_value '(function () { var a = Object.values(output.sta
 # covered by approvals.test.ts because the fake RPC returns too fast to
 # capture reliably.
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed for the approvals inbox"
+live_require_absence "$LIVE_TUI_SESSION" "FakeAgent │ settings" 10 "settings closed for the approvals surface"
 live_key "$LIVE_TUI_SESSION" "v"
-live_require_text "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals inbox opens for the promotion"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 10 "full approvals opens for the promotion"
 live_require_text "$LIVE_TUI_SESSION" "Promote memory for FakeAgent" 10 "the promotion row is visible"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Approve" 10 "the resolution choice opens"
@@ -1508,8 +1508,8 @@ live_require_text "$LIVE_TUI_SESSION" "✓ Resolved" 10 "the resolved row settle
 promotions_left=$(live_snapshot_value 'Object.values(output.state.approvals).filter(function (x) { return x.status === "pending" && x.kind === "promote_memory" }).length')
 [[ "$promotions_left" == '0' ]] || live_fail "promotion approval was not cleaned up (got $promotions_left)"
 live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "Approvals inbox" 10 "approvals inbox closed after resolving"
-live_log "settings p promoted the selected memory through the TUI approvals inbox"
+live_require_absence "$LIVE_TUI_SESSION" "Promote memory for FakeAgent" 10 "approvals returned to split after resolving"
+live_log "settings p promoted the selected memory through the full approvals surface"
 # Slice D inline filter (ticket #80): / opens the shared command-line search
 # and filters the focused settings tab live; Enter commits, Esc would restore
 # the prior filter. Resolving through the inbox closed Settings, so reopen it
@@ -2394,16 +2394,16 @@ live_invoke "message.send" "{\"workspaceID\":\"$ws_id\",\"text\":\"fake-ask-pers
 live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release channel should this task use?" 30 "ask_person reaches the approvals surface"
 live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 30 "needs-you card treatment"
 live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "needs-you group is visible"
-live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ v focus" 20 "approvals are sticky in the Work pane"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ v open" 20 "approvals are a small summary under Work"
 sleep 2.2
 live_assert_text "$LIVE_TUI_SESSION" "NEEDS YOU" "needs-you persists beyond the shared hold window"
 live_assert_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" "needs-you group stays mounted"
-# Ticket #173: resolve from the sticky section, not the modal inbox. v focuses
-# approvals; Enter opens the decision; the ask answer prompt then resolves.
+# Ticket #185: v opens the full-height inbox over Work; Enter opens the
+# decision; the ask answer prompt then resolves. Esc returns to split.
 live_focus_work
 live_key "$LIVE_TUI_SESSION" "v"
-live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work approvals" 10 "v focuses the sticky approvals"
-live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ j/k select │ enter resolve │ esc work" 10 "inline approvals name their grammar"
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Approvals" 10 "v opens full approvals"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ 1/1" 10 "the full inbox names its position and grammar"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent needs your input" 10 "Enter opens the approval decision"
 live_require_text "$LIVE_TUI_SESSION" "Answer" 10 "the ask_person decision offers Answer"
@@ -2423,11 +2423,13 @@ for _ in $(seq 1 80); do
   sleep 0.5
 done
 [[ "$v7_ask_replied" == '"replied:cleared"' ]] || live_fail "needs-you task did not reply after its approval resolved (got $v7_ask_replied)"
+live_key "$LIVE_TUI_SESSION" Escape
+live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Esc returns full approvals to the split Work view"
 live_require_absence "$LIVE_TUI_SESSION" "NEEDS YOU" 20 "needs-you marker clears after the decision"
-live_require_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 10 "inline approval leaves after the decision"
+live_require_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" 10 "the small approval summary leaves after the decision"
 live_wait_for 20 "needs-you group cleared" no_work_header \
   || live_fail "needs-you group did not leave ACTIVE after resolution"
-live_assert_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" "sticky approvals disappear with the last decision"
+live_assert_absence "$LIVE_TUI_SESSION" "APPROVALS 1 pending" "small approvals disappear with the last decision"
 live_focus_work
 live_key "$LIVE_TUI_SESSION" "f"
 live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │" 10 "resolved needs-you work moves to HISTORY"
@@ -2446,11 +2448,12 @@ live_require_joined_text "$LIVE_TUI_SESSION" "Approval needed: Which release cha
 live_require_text "$LIVE_TUI_SESSION" "NEEDS YOU" 30 "rejected ask starts as needs-you"
 live_focus_work
 live_key "$LIVE_TUI_SESSION" "v"
-live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ j/k select │ enter resolve │ esc work" 10 "rejected ask is in the sticky section"
+live_require_text "$LIVE_TUI_SESSION" "APPROVALS 1 pending │ 1/1" 10 "rejected ask is in the full inbox"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "FakeAgent needs your input" 10 "rejecting ask opens its decision"
 live_key "$LIVE_TUI_SESSION" Down
 live_key "$LIVE_TUI_SESSION" Enter
+live_key "$LIVE_TUI_SESSION" Escape
 # Ticket #170: rejecting an ask is an explicit controlled stop, not a native
 # execution error; the card and event read CANCELLED, never FAILED.
 live_require_text "$LIVE_TUI_SESSION" "⊘ fake-ask-person-reject cancelled" 20 "rejected ask emits one controlled-stop event"

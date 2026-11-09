@@ -46,7 +46,7 @@ export function isPaneFocus(focus: InteractionFocus): focus is PaneID {
   return PANE_IDS.has(focus)
 }
 
-export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "approvals" | "help" | "logs"
+export type InteractionOverlay = "none" | "settings" | "wizard" | "dialog" | "help" | "logs"
 
 export type CommandInput = { kind: ":" | "/"; text: string; cursor: number; returnMode: InteractionMode }
 
