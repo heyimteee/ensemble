@@ -321,6 +321,7 @@ const DIALOG: readonly KeyEntry[] = [
   { id: "approvals.resolve", scope: "normal", contexts: ["approvals"], keys: ["enter"], title: "Resolve the focused approval", group: "Approvals", hint: "enter resolve" },
   { id: "focus.tab", scope: "normal", contexts: ["approvals"], keys: ["tab"], title: "Next visible pane", group: "Focus", hint: "tab next" },
   { id: "focus.shift.tab", scope: "normal", contexts: ["approvals"], keys: ["shift+tab"], title: "Previous visible pane", group: "Focus" },
+  { id: "leader", scope: "normal", contexts: ["approvals"], keys: ["space"], title: "Leader menu", group: "Leader", hint: "space leader" },
   { id: "approvals.close", scope: "normal", contexts: ["approvals"], keys: ["escape"], title: "Close full approvals and return to split", group: "Navigation", hint: "esc split" },
 ]
 

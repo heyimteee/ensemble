@@ -139,7 +139,7 @@ test("the work zone is reachable with Tab and keeps spatial list navigation", ()
 
 test("ticket185: full approvals own j/k, Enter, Esc, and Tab", () => {
   const keys = keysFor("approvals")
-  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "shift+tab", "escape"]) {
+  for (const sequence of ["j", "k", "g g", "shift+g", "enter", "tab", "shift+tab", "space", "escape"]) {
     assert.ok(keys.includes(sequence), `full approvals keep ${sequence}`)
   }
   assert.equal(entryId("approvals", "j"), "approvals.down")
