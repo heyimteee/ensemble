@@ -383,6 +383,42 @@ test("SnapshotMeta stays the feed cursor shape", () => {
   assert.equal(value.protocol, 3)
 })
 
+test("ticket188: dispatch-group entities validate through the patch feed", () => {
+  // Ticket #188 found this missing case in the live probe: a batch carrying the
+  // dispatch ledger was rejected as malformed, so a native subagent card waited
+  // for a full-snapshot fallback and could miss a short-lived child entirely.
+  const group = {
+    id: "g1",
+    workspaceID: "w1",
+    rootID: "g1",
+    continuationIndex: 0,
+    maxHops: 8,
+    usedHops: 1,
+    depthMax: 8,
+    createdAt: 1,
+  }
+  const decision = decidePatchApply(meta({ version: 4 }), batch({
+    from: 4,
+    version: 6,
+    entries: [
+      { version: 5, changes: [], entities: [{ entity: "dispatchGroup", op: "upsert", group }] },
+      { version: 6, changes: [], entities: [{ entity: "dispatchGroup", op: "remove", id: "g2" }] },
+    ] as any,
+  }))
+  assert.equal(decision.action, "apply")
+  assert.deepEqual(decision.action === "apply" ? decision.changes : [], [
+    { entity: "dispatchGroup", op: "upsert", group },
+    { entity: "dispatchGroup", op: "remove", id: "g2" },
+  ])
+
+  const store = createClientStore()
+  const state = createInitialState()
+  state.version = 4
+  store.applySnapshot({ state, models: [], skills: [], directory: "/tmp/ensemble" })
+  if (decision.action === "apply") store.applyChanges(decision.changes, decision.version)
+  assert.equal(store.state()?.dispatchGroups.g1?.usedHops, 1)
+})
+
 test("ticket182: native subagent entities validate and apply through the patch feed", () => {
   const run = {
     childSessionID: "child_1",

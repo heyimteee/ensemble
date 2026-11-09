@@ -47,6 +47,7 @@ import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
 import { RecentHostEvents, retryEventKey } from "./host-events.ts"
 import {
   NATIVE_SUBAGENT_ACTIVE_LIMIT,
+  NATIVE_SUBAGENT_BARRIER_MS,
   NATIVE_SUBAGENT_PENDING_LIMIT,
   boundNativeSubagentInstruction,
   nativeSubagentChildID,
@@ -496,6 +497,11 @@ export class EnsembleV2Service {
   private readonly nativeSubagentPendingStates = new Map<string, { state: NativeSubagentState; at: number }>()
   /** Ticket #182: durable instructions that still use the child-title fallback. */
   private readonly nativeSubagentFallbacks = new Set<string>()
+  /**
+   * Ticket #188: parent-session wakeups for the bounded background-child
+   * barrier. One set per parent session; terminal child transitions release it.
+   */
+  private readonly nativeSubagentWaiters = new Map<string, Set<() => void>>()
   /** Ticket #155: one bounded, version-neutral activity update per task/window. */
   private readonly workActivity = createStreamCoalescer<WorkActivity>((updates) => {
     for (const activity of updates.values()) this.emitWorkActivity(activity)
@@ -533,10 +539,13 @@ export class EnsembleV2Service {
   private startedAtMs = now()
   /** Heartbeat cadence; overridable only to exercise multi-heartbeat leases quickly. */
   private readonly heartbeatMs: number
+  /** Ticket #188: how long a parent run may hold for missing child terminal events. */
+  private readonly nativeSubagentBarrierMs: number
 
-  constructor(ctx: Ctx, options: { heartbeatMs?: number } = {}) {
+  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number } = {}) {
     this.ctx = ctx
     this.heartbeatMs = Math.max(10, Math.floor(options.heartbeatMs ?? HEARTBEAT_MS))
+    this.nativeSubagentBarrierMs = Math.max(1, Math.floor(options.nativeSubagentBarrierMs ?? NATIVE_SUBAGENT_BARRIER_MS))
     this.catalog = new Catalog(ctx, () => {
       this.publishFeedMetaIfChanged()
     })
@@ -610,6 +619,7 @@ export class EnsembleV2Service {
       this.nativeSubagentPending.clear()
       this.nativeSubagentPendingStates.clear()
       this.nativeSubagentFallbacks.clear()
+      this.releaseNativeSubagentWaiters()
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
       await this.maintenanceRun?.catch(() => undefined)
@@ -4147,6 +4157,18 @@ export class EnsembleV2Service {
     const registration = await ctx.session.hook("experimental.idle", (event: any) => {
       if (!event || typeof event.sessionID !== "string" || event.sessionID.length === 0) return
       const background = Array.isArray(event.background) ? event.background : []
+      // Ticket #188: prove the host delivered the documented background shape
+      // without logging shell commands, image paths, or subagent descriptions.
+      this.logger?.event("debug", "host", "native.subagent.idle-hook", {
+        sessionID: event.sessionID,
+        count: background.length,
+        background: background.map((entry: any) => {
+          if (entry?.kind === "subagent") {
+            return { kind: "subagent", sessionID: entry.sessionID, childSessionID: entry.childSessionID }
+          }
+          return { kind: String(entry?.kind ?? "unknown"), sessionID: entry?.sessionID }
+        }),
+      })
       void this.handleNativeSubagentIdle({
         type: "session.idle",
         data: { sessionID: event.sessionID, background },
@@ -6110,6 +6132,94 @@ export class EnsembleV2Service {
     }
   }
 
+  /**
+   * Ticket #188: a background subagent can outlive the parent's first turn.
+   * The host's `subagent` tool returns immediately in background mode, so the
+   * parent prompt finishes while the child still streams. Hold the parent run
+   * (the existing heartbeat keeps its lease live) until every child mapped to
+   * this task is terminal, or until the bound expires. Event-driven: terminal
+   * transitions wake the waiter, and the bound covers missing host events.
+   * Returns true only when active children actually existed and finished, so
+   * the caller knows a host wake-up turn may still need settling.
+   */
+  private activeNativeChildrenForTask(parentSessionID: string, taskID: string): NativeSubagentRun[] {
+    return this.store.nativeSubagents().filter(
+      (run) => run.state === "working" && run.parentSessionID === parentSessionID && run.parentTaskID === taskID,
+    )
+  }
+
+  private notifyNativeSubagentWaiters(parentSessionID: string): void {
+    const waiters = this.nativeSubagentWaiters.get(parentSessionID)
+    if (!waiters) return
+    this.nativeSubagentWaiters.delete(parentSessionID)
+    for (const wake of [...waiters]) wake()
+  }
+
+  private releaseNativeSubagentWaiters(): void {
+    for (const parentSessionID of [...this.nativeSubagentWaiters.keys()]) {
+      this.notifyNativeSubagentWaiters(parentSessionID)
+    }
+  }
+
+  private waitForNativeSubagentSignal(parentSessionID: string, timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let set = this.nativeSubagentWaiters.get(parentSessionID)
+      if (!set) {
+        set = new Set()
+        this.nativeSubagentWaiters.set(parentSessionID, set)
+      }
+      const waiters = set
+      let settled = false
+      const wake = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        waiters.delete(wake)
+        if (waiters.size === 0 && this.nativeSubagentWaiters.get(parentSessionID) === waiters) {
+          this.nativeSubagentWaiters.delete(parentSessionID)
+        }
+        resolve()
+      }
+      const timer = setTimeout(wake, Math.max(1, timeoutMs))
+      if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
+        ;(timer as unknown as { unref: () => void }).unref()
+      }
+      waiters.add(wake)
+    })
+  }
+
+  private async awaitNativeSubagentBarrier(parentSessionID: string, task: Subtask): Promise<boolean> {
+    const startedAt = now()
+    let waited = false
+    for (;;) {
+      const active = this.activeNativeChildrenForTask(parentSessionID, task.id)
+      if (active.length === 0) {
+        if (waited) {
+          this.logger?.event("info", "host", "native.subagent.barrier.released", {
+            parentSessionID,
+            parentTaskID: task.id,
+            durationMs: now() - startedAt,
+          })
+        }
+        return waited
+      }
+      waited = true
+      const remaining = this.nativeSubagentBarrierMs - (now() - startedAt)
+      if (remaining <= 0) {
+        // IDs, states, and counts only: the instruction never enters a log.
+        this.logger?.event("warn", "host", "native.subagent.barrier.timeout", {
+          parentSessionID,
+          parentTaskID: task.id,
+          childSessionIDs: active.map((run) => run.childSessionID),
+          count: active.length,
+          durationMs: now() - startedAt,
+        })
+        return false
+      }
+      await this.waitForNativeSubagentSignal(parentSessionID, remaining)
+    }
+  }
+
   /** IDs, names, states, and durations only. Instructions never enter a log. */
   private logNativeSubagent(event: string, run: NativeSubagentRun, extra: Record<string, unknown> = {}): void {
     this.logger?.event("info", "host", event, {
@@ -6338,6 +6448,7 @@ export class EnsembleV2Service {
       this.nativeSubagentFallbacks.delete(next.childSessionID)
     }
     this.logNativeSubagent("native.subagent.finished", next, { fromState: existing.state, reason })
+    this.notifyNativeSubagentWaiters(next.parentSessionID)
   }
 
   private async closeNativeSubagentsForTask(taskID: string, reason: string): Promise<void> {
@@ -6363,6 +6474,7 @@ export class EnsembleV2Service {
       this.nativeSubagentActive.delete(child.childSessionID)
       this.nativeSubagentFallbacks.delete(child.childSessionID)
       this.nativeSubagentParents.delete(child.childSessionID)
+      this.notifyNativeSubagentWaiters(child.parentSessionID)
     }
     if (children.length > 0) {
       this.logger?.event("debug", "host", "native.subagent.removed", { reason: "task-removed", taskID, count: children.length })
@@ -7071,8 +7183,20 @@ export class EnsembleV2Service {
         failureContext.startedAt = attemptStartedAt
         await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined), delivery: "steer" })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
-        const messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
+        let messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)
+        // Ticket #188: background subagents return from the tool before the
+        // child finishes, so the host can settle the parent turn early. Hold
+        // the run on the existing heartbeat until its children are terminal;
+        // then let a host wake-up turn settle and use its latest answer.
+        if (!result.failure) {
+          const released = await this.awaitNativeSubagentBarrier(binding.sessionID, task)
+          if (released && !this.stopped) {
+            await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
+            messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
+            result = assistantResult(messages, attemptStartedAt)
+          }
+        }
         failureContext.toolOutcomes = result.toolOutcomes
         failureContext.cause = result.failure
         if (!result.failure) break

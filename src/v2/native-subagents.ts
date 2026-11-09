@@ -6,6 +6,14 @@ export const NATIVE_SUBAGENT_INSTRUCTION_LIMIT = 120
 export const NATIVE_SUBAGENT_ACTIVE_LIMIT = 128
 /** Pending tool instructions kept per parent session until a child appears. */
 export const NATIVE_SUBAGENT_PENDING_LIMIT = 8
+/**
+ * Ticket #188: the bounded parent barrier. The host can finalize a parent turn
+ * while a background subagent still runs; the run holds its lease and waits for
+ * the child's terminal event, but never longer than this bound when an event is
+ * missing. Five minutes matches the queue's existing delivery visibility
+ * horizon and is far longer than a normal child turn.
+ */
+export const NATIVE_SUBAGENT_BARRIER_MS = 5 * 60_000
 
 const SUBAGENT_TOOL_NAMES = new Set(["task", "subagent"])
 const INSTRUCTION_FIELDS = ["description", "instruction", "prompt", "message", "title", "command", "text"] as const

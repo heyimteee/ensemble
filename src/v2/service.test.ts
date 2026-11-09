@@ -7065,6 +7065,185 @@ test("ticket170: a held run heartbeats across its delivery deadline and still co
   }
 })
 
+test("ticket188: a background child holds the parent task working until the child terminates", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-188-barrier-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20, nativeSubagentBarrierMs: 5_000 })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    assert.equal(agent.ok, true)
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    assert.equal(workspace.ok, true)
+    const sent = await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    assert.equal(sent.ok, true)
+    await waitFor(async () => waitCalls === 1)
+    const claimed = await handlers.snapshot({ directory })
+    const task = Object.values(claimed.state.subtasks)[0] as any
+    const binding = Object.values(claimed.state.bindings)[0] as any
+    assert.ok(task && binding, "the run owns a task and a native session")
+    emitEvent({
+      id: "evt_188_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_188", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_188?.state === "working")
+    releaseWait?.()
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const during = await handlers.snapshot({ directory })
+    assert.equal(during.state.subtasks[task.id].state, "working", "the parent stays working while the child is active")
+    assert.ok(during.state.subtasks[task.id].activeRunID, "the parent run still owns its claim")
+    const lease = during.state.subtasks[task.id].leaseUntil as number
+    assert.ok(lease > Date.now(), "the lease is live during the barrier")
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks[task.id].leaseUntil as number) > lease
+    }, 2_000)
+    emitEvent({
+      id: "evt_188_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_188" },
+    })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.nativeSubagents.child_188?.state === "replied" && next.state.subtasks[task.id].state === "replied"
+    })
+    assert.equal((await handlers.snapshot({ directory })).state.subtasks[task.id].outcome, "succeeded")
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket188: the barrier releases work after its bound and logs no instruction content", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-188-barrier-timeout-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20, nativeSubagentBarrierMs: 80 })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  const instruction = "PRIVATE watch the CI"
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    const claimed = await handlers.snapshot({ directory })
+    const task = Object.values(claimed.state.subtasks)[0] as any
+    const binding = Object.values(claimed.state.bindings)[0] as any
+    emitEvent({
+      id: "evt_188_timeout_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_188_timeout", parentID: binding.sessionID, agent: "explore", title: instruction },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_188_timeout?.instruction === instruction)
+    releaseWait?.()
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "replied", 2_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.nativeSubagents.child_188_timeout.state, "cancelled", "a timed-out parent closes its live child record")
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "native.subagent.barrier.timeout", limit: 20 })
+    assert.equal(logs.entries.length, 1, "the timeout is audited once")
+    assert.ok(!JSON.stringify(logs.entries).includes(instruction), "the barrier log carries no instruction content")
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket188: experimental.idle accepts the documented subagent background shape without content logs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-188-idle-hook-"))
+  const previousLogLevel = process.env.ENSEMBLE_LOG_LEVEL
+  process.env.ENSEMBLE_LOG_LEVEL = "debug"
+  const { ctx } = fakeContext()
+  const hooks = new Map<string, (event: any) => void>()
+  ;(ctx.session as any).hook = async (name: string, callback: (event: any) => void) => {
+    hooks.set(name, callback)
+    return { dispose: async () => undefined }
+  }
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedNativeParent(seed, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  service.registerLocalRunForTest({
+    id: "run_parent",
+    subtaskID: "task_parent",
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  const instruction = "PRIVATE watch the CI"
+  try {
+    await service.installIdleHook(ctx)
+    const hook = hooks.get("experimental.idle")
+    assert.ok(hook, "the idle hook is installed")
+    hook!({
+      sessionID: "session_parent",
+      background: [
+        { kind: "shell", sessionID: "session_parent", shellID: "shell_1", command: "PRIVATE shell command" },
+        { kind: "subagent", sessionID: "session_parent", childSessionID: "child_idle", agent: "explore", description: instruction },
+        { kind: "image", sessionID: "session_parent", path: "/tmp/PRIVATE/image.png", model: "image-model" },
+      ],
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_idle?.instruction === instruction)
+    const run = (await handlers.snapshot({ directory })).state.nativeSubagents.child_idle!
+    assert.equal(run.parentSessionID, "session_parent")
+    assert.equal(run.parentTaskID, "task_parent")
+    assert.equal(run.source, "idle-background")
+    assert.equal(run.state, "working")
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "native.subagent.idle-hook", level: "debug", limit: 10 })
+    assert.equal(logs.entries.length, 1, "the hook records one structured delivery")
+    const payload = JSON.stringify(logs.entries[0])
+    assert.ok(!payload.includes(instruction), "the subagent description never enters the log")
+    assert.ok(!payload.includes("PRIVATE shell command"), "shell commands never enter the log")
+    assert.ok(!payload.includes("/tmp/PRIVATE/image.png"), "image paths never enter the log")
+    assert.ok(payload.includes("child_idle"), "the subagent child session id is logged")
+  } finally {
+    if (previousLogLevel === undefined) delete process.env.ENSEMBLE_LOG_LEVEL
+    else process.env.ENSEMBLE_LOG_LEVEL = previousLogLevel
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket182: session.created maps a child session to its parent task and group without queue effects", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-182-child-create-"))
   const { ctx, emitEvent } = fakeContext()
