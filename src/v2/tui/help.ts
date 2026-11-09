@@ -236,10 +236,13 @@ function keymapLabel(entry: KeyEntry): string {
 
 function keymapHelpEntry(entry: KeyEntry, context: KeyContext | "leader"): HelpEntry {
   const base = keymapLabel(entry)
+  // Ticket #183: leader prefixes read as separate keys (`Space b l`), while
+  // text chords keep the compact Vim spelling (`gg`, `d$`).
+  const leaderBase = entry.keys.map((key) => keyChordLabel([key])).join(" ")
   const keys = context === "leader"
     ? entry.id === "leader.cancel"
       ? base
-      : `Space ${base}`
+      : `Space ${leaderBase}`
     : base
   return {
     id: `keymap.${context}.${entry.id}`,

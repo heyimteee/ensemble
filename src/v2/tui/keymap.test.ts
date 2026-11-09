@@ -4,9 +4,11 @@ import {
   KEYMAP_CATALOG,
   duplicateBindings,
   commandStatusHints,
+  globalEntries,
   keyChordLabel,
   layerEntries,
   leaderHints,
+  leaderMenuEntries,
   singleKeyEntry,
   leaderEntries,
   leaderLayerEntries,
@@ -357,9 +359,60 @@ test("text-field hints share the dialog ladder vocabulary", () => {
 })
 
 test("leader keys resolve and Esc cancels the leader", () => {
-  assert.equal(actionId(resolveLeaderKey("?")), "leader.help")
-  assert.equal(actionId(resolveLeaderKey("escape")), "leader.cancel")
-  assert.equal(resolveLeaderKey("~").type, "none")
+  assert.equal(actionId(resolveLeaderKey([], "?")), "leader.help")
+  assert.equal(actionId(resolveLeaderKey([], "escape")), "leader.cancel")
+  assert.equal(resolveLeaderKey([], "~").type, "none")
+})
+
+test("ticket183: Space b is a prefix and Space l/r stay direct", () => {
+  const pending = resolveLeaderKey([], "b")
+  assert.equal(pending.type, "pending")
+  assert.deepEqual(pending.type === "pending" ? pending.prefix : [], ["b"], "b waits for the pane key")
+  assert.deepEqual(
+    pending.type === "pending" ? pending.entries.map((entry) => entry.id).sort() : [],
+    ["leader.pane.left", "leader.pane.right"],
+    "the submenu offers the two pane toggles",
+  )
+  assert.equal(actionId(resolveLeaderKey(["b"], "l")), "leader.pane.left")
+  assert.equal(actionId(resolveLeaderKey(["b"], "r")), "leader.pane.right")
+  assert.equal(actionId(resolveLeaderKey([], "l")), "leader.limits", "Space l still opens limits")
+  assert.equal(actionId(resolveLeaderKey([], "r")), "leader.retry", "Space r still retries")
+  assert.equal(actionId(resolveLeaderKey(["b"], "escape")), "leader.cancel", "Esc cancels the pending prefix")
+  assert.equal(resolveLeaderKey(["b"], "x").type, "none", "an unrelated key never resolves the submenu")
+  assert.equal(resolveLeaderKey([], "x").type, "action", "a direct leader key still resolves at the top level")
+})
+
+test("ticket183: which-key shows the pane submenu at each depth", () => {
+  const top = leaderMenuEntries([])
+  assert.ok(top.some((entry) => entry.id === "leader.pane"), "the top level names the pane submenu")
+  assert.ok(!top.some((entry) => entry.id === "leader.pane.left"), "nested keys wait for the prefix")
+  const topLines = whichKeyLines(top)
+  assert.ok(topLines.join("\n").includes("b Pane visibility"), topLines.join("\n"))
+
+  const submenu = leaderMenuEntries(["b"])
+  assert.deepEqual(submenu.map((entry) => entry.id), ["leader.pane.left", "leader.pane.right"])
+  const submenuLines = whichKeyLines(submenu, 2, 1)
+  const text = submenuLines.join("\n")
+  assert.ok(text.includes("l Toggle the left pane"), text)
+  assert.ok(text.includes("r Toggle the right pane"), text)
+})
+
+test("ticket183: the leader layer binds only immediate, non-prefix actions", () => {
+  const ids = leaderLayerEntries().map((entry) => entry.id)
+  assert.ok(ids.includes("leader.limits"))
+  assert.ok(ids.includes("leader.retry"))
+  assert.ok(!ids.includes("leader.pane"), "the b prefix is resolved by the raw key machine, not a host binding")
+  assert.ok(!ids.includes("leader.pane.left"))
+  assert.ok(!ids.includes("leader.pane.right"))
+})
+
+test("ticket183: leader hints teach the pane prefix and its submenu", () => {
+  const top = leaderHints()
+  assert.ok(top.includes("b panes"), top)
+  const submenu = leaderHints(["b"])
+  assert.ok(submenu.includes("l left"), submenu)
+  assert.ok(submenu.includes("r right"), submenu)
+  assert.ok(submenu.includes("esc cancel"), submenu)
 })
 
 test("statusline hints come from the same catalog and adapt to the work zone", () => {
@@ -459,7 +512,7 @@ test("raw keypresses normalize to catalog tokens", () => {
   assert.equal(normalizeKeyToken({ name: "return", shift: true }), "shift+enter")
   assert.equal(normalizeKeyToken({ name: "escape" }), "escape")
   assert.equal(normalizeKeyToken({ name: "tab" }), "tab")
-  assert.equal(normalizeKeyToken({ name: "F3", sequence: "\u001bOR" }), "f3", "ticket172: function keys normalize for the drawer")
+  assert.equal(normalizeKeyToken({ name: "F3", sequence: "\u001bOR" }), "f3", "function keys still normalize")
   assert.equal(normalizeKeyToken({ name: "g", shift: true }), "shift+g")
   assert.equal(normalizeKeyToken({ name: "G", sequence: "G" }), "shift+g")
   assert.equal(normalizeKeyToken({ name: "d", ctrl: true }), "ctrl+d")
@@ -550,7 +603,8 @@ test("the catalog covers every app-level key the handlers consume", () => {
   for (const [context, token, id] of required) {
     assert.equal(singleKeyEntry(context, token)?.id, id, `${context} resolves ${token} to ${id}`)
   }
-  assert.equal(KEYMAP_CATALOG.find((entry) => entry.id === "global.work")?.keys.join(" "), "f3", "ticket172: F3 owns the drawer toggle")
+  assert.equal(KEYMAP_CATALOG.find((entry) => entry.id === "global.work"), undefined, "ticket183: F3 is retired")
+  assert.ok(!globalEntries().some((entry) => entry.keys.includes("f3")), "no global binding claims F3")
   // Multi-key chords resolve through the same pending machine.
   assert.equal(actionId(resolveNormalKey("wizardText", ["g"], "g")), "wizardText.motion.gg")
   assert.equal(actionId(resolveNormalKey("wizardText", ["y"], "y")), "wizardText.yy")

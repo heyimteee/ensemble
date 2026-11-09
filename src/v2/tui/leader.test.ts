@@ -16,6 +16,6 @@ test("the leader catalog remains immediately actionable while the popup waits", 
   // Space q acts on the first keypress even though the menu is still hidden.
   assert.equal(LEADER_POPUP_DELAY_MS > 0, true)
   assert.equal(leaderPopupVisible(1_000, 1_050), false)
-  assert.equal(resolveLeaderKey("q").type, "action")
-  assert.equal(resolveLeaderKey("?").type, "action")
+  assert.equal(resolveLeaderKey([], "q").type, "action")
+  assert.equal(resolveLeaderKey([], "?").type, "action")
 })

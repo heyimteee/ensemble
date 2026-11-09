@@ -137,7 +137,7 @@ import {
   type InteractionResult,
   type InteractionState,
 } from "./interaction.ts"
-import { chatPaneFocused, cyclePaneFocus, enterPane, movePaneFocus, paneOwnsFocus, railSectionFocused, workCardsFocused, workPaneFocused, type PaneID, type PaneVisibility } from "./panefocus.ts"
+import { chatPaneFocused, cyclePaneFocus, enterPane, focusForPaneToggle, movePaneFocus, paneOwnsFocus, paneSideVisibility, paneVisibilityFor, railSectionFocused, togglePaneSide, workCardsFocused, workPaneFocused, type PaneID, type PaneSide, type PaneSideVisibility, type PaneVisibility } from "./panefocus.ts"
 import { applySendResult, clearDraft, draftFor, draftKey, updateDraft, type DraftStore, type DraftSurface } from "./drafts.ts"
 import { createClipboardPort, createEditorPort, createVimBuffer } from "./vim-opentui.ts"
 import { MOUSE_PANE_IDS, handleMouseSelection, paneName } from "./mouse.ts"
@@ -146,7 +146,7 @@ import { dialogEscape, dialogKeyContext } from "./dialogs.ts"
 import { buildStatuslineSegments, composerPosition, contextLabel, listPosition, statuslineRow2Parts, statuslineRow2PromptParts, transcriptPosition, type StatuslineRow2Input, type StatuslineSurface } from "./statusline.ts"
 import { clearToasts, createToastState, expireToasts, feedbackChannel, initToast, nextToastDeadline, pushToast, toastPlacement, type ToastInput } from "./toast.ts"
 import { editLine } from "./line-editor.ts"
-import { commandStatusHints, layerEntries, globalEntries, leaderEntries, leaderHints, leaderLayerEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, singleKeyEntry, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
+import { commandStatusHints, layerEntries, globalEntries, leaderHints, leaderLayerEntries, leaderMenuEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, singleKeyEntry, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
 import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
 import { createLogger, type EnsembleLogger, type LogEntry } from "../logging.ts"
@@ -437,10 +437,14 @@ export function EnsembleV2App() {
   // Ticket #172: Work is a dedicated pane. Focus is task identity, the view
   // owns ACTIVE/HISTORY, and the pane pages its own body instead of sharing
   // the chat column. The drawer only exists below the 96-column breakpoint.
+  // Ticket #183: durable left/right column visibility. Missing UI state means
+  // both columns are open; the width memo and every focus transition read the
+  // same two switches.
+  const [paneSides, setPaneSides] = createSignal<PaneSideVisibility>({ left: true, right: true })
+  let paneSidesKey = ""
   const [workView, setWorkView] = createSignal<WorkView>("active")
   const [workPage, setWorkPage] = createSignal(1)
   const [workFocusID, setWorkFocusID] = createSignal<string | undefined>(undefined)
-  const [workDrawerOpen, setWorkDrawerOpen] = createSignal(false)
   // Ticket #173: spatial focus remembers the last rendered rectangle so a
   // disappeared card falls back to its nearest neighbour, not a column index.
   let lastWorkFocus: WorkFocusPosition | undefined
@@ -457,6 +461,8 @@ export function EnsembleV2App() {
   const [draft, setDraft] = createSignal<Agent | null>(null)
   const [dirty, setDirty] = createSignal(false)
   const [leaderMode, setLeaderMode] = createSignal(false)
+  // Ticket #183: `Space b` is a pending leader prefix; this holds its keys.
+  const [leaderKeys, setLeaderKeys] = createSignal<string[]>([])
   // The which-key popup waits a short beat; leader keys act immediately.
   const [leaderPopup, setLeaderPopup] = createSignal(false)
   let leaderPopupTimer: ReturnType<typeof setTimeout> | undefined
@@ -621,25 +627,20 @@ export function EnsembleV2App() {
   const interactionMode = (): InteractionMode => interaction().mode
   const commandActive = () => interaction().command !== null
   const setFocusArea = (area: FocusArea) => {
-    if (workPaneMode() === "drawer" && area === "chat") setWorkDrawerOpen(false)
+    // Ticket #183: moving focus never changes durable pane visibility.
     dispatchInteraction({ type: "focus.set", focus: area === "rail" ? "agents" : "chat" })
   }
   const setPaneFocus = (pane: PaneID, mode: "select" | "interact" = "select") => {
-    // Below 96 columns the Work/Approvals column is a drawer. Selecting it is
-    // explicit, so open it; returning to the left/chat column releases it.
-    if (workPaneMode() === "drawer") setWorkDrawerOpen(pane === "work" || pane === "approvals")
     dispatchInteraction({ type: "pane.set", pane, mode })
   }
   const paneMode = () => interaction().paneMode
   const paneInteracting = (pane: PaneID) => paneOwnsFocus(paneState(), pane) && paneMode() === "interact"
-  // Ticket #180: live pane visibility. #183 owns the durable left/right
-  // toggles; this memo already skips closed or absent panes safely.
-  const paneVisibility = (): PaneVisibility => ({
-    agents: true,
-    workspaces: true,
-    chat: true,
-    work: showWorkPane(),
-    approvals: showWorkPane() && pendingApprovals().length > 0,
+  // Ticket #183: the two durable column switches expand into the per-pane
+  // map every focus transition reads. A DM has no Work pane, and an empty
+  // approvals list has no approvals sub-pane.
+  const paneVisibility = (): PaneVisibility => paneVisibilityFor(paneSides(), {
+    work: surface()?.kind === "workspace",
+    approvals: pendingApprovals().length > 0,
   })
   const applyInteraction = (result: InteractionResult) => {
     setInteraction(result.state)
@@ -876,15 +877,15 @@ export function EnsembleV2App() {
   const viewWidth = () => Math.max(60, renderSize().width - 2)
   const viewHeight = () => renderSize().height
   const messageHeight = () => Math.max(6, viewHeight() - 14)
-  // Ticket #172: one pane-width source of truth consumed by the chat
-  // transcript, the Work pane, and hit-testing. The rail keeps #171's width;
-  // the Work pane is a sibling column or a right drawer below 96 columns.
-  const panes = createMemo(() => workspacePaneWidths(renderSize().width))
-  // Ticket #172: the Work pane is a sibling of the chat only on a workspace
-  // surface, and only when the drawer is open below 96 columns. A DM (or a
-  // closed drawer) lets the transcript use the full two-column width.
+  // Ticket #172/#183: one pane-width source of truth consumed by the chat
+  // transcript, the Work pane, and hit-testing. The two durable column
+  // switches feed it, so a hidden side reclaims its width for the chat.
+  const panes = createMemo(() => workspacePaneWidths(renderSize().width, paneSides()))
+  // Ticket #172/#183: the Work pane is a sibling of the chat only on a
+  // workspace surface. At every width the same right switch owns it; below 96
+  // columns it renders as a right drawer over the chat.
   const showWorkPane = createMemo(
-    () => surface()?.kind === "workspace" && (panes().mode !== "drawer" || workDrawerOpen()),
+    () => surface()?.kind === "workspace" && paneSides().right,
   )
   const railWidth = () => panes().railWidth
   const messageWidth = () => showWorkPane() ? panes().chatContentWidth : panes().chatOnlyContentWidth
@@ -906,8 +907,40 @@ export function EnsembleV2App() {
   const initRows = createMemo(() => liveInitJobs().map((job) => initRowForJob(job, motionFrame(), process.env)))
   const initRowMessageIDs = createMemo(() => initJobMessageIDs(state()?.initJobs ?? {}, surface()?.kind === "workspace" ? activeWorkspace()?.id : undefined))
   const pendingApprovals = createMemo(() => Object.values(state()?.approvals ?? {}).filter((approval) => approval.status === "pending"))
+  // Ticket #183: hydrate the column switches from durable UI state, then keep
+  // local toggles optimistic. The serialized key suppresses the echo of our
+  // own save, exactly like the rail collapse state above.
+  createEffect(() => {
+    const stored = state()?.ui.paneVisibility
+    if (!stored) return
+    const next = paneSideVisibility(stored)
+    const key = JSON.stringify(next)
+    if (key === paneSidesKey) return
+    paneSidesKey = key
+    setPaneSides(next)
+  })
+  const persistPaneSides = (next: PaneSideVisibility) => {
+    paneSidesKey = JSON.stringify(next)
+    setPaneSides(next)
+    void invoke(context, "ui.save", { paneVisibility: next }).catch(() => undefined)
+  }
+  /** Space b l / Space b r share one toggle and one focus-recovery rule. */
+  const togglePane = (side: PaneSide) => {
+    const next = togglePaneSide(paneSides(), side)
+    persistPaneSides(next)
+    const visibility = paneVisibilityFor(next, {
+      work: surface()?.kind === "workspace",
+      approvals: pendingApprovals().length > 0,
+    })
+    const current = paneState()
+    const focus = focusForPaneToggle(current, side, visibility)
+    // Closing an unfocused column must not blur the composer or reselect the
+    // current pane; only a real focus change dispatches a pane transition.
+    if (focus.pane !== current.pane || focus.mode !== current.mode) setPaneFocus(focus.pane, focus.mode)
+  }
   // Ticket #180: a pane that closes or disappears never traps focus; the
-  // pure machine returns selection to chat. #183 will toggle left/right.
+  // pure machine returns selection to chat. Ticket #183 owns the column
+  // switches and the focus recovery on close.
   createEffect(() => {
     const visible = paneVisibility()
     const current = paneState()
@@ -1459,13 +1492,6 @@ export function EnsembleV2App() {
   // until Work is entered.
   const workOwnsFocus = () => workPaneFocused(paneState()) && !composerActive() && !overlayOpen()
   const chatOwnsFocus = () => chatPaneFocused(paneState()) && !overlayOpen()
-  // A resize into the drawer breakpoint must not leave keyboard focus on a
-  // hidden pane. Opening the drawer is explicit (Tab/F3); closing it returns
-  // focus to the chat.
-  createEffect(() => {
-    if (workPaneMode() !== "drawer" || workDrawerOpen()) return
-    if (paneOwnsFocus(paneState(), "work") || paneOwnsFocus(paneState(), "approvals")) setFocusArea("chat")
-  })
   // Slice C stop affordance (brief §2.5): while active work runs on the group
   // surface a run is abortable, so the composer names `Ctrl+C stop`; the hint
   // and the binding stay hidden otherwise. Terminal cards are display-only.
@@ -2808,18 +2834,6 @@ export function EnsembleV2App() {
     setWorkFocusID(undefined)
   }
   const moveWorkPage = (delta: number) => selectWorkPage(workPage() + delta)
-  const toggleWorkDrawer = () => {
-    if (workPaneMode() !== "drawer") return
-    if (workDrawerOpen()) {
-      setWorkDrawerOpen(false)
-      if (paneOwnsFocus(paneState(), "work") || paneOwnsFocus(paneState(), "approvals")) setFocusArea("chat")
-    } else {
-      // Ticket #180 keeps the legacy F3 drawer gesture untouched: it still
-      // lands on the cards. #183 replaces F3 with Space b r.
-      setPaneFocus("work", "interact")
-      if (workFocusID() === undefined) focusFirstWork()
-    }
-  }
   const workFocusAtLast = () => {
     const last = lastWorkCardFocus(workFocusPages())
     return Boolean(last && last.id === workFocusID())
@@ -2906,8 +2920,8 @@ export function EnsembleV2App() {
   }
   /**
    * Tab/Shift+Tab cycle the visible panes and land in select mode. Closed or
-   * absent panes are skipped by the pure pane machine; the drawer follows the
-   * selected column below 96 columns.
+   * absent panes are skipped by the pure pane machine; the same right switch
+   * owns the wide pane and the narrow drawer.
    */
   const cycleFocusZone = (direction: 1 | -1 = 1) => {
     clearPendingChord()
@@ -3196,6 +3210,7 @@ export function EnsembleV2App() {
   }
   const openLeader = () => {
     clearPendingChord()
+    setLeaderKeys([])
     setLeaderMode(true)
     setLeaderPopup(false)
     if (leaderPopupTimer !== undefined) clearTimeout(leaderPopupTimer)
@@ -3208,6 +3223,7 @@ export function EnsembleV2App() {
   const closeLeader = () => {
     if (leaderPopupTimer !== undefined) { clearTimeout(leaderPopupTimer); leaderPopupTimer = undefined }
     setLeaderPopup(false)
+    setLeaderKeys([])
     setLeaderMode(false)
     clearPendingChord()
   }
@@ -4570,6 +4586,8 @@ export function EnsembleV2App() {
     "leader.archive.agent": () => archiveSelectedAgent(),
     "leader.delete.agent": () => deleteSelectedAgent(),
     "leader.approvals": () => openApprovals(),
+    "leader.pane.left": () => togglePane("left"),
+    "leader.pane.right": () => togglePane("right"),
     "leader.pause": () => togglePause(),
     "leader.init": () => initEnsemble(),
     "leader.native": () => openNative(),
@@ -4834,21 +4852,39 @@ export function EnsembleV2App() {
           openHelp()
           return
         }
-        // Ticket #172: F3 toggles the Work drawer below 96 columns.
-        const globalWork = globalEntries().find((entry) => entry.id === "global.work")
-        if (globalWork && token === globalWork.keys[0] && workPaneMode() === "drawer") {
-          event?.preventDefault?.(); event?.stopPropagation?.()
-          toggleWorkDrawer()
+      }
+      // v5.6 T3 / ticket #183: the leader owns known keys through the
+      // generated leader layer; `b` starts a pending prefix that only the raw
+      // key machine can resolve into `b l` / `b r`.
+      if (leaderMode()) {
+        const pending = leaderKeys()
+        // Esc closes the leader, including a pending prefix, without running
+        // an action. At the top level the host leader layer owns Esc.
+        if (token === "escape") {
+          if (pending.length > 0) {
+            event?.preventDefault?.(); event?.stopPropagation?.()
+            closeLeader()
+          }
           return
         }
-      }
-      // v5.6 T3: the leader owns known keys through the generated leader
-      // layer; anything else closes which-key with a truthful warning.
-      if (leaderMode()) {
-        if (token === "escape" || resolveLeaderKey(token).type === "action") return
+        const resolved = resolveLeaderKey(pending, token)
+        if (resolved.type === "pending") {
+          event?.preventDefault?.(); event?.stopPropagation?.()
+          setLeaderKeys([...resolved.prefix])
+          setPendingChord(["space", ...resolved.prefix])
+          return
+        }
+        if (resolved.type === "action") {
+          // Top-level actions stay on the generated host layer; submenu
+          // actions have no host binding and run here.
+          if (pending.length > 0) {
+            event?.preventDefault?.(); event?.stopPropagation?.()
+            runLeaderAction(resolved.entry.id)
+          }
+          return
+        }
         event?.preventDefault?.(); event?.stopPropagation?.()
-        setLeaderMode(false)
-        clearPendingChord()
+        closeLeader()
         showToast({ title: "Leader", message: `Unknown shortcut: ${String(event?.sequence ?? event?.name ?? token)}`, tone: "warning" })
         return
       }
@@ -6448,7 +6484,7 @@ export function EnsembleV2App() {
     return ""
   }
   const statusHints = () => {
-    if (leaderMode()) return leaderHints()
+    if (leaderMode()) return leaderHints(leaderKeys())
     const command = interaction().command
     if (command) {
       const hints = commandStatusHints(command.kind)
@@ -6582,11 +6618,13 @@ export function EnsembleV2App() {
       <box id={MOUSE_PANE_IDS.header} height={3} flexDirection="row" border={["bottom"]} borderColor={colors.border} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1} opacity={overlayOpen() ? 0.35 : 1}>
         <box flexDirection="column" flexGrow={1}>
           <ChromeText colors={colors} fg={colors.accent} bg={colors.bg} width="100%" truncate text={chromeJoin(["ENSEMBLE", ...(activeWorkspace() ? [`#${activeWorkspace()!.name}`, ...(activeWorkspace()!.paused ? ["paused"] : []), workspaceLabel(activeWorkspace()!.directory)] : ["no workspace"])])} />
-          <ChromeText colors={colors} fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={leaderMode() ? chromeJoin(["LEADER", "which-key", "esc cancel"]) : `${isBusy() ? `${chromeJoin(["BUSY", status()])}` : status()}`} />
+          <ChromeText colors={colors} fg={leaderMode() ? colors.warn : busy() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={leaderMode() ? chromeJoin(["LEADER", `Space${leaderKeys().length > 0 ? ` ${leaderKeys().join(" ")}` : ""}`, "esc cancel"]) : `${isBusy() ? `${chromeJoin(["BUSY", status()])}` : status()}`} />
         </box>
       </box>
         <box flexDirection="row" flexGrow={1} minHeight={0} gap={1} position="relative" opacity={overlayOpen() ? 0.35 : 1}>
-          <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focusedSection={railSectionFocused(paneState(), "agents") ? "agents" : railSectionFocused(paneState(), "workspaces") ? "workspaces" : null} cursorVisible={paneMode() === "interact" && (interaction().pane === "agents" || interaction().pane === "workspaces")} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
+          <Show when={paneSides().left}>
+            <Rail colors={colors} sections={railModel().sections} cursor={railCursor()} focusedSection={railSectionFocused(paneState(), "agents") ? "agents" : railSectionFocused(paneState(), "workspaces") ? "workspaces" : null} cursorVisible={paneMode() === "interact" && (interaction().pane === "agents" || interaction().pane === "workspaces")} pendingApprovals={pendingApprovals().length} width={railWidth()} filter={workspaceFilter()} motionTick={motionFrame()} emphasis={railEmphasis()} onToggleGroup={toggleRailGroup} />
+          </Show>
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chatOwnsFocus() ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chatOwnsFocus() || composerActive() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
             <Show when={limitsOpen()} fallback={
@@ -7057,7 +7095,7 @@ export function EnsembleV2App() {
           bottom={4}
           right={4}
           width={68}
-          height={whichKeyLines(leaderEntries()).length + 2}
+          height={whichKeyLines(leaderMenuEntries(leaderKeys()), 2, leaderKeys().length).length + 2}
           zIndex={90}
           border
           borderStyle="rounded"
@@ -7068,8 +7106,8 @@ export function EnsembleV2App() {
           flexDirection="column"
           opacity={overlayOpacity()}
         >
-          <ChromeText colors={colors} fg={colors.leader} bg={colors.panel} width="100%" truncate text={chromeJoin(["LEADER", "Space"])} />
-          <For each={whichKeyLines(leaderEntries())}>{(line) => <text fg={colors.text} bg={colors.panel} width="100%" truncate>{line}</text>}</For>
+          <ChromeText colors={colors} fg={colors.leader} bg={colors.panel} width="100%" truncate text={chromeJoin(["LEADER", `Space${leaderKeys().length > 0 ? ` ${leaderKeys().join(" ")}` : ""}`])} />
+          <For each={whichKeyLines(leaderMenuEntries(leaderKeys()), 2, leaderKeys().length)}>{(line) => <text fg={colors.text} bg={colors.panel} width="100%" truncate>{line}</text>}</For>
         </box>
       </Show>
       <box id={MOUSE_PANE_IDS.statusline} height={3} flexDirection="column" border={["top"]} borderColor={colors.border} backgroundColor={colors.bg} opacity={overlayOpen() ? 0.35 : 1}>

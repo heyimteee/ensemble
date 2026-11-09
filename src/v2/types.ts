@@ -560,6 +560,14 @@ export type Snapshot = {
        * rail. Durable so the rail reopens the way the user left it.
        */
       collapsedRailGroups?: Id[]
+      /**
+       * Ticket #183: durable left/right pane visibility. Missing means both
+       * columns are open; the TUI writes the switches through `ui.save`.
+       */
+      paneVisibility?: {
+        left?: boolean
+        right?: boolean
+      }
       history?: Record<string, {
         surface: "workspace" | "agent"
         workspaceID?: Id

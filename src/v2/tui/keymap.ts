@@ -102,6 +102,10 @@ const LEADER: readonly KeyEntry[] = [
   { id: "leader.archive.agent", scope: "leader", contexts: SURFACES, keys: ["shift+a"], title: "Archive agent", group: "Archive" },
   { id: "leader.delete.agent", scope: "leader", contexts: SURFACES, keys: ["shift+d"], title: "Delete agent", group: "Delete" },
   { id: "leader.approvals", scope: "leader", contexts: SURFACES, keys: ["v"], title: "Approvals", group: "Navigate" },
+  // Ticket #183: `Space b` is a nested prefix; Space l/r below stay direct.
+  { id: "leader.pane", scope: "leader", contexts: SURFACES, keys: ["b"], title: "Pane visibility", group: "View", hint: "b panes" },
+  { id: "leader.pane.left", scope: "leader", contexts: SURFACES, keys: ["b", "l"], title: "Toggle the left pane", group: "View", hint: "l left" },
+  { id: "leader.pane.right", scope: "leader", contexts: SURFACES, keys: ["b", "r"], title: "Toggle the right pane", group: "View", hint: "r right" },
   { id: "leader.pause", scope: "leader", contexts: SURFACES, keys: ["p"], title: "Pause / resume", group: "State" },
   { id: "leader.init", scope: "leader", contexts: SURFACES, keys: ["i"], title: "Init workspace files", group: "State" },
   { id: "leader.native", scope: "leader", contexts: SURFACES, keys: ["o"], title: "Native session", group: "Navigate" },
@@ -604,8 +608,6 @@ const TEXT_FIELDS: readonly KeyEntry[] = [
 const GLOBAL: readonly KeyEntry[] = [
   { id: "global.help", scope: "normal", contexts: ["global"], keys: ["?"], title: "Open help", group: "Global", hint: "? help" },
   { id: "global.native", scope: "normal", contexts: ["global"], keys: ["f2"], title: "Open Ensemble from a native session", group: "Global" },
-  // Ticket #172: below 96 columns the Work pane is a drawer; F3 toggles it.
-  { id: "global.work", scope: "normal", contexts: ["global"], keys: ["f3"], title: "Toggle the Work drawer", group: "Global", hint: "F3 work" },
 ]
 
 /** Help overlay grammar: the same dialog grammar used by every other list. */
@@ -692,7 +694,20 @@ export function layerEntries(context: KeyContext): readonly KeyEntry[] {
 }
 
 export function leaderLayerEntries(): readonly KeyEntry[] {
-  return leaderEntries().filter((entry) => entry.keys.length === 1)
+  const catalog = leaderEntries()
+  // Ticket #183: a prefix such as `b` waits for its next key in the raw key
+  // machine. Binding it as a host action would execute the prefix early.
+  return catalog.filter((entry) => entry.keys.length === 1 && !catalog.some((other) =>
+    other.keys.length > entry.keys.length && isPrefix(entry.keys, other.keys)))
+}
+
+/**
+ * The immediate which-key/help menu for a leader prefix. An empty prefix shows
+ * the top-level keys; `["b"]` shows only the pane toggles.
+ */
+export function leaderMenuEntries(pending: readonly string[] = []): readonly KeyEntry[] {
+  return leaderEntries().filter((entry) =>
+    entry.keys.length === pending.length + 1 && isPrefix(pending, entry.keys))
 }
 
 function sameKeys(left: readonly string[], right: readonly string[]): boolean {
@@ -732,10 +747,24 @@ export function singleKeyEntry(context: KeyContext, token: string): KeyEntry | n
   return resolution.type === "action" ? resolution.entry : null
 }
 
-/** Leader keys are a single chord level; no further pending state exists. */
-export function resolveLeaderKey(token: string): KeyResolution {
-  const entry = leaderEntries().find((candidate) => candidate.keys.length === 1 && candidate.keys[0] === token)
-  return entry ? { type: "action", entry } : { type: "none" }
+/** Leader keys resolve through the same pending-prefix machine as Normal. */
+export function resolveLeaderKey(pending: readonly string[], token: string): KeyResolution {
+  const entries = leaderEntries()
+  const sequence = [...pending, token]
+  // Esc always cancels the open leader, including a pending prefix.
+  if (token === "escape") {
+    const cancel = entries.find((entry) => entry.id === "leader.cancel")
+    return cancel ? { type: "action", entry: cancel } : { type: "none" }
+  }
+  // A prefix always wins over an exact entry: `b` must wait for `l`/`r`.
+  if (entries.some((entry) => isPrefix(sequence, entry.keys))) {
+    return { type: "pending", prefix: sequence, entries: leaderMenuEntries(sequence) }
+  }
+  const exact = entries.find((entry) => sameKeys(entry.keys, sequence))
+  if (exact) return { type: "action", entry: exact }
+  // An unknown key inside an explicit leader submenu is never reinterpreted as
+  // a top-level destructive action (b, x must not cancel work).
+  return { type: "none" }
 }
 
 export type DuplicateBinding = { scope: KeyScope; context: string; keys: string; ids: string[] }
@@ -793,10 +822,11 @@ export function statuslineHints(
  * Leader statusline hints, generated from the same leader table as the
  * which-key popup and layer. Only teaching entries carry a hint.
  */
-export function leaderHints(): string {
-  const hints = leaderEntries()
+export function leaderHints(pending: readonly string[] = []): string {
+  const hints = leaderMenuEntries(pending)
     .flatMap((entry) => entry.hint && entry.listed !== false ? [entry.hint] : [])
     .filter((hint, index, all) => all.indexOf(hint) === index)
+  if (pending.length > 0 && !hints.includes("esc cancel")) hints.push("esc cancel")
   return chromeJoin(hints)
 }
 
@@ -868,7 +898,7 @@ function modifierLabel(key: string): string {
  * Which-key rows: column-major cells so a short list reads top-to-bottom in
  * each column. Pure text; the popup only adds the border.
  */
-export function whichKeyLines(entries: readonly KeyEntry[], columns = 2): string[] {
+export function whichKeyLines(entries: readonly KeyEntry[], columns = 2, keyOffset = 0): string[] {
   const listed = entries.filter((entry) => entry.listed !== false)
   if (listed.length === 0) return []
   const columnCount = Math.max(1, Math.min(columns, listed.length))
@@ -880,7 +910,7 @@ export function whichKeyLines(entries: readonly KeyEntry[], columns = 2): string
     for (let column = 0; column < columnCount; column++) {
       const entry = listed[row + column * rows]
       if (!entry) continue
-      const cell = `${keyChordLabel(entry.keys)} ${entry.title}`
+      const cell = `${keyChordLabel(entry.keys.slice(keyOffset))} ${entry.title}`
       cells.push(column < columnCount - 1 ? cell.padEnd(width) : cell)
     }
     const line = cells.join("").trimEnd()

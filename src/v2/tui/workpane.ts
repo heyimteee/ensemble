@@ -1,6 +1,7 @@
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { allWorkGroupsForTasks, workFinishedAt, type WorkGroup, type WorkGroupOptions } from "../work-groups.ts"
 import type { Subtask } from "../types.ts"
+import type { PaneSideVisibility } from "./panefocus.ts"
 import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS, workCardContentWidth } from "./workrows.ts"
 import { workGroupLabel } from "./workgroups.ts"
 
@@ -61,15 +62,25 @@ function clamp(minimum: number, maximum: number, value: number): number {
  * - >= 118 columns: three stable panes (`three`).
  * - 96..117 columns: three panes with compact Work (`compact`).
  * - < 96 columns: Work is a toggleable right drawer (`drawer`).
+ *
+ * Ticket #183: the two durable column switches feed this one function. A
+ * closed column claims no width, so the chat reclaims it; the drawer itself
+ * still overlays the chat at narrow widths.
  */
-export function workspacePaneWidths(terminalWidth: number): ShellPaneWidths {
+export function workspacePaneWidths(
+  terminalWidth: number,
+  visibility: Partial<PaneSideVisibility> = {},
+): ShellPaneWidths {
   const terminal = Math.max(60, Math.floor(terminalWidth))
   const viewWidth = terminal - SHELL_VIEW_INSET
-  const railWidth = clamp(26, 34, Math.floor(viewWidth * 0.26))
+  const left = visibility.left !== false
+  const right = visibility.right !== false
+  const railWidth = left ? clamp(26, 34, Math.floor(viewWidth * 0.26)) : 0
   const mode: ShellPaneMode = terminal >= 118 ? "three" : terminal >= 96 ? "compact" : "drawer"
   const workChrome = WORK_PANE_HORIZONTAL_CHROME
+  const chatOnlyWidth = viewWidth - railWidth - (left ? SHELL_PANE_GAP : 0)
   if (mode === "drawer") {
-    const chatWidth = viewWidth - railWidth - SHELL_PANE_GAP
+    const chatWidth = chatOnlyWidth
     const workWidth = clamp(30, 48, Math.floor(viewWidth * 0.6))
     return {
       mode,
@@ -82,18 +93,32 @@ export function workspacePaneWidths(terminalWidth: number): ShellPaneWidths {
       workChrome,
       workContentWidth: Math.max(WORK_CARD_MIN_WIDTH - WORK_CARD_HORIZONTAL_CHROME, workWidth - workChrome),
       chatContentWidth: Math.max(20, chatWidth - 9),
-      chatOnlyContentWidth: Math.max(20, chatWidth - 9),
+      chatOnlyContentWidth: Math.max(20, chatOnlyWidth - 9),
     }
   }
-  const chatOnlyWidth = viewWidth - railWidth - SHELL_PANE_GAP
+  if (!right) {
+    return {
+      mode,
+      terminalWidth: terminal,
+      viewWidth,
+      gap: SHELL_PANE_GAP,
+      railWidth,
+      chatWidth: chatOnlyWidth,
+      workWidth: 0,
+      workChrome,
+      workContentWidth: 0,
+      chatContentWidth: Math.max(20, chatOnlyWidth - 9),
+      chatOnlyContentWidth: Math.max(20, chatOnlyWidth - 9),
+    }
+  }
   const ratio = terminal >= 140 ? 0.4 : 0.38
   let workWidth = clamp(30, 78, Math.floor(viewWidth * ratio))
-  let chatWidth = viewWidth - railWidth - workWidth - SHELL_PANE_GAP * 2
+  let chatWidth = viewWidth - railWidth - workWidth - SHELL_PANE_GAP - (left ? SHELL_PANE_GAP : 0)
   // The chat is the shell's primary surface: shrink the Work pane before the
   // transcript drops below a readable 30-cell column.
   if (chatWidth < 30) {
     workWidth = Math.max(28, workWidth - (30 - chatWidth))
-    chatWidth = viewWidth - railWidth - workWidth - SHELL_PANE_GAP * 2
+    chatWidth = viewWidth - railWidth - workWidth - SHELL_PANE_GAP - (left ? SHELL_PANE_GAP : 0)
   }
   return {
     mode,

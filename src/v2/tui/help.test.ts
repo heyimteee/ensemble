@@ -169,6 +169,18 @@ test("help retires stale hand-written Settings and wizard chords", () => {
   assert.ok(keys.includes("p"), "promote stays documented under the settings syntax")
 })
 
+test("ticket183: the leader help documents the pane submenu and retires F3", () => {
+  const leader = helpSections().find((section) => section.id === "leader")
+  assert.ok(leader, "the leader section exists")
+  const keys = leader!.entries.map((entry) => entry.keys)
+  assert.ok(keys.includes("Space b l"), `left toggle is documented: ${keys.join(", ")}`)
+  assert.ok(keys.includes("Space b r"), `right toggle is documented: ${keys.join(", ")}`)
+  assert.ok(keys.includes("Space b"), "the prefix itself is discoverable")
+  assert.ok(!keys.includes("F3"), "the retired drawer key never appears in help")
+  const all = helpSections().flatMap((section) => section.entries.map((entry) => entry.keys))
+  assert.ok(!all.includes("F3"), "no section teaches the retired F3 drawer")
+})
+
 test("v5.7 help states the persistent-mode, caret, native, separator, badge, and memory contract", () => {
   const entries = helpSections().flatMap((section) => section.entries.map((entry) => ({ section: section.id, ...entry })))
   const entry = (key: string) => entries.find((candidate) => `${candidate.section}:${candidate.id}` === key)

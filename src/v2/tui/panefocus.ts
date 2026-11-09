@@ -19,6 +19,59 @@ export const PANE_ORDER: readonly PaneID[] = ["agents", "workspaces", "chat", "w
 
 export type PaneVisibility = Partial<Record<PaneID, boolean>>
 
+/** Ticket #183: two durable column switches behind every pane transition. */
+export type PaneSide = "left" | "right"
+
+export type PaneSideVisibility = { left: boolean; right: boolean }
+
+/** The stored value may come from an older snapshot; both columns default open. */
+export function paneSideVisibility(input?: Partial<Record<PaneSide, boolean>> | null): PaneSideVisibility {
+  return { left: input?.left !== false, right: input?.right !== false }
+}
+
+/**
+ * Expand the two column switches into the per-pane map the focus machine
+ * reads. `available` carries surface facts the layout cannot know: a DM has no
+ * Work pane and an empty approvals list has no approvals sub-pane.
+ */
+export function paneVisibilityFor(
+  sides: PaneSideVisibility,
+  available: { work?: boolean; approvals?: boolean } = {},
+): PaneVisibility {
+  const work = sides.right && available.work !== false
+  return {
+    agents: sides.left,
+    workspaces: sides.left,
+    chat: true,
+    work,
+    approvals: work && available.approvals !== false,
+  }
+}
+
+/** Flip one column; the other and the chat always stay as they were. */
+export function togglePaneSide(sides: PaneSideVisibility, side: PaneSide): PaneSideVisibility {
+  return { ...sides, [side]: !sides[side] }
+}
+
+/**
+ * Focus after a `Space b l` / `Space b r` toggle. Closing the focused column
+ * returns to chat selection; reopening selects the column's first pane in
+ * select mode, never inside its content. A column with no visible pane (a DM's
+ * right column) never steals focus.
+ */
+export function focusForPaneToggle(
+  state: PaneFocus,
+  side: PaneSide,
+  visible: PaneVisibility,
+): PaneFocus {
+  const first: PaneID = side === "left" ? "agents" : "work"
+  if (paneIsVisible(first, visible)) return { pane: first, mode: "select" }
+  const currentSide = side === "left"
+    ? state.pane === "agents" || state.pane === "workspaces"
+    : state.pane === "work" || state.pane === "approvals"
+  return currentSide ? { pane: "chat", mode: "select" } : state
+}
+
 export type PaneMove = "left" | "right" | "up" | "down"
 
 export type PaneTransitionInput = {
