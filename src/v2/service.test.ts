@@ -7,6 +7,7 @@ import { EnsembleV2Service, streamFinalization } from "./service.ts"
 import { startServiceForTest } from "./test-service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
+import { completionWorkKey } from "./handoff.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import { workTaskActions } from "./tui/workactions.ts"
 import type { Agent, Workspace } from "./types.ts"
@@ -8558,6 +8559,740 @@ test("ticket197: service stop aborts the wake-up wait", async () => {
   } finally {
     releaseWait?.()
     if (!stopped) await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+/** Ticket #199: a finalized parent task with a known terminal native child. */
+async function seedLateNativeCase(
+  ctx: any,
+  directory: string,
+  options: { leader?: boolean; child?: boolean; childTaskID?: string } = {},
+) {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  const at = Date.now()
+  const resultAt = at - 1_000
+  const childFinishedAt = at - 2_000
+  await seedAgent(seed, { name: "Kakiko" })
+  await seed.saveAgent(novaAgent({ id: "leader", name: "Lead" }))
+  const leaderID = options.leader ? "a" : "leader"
+  await seedWorkspace(seed, directory, { leaderID, memberIDs: ["a", "leader"], nextSeq: 20 })
+  await seed.saveDispatchGroup({
+    id: "group_parent",
+    workspaceID: "w",
+    rootID: "group_parent",
+    continuationIndex: 0,
+    maxHops: 8,
+    usedHops: 1,
+    depthMax: 8,
+    createdAt: 1,
+  })
+  const result = await seed.appendMessage("w", {
+    id: "msg_result",
+    author: "agent",
+    agentID: "a",
+    text: "FIRST ANSWER",
+    kind: "text",
+    taskID: "task_parent",
+    createdAt: resultAt,
+  })
+  await seed.saveSubtask({
+    id: "task_parent",
+    workspaceID: "w",
+    creatorType: "user",
+    assigneeID: "a",
+    title: "Parent task",
+    instruction: "Do parent",
+    mode: "research",
+    state: "replied",
+    stage: "initial",
+    outcome: "succeeded",
+    interrupted: false,
+    awaitingChildren: false,
+    attempts: 1,
+    createdAt: 1,
+    startedAt: 2,
+    repliedAt: resultAt,
+    finishedAt: resultAt,
+    resultMessageID: result.id,
+    dispatchGroupID: "group_parent",
+    dispatchDepth: 0,
+    workKind: "delegation",
+  })
+  if (!options.leader) {
+    const key = completionWorkKey({ workspaceID: "w", finishedTaskID: "task_parent", recipientID: "leader" })
+    await seed.saveSubtask({
+      id: "task_completion",
+      workspaceID: "w",
+      parentID: "task_parent",
+      creatorType: "agent",
+      creatorAgentID: "a",
+      assigneeID: "leader",
+      title: "Parent task",
+      instruction: "$Kakiko finished the parent task. FIRST ANSWER",
+      mode: "research",
+      state: "replied",
+      stage: "initial",
+      outcome: "succeeded",
+      interrupted: false,
+      awaitingChildren: false,
+      attempts: 0,
+      createdAt: resultAt + 1,
+      repliedAt: resultAt + 2,
+      finishedAt: resultAt + 2,
+      workKind: "handoff",
+      queueKey: key,
+      dispatchGroupID: "group_parent",
+      dispatchDepth: 1,
+      handoff: {
+        correlationID: "handoff_original",
+        senderID: "a",
+        recipientID: "leader",
+        depth: 2,
+        parentID: "task_parent",
+        completion: true,
+        chain: ["a"],
+      },
+    })
+  }
+  if (options.child !== false) {
+    await seed.saveNativeSubagent({
+      childSessionID: "child_late",
+      parentSessionID: "session_parent",
+      parentTaskID: options.childTaskID ?? "task_parent",
+      dispatchGroupID: "group_parent",
+      workspaceID: "w",
+      parentAgentID: "a",
+      parentAgent: "Kakiko",
+      instruction: "Watch the CI pipeline",
+      state: "replied",
+      startedAt: childFinishedAt - 3_000,
+      finishedAt: childFinishedAt,
+      source: "session-created",
+    })
+  }
+  await seed.saveBinding({
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    kind: "workspace",
+    directory,
+    agentVersion: 1,
+    updatedAt: 1,
+  })
+  return { seed, result }
+}
+
+function lateNativeHostMessages(): any[] {
+  return [
+    { id: "native_pre", type: "assistant", time: { created: Date.now() - 3_000 }, content: [{ type: "text", text: "FIRST ANSWER" }] },
+  ]
+}
+
+test("ticket199: a post-finalize native answer is reconciled into the group and the leader once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-late-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string, at = Date.now()) => {
+    const message = { id: `native_msg_${messages.length + 1}`, type: "assistant", time: { created: at }, content: [{ type: "text", text }] }
+    messages.push(message)
+    return message
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  const lateMarker = "PRIVATE LATE NATIVE REPORT"
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const leader = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Lead" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id, leader.result.id], leaderID: leader.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    releaseWait?.()
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const task = Object.values(next.state.subtasks).find((item: any) => item.assigneeID === agent.result.id) as any
+      return task?.state === "replied"
+    })
+    const finalized = await handlers.snapshot({ directory })
+    const task = Object.values(finalized.state.subtasks).find((item: any) => item.assigneeID === agent.result.id) as any
+    const binding = Object.values(finalized.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    const originalHop = Object.values(finalized.state.subtasks).find(
+      (item: any) => item.parentID === task.id && item.handoff?.completion === true,
+    ) as any
+    assert.ok(task && binding && originalHop, "the parent finalized with its original completion hop")
+    const resultBefore = finalized.state.messages[workspace.result.id].find((message: any) => message.id === task.resultMessageID)
+    assert.equal(resultBefore?.text, "FIRST ANSWER")
+    emitEvent({
+      id: "evt_199_late_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_199_late", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_199_late?.state === "working")
+    emitEvent({
+      id: "evt_199_late_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_199_late" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_199_late?.state === "replied")
+    const child = (await handlers.snapshot({ directory })).state.nativeSubagents.child_199_late
+    const late = answer(lateMarker, Math.max(Date.now(), (child.finishedAt ?? 0) + 10))
+    const lateIdle = {
+      id: "evt_199_late_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    }
+    emitEvent(lateIdle)
+    // The same host event delivered twice is claimed once by identity.
+    emitEvent({ ...lateIdle })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.messages[workspace.result.id] ?? []).some((message: any) => message.nativeMessageID === late.id)
+        && next.state.subtasks[task.id]?.lateNativeFollowUps?.length === 1
+    })
+    const after = await handlers.snapshot({ directory })
+    const rows = (after.state.messages[workspace.result.id] ?? []).filter((message: any) => message.nativeMessageID === late.id)
+    assert.equal(rows.length, 1, "the late answer is appended exactly once")
+    const row = rows[0]
+    assert.equal(row.author, "agent")
+    assert.equal(row.agentID, agent.result.id, "the late answer is attributed to the parent agent")
+    assert.equal(row.taskID, task.id, "the late row links the original task")
+    assert.equal(row.correlationID, originalHop.handoff.correlationID, "the late row carries the original correlation")
+    assert.ok(row.seq > resultBefore.seq, "the late row appends after the existing result without replacing it")
+    assert.equal(
+      after.state.messages[workspace.result.id].find((message: any) => message.id === task.resultMessageID)?.text,
+      "FIRST ANSWER",
+      "the original result row is untouched",
+    )
+    const taskAfter = after.state.subtasks[task.id] as any
+    assert.equal(taskAfter.lateNativeFollowUps?.length, 1, "the durable marker is recorded on the task")
+    assert.equal(taskAfter.lateNativeFollowUps[0].nativeMessageID, late.id)
+    const followUp = after.state.subtasks[taskAfter.lateNativeFollowUps[0].hopID] as any
+    assert.ok(followUp, "the late answer creates a follow-up completion hop")
+    assert.equal(followUp.assigneeID, leader.result.id)
+    assert.equal(followUp.handoff.correlationID, originalHop.handoff.correlationID)
+    assert.match(followUp.instruction, new RegExp(lateMarker), "the follow-up hop carries the actual late answer")
+    assert.ok(followUp.queueKey.includes(":late:"), "the follow-up is keyed by the late native message")
+    const followUpParent = after.state.subtasks[followUp.parentID] as any
+    assert.ok(
+      followUp.parentID === task.id || followUpParent?.handoff?.batch === true,
+      "the follow-up is linked to the original task or its normal review batch",
+    )
+    assert.equal(followUp.dispatchGroupID, originalHop.dispatchGroupID, "the follow-up stays in the original dispatch group")
+    assert.equal(
+      after.state.dispatchGroups[originalHop.dispatchGroupID].usedHops,
+      finalized.state.dispatchGroups[originalHop.dispatchGroupID].usedHops,
+      "the follow-up spends no hop",
+    )
+    assert.equal(
+      Object.values(after.state.dispatchGroups).length,
+      Object.values(finalized.state.dispatchGroups).length,
+      "the follow-up creates no new dispatch group",
+    )
+    assert.equal(taskAfter.lateNativeFollowUps[0].hopID, followUp.id)
+    assert.equal(taskAfter.lateNativeFollowUps[0].messageRowID, row.id)
+    // Duplicate idles are safe after the durable marker exists.
+    emitEvent({
+      id: "evt_199_late_duplicate_one",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    })
+    emitEvent({
+      id: "evt_199_late_duplicate_two",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const stable = await handlers.snapshot({ directory })
+    assert.equal(
+      (stable.state.messages[workspace.result.id] ?? []).filter((message: any) => message.nativeMessageID === late.id).length,
+      1,
+      "duplicate idles do not duplicate the late row",
+    )
+    assert.equal(
+      Object.values(stable.state.subtasks).filter((item: any) => item.queueKey?.includes(":late:")).length,
+      1,
+      "duplicate idles do not duplicate the follow-up hop",
+    )
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "native.subagent.followup.reconciled", limit: 20 })
+    assert.equal(logs.entries.length, 1, "the reconciliation is audited once")
+    assert.ok(!JSON.stringify(logs.entries).includes(lateMarker), "the reconciliation log carries no answer content")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: a late native answer reconciles after a service restart exactly once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-restart-"))
+  const { ctx, emitEvent } = fakeContext()
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  await seedLateNativeCase(ctx, directory)
+  const first = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stopFirst = await startServiceForTest(first, ctx)
+  await stopFirst()
+  // The wake-up answer lands while no service process is active.
+  messages.push({
+    id: "native_late",
+    type: "assistant",
+    time: { created: Date.now() + 50 },
+    content: [{ type: "text", text: "PRIVATE LATE AFTER RESTART" }],
+  })
+  const second = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stopSecond = await startServiceForTest(second, ctx)
+  const handlers = second.handlers()
+  try {
+    emitEvent({
+      id: "evt_199_restart_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.subtasks.task_parent?.lateNativeFollowUps?.length === 1
+    })
+    const reconciled = await handlers.snapshot({ directory })
+    const task = reconciled.state.subtasks.task_parent
+    const marker = task.lateNativeFollowUps![0]!
+    assert.equal(
+      reconciled.state.messages.w.filter((message: any) => message.nativeMessageID === "native_late").length,
+      1,
+      "the late answer is appended once after restart",
+    )
+    assert.ok(reconciled.state.subtasks[marker.hopID!], "the follow-up hop is created after restart")
+    const groupsBefore = Object.keys(reconciled.state.dispatchGroups).length
+    const usedBefore = reconciled.state.dispatchGroups.group_parent!.usedHops
+    const lateRowsBefore = reconciled.state.messages.w.filter((message: any) => message.nativeMessageID === "native_late").length
+    await stopSecond()
+    // A second restart loses every in-memory guard; the durable marker must
+    // still prevent a duplicate row and hop.
+    const third = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+    const stopThird = await startServiceForTest(third, ctx)
+    const thirdHandlers = third.handlers()
+    try {
+      emitEvent({
+        id: "evt_199_restart_duplicate_idle",
+        created: Date.now(),
+        type: "session.idle",
+        data: { sessionID: "session_parent" },
+      })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const stable = await thirdHandlers.snapshot({ directory })
+      assert.equal(
+        stable.state.messages.w.filter((message: any) => message.nativeMessageID === "native_late").length,
+        lateRowsBefore,
+        "a repeated idle after restart does not duplicate the late row",
+      )
+      assert.equal((stable.state.subtasks.task_parent.lateNativeFollowUps ?? []).length, 1, "the marker survives restart")
+      assert.equal(
+        Object.values(stable.state.subtasks).filter((item: any) => item.queueKey?.includes(":late:")).length,
+        1,
+        "the follow-up hop is not duplicated after restart",
+      )
+      assert.equal(Object.keys(stable.state.dispatchGroups).length, groupsBefore, "restart reconciliation creates no dispatch group")
+      assert.equal(stable.state.dispatchGroups.group_parent!.usedHops, usedBefore, "restart reconciliation spends no hop")
+    } finally {
+      await stopThird()
+    }
+  } finally {
+    await stopSecond().catch(() => undefined)
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: a crash after the group row still resolves the same row and marker", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-row-crash-"))
+  const { ctx, emitEvent } = fakeContext()
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  const { seed } = await seedLateNativeCase(ctx, directory)
+  const lateText = "PRIVATE CRASH WINDOW ANSWER"
+  const existing = await seed.appendMessage("w", {
+    id: "msg_crash_window",
+    author: "agent",
+    agentID: "a",
+    text: lateText,
+    kind: "text",
+    taskID: "task_parent",
+    correlationID: "handoff_original",
+    nativeMessageID: "native_crash_window",
+    createdAt: Date.now() - 500,
+  })
+  messages.push({ id: "native_crash_window", type: "assistant", time: { created: Date.now() + 50 }, content: [{ type: "text", text: lateText }] })
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, ctx)
+  const handlers = service.handlers()
+  try {
+    emitEvent({
+      id: "evt_199_crash_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks.task_parent?.lateNativeFollowUps?.length === 1)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(
+      (after.state.messages.w ?? []).filter((message: any) => message.nativeMessageID === "native_crash_window").length,
+      1,
+      "the existing late row is reused, never appended twice",
+    )
+    const marker = after.state.subtasks.task_parent.lateNativeFollowUps![0]!
+    assert.equal(marker.messageRowID, existing.id, "the marker points at the durable row")
+    assert.ok(marker.hopID, "the missing follow-up hop is created")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: a restart-cancelled child does not hide an already-written late answer", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-cancelled-child-"))
+  const { ctx, emitEvent } = fakeContext()
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  const { seed } = await seedLateNativeCase(ctx, directory)
+  const child = seed.nativeSubagent("child_late")!
+  // A restart that finds the parent terminal closes a still-working child at
+  // the service clock, later than the answer the host already wrote.
+  await seed.saveNativeSubagent({ ...child, state: "cancelled", finishedAt: Date.now() + 5_000 })
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, ctx)
+  const handlers = service.handlers()
+  try {
+    messages.push({ id: "native_before_cancel", type: "assistant", time: { created: Date.now() + 50 }, content: [{ type: "text", text: "WRITTEN BEFORE RESTART CLEANUP" }] })
+    emitEvent({
+      id: "evt_199_cancelled_child_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks.task_parent?.lateNativeFollowUps?.length === 1)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(
+      (after.state.messages.w ?? []).filter((message: any) => message.nativeMessageID === "native_before_cancel").length,
+      1,
+      "the synthetic cancellation time does not hide a real late answer",
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: a native session with no known child record is not mirrored", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-no-child-"))
+  const { ctx, emitEvent } = fakeContext()
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  await seedLateNativeCase(ctx, directory, { child: false })
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, ctx)
+  const handlers = service.handlers()
+  const lateMarker = "PRIVATE UNRELATED NATIVE CHAT"
+  try {
+    messages.push({ id: "native_unrelated", type: "assistant", time: { created: Date.now() + 50 }, content: [{ type: "text", text: lateMarker }] })
+    emitEvent({
+      id: "evt_199_no_child_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const after = await handlers.snapshot({ directory })
+    assert.equal(
+      (after.state.messages.w ?? []).filter((message: any) => message.nativeMessageID === "native_unrelated").length,
+      0,
+      "arbitrary native chat is never mirrored into the group",
+    )
+    assert.equal(after.state.subtasks.task_parent.lateNativeFollowUps, undefined)
+    assert.equal(
+      Object.values(after.state.subtasks).filter((item: any) => item.queueKey?.includes(":late:")).length,
+      0,
+      "no follow-up hop is created without a known child",
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: a live or unrelated native child cannot trigger reconciliation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-live-child-"))
+  const { ctx, emitEvent } = fakeContext()
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  // A terminal child mapped to a different parent task is not this task's
+  // follow-up, even though it belongs to the same native session.
+  await seedLateNativeCase(ctx, directory, { childTaskID: "task_other" })
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, ctx)
+  const handlers = service.handlers()
+  try {
+    emitEvent({
+      id: "evt_199_live_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_199_live", parentID: "session_parent", agent: "explore", title: "Watch live" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_199_live?.state === "working")
+    messages.push({ id: "native_live", type: "assistant", time: { created: Date.now() + 50 }, content: [{ type: "text", text: "LIVE CHILD IS NOT DONE" }] })
+    emitEvent({
+      id: "evt_199_live_child_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const held = await handlers.snapshot({ directory })
+    assert.equal(
+      (held.state.messages.w ?? []).filter((message: any) => message.nativeMessageID === "native_live").length,
+      0,
+      "a live child's text is not a late follow-up",
+    )
+    assert.equal(held.state.subtasks.task_parent.lateNativeFollowUps, undefined)
+    // Once that same known child finishes, its next idle is eligible.
+    emitEvent({
+      id: "evt_199_live_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_199_live" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_199_live?.state === "replied")
+    messages.push({ id: "native_after_live", type: "assistant", time: { created: Date.now() + 50 }, content: [{ type: "text", text: "TERMINAL CHILD ANSWER" }] })
+    emitEvent({
+      id: "evt_199_live_child_after_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks.task_parent?.lateNativeFollowUps?.length === 1)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(
+      (after.state.messages.w ?? []).filter((message: any) => message.nativeMessageID === "native_after_live").length,
+      1,
+      "the terminal child's post-finish answer is reconciled",
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: a later run on the same parent session bounds the older task's late window", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-boundary-"))
+  const { ctx, emitEvent } = fakeContext()
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  const { seed } = await seedLateNativeCase(ctx, directory)
+  const newerStartedAt = Date.now() + 1_000
+  await seed.saveSubtask({
+    id: "task_newer",
+    workspaceID: "w",
+    creatorType: "user",
+    assigneeID: "a",
+    title: "Newer task",
+    instruction: "Do the newer task",
+    mode: "research",
+    state: "replied",
+    stage: "initial",
+    outcome: "succeeded",
+    interrupted: false,
+    awaitingChildren: false,
+    attempts: 1,
+    createdAt: newerStartedAt - 100,
+    startedAt: newerStartedAt,
+    repliedAt: newerStartedAt + 100,
+    finishedAt: newerStartedAt + 100,
+    dispatchGroupID: "group_parent",
+  })
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, ctx)
+  const handlers = service.handlers()
+  try {
+    messages.push({ id: "native_later_run", type: "assistant", time: { created: newerStartedAt + 10 }, content: [{ type: "text", text: "A LATER RUN ANSWER" }] })
+    emitEvent({
+      id: "evt_199_boundary_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const after = await handlers.snapshot({ directory })
+    assert.equal(
+      (after.state.messages.w ?? []).filter((message: any) => message.nativeMessageID === "native_later_run").length,
+      0,
+      "a newer run's answer is not attributed to the older task",
+    )
+    assert.equal(after.state.subtasks.task_parent.lateNativeFollowUps, undefined)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: a non-leader late follow-up is one direct completion hop and a leader turn creates none", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-direct-hop-"))
+  const { ctx, emitEvent } = fakeContext()
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  await seedLateNativeCase(ctx, directory)
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, ctx)
+  const handlers = service.handlers()
+  const lateMarker = "PRIVATE LATE DIRECT HOP ANSWER"
+  try {
+    messages.push({ id: "native_direct", type: "assistant", time: { created: Date.now() + 50 }, content: [{ type: "text", text: lateMarker }] })
+    emitEvent({
+      id: "evt_199_direct_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks.task_parent?.lateNativeFollowUps?.length === 1)
+    const after = await handlers.snapshot({ directory })
+    const marker = after.state.subtasks.task_parent.lateNativeFollowUps![0]!
+    const followUp = after.state.subtasks[marker.hopID!] as any
+    assert.ok(followUp, "the follow-up hop exists")
+    assert.equal(followUp.parentID, "task_parent", "a lone follow-up stays a direct child of the original task")
+    assert.equal(followUp.assigneeID, "leader")
+    assert.equal(followUp.workKind, "handoff")
+    assert.equal(followUp.handoff.completion, true)
+    assert.equal(followUp.handoff.correlationID, "handoff_original")
+    assert.match(followUp.instruction, new RegExp(lateMarker))
+    assert.equal(followUp.dispatchGroupID, "group_parent")
+    assert.equal(after.state.dispatchGroups.group_parent!.usedHops, 1, "the follow-up spends no hop")
+    assert.equal(Object.keys(after.state.dispatchGroups).length, 1, "the follow-up creates no dispatch group")
+    emitEvent({
+      id: "evt_199_direct_duplicate_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const stable = await handlers.snapshot({ directory })
+    assert.equal(
+      Object.values(stable.state.subtasks).filter((item: any) => item.queueKey?.includes(":late:")).length,
+      1,
+      "a repeated idle does not add a second follow-up hop",
+    )
+    assert.equal(stable.state.subtasks.task_parent.lateNativeFollowUps!.length, 1)
+    const logs = await (handlers as any)["logs.recent"]({ directory, limit: 200 })
+    assert.ok(!JSON.stringify(logs.entries).includes(lateMarker), "no service log carries the late answer")
+    const reconciled = (logs.entries as any[]).filter((entry) => entry.event === "native.subagent.followup.reconciled")
+    assert.equal(reconciled.length, 1, "the late reconciliation is audited once")
+    assert.equal((reconciled[0] as any).count, 1)
+    assert.equal((reconciled[0] as any).reason, "late-native-followup")
+    assert.equal((reconciled[0] as any).parentTaskID, "task_parent")
+    assert.equal((reconciled[0] as any).nativeMessageIDs[0], "native_direct")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: a leader late follow-up lands in the group without a completion hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-leader-"))
+  const { ctx, emitEvent } = fakeContext()
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  await seedLateNativeCase(ctx, directory, { leader: true })
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, ctx)
+  const handlers = service.handlers()
+  const lateMarker = "PRIVATE LEADER LATE ANSWER"
+  try {
+    messages.push({ id: "native_leader", type: "assistant", time: { created: Date.now() + 50 }, content: [{ type: "text", text: lateMarker }] })
+    emitEvent({
+      id: "evt_199_leader_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: "session_parent" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks.task_parent?.lateNativeFollowUps?.length === 1)
+    const after = await handlers.snapshot({ directory })
+    const markers = after.state.subtasks.task_parent.lateNativeFollowUps!
+    assert.equal(markers.length, 1)
+    assert.equal(markers[0]!.hopID, undefined, "a leader turn needs no completion hop")
+    assert.equal(
+      (after.state.messages.w ?? []).filter((message: any) => message.nativeMessageID === "native_leader").length,
+      1,
+      "the leader still sees the late answer in the group",
+    )
+    assert.equal(
+      Object.values(after.state.subtasks).filter((item: any) => item.queueKey?.includes(":late:")).length,
+      0,
+      "no follow-up completion hop is created for a leader",
+    )
+    assert.equal(after.state.dispatchGroups.group_parent!.usedHops, 1, "no hop is spent")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket199: the experimental idle hook reconciles a late native answer once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-199-idle-hook-"))
+  const { ctx } = fakeContext()
+  const hooks = new Map<string, (event: any) => void>()
+  ;(ctx.session as any).hook = async (name: string, callback: (event: any) => void) => {
+    hooks.set(name, callback)
+    return { dispose: async () => undefined }
+  }
+  const messages = lateNativeHostMessages()
+  ctx.session.context = async () => ({ data: [...messages] })
+  await seedLateNativeCase(ctx, directory)
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20 })
+  const stop = await startServiceForTest(service, ctx)
+  const handlers = service.handlers()
+  try {
+    await service.installIdleHook(ctx)
+    const hook = hooks.get("experimental.idle")
+    assert.ok(hook, "the idle hook is installed")
+    messages.push({ id: "native_hook_late", type: "assistant", time: { created: Date.now() + 50 }, content: [{ type: "text", text: "HOOK LATE ANSWER" }] })
+    hook!({ sessionID: "session_parent", background: [] })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks.task_parent?.lateNativeFollowUps?.length === 1)
+    const reconciled = await handlers.snapshot({ directory })
+    assert.equal(
+      reconciled.state.messages.w.filter((message: any) => message.nativeMessageID === "native_hook_late").length,
+      1,
+      "the hook path reconciles the late answer",
+    )
+    hook!({ sessionID: "session_parent", background: [] })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const stable = await handlers.snapshot({ directory })
+    assert.equal(
+      stable.state.messages.w.filter((message: any) => message.nativeMessageID === "native_hook_late").length,
+      1,
+      "a duplicate hook delivery does not duplicate the late row",
+    )
+    assert.equal(stable.state.subtasks.task_parent.lateNativeFollowUps!.length, 1)
+  } finally {
+    await stop()
     rmSync(directory, { recursive: true, force: true })
   }
 })

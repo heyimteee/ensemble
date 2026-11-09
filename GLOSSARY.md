@@ -91,6 +91,9 @@ _Avoid_: Batch (for the whole dispatch), run (a single execution, not the fan-ou
 
 **Native session**: An OpenCode session in which an agent's execution and tool activity can be inspected through OpenCode's existing interface. A workspace binds one native session per agent.
 
+**Late native follow-up**: The assistant answer a parent agent produces after its background native subagent returns, when it arrives after the parent run already finalized. Ensemble reconciles it into the group once by native message identity and delivers it through the normal completion handoff; it is not a general mirror of native chat.
+_Avoid_: Native bridge, chat mirror (when referring to this follow-up path).
+
 **Session binding**: The association between a workspace, an agent, and that agent's persistent native session and behavioral version.
 
 **Mode**: The global interaction state—Normal, Insert, Visual, or Command—that decides whether keys act on lists or type into the focused text editor.
