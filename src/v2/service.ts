@@ -1756,6 +1756,7 @@ export class EnsembleV2Service {
     switch (action) {
       case "agent.create": return this.createAgent(payload)
       case "agent.update": return this.updateAgent(payload)
+      case "agent.rebindSession": return this.rebindAgentSession(payload)
       case "agent.archive": return this.archiveAgent(payload.id, payload.replacementLeaderID)
       case "agent.delete": return this.deleteAgent(payload.id, payload.replacementLeaderID, Boolean(payload.deleteNativeSessions))
       case "agent.moveHome": return this.moveHomeSession(payload.agentID, payload.workspaceID)
@@ -1809,7 +1810,10 @@ export class EnsembleV2Service {
 
   private async ensureHomeBinding(agent: Agent): Promise<{ sessionID: string; directory: string }> {
     const existing = this.store.binding("home", agent.id)
-    if (existing?.kind === "home") return { sessionID: existing.sessionID, directory: existing.directory ?? agent.homeDirectory ?? homedir() }
+    if (existing?.kind === "home" && !(await this.nativeSessionMissing(existing.sessionID))) {
+      await this.refreshAgentSession(existing, agent)
+      return { sessionID: existing.sessionID, directory: existing.directory ?? agent.homeDirectory ?? homedir() }
+    }
     const inFlight = this.homeBindingPromises.get(agent.id)
     if (inFlight) return inFlight
     const promise = this.createHomeBinding(agent)
@@ -1818,6 +1822,7 @@ export class EnsembleV2Service {
   }
 
   private async createHomeBinding(agent: Agent): Promise<{ sessionID: string; directory: string }> {
+    const existing = this.store.binding("home", agent.id)
     const directory = agent.homeDirectory ?? join(homedir(), ".ensemble", "agents", agent.id)
     mkdirSync(directory, { recursive: true })
     const created = unwrap<any>(await this.ctx.session.create({
@@ -1828,8 +1833,18 @@ export class EnsembleV2Service {
       location: { directory },
     }))
     if (!created?.id) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
-    const binding = { workspaceID: "home", agentID: agent.id, sessionID: created.id, kind: "home" as const, directory, agentVersion: agent.version, updatedAt: now() }
+    const binding = {
+      workspaceID: "home",
+      agentID: agent.id,
+      sessionID: created.id,
+      history: existing ? [...(existing.history ?? []), existing.sessionID] : [],
+      kind: "home" as const,
+      directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
     await this.store.saveBinding(binding)
+    if (existing && existing.sessionID !== created.id) await this.settleNativeForSession(existing.sessionID, "Session ended before the permission was answered.")
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
     const current = this.store.cloneAgent(agent.id)
     if (current) {
@@ -1837,6 +1852,7 @@ export class EnsembleV2Service {
       current.homeDirectory = directory
       await this.store.saveAgent(current)
     }
+    await this.clearPendingSettings(agent.id)
     return { sessionID: created.id, directory }
   }
 
@@ -1871,11 +1887,87 @@ export class EnsembleV2Service {
     }
   }
 
+  /**
+   * The bound native session may have been removed outside Ensemble (archived
+   * by the user, deleted by a cleanup, or lost with a profile). Rotation is
+   * only safe when the host proves absence. A context that does not expose
+   * `session.get` cannot prove it, so keep the binding rather than replace a
+   * conversation on an unavailable API.
+   */
+  private async nativeSessionMissing(sessionID: string): Promise<boolean> {
+    const get = this.ctx.session?.get
+    if (typeof get !== "function") return false
+    try {
+      const info = unwrap<any>(await get.call(this.ctx.session, { sessionID }))
+      return !info || (typeof info === "object" && !info.id)
+    } catch (error: any) {
+      const reason = String(error?._tag ?? error?.code ?? error?.type ?? "")
+      const status = Number(error?.status ?? error?.statusCode ?? 0)
+      return reason === "SessionNotFoundError" || reason === "session_not_found" || reason === "not_found" || status === 404
+    }
+  }
+
+  /**
+   * Ticket #189: apply the agent's current behavior to a native session in
+   * place. These are the same host surfaces runTask and the identity poll
+   * already use; none of them requires a new session.
+   */
+  private async applyAgentBehavior(sessionID: string, agent: Agent): Promise<void> {
+    try {
+      await this.ctx.session.instructions.entry.put({
+        sessionID,
+        key: "ensemble.v2.identity",
+        value: this.identityForAgent(agent),
+      })
+      this.identityVersions.set(sessionID, agent.version)
+    } catch {
+      // The next identity poll can retry; model and permissions still apply.
+    }
+    await this.ctx.session.switchModel({
+      sessionID,
+      model: {
+        providerID: agent.mainModel.providerID,
+        id: agent.mainModel.modelID,
+        ...(agent.mainModel.variant ? { variant: agent.mainModel.variant } : {}),
+      },
+    }).catch(() => undefined)
+    await this.ctx.session.update({
+      sessionID,
+      permissions: skillPermissions(agent.skillbox),
+    }).catch(() => undefined)
+  }
+
+  /**
+   * Refresh a stored binding whose native session is still alive. Returns true
+   * when the behavior was applied (and the binding saved) this call.
+   */
+  private async refreshAgentSession(binding: SessionBinding, agent: Agent): Promise<boolean> {
+    if (binding.agentVersion === agent.version) return false
+    await this.applyAgentBehavior(binding.sessionID, agent)
+    binding.agentVersion = agent.version
+    binding.updatedAt = now()
+    await this.store.saveBinding(binding)
+    await this.clearPendingSettings(agent.id)
+    return true
+  }
+
+  /** Clear the deferred-settings flag from the store's current row, never a run's snapshot. */
+  private async clearPendingSettings(agentID: string): Promise<void> {
+    const current = this.store.cloneAgent(agentID)
+    if (!current?.pendingSettings) return
+    current.pendingSettings = false
+    await this.store.saveAgent(current)
+  }
+
   private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number }> {
     const target = this.chatSession(agent, workspaceID)
     if (target.sessionID) {
-      await this.ensureIdentity(target.sessionID, agent, target.bindingVersion)
-      return target
+      const binding = this.store.binding(target.bindingKeyID, agent.id)
+      if (binding && !(await this.nativeSessionMissing(binding.sessionID))) {
+        await this.refreshAgentSession(binding, agent)
+        await this.ensureIdentity(binding.sessionID, agent, binding.agentVersion)
+        return { ...target, sessionID: binding.sessionID, bindingVersion: binding.agentVersion }
+      }
     }
     if (target.workspace) {
       const binding = await this.ensureBinding(target.workspace, agent)
@@ -2087,29 +2179,40 @@ export class EnsembleV2Service {
     const agent = this.store.cloneAgent(payload.id)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     let behavioral = false
+    // Ticket #189: the audit names only changed fields, never their values.
+    const changed: string[] = []
     if (payload.name !== undefined) {
       const nextName = String(payload.name).trim() || agent.name
       if (Object.values(state.agents).some((item) => item.id !== agent.id && !item.archived && item.name.toLowerCase() === nextName.toLowerCase())) {
         throw Object.assign(new Error(`Agent name already exists: ${nextName}`), { code: "duplicate_name" })
       }
+      if (nextName !== agent.name) changed.push("name")
       agent.name = nextName
     }
-    if (payload.title !== undefined) agent.title = String(payload.title)
-    if (payload.role !== undefined && String(payload.role) !== agent.role) { agent.role = String(payload.role); behavioral = true }
-    if (payload.color !== undefined) agent.color = String(payload.color)
+    if (payload.title !== undefined) {
+      const nextTitle = String(payload.title)
+      if (nextTitle !== agent.title) changed.push("title")
+      agent.title = nextTitle
+    }
+    if (payload.role !== undefined && String(payload.role) !== agent.role) { agent.role = String(payload.role); behavioral = true; changed.push("role") }
+    if (payload.color !== undefined) {
+      const nextColor = String(payload.color)
+      if (nextColor !== agent.color) changed.push("color")
+      agent.color = nextColor
+    }
     if (payload.mainModel !== undefined) {
       this.catalog.validate(payload.mainModel)
-      if (!sameModel(agent.mainModel, payload.mainModel)) behavioral = true
+      if (!sameModel(agent.mainModel, payload.mainModel)) { behavioral = true; changed.push("mainModel") }
       agent.mainModel = payload.mainModel
     }
     if (payload.backupModels !== undefined) {
       for (const model of payload.backupModels) this.catalog.validate(model)
-      if (!sameModels(agent.backupModels, payload.backupModels)) behavioral = true
+      if (!sameModels(agent.backupModels, payload.backupModels)) { behavioral = true; changed.push("backupModels") }
       agent.backupModels = payload.backupModels
     }
     if (payload.skillbox !== undefined) {
       const next = stringList(payload.skillbox, "skillbox")
-      if (next.length !== agent.skillbox.length || next.some((skill) => !agent.skillbox.includes(skill))) behavioral = true
+      if (next.length !== agent.skillbox.length || next.some((skill) => !agent.skillbox.includes(skill))) { behavioral = true; changed.push("skillbox") }
       agent.skillbox = next
     }
     if (behavioral) {
@@ -2118,11 +2221,57 @@ export class EnsembleV2Service {
     }
     agent.updatedAt = now()
     await this.store.saveAgent(agent)
+    this.logger?.event("info", "service", "agent.updated", {
+      agentID: agent.id,
+      version: agent.version,
+      changed,
+    })
     const synced = this.store.read()
     for (const workspace of Object.values(synced.workspaces)) {
       if (workspace.memberIDs.includes(agent.id)) writeWorkspaceConfig(workspace, synced.agents)
     }
     return agent
+  }
+
+  /**
+   * Ticket #189 maintenance action: point a binding at a session it already
+   * owns. Only history/current sessions are selectable so a stale or foreign
+   * id can never hijack an agent. IDs only reach the audit log.
+   */
+  private async rebindAgentSession(payload: Json): Promise<any> {
+    const agent = this.store.agent(payload.agentID)
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    const rawWorkspaceID = payload.workspaceID
+    const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null || String(rawWorkspaceID).length === 0
+      ? "home"
+      : String(rawWorkspaceID)
+    const binding = this.store.binding(workspaceID, agent.id)
+    if (!binding) throw Object.assign(new Error("Session binding not found."), { code: "not_found" })
+    const target = String(payload.sessionID ?? "").trim()
+    const history = binding.history ?? []
+    if (!target || (target !== binding.sessionID && !history.includes(target))) {
+      throw Object.assign(new Error("The target session is not part of this binding."), { code: "invalid_session" })
+    }
+    const busy = [...this.activeRuns.values()].some((run) => run.sessionID === binding.sessionID) || this.directBusy.has(binding.sessionID)
+    if (busy) throw Object.assign(new Error("The current session is busy."), { code: "session_busy" })
+    const fromSessionID = binding.sessionID
+    await this.applyAgentBehavior(target, agent)
+    await this.clearPendingSettings(agent.id)
+    const next: SessionBinding = {
+      ...binding,
+      sessionID: target,
+      history: [fromSessionID, ...history.filter((sessionID) => sessionID !== target)],
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
+    await this.store.saveBinding(next)
+    this.logger?.event("info", "service", "agent.session.rebound", {
+      agentID: agent.id,
+      workspaceID: binding.workspaceID,
+      fromSessionID,
+      sessionID: target,
+    })
+    return { ok: true, binding: next }
   }
 
   private async archiveAgent(agentID: string, replacementLeaderID?: string): Promise<any> {
@@ -7150,7 +7299,6 @@ export class EnsembleV2Service {
     if (registration.orphaned) {
       await this.finalizeStream(registration.orphaned.message, registration.orphaned.buffer || registration.orphaned.message.text || REPLY_INTERRUPTED, true, globalEpoch, workspaceEpoch, task.workspaceID)
     }
-    await this.store.saveAgent(agent)
     let live: Message | undefined
     let attemptStartedAt = now()
     let granted = false
@@ -7490,16 +7638,17 @@ export class EnsembleV2Service {
 
   private async ensureBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string } | undefined> {
     const existing = this.store.binding(workspace.id, agent.id)
-    if (existing && existing.agentVersion === agent.version) {
-      if (existing.kind !== "workspace" || existing.directory !== workspace.directory) {
-        await this.store.saveBinding({
-          ...existing,
-          kind: "workspace",
-          directory: workspace.directory,
-          updatedAt: now(),
-        })
+    if (existing) {
+      const normalized = existing.kind !== "workspace" || existing.directory !== workspace.directory
+        ? { ...existing, kind: "workspace" as const, directory: workspace.directory, updatedAt: now() }
+        : existing
+      // Ticket #189: a behavior version bump applies in place on the current
+      // session. Only a missing native session retires the binding.
+      if (!(await this.nativeSessionMissing(normalized.sessionID))) {
+        const saved = await this.refreshAgentSession(normalized, agent)
+        if (!saved && normalized !== existing) await this.store.saveBinding(normalized)
+        return { sessionID: normalized.sessionID }
       }
-      return { sessionID: existing.sessionID }
     }
     const key = bindingKey(workspace.id, agent.id)
     const inFlight = this.bindingPromises.get(key)
@@ -7534,11 +7683,7 @@ export class EnsembleV2Service {
     // answered by the host, so settle it instead of lingering.
     if (existing && existing.sessionID !== created.id) await this.settleNativeForSession(existing.sessionID, "Session ended before the permission was answered.")
     await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
-    const current = this.store.cloneAgent(agent.id)
-    if (current?.pendingSettings) {
-      current.pendingSettings = false
-      await this.store.saveAgent(current)
-    }
+    await this.clearPendingSettings(agent.id)
     return { sessionID: created.id }
   }
 
