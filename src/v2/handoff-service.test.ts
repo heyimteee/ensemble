@@ -1,11 +1,12 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
 import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
+import { parseHandoffFile } from "./handoff.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -81,6 +82,8 @@ const handoffFile = (directory: string, name: string, body: string): string => {
   writeFileSync(join(directory, ".ensemble", "handoffs", name), body)
   return `.ensemble/handoffs/${name}`
 }
+
+const hopFileName = (path: string): string => path.split(/[\\/]/).pop() ?? ""
 
 async function setupPair(directory: string, handlers: Handlers) {
   const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
@@ -173,6 +176,121 @@ test("handoff relay lands the answer in the asking conversation exactly once", a
   }
 })
 
+// Ticket #195: the common handoff path is one tool call. The typed input is
+// the durable record: the service writes a valid handoff file under the
+// workspace handoff directory and the hop points at it.
+test("inline handoff writes a valid handoff file and queues one hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    const sessionID = await bindingSessionID(handlers, directory, nova.id)
+    const instruction = "Condense the deploy notes into three exec-ready bullets; flag rollout risks."
+    const asked = await tools.get("handoff").execute(
+      {
+        maxHops: 1,
+        task: "Deploy summary",
+        instruction,
+        summary: "Exec-ready bullets",
+        constraints: "Keep it under 100 words",
+        expected: "Three bullets",
+        to: "Sage",
+      },
+      { sessionID },
+    )
+    assert.match(asked.content, /Handed to \$Sage/)
+    const after = await handlers.snapshot({ directory })
+    const hops = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true) as any[]
+    assert.equal(hops.length, 1)
+    const hop = hops[0]
+    assert.equal(hop.assigneeID, sage.id)
+    assert.equal(hop.taskMaxHops, 1)
+    assert.match(hop.handoff.path, /^\.ensemble\/handoffs\/[^/]+\.md$/)
+    assert.ok(hop.instruction.startsWith(instruction))
+    assert.ok(hop.instruction.includes(hop.handoff.path))
+    const absolute = join(directory, hop.handoff.path)
+    assert.equal(existsSync(absolute), true)
+    const parsed = parseHandoffFile(readFileSync(absolute, "utf8"))
+    assert.equal(parsed.ok, true)
+    assert.equal(parsed.ok && parsed.data.task, "Deploy summary")
+    assert.equal(parsed.ok && parsed.data.instruction, instruction)
+    assert.equal(parsed.ok && parsed.data.summary, "Exec-ready bullets")
+    assert.equal(parsed.ok && parsed.data.constraints, "Keep it under 100 words")
+    assert.equal(parsed.ok && parsed.data.expected, "Three bullets")
+    assert.equal(parsed.ok && parsed.data.to, "Sage")
+    assert.equal(parsed.ok && parsed.data.correlationID, hop.handoff.correlationID)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("inline handoff needs only task, recipient, and budget", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    const sessionID = await bindingSessionID(handlers, directory, nova.id)
+    const asked = await tools.get("handoff").execute({ maxHops: 0, task: "Quick check", to: "Sage" }, { sessionID })
+    assert.match(asked.content, /Handed to \$Sage/)
+    const after = await handlers.snapshot({ directory })
+    const hop = Object.values(after.state.subtasks).find((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true) as any
+    assert.equal(hop.assigneeID, sage.id)
+    assert.equal(hop.taskMaxHops, 0)
+    assert.equal(hop.constraints, undefined)
+    assert.equal(hop.expected, undefined)
+    const parsed = parseHandoffFile(readFileSync(join(directory, hop.handoff.path), "utf8"))
+    assert.equal(parsed.ok, true)
+    assert.equal(parsed.ok && parsed.data.task, "Quick check")
+    assert.equal(parsed.ok && parsed.data.summary, undefined)
+    assert.equal(parsed.ok && parsed.data.instruction, undefined)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("duplicate inline handoff returns the existing hop without a second file", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    const sessionID = await bindingSessionID(handlers, directory, nova.id)
+    const input = { maxHops: 1, task: "Deploy summary", instruction: "Condense the deploy notes.", summary: "Short version", to: "Sage" }
+    const first = await tools.get("handoff").execute(input, { sessionID })
+    assert.match(first.content, /Handed to \$Sage/)
+    // Resubmitting after the asking run finished still dedupes: the original
+    // hop is the durable record, not a new file or a new queue entry.
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const parent = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
+      return parent?.state === "replied"
+    }, 10_000)
+    const second = await tools.get("handoff").execute(input, { sessionID })
+    assert.match(second.content, /Already handed to \$Sage/)
+    const after = await handlers.snapshot({ directory })
+    const hops = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true) as any[]
+    assert.equal(hops.length, 1)
+    const files = readdirSync(join(directory, ".ensemble", "handoffs")).filter((name) => name.endsWith(".md"))
+    assert.deepEqual(files, [hopFileName(hops[0].handoff.path)])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 // Ticket #73: the sender's self-authored instruction reaches the recipient
 // as the work item instruction under a short display title — never the
 // user's verbatim words. A distinct brief is a distinct unit of work, and
@@ -252,6 +370,97 @@ test("malformed, unknown, and missing-recipient handoffs are refused visibly", a
     const texts = ((after.state.messages[workspace.id] ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handoff refused")))
     for (const text of texts) assert.ok(!text.includes("@Sage") && !text.includes("@Nope"))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("supplied handoff paths keep the boundary, existence, and frontmatter checks", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    const sessionID = await bindingSessionID(handlers, directory, nova.id)
+    writeFileSync(join(directory, "outside.md"), "---\nensemble: handoff\ntask: Outside\n---\n# Handoff\n")
+    const traversal = await tools.get("handoff").execute({ maxHops: 1, task: "Outside", to: "Sage", path: "outside.md" }, { sessionID })
+    assert.match(traversal.content, /must be inside \.ensemble\/handoffs/)
+    const nonexistent = await tools.get("handoff").execute({ maxHops: 1, task: "Missing", to: "Sage", path: ".ensemble/handoffs/missing.md" }, { sessionID })
+    assert.match(nonexistent.content, /does not exist/)
+    const malformedPath = handoffFile(directory, "bad.md", "No frontmatter here.\n")
+    const malformed = await tools.get("handoff").execute({ maxHops: 1, task: "Bad", to: "Sage", path: malformedPath }, { sessionID })
+    assert.match(malformed.content, /frontmatter/)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 0)
+    const files = readdirSync(join(directory, ".ensemble", "handoffs")).filter((name) => name.endsWith(".md"))
+    assert.deepEqual(files, ["bad.md"], "a refused handoff creates no generated file")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("refused inline handoffs resolve the recipient before writing a file", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    const sessionID = await bindingSessionID(handlers, directory, nova.id)
+    const unknown = await tools.get("handoff").execute({ maxHops: 1, task: "Unknown", instruction: "Help.", to: "Ghost" }, { sessionID })
+    assert.match(unknown.content, /No agent matches "Ghost"/)
+    const missing = await tools.get("handoff").execute({ maxHops: 1, task: "Missing recipient", instruction: "Help." }, { sessionID })
+    assert.match(missing.content, /must name a recipient/)
+    const missingTask = await tools.get("handoff").execute({ maxHops: 1, instruction: "Help.", to: "Sage" }, { sessionID })
+    assert.match(missingTask.content, /non-empty task/)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff").length, 0)
+    const handoffs = join(directory, ".ensemble", "handoffs")
+    assert.equal(existsSync(handoffs) ? readdirSync(handoffs).filter((name) => name.endsWith(".md")).length : 0, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("outside-roster inline handoff keeps its generated path through approval", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-handoff-"))
+  const { ctx, tools } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const { nova, workspace } = await setupPair(directory, handlers)
+    const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
+    const sessionID = await bindingSessionID(handlers, directory, nova.id)
+    const asked = await tools.get("handoff").execute(
+      { maxHops: 0, task: "Outside help", instruction: "Check the external API contract.", to: "Echo" },
+      { sessionID },
+    )
+    assert.match(asked.content, /Approval required before contacting Echo/)
+    const pending = await handlers.snapshot({ directory })
+    const approval = (Object.values(pending.state.approvals) as any[])[0]
+    assert.equal(approval.kind, "outside_roster")
+    assert.match(approval.payload.path, /^\.ensemble\/handoffs\/[^/]+\.md$/)
+    assert.equal(existsSync(join(directory, approval.payload.path)), true)
+    const resolved = await handlers.invoke({ directory, action: "approval.resolve", payload: { id: approval.id, approve: true } })
+    assert.equal(resolved.ok, true)
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.workKind === "handoff" && task.assigneeID === echo.result.id)
+    })
+    const after = await handlers.snapshot({ directory })
+    const hop = Object.values(after.state.subtasks).find((task: any) => task.workKind === "handoff" && task.assigneeID === echo.result.id) as any
+    assert.equal(hop.handoff.path, approval.payload.path)
+    assert.equal(hop.handoff.correlationID, approval.payload.correlationID)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

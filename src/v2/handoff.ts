@@ -296,6 +296,63 @@ export function newCorrelationID(): string {
   return `${HANDOFF_CORRELATION_PREFIX}_${stableHash(`${Date.now()}\0${Math.random()}`)}`
 }
 
+/** One filename segment: lowercase ASCII alphanumerics and single hyphens. */
+function fileSegment(value: string, fallback: string): string {
+  const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48)
+  return slug || fallback
+}
+
+/**
+ * Ticket #195: safe generated handoff filename. The result is one flat
+ * basename under `.ensemble/handoffs/` — no separator, no dot segment, and
+ * no caller-supplied path can escape the handoff directory. Timestamp and
+ * nonce keep concurrent asks distinct. Pure.
+ */
+export function inlineHandoffFileName(input: {
+  task: string
+  from: string
+  to: string
+  at?: number
+  nonce?: string
+}): string {
+  const stamp = Number.isFinite(input.at) ? Math.max(0, Math.trunc(input.at as number)) : Date.now()
+  const rawNonce = input.nonce ?? Math.random().toString(36).slice(2)
+  const nonce = rawNonce.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12) || Math.random().toString(36).replace(/[^a-z0-9]/g, "").slice(0, 12)
+  return `handoff-${fileSegment(input.task, "task")}-${fileSegment(input.from, "sender")}-${fileSegment(input.to, "recipient")}-${stamp}-${nonce}.md`
+}
+
+/**
+ * Ticket #195: the durable handoff record the service writes for a typed
+ * one-step handoff. Frontmatter fields are single-line (the parser is
+ * line-based); the full instruction and optional sections stay readable in
+ * the Markdown body. The result re-parses with `parseHandoffFile`. Pure.
+ */
+export function handoffFileContent(data: HandoffFileData & { from?: string; workspace?: string; createdAt?: number }): string {
+  const line = (value: string) => value.replace(/\s*\r?\n\s*/g, " ").trim()
+  const frontmatter = [
+    "---",
+    HANDOFF_MARKER,
+    "version: 1",
+    data.workspace ? `workspace: ${line(data.workspace)}` : undefined,
+    `task: ${line(data.task)}`,
+    data.instruction ? `instruction: ${line(data.instruction)}` : undefined,
+    data.summary ? `summary: ${line(data.summary)}` : undefined,
+    data.constraints ? `constraints: ${line(data.constraints)}` : undefined,
+    data.expected ? `expected: ${line(data.expected)}` : undefined,
+    data.from ? `from: ${line(data.from)}` : undefined,
+    data.to ? `to: ${line(data.to)}` : undefined,
+    data.correlationID ? `correlation: ${line(data.correlationID)}` : undefined,
+    `created: ${new Date(data.createdAt ?? Date.now()).toISOString()}`,
+    "---",
+  ].filter((value): value is string => value !== undefined)
+  const body = ["", "# Handoff", "", "## Task", "", data.task.trim()]
+  if (data.instruction?.trim()) body.push("", "## Instruction", "", data.instruction.trim())
+  if (data.summary?.trim()) body.push("", "## Details", "", data.summary.trim())
+  if (data.constraints?.trim()) body.push("", "## Constraints", "", data.constraints.trim())
+  if (data.expected?.trim()) body.push("", "## Expected", "", data.expected.trim())
+  return `${[...frontmatter, ...body].join("\n")}\n`
+}
+
 export type HandoffRecipient =
   | { status: "ok"; agent: Agent }
   | { status: "unknown"; ref: string }

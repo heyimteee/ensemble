@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unl
 import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
-import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, reconcileEnsembleInstructions, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
+import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, reconcileEnsembleInstructions, writeAgentsBlock, writeHandoff, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
 import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
@@ -41,7 +41,7 @@ import {
 } from "./dispatch-budget.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
-import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
+import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffFileContent, handoffGroupAckText, handoffWorkKey, inlineHandoffFileName, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type HandoffParseOk, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
@@ -1851,7 +1851,7 @@ export class EnsembleV2Service {
       agent.role || "You are a focused teammate.",
       "</ensemble_persona>",
       "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
-      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path, recipient, and required maxHops. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
+      "For handoffs, call ensemble_handoff with the typed task, recipient, self-authored instruction, and required maxHops; Ensemble writes the valid handoff file under .ensemble/handoffs. You may instead supply a path to a handoff file you already wrote under .ensemble/handoffs; no other path is accepted. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
       "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work). Your turn context shows task, group, command, and depth budgets; successful results show what remains. You cannot raise a ceiling. When a budget is exhausted, return your result to the leader; only the leader may open a linked continuation group with ensemble_delegate's continuationOf plus a required groupMaxHops tier. When the command or continuation cap is reached, ask the user to start a new command for a fresh budget.",
       "Answer first: write your own answer in the group chat before handing off. A handoff forwards a completed result or clearly scoped work; it is never a substitute for answering your assignment.",
       "A `/skill` token in a user message is a deliberate skill request. When it applies to your part, load that skill with the native skill tool rather than treating it as prose.",
@@ -4702,36 +4702,44 @@ export class EnsembleV2Service {
       return { content: reason }
     }
     if (workspace.paused) return fail(`workspace ${workspace.name} is paused.`)
-    const rawPath = String(input.path ?? "")
-    const absolute = resolve(workspace.directory, rawPath)
-    const handoffs = resolve(handoffDirectory(workspace.directory))
-    if (absolute !== handoffs && !absolute.startsWith(`${handoffs}${sep}`)) {
-      return fail("The handoff path must be inside .ensemble/handoffs/.")
+    // Ticket #195: the path is optional. With a path, the file is the durable
+    // record and keeps its existing boundary/existence/frontmatter checks.
+    // Without one, the typed tool input is the record and the service writes
+    // the file after recipient and budget validation, so a refused handoff
+    // leaves no new file.
+    const suppliedPath = typeof input.path === "string" && input.path.trim() ? input.path : ""
+    let suppliedAbsolute: string | undefined
+    let parsed: HandoffParseOk | undefined
+    if (suppliedPath) {
+      suppliedAbsolute = resolve(workspace.directory, suppliedPath)
+      const handoffs = resolve(handoffDirectory(workspace.directory))
+      if (suppliedAbsolute !== handoffs && !suppliedAbsolute.startsWith(`${handoffs}${sep}`)) {
+        return fail("The handoff path must be inside .ensemble/handoffs/.")
+      }
+      if (!existsSync(suppliedAbsolute) || !statSync(suppliedAbsolute).isFile()) return fail("The handoff file does not exist.")
+      const content = readFileSync(suppliedAbsolute, "utf8")
+      const parsedFile = parseHandoffFile(content)
+      if (!parsedFile.ok) return fail(parsedFile.reason)
+      parsed = parsedFile
     }
-    if (!existsSync(absolute) || !statSync(absolute).isFile()) return fail("The handoff file does not exist.")
-    const content = readFileSync(absolute, "utf8")
-    const parsed = parseHandoffFile(content)
-    if (!parsed.ok) return fail(parsed.reason)
-    const task = parsed.data.task || String(input.task ?? "").trim()
-    if (!task) return fail("The handoff file must include a non-empty task field.")
-    const summary = parsed.data.summary ?? (typeof input.summary === "string" ? input.summary.trim() : "") ?? ""
-    const constraints = parsed.data.constraints ?? (typeof input.constraints === "string" ? input.constraints.trim() || undefined : undefined)
-    const expected = parsed.data.expected ?? (typeof input.expected === "string" ? input.expected.trim() || undefined : undefined)
+    const task = parsed?.data.task ?? String(input.task ?? "").trim()
+    if (!task) return fail(suppliedPath ? "The handoff file must include a non-empty task field." : "The handoff must include a non-empty task.")
+    const summary = parsed?.data.summary ?? (typeof input.summary === "string" ? input.summary.trim() : "")
+    const constraints = parsed?.data.constraints ?? (typeof input.constraints === "string" ? input.constraints.trim() || undefined : undefined)
+    const expected = parsed?.data.expected ?? (typeof input.expected === "string" ? input.expected.trim() || undefined : undefined)
     // Ticket #73 instruction contract: the recipient-facing brief is the
     // sender's self-authored instruction (file frontmatter wins, tool arg
     // is the fallback), distinct from the short display title. Legacy
     // callers without one keep the title+summary brief for compat.
-    const tailored = parsed.data.instruction ?? (typeof input.instruction === "string" ? input.instruction.trim() || undefined : undefined)
+    const tailored = parsed?.data.instruction ?? (typeof input.instruction === "string" ? input.instruction.trim() || undefined : undefined)
     const brief = tailored ?? (summary ? `${task}\n\n${summary}` : task)
-    const recipientRef = (typeof input.to === "string" && input.to.trim()) || parsed.data.to || ""
+    const recipientRef = (typeof input.to === "string" && input.to.trim()) || parsed?.data.to || ""
     if (!recipientRef) return fail("The handoff must name a recipient; no recipient was given.")
     const resolved = resolveHandoffRecipient(state, recipientRef)
     if (resolved.status === "unknown") return fail(`No agent matches "${resolved.ref}".`)
     if (resolved.status === "ambiguous") return fail(`"${resolved.ref}" matches more than one agent; name one explicitly.`)
     if (resolved.status === "archived") return fail(`${resolved.agent.name} is archived and cannot receive handoffs.`)
     const recipient = resolved.agent
-    const path = relative(workspace.directory, absolute)
-    const hopInstruction = `${brief} (${path})`
     const run = this.runForSession(state, context.sessionID)
     // Parentless-hop hole (ticket #70): a handoff called from a session
     // with no live run would orphan the hop (parentID undefined), so the
@@ -4753,6 +4761,10 @@ export class EnsembleV2Service {
     // open row (for example an inbound completion hop); fall back to the same
     // logical ask so anchor drift cannot duplicate the hop either.
     const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: askingSubtaskID, recipientID: recipient.id, task, instruction: brief, constraints, expected })
+    // A supplied path is known before the duplicate check. An inline handoff
+    // has no path yet, so the fallback compares against the path recorded on
+    // the existing hop; the queue key remains the primary guard.
+    const suppliedInstruction = suppliedAbsolute ? `${brief} (${relative(workspace.directory, suppliedAbsolute)})` : undefined
     const duplicate = this.findWorkByKey(workspace.id, key) ?? (!run ? Object.values(state.subtasks).find((item) =>
       item.workspaceID === workspace.id &&
       item.workKind === "handoff" &&
@@ -4760,7 +4772,7 @@ export class EnsembleV2Service {
       item.handoff?.senderID === sender.id &&
       item.handoff?.recipientID === recipient.id &&
       item.title === task &&
-      item.instruction === hopInstruction &&
+      item.instruction === (suppliedInstruction ?? `${brief} (${item.handoff?.path ?? ""})`) &&
       (item.constraints ?? "") === (constraints ?? "") &&
       (item.expected ?? "") === (expected ?? "")
     ) : undefined)
@@ -4782,7 +4794,33 @@ export class EnsembleV2Service {
       return this.refuseDispatch(workspace, "handoff", preflight.refusal, askingTask, this.store.dispatchGroup(dispatchGroupID), { recipientID: recipient.id, actorID: sender.id, taskMaxHops: taskBudget.maxHops, dispatchDepth: preflight.depth })
     }
     const at = now()
-    const correlationID = parsed.data.correlationID || correlationIDForKey("handoff", key)
+    const correlationID = parsed?.data.correlationID ?? correlationIDForKey("handoff", key)
+    // Recipient, task, and budget are valid by this point. Only now does an
+    // inline handoff create its durable file; a supplied path already exists.
+    let path: string
+    let generatedAbsolute: string | undefined
+    if (suppliedAbsolute) {
+      path = relative(workspace.directory, suppliedAbsolute)
+    } else {
+      const fileName = inlineHandoffFileName({ task, from: sender.name, to: recipient.name, at })
+      generatedAbsolute = writeHandoff(
+        workspace.directory,
+        fileName,
+        handoffFileContent({
+          task,
+          instruction: tailored,
+          summary,
+          constraints,
+          expected,
+          from: sender.name,
+          to: recipient.name,
+          correlationID,
+          createdAt: at,
+        }),
+      )
+      path = relative(workspace.directory, generatedAbsolute)
+    }
+    const hopInstruction = `${brief} (${path})`
     if (!workspace.memberIDs.includes(recipient.id)) {
       // Cross-workspace handoffs carry the granted budget through approval and
       // revalidate it when the approval resolves; an approval that becomes
@@ -4855,11 +4893,30 @@ export class EnsembleV2Service {
     }
     const admission = await this.persistNewWork(hop, { maxPerRun: HANDOFF_MAX_PER_RUN, perRunKind: "handoff" })
     if (!admission.admitted) {
+      // A serialized race can still refuse after the file exists; a refused
+      // handoff leaves no new file behind.
+      if (generatedAbsolute) {
+        try {
+          unlinkSync(generatedAbsolute)
+        } catch {
+          // The file never landed or was already removed; the refusal stands.
+        }
+      }
       return this.refuseDispatch(workspace, "handoff", admission.refusal!, askingTask, this.store.dispatchGroup(dispatchGroupID), { log: false })
     }
     // Two concurrent identical handoffs: the serialized admission returns the
-    // winner, which already queued the hop and posted its ack.
-    if (admission.deduped) return { content: handoffDuplicateText(recipient.name, task) }
+    // winner, which already queued the hop and posted its ack. The loser's
+    // generated file is not referenced by any hop.
+    if (admission.deduped) {
+      if (generatedAbsolute) {
+        try {
+          unlinkSync(generatedAbsolute)
+        } catch {
+          // The winning hop remains the only durable record.
+        }
+      }
+      return { content: handoffDuplicateText(recipient.name, task) }
+    }
     this.noteWorkChanged(hop)
     // Ticket #73: the group sees only a concise system line. The policy
     // sentence and correlation ref stay in the tool result below, which is
