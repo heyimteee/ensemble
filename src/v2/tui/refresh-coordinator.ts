@@ -114,6 +114,8 @@ function validChange(value: any): value is EntityChange {
       return upsert ? isRecord(value.memory) && validID(value.memory.id) : remove && validID(value.id)
     case "initJob":
       return upsert ? isRecord(value.job) && validID(value.job.id) : remove && validID(value.id)
+    case "nativeSubagent":
+      return upsert ? isRecord(value.run) && validID(value.run.childSessionID) : remove && validID(value.id)
     case "settings":
       return upsert && isRecord(value.settings)
     case "ui":

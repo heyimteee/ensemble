@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
-import type { Agent, Message, Subtask, Workspace } from "./types.ts"
+import type { Agent, Message, NativeSubagentRun, Subtask, Workspace } from "./types.ts"
 
 function fakeContext() {
   const values = new Map<string, unknown>()
@@ -38,6 +38,20 @@ const subtask = (patch: Partial<Subtask> = {}): Subtask => ({
 const message = (patch: Partial<Message> = {}): Message => ({
   id: "m", workspaceID: "w", seq: 1, author: "agent", text: "reply", kind: "text", createdAt: 1, ...patch,
 })
+const nativeSubagent = (patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
+  childSessionID: "child_1",
+  parentSessionID: "parent_1",
+  parentTaskID: "t",
+  dispatchGroupID: "group_1",
+  workspaceID: "w",
+  parentAgentID: "a",
+  parentAgent: "Nova",
+  instruction: "watch the CI",
+  state: "working",
+  startedAt: 2,
+  source: "session-created",
+  ...patch,
+})
 
 test("store reloads settings, UI state, and bindings", async () => {
   const ctx = fakeContext()
@@ -54,6 +68,23 @@ test("store reloads settings, UI state, and bindings", async () => {
   assert.equal(loaded.snapshot().ui.activeWorkspaceID, "w")
   assert.deepEqual(loaded.snapshot().ui.collapsedRailGroups, ["w"], "rail collapse state survives a restart")
   assert.equal(loaded.binding("w", "a")?.sessionID, "s")
+})
+
+test("native subagent records are durable by child session and removable", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.saveNativeSubagent(nativeSubagent())
+  assert.deepEqual(store.nativeSubagent("child_1"), nativeSubagent())
+  const loaded = new V2Store(ctx)
+  await loaded.load()
+  assert.deepEqual(loaded.nativeSubagents(), [nativeSubagent()], "a child record survives restart")
+  await loaded.saveNativeSubagent(nativeSubagent({ state: "replied", finishedAt: 9 }))
+  assert.equal(loaded.nativeSubagent("child_1")?.state, "replied")
+  await loaded.removeNativeSubagent("child_1")
+  assert.equal(loaded.nativeSubagent("child_1"), undefined)
+  const reloaded = new V2Store(ctx)
+  await reloaded.load()
+  assert.deepEqual(reloaded.nativeSubagents(), [])
 })
 
 test("store removes entities and prefixes", async () => {
@@ -86,6 +117,7 @@ test("pruning a workspace removes its messages, tasks, approvals, memories, and 
   await store.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s", agentVersion: 1, updatedAt: 1 })
   await store.saveApproval({ id: "ap", workspaceID: "w", kind: "ask_person", title: "Ask", detail: "?", status: "pending", createdAt: 1 })
   await store.saveMemory({ id: "mem", workspaceID: "w", scope: "workspace", text: "note", origin: "manual", source: "user", createdAt: 1, updatedAt: 1, history: [] })
+  await store.saveNativeSubagent(nativeSubagent())
   await store.pruneWorkspace("w")
   const snapshot = store.snapshot()
   assert.equal(snapshot.workspaces.w, undefined)
@@ -94,6 +126,7 @@ test("pruning a workspace removes its messages, tasks, approvals, memories, and 
   assert.equal(snapshot.bindings["w:a"], undefined)
   assert.equal(snapshot.approvals.ap, undefined)
   assert.equal(snapshot.memories.mem, undefined)
+  assert.equal(snapshot.nativeSubagents.child_1, undefined, "pruning a workspace drops its native child records")
 })
 
 test("load drops a UI workspace id that no longer exists", async () => {

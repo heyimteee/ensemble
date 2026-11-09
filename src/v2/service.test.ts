@@ -147,6 +147,51 @@ async function waitFor(check: () => Promise<boolean>, timeout = 2000): Promise<v
   throw new Error("Timed out waiting for condition")
 }
 
+/** Ticket #182: one live Ensemble parent task with a bound native session. */
+async function seedNativeParent(seed: V2Store, directory: string): Promise<void> {
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveDispatchGroup({
+    id: "group_parent",
+    workspaceID: "w",
+    rootID: "group_parent",
+    continuationIndex: 0,
+    maxHops: 8,
+    usedHops: 1,
+    depthMax: 8,
+    createdAt: 1,
+  })
+  await seed.saveSubtask({
+    id: "task_parent",
+    workspaceID: "w",
+    creatorType: "user",
+    assigneeID: "a",
+    title: "Parent",
+    instruction: "Do parent",
+    mode: "research",
+    state: "working",
+    stage: "initial",
+    outcome: "pending",
+    interrupted: false,
+    awaitingChildren: false,
+    attempts: 1,
+    createdAt: 1,
+    dispatchGroupID: "group_parent",
+    claimedBy: "run_parent",
+    activeRunID: "run_parent",
+    leaseUntil: Date.now() + 60_000,
+  })
+  await seed.saveBinding({
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    kind: "workspace",
+    directory,
+    agentVersion: 1,
+    updatedAt: 1,
+  })
+}
+
 test("service.start installs no event subscriptions on the bootstrap context", async () => {
   const { ctx } = fakeContext()
   let subscriptions = 0
@@ -7015,6 +7060,440 @@ test("ticket170: a held run heartbeats across its delivery deadline and still co
     assert.equal((after.state.subtasks.t as any).attempts, 1)
   } finally {
     releaseWait()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: session.created maps a child session to its parent task and group without queue effects", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-182-child-create-"))
+  const { ctx, emitEvent } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedNativeParent(seed, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  service.registerLocalRunForTest({
+    id: "run_parent",
+    subtaskID: "task_parent",
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  try {
+    const before = await handlers.snapshot({ directory })
+    emitEvent({
+      id: "evt_child_created",
+      created: 5,
+      type: "session.created",
+      data: { sessionID: "child_1", parentID: "session_parent", agent: "build", title: "CI watcher" },
+    })
+    await waitFor(async () => Boolean((await handlers.snapshot({ directory })).state.nativeSubagents.child_1))
+    const after = await handlers.snapshot({ directory })
+    const run = after.state.nativeSubagents.child_1
+    assert.deepEqual(
+      {
+        childSessionID: run.childSessionID,
+        parentSessionID: run.parentSessionID,
+        parentTaskID: run.parentTaskID,
+        dispatchGroupID: run.dispatchGroupID,
+        workspaceID: run.workspaceID,
+        parentAgentID: run.parentAgentID,
+        parentAgent: run.parentAgent,
+        state: run.state,
+        source: run.source,
+        startedAt: run.startedAt,
+      },
+      {
+        childSessionID: "child_1",
+        parentSessionID: "session_parent",
+        parentTaskID: "task_parent",
+        dispatchGroupID: "group_parent",
+        workspaceID: "w",
+        parentAgentID: "a",
+        parentAgent: "Nova",
+        state: "working",
+        source: "session-created",
+        startedAt: 5,
+      },
+    )
+    assert.equal(run.instruction, "CI watcher", "the child title is the honest fallback instruction")
+    assert.equal(after.state.dispatchGroups.group_parent!.usedHops, 1, "a subagent spends no dispatch hop")
+    assert.deepEqual(Object.keys(after.state.subtasks), ["task_parent"], "a subagent never becomes a queue row")
+    assert.deepEqual(Object.keys(before.state.nativeSubagents), [])
+
+    emitEvent({
+      id: "evt_child_created_duplicate",
+      created: 6,
+      type: "session.created",
+      data: { sessionID: "child_1", parentID: "session_parent", agent: "build", title: "A different title" },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    const deduped = await handlers.snapshot({ directory })
+    assert.deepEqual(Object.keys(deduped.state.nativeSubagents), ["child_1"], "dedupe is by child session")
+    assert.equal(deduped.state.nativeSubagents.child_1!.instruction, "CI watcher")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: the parent task/subagent tool instruction wins over the fallback", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-182-instruction-"))
+  const { ctx, emitEvent } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedNativeParent(seed, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  service.registerLocalRunForTest({
+    id: "run_parent",
+    subtaskID: "task_parent",
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  try {
+    emitEvent({
+      id: "evt_tool_input",
+      created: 10,
+      type: "session.tool.input.started",
+      data: { sessionID: "session_parent", assistantMessageID: "message_parent", id: "call_task", name: "task" },
+    })
+    emitEvent({
+      id: "evt_tool_called",
+      created: 11,
+      type: "session.tool.called",
+      data: {
+        sessionID: "session_parent",
+        assistantMessageID: "message_parent",
+        id: "call_task",
+        input: { description: "watch the CI\nuntil green", prompt: "a very long prompt that must not win" },
+      },
+    })
+    emitEvent({
+      id: "evt_child_after_tool",
+      created: 12,
+      type: "session.created",
+      data: { sessionID: "child_1", parentID: "session_parent", agent: "build", title: "New session" },
+    })
+    await waitFor(async () => Boolean((await handlers.snapshot({ directory })).state.nativeSubagents.child_1))
+    const run = (await handlers.snapshot({ directory })).state.nativeSubagents.child_1!
+    assert.equal(run.instruction, "watch the CI until green", "the tool instruction is single-line and bounded")
+    assert.equal(run.source, "session-created")
+    assert.ok(!run.instruction.includes("\n"))
+    assert.ok(!run.instruction.includes("very long prompt"))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: execution, idle, failure, and deletion transition child state", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-182-states-"))
+  const { ctx, emitEvent } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedNativeParent(seed, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  service.registerLocalRunForTest({
+    id: "run_parent",
+    subtaskID: "task_parent",
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  const child = (childSessionID: string) => ({
+    type: "session.created",
+    data: { sessionID: childSessionID, parentID: "session_parent", agent: "build", title: `title ${childSessionID}` },
+  })
+  try {
+    emitEvent({ id: "evt_ok_create", created: 20, ...child("child_ok") })
+    emitEvent({ id: "evt_ok_started", created: 21, type: "session.execution.started", data: { sessionID: "child_ok" } })
+    emitEvent({ id: "evt_ok_done", created: 22, type: "session.execution.succeeded", data: { sessionID: "child_ok" } })
+    emitEvent({ id: "evt_fail_create", created: 23, ...child("child_fail") })
+    emitEvent({ id: "evt_fail_done", created: 24, type: "session.execution.failed", data: { sessionID: "child_fail" } })
+    emitEvent({ id: "evt_idle_create", created: 25, ...child("child_idle") })
+    emitEvent({ id: "evt_idle_done", created: 26, type: "session.idle", data: { sessionID: "child_idle" } })
+    emitEvent({ id: "evt_gone_create", created: 27, ...child("child_gone") })
+    emitEvent({ id: "evt_gone_delete", created: 28, type: "session.deleted", data: { sessionID: "child_gone" } })
+    await waitFor(async () => {
+      const state = (await handlers.snapshot({ directory })).state.nativeSubagents
+      return state.child_ok?.state === "replied"
+        && state.child_fail?.state === "failed"
+        && state.child_idle?.state === "replied"
+        && state.child_gone?.state === "cancelled"
+    })
+    const state = (await handlers.snapshot({ directory })).state.nativeSubagents
+    assert.ok(state.child_ok.finishedAt! >= 22)
+    assert.ok(state.child_fail.finishedAt! >= 24)
+    assert.ok(state.child_idle.finishedAt! >= 26)
+    assert.ok(state.child_gone.finishedAt! >= 28)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: session.idle background reconciles a missed session.created", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-182-idle-bg-"))
+  const { ctx, emitEvent } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedNativeParent(seed, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  service.registerLocalRunForTest({
+    id: "run_parent",
+    subtaskID: "task_parent",
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  try {
+    emitEvent({
+      id: "evt_parent_idle_background",
+      created: 30,
+      type: "session.idle",
+      data: {
+        sessionID: "session_parent",
+        background: [{
+          kind: "subagent",
+          sessionID: "session_parent",
+          childSessionID: "child_missed",
+          agent: "build",
+          description: "reconcile the missed child",
+        }],
+      },
+    })
+    await waitFor(async () => Boolean((await handlers.snapshot({ directory })).state.nativeSubagents.child_missed))
+    const run = (await handlers.snapshot({ directory })).state.nativeSubagents.child_missed!
+    assert.equal(run.parentSessionID, "session_parent")
+    assert.equal(run.parentTaskID, "task_parent")
+    assert.equal(run.dispatchGroupID, "group_parent")
+    assert.equal(run.workspaceID, "w")
+    assert.equal(run.source, "idle-background")
+    assert.equal(run.state, "working")
+    assert.equal(run.instruction, "reconcile the missed child")
+
+    emitEvent({ id: "evt_missed_done", created: 31, type: "session.execution.succeeded", data: { sessionID: "child_missed" } })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_missed?.state === "replied")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: a terminal task or deleted parent session cancels its active children", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-182-cleanup-"))
+  const { ctx, emitEvent } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedNativeParent(seed, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  service.registerLocalRunForTest({
+    id: "run_parent",
+    subtaskID: "task_parent",
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  try {
+    emitEvent({
+      id: "evt_cancel_create",
+      created: 40,
+      type: "session.created",
+      data: { sessionID: "child_cancel", parentID: "session_parent", agent: "build", title: "task child" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_cancel?.state === "working")
+    const cancelled = await handlers.invoke({ directory, action: "task.cancel", payload: { id: "task_parent" } })
+    assert.equal(cancelled.ok, true)
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_cancel?.state === "cancelled")
+    const afterTask = (await handlers.snapshot({ directory })).state.nativeSubagents.child_cancel!
+    assert.ok(afterTask.finishedAt !== undefined)
+
+    const restart = new V2Store(ctx)
+    await restart.load()
+    await restart.saveSubtask({
+      ...restart.subtask("task_parent")!,
+      state: "working",
+      outcome: "pending",
+      stoppedAt: undefined,
+      finishedAt: undefined,
+      repliedAt: undefined,
+      claimedBy: "run_parent",
+      activeRunID: "run_parent",
+      leaseUntil: Date.now() + 60_000,
+    })
+    emitEvent({
+      id: "evt_parent_delete_child",
+      created: 41,
+      type: "session.created",
+      data: { sessionID: "child_orphan", parentID: "session_parent", agent: "build", title: "orphan child" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_orphan?.state === "working")
+    emitEvent({ id: "evt_parent_deleted", created: 42, type: "session.deleted", data: { sessionID: "session_parent" } })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_orphan?.state === "cancelled")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: finished child records purge after the 24h retention window", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-182-retention-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveNativeSubagent({
+    childSessionID: "child_old",
+    parentSessionID: "session_parent",
+    workspaceID: "w",
+    instruction: "old work",
+    state: "replied",
+    startedAt: 1,
+    finishedAt: 1,
+    source: "session-created",
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    const snapshot = await service.handlers().snapshot({ directory })
+    assert.equal(snapshot.state.nativeSubagents.child_old, undefined, "24h finished retention purges the record")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: instructions stay out of logs and diagnostics but remain in the durable record", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-182-privacy-"))
+  const { ctx, emitEvent } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedNativeParent(seed, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  service.registerLocalRunForTest({
+    id: "run_parent",
+    subtaskID: "task_parent",
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  const secret = "PRIVATE watch the CI pipeline"
+  try {
+    emitEvent({
+      id: "evt_privacy_create",
+      created: 50,
+      type: "session.created",
+      data: { sessionID: "child_private", parentID: "session_parent", agent: "build", title: "CI watcher" },
+    })
+    emitEvent({
+      id: "evt_privacy_input",
+      created: 51,
+      type: "session.tool.input.started",
+      data: { sessionID: "session_parent", assistantMessageID: "message_parent", id: "call_private", name: "task" },
+    })
+    emitEvent({
+      id: "evt_privacy_called",
+      created: 52,
+      type: "session.tool.called",
+      data: {
+        sessionID: "session_parent",
+        assistantMessageID: "message_parent",
+        id: "call_private",
+        input: { description: secret },
+      },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_private?.instruction === secret)
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.nativeSubagents.child_private!.instruction, secret, "the display record keeps the instruction")
+
+    const diagnostic = await (handlers as any).diagnostic({ directory })
+    assert.ok(!JSON.stringify(diagnostic).includes(secret), "diagnostics never carry the instruction")
+    assert.ok(!JSON.stringify(diagnostic).includes("CI watcher"), "diagnostics never carry the fallback instruction")
+
+    for (const event of ["native.subagent.created", "native.subagent.updated", "native.subagent.finished"]) {
+      const logs = await (handlers as any)["logs.recent"]({ directory, event, limit: 50 })
+      assert.ok(!JSON.stringify(logs.entries).includes(secret), `${event} never logs the instruction`)
+      assert.ok(!JSON.stringify(logs.entries).includes("CI watcher"), `${event} never logs the fallback`)
+    }
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: a tool instruction seen before its child session is applied when the child arrives", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-182-pending-instruction-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedNativeParent(seed, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  service.registerLocalRunForTest({
+    id: "run_parent",
+    subtaskID: "task_parent",
+    workspaceID: "w",
+    agentID: "a",
+    sessionID: "session_parent",
+    status: "running",
+    startedAt: 1,
+  } as any)
+  try {
+    await service.handleHostEvent({
+      id: "evt_pending_input_direct",
+      created: 60,
+      type: "session.tool.input.started",
+      data: { sessionID: "session_parent", assistantMessageID: "message_parent", id: "call_pending", name: "subagent" },
+    }, ctx)
+    await service.handleHostEvent({
+      id: "evt_pending_called_direct",
+      created: 61,
+      type: "session.tool.called",
+      data: {
+        sessionID: "session_parent",
+        assistantMessageID: "message_parent",
+        id: "call_pending",
+        input: { instruction: "inspect the pending child" },
+      },
+    }, ctx)
+    assert.deepEqual(Object.keys((await handlers.snapshot({ directory })).state.nativeSubagents), [], "no child record exists yet")
+    await service.handleHostEvent({
+      id: "evt_pending_created_direct",
+      created: 62,
+      type: "session.created",
+      data: { sessionID: "child_pending", parentID: "session_parent", agent: "build", title: "fallback" },
+    }, ctx)
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_pending?.instruction === "inspect the pending child")
+    const run = (await handlers.snapshot({ directory })).state.nativeSubagents.child_pending!
+    assert.equal(run.instruction, "inspect the pending child")
+  } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
   }

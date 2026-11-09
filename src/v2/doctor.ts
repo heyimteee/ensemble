@@ -1,6 +1,6 @@
 import { dispatchGroupState, dispatchHopCount, dispatchLedgerSummary, isRootGroup, type DispatchLedgerSummary } from "./dispatch-budget.ts"
-import { DEADLINE_MS, deriveWorkStatus, isDerivedWorkStatus, type DerivedWorkStatus } from "./queue.ts"
-import type { DispatchGroup, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
+import { DEADLINE_MS, FINISHED_RETENTION_MS, deriveWorkStatus, isDerivedWorkStatus, type DerivedWorkStatus } from "./queue.ts"
+import type { DispatchGroup, NativeSubagentSource, NativeSubagentState, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
 import type { WorkspaceConfig } from "./workspace-config.ts"
 
 export type ServiceIdentity = {
@@ -81,6 +81,22 @@ export type DoctorRecovery = {
   at?: number
 }
 
+/**
+ * Ticket #182: native subagent lifecycle facts only. The display instruction
+ * is deliberately absent from this seam, so diagnostics cannot leak it.
+ */
+export type DoctorNativeSubagent = {
+  childSessionID: string
+  parentSessionID: string
+  parentTaskID?: string
+  dispatchGroupID?: string
+  workspaceID?: string
+  state: NativeSubagentState
+  startedAt?: number
+  finishedAt?: number
+  source?: NativeSubagentSource
+}
+
 export type DoctorSnapshot = {
   agents: Record<string, DoctorAgent>
   workspaces: Record<string, DoctorWorkspace>
@@ -91,6 +107,8 @@ export type DoctorSnapshot = {
   subtasks?: Record<string, DoctorSubtask>
   /** Recent `task.recovered` audit rows (ticket #170); absent on older services. */
   recoveries?: DoctorRecovery[]
+  /** Ticket #182 native child records; absent on older services. */
+  nativeSubagents?: Record<string, DoctorNativeSubagent>
 }
 
 export type DoctorConfigRead =
@@ -296,6 +314,12 @@ const remediation: Record<string, string> = {
     "A failed row carries a structured delivery, lease, timeout, or queue cause. It should read stalled, not failed; repair the classification from the structured cause and keep a genuine native error failed.",
   work_recovery_mismatch:
     "A task.recovered audit row disagrees with the current durable task. Reconcile the card and transcript from the durable answer; keep the recovery event, and never replace a real answer with a failure placeholder.",
+  native_subagent_orphaned:
+    "A native subagent record names a missing workspace, parent task, or dispatch group. Let the live host reconcile child sessions, or remove the orphaned child record; do not invent a parent task.",
+  native_subagent_mismatch:
+    "A native subagent record disagrees with its parent task's workspace or dispatch group. Reopen the parent session so the child is remapped, or remove the contradictory child record.",
+  native_subagent_stale:
+    "An active native subagent record is older than the 24h retention window. Check whether its child native session still exists; close the record if the child is gone, and never keep a stale card active.",
   binding_unknown_workspace:
     "A session binding points at a workspace that no longer exists. Remove or repair the orphaned binding by recreating the workspace; do not hand-edit OpenCode storage.",
   binding_unknown_agent:
@@ -511,6 +535,76 @@ function checkWorkRows(input: DoctorLocationInput, add: (
  * Walk the parent chain from one group to the root it declares. Returns a
  * reason code when the chain is broken; IDs only, no task content.
  */
+/**
+ * Ticket #182: native subagent invariants over structured fields only. The
+ * record's display instruction is not part of DoctorSnapshot at all.
+ */
+function checkNativeSubagents(input: DoctorLocationInput, add: (
+  indexes: number[],
+  code: string,
+  details: Record<string, unknown>,
+  message: string,
+  scope?: DoctorMismatch["scope"],
+) => void, index: number): void {
+  const runs = input.snapshot.nativeSubagents ?? {}
+  const tasks = input.snapshot.subtasks ?? {}
+  const groups = input.snapshot.dispatchGroups ?? {}
+  const now = input.now ?? Date.now()
+  for (const run of Object.values(runs).sort((a, b) => a.childSessionID.localeCompare(b.childSessionID))) {
+    const base = {
+      childSessionID: run.childSessionID,
+      parentSessionID: run.parentSessionID,
+      workspaceID: run.workspaceID,
+      parentTaskID: run.parentTaskID,
+      state: run.state,
+    }
+    const orphaned: string[] = []
+    if (run.workspaceID !== undefined && !input.snapshot.workspaces[run.workspaceID]) orphaned.push("missing-workspace")
+    if (run.parentTaskID !== undefined && !tasks[run.parentTaskID]) orphaned.push("missing-parent-task")
+    if (run.dispatchGroupID !== undefined && !groups[run.dispatchGroupID]) orphaned.push("missing-dispatch-group")
+    if (orphaned.length > 0) {
+      add(
+        [index],
+        "native_subagent_orphaned",
+        { ...base, problems: orphaned },
+        `Native child ${run.childSessionID} is orphaned (${orphaned.join(", ")}).`,
+        "storage",
+      )
+      continue
+    }
+    const problems: string[] = []
+    const task = run.parentTaskID ? tasks[run.parentTaskID] : undefined
+    if (task) {
+      if (task.workspaceID !== undefined && run.workspaceID !== undefined && task.workspaceID !== run.workspaceID) {
+        problems.push("workspace-task-mismatch")
+      }
+      if (task.dispatchGroupID !== undefined && run.dispatchGroupID !== undefined && task.dispatchGroupID !== run.dispatchGroupID) {
+        problems.push("group-task-mismatch")
+      }
+    }
+    if (run.state === "working" && run.finishedAt !== undefined) problems.push("active-with-finish")
+    if (run.state !== "working" && run.finishedAt === undefined) problems.push("terminal-without-finish")
+    if (problems.length > 0) {
+      add(
+        [index],
+        "native_subagent_mismatch",
+        { ...base, problems },
+        `Native child ${run.childSessionID} has contradictory fields: ${problems.join(", ")}.`,
+        "storage",
+      )
+    }
+    if (run.state === "working" && run.startedAt !== undefined && now - run.startedAt >= FINISHED_RETENTION_MS) {
+      add(
+        [index],
+        "native_subagent_stale",
+        { ...base, startedAt: run.startedAt, ageMs: Math.max(0, now - run.startedAt) },
+        `Native child ${run.childSessionID} has been active beyond the retention window.`,
+        "storage",
+      )
+    }
+  }
+}
+
 function dispatchReachability(
   group: DispatchGroup,
   groups: Record<string, DispatchGroup>,
@@ -785,6 +879,9 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
     // Ticket #170: work-lifecycle invariants. Durable timestamps, claim
     // fields, structured failure causes, and recovery audit rows only.
     checkWorkRows(input, add, index)
+    // Ticket #182: native child records must agree with their parent task,
+    // workspace, and dispatch group, and cannot stay active past retention.
+    checkNativeSubagents(input, add, index)
 
     for (const item of Object.values(input.snapshot.bindings).sort((a, b) => a.key.localeCompare(b.key))) {
       const expectedKey = `${item.workspaceID}:${item.agentID}`

@@ -307,6 +307,7 @@ test("disposing one location removes only its registrations and keeps the shared
     assert.equal(alpha.rpcRegistrations[0].disposed, true, "the first location disposes its RPC registration")
     assert.equal(alpha.toolRegistrations[0].disposed, true, "the first location disposes its tool transform")
     assert.equal(alpha.hookRegistrations[0].disposed, true, "the first location disposes its retry hook")
+    assert.equal(alpha.hookRegistrations[1].disposed, true, "the first location disposes its idle hook")
     assert.equal(alpha.tools.size, 0, "a disposed location no longer contributes tools")
     await waitFor(() => alpha.events.active() === 0)
     assert.equal(alpha.events.subscriptions.size, 0, "the first location's event subscriptions are aborted")
@@ -324,7 +325,7 @@ test("disposing one location removes only its registrations and keeps the shared
     await alphaAttachment.dispose()
     assert.equal(alpha.rpcRegistrations.length, 1, "a repeated dispose is a no-op")
     assert.equal(alpha.toolRegistrations.length, 1)
-    assert.equal(alpha.hookRegistrations.length, 1)
+    assert.equal(alpha.hookRegistrations.length, 2)
 
     await betaAttachment.dispose()
     assert.equal(beta.toolRegistrations[0].disposed, true)
@@ -584,6 +585,65 @@ test("ticket155: each location subscribes to native tool and execution activity"
     }
   } finally {
     await attachment.dispose()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: each location subscribes to child session creation and deletion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-182-location-events-"))
+  const host = fakeHost("children", join(root, "children"))
+  const { registry } = serviceRegistry()
+  const attachment = await registry.attach(host.ctx)
+  try {
+    const types = [...host.events.subscriptions].flatMap((subscription) => subscription.types)
+    for (const type of ["session.created", "session.deleted"]) {
+      assert.ok(types.includes(type), `${type} is subscribed per location`)
+    }
+  } finally {
+    await attachment.dispose()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("ticket182: disposing a location closes its active child records but keeps them durable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-182-location-dispose-"))
+  const alphaDirectory = join(root, "alpha")
+  const betaDirectory = join(root, "beta")
+  mkdirSync(alphaDirectory, { recursive: true })
+  mkdirSync(betaDirectory, { recursive: true })
+  const values = new Map<string, unknown>()
+  const alpha = fakeHost("alpha", alphaDirectory, values)
+  const beta = fakeHost("beta", betaDirectory)
+  const seed = new V2Store(alpha.ctx as any)
+  await seed.load()
+  await seed.saveAgent(agent)
+  await seed.saveWorkspace(workspace("wa", "alpha", alphaDirectory))
+  await seed.saveWorkspace(workspace("wb", "beta", betaDirectory))
+  await seed.saveBinding(binding("wa", "parent_session", alphaDirectory))
+
+  const { registry } = serviceRegistry()
+  const alphaAttachment = await registry.attach(alpha.ctx)
+  const betaAttachment = await registry.attach(beta.ctx)
+  const handlers = betaAttachment.service.handlers()
+  try {
+    alpha.events.emit({
+      id: "evt_dispose_child",
+      created: 3,
+      type: "session.created",
+      data: { sessionID: "child_alpha", parentID: "parent_session", agent: "build", title: "alpha child" },
+    })
+    await waitFor(async () => Boolean((await handlers.snapshot({ directory: betaDirectory })).state.nativeSubagents.child_alpha))
+    const before = await handlers.snapshot({ directory: betaDirectory })
+    assert.equal(before.state.nativeSubagents.child_alpha.state, "working")
+    assert.equal(before.state.nativeSubagents.child_alpha.workspaceID, "wa")
+
+    await alphaAttachment.dispose()
+    await waitFor(async () => (await handlers.snapshot({ directory: betaDirectory })).state.nativeSubagents.child_alpha?.state === "cancelled")
+    const after = await handlers.snapshot({ directory: betaDirectory })
+    assert.ok(after.state.nativeSubagents.child_alpha.finishedAt !== undefined)
+  } finally {
+    await alphaAttachment.dispose()
+    await betaAttachment.dispose()
     rmSync(root, { recursive: true, force: true })
   }
 })

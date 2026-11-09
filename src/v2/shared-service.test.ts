@@ -204,6 +204,7 @@ test("every location registers and disposes its own host surfaces against the on
   const detached: any[] = []
   const toolRegistrations: any[] = []
   const hookRegistrations: any[] = []
+  const idleHookRegistrations: any[] = []
   const service = {
     handlers: () => ({ fake: true }),
     attach: (registration: any) => { attached.push(registration) },
@@ -219,6 +220,11 @@ test("every location registers and disposes its own host surfaces against the on
     installRetryHook: async (ctx: any) => {
       const registration = { kind: "retry", ctx, disposed: false, dispose: async () => { registration.disposed = true } }
       hookRegistrations.push(registration)
+      return registration
+    },
+    installIdleHook: async (ctx: any) => {
+      const registration = { kind: "idle", ctx, disposed: false, dispose: async () => { registration.disposed = true } }
+      idleHookRegistrations.push(registration)
       return registration
     },
   }
@@ -264,13 +270,16 @@ test("every location registers and disposes its own host surfaces against the on
   assert.deepEqual(registrations.map((registration) => registration.handlers), Array.from({ length: 13 }, () => ({ fake: true })))
   assert.equal(toolRegistrations.length, 13, "every location installs its own tool transform")
   assert.equal(hookRegistrations.length, 13, "every location installs its own retry hook")
+  assert.equal(idleHookRegistrations.length, 13, "every location installs its own idle hook")
   assert.deepEqual(toolRegistrations.map((registration) => registration.ctx), contexts)
   assert.deepEqual(hookRegistrations.map((registration) => registration.ctx), contexts)
+  assert.deepEqual(idleHookRegistrations.map((registration) => registration.ctx), contexts)
 
   for (const cleanup of cleanups.slice(0, -1)) await cleanup()
   assert.equal(registrations.filter((registration) => registration.disposed).length, 12, "each location disposes its own registration")
   assert.equal(toolRegistrations.filter((registration) => registration.disposed).length, 12, "each location disposes its own tool transform")
   assert.equal(hookRegistrations.filter((registration) => registration.disposed).length, 12, "each location disposes its own retry hook")
+  assert.equal(idleHookRegistrations.filter((registration) => registration.disposed).length, 12, "each location disposes its own idle hook")
   assert.equal(detached.length, 12)
   assert.equal(stops, 0, "the service stays up while a location remains")
 
@@ -278,6 +287,7 @@ test("every location registers and disposes its own host surfaces against the on
   assert.equal(registrations.every((registration) => registration.disposed), true)
   assert.equal(toolRegistrations.every((registration) => registration.disposed), true)
   assert.equal(hookRegistrations.every((registration) => registration.disposed), true)
+  assert.equal(idleHookRegistrations.every((registration) => registration.disposed), true)
   assert.equal(detached.length, 13)
   assert.equal(stops, 1, "the last location release stops the service")
 })
