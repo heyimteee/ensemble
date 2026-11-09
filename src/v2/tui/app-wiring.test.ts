@@ -225,6 +225,14 @@ test("the transcript width follows the Work pane state", () => {
   assert.ok(has(app(), "panes().chatOnlyContentWidth"))
 })
 
+test("ticket190: the plain transcript markdown follows the reactive chat width", () => {
+  assert.ok(
+    has(app(), 'syntaxStyle={style()} width={Math.max(16, messageWidth())}'),
+    "plain transcript markdown gets the reactive content width",
+  )
+  assert.ok(!has(app(), 'syntaxStyle={style()} width="100%"'), "no transcript markdown keeps a static 100% width")
+})
+
 test("the Work layout reads the pane content width", () => {
   assert.ok(has(app(), "panes().workContentWidth"))
 })
