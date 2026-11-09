@@ -64,6 +64,7 @@ export function formatLogEntry(entry: LogEntry): string {
     ["attempt", entry.attempt],
     ["delay", entry.delayMs],
     ["retryAt", entry.retryAfter],
+    ["holdAt", entry.holdUntil],
     ["state", entry.toState ?? entry.state],
     ["outcome", entry.toOutcome ?? entry.outcome],
     ["failure", entry.failureClass],

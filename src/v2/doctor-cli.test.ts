@@ -218,6 +218,7 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
         status: "failed",
         attempts: 5,
         failure: { kind: "delivery", reason: "deadline-exceeded" },
+        deliveryHoldUntil: 11,
         finishedAt: 10,
         repliedAt: 10,
       }
@@ -316,6 +317,7 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
     const workReport = JSON.parse(output)
     assert.ok(workReport.mismatches.some((mismatch: any) => mismatch.code === "work_failed_timeout"))
     assert.ok(workReport.mismatches.some((mismatch: any) => mismatch.code === "work_recovery_mismatch"))
+    assert.ok(workReport.mismatches.some((mismatch: any) => mismatch.code === "work_terminal_contradiction"), "a terminal delivery hold crosses the diagnostic wire")
     assert.equal(output.includes("PRIVATE-TASK-TITLE"), false)
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))

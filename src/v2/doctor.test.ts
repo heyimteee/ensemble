@@ -443,12 +443,17 @@ test("ticket170: the doctor detects contradictory terminal rows", () => {
       state: "replied", outcome: "succeeded", status: "replied", finishedAt: 30, repliedAt: 30,
       claimedBy: "run_live", leaseUntil: 9_999_999,
     }),
+    workTask("terminal-with-hold", {
+      state: "replied", outcome: "succeeded", status: "replied", finishedAt: 40, repliedAt: 40,
+      deliveryHoldUntil: 50,
+    }),
   ])
   const contradictions = report.mismatches.filter((mismatch) => mismatch.code === "work_terminal_contradiction")
-  assert.equal(contradictions.length, 3)
+  assert.equal(contradictions.length, 4)
   assert.deepEqual(contradictions.find((mismatch) => mismatch.details.taskID === "success-with-failure")?.details.problems, ["succeeded-with-failure"])
   assert.deepEqual(contradictions.find((mismatch) => mismatch.details.taskID === "nonterminal-with-finish")?.details.problems, ["non-terminal-with-finish"])
   assert.deepEqual(contradictions.find((mismatch) => mismatch.details.taskID === "terminal-with-claim")?.details.problems, ["terminal-with-queue-fields"])
+  assert.deepEqual(contradictions.find((mismatch) => mismatch.details.taskID === "terminal-with-hold")?.details.problems, ["terminal-with-queue-fields"])
 })
 
 test("ticket170: the doctor flags a queue or timeout cause persisted as failed", () => {

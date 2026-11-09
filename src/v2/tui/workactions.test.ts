@@ -44,6 +44,13 @@ test("ticket173: retry is offered for stalled and scheduled-retry cards, not que
   assert.ok(!ids(task({ id: "queued" })).includes("work.retry"))
 })
 
+test("ticket193: a delivery hold never advertises retry", () => {
+  assert.ok(!ids(task({ id: "hold", deliveryHoldUntil: 60_000 }), 1_000).includes("work.retry"))
+  assert.ok(!ids(task({ id: "hold-after-run", attempts: 2, deliveryHoldUntil: 60_000 }), 1_000).includes("work.retry"))
+  assert.ok(!ids(task({ id: "legacy", attempts: 0, retryAfter: 60_000 }), 1_000).includes("work.retry"))
+  assert.ok(ids(task({ id: "retry", attempts: 1, retryAfter: 60_000 }), 1_000).includes("work.retry"))
+})
+
 test("ticket173: history cards keep only the actions that are valid for a finished row", () => {
   const failed = task({ id: "failed", state: "replied", outcome: "failed", resultMessageID: "m1", createdAt: 1, finishedAt: 2, repliedAt: 2 })
   assert.deepEqual(ids(failed), ["work.native", "work.open", "work.restart", "work.retry"])

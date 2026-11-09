@@ -87,6 +87,7 @@ export function workLifecycleSignature(task: Subtask): string {
     task.outcome,
     task.attempts,
     task.retryAfter,
+    task.deliveryHoldUntil,
     task.stoppedAt,
     task.finishedAt,
     task.claimedBy,

@@ -107,7 +107,7 @@ export type WorkNeedsYouContext = {
 /** The durable lifecycle fields the canonical derivation reads. */
 export type WorkLifecycle = Pick<
   Subtask,
-  "id" | "state" | "outcome" | "interrupted" | "approvalID" | "awaitingChildren" | "attempts" | "claimedBy" | "leaseUntil" | "activeRunID" | "retryAfter" | "failure" | "stoppedAt"
+  "id" | "state" | "outcome" | "interrupted" | "approvalID" | "awaitingChildren" | "attempts" | "claimedBy" | "leaseUntil" | "activeRunID" | "retryAfter" | "deliveryHoldUntil" | "failure" | "stoppedAt"
 >
 
 /**
@@ -119,6 +119,9 @@ export type WorkLifecycle = Pick<
  * Precedence (ticket #168): terminal -> live lease/active run -> needs-you ->
  * awaiting children -> scheduled retry -> stalled exhaustion -> queued
  * pending. A live lease always wins over an old deadline or attempt count.
+ * A delivery hold (ticket #193) is a queued-delivery timer, not a retry: it
+ * never derives `retrying`, and a zero-attempt legacy row carrying only
+ * `retryAfter` reads pending as well.
  *
  * `failed` is reserved for a structured native execution failure. Rows with a
  * structured delivery/lease/attempt cause derive `stalled`. Legacy terminal
@@ -145,9 +148,13 @@ export function deriveWorkStatus(task: WorkLifecycle, now: number, context?: Wor
   if (task.awaitingChildren) return "waiting"
   const lostLease = task.claimedBy !== undefined && task.attempts > 0 && task.attempts < MAX_ATTEMPTS
   // A retry time that has arrived is still a scheduled retry until the pump
-  // claims the row; only clearing `retryAfter` ends the backoff.
-  const scheduledRetry = task.retryAfter !== undefined
+  // claims the row; only clearing `retryAfter` ends the backoff. A retry needs
+  // real failure evidence: a legacy completion row written before ticket #193
+  // carries only `retryAfter` with zero attempts and must still read queued.
+  const scheduledRetry = task.retryAfter !== undefined && (task.attempts > 0 || task.failure !== undefined)
   if (lostLease || scheduledRetry) return "retrying"
+  // A delivery hold is queued work, never a retry. The row reads pending
+  // before and after the hold's claim time; the scheduler honors the timer.
   // Exhausted delivery/lease retries have no native error to call their own.
   if (task.attempts >= MAX_ATTEMPTS) return "stalled"
   return "pending"

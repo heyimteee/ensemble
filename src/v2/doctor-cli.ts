@@ -336,6 +336,7 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
         ...(number(raw.leaseUntil) !== undefined ? { leaseUntil: number(raw.leaseUntil) } : {}),
         ...(typeof raw.activeRunID === "string" ? { activeRunID: raw.activeRunID } : {}),
         ...(number(raw.retryAfter) !== undefined ? { retryAfter: number(raw.retryAfter) } : {}),
+        ...(number(raw.deliveryHoldUntil) !== undefined ? { deliveryHoldUntil: number(raw.deliveryHoldUntil) } : {}),
         ...(number(raw.finishedAt) !== undefined ? { finishedAt: number(raw.finishedAt) } : {}),
         ...(number(raw.repliedAt) !== undefined ? { repliedAt: number(raw.repliedAt) } : {}),
         ...(number(raw.stoppedAt) !== undefined ? { stoppedAt: number(raw.stoppedAt) } : {}),
