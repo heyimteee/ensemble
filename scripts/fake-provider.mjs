@@ -32,6 +32,12 @@ const FAKE_INLINE_HANDOFF_PROMPT = "inline-handoff-probe"
 // which is exactly the early-finalization condition the barrier must cover.
 const FAKE_SUBAGENT_PROMPT = "fake-subagent-parent-fixture"
 const FAKE_SUBAGENT_CHILD_PROMPT = "fake-subagent-child-hold-fixture"
+// Ticket #197: distinct pre-child and post-child answers prove the live task
+// result and completion hop carry the wake-up turn, not the first turn.
+const FAKE_SUBAGENT_PRE_CHILD_MARKER = "fake-subagent-pre-child-marker"
+const FAKE_SUBAGENT_WAKEUP_MARKER = "fake-subagent-wakeup-marker"
+const FAKE_SUBAGENT_PRE_CHILD_REPLY = `The background child is still running. ${FAKE_SUBAGENT_PRE_CHILD_MARKER}.`
+const FAKE_SUBAGENT_WAKEUP_REPLY = `The child finished and I reported the result. ${FAKE_SUBAGENT_WAKEUP_MARKER}.`
 const SUBAGENT_CHILD_DELAY_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_SUBAGENT_CHILD_DELAY_MS ?? "120"))
 const SUBAGENT_CHILD_MARKDOWN = [
   "# Subagent child fixture",
@@ -429,7 +435,7 @@ function writeBudgetHandoff(marker, nextMarker, hop) {
   return { title, file }
 }
 
-async function streamToolCall(response, requestID, tool, args, event, fields = {}) {
+async function streamToolCall(response, requestID, tool, args, event, fields = {}, text = "") {
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache",
@@ -439,6 +445,9 @@ async function streamToolCall(response, requestID, tool, args, event, fields = {
   response.flushHeaders?.()
   response.write(roleFrame())
   if (initialDelay > 0) await delay(initialDelay)
+  // Ticket #197: an optional text part gives the pre-child turn a distinct
+  // answer so the wake-up assertion can prove the result was replaced.
+  if (text) response.write(chunkFrame(text))
   response.write(`data: ${JSON.stringify({
     id: completionId(),
     object: "chat.completion.chunk",
@@ -522,7 +531,15 @@ const server = createServer(async (request, response) => {
     }
     const latestUserText = lastUser >= 0 ? textOf(messages[lastUser]?.content) : ""
     const subagentChild = latestUserText.includes(FAKE_SUBAGENT_CHILD_PROMPT)
-    const subagentParent = latestUserText.includes(FAKE_SUBAGENT_PROMPT)
+    // The completion handoff reviews the finished parent title, which also
+    // contains the fixture text. Only the parent's own turn dispatches the
+    // subagent; a review turn must not create a second native child.
+    const completionReview = latestUserText.includes("Review the finished turn and decide what happens next")
+    const subagentParent = latestUserText.includes(FAKE_SUBAGENT_PROMPT) && !completionReview
+    // Ticket #197: the host's post-child wake-up turn carries the child result
+    // in the accumulated prompt (`</subagent>`), unlike the immediate tool-result
+    // turn. Only this turn returns the wake-up marker.
+    const subagentWakeup = !subagentChild && prompt.includes("</subagent>")
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
     const inlineHandoff = latestUserText.includes(FAKE_INLINE_HANDOFF_PROMPT)
     const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
@@ -641,6 +658,12 @@ const server = createServer(async (request, response) => {
         await streamCompletion(response, SUBAGENT_CHILD_MARKDOWN, requestID, SUBAGENT_CHILD_DELAY_MS)
         return
       }
+      if (body?.stream !== false && subagentWakeup) {
+        // The real post-child wake-up turn: its answer must become the task
+        // result and the completion-handoff content.
+        await streamCompletion(response, FAKE_SUBAGENT_WAKEUP_REPLY, requestID)
+        return
+      }
       if (body?.stream !== false && subagentParent && !toolResult) {
         // Background mode is the host shape that finalizes the parent before
         // the child: the tool returns an ack immediately, then the child runs.
@@ -655,6 +678,8 @@ const server = createServer(async (request, response) => {
             background: true,
           },
           "subagent_tool_call",
+          {},
+          FAKE_SUBAGENT_PRE_CHILD_REPLY,
         )
         return
       }

@@ -7743,7 +7743,7 @@ test("ticket170: a held run heartbeats across its delivery deadline and still co
 test("ticket188: a background child holds the parent task working until the child terminates", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-188-barrier-"))
   const { ctx, emitEvent } = fakeContext()
-  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20, nativeSubagentBarrierMs: 5_000 })
+  const service = new EnsembleV2Service(ctx, { heartbeatMs: 20, nativeSubagentBarrierMs: 5_000, nativeSubagentWakeupGraceMs: 200 })
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   let waitCalls = 0
@@ -7932,6 +7932,632 @@ test("ticket188: reset aborts the barrier instead of waiting for its bound", asy
     }
     releaseWait?.()
     await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket197: a delayed post-child wake-up answer becomes the task result", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-197-wakeup-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 5_000,
+    nativeSubagentDiscoveryGraceMs: 500,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const leader = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Lead" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: {
+        name: "probe",
+        directory,
+        memberIDs: [agent.result.id, leader.result.id],
+        leaderID: leader.result.id,
+      },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const task = Object.values(claimed.state.subtasks).find((item: any) => item.assigneeID === agent.result.id) as any
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    assert.ok(task && binding, "the run owns a task and a native session")
+    emitEvent({
+      id: "evt_197_delayed_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_197_delayed", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_delayed?.state === "working")
+    releaseWait?.()
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "working")
+    const lease = (await handlers.snapshot({ directory })).state.subtasks[task.id].leaseUntil as number
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks[task.id].leaseUntil as number) > lease
+    }, 2_000)
+    emitEvent({
+      id: "evt_197_delayed_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_197_delayed" },
+    })
+    // The first parent idle can arrive before the host has started the
+    // post-child turn. It must not finalize the task with the first answer.
+    emitEvent({
+      id: "evt_197_delayed_idle_before_wakeup",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const during = await handlers.snapshot({ directory })
+    assert.equal(during.state.subtasks[task.id].state, "working", "an idle with no new answer keeps the parent working")
+    answer("POST-CHILD MARKER: the child finished and I reported it.")
+    emitEvent({
+      id: "evt_197_delayed_idle_wakeup",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "replied", 3_000)
+    const after = await handlers.snapshot({ directory })
+    const result = (after.state.messages[workspace.result.id] ?? []).find((message: any) => message.id === after.state.subtasks[task.id].resultMessageID)
+    assert.ok(result, "the task has a result message")
+    assert.match(result.text, /POST-CHILD MARKER/, "the post-child answer becomes the result")
+    assert.ok(!result.text.includes("FIRST ANSWER"), "the pre-child answer is replaced, not appended")
+    const hop = Object.values(after.state.subtasks).find(
+      (item: any) => item.parentID === task.id && item.handoff?.completion === true,
+    ) as any
+    assert.ok(hop, "the non-leader parent created a completion handoff")
+    assert.match(hop.instruction, /POST-CHILD MARKER/, "the completion handoff carries the post-child answer")
+    assert.ok(!hop.instruction.includes("FIRST ANSWER"), "the completion handoff does not carry the replaced answer")
+    const agentMessages = (after.state.messages[workspace.result.id] ?? []).filter(
+      (message: any) => message.taskID === task.id && message.author === "agent",
+    )
+    assert.equal(agentMessages.length, 1, "the task keeps exactly one agent row")
+    // Repeated host idles after finalization are safe: no duplicate row, task,
+    // group, or hop appears.
+    emitEvent({
+      id: "evt_197_duplicate_idle_one",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    })
+    emitEvent({
+      id: "evt_197_duplicate_idle_two",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const stable = await handlers.snapshot({ directory })
+    assert.equal(
+      (stable.state.messages[workspace.result.id] ?? []).filter((message: any) => message.taskID === task.id && message.author === "agent").length,
+      1,
+      "duplicate idles do not duplicate the result row",
+    )
+    assert.equal(
+      Object.values(stable.state.subtasks).filter(
+        (item: any) => item.parentID === task.id && item.handoff?.completion === true,
+      ).length,
+      1,
+      "duplicate idles do not duplicate the completion hop",
+    )
+    assert.equal(
+      Object.values(stable.state.subtasks).filter(
+        (item: any) => item.workspaceID === workspace.result.id && item.assigneeID === agent.result.id,
+      ).length,
+      1,
+      "duplicate idles do not duplicate the task",
+    )
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket197: a delayed child creation is caught by the discovery grace", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-197-discovery-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 5_000,
+    nativeSubagentDiscoveryGraceMs: 1_000,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const task = Object.values(claimed.state.subtasks).find((item: any) => item.assigneeID === agent.result.id) as any
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    assert.ok(task && binding, "the run owns a task and a native session")
+    emitEvent({
+      id: "evt_197_discovery_tool_call",
+      created: Date.now(),
+      type: "session.tool.input.started",
+      data: {
+        sessionID: binding.sessionID,
+        id: "call_197_discovery",
+        name: "subagent",
+        input: { description: "Watch the CI pipeline", prompt: "Check the CI pipeline from start to finish." },
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    releaseWait?.()
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const during = await handlers.snapshot({ directory })
+    assert.equal(during.state.subtasks[task.id].state, "working", "an observed tool call holds the parent through discovery")
+    assert.equal(Object.values(during.state.nativeSubagents).length, 0, "the child record is still delayed")
+    emitEvent({
+      id: "evt_197_discovery_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_197_discovery", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_discovery?.state === "working")
+    const held = await handlers.snapshot({ directory })
+    assert.equal(held.state.subtasks[task.id].state, "working", "the discovered child keeps the parent working")
+    emitEvent({
+      id: "evt_197_discovery_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_197_discovery" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_discovery?.state === "replied")
+    // Let the barrier release and take its first successful read before the
+    // wake-up turn adds new assistant text.
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    answer("POST-CHILD MARKER: the discovered child finished.")
+    emitEvent({
+      id: "evt_197_discovery_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "replied", 3_000)
+    const after = await handlers.snapshot({ directory })
+    const result = (after.state.messages[workspace.result.id] ?? []).find((message: any) => message.id === after.state.subtasks[task.id].resultMessageID)
+    assert.match(result?.text ?? "", /POST-CHILD MARKER/, "the discovered child's wake-up answer is the result")
+    const parentTasks = Object.values(after.state.subtasks).filter(
+      (item: any) => item.workspaceID === workspace.result.id && item.assigneeID === agent.result.id,
+    )
+    assert.equal(parentTasks.length, 1, "the discovery race creates no duplicate task")
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket197: a missing wake-up finalizes at the wake-up grace with the first answer", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-197-wakeup-timeout-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 150,
+    nativeSubagentDiscoveryGraceMs: 500,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  const instruction = "PRIVATE watch the CI"
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const task = Object.values(claimed.state.subtasks).find((item: any) => item.assigneeID === agent.result.id) as any
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    emitEvent({
+      id: "evt_197_timeout_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_197_timeout", parentID: binding.sessionID, agent: "explore", title: instruction },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_timeout?.state === "working")
+    releaseWait?.()
+    const lease = (await handlers.snapshot({ directory })).state.subtasks[task.id].leaseUntil as number
+    emitEvent({
+      id: "evt_197_timeout_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_197_timeout" },
+    })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks[task.id].leaseUntil as number) > lease
+    }, 2_000)
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "replied", 2_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks[task.id].outcome, "succeeded")
+    assert.equal(after.state.subtasks[task.id].attempts, 1, "a missing wake-up is not a failed attempt")
+    const result = (after.state.messages[workspace.result.id] ?? []).find((message: any) => message.id === after.state.subtasks[task.id].resultMessageID)
+    assert.equal(result?.text, "FIRST ANSWER", "the first successful answer stands")
+    assert.equal(after.state.nativeSubagents.child_197_timeout.state, "replied", "the child finished without being cancelled")
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "native.subagent.wakeup.timeout", limit: 20 })
+    assert.equal(logs.entries.length, 1, "the wake-up timeout is audited once")
+    assert.ok(!JSON.stringify(logs.entries).includes(instruction), "the wake-up timeout log carries no instruction content")
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket197: a failed wake-up turn keeps the first answer and logs a structured warning", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-197-wakeup-failed-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 2_000,
+    nativeSubagentDiscoveryGraceMs: 500,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const task = Object.values(claimed.state.subtasks).find((item: any) => item.assigneeID === agent.result.id) as any
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    emitEvent({
+      id: "evt_197_failed_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_197_failed", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_failed?.state === "working")
+    releaseWait?.()
+    emitEvent({
+      id: "evt_197_failed_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_197_failed" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_failed?.state === "replied")
+    messages.push({
+      type: "idle",
+      time: { created: Date.now() },
+      outcome: "failed",
+      error: { type: "provider.internal", message: "PRIVATE wake failure detail" },
+    })
+    emitEvent({
+      id: "evt_197_failed_idle",
+      created: Date.now(),
+      type: "session.idle",
+      data: { sessionID: binding.sessionID },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.subtasks[task.id].state === "replied", 3_000)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.subtasks[task.id].outcome, "succeeded", "the helper failure does not fail the job")
+    assert.equal(after.state.subtasks[task.id].attempts, 1, "the helper failure does not consume an attempt")
+    const result = (after.state.messages[workspace.result.id] ?? []).find((message: any) => message.id === after.state.subtasks[task.id].resultMessageID)
+    assert.equal(result?.text, "FIRST ANSWER", "the first successful answer stands")
+    const logs = await (handlers as any)["logs.recent"]({ directory, event: "native.subagent.wakeup.failed", limit: 20 })
+    assert.equal(logs.entries.length, 1, "the failed wake-up is audited once")
+    assert.equal(logs.entries[0].reason, "provider.internal", "the warning carries the structured reason")
+    assert.ok(!JSON.stringify(logs.entries).includes("PRIVATE wake failure detail"), "the warning carries no failure content")
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket197: workspace archive aborts the wake-up wait", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-197-wakeup-archive-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 5_000,
+    nativeSubagentDiscoveryGraceMs: 500,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    emitEvent({
+      id: "evt_197_archive_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_197_archive", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_archive?.state === "working")
+    releaseWait?.()
+    emitEvent({
+      id: "evt_197_archive_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_197_archive" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_archive?.state === "replied")
+    let timer: NodeJS.Timeout | undefined
+    const tooSlow = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("workspace archive waited for the wake-up grace")), 1_500)
+      timer.unref?.()
+    })
+    try {
+      const archived = await Promise.race([
+        handlers.invoke({ directory, action: "workspace.archive", payload: { id: workspace.result.id } }),
+        tooSlow,
+      ])
+      assert.equal(archived.ok, true)
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket197: workspace delete aborts the wake-up wait", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-197-wakeup-delete-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 5_000,
+    nativeSubagentDiscoveryGraceMs: 500,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    emitEvent({
+      id: "evt_197_delete_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_197_delete", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_delete?.state === "working")
+    releaseWait?.()
+    emitEvent({
+      id: "evt_197_delete_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_197_delete" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_delete?.state === "replied")
+    let timer: NodeJS.Timeout | undefined
+    const tooSlow = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("workspace delete waited for the wake-up grace")), 1_500)
+      timer.unref?.()
+    })
+    try {
+      const deleted = await Promise.race([
+        handlers.invoke({ directory, action: "workspace.delete", payload: { id: workspace.result.id } }),
+        tooSlow,
+      ])
+      assert.equal(deleted.ok, true)
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  } finally {
+    releaseWait?.()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket197: service stop aborts the wake-up wait", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-197-wakeup-stop-"))
+  const { ctx, emitEvent } = fakeContext()
+  const service = new EnsembleV2Service(ctx, {
+    heartbeatMs: 20,
+    nativeSubagentBarrierMs: 5_000,
+    nativeSubagentWakeupGraceMs: 5_000,
+    nativeSubagentDiscoveryGraceMs: 500,
+  })
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const messages: any[] = []
+  const answer = (text: string) => {
+    messages.push({ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text }] })
+  }
+  ctx.session.context = async () => ({ data: [...messages] })
+  let waitCalls = 0
+  let releaseWait: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { releaseWait = resolve })
+  ctx.session.wait = async () => {
+    waitCalls += 1
+    await gate
+  }
+  let stopped = false
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kakiko" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "probe", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID: workspace.result.id, text: "watch the CI", recipientIDs: [agent.result.id] },
+    })
+    await waitFor(async () => waitCalls === 1)
+    answer("FIRST ANSWER")
+    const claimed = await handlers.snapshot({ directory })
+    const binding = Object.values(claimed.state.bindings).find((item: any) => item.agentID === agent.result.id) as any
+    emitEvent({
+      id: "evt_197_stop_child_created",
+      created: Date.now(),
+      type: "session.created",
+      data: { sessionID: "child_197_stop", parentID: binding.sessionID, agent: "explore", title: "Watch the CI pipeline" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_stop?.state === "working")
+    releaseWait?.()
+    emitEvent({
+      id: "evt_197_stop_child_done",
+      created: Date.now(),
+      type: "session.execution.succeeded",
+      data: { sessionID: "child_197_stop" },
+    })
+    await waitFor(async () => (await handlers.snapshot({ directory })).state.nativeSubagents.child_197_stop?.state === "replied")
+    let timer: NodeJS.Timeout | undefined
+    const tooSlow = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("service stop waited for the wake-up grace")), 1_500)
+      timer.unref?.()
+    })
+    try {
+      await Promise.race([stop(), tooSlow])
+      stopped = true
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  } finally {
+    releaseWait?.()
+    if (!stopped) await stop()
     rmSync(directory, { recursive: true, force: true })
   }
 })

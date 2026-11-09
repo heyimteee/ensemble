@@ -49,7 +49,9 @@ import { RecentHostEvents, retryEventKey } from "./host-events.ts"
 import {
   NATIVE_SUBAGENT_ACTIVE_LIMIT,
   NATIVE_SUBAGENT_BARRIER_MS,
+  NATIVE_SUBAGENT_DISCOVERY_GRACE_MS,
   NATIVE_SUBAGENT_PENDING_LIMIT,
+  NATIVE_SUBAGENT_WAKEUP_GRACE_MS,
   boundNativeSubagentInstruction,
   nativeSubagentChildID,
   nativeSubagentFallbackInstruction,
@@ -131,6 +133,22 @@ type NativeParentContext = {
   workspaceID?: string
   agentID?: string
   agentName?: string
+}
+
+/** Ticket #197: host lifecycle counters for one parent session. */
+type NativeSessionGeneration = {
+  idle: number
+  execution: number
+  lastIdleAt?: number
+  lastExecutionAt?: number
+}
+
+/** Ticket #197: outcome of the child barrier before the wake-up settle. */
+type NativeBarrierOutcome = {
+  /** Every observed child is terminal. */
+  settled: boolean
+  /** Latest terminal child finish time (service clock), when settled. */
+  finishedAt?: number
 }
 
 /**
@@ -503,6 +521,15 @@ export class EnsembleV2Service {
    * barrier. One set per parent session; terminal child transitions release it.
    */
   private readonly nativeSubagentWaiters = new Map<string, Set<() => void>>()
+  /**
+   * Ticket #197: per-parent-session idle/execution generations from host
+   * lifecycle events. A child finish anchors the next wake-up to a later idle;
+   * the post-child answer is read only from assistant text added after the
+   * first successful answer, never from the pre-child turn.
+   */
+  private readonly nativeSessionGenerations = new Map<string, NativeSessionGeneration>()
+  /** Ticket #197: the last observed `task`/`subagent` tool call per session. */
+  private readonly nativeSubagentToolCalls = new Map<string, number>()
   /** Ticket #155: one bounded, version-neutral activity update per task/window. */
   private readonly workActivity = createStreamCoalescer<WorkActivity>((updates) => {
     for (const activity of updates.values()) this.emitWorkActivity(activity)
@@ -542,11 +569,25 @@ export class EnsembleV2Service {
   private readonly heartbeatMs: number
   /** Ticket #188: how long a parent run may hold for missing child terminal events. */
   private readonly nativeSubagentBarrierMs: number
+  /** Ticket #197: how long the parent may wait for the post-child wake-up idle. */
+  private readonly nativeSubagentWakeupGraceMs: number
+  /** Ticket #197: how long to hold for an event-delayed child session. */
+  private readonly nativeSubagentDiscoveryGraceMs: number
 
-  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number } = {}) {
+  constructor(
+    ctx: Ctx,
+    options: {
+      heartbeatMs?: number
+      nativeSubagentBarrierMs?: number
+      nativeSubagentWakeupGraceMs?: number
+      nativeSubagentDiscoveryGraceMs?: number
+    } = {},
+  ) {
     this.ctx = ctx
     this.heartbeatMs = Math.max(10, Math.floor(options.heartbeatMs ?? HEARTBEAT_MS))
     this.nativeSubagentBarrierMs = Math.max(1, Math.floor(options.nativeSubagentBarrierMs ?? NATIVE_SUBAGENT_BARRIER_MS))
+    this.nativeSubagentWakeupGraceMs = Math.max(1, Math.floor(options.nativeSubagentWakeupGraceMs ?? NATIVE_SUBAGENT_WAKEUP_GRACE_MS))
+    this.nativeSubagentDiscoveryGraceMs = Math.max(1, Math.floor(options.nativeSubagentDiscoveryGraceMs ?? NATIVE_SUBAGENT_DISCOVERY_GRACE_MS))
     this.catalog = new Catalog(ctx, () => {
       this.publishFeedMetaIfChanged()
     })
@@ -620,6 +661,8 @@ export class EnsembleV2Service {
       this.nativeSubagentPending.clear()
       this.nativeSubagentPendingStates.clear()
       this.nativeSubagentFallbacks.clear()
+      this.nativeSessionGenerations.clear()
+      this.nativeSubagentToolCalls.clear()
       this.releaseNativeSubagentWaiters()
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
@@ -738,9 +781,15 @@ export class EnsembleV2Service {
       return
     }
     if (type === "session.idle") {
+      const sessionID = String((event?.data ?? event)?.sessionID ?? "")
+      // Ticket #197: the wake-up barrier reads the parent's next idle after the
+      // child finishes. Record the generation before dispatch so a concurrent
+      // waiter can never miss the idle that woke it.
+      this.noteNativeSessionGeneration(sessionID, "idle")
       // Ticket #182: an idle parent may still own background subagent work.
       // Reconcile those children before clearing the task's live activity.
       await this.handleNativeSubagentIdle(event)
+      this.notifyNativeSubagentWaiters(sessionID)
       await this.handleStreamEvent(event)
       return
     }
@@ -777,7 +826,12 @@ export class EnsembleV2Service {
       type === "session.execution.failed" ||
       type === "session.execution.interrupted"
     ) {
+      const sessionID = String((event?.data ?? event)?.sessionID ?? "")
+      // Ticket #197: execution lifecycle advances the parent-session generation
+      // alongside idle so a wake-up turn is distinguishable from the first turn.
+      this.noteNativeSessionGeneration(sessionID, "execution")
       await this.handleNativeSubagentExecution(event)
+      this.notifyNativeSubagentWaiters(sessionID)
       this.handleExecutionActivityEvent(event)
       return
     }
@@ -4360,10 +4414,15 @@ export class EnsembleV2Service {
           return { kind: String(entry?.kind ?? "unknown"), sessionID: entry?.sessionID }
         }),
       })
+      // Ticket #197: the experimental hook is the host's reliable idle
+      // delivery surface; record the same generation the event stream feeds so
+      // the post-child wake-up barrier sees this idle even when `session.idle`
+      // is not published to the server event bus.
+      this.noteNativeSessionGeneration(event.sessionID, "idle")
       void this.handleNativeSubagentIdle({
         type: "session.idle",
         data: { sessionID: event.sessionID, background },
-      }).catch(() => undefined)
+      }).catch(() => undefined).finally(() => this.notifyNativeSubagentWaiters(event.sessionID))
     })
     const handle = this.hostRegistration(registration, this.idleHooks, ctx)
     this.idleHooks.set(ctx, handle)
@@ -6561,19 +6620,69 @@ export class EnsembleV2Service {
   }
 
   /**
-   * Ticket #188: a background subagent can outlive the parent's first turn.
-   * The host's `subagent` tool returns immediately in background mode, so the
-   * parent prompt finishes while the child still streams. Hold the parent run
-   * (the existing heartbeat keeps its lease live) until every child mapped to
-   * this task is terminal, or until the bound expires. Event-driven: terminal
-   * transitions wake the waiter, and the bound covers missing host events.
-   * Returns true only when active children actually existed and finished, so
-   * the caller knows a host wake-up turn may still need settling.
+   * Ticket #188/#197: children mapped to this parent task during the attempt.
+   * A working record always counts; a terminal record must have started inside
+   * the attempt so a previous run's child cannot trigger a new wake-up wait.
    */
-  private activeNativeChildrenForTask(parentSessionID: string, taskID: string): NativeSubagentRun[] {
+  private nativeChildrenForTask(parentSessionID: string, taskID: string, since: number): NativeSubagentRun[] {
     return this.store.nativeSubagents().filter(
-      (run) => run.state === "working" && run.parentSessionID === parentSessionID && run.parentTaskID === taskID,
+      (run) =>
+        run.parentSessionID === parentSessionID &&
+        run.parentTaskID === taskID &&
+        (run.state === "working" || run.startedAt >= since),
     )
+  }
+
+  /**
+   * Ticket #197: a subagent tool call was observed for this attempt, or a child
+   * record exists for this parent session but has not been mapped to the task
+   * yet. Either shape means `session.created` may still be in flight.
+   */
+  private nativeChildDiscoveryPending(parentSessionID: string, since: number): boolean {
+    const observedAt = this.nativeSubagentToolCalls.get(parentSessionID)
+    if (observedAt !== undefined && observedAt >= since) return true
+    return this.store.nativeSubagents().some(
+      (run) =>
+        run.parentSessionID === parentSessionID &&
+        run.parentTaskID === undefined &&
+        run.state === "working" &&
+        run.startedAt >= since,
+    )
+  }
+
+  /**
+   * Ticket #197: record one host lifecycle generation for a session. Idle is
+   * the wake-up signal; execution distinguishes a new turn from the first one.
+   */
+  private noteNativeSessionGeneration(sessionID: string, kind: "idle" | "execution", at = now()): void {
+    if (!sessionID) return
+    const current = this.nativeSessionGenerations.get(sessionID) ?? { idle: 0, execution: 0 }
+    this.nativeSessionGenerations.delete(sessionID)
+    if (kind === "idle") {
+      current.idle += 1
+      current.lastIdleAt = at
+    } else {
+      current.execution += 1
+      current.lastExecutionAt = at
+    }
+    this.nativeSessionGenerations.set(sessionID, current)
+    while (this.nativeSessionGenerations.size > NATIVE_SUBAGENT_ACTIVE_LIMIT) {
+      const oldest = this.nativeSessionGenerations.keys().next().value
+      if (oldest === undefined) break
+      this.nativeSessionGenerations.delete(oldest)
+    }
+  }
+
+  /** Ticket #197: remember the last parent subagent tool call for discovery. */
+  private noteNativeSubagentToolCall(sessionID: string, at = now()): void {
+    if (!sessionID) return
+    this.nativeSubagentToolCalls.delete(sessionID)
+    this.nativeSubagentToolCalls.set(sessionID, at)
+    while (this.nativeSubagentToolCalls.size > NATIVE_SUBAGENT_ACTIVE_LIMIT) {
+      const oldest = this.nativeSubagentToolCalls.keys().next().value
+      if (oldest === undefined) break
+      this.nativeSubagentToolCalls.delete(oldest)
+    }
   }
 
   private notifyNativeSubagentWaiters(parentSessionID: string): void {
@@ -6616,43 +6725,156 @@ export class EnsembleV2Service {
     })
   }
 
+  /**
+   * Ticket #188: hold the parent run (the existing heartbeat keeps its lease
+   * live) until every child mapped to this task is terminal, or until the
+   * bound expires. Event-driven: terminal transitions wake the waiter, and the
+   * bound covers missing host events.
+   *
+   * Ticket #197: if a parent `subagent` tool call was observed with no child
+   * record yet, hold for a short discovery grace so an event-delayed
+   * `session.created` cannot escape the barrier. A settled outcome tells the
+   * caller to wait for the parent's post-child idle before finalizing.
+   */
   private async awaitNativeSubagentBarrier(
     parentSessionID: string,
     task: Subtask,
     globalEpoch: number,
     workspaceEpoch: number,
-  ): Promise<boolean> {
+    since: number,
+  ): Promise<NativeBarrierOutcome> {
     const startedAt = now()
-    let waited = false
+    let discoveryStartedAt: number | undefined
     for (;;) {
       // Reset, workspace delete/archive, and service stop already changed the
       // run's lifecycle identity. Never hold a run the rest of the system has
       // retired; the caller's existing epoch/ownership checks take over.
-      if (this.stopped || this.globalEpoch !== globalEpoch) return false
-      if ((this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return false
-      const active = this.activeNativeChildrenForTask(parentSessionID, task.id)
-      if (active.length === 0) {
-        if (waited) {
-          this.logger?.event("info", "host", "native.subagent.barrier.released", {
+      if (this.stopped || this.globalEpoch !== globalEpoch) return { settled: false }
+      if ((this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return { settled: false }
+      const children = this.nativeChildrenForTask(parentSessionID, task.id, since)
+      const active = children.filter((run) => run.state === "working")
+      if (active.length > 0) {
+        discoveryStartedAt = undefined
+        const remaining = this.nativeSubagentBarrierMs - (now() - startedAt)
+        if (remaining <= 0) {
+          // IDs, states, and counts only: the instruction never enters a log.
+          this.logger?.event("warn", "host", "native.subagent.barrier.timeout", {
+            parentSessionID,
+            parentTaskID: task.id,
+            childSessionIDs: active.map((run) => run.childSessionID),
+            count: active.length,
+            durationMs: now() - startedAt,
+          })
+          return { settled: false }
+        }
+        await this.waitForNativeSubagentSignal(parentSessionID, remaining)
+        continue
+      }
+      if (children.length > 0) {
+        const finishedAt = Math.max(...children.map((run) => run.finishedAt ?? now()))
+        this.logger?.event("info", "host", "native.subagent.barrier.released", {
+          parentSessionID,
+          parentTaskID: task.id,
+          durationMs: now() - startedAt,
+        })
+        return { settled: true, finishedAt }
+      }
+      // No child mapped to the task yet. Only hold when this attempt actually
+      // dispatched a subagent or left a recent unmapped child; an ordinary
+      // turn pays no discovery wait.
+      if (!this.nativeChildDiscoveryPending(parentSessionID, since)) {
+        return { settled: false }
+      }
+      if (discoveryStartedAt === undefined) discoveryStartedAt = now()
+      const remaining = this.nativeSubagentDiscoveryGraceMs - (now() - discoveryStartedAt)
+      if (remaining <= 0) {
+        this.logger?.event("warn", "host", "native.subagent.discovery.timeout", {
+          parentSessionID,
+          parentTaskID: task.id,
+          durationMs: now() - startedAt,
+        })
+        return { settled: false }
+      }
+      await this.waitForNativeSubagentSignal(parentSessionID, remaining)
+    }
+  }
+
+  /**
+   * Ticket #197: wait for the parent's next idle after the child finished.
+   * The first parent idle can arrive before the host starts the wake-up turn,
+   * so an idle with no substantive new answer keeps waiting inside the same
+   * bound. The new answer is the assistant text added after the first
+   * successful read, not a clock cutoff: host event delivery can lag the
+   * message timestamp. A failed wake-up turn is contained: the caller keeps
+   * its first successful answer and the warning records IDs and reason only.
+   */
+  private async awaitNativeWakeup(
+    parentSessionID: string,
+    task: Subtask,
+    globalEpoch: number,
+    workspaceEpoch: number,
+    since: number,
+    baselineText: string,
+    idleAfter: number,
+  ): Promise<ReturnType<typeof assistantResult> | undefined> {
+    const startedAt = now()
+    const baseline = baselineText.trim()
+    let inspectedIdle = -1
+    let emptyLogged = false
+    for (;;) {
+      if (this.stopped || this.globalEpoch !== globalEpoch) return undefined
+      if ((this.workspaceEpoch.get(task.workspaceID) ?? 0) !== workspaceEpoch) return undefined
+      const generation = this.nativeSessionGenerations.get(parentSessionID)
+      // Only an idle delivered or observed after the first successful read can
+      // carry a wake-up answer. The freshness bound is the attempt start, not
+      // the service-observed child finish: host event ordering can invert the
+      // two clocks, and the baseline delta below keeps a pre-child answer from
+      // ever becoming the result.
+      const idleReady = generation !== undefined &&
+        generation.lastIdleAt !== undefined &&
+        generation.lastIdleAt >= idleAfter &&
+        generation.lastIdleAt >= since &&
+        generation.idle > inspectedIdle
+      if (idleReady && generation) {
+        inspectedIdle = generation.idle
+        const messages = listData(await this.ctx.session.context({ sessionID: parentSessionID }))
+        const full = assistantResult(messages, since)
+        if (full.failure) {
+          this.logger?.event("warn", "host", "native.subagent.wakeup.failed", {
+            parentSessionID,
+            parentTaskID: task.id,
+            reason: String(full.failure?.type ?? "wakeup-failed"),
+            durationMs: now() - startedAt,
+          })
+          return undefined
+        }
+        const fullText = full.text.trim()
+        const answer = baseline && fullText.startsWith(baseline) ? fullText.slice(baseline.length).trim() : fullText
+        if (isSubstantiveReply(answer)) {
+          this.logger?.event("info", "host", "native.subagent.wakeup.received", {
+            parentSessionID,
+            parentTaskID: task.id,
+            durationMs: now() - startedAt,
+          })
+          return { ...full, text: answer }
+        }
+        if (!emptyLogged) {
+          emptyLogged = true
+          this.logger?.event("debug", "host", "native.subagent.wakeup.empty", {
             parentSessionID,
             parentTaskID: task.id,
             durationMs: now() - startedAt,
           })
         }
-        return waited
       }
-      waited = true
-      const remaining = this.nativeSubagentBarrierMs - (now() - startedAt)
+      const remaining = this.nativeSubagentWakeupGraceMs - (now() - startedAt)
       if (remaining <= 0) {
-        // IDs, states, and counts only: the instruction never enters a log.
-        this.logger?.event("warn", "host", "native.subagent.barrier.timeout", {
+        this.logger?.event("warn", "host", "native.subagent.wakeup.timeout", {
           parentSessionID,
           parentTaskID: task.id,
-          childSessionIDs: active.map((run) => run.childSessionID),
-          count: active.length,
           durationMs: now() - startedAt,
         })
-        return false
+        return undefined
       }
       await this.waitForNativeSubagentSignal(parentSessionID, remaining)
     }
@@ -6693,6 +6915,9 @@ export class EnsembleV2Service {
     await this.store.saveNativeSubagent(run)
     rememberNativeSubagentActive(this.nativeSubagentActive, run.childSessionID, run.startedAt)
     this.logNativeSubagent(event, run, { activeCount: this.nativeSubagentActive.size })
+    // Ticket #197: a child record may arrive during the discovery grace; wake
+    // the barrier so it can hold on the real child instead of timing out.
+    this.notifyNativeSubagentWaiters(run.parentSessionID)
   }
 
   private async updateNativeSubagent(
@@ -6709,6 +6934,9 @@ export class EnsembleV2Service {
       this.nativeSubagentFallbacks.delete(next.childSessionID)
     }
     this.logNativeSubagent("native.subagent.updated", next, { reason, fromState: run.state })
+    // A parent/task mapping patch can turn an unmapped discovery child into a
+    // barrier candidate; wake waiters so the hold starts without a poll.
+    this.notifyNativeSubagentWaiters(next.parentSessionID)
     return next
   }
 
@@ -7106,6 +7334,11 @@ export class EnsembleV2Service {
     input?: unknown,
   ): Promise<void> {
     if (!parentSessionID || !call || !nativeSubagentToolName(call.name)) return
+    // Ticket #197: remember the observation before any early return. The
+    // discovery grace belongs to the barrier even when the host omits a usable
+    // instruction or child hint from this event.
+    this.noteNativeSubagentToolCall(parentSessionID)
+    this.notifyNativeSubagentWaiters(parentSessionID)
     const instruction = nativeSubagentInstructionFromInput(input)
     const childHint = nativeSubagentChildID(input)
     if (!instruction && !childHint) return
@@ -7651,16 +7884,43 @@ export class EnsembleV2Service {
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
         let messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)
-        // Ticket #188: background subagents return from the tool before the
-        // child finishes, so the host can settle the parent turn early. Hold
-        // the run on the existing heartbeat until its children are terminal;
-        // then let a host wake-up turn settle and use its latest answer.
+        // Ticket #188/#197: background subagents return from the tool before
+        // the child finishes, so the host can settle the parent turn early.
+        // Hold the run on the existing heartbeat until its children are
+        // terminal, then wait for the parent's next idle (the wake-up turn) and
+        // prefer that answer. The wake-up grace is separate from the
+        // five-minute child barrier.
         if (!result.failure) {
-          const released = await this.awaitNativeSubagentBarrier(binding.sessionID, task, globalEpoch, workspaceEpoch)
-          if (released && !this.stopped) {
-            await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
+          const native = await this.awaitNativeSubagentBarrier(
+            binding.sessionID,
+            task,
+            globalEpoch,
+            workspaceEpoch,
+            attemptStartedAt,
+          )
+          if (native.settled && !this.stopped) {
+            // Re-read everything written while the barrier held; a wake-up
+            // turn may already have answered before the child's terminal event.
             messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
             result = assistantResult(messages, attemptStartedAt)
+            if (!result.failure) {
+              const baselineReadAt = now()
+              this.logger?.event("debug", "host", "native.subagent.wakeup.wait", {
+                parentSessionID: binding.sessionID,
+                parentTaskID: task.id,
+                childFinishedAt: native.finishedAt ?? now(),
+              })
+              const wakeup = await this.awaitNativeWakeup(
+                binding.sessionID,
+                task,
+                globalEpoch,
+                workspaceEpoch,
+                attemptStartedAt,
+                result.text,
+                baselineReadAt,
+              )
+              if (wakeup) result = wakeup
+            }
           }
         }
         failureContext.toolOutcomes = result.toolOutcomes
@@ -7799,8 +8059,10 @@ export class EnsembleV2Service {
       }
       let children = this.store.subtasks().filter((item) => item.parentID === task.id)
       // Ticket #194: the one turn-finalization policy sits at the existing
-      // terminal-write boundary. #197/#198/#200 add wait/correct/warn
-      // orchestration here rather than growing parallel finalization checks
+      // terminal-write boundary. Ticket #197 settles the native child and its
+      // post-child wake-up answer before this point, so the policy evaluates
+      // the final reply; no second finalization seam exists. #198/#200 add
+      // correction orchestration here rather than growing parallel checks
       // elsewhere.
       let finalization = decideTurnFinalization(this.turnFinalizationFacts(currentTask, reply, children, current))
       // Ticket #198: a batch review may not finalize as a successful reply
