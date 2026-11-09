@@ -174,6 +174,7 @@ const INFO_ENTRIES: Readonly<Record<HelpSectionID, readonly HelpEntry[]>> = {
   ],
   "composer-insert": [
     info("typing", "text", "Type at the cursor. Enter sends and keeps Insert focus; Shift+Enter adds a line."),
+    info("composer.prefixes", "$ / @ / /", "$ addresses an agent, @ completes workspace files only, and / lists commands and skills. The empty @ palette points to / for skills."),
     info("composer.skill-palette", "/", "At message start / lists commands plus every skill with Command, Skill | General, or Skill | <Owner> flags; after $Agent / it lists only that agent's assigned skills."),
     info("composer.general-triage", "General", "A General skill has no Skillbox owner; it routes to the leader for triage. A General skill under a non-leader mention is rejected with the leader's name so the Skillbox stays authoritative."),
     info("composer.init-solo", "/init", "Init is solo-only and workspace-only: send /init by itself. It appends a visible System Agent job, streams progress and a report, and never falls through to native /init."),

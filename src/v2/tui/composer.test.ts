@@ -1,11 +1,13 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import {
+  COMPOSER_PLACEHOLDER,
   COMPOSER_VALIDATION_MS,
   composerHeight,
   composerTrigger,
   composerValidationBorder,
   composerValidationReducer,
+  filePaletteHeader,
   insertAgentMention,
   insertFileReference,
   fileReferenceTokenAt,
@@ -130,6 +132,23 @@ test("palette rows lead with their flag so a narrow chat cell keeps the owner", 
   assert.ok(title.startsWith("Skill | FakeAgent"), title)
   assert.match(title, /ensemble-live-skill/, "the skill name follows the flag")
   assert.equal(paletteRowTitle("restart", "Command"), "Command │ restart")
+})
+
+test("the composer hint puts /skill beside @file and keeps @ file-only", () => {
+  assert.match(COMPOSER_PLACEHOLDER, /\$agent/)
+  assert.match(COMPOSER_PLACEHOLDER, /@file/)
+  assert.match(COMPOSER_PLACEHOLDER, /\/command/)
+  assert.match(COMPOSER_PLACEHOLDER, /\/skill/)
+  assert.doesNotMatch(COMPOSER_PLACEHOLDER, /@skill/i, "@ never advertises skills")
+})
+
+test("the empty file palette points to / for skills and keeps @ files-only", () => {
+  assert.match(filePaletteHeader(0), /@ files/)
+  assert.match(filePaletteHeader(0), /skills use \//)
+  assert.doesNotMatch(filePaletteHeader(0), /@skill/i, "the file palette never advertises @skills")
+  assert.equal(filePaletteHeader(2), "@ files")
+  assert.equal(filePaletteHeader(2, "hand"), "@ files │ hand")
+  assert.equal(filePaletteHeader(0, "hand"), "@ files │ hand │ skills use /")
 })
 
 test("escaped-space paths complete and reinsert without losing the suffix", () => {
