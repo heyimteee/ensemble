@@ -91,6 +91,21 @@ export function completionWorkKey(input: { workspaceID: string; finishedTaskID: 
   return `completion:${input.workspaceID}:${input.finishedTaskID}:${input.recipientID}`
 }
 
+/**
+ * Ticket #199: one follow-up completion hop per late native answer. The
+ * original completion key stays occupied by the first delivery, so the late
+ * report uses its own native message identity. The message id is hashed, never
+ * stored raw, and a repeated idle or restart resolves the same hop. Pure.
+ */
+export function completionFollowUpWorkKey(input: {
+  workspaceID: string
+  finishedTaskID: string
+  recipientID: string
+  nativeMessageID: string
+}): string {
+  return `completion:${input.workspaceID}:${input.finishedTaskID}:${input.recipientID}:late:${stableHash(input.nativeMessageID)}`
+}
+
 export type CompletionCandidate = {
   id: string
   workspaceID: string

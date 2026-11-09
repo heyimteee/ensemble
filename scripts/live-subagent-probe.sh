@@ -13,7 +13,9 @@ fi
 # streams a bounded hold. The probe then checks the durable NativeSubagentRun,
 # the Work card, the group mapping, lifecycle timing, the post-child wake-up
 # answer in the task result and completion handoff, cleanup, privacy, and
-# restart retention.
+# restart retention. Ticket #199 adds the no-duplicate guard: the captured
+# wake-up answer is never mirrored as a late follow-up, and a restart does not
+# duplicate the parent row or its completion hop.
 #
 #   npm run test:live:subagent
 #   ENSEMBLE_SUBAGENT_EXPECT=early npm run test:live:subagent
@@ -127,6 +129,17 @@ parent_result_has_wakeup_marker() {
 
 completion_hop_has_wakeup_marker() {
   grep -qF "$WAKEUP_MARKER" <<<"$(completion_hop_instruction)"
+}
+
+# Ticket #199: the captured wake-up answer is already the task result, so it
+# must never be mirrored again as a late native follow-up. A real host restart
+# must not duplicate the parent row, the late marker, or the completion hop.
+parent_late_followup_count() {
+  live_snapshot_value "(() => { const task = output.state.subtasks[\"$TASK_ID\"]; return task && task.lateNativeFollowUps ? task.lateNativeFollowUps.length : 0 })()" | tr -d '"'
+}
+
+parent_agent_row_count() {
+  live_snapshot_value "(() => { const task = output.state.subtasks[\"$TASK_ID\"]; if (!task) return -1; return (output.state.messages[task.workspaceID] || []).filter(function (message) { return message.taskID === task.id && message.author === \"agent\" && message.kind === \"text\" }).length })()" | tr -d '"'
 }
 
 parent_group_unchanged() {
@@ -346,6 +359,10 @@ fi
 if grep -qF "$PRE_CHILD_MARKER" <<<"$(completion_hop_instruction)"; then
   live_fail "the completion handoff still carries the replaced pre-child answer"
 fi
+# Ticket #199: the wake-up answer was consumed by the task result. It must not
+# be mirrored a second time as a late follow-up, even after the restart below.
+[[ "$(parent_late_followup_count)" == "0" ]] || live_fail "the captured wake-up answer was mirrored as a late follow-up"
+[[ "$(parent_agent_row_count)" == "1" ]] || live_fail "the parent task has more than one agent row"
 verify_idle_hook_shape
 
 require_history_card "after completion"
@@ -363,6 +380,11 @@ live_wait_for "$LIVE_STEP_TIMEOUT" "native record after restart" native_count_is
   || live_fail "native subagent record did not survive the service restart"
 [[ "$(native_field state)" == "replied" ]] || live_fail "restart changed the terminal child state"
 require_history_card "after restart"
+# Ticket #199: restart neither mirrors the already-captured wake-up answer as a
+# late follow-up nor duplicates the parent row or its single completion hop.
+[[ "$(parent_late_followup_count)" == "0" ]] || live_fail "restart created a spurious late follow-up"
+[[ "$(parent_agent_row_count)" == "1" ]] || live_fail "restart duplicated the parent agent row"
+[[ "$(completion_hop_count)" == "1" ]] || live_fail "restart duplicated the parent completion hop"
 
 # Privacy: the display instruction is durable, but the service diagnostics and
 # every log entry carry IDs, agent, state, and counts only.

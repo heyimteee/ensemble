@@ -144,6 +144,12 @@ export type Message = {
   updatedAt?: number
   /** Correlation ID linking handoff ask/ack/relay/notice legs. */
   correlationID?: string
+  /**
+   * Ticket #199: native assistant message identity for a late native-subagent
+   * follow-up row. Durable so a repeated idle, duplicate host event, or restart
+   * resolves the same group row instead of appending another.
+   */
+  nativeMessageID?: Id
 }
 
 /**
@@ -193,6 +199,25 @@ export type NativeSubagentRun = {
   startedAt: number
   finishedAt?: number
   source: NativeSubagentSource
+}
+
+/**
+ * Ticket #199: durable marker for one late native-subagent answer already
+ * reconciled into the group. The marker lives on the parent task so a repeated
+ * idle, duplicate host event, or service restart cannot append a second group
+ * row or create a second follow-up completion hop.
+ */
+export type LateNativeFollowUp = {
+  /** Native assistant message ids included in this reconciled answer. */
+  messageIDs: Id[]
+  /** Newest native message id; keys the follow-up completion hop. */
+  nativeMessageID: Id
+  /** Newest native message time; bounds the next reconciliation scan. */
+  at: number
+  /** Group transcript row carrying the late answer. */
+  messageRowID: Id
+  /** Follow-up completion hop id, absent for a leader turn. */
+  hopID?: Id
 }
 
 /**
@@ -373,6 +398,13 @@ export type Subtask = {
    * one correction per contract.
    */
   mentionCorrectionSent?: boolean
+  /**
+   * Ticket #199: late native-subagent answers already reconciled into the
+   * group, keyed by native message identity. Durable so a repeated idle,
+   * duplicate host event, or restart cannot duplicate the group row or the
+   * follow-up completion hop. Bounded by the reconciliation path.
+   */
+  lateNativeFollowUps?: LateNativeFollowUp[]
   /**
    * General-skill leader triage (ticket #103): the turn must read and either
    * use or delegate the listed skills. This is the single triage source of

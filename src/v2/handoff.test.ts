@@ -2,6 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import {
   HANDOFF_MARKER,
+  completionFollowUpWorkKey,
   completionReviewInstruction,
   handoffAckText,
   handoffDuplicateText,
@@ -207,6 +208,16 @@ test("completion review instruction frames the finished turn for review", () => 
   assert.match(text, /Review/)
   assert.match(text, /@\.ensemble\/handoffs\/done\.md/)
   assert.ok(!text.includes("@Sage"))
+})
+
+test("ticket199: a late native completion follow-up keys once per native message", () => {
+  const base = { workspaceID: "w", finishedTaskID: "task_1", recipientID: "leader" }
+  const first = completionFollowUpWorkKey({ ...base, nativeMessageID: "msg_1" })
+  const same = completionFollowUpWorkKey({ ...base, nativeMessageID: "msg_1" })
+  const second = completionFollowUpWorkKey({ ...base, nativeMessageID: "msg_2" })
+  assert.equal(first, same, "a repeated idle resolves the same hop")
+  assert.notEqual(first, second, "a new native message is a new late report")
+  assert.ok(!first.includes("msg_1"), "the native message id is hashed, not stored raw")
 })
 
 test("direct envelope carries addressing, correlation, ordering, and delivery state", () => {

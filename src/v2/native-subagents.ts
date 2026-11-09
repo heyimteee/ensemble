@@ -1,3 +1,4 @@
+import { stableHash } from "./queue.ts"
 import type { NativeSubagentState } from "./types.ts"
 
 /** Longest display instruction head kept in a durable subagent record. */
@@ -6,6 +7,12 @@ export const NATIVE_SUBAGENT_INSTRUCTION_LIMIT = 120
 export const NATIVE_SUBAGENT_ACTIVE_LIMIT = 128
 /** Pending tool instructions kept per parent session until a child appears. */
 export const NATIVE_SUBAGENT_PENDING_LIMIT = 8
+/**
+ * Ticket #199: durable late-follow-up markers kept per parent task. The scan
+ * boundary advances with the newest marker, so older evicted ids can never be
+ * reconciled again.
+ */
+export const NATIVE_LATE_FOLLOW_UP_LIMIT = 8
 /**
  * Ticket #188: the bounded parent barrier. The host can finalize a parent turn
  * while a background subagent still runs; the run holds its lease and waits for
@@ -114,4 +121,65 @@ export function rememberNativeSubagentActive(
     if (oldest === undefined) break
     active.delete(oldest)
   }
+}
+
+/** One late native assistant answer that may enter the group transcript. */
+export type NativeLateMessage = {
+  /** Host assistant message id, or a deterministic content identity. */
+  messageID: string
+  /** Host message creation time in milliseconds. */
+  createdAt: number
+  /** Assistant text parts from this message, joined and trimmed. */
+  text: string
+}
+
+function nativeMessageCreatedAt(message: any): number {
+  const created = message?.time?.created
+  if (typeof created === "number" && Number.isFinite(created)) return created
+  if (created instanceof Date) return created.getTime()
+  if (typeof created === "string") {
+    const parsed = Date.parse(created)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return 0
+}
+
+/** Host message identity when the host supplies one. */
+export function nativeAssistantMessageID(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined
+  const value = message as Record<string, any>
+  const candidate = value.id ?? value.messageID ?? value.info?.id
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined
+}
+
+/**
+ * Ticket #199: assistant text that arrived after a native child and its parent
+ * task finished. Only assistant text parts count; user text, reasoning, tools,
+ * and blank messages are never mirrored. Identity is the host message id so a
+ * repeated idle or restart dedupes; a host without ids gets a deterministic
+ * content identity. Pure.
+ */
+export function nativeLateFollowUps(
+  messages: readonly unknown[],
+  after: number,
+  reconciled: ReadonlySet<string> = new Set(),
+): NativeLateMessage[] {
+  const late: NativeLateMessage[] = []
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue
+    const value = message as Record<string, any>
+    if (value.type !== "assistant" || !Array.isArray(value.content)) continue
+    const createdAt = nativeMessageCreatedAt(value)
+    if (!(createdAt > after)) continue
+    const text = value.content
+      .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+      .map((part: any) => part.text)
+      .join("\n")
+      .trim()
+    if (!text) continue
+    const messageID = nativeAssistantMessageID(value) ?? stableHash(`${createdAt}\0${text}`)
+    if (reconciled.has(messageID)) continue
+    late.push({ messageID, createdAt, text })
+  }
+  return late
 }

@@ -41,7 +41,7 @@ import {
 } from "./dispatch-budget.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
-import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffFileContent, handoffGroupAckText, handoffWorkKey, inlineHandoffFileName, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type HandoffParseOk, type ReviewDecision } from "./handoff.ts"
+import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionFollowUpWorkKey, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffFileContent, handoffGroupAckText, handoffWorkKey, inlineHandoffFileName, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type HandoffParseOk, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
@@ -52,7 +52,9 @@ import {
   NATIVE_SUBAGENT_DISCOVERY_GRACE_MS,
   NATIVE_SUBAGENT_PENDING_LIMIT,
   NATIVE_SUBAGENT_WAKEUP_GRACE_MS,
+  NATIVE_LATE_FOLLOW_UP_LIMIT,
   boundNativeSubagentInstruction,
+  nativeLateFollowUps,
   nativeSubagentChildID,
   nativeSubagentFallbackInstruction,
   nativeSubagentInstructionFromInput,
@@ -530,6 +532,12 @@ export class EnsembleV2Service {
   private readonly nativeSessionGenerations = new Map<string, NativeSessionGeneration>()
   /** Ticket #197: the last observed `task`/`subagent` tool call per session. */
   private readonly nativeSubagentToolCalls = new Map<string, number>()
+  /**
+   * Ticket #199: sessions with an in-flight late-follow-up reconciliation.
+   * Only prevents concurrent duplicate work in this process; the durable task
+   * marker is the restart-safe authority.
+   */
+  private readonly nativeLateReconciling = new Set<string>()
   /** Ticket #155: one bounded, version-neutral activity update per task/window. */
   private readonly workActivity = createStreamCoalescer<WorkActivity>((updates) => {
     for (const activity of updates.values()) this.emitWorkActivity(activity)
@@ -663,6 +671,7 @@ export class EnsembleV2Service {
       this.nativeSubagentFallbacks.clear()
       this.nativeSessionGenerations.clear()
       this.nativeSubagentToolCalls.clear()
+      this.nativeLateReconciling.clear()
       this.releaseNativeSubagentWaiters()
       for (const timer of this.timers) clearTimeout(timer)
       this.timers.clear()
@@ -789,6 +798,9 @@ export class EnsembleV2Service {
       // Ticket #182: an idle parent may still own background subagent work.
       // Reconcile those children before clearing the task's live activity.
       await this.handleNativeSubagentIdle(event)
+      // Ticket #199: a parent idle with no active run is the durable backstop
+      // for a post-child answer that arrived after the run finalized.
+      await this.reconcileLateNativeFollowUp(sessionID)
       this.notifyNativeSubagentWaiters(sessionID)
       await this.handleStreamEvent(event)
       return
@@ -3673,7 +3685,7 @@ export class EnsembleV2Service {
     return (await this.createWorkItem(input)).subtask
   }
 
-  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; notice?: Message["notice"]; correlationID?: string; updatedAt?: number }): Promise<Message> {
+  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; notice?: Message["notice"]; correlationID?: string; nativeMessageID?: string; updatedAt?: number }): Promise<Message> {
     return this.store.appendMessage(workspace.id, {
       id: id("msg"),
       author: input.author,
@@ -3686,6 +3698,7 @@ export class EnsembleV2Service {
       interrupted: input.interrupted,
       notice: input.notice,
       correlationID: input.correlationID,
+      nativeMessageID: input.nativeMessageID,
       createdAt: now(),
       ...(input.updatedAt !== undefined ? { updatedAt: input.updatedAt } : {}),
     })
@@ -4419,10 +4432,16 @@ export class EnsembleV2Service {
       // the post-child wake-up barrier sees this idle even when `session.idle`
       // is not published to the server event bus.
       this.noteNativeSessionGeneration(event.sessionID, "idle")
-      void this.handleNativeSubagentIdle({
-        type: "session.idle",
-        data: { sessionID: event.sessionID, background },
-      }).catch(() => undefined).finally(() => this.notifyNativeSubagentWaiters(event.sessionID))
+      void (async () => {
+        await this.handleNativeSubagentIdle({
+          type: "session.idle",
+          data: { sessionID: event.sessionID, background },
+        })
+        // Ticket #199: the experimental hook can be the only idle surface, so
+        // the late-follow-up backstop runs here too; the durable marker makes a
+        // duplicate bus delivery harmless.
+        await this.reconcileLateNativeFollowUp(event.sessionID)
+      })().catch(() => undefined).finally(() => this.notifyNativeSubagentWaiters(event.sessionID))
     })
     const handle = this.hostRegistration(registration, this.idleHooks, ctx)
     this.idleHooks.set(ctx, handle)
@@ -5180,6 +5199,7 @@ export class EnsembleV2Service {
     finished: Subtask,
     replyText: string,
     children: Subtask[],
+    options: { lateNativeMessageID?: string } = {},
   ): Promise<Subtask | undefined> {
     const state = this.store.read()
     const workspace = state.workspaces[finished.workspaceID]
@@ -5203,13 +5223,34 @@ export class EnsembleV2Service {
       return undefined
     }
     const recipient = state.agents[route.to] ?? leader
-    const dispatchGroupID = resolveDispatchGroupID(finished, state.subtasks) ?? newDispatchGroupID()
-    const dispatchDepth = dispatchDepthFor(finished, state.subtasks) + 1
-    const key = completionWorkKey({ workspaceID: workspace.id, finishedTaskID: finished.id, recipientID: recipient.id })
+    // Ticket #199: the original completion key is already occupied by the
+    // first delivery. A late native answer gets its own keyed follow-up hop in
+    // the same dispatch group, and must never mint a new group or spend a hop.
+    const originalKey = completionWorkKey({ workspaceID: workspace.id, finishedTaskID: finished.id, recipientID: recipient.id })
+    const originalHop = options.lateNativeMessageID ? this.findWorkByKey(workspace.id, originalKey) : undefined
+    const dispatchGroupID = options.lateNativeMessageID
+      ? finished.dispatchGroupID ?? originalHop?.dispatchGroupID ?? resolveDispatchGroupID(finished, state.subtasks)
+      : resolveDispatchGroupID(finished, state.subtasks) ?? newDispatchGroupID()
+    const dispatchDepth = options.lateNativeMessageID
+      ? originalHop?.dispatchDepth ?? dispatchDepthFor(finished, state.subtasks) + 1
+      : dispatchDepthFor(finished, state.subtasks) + 1
+    const key = options.lateNativeMessageID
+      ? completionFollowUpWorkKey({
+          workspaceID: workspace.id,
+          finishedTaskID: finished.id,
+          recipientID: recipient.id,
+          nativeMessageID: options.lateNativeMessageID,
+        })
+      : originalKey
     const duplicate = this.findWorkByKey(workspace.id, key)
     if (duplicate) return duplicate
     const at = now()
-    const correlationID = correlationIDForKey("handoff", key)
+    const correlationID = options.lateNativeMessageID
+      ? originalHop?.handoff?.correlationID
+        ?? finished.handoff?.correlationID
+        ?? finished.turn?.correlationID
+        ?? correlationIDForKey("handoff", originalKey)
+      : correlationIDForKey("handoff", key)
     const content = replyText.trim() || "Work completed."
     const chain = [...prior, finisherID]
     // Ticket #73: the leader receives review work — who finished what with
@@ -6722,6 +6763,190 @@ export class EnsembleV2Service {
         run.state === "working" &&
         run.startedAt >= since,
     )
+  }
+
+  /** Ticket #199: the one live run that owns a native session, if any. */
+  private activeRunForSession(sessionID: string): Run | undefined {
+    if (!sessionID) return undefined
+    const runID = this.runBySession.get(sessionID)
+    if (!runID) return undefined
+    const run = this.activeRuns.get(runID)
+    return run?.status === "running" ? run : undefined
+  }
+
+  /**
+   * Ticket #199: reconcile a known native child's late answer after its parent
+   * run finalized. The idle is the trigger; no active run may own the session.
+   * This is a native-subagent follow-up path, never a general native bridge:
+   * an unmapped child, an unknown parent task, or a live child is skipped.
+   */
+  private async reconcileLateNativeFollowUp(parentSessionID: string): Promise<void> {
+    if (this.stopped || !parentSessionID) return
+    if (this.activeRunForSession(parentSessionID)) return
+    if (this.nativeLateReconciling.has(parentSessionID)) return
+    this.nativeLateReconciling.add(parentSessionID)
+    try {
+      const byTask = new Map<string, NativeSubagentRun[]>()
+      for (const run of this.store.nativeSubagents()) {
+        if (run.parentSessionID !== parentSessionID || !run.parentTaskID) continue
+        const bucket = byTask.get(run.parentTaskID)
+        if (bucket) bucket.push(run)
+        else byTask.set(run.parentTaskID, [run])
+      }
+      for (const [taskID, runs] of byTask) {
+        if (this.stopped) return
+        await this.reconcileLateNativeFollowUpForTask(parentSessionID, taskID, runs)
+      }
+    } finally {
+      this.nativeLateReconciling.delete(parentSessionID)
+    }
+  }
+
+  /**
+   * Ticket #199: append one late native answer to the group and delivery path.
+   * Only assistant text created after the child finished and after the task's
+   * existing result counts. The durable task marker plus the group row's
+   * native message id make repeated idles, duplicate host events, and restarts
+   * resolve the same row and follow-up hop. Never mirrors arbitrary chat.
+   */
+  private async reconcileLateNativeFollowUpForTask(
+    parentSessionID: string,
+    taskID: string,
+    runs: NativeSubagentRun[],
+  ): Promise<void> {
+    // A still-live child has not finished; its answer cannot be a follow-up.
+    if (runs.some((run) => run.state === "working")) return
+    // A cancelled record's finishedAt can be the service's synthetic cleanup
+    // time (restart, task-terminal, session delete), not the host child finish.
+    // It must not hide an answer that was written before that cleanup.
+    const childFinishedAt = runs.reduce(
+      (latest, run) => Math.max(latest, run.state === "cancelled" ? 0 : run.finishedAt ?? 0),
+      0,
+    )
+    const task = this.store.subtask(taskID)
+    if (!task) return
+    const workspace = this.store.workspace(task.workspaceID)
+    if (!workspace || workspace.archived || workspace.paused) return
+    // The backstop is only for a turn that finalized with a real result.
+    if (deriveWorkStatus(task, now()) !== "replied" || !task.resultMessageID || !task.assigneeID) return
+    const result = this.store.messages(task.workspaceID).find((message) => message.id === task.resultMessageID)
+    if (!result) return
+    const agent = this.store.agent(task.assigneeID)
+    if (!agent) return
+    const markers = task.lateNativeFollowUps ?? []
+    const lastMarkerAt = markers.reduce((latest, marker) => Math.max(latest, marker.at), 0)
+    // The result row's last settle time is the "existing result" boundary: the
+    // live row can be opened before the answer text was produced, so its
+    // creation time alone would re-mirror the wake-up answer #197 already used.
+    const resultSettledAt = result.updatedAt ?? task.finishedAt ?? result.createdAt
+    const after = Math.max(childFinishedAt, resultSettledAt, lastMarkerAt)
+    const boundary = this.nativeLateFollowUpBoundary(task)
+    const reconciled = new Set(markers.flatMap((marker) => marker.messageIDs))
+    let nativeMessages: any[]
+    try {
+      nativeMessages = listData(await this.ctx.session.context({ sessionID: parentSessionID }))
+    } catch {
+      this.logger?.event("debug", "host", "native.subagent.followup.skipped", {
+        parentSessionID,
+        parentTaskID: task.id,
+        reason: "context-unavailable",
+      })
+      return
+    }
+    if (this.stopped) return
+    const late = nativeLateFollowUps(nativeMessages, after, reconciled)
+      // A newer run on the same parent session owns its own answers. Bounding
+      // by that run's start keeps an older task from claiming a later turn as
+      // its late follow-up; a still-pending newer task does not bound yet.
+      .filter((item) => item.createdAt < boundary)
+    if (late.length === 0) return
+    const text = late.map((item) => item.text).join("\n").trim()
+    if (!isSubstantiveReply(text)) return
+    const primary = late[late.length - 1]!
+    const originalHop = this.originalCompletionHop(task)
+    const correlationID = originalHop?.handoff?.correlationID ?? task.handoff?.correlationID ?? task.turn?.correlationID
+    // A crash between the row append and the marker save still finds the
+    // durable row by its native message identity.
+    let row = this.store.messages(task.workspaceID).find(
+      (message) => message.nativeMessageID === primary.messageID,
+    )
+    if (!row) {
+      row = await this.appendMessage(workspace, {
+        author: "agent",
+        agentID: agent.id,
+        text,
+        kind: "text",
+        taskID: task.id,
+        correlationID,
+        nativeMessageID: primary.messageID,
+      })
+    }
+    let hop: Subtask | undefined
+    if (workspace.leaderID !== agent.id) {
+      hop = await this.ensureCompletionHandoff(
+        task,
+        text,
+        this.store.subtasks().filter((item) => item.parentID === task.id),
+        { lateNativeMessageID: primary.messageID },
+      )
+    }
+    if (this.stopped) return
+    const current = this.store.cloneSubtask(task.id)
+    if (!current) return
+    const markersAfter = [...(current.lateNativeFollowUps ?? [])]
+    if (!markersAfter.some((marker) => marker.nativeMessageID === primary.messageID)) {
+      markersAfter.push({
+        messageIDs: late.map((item) => item.messageID),
+        nativeMessageID: primary.messageID,
+        at: primary.createdAt,
+        messageRowID: row.id,
+        ...(hop ? { hopID: hop.id } : {}),
+      })
+    }
+    current.lateNativeFollowUps = markersAfter.slice(-NATIVE_LATE_FOLLOW_UP_LIMIT)
+    await this.store.saveSubtask(current)
+    this.noteWorkChanged(current)
+    // IDs, states, and counts only: the late answer never enters a log.
+    this.logger?.event("info", "host", "native.subagent.followup.reconciled", {
+      workspaceID: task.workspaceID,
+      parentSessionID,
+      parentTaskID: task.id,
+      dispatchGroupID: task.dispatchGroupID,
+      parentAgentID: agent.id,
+      childSessionIDs: runs.map((run) => run.childSessionID),
+      nativeMessageIDs: late.map((item) => item.messageID),
+      count: late.length,
+      messageRowID: row.id,
+      hopID: hop?.id,
+      reason: "late-native-followup",
+    })
+  }
+
+  /** Ticket #199: the original automatic completion hop for a finished task. */
+  private originalCompletionHop(task: Subtask): Subtask | undefined {
+    if (!task.assigneeID) return undefined
+    const workspace = this.store.workspace(task.workspaceID)
+    if (!workspace) return undefined
+    const key = completionWorkKey({ workspaceID: task.workspaceID, finishedTaskID: task.id, recipientID: workspace.leaderID })
+    return this.store.subtasks().find((item) => item.queueKey === key)
+  }
+
+  /**
+   * Ticket #199: no late-follow-up message may belong to a newer run on the
+   * same parent session. A newer task that already started bounds the older
+   * task's window; a merely created task does not, because its run starts
+   * after the late wake-up arrives.
+   */
+  private nativeLateFollowUpBoundary(task: Subtask): number {
+    if (!task.assigneeID) return Number.POSITIVE_INFINITY
+    const finishedAt = task.finishedAt ?? task.createdAt
+    let boundary = Number.POSITIVE_INFINITY
+    for (const item of this.store.subtasks()) {
+      if (item.id === task.id || item.workspaceID !== task.workspaceID || item.assigneeID !== task.assigneeID) continue
+      if (item.startedAt === undefined || item.startedAt <= finishedAt) continue
+      boundary = Math.min(boundary, item.startedAt)
+    }
+    return boundary
   }
 
   /**
