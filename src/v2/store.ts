@@ -15,6 +15,7 @@ import type {
   InitJob,
   Memory,
   Message,
+  NativeSubagentRun,
   PatchBatch,
   ScopeName,
   ScopeVersions,
@@ -221,6 +222,10 @@ export class V2Store {
     for (const { value } of await this.scanAll("v2/init/")) {
       const job = value as InitJob
       if (job?.id) this.state.initJobs[job.id] = job
+    }
+    for (const { value } of await this.scanAll("v2/native-subagent/")) {
+      const run = value as NativeSubagentRun
+      if (run?.childSessionID) this.state.nativeSubagents[run.childSessionID] = run
     }
     for (const { value } of await this.scanAll("v2/binding/")) {
       const binding = value as SessionBinding
@@ -485,6 +490,15 @@ export class V2Store {
       if (current?.state === "running" && job.state === "running") continue
       this.state.initJobs[job.id] = job
     }
+    for (const { value } of await this.scanAll("v2/native-subagent/")) {
+      const run = value as NativeSubagentRun
+      if (!run?.childSessionID) continue
+      const current = this.state.nativeSubagents[run.childSessionID]
+      // The owning process drives the live child; a staler storage view must
+      // not rewind a working record. Terminal storage states are adopted.
+      if (current?.state === "working" && run.state === "working") continue
+      this.state.nativeSubagents[run.childSessionID] = run
+    }
     const knownMessages = new Map<string, Set<string>>()
     for (const [workspaceID, list] of Object.entries(this.state.messages)) {
       const ids = new Set<string>()
@@ -653,6 +667,14 @@ export class V2Store {
 
   initJob(jobID: string): InitJob | undefined {
     return this.state.initJobs[jobID]
+  }
+
+  nativeSubagents(): NativeSubagentRun[] {
+    return Object.values(this.state.nativeSubagents)
+  }
+
+  nativeSubagent(childSessionID: string): NativeSubagentRun | undefined {
+    return this.state.nativeSubagents[childSessionID]
   }
 
   memories(): Memory[] {
@@ -1113,6 +1135,22 @@ export class V2Store {
     })
   }
 
+  async saveNativeSubagent(run: NativeSubagentRun): Promise<void> {
+    await this.write(async () => {
+      this.state.nativeSubagents[run.childSessionID] = run
+      await this.ctx.storage.set(`v2/native-subagent/${run.childSessionID}`, run)
+      await this.commit([{ entity: "nativeSubagent", op: "upsert", run: structuredClone(run) }])
+    })
+  }
+
+  async removeNativeSubagent(childSessionID: string): Promise<void> {
+    await this.write(async () => {
+      delete this.state.nativeSubagents[childSessionID]
+      await this.ctx.storage.remove(`v2/native-subagent/${childSessionID}`)
+      await this.commit([{ entity: "nativeSubagent", op: "remove", id: childSessionID }])
+    })
+  }
+
   /**
    * Direct storage re-read of one subtask row, bypassing the in-memory
    * snapshot. Used for claim fencing: after persisting a claim, the runner
@@ -1259,6 +1297,7 @@ export class V2Store {
       const subtaskIDs = Object.values(this.state.subtasks).filter((subtask) => subtask.workspaceID === workspaceID).map((subtask) => subtask.id)
       const dispatchGroupIDs = Object.values(this.state.dispatchGroups).filter((group) => group.workspaceID === workspaceID).map((group) => group.id)
       const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
+      const nativeSubagentIDs = Object.values(this.state.nativeSubagents).filter((run) => run.workspaceID === workspaceID).map((run) => run.childSessionID)
       const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
       const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
       const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
@@ -1271,6 +1310,7 @@ export class V2Store {
       for (const id of subtaskIDs) delete this.state.subtasks[id]
       for (const id of dispatchGroupIDs) delete this.state.dispatchGroups[id]
       for (const id of initJobIDs) delete this.state.initJobs[id]
+      for (const id of nativeSubagentIDs) delete this.state.nativeSubagents[id]
       for (const [key, binding] of Object.entries(this.state.bindings)) if (binding.workspaceID === workspaceID) delete this.state.bindings[key]
       for (const id of memoryIDs) delete this.state.memories[id]
       for (const id of approvalIDs) delete this.state.approvals[id]
@@ -1282,6 +1322,7 @@ export class V2Store {
       for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
       for (const id of dispatchGroupIDs) await this.ctx.storage.remove(`v2/dispatchgroup/${id}`)
       for (const id of initJobIDs) await this.ctx.storage.remove(`v2/init/${id}`)
+      for (const id of nativeSubagentIDs) await this.ctx.storage.remove(`v2/native-subagent/${id}`)
       for (const id of memoryIDs) await this.ctx.storage.remove(`v2/memory/${id}`)
       for (const id of approvalIDs) await this.ctx.storage.remove(`v2/approval/${id}`)
       for (const id of dmQueueIDs) await this.ctx.storage.remove(`v2/dmqueue/${id}`)
@@ -1296,6 +1337,7 @@ export class V2Store {
           ...subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
           ...dispatchGroupIDs.map((id) => ({ entity: "dispatchGroup" as const, op: "remove" as const, id })),
           ...initJobIDs.map((id) => ({ entity: "initJob" as const, op: "remove" as const, id })),
+          ...nativeSubagentIDs.map((id) => ({ entity: "nativeSubagent" as const, op: "remove" as const, id })),
           ...memoryIDs.map((id) => ({ entity: "memory" as const, op: "remove" as const, id })),
           ...approvalIDs.map((id) => ({ entity: "approval" as const, op: "remove" as const, id })),
           ...bindingAgentIDs.map((agentID) => ({ entity: "binding" as const, op: "remove" as const, workspaceID, agentID })),
@@ -1324,6 +1366,7 @@ export class V2Store {
     if (parts[1] === "subtask" && parts[2]) delete this.state.subtasks[parts[2]]
     if (parts[1] === "dispatchgroup" && parts[2]) delete this.state.dispatchGroups[parts[2]]
     if (parts[1] === "init" && parts[2]) delete this.state.initJobs[parts[2]]
+    if (parts[1] === "native-subagent" && parts[2]) delete this.state.nativeSubagents[parts[2]]
     if (parts[1] === "memory" && parts[2]) delete this.state.memories[parts[2]]
     if (parts[1] === "approval" && parts[2]) delete this.state.approvals[parts[2]]
     if (parts[1] === "binding" && parts[2] && parts[3]) delete this.state.bindings[`${parts[2]}:${parts[3]}`]
@@ -1393,7 +1436,7 @@ export class V2Store {
   async reset(): Promise<void> {
     await this.write(async () => {
       const previousPublished = this.lastPublishedVersion
-      for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/dispatchgroup/", "v2/init/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
+      for (const prefix of ["v2/agent/", "v2/workspace/", "v2/message/", "v2/subtask/", "v2/dispatchgroup/", "v2/init/", "v2/native-subagent/", "v2/binding/", "v2/memory/", "v2/approval/", "v2/dmqueue/", "v2/dm/"]) {
         await this.removePrefixNow(prefix)
       }
       await this.ctx.storage.remove("v2/meta")
