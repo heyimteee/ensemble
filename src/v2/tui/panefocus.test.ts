@@ -6,12 +6,16 @@ import {
   composeFromPane,
   cyclePaneFocus,
   enterPane,
+  focusForPaneToggle,
   leaveComposerToPane,
   leavePaneInteraction,
   movePaneFocus,
   paneOwnsFocus,
+  paneSideVisibility,
+  paneVisibilityFor,
   railSectionFocused,
   recoverPaneFocus,
+  togglePaneSide,
   visiblePanes,
   workCardsFocused,
   workPaneFocused,
@@ -139,4 +143,75 @@ test("ticket180: rail headings and chat border follow their own pane", () => {
   assert.equal(chatPaneFocused(focus("chat")), true)
   assert.equal(chatPaneFocused(focus("chat", "interact")), true)
   assert.equal(chatPaneFocused(focus("work")), false)
+})
+
+test("ticket183: durable side switches derive one per-pane visibility map", () => {
+  assert.deepEqual(paneSideVisibility(), { left: true, right: true }, "both columns open by default")
+  assert.deepEqual(paneSideVisibility({ left: false }), { left: false, right: true })
+  assert.deepEqual(paneSideVisibility({ right: false }), { left: true, right: false })
+  assert.deepEqual(
+    paneVisibilityFor({ left: true, right: true }),
+    { agents: true, workspaces: true, chat: true, work: true, approvals: true },
+  )
+  assert.deepEqual(
+    paneVisibilityFor({ left: false, right: true }),
+    { agents: false, workspaces: false, chat: true, work: true, approvals: true },
+    "the left switch closes both stacked sub-panes",
+  )
+  assert.deepEqual(
+    paneVisibilityFor({ left: true, right: false }),
+    { agents: true, workspaces: true, chat: true, work: false, approvals: false },
+    "the right switch closes Work and Approvals together",
+  )
+  assert.deepEqual(
+    paneVisibilityFor({ left: true, right: true }, { work: false }),
+    { agents: true, workspaces: true, chat: true, work: false, approvals: false },
+    "a DM keeps the right column state but has no Work pane",
+  )
+  assert.deepEqual(
+    paneVisibilityFor({ left: true, right: true }, { approvals: false }),
+    { agents: true, workspaces: true, chat: true, work: true, approvals: false },
+    "empty approvals close only the approvals sub-pane",
+  )
+})
+
+test("ticket183: toggling a side flips exactly one column", () => {
+  assert.deepEqual(togglePaneSide({ left: true, right: true }, "left"), { left: false, right: true })
+  assert.deepEqual(togglePaneSide({ left: false, right: true }, "left"), { left: true, right: true })
+  assert.deepEqual(togglePaneSide({ left: true, right: true }, "right"), { left: true, right: false })
+  assert.deepEqual(togglePaneSide({ left: true, right: false }, "right"), { left: true, right: true })
+})
+
+test("ticket183: closing a focused pane returns to chat, reopening selects the column", () => {
+  const leftClosed = paneVisibilityFor({ left: false, right: true })
+  assert.deepEqual(focusForPaneToggle(focus("agents", "interact"), "left", leftClosed), focus("chat"), "closing focused Agents returns to chat select")
+  assert.deepEqual(focusForPaneToggle(focus("workspaces"), "left", leftClosed), focus("chat"), "closing focused Workspaces returns to chat select")
+  assert.deepEqual(focusForPaneToggle(focus("chat"), "left", leftClosed), focus("chat"), "closing an unfocused side leaves chat alone")
+
+  const rightClosed = paneVisibilityFor({ left: true, right: false })
+  assert.deepEqual(focusForPaneToggle(focus("work", "interact"), "right", rightClosed), focus("chat"), "closing focused Work returns to chat select")
+  assert.deepEqual(focusForPaneToggle(focus("approvals"), "right", rightClosed), focus("chat"), "closing focused Approvals returns to chat select")
+  assert.deepEqual(focusForPaneToggle(focus("agents"), "right", rightClosed), focus("agents"), "closing the right side never moves the left focus")
+
+  assert.deepEqual(focusForPaneToggle(focus("chat"), "left", paneVisibilityFor({ left: true, right: true })), focus("agents"), "reopening the left selects Agents")
+  assert.deepEqual(focusForPaneToggle(focus("work"), "right", paneVisibilityFor({ left: true, right: true })), focus("work"), "reopening the right selects Work")
+  assert.deepEqual(focusForPaneToggle(focus("chat"), "right", paneVisibilityFor({ left: true, right: true })), focus("work"), "reopening the right selects Work")
+  assert.deepEqual(
+    focusForPaneToggle(focus("chat"), "right", paneVisibilityFor({ left: true, right: true }, { work: false })),
+    focus("chat"),
+    "a right column with no visible pane never steals focus",
+  )
+})
+
+test("ticket183: closed columns are skipped by movement and Tab cycles", () => {
+  const leftClosed = paneVisibilityFor({ left: false, right: true })
+  const rightClosed = paneVisibilityFor({ left: true, right: false })
+  const bothClosed = paneVisibilityFor({ left: false, right: false })
+  assert.deepEqual(movePaneFocus(focus("chat"), "left", { visible: leftClosed }), focus("chat"), "no left column to select")
+  assert.deepEqual(movePaneFocus(focus("chat"), "right", { visible: rightClosed }), focus("chat"), "no right column to select")
+  assert.deepEqual(cyclePaneFocus(focus("chat"), 1, leftClosed), focus("work"), "Tab skips closed Agents and Workspaces")
+  assert.deepEqual(cyclePaneFocus(focus("work"), 1, rightClosed), focus("agents"), "Tab skips a closed right column and wraps")
+  assert.deepEqual(cyclePaneFocus(focus("chat"), 1, bothClosed), focus("chat"), "only chat remains visible")
+  assert.deepEqual(visiblePanes(bothClosed), ["chat"])
+  assert.deepEqual(recoverPaneFocus(focus("work"), rightClosed), focus("chat"), "a hidden focused pane recovers to chat")
 })

@@ -25,7 +25,8 @@ rendered `name | role` without one label column, so separators did not align.
    function. `messageWidth` subtracts the rail and Work width and uses the same
    value as the transcript and composer. Breakpoints are ≥118 columns (full
    three panes), 96–117 (three panes with compact Work), and <96 (Work becomes
-   a right drawer toggled by the Work focus key or `F3`). The Work card design
+   a right drawer toggled by `Space b r`; ticket #183 made both column
+   switches durable). The Work card design
    is unchanged; only container width/height and the focus border adapt.
 
 2. **Rail is two panes, grouped by primary workspace.**

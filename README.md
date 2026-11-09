@@ -72,13 +72,13 @@ Visual, and Command; an unfocused editor shows no caret.
 | `Ctrl+G` | Leave the focused editor and set Normal |
 | `i` | Focus the composer or current text field in Insert |
 | `Space` | Leader key: which-key menu for create, edit, archive, delete, settings, approvals, pause/resume, init, native, delegate, reassign, retry, restart, cancel, leave, and help |
+| `Space b l` / `Space b r` | Toggle the left rail / right Work column at every width; visibility survives restarts |
 | `Space q` or `:q` | Leave Ensemble deliberately; the native prompt owns keys immediately, including `/`, and `F2` returns |
 | `/` | Search the transcript or filter the focused list |
 | `:` | Command line with completion and history |
 | `?` | Full, searchable keyboard help |
 | `n` / `N` | Next / previous search match |
 | `F2` | Return to Ensemble from a native session |
-| `F3` | Toggle the Work drawer below 96 columns |
 | `a` / `n` | New agent / new workspace |
 | `e` / `s` | Edit selection / agent settings |
 | `x` / `X` | Archive / delete the selection (destructive actions confirm) |
