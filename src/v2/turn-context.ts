@@ -56,7 +56,7 @@ export function ensembleTurnContext(input: TurnContextInput): string {
         .map((agent) => agent.name)
     : []
   const lines = [
-    `<ensemble_turn${attribute("agent", input.agent.name)}${attribute("role", input.agent.role)}${attribute("conversation", conversation)}${attribute("workspace", workspace?.name)}${attribute("directory", workspace?.directory)}>`,
+    `<ensemble_turn${attribute("agent", input.agent.name)}${attribute("conversation", conversation)}${attribute("workspace", workspace?.name)}${attribute("directory", workspace?.directory)}>`,
   ]
   if (workspace && conversation === "group") {
     lines.push(`Leader: ${leader ?? "unknown"}`)
