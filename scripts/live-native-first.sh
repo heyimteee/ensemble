@@ -145,8 +145,14 @@ live_log "native reconcile evidence: start=$START_COUNT reconnect=$RECONNECT_COU
 
 SHADOW_GAP=$(grep -c '"name": "shadow-mode-ingestion-and-comparison"' "$RESTART_OUT" || true)
 if [[ "$SHADOW_GAP" != "0" ]]; then
-  live_log "shadow-mode comparison is a recorded gap, not a pass: see $RESTART_OUT"
+  live_fail "shadow-mode ingestion/comparison recorded a gap: see $RESTART_OUT"
 fi
+SHADOW_COMPARE=$(grep -R -h 'native.shadow.compare' "$LIVE_STATE/ensemble/logs" 2>/dev/null | wc -l | tr -d ' ')
+[[ "$SHADOW_COMPARE" != "0" ]] || live_fail "the run never logged a native shadow comparison"
+if grep -R -qF "shadow-mode-fixture" "$LIVE_STATE/ensemble/logs" 2>/dev/null; then
+  live_fail "the service logs carried native prompt content"
+fi
+live_log "native shadow comparison rows logged: $SHADOW_COMPARE"
 
 if [[ -n "${ENSEMBLE_LIVE_ARTIFACTS:-}" ]]; then
   mkdir -p "$ENSEMBLE_LIVE_ARTIFACTS"

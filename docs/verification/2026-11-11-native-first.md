@@ -1,8 +1,10 @@
 # Native-first cutover verification (#227)
 
-Status: **Matrix executed. The cutover is not closeable yet: two acceptance
-blockers are open (#228 attachment size, #230 shadow mode) and one adoption
-follow-up was found (#229). #227 remains open.**
+Status: **Matrix executed.**
+Update 2026-11-11: #228 (attachment size) and #230 (shadow mode) are fixed;
+a rerun on `ticket/230-shadow-mode` passes main **65/65** and restart
+**16/16** with **0 gaps**. See [ticket #230 verification](2026-11-11-ticket-230.md).
+The original blocked-run record is preserved below; #229 remains a follow-up.
 Date: 2026-11-11
 Issue: [#227](https://github.com/heyimteee/ensemble/issues/227)
 Spec: [#209](https://github.com/heyimteee/ensemble/issues/209)

@@ -13038,3 +13038,282 @@ test("ticket228: a native prompt file with only inline data gets a positive boun
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+// ---- Ticket #230: nativeFirst shadow ingestion and comparison ----
+
+test("ticket230: shadow ingests invisibly, publishes nothing, and records a content-free comparison", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-230-shadow-"))
+  const { ctx, nativeSessions, emitted, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  ;(ctx.session as any).context = async ({ sessionID }: any) => ({
+    data: sessionID === "s_group"
+      ? [
+          { id: "m1", type: "user", content: [{ type: "text", text: "Shadow fixture" }], time: { created: 1 } },
+          { id: "m2", type: "assistant", content: [{ type: "text", text: "Shadow final answer." }], time: { created: 2 } },
+          { id: "m3", type: "idle" },
+        ]
+      : [],
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const diagnostic = async () => service.handlers().diagnostic({ directory })
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow" } })
+    const emittedBefore = emitted.length
+
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "Shadow fixture" } },
+    }, { id: "evt_230_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_230_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0 }, { id: "evt_230_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.delta", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, delta: "Shadow final" }, { id: "evt_230_delta", created: 103 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, text: "Shadow final answer." }, { id: "evt_230_ended", created: 104 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_230_done", created: 105 }))
+
+    await waitFor(async () => (await diagnostic()).native.shadow.comparisons === 1)
+    const diag = await diagnostic()
+    const row = diag.native.shadow.last[0]
+    assert.equal(diag.native.shadow.activeTurns, 0, "the shadow turn is cleared at settle")
+    assert.equal(diag.native.shadow.activeSessions, 0, "the shadow session is cleared at settle")
+    assert.equal(row.sessionID, "s_group")
+    assert.equal(row.inboxID, "m1")
+    assert.equal(row.conversationID, "w")
+    assert.equal(row.channelKind, "workspace")
+    assert.equal(row.phase, "replied")
+    assert.equal(row.expectedPhase, "replied")
+    assert.equal(row.phaseMatch, true)
+    assert.equal(row.textLength, "Shadow final answer.".length)
+    assert.match(row.textDigest, /^[a-f0-9]{32}$/)
+    assert.equal(row.visibleTextLength, "Shadow final answer.".length)
+    assert.equal(row.visibleTextDigest, row.textDigest)
+    assert.equal(row.textMatch, true)
+    assert.equal(row.visibleHasTurn, false)
+    assert.equal(row.plannedRoutes, 0)
+    assert.equal(row.visibleRoutes, 0)
+    assert.equal(row.routingMatch, true)
+    assert.equal(JSON.stringify(diag.native.shadow.last).includes("Shadow final answer."), false, "comparison rows carry no content")
+
+    const state = await snapshotFor(handlers, directory)
+    assert.equal(state.messages["w"], undefined, "shadow writes no visible message")
+    assert.equal(Object.keys(state.subtasks).length, 0, "shadow creates no visible turn")
+    const newEvents = emitted.slice(emittedBefore)
+    const entityChanges = newEvents
+      .filter((event) => event.name === "patches")
+      .flatMap((event) => Array.isArray(event.data?.entries) ? event.data.entries : [])
+    assert.equal(entityChanges.length, 0, "shadow publishes no durable entity patches")
+    assert.equal(newEvents.some((event) => event.name === "stream"), false, "shadow publishes no stream frames")
+
+    const logs = await service.handlers()["logs.recent"]({ directory, event: "native.shadow.compare", limit: 20 })
+    const entry = logs.entries.find((candidate: any) => candidate.inboxID === "m1") as any
+    assert.ok(entry, "the comparison is logged")
+    assert.equal(entry.cat, "native")
+    assert.equal(entry.phase, "replied")
+    assert.equal(entry.textLength, "Shadow final answer.".length)
+    assert.equal(typeof entry.text, "undefined")
+    assert.equal(JSON.stringify(entry).includes("Shadow final answer."), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket230: off does nothing, shadow compares invisibly, and on still cuts over", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-230-modes-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  ;(ctx.session as any).context = async () => ({
+    data: [
+      { id: "m20", type: "user", content: [{ type: "text", text: "Modes" }], time: { created: 1 } },
+      { id: "m21", type: "assistant", content: [{ type: "text", text: "Mode answer." }], time: { created: 2 } },
+      { id: "m22", type: "idle" },
+    ],
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const diagnostic = async () => service.handlers().diagnostic({ directory })
+  const emitTurn = (n: number) => {
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: `m${n}`,
+      item: { type: "user", delivery: "steer", payload: { text: `Modes ${n}` } },
+    }, { id: `evt_230_modes_enqueue_${n}`, created: n * 10 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: `evt_230_modes_start_${n}`, created: n * 10 + 1 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: `a${n}`, ordinal: 0 }, { id: `evt_230_modes_text_${n}`, created: n * 10 + 2 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: `a${n}`, ordinal: 0, text: "Mode answer." }, { id: `evt_230_modes_ended_${n}`, created: n * 10 + 3 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: `evt_230_modes_done_${n}`, created: n * 10 + 4 }))
+  }
+  try {
+    emitTurn(30)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal((await diagnostic()).native.shadow.comparisons, 0, "off never shadow-ingests")
+    let state = await snapshotFor(handlers, directory)
+    assert.equal(state.messages["w"], undefined)
+    assert.equal(Object.keys(state.subtasks).length, 0)
+
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow" } })
+    emitTurn(31)
+    await waitFor(async () => (await diagnostic()).native.shadow.comparisons === 1)
+    state = await snapshotFor(handlers, directory)
+    assert.equal(state.messages["w"], undefined, "shadow still writes no visible rows")
+    assert.equal(Object.keys(state.subtasks).length, 0)
+
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitTurn(32)
+    await waitFor(async () => {
+      const next = await snapshotFor(handlers, directory)
+      return (next.messages["w"] ?? []).some((message: any) => message.author === "agent")
+    })
+    state = await snapshotFor(handlers, directory)
+    assert.equal(state.messages["w"].length, 2, "on still produces the durable turn")
+    assert.equal(Object.values(state.subtasks).filter((task: any) => task.origin === "native").length, 1)
+    assert.equal((await diagnostic()).native.shadow.comparisons, 1, "shadow comparisons are bounded history, not visible state")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket230: shadow counts planned routes without creating peer work", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-230-routes-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  nativeSessions.set("s_b", { id: "s_b" })
+  await seedNativeWorkspace(ctx, directory, { a: "s_group", b: "s_b" })
+  ;(ctx.session as any).context = async () => ({
+    data: [
+      { id: "m40", type: "user", content: [{ type: "text", text: "Route to $B" }], time: { created: 1 } },
+      { id: "m41", type: "assistant", content: [{ type: "text", text: "Done $B" }], time: { created: 2 } },
+      { id: "m42", type: "idle" },
+    ],
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const diagnostic = async () => service.handlers().diagnostic({ directory })
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow" } })
+    const enqueue = nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m40",
+      item: { type: "user", delivery: "steer", payload: { text: "Route to $B" } },
+    })
+    emitEvent({ ...enqueue, id: "evt_230_route_enqueue", created: 100 })
+    emitEvent({ ...enqueue, id: "evt_230_route_enqueue_dup", created: 100 })
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_230_route_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m41", ordinal: 0 }, { id: "evt_230_route_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m41", ordinal: 0, text: "Done $B" }, { id: "evt_230_route_ended", created: 103 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_230_route_done", created: 104 }))
+
+    await waitFor(async () => (await diagnostic()).native.shadow.comparisons === 1)
+    const row = (await diagnostic()).native.shadow.last[0]
+    assert.equal(row.plannedUserRoutes, 1)
+    assert.equal(row.plannedFinalRoutes, 1)
+    assert.equal(row.plannedRoutes, 2, "the planner would route both the user and final mentions")
+    assert.equal(row.visibleRoutes, 0)
+    assert.equal(row.routingMatch, false, "the mismatch is recorded, not hidden")
+    const state = await snapshotFor(handlers, directory)
+    assert.equal(Object.keys(state.subtasks).length, 0, "shadow routes no peer turns")
+    assert.equal(state.messages["w"], undefined)
+    const logs = await service.handlers()["logs.recent"]({ directory, event: "native.route.created", limit: 20 })
+    assert.equal(logs.entries.length, 0, "shadow never admits a route")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket230: shadow state clears on settle, stop, and restart while comparisons stay bounded", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-230-shadow-lifecycle-"))
+  const { ctx, values, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  ;(ctx.session as any).context = async () => ({
+    data: [
+      { id: "m50", type: "user", content: [{ type: "text", text: "Lifecycle" }], time: { created: 1 } },
+      { id: "m51", type: "assistant", content: [{ type: "text", text: "Lifecycle answer." }], time: { created: 2 } },
+      { id: "m52", type: "idle" },
+    ],
+  })
+  const first = new EnsembleV2Service(ctx)
+  const stopFirst = await startServiceForTest(first, first.ctx)
+  let comparisons = 0
+  try {
+    await first.handlers().invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow" } })
+    for (let index = 0; index < 40; index++) {
+      const n = 100 + index
+      emitEvent(nativeEvent("session.inbox.enqueued", {
+        sessionID: "s_group",
+        inboxID: `m${n}`,
+        item: { type: "user", delivery: "steer", payload: { text: `Lifecycle ${n}` } },
+      }, { id: `evt_230_life_enqueue_${n}`, created: n }))
+      emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: `evt_230_life_start_${n}`, created: n }))
+      emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: `a${n}`, ordinal: 0 }, { id: `evt_230_life_text_${n}`, created: n }))
+      emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: `a${n}`, ordinal: 0, text: "Lifecycle answer." }, { id: `evt_230_life_ended_${n}`, created: n }))
+      emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: `evt_230_life_done_${n}`, created: n }))
+    }
+    await waitFor(async () => (await first.handlers().diagnostic({ directory })).native.shadow.comparisons >= 40)
+    const diag = await first.handlers().diagnostic({ directory })
+    comparisons = diag.native.shadow.comparisons
+    assert.equal(comparisons, 40)
+    assert.equal(diag.native.shadow.activeTurns, 0)
+    assert.equal(diag.native.shadow.activeSessions, 0)
+    assert.ok(diag.native.shadow.last.length <= 32, "comparison history is bounded")
+  } finally {
+    await stopFirst()
+  }
+
+  const second = new EnsembleV2Service(ctx)
+  const stopSecond = await startServiceForTest(second, second.ctx)
+  try {
+    const restarted = await second.handlers().diagnostic({ directory })
+    assert.equal(restarted.state.settings.nativeFirst, "shadow")
+    assert.equal(restarted.native.shadow.comparisons, 0, "restart clears shadow comparisons")
+    assert.equal(restarted.native.shadow.activeTurns, 0)
+    assert.equal(restarted.native.shadow.activeSessions, 0)
+    assert.equal(Object.values(restarted.state.subtasks).filter((task: any) => task.origin === "native").length, 0)
+    void values
+  } finally {
+    await stopSecond()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket230: shadow skips internal service prompts instead of comparing them", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-230-shadow-internal-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  const diagnostic = async () => service.handlers().diagnostic({ directory })
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m60",
+      item: { type: "user", delivery: "steer", payload: { text: "internal prompt", metadata: { "ensemble.internal": true } } },
+    }, { id: "evt_230_internal_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_230_internal_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m61", ordinal: 0 }, { id: "evt_230_internal_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m61", ordinal: 0, text: "internal answer" }, { id: "evt_230_internal_ended", created: 103 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_230_internal_done", created: 104 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const diag = await diagnostic()
+    assert.equal(diag.native.shadow.comparisons, 0)
+    assert.equal(diag.native.shadow.activeTurns, 0)
+    assert.equal(diag.native.shadow.activeSessions, 0)
+    const state = await snapshotFor(handlers, directory)
+    assert.equal(state.messages["w"], undefined)
+    assert.equal(Object.keys(state.subtasks).length, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

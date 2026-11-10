@@ -639,28 +639,48 @@ async function restart() {
 
   // --- shadow-mode contract ----------------------------------------------
   await invoke("settings.update", { nativeFirst: "shadow" })
-  const shadowSnapshot = await state()
+  const shadowBefore = await state()
   const shadowBinding = await invoke("agent.sessionBinding", { agentID: saved.leadID, workspaceID: saved.workspaceID, conversation: "workspace" })
-  check("shadow setting is accepted", shadowSnapshot.settings.nativeFirst === "shadow")
-  check("shadow reports its mode", shadowBinding.mode === "shadow")
+  check(
+    "shadow setting and binding report the shadow mode",
+    shadowBefore.settings.nativeFirst === "shadow" && shadowBinding.mode === "shadow",
+  )
   const shadowMarker = "shadow-mode-fixture"
   const shadowInbox = await promptNative(saved.groupSessionID, shadowMarker)
   if (typeof client.session.wait === "function") await client.session.wait({ sessionID: saved.groupSessionID }).catch(() => undefined)
   await sleep(1500)
-  const shadowAfter = await state()
-  const shadowTurn = nativeTask(shadowAfter, saved.groupSessionID, shadowInbox.id)
-  const shadowRow = shadowTurn ? messageByID(shadowAfter, saved.workspaceChannel, shadowTurn.resultMessageID) : undefined
+  const shadowDiag = await diagnostic()
+  const shadowAfter = shadowDiag.state
+  const shadowRows = shadowDiag.native?.shadow?.last ?? []
+  const shadowComparison = shadowRows.find((row) => row.inboxID === shadowInbox.id)
   const shadowOutcome = {
-    ingested: Boolean(shadowTurn),
-    visiblePathUnchanged: shadowOutcomeVisiblePath(shadowAfter, saved),
-    comparisonRows: Boolean(shadowTurn && shadowRow),
+    ingested: Boolean(shadowComparison) && (shadowDiag.native?.shadow?.comparisons ?? 0) > 0,
+    visiblePathUnchanged: shadowOutcomeVisiblePath(shadowBefore, shadowAfter, saved, shadowInbox.id),
+    comparisonRows: Boolean(
+      shadowComparison
+      && shadowComparison.textLength > 0
+      && /^[a-f0-9]{32}$/.test(String(shadowComparison.textDigest ?? ""))
+      && ["replied", "failed", "interrupted", "cancelled"].includes(shadowComparison.phase),
+    ),
+    phase: shadowComparison?.phase,
+    textLength: shadowComparison?.textLength,
+    plannedRoutes: shadowComparison?.plannedRoutes,
   }
-  gaps.push({
-    name: "shadow-mode-ingestion-and-comparison",
-    observed: shadowOutcome,
-    expected: "shadow ingests without changing the visible path and compares final text, turn state, and routing outcomes",
-    note: "nativeFirst=shadow is currently identical to off; no shadow comparison path is implemented",
-  })
+  const shadowOk = shadowOutcome.ingested && shadowOutcome.visiblePathUnchanged && shadowOutcome.comparisonRows
+  check(
+    "shadow ingests, compares, and leaves the visible path unchanged",
+    shadowOk,
+    JSON.stringify(shadowOutcome),
+  )
+  if (!shadowOk) {
+    gaps.push({
+      name: "shadow-mode-ingestion-and-comparison",
+      observed: shadowOutcome,
+      expected: "shadow ingests without changing the visible path and records a final-text/phase/routing comparison row",
+      note: "#230 shadow ingestion or comparison did not produce the required observation",
+    })
+  }
+  metrics.shadow = shadowOutcome
   await invoke("settings.update", { nativeFirst: "on" })
   metrics.restart = {
     nativeTurns: nativeTurns.length,
@@ -674,11 +694,17 @@ async function restart() {
   stateFileData.phase = "restart"
 }
 
-function shadowOutcomeVisiblePath(snapshot, saved) {
-  // The current release keeps the pre-cutover visible path under shadow. The
-  // check records that no native turn was created; it does not assert a
-  // comparison that the product does not yet run.
-  return snapshot.settings.nativeFirst === "shadow"
+function visibleMessageCount(snapshot) {
+  return Object.values(snapshot.messages ?? {}).reduce((total, list) => total + (Array.isArray(list) ? list.length : 0), 0)
+}
+
+function shadowOutcomeVisiblePath(before, after, saved, inboxID) {
+  // The pre-cutover visible path must be byte-for-byte unchanged: same mode,
+  // no durable native turn for the prompt, and no message/subtask growth.
+  return after.settings.nativeFirst === "shadow"
+    && !nativeTask(after, saved.groupSessionID, inboxID)
+    && Object.keys(after.subtasks ?? {}).length === Object.keys(before.subtasks ?? {}).length
+    && visibleMessageCount(after) === visibleMessageCount(before)
 }
 
 try {

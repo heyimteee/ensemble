@@ -106,6 +106,39 @@ const nativeSync = {
   additionalProperties: false,
 }
 
+/** Ticket #230: one content-free shadow comparison row. */
+const nativeShadowComparison = {
+  type: "object",
+  properties: {
+    sessionID: { type: "string" },
+    turnID: { type: "string" },
+    inboxID: { type: "string" },
+    conversationID: { type: "string" },
+    channelKind: { type: "string", enum: ["workspace", "direct", "home"] },
+    phase: { type: "string", enum: ["queued", "working", "retrying", "replied", "failed", "cancelled", "interrupted"] },
+    expectedPhase: { type: "string", enum: ["queued", "working", "retrying", "replied", "failed", "cancelled", "interrupted"] },
+    phaseMatch: { type: "boolean" },
+    textLength: { type: "number" },
+    textDigest: { type: "string" },
+    visibleTextLength: { type: "number" },
+    visibleTextDigest: { type: "string" },
+    visibleHasTurn: { type: "boolean" },
+    textMatch: { type: "boolean" },
+    plannedUserRoutes: { type: "number" },
+    plannedFinalRoutes: { type: "number" },
+    plannedRoutes: { type: "number" },
+    visibleRoutes: { type: "number" },
+    routingMatch: { type: "boolean" },
+    at: { type: "number" },
+  },
+  required: [
+    "sessionID", "turnID", "inboxID", "conversationID", "channelKind", "phase", "expectedPhase", "phaseMatch",
+    "textLength", "textDigest", "visibleHasTurn", "textMatch", "plannedUserRoutes", "plannedFinalRoutes",
+    "plannedRoutes", "visibleRoutes", "routingMatch", "at",
+  ],
+  additionalProperties: false,
+}
+
 const patchFields = {
   epoch: { type: "number" },
   from: { type: "number" },
@@ -408,8 +441,19 @@ export const EnsembleV2Rpc = Rpc.define({
                 required: ["maxPasses", "turns"],
                 additionalProperties: false,
               },
+              shadow: {
+                type: "object",
+                properties: {
+                  activeTurns: { type: "number" },
+                  activeSessions: { type: "number" },
+                  comparisons: { type: "number" },
+                  last: { type: "array", items: nativeShadowComparison },
+                },
+                required: ["activeTurns", "activeSessions", "comparisons", "last"],
+                additionalProperties: false,
+              },
             },
-            required: ["sync", "watchdog"],
+            required: ["sync", "watchdog", "shadow"],
             additionalProperties: false,
           },
           clones: {

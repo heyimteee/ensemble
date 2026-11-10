@@ -6,6 +6,7 @@ import {
   NATIVE_INTERNAL_PROMPT_METADATA,
   nativeAssistantMessageID,
   nativeContextAnswer,
+  nativeContextAnswerExact,
   nativeContextTurnAnswer,
   nativeContextTurnGroups,
   nativeContextTurnSettled,
@@ -78,6 +79,15 @@ test("ticket215: context reconciliation prefers recorded assistant ids", () => {
   assert.equal(nativeContextAnswer(messages, { inboxID: "m1" }), "first answer")
   assert.equal(nativeContextAnswer(messages, {}), "second answer")
   assert.equal(nativeContextAnswer([{ id: "m1", type: "idle" }]), undefined)
+})
+
+test("ticket230: exact context comparison preserves trailing host whitespace", () => {
+  const messages = [
+    { id: "m1", type: "user", content: [{ type: "text", text: "question" }] },
+    { id: "m2", type: "assistant", content: [{ type: "text", text: "answer\n" }] },
+  ]
+  assert.equal(nativeContextAnswer(messages, { inboxID: "m1" }), "answer")
+  assert.equal(nativeContextAnswerExact(messages, { inboxID: "m1" }), "answer\n")
 })
 
 test("ticket217: interruption reasons distinguish cancellation from needs-you", () => {

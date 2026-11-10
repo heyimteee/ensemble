@@ -61,9 +61,9 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   an attachment prompt, session adoption, retry, user interruption, Work
   history paging and a fresh reload, rollback to `toolSurface: "legacy"`, a
   full host restart with post-restart ingestion, and latency/token metrics.
-  The restart phase records the `nativeFirst: "shadow"` contract; while #230 is
-  open it reports a gap instead of a pass. The scenario exits non-zero while
-  the attachment size check (#228) or shadow gap is open.
+  The restart phase asserts the `nativeFirst: "shadow"` contract: shadow
+  ingestion, a content-free comparison row, and an unchanged visible path. The
+  scenario fails on any recorded shadow gap or prompt content in service logs.
 - `npm run test:live:subagent`: ticket #188's real native-subagent probe. The
   isolated OpenCode 2.2.6 host runs the worktree plugin against the fake
   provider, then an Ensemble agent's fake turn calls the host's built-in
