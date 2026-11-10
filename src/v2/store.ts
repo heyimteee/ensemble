@@ -374,6 +374,7 @@ export class V2Store {
       const legacyEntries = await this.scanAll("v2/dm/")
       if (legacyEntries.length === 0) return { channels: 0, backfilled: 0, removed: 0 }
       const byChannel = new Map<Id, { workspaceKey: Id; agentID: Id; messages: ChatMessage[] }>()
+      const removable: string[] = []
       for (const { key, value } of legacyEntries) {
         const parts = key.split("/")
         const workspaceKey = parts[2]
@@ -384,7 +385,11 @@ export class V2Store {
         const entry = byChannel.get(channel) ?? { workspaceKey, agentID, messages: [] }
         entry.messages.push({ ...message })
         byChannel.set(channel, entry)
+        removable.push(key)
       }
+      // Leave a malformed legacy key in place rather than deleting a row that
+      // could not be mapped to a channel.
+      if (byChannel.size === 0) return { channels: 0, backfilled: 0, removed: 0 }
       const changes: EntityChange[] = []
       let backfilled = 0
       let removed = 0
@@ -428,7 +433,7 @@ export class V2Store {
         backfilled += added
       }
       // Phase 2 runs only after every channel row above is durable.
-      for (const { key } of legacyEntries) {
+      for (const key of removable) {
         await this.ctx.storage.remove(key)
         removed++
       }

@@ -196,17 +196,21 @@ test("ticket226: migration backfills pre-channel direct rows in order with attac
     id: "dm_new", workspaceID: "home", channel: directMessageChannel("a"), seq: 9,
     author: "user", text: "third", kind: "text", createdAt: 30,
   })
+  // A malformed legacy key is left alone rather than deleted unmigrated.
+  ctx.values.set("v2/dm/broken", { text: "unmapped" })
   const store = new V2Store(ctx)
   await store.load()
 
   const migrated = await store.migrateLegacyDirectTranscripts()
 
   assert.deepEqual(migrated, { channels: 1, backfilled: 2, removed: 3 })
+  assert.deepEqual(ctx.values.get("v2/dm/broken"), { text: "unmapped" })
   const rows = store.messages(directMessageChannel("a"))
   assert.deepEqual(rows.map((row) => row.text), ["first", "second", "third"])
   assert.deepEqual(rows.map((row) => row.seq), [1, 2, 3])
   assert.deepEqual(rows[1]!.attachments, [{ id: "att_1", name: "shot.png", mime: "image/png", size: 12, kind: "image" }])
-  assert.equal((await (ctx.storage.scan({ prefix: "v2/dm/" }) as any)).entries.length, 0, "the legacy store is emptied only after the channel rows are durable")
+  const remainingLegacy = await (ctx.storage.scan({ prefix: "v2/dm/" }) as any)
+  assert.deepEqual(remainingLegacy.entries.map((entry: any) => entry.key), ["v2/dm/broken"], "only mapped legacy rows are removed")
 
   // A reload sees the same durable transcript with no duplicate or lost line.
   const reloaded = new V2Store(ctx)
