@@ -33,6 +33,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   const instructions: Array<{ sessionID: string; key: string; value: string }> = []
   const modelSwitches: Array<{ sessionID: string; model: any }> = []
   const createdSessionIDs: string[] = []
+  const createdSessionInputs: any[] = []
   const nativeSessions = new Map<string, any>()
   let sessions = 0
   const handlers: Partial<Handlers> = {}
@@ -81,9 +82,10 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     },
     session: {
       hook: async () => ({ dispose: async () => undefined }),
-      create: async ({ title }: any) => {
+      create: async ({ title, ...input }: any) => {
         const id = `session_${++sessions}`
         createdSessionIDs.push(id)
+        createdSessionInputs.push({ ...input, title })
         nativeSessions.set(id, { id, title })
         return { data: { id, title } }
       },
@@ -127,7 +129,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     skill: { list: async (): Promise<any[]> => [] },
     event,
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, modelSwitches, createdSessionIDs, nativeSessions, tools, emitted, emitEvent }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, modelSwitches, createdSessionIDs, createdSessionInputs, nativeSessions, tools, emitted, emitEvent }
 }
 
 /** Shared fixtures for tests that need durable work without exercising setup. */
@@ -8668,6 +8670,490 @@ test("ticket213: a direct rebind moves the reverse index and keeps the retired s
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+/** Ticket #214: a workspace member with a group and home session but no direct binding yet. */
+async function seedDirectChat(
+  ctx: any,
+  directory: string,
+  homeDirectory: string,
+): Promise<void> {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory })
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({
+    workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace",
+    directory, agentVersion: 1, updatedAt: 1,
+  })
+}
+
+test("ticket214: workspace direct chat owns a session in the workspace directory, distinct from the group session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-workspace-direct-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-home-"))
+  const { ctx, nativeSessions, createdSessionInputs } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedDirectChat(ctx, directory, home)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(context.ok, true)
+    assert.notEqual(context.result.sessionID, "s_group", "direct chat never borrows the group session")
+    assert.equal(context.result.directory, directory, "the direct session keeps workspace file access")
+    assert.equal(context.result.conversation.kind, "direct")
+    assert.equal(context.result.conversation.context, "workspace")
+    assert.equal(context.result.conversation.workspaceName, "site")
+    assert.equal(context.result.conversation.sharedSession, false)
+
+    const created = createdSessionInputs.at(-1)
+    assert.equal(created?.location?.directory, directory, "the host session is created in the workspace directory")
+
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.bindings["w:a"].sessionID, "s_group", "the group binding is untouched")
+    const direct = snapshot.state.bindings["dm:a:w"]
+    assert.equal(direct.kind, "direct")
+    assert.equal(direct.sessionID, context.result.sessionID)
+    assert.equal(direct.directory, directory)
+
+    const again = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(again.result.sessionID, context.result.sessionID, "reopening direct chat reuses its own session")
+    assert.equal(createdSessionInputs.length, 1, "one direct session for one conversation")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: direct chat outside a workspace uses the home-direct session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-home-direct-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-home-dir-"))
+  const { ctx, prompts } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    assert.equal(context.result.directory, home)
+    assert.equal(context.result.conversation.kind, "home")
+    assert.equal(context.result.conversation.context, "home")
+    assert.equal(context.result.conversation.workspaceID, undefined)
+    assert.equal(context.result.conversation.sharedSession, false)
+
+    const snapshot = await handlers.snapshot({ directory })
+    assert.deepEqual(Object.keys(snapshot.state.bindings), ["home:a"])
+    assert.equal(snapshot.state.bindings["home:a"].kind, "home")
+
+    const sent = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "Private note" } })
+    assert.equal(sent.result.queued, false)
+    assert.equal(prompts.at(-1).sessionID, context.result.sessionID)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: membership changes switch direct context without moving or reusing either session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-membership-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-membership-home-"))
+  const { ctx, nativeSessions, movedSessions } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  await seed.saveAgent({ ...novaAgent(), id: "b", name: "Bob", homeDirectory: home })
+  await seed.saveWorkspace({ ...siteWorkspace(directory), memberIDs: ["a", "b"], leaderID: "b" })
+  await seed.saveBinding({
+    workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace",
+    directory, agentVersion: 1, updatedAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const joined = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(joined.result.conversation.kind, "direct")
+    const directSession = joined.result.sessionID
+
+    await handlers.invoke({ directory, action: "workspace.update", payload: { id: "w", memberIDs: ["b"] } })
+    const left = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(left.result.conversation.kind, "home", "a former member falls back to the home context")
+    assert.equal(left.result.directory, home)
+    assert.notEqual(left.result.sessionID, directSession)
+    assert.notEqual(left.result.sessionID, "s_group")
+
+    const afterLeave = await handlers.snapshot({ directory })
+    assert.equal(afterLeave.state.bindings["dm:a:w"].sessionID, directSession, "the workspace-direct session is never retargeted")
+    assert.equal(afterLeave.state.bindings["w:a"].sessionID, "s_group", "the group session survives the membership change")
+
+    await handlers.invoke({ directory, action: "workspace.update", payload: { id: "w", memberIDs: ["a", "b"] } })
+    const rejoined = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(rejoined.result.conversation.kind, "direct")
+    assert.equal(rejoined.result.sessionID, directSession, "rejoining reuses the conversation's own session")
+    assert.deepEqual(movedSessions, [], "switching conversations never moves a session")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: group and direct conversations keep separate sessions, messages, and work state", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-isolation-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-isolation-home-"))
+  const { ctx, nativeSessions, prompts } = fakeContext()
+  for (const sessionID of ["s_group", "s_direct", "s_home"]) nativeSessions.set(sessionID, { id: sessionID })
+  ;(ctx.session as any).context = async ({ sessionID }: any) => ({
+    data: [{ type: "assistant", time: { created: 1 }, content: [{ type: "text", text: sessionID === "s_group" ? "GROUP NATIVE" : "DIRECT NATIVE" }] }],
+  })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_direct", kind: "direct", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveBinding({ workspaceID: "home", agentID: "a", sessionID: "s_home", kind: "home", directory: home, agentVersion: 1, updatedAt: 1 })
+  await seed.appendMessage("w", { id: "m_group", author: "user", text: "GROUP CHANNEL", kind: "text", createdAt: 10 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(context.result.sessionID, "s_direct")
+    const texts = (context.result.messages as any[]).map((message) => message.text)
+    assert.ok(texts.includes("DIRECT NATIVE"), "the direct surface reads its own native context")
+    assert.ok(!texts.includes("GROUP NATIVE"), "group native context never leaks into direct chat")
+    assert.ok(!texts.includes("GROUP CHANNEL"), "group messages never leak into direct chat")
+
+    const sent = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "DIRECT LINE" } })
+    assert.equal(sent.result.queued, false)
+    assert.equal(prompts.at(-1).sessionID, "s_direct", "direct prompts target the direct session")
+
+    const snapshot = await handlers.snapshot({ directory })
+    assert.deepEqual(snapshot.state.messages["w"].map((message: any) => message.text), ["GROUP CHANNEL"])
+    assert.ok(snapshot.state.messages["dm:a:w"].some((message: any) => message.text === "DIRECT LINE"))
+    assert.deepEqual(Object.keys(snapshot.state.subtasks), [], "a direct message mints no group turn")
+    assert.equal(snapshot.state.bindings["w:a"].sessionID, "s_group")
+    assert.equal(snapshot.state.bindings["home:a"].sessionID, "s_home")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: a busy group turn does not block or queue direct chat", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-group-busy-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-group-busy-home-"))
+  const { ctx, nativeSessions, prompts } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  await seedDirectChat(ctx, directory, home)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "Group work" } })
+    await waitFor(async () => prompts.some((prompt) => prompt.sessionID === "s_group"))
+
+    const sent = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "Private work" } })
+    assert.equal(sent.result.queued, false, "the group turn holds only the group session")
+    const directPrompt = prompts.at(-1)
+    assert.notEqual(directPrompt.sessionID, "s_group")
+    const snapshot = await handlers.snapshot({ directory })
+    assert.deepEqual(Object.keys(snapshot.state.dmQueue), [], "nothing is parked behind the group turn")
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(context.result.busy, true, "the direct turn is busy on its own session")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: workspace direct queueing, send, and flush stay on the direct session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-direct-busy-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-direct-busy-home-"))
+  const { ctx, nativeSessions, prompts } = fakeContext()
+  for (const sessionID of ["s_group", "s_direct"]) nativeSessions.set(sessionID, { id: sessionID })
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 200)) }
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_direct", kind: "direct", directory, agentVersion: 1, updatedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const first = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "First" } })
+    assert.equal(first.result.queued, false)
+    const queued = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "While busy" } })
+    assert.equal(queued.result.queued, true)
+    const during = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(during.result.sessionID, "s_direct")
+    assert.equal(during.result.busy, true)
+    assert.equal(during.result.queued, 1)
+    const visible = (during.result.messages as any[]).filter((message) => message.role === "user")
+    assert.deepEqual(visible.map((message) => message.text), ["First", "While busy"])
+    assert.equal(visible[1].queued, true)
+
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.dmQueue).every((entry: any) => entry.status === "sent")
+    }, 4000)
+    const sentPrompts = prompts.filter((prompt) => prompt.sessionID === "s_direct")
+    assert.deepEqual(sentPrompts.map((prompt) => prompt.text), ["First", "While busy"], "flush targets the direct session")
+    assert.deepEqual(prompts.filter((prompt) => prompt.sessionID === "s_group"), [], "the group session never receives direct text")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: a group turn settling never flushes the direct queue into a busy direct session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-flush-guard-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-flush-guard-home-"))
+  const { ctx, nativeSessions, prompts } = fakeContext()
+  for (const sessionID of ["s_group", "s_direct"]) nativeSessions.set(sessionID, { id: sessionID })
+  ;(ctx.session as any).wait = async ({ sessionID }: any) => {
+    await new Promise((resolve) => setTimeout(resolve, sessionID === "s_group" ? 5 : 300))
+  }
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_direct", kind: "direct", directory, agentVersion: 1, updatedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "First" } })
+    const queued = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "While busy" } })
+    assert.equal(queued.result.queued, true)
+
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: "w", text: "Group work" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.state === "replied")
+    })
+    const during = await handlers.snapshot({ directory })
+    assert.equal(during.state.dmQueue[queued.result.id].status, "queued", "the direct session still owns its queue")
+    assert.deepEqual(prompts.filter((prompt) => prompt.sessionID === "s_direct").map((prompt) => prompt.text), ["First"])
+
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return next.state.dmQueue[queued.result.id]?.status === "sent"
+    }, 4000)
+    assert.deepEqual(prompts.filter((prompt) => prompt.sessionID === "s_direct").map((prompt) => prompt.text), ["First", "While busy"])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: nativeFirst off and shadow keep the old direct selection and on rolls back cleanly", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-flag-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-flag-home-"))
+  const { ctx, nativeSessions, prompts, createdSessionIDs } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedDirectChat(ctx, directory, home)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const legacy = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(legacy.result.sessionID, "s_group", "off keeps the pre-cutover selection")
+    assert.equal(legacy.result.conversation.kind, "workspace")
+    assert.equal(legacy.result.conversation.sharedSession, true, "the label reports the shared rollback session")
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "Off path" } })
+    assert.equal(prompts.at(-1).sessionID, "s_group")
+
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow" } })
+    const shadow = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(shadow.result.sessionID, "s_group", "shadow does not change the visible path")
+    assert.equal(createdSessionIDs.length, 0)
+
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const cut = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.notEqual(cut.result.sessionID, "s_group")
+    assert.equal(cut.result.conversation.kind, "direct")
+    assert.equal(cut.result.conversation.sharedSession, false)
+    assert.equal(createdSessionIDs.length, 1)
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "On path" } })
+    assert.equal(prompts.at(-1).sessionID, cut.result.sessionID)
+
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "off" } })
+    const rolledBack = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(rolledBack.result.sessionID, "s_group", "rollback returns to the old selection")
+    await waitFor(async () => !(await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })).result.busy)
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", workspaceID: "w", text: "Rolled back" } })
+    assert.equal(prompts.at(-1).sessionID, "s_group")
+    const stored = await handlers.snapshot({ directory })
+    assert.equal(stored.state.bindings["dm:a:w"].sessionID, cut.result.sessionID, "rollback never deletes the direct binding")
+
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const resumed = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(resumed.result.sessionID, cut.result.sessionID, "re-enabling reuses the direct session")
+    assert.equal(createdSessionIDs.length, 1, "rollback and resume never fork the direct session")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: a permission on the direct session never posts into the group conversation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-permission-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-permission-home-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  for (const sessionID of ["s_group", "s_direct"]) nativeSessions.set(sessionID, { id: sessionID })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_direct", kind: "direct", directory, agentVersion: 1, updatedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    emitEvent({ type: "permission.asked", data: { sessionID: "s_direct", id: "perm_direct", action: "read", resources: ["notes.txt"] } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.approvals).some((approval: any) => approval.status === "pending" && approval.kind === "native")
+    })
+    const snapshot = await handlers.snapshot({ directory })
+    assert.deepEqual(snapshot.state.messages["w"] ?? [], [], "direct-session activity stays out of the group transcript")
+    const approval = Object.values(snapshot.state.approvals).find((row: any) => row.kind === "native") as any
+    assert.equal(approval.workspaceID, undefined, "the approval carries no group channel")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: moving a home direct session into a workspace targets the direct conversation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-move-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-move-home-"))
+  const { ctx, nativeSessions, movedSessions } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const homeChat = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    const homeSession = homeChat.result.sessionID
+    nativeSessions.set(homeSession, { id: homeSession })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: ["a"], leaderID: "a" } })
+
+    const moved = await handlers.invoke({ directory, action: "agent.moveHome", payload: { agentID: "a", workspaceID: workspace.result.id } })
+    assert.equal(moved.result.moved, true)
+    assert.equal(movedSessions.length, 1)
+    assert.equal(movedSessions[0]!.sessionID, homeSession)
+    assert.equal(movedSessions[0]!.directory, directory)
+
+    const afterMove = await handlers.snapshot({ directory })
+    assert.equal(afterMove.state.bindings["home:a"], undefined)
+    assert.equal(afterMove.state.bindings[`${workspace.result.id}:a`], undefined, "the group conversation gains no binding")
+    const direct = afterMove.state.bindings[`dm:a:${workspace.result.id}`]
+    assert.equal(direct.kind, "direct")
+    assert.equal(direct.sessionID, homeSession)
+
+    const directChat = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: workspace.result.id } })
+    assert.equal(directChat.result.conversation.kind, "direct")
+    assert.equal(directChat.result.sessionID, homeSession)
+
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.result.id, text: "Group work" } })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Boolean(next.state.bindings[`${workspace.result.id}:a`]?.sessionID)
+    })
+    const grouped = await handlers.snapshot({ directory })
+    assert.notEqual(grouped.state.bindings[`${workspace.result.id}:a`].sessionID, homeSession, "group chat creates its own session")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: a busy home direct session is never moved into a workspace", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-move-busy-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-move-busy-home-"))
+  const { ctx, nativeSessions, movedSessions } = fakeContext()
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 300)) }
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const homeChat = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    nativeSessions.set(homeChat.result.sessionID, { id: homeChat.result.sessionID })
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "Hold the session" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: ["a"], leaderID: "a" } })
+    const moved = await handlers.invoke({ directory, action: "agent.moveHome", payload: { agentID: "a", workspaceID: workspace.result.id } })
+    assert.equal(moved.ok, false)
+    assert.equal(moved.error?.code, "session_busy")
+    assert.deepEqual(movedSessions, [])
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.bindings["home:a"].sessionID, homeChat.result.sessionID)
+    assert.equal(snapshot.state.bindings[`dm:a:${workspace.result.id}`], undefined)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket214: parallel workspace direct opens create only one direct session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-214-parallel-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-214-parallel-home-"))
+  const { ctx, nativeSessions, createdSessionIDs } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedDirectChat(ctx, directory, home)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    await Promise.all([
+      handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } }),
+      handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } }),
+      handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } }),
+    ])
+    assert.equal(createdSessionIDs.length, 1)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(Object.keys(after.state.bindings).sort().join(","), "dm:a:w,w:a")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
   }
 })
 

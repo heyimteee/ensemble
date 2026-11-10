@@ -1,5 +1,5 @@
 import { homedir } from "node:os"
-import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
+import type { Agent, ChatConversationContext, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
 import { chromeSeparator } from "./separators.ts"
 
 export function short(value: string, width = 60): string {
@@ -321,4 +321,18 @@ export function relayTaskForMessage(
     const answeredBy = task.turn?.answeredByID ?? task.handoff?.answeredByID
     return message.agentID === (answeredBy ?? task.assigneeID)
   })
+}
+
+/**
+ * Ticket #214: the direct surface always says which native context it serves.
+ * `sharedSession` marks the pre-cutover rollback, where the group session is
+ * still answering direct chat. Parts join through `chromeJoin`, so the helper
+ * stays renderer-agnostic and the fallback keeps the label truthful while the
+ * chat context is loading or unavailable.
+ */
+export function directConversationParts(conversation: ChatConversationContext | undefined, fallbackWorkspaceName?: string): string[] {
+  if (conversation?.kind === "home") return ["direct", "home"]
+  const workspace = conversation?.workspaceName ?? fallbackWorkspaceName
+  const scope = workspace ? `workspace #${workspace}` : conversation ? "workspace" : "home"
+  return ["direct", scope, ...(conversation?.sharedSession ? ["shared session"] : [])]
 }

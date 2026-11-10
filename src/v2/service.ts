@@ -82,11 +82,14 @@ import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registr
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import { nativeFirstMode, isNativeFirstMode } from "./native-first.ts"
+import { directSessionCutover, selectDirectConversation } from "./direct-session.ts"
+import { bindingConversation } from "./conversation-binding.ts"
 import type {
   Agent,
   Approval,
   BindingConversation,
   ChangesSince,
+  ChatConversationContext,
   DispatchGroup,
   DmQueueEntry,
   FeedMeta,
@@ -500,6 +503,8 @@ export class EnsembleV2Service {
   private readonly identityVersions = new Map<string, number>()
   private readonly homeBindingPromises = new Map<string, Promise<{ sessionID: string; directory: string }>>()
   private readonly bindingPromises = new Map<string, Promise<{ sessionID: string } | undefined>>()
+  /** Ticket #214: one in-flight workspace-direct session per agent/workspace. */
+  private readonly directBindingPromises = new Map<string, Promise<{ sessionID: string }>>()
   private readonly workspaceEpoch = new Map<string, number>()
   private lastDmAt = 0
   private dmNow(): number {
@@ -1155,7 +1160,14 @@ export class EnsembleV2Service {
     if (run) return { workspaceID: run.workspaceID, agentID: run.agentID, subtaskID: run.subtaskID }
     const binding = this.store.bindingForSession(sessionID)
     if (!binding) return undefined
-    return { workspaceID: binding.workspaceID, agentID: binding.agentID }
+    const conversation = bindingConversation(binding)
+    if (!conversation) return undefined
+    // Ticket #214: only a workspace group binding owns a group channel. A
+    // direct conversation's host activity must never surface in that channel.
+    return {
+      workspaceID: conversation.kind === "workspace" ? conversation.workspaceID : undefined,
+      agentID: binding.agentID,
+    }
   }
 
   /** True while the host waits on a user decision for this session. */
@@ -1900,16 +1912,26 @@ export class EnsembleV2Service {
     return { sessionID: created.id, directory }
   }
 
-  private chatSession(agent: Agent, workspaceID?: string): { workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number } {
+  /**
+   * Ticket #214: resolve which conversation a direct chat serves. The choice
+   * reads live membership and the native-first mode; it never trusts a stale
+   * surface workspace. `bindingKeyID` stays the legacy DM transcript/queue key
+   * (workspace id or `home`) so a rollback keeps the same history.
+   */
+  private chatTarget(agent: Agent, workspaceID?: string): {
+    conversation: BindingConversation
+    workspace?: Workspace
+    bindingKeyID: string
+    directory: string
+  } {
     const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
-    if (workspace && workspace.memberIDs.includes(agent.id)) {
-      const binding = this.store.binding(workspace.id, agent.id)
-      if (binding) return { workspace, sessionID: binding.sessionID, directory: workspace.directory, bindingKeyID: workspace.id, bindingVersion: binding.agentVersion }
-      return { workspace, sessionID: "", directory: workspace.directory, bindingKeyID: workspace.id }
+    const member = workspace?.memberIDs.includes(agent.id) ?? false
+    const mode = nativeFirstMode(this.store.settings())
+    const conversation = selectDirectConversation({ agentID: agent.id, workspaceID: workspace?.id, workspaceMember: member, mode })
+    if (conversation.kind === "home" || !workspace) {
+      return { conversation: { kind: "home", agentID: agent.id }, bindingKeyID: "home", directory: agent.homeDirectory ?? homedir() }
     }
-    const home = this.store.binding("home", agent.id)
-    if (home) return { workspace: workspace && workspace.memberIDs.includes(agent.id) ? workspace : undefined, sessionID: home.sessionID, directory: home.directory ?? agent.homeDirectory ?? homedir(), bindingKeyID: "home", bindingVersion: home.agentVersion }
-    return { workspace, sessionID: "", directory: workspace && workspace.memberIDs.includes(agent.id) ? workspace.directory : agent.homeDirectory ?? homedir(), bindingKeyID: workspace && workspace.memberIDs.includes(agent.id) ? workspace.id : "home" }
+    return { conversation, workspace, bindingKeyID: workspace.id, directory: workspace.directory }
   }
 
   /**
@@ -2028,31 +2050,69 @@ export class EnsembleV2Service {
     await this.store.saveAgent(current)
   }
 
-  private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number }> {
-    const target = this.chatSession(agent, workspaceID)
-    if (target.sessionID) {
-      const binding = this.store.binding(target.bindingKeyID, agent.id)
-      if (binding && !(await this.nativeSessionMissing(binding.sessionID))) {
-        await this.refreshAgentSession(binding, agent)
-        await this.ensureIdentity(binding.sessionID, agent, binding.agentVersion)
-        return { ...target, sessionID: binding.sessionID, bindingVersion: binding.agentVersion }
+  private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{
+    workspace?: Workspace
+    conversation: BindingConversation
+    sessionID: string
+    directory: string
+    bindingKeyID: string
+    bindingVersion?: number
+  }> {
+    const target = this.chatTarget(agent, workspaceID)
+    const binding = this.store.bindingForConversation(agent.id, target.conversation)
+    if (binding && !(await this.nativeSessionMissing(binding.sessionID))) {
+      await this.refreshAgentSession(binding, agent)
+      // A workspace directory is the file-access scope. Keep the direct
+      // binding's recorded directory truthful without rotating the session.
+      if (target.workspace && binding.directory !== target.workspace.directory) {
+        binding.directory = target.workspace.directory
+        binding.updatedAt = now()
+        await this.store.saveBinding(binding)
+      }
+      await this.ensureIdentity(binding.sessionID, agent, binding.agentVersion)
+      return {
+        ...target,
+        sessionID: binding.sessionID,
+        directory: target.conversation.kind === "home" ? binding.directory ?? target.directory : target.directory,
+        bindingVersion: binding.agentVersion,
       }
     }
-    if (target.workspace) {
-      const binding = await this.ensureBinding(target.workspace, agent)
-      if (!binding) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
-      const stored = this.store.binding(target.workspace.id, agent.id)
-      await this.ensureIdentity(binding.sessionID, agent, stored?.agentVersion)
-      return { ...target, sessionID: binding.sessionID, bindingKeyID: target.workspace.id, bindingVersion: stored?.agentVersion }
+    if (target.conversation.kind === "direct" && target.workspace) {
+      // Ticket #214: direct chat in a workspace gets its own session in the
+      // workspace directory. It is created even when the group session exists;
+      // the two conversations never share native context.
+      const created = await this.ensureDirectBinding(target.workspace, agent)
+      const stored = this.store.bindingForConversation(agent.id, target.conversation)
+      await this.ensureIdentity(created.sessionID, agent, stored?.agentVersion)
+      return { ...target, sessionID: created.sessionID, bindingVersion: stored?.agentVersion }
+    }
+    if (target.conversation.kind === "workspace" && target.workspace) {
+      const created = await this.ensureBinding(target.workspace, agent)
+      if (!created) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
+      const stored = this.store.bindingForConversation(agent.id, target.conversation)
+      await this.ensureIdentity(created.sessionID, agent, stored?.agentVersion)
+      return { ...target, sessionID: created.sessionID, bindingVersion: stored?.agentVersion }
     }
     const home = await this.ensureHomeBinding(agent)
-    const binding = this.store.binding("home", agent.id)
-    await this.ensureIdentity(home.sessionID, agent, binding?.agentVersion)
-    return { workspace: undefined, sessionID: home.sessionID, directory: home.directory, bindingKeyID: "home", bindingVersion: binding?.agentVersion }
+    const stored = this.store.bindingForConversation(agent.id, { kind: "home", agentID: agent.id })
+    await this.ensureIdentity(home.sessionID, agent, stored?.agentVersion)
+    return {
+      workspace: undefined,
+      conversation: { kind: "home", agentID: agent.id },
+      sessionID: home.sessionID,
+      directory: home.directory,
+      bindingKeyID: "home",
+      bindingVersion: stored?.agentVersion,
+    }
   }
 
   private dmChannelReads(): DmChannelReadMode {
     return this.dmChannelReadsOption ?? dmChannelReadMode()
+  }
+
+  /** True while this native session is serving a live run or direct prompt. */
+  private isSessionBusy(sessionID: string): boolean {
+    return this.directBusy.has(sessionID) || [...this.activeRuns.values()].some((run) => run.sessionID === sessionID)
   }
 
   private async chatContext(agentID: string, workspaceID?: string): Promise<any> {
@@ -2083,9 +2143,20 @@ export class EnsembleV2Service {
     const stored = storedBase.map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
     const native = mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
     const messages = mergeDmTranscript(stored, native)
-    const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
+    const busy = this.isSessionBusy(target.sessionID)
     const queued = this.store.dmQueue().filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID)).length
-    return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages, queued }
+    // Ticket #214: the direct surface labels the native context it is bound
+    // to. `sharedSession` marks the pre-cutover rollback, where direct chat is
+    // still served by the group session.
+    const conversation: ChatConversationContext = {
+      kind: target.conversation.kind,
+      ...(target.conversation.kind === "home" ? {} : { workspaceID: target.conversation.workspaceID }),
+      ...(target.workspace ? { workspaceName: target.workspace.name } : {}),
+      context: target.conversation.kind === "home" ? "home" : "workspace",
+      sessionID: target.sessionID,
+      sharedSession: target.conversation.kind === "workspace",
+    }
+    return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages, queued, conversation }
   }
 
   /**
@@ -2102,7 +2173,7 @@ export class EnsembleV2Service {
       if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
       const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
       if (workspaceID && !workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
-      const target = this.chatSession(agent, workspace?.id)
+      const target = this.chatTarget(agent, workspace?.id)
       const workspaceDirect = target.workspace?.id
       return {
         directory: target.directory,
@@ -2183,6 +2254,9 @@ export class EnsembleV2Service {
     }
     const target = await this.ensureChatSession(agent, workspaceID)
     const workspaceKey = target.bindingKeyID
+    // Ticket #223: attachments use the same conversation the direct send
+    // resolves to. Ticket #214: the binding decision is `ensureChatSession`'s,
+    // so a workspace-direct send cannot read the group store.
     const conversationKey = attachmentConversationKey({
       agentID: agent.id,
       workspaceID: target.workspace?.id,
@@ -2190,7 +2264,7 @@ export class EnsembleV2Service {
     })
     const attachments = resolveAttachments(target.directory, conversationKey, attachmentList)
     const promptFiles = promptFilesForAttachments(target.directory, conversationKey, attachments)
-    const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
+    const busy = this.isSessionBusy(target.sessionID)
     const correlationID = envelope?.correlationID ?? newCorrelationID()
     const line = {
       id: id("dm"),
@@ -2265,6 +2339,10 @@ export class EnsembleV2Service {
     const workspace = this.store.workspace(workspaceID)
     if (!agent || !workspace) throw Object.assign(new Error("Agent or workspace not found."), { code: "not_found" })
     if (!workspace.memberIDs.includes(agent.id)) throw Object.assign(new Error("The agent is not a member."), { code: "not_member" })
+    // Ticket #214: after the cutover the home binding is the home-direct
+    // conversation, so moving it targets the workspace-direct conversation
+    // instead of silently turning it into the group session.
+    if (directSessionCutover(nativeFirstMode(this.store.settings()))) return this.moveHomeSessionToDirect(agent, workspace)
     if (this.store.binding(workspace.id, agent.id)) return { moved: false }
     const home = this.store.binding("home", agent.id)
     if (!home) return { moved: false }
@@ -2278,12 +2356,68 @@ export class EnsembleV2Service {
     return { moved: true }
   }
 
+  /**
+   * Ticket #214: moving an idle home-direct session into a workspace direct
+   * conversation. The home transcript stays on its own channel; only the
+   * session and its future file access move. A busy session is refused because
+   * the host would only queue the move.
+   */
+  private async moveHomeSessionToDirect(agent: Agent, workspace: Workspace): Promise<any> {
+    const directConversation: BindingConversation = { kind: "direct", workspaceID: workspace.id, agentID: agent.id }
+    if (this.store.bindingForConversation(agent.id, directConversation)) return { moved: false }
+    const homeConversation: BindingConversation = { kind: "home", agentID: agent.id }
+    const home = this.store.bindingForConversation(agent.id, homeConversation)
+    if (!home) return { moved: false }
+    if (this.isSessionBusy(home.sessionID)) {
+      throw Object.assign(new Error("The direct session is busy."), { code: "session_busy" })
+    }
+    await this.ctx.session.move({ sessionID: home.sessionID, directory: workspace.directory })
+    await this.store.removeConversationBinding(agent.id, homeConversation)
+    await this.store.saveBinding({
+      workspaceID: workspace.id,
+      agentID: agent.id,
+      sessionID: home.sessionID,
+      history: home.history,
+      kind: "direct",
+      directory: workspace.directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    })
+    const current = this.store.cloneAgent(agent.id)
+    if (current) {
+      current.homeSessionID = undefined
+      await this.store.saveAgent(current)
+    }
+    this.logger?.event("info", "service", "agent.direct.session.moved", {
+      agentID: agent.id,
+      workspaceID: workspace.id,
+      sessionID: home.sessionID,
+    })
+    return { moved: true }
+  }
+
   private async flushDmQueue(agentID: string, workspaceID?: string): Promise<void> {
     if (workspaceID && !this.store.workspace(workspaceID)) return
     const workspaceKey = workspaceID ?? "home"
     const candidates = this.store.dmQueue()
       .filter((entry) => entry.agentID === agentID && entry.status === "queued" && (entry.workspaceID ?? "home") === workspaceKey)
       .sort((a, b) => a.createdAt - b.createdAt)
+    if (candidates.length === 0) return
+    const agent = this.store.agent(agentID)
+    if (agent) {
+      try {
+        const target = await this.ensureChatSession(agent, workspaceID)
+        // A workspace queue belongs to the workspace-direct conversation. A
+        // former member keeps the text parked instead of spilling it into the
+        // home context.
+        if (workspaceID && target.conversation.kind === "home") return
+        // Ticket #214: a group turn settling must not race a direct answer that
+        // still owns the direct session. The direct wait drains its own queue.
+        if (this.isSessionBusy(target.sessionID)) return
+      } catch {
+        // The per-entry path records a resolution failure on each candidate.
+      }
+    }
     for (const candidate of candidates) {
       const entry = this.store.cloneDmQueueEntry(candidate.id)
       if (!entry) continue
@@ -7954,6 +8088,68 @@ export class EnsembleV2Service {
       this.runBySession.delete(binding.sessionID)
       await this.flushDmQueue(agent.id, task.workspaceID).catch(() => undefined)
     }
+  }
+
+  /**
+   * Ticket #214: one direct session per agent and workspace. It runs in the
+   * workspace directory (so project files stay reachable) but is a different
+   * conversation from the group binding, which is never rotated here.
+   */
+  private async ensureDirectBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string }> {
+    const conversation: BindingConversation = { kind: "direct", workspaceID: workspace.id, agentID: agent.id }
+    const existing = this.store.bindingForConversation(agent.id, conversation)
+    if (existing && !(await this.nativeSessionMissing(existing.sessionID))) {
+      const saved = await this.refreshAgentSession(existing, agent)
+      if (!saved && existing.directory !== workspace.directory) {
+        existing.directory = workspace.directory
+        existing.updatedAt = now()
+        await this.store.saveBinding(existing)
+      }
+      return { sessionID: existing.sessionID }
+    }
+    const key = `direct:${workspace.id}:${agent.id}`
+    const inFlight = this.directBindingPromises.get(key)
+    if (inFlight) return inFlight
+    const promise = this.createDirectBinding(workspace, agent)
+    this.directBindingPromises.set(key, promise)
+    try { return await promise } finally { this.directBindingPromises.delete(key) }
+  }
+
+  private async createDirectBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string }> {
+    const conversation: BindingConversation = { kind: "direct", workspaceID: workspace.id, agentID: agent.id }
+    const existing = this.store.bindingForConversation(agent.id, conversation)
+    const created = unwrap<any>(await this.ctx.session.create({
+      title: `${agent.name} · direct · ${workspace.name}`,
+      agent: "build",
+      model: { providerID: agent.mainModel.providerID, id: agent.mainModel.modelID, ...(agent.mainModel.variant ? { variant: agent.mainModel.variant } : {}) },
+      permissions: skillPermissions(agent.skillbox),
+      location: { directory: workspace.directory },
+    }))
+    if (!created?.id) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
+    const binding: SessionBinding = {
+      workspaceID: workspace.id,
+      agentID: agent.id,
+      sessionID: created.id,
+      history: existing ? [...(existing.history ?? []), existing.sessionID] : [],
+      kind: "direct",
+      directory: workspace.directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
+    await this.store.saveBinding(binding)
+    // A replaced direct session can never answer a pending host decision.
+    if (existing && existing.sessionID !== created.id) {
+      await this.settleNativeForSession(existing.sessionID, "Session ended before the permission was answered.")
+    }
+    await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
+    await this.clearPendingSettings(agent.id)
+    this.logger?.event("info", "service", "agent.direct.session.created", {
+      agentID: agent.id,
+      workspaceID: workspace.id,
+      sessionID: created.id,
+      replacedSessionID: existing?.sessionID,
+    })
+    return { sessionID: created.id }
   }
 
   private async ensureBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string } | undefined> {

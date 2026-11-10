@@ -573,6 +573,21 @@ export type ChatMessage = {
   correlationID?: string
 }
 
+/**
+ * Ticket #214: which native context a direct chat is bound to. `kind` names
+ * the binding conversation; `context` is the file-access scope. `sharedSession`
+ * marks the pre-cutover rollback, where direct chat is served by the group
+ * session instead of its own.
+ */
+export type ChatConversationContext = {
+  kind: BindingKind
+  workspaceID?: Id
+  workspaceName?: string
+  context: "workspace" | "home"
+  sessionID: Id
+  sharedSession: boolean
+}
+
 export type ChatContext = {
   agentID: Id
   workspaceID?: Id
@@ -581,6 +596,7 @@ export type ChatContext = {
   busy: boolean
   messages: ChatMessage[]
   queued: number
+  conversation: ChatConversationContext
 }
 
 /** Server-derived rail counts (ticket #141); never computed by client scans. */
