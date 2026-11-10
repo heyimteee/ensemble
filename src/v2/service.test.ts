@@ -12893,3 +12893,53 @@ test("ticket218: native sync reports degraded on a failed read and returns to li
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test("ticket228: a native prompt file with only inline data gets a positive bounded chip size", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-228-direct-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-228-home-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_direct", { id: "s_direct" })
+  await seedNativeDirect(ctx, directory, home)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const content = "ticket 228 native attachment fixture"
+    const data = Buffer.from(content).toString("base64")
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_direct",
+      inboxID: "m228",
+      item: {
+        type: "user",
+        delivery: "steer",
+        payload: {
+          text: "Review the fixture",
+          files: [{ name: "fixture.txt", mime: "text/plain", description: "fixture", data }],
+        },
+      },
+    }, { id: "evt_228_enqueue", created: 200 }))
+
+    await waitFor(async () => ((await snapshotFor(handlers, directory)).messages["dm:a:w"] ?? []).length === 1)
+    const state = await snapshotFor(handlers, directory)
+    const user = state.messages["dm:a:w"][0]
+    const chip = user.attachments?.[0]
+    assert.ok(chip, "the durable user row carries the native prompt attachment")
+    assert.deepEqual({ name: chip.name, mime: chip.mime, kind: chip.kind }, {
+      name: "fixture.txt",
+      mime: "text/plain",
+      kind: "file",
+    })
+    assert.ok(chip.size > 0, "the chip size is derived from the inline data payload")
+    assert.equal(chip.size, Buffer.byteLength(content))
+    const serialized = JSON.stringify(user)
+    assert.equal(serialized.includes(data), false, "the durable row never carries the base64 payload")
+    assert.equal(serialized.includes(content), false, "the durable row never carries file bytes")
+    assert.equal(serialized.includes(".ensemble/attachments"), false)
+    assert.equal(serialized.includes(directory), false, "the durable row never carries a source or store path")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
