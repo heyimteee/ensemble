@@ -617,6 +617,13 @@ export type Settings = {
    * enables native-first behavior as each surface cuts over.
    */
   nativeFirst?: NativeFirstMode
+  /**
+   * Native mention-routing kill switch (ADR 0011). Routing runs only under
+   * `nativeFirst: "on"`; `false` keeps native messages posting, turns `$Name`
+   * into a reference, and appends a visible refusal instead of creating work.
+   * User/operator-owned; agents cannot write settings.
+   */
+  nativeMentionRouting?: boolean
   /** Dispatch budget tiers (ticket #160); captured by each new root group. */
   dispatchGroupMaxHops: number
   dispatchCommandMaxHops: number
