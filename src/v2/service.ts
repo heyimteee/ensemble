@@ -8377,6 +8377,12 @@ export class EnsembleV2Service {
         suppressed: plan.suppressed.length,
         refusals: plan.refusals.length,
         excluded,
+        ...(plan.budget.kind === "workspace"
+          ? {
+              groupRemaining: plan.budget.groupRemaining,
+              delegationTaskMaxHops: plan.budget.delegationTaskMaxHops,
+            }
+          : {}),
       })
     }
     for (const suppression of plan.suppressed) {

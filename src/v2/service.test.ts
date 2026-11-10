@@ -11790,6 +11790,10 @@ test("ticket221: a native turn's final $Name creates one child peer turn in its 
     assert.equal(logs.entries[0].turnID, turn.id)
     assert.equal(logs.entries[0].recipientID, "b")
     assert.equal(logs.entries[0].source, "agent-final")
+    const planned = await (handlers as any)["logs.recent"]({ directory, event: "native.route.planned", limit: 20 })
+    assert.equal(planned.entries.length, 1)
+    assert.equal(planned.entries[0].groupRemaining, 8, "the server sees the root group's remaining budget")
+    assert.equal(planned.entries[0].delegationTaskMaxHops, 8, "the server derives the delegation budget from the ledger")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
