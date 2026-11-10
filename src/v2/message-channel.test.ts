@@ -5,7 +5,6 @@ import {
   chatLineFromMessage,
   directMessageChannel,
   directMessageChannelForBinding,
-  dmChannelReadMode,
   isDirectMessageChannel,
   messageChannel,
   projectDirectLines,
@@ -26,16 +25,7 @@ test("ticket212: a group message uses its workspace as the channel and a direct 
   assert.equal(messageChannel({ workspaceID: "w", channel: "dm:a:w" }), "dm:a:w")
 })
 
-test("ticket212: the direct-channel read flag defaults to the legacy path", () => {
-  assert.equal(dmChannelReadMode(undefined), "off")
-  assert.equal(dmChannelReadMode(""), "off")
-  assert.equal(dmChannelReadMode("off"), "off")
-  assert.equal(dmChannelReadMode("shadow"), "shadow")
-  assert.equal(dmChannelReadMode("ON"), "on")
-  assert.equal(dmChannelReadMode("unexpected"), "off")
-})
-
-test("ticket212: the compatibility projection prefers durable rows without losing legacy lines", () => {
+test("ticket226: the compatibility projection is the previous-release rollback read", () => {
   const legacy: ChatMessage[] = [
     { id: "dm_1", role: "user", author: "You", text: "before migration", createdAt: 1 },
     { id: "dm_2", role: "user", author: "You", text: "stale legacy copy", createdAt: 2 },

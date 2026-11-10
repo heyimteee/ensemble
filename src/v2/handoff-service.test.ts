@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
 import { startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
+import { directMessageChannel } from "./message-channel.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -462,12 +463,12 @@ test("direct messages carry an envelope and cross-boundary contact needs approva
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       return Object.values(next.state.dmQueue).some((entry: any) => entry.agentID === echo.result.id)
-        || (next.state.dmTranscripts as any)[`home:${echo.result.id}`]?.some((line: any) => line.text === "Hello outside")
+        || Boolean((next.state.messages[directMessageChannel(echo.result.id)] as any[] | undefined)?.some((line: any) => line.text === "Hello outside"))
     }, 8000)
     const after = await handlers.snapshot({ directory })
     const delivered = [
       ...Object.values(after.state.dmQueue),
-      ...Object.values((after.state.dmTranscripts as any) ?? {}).flat(),
+      ...((after.state.messages[directMessageChannel(echo.result.id)] as any[]) ?? []),
     ] as any[]
     const matches = delivered.filter((item: any) => item.text === "Hello outside" || item.correlationID === approvals[0].payload.correlationID)
     assert.ok(matches.length >= 1)

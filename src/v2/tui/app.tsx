@@ -5,7 +5,7 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageAttachment, MessageStream, ModelOption, NativeSubagentRun, NativeSyncState, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageAttachment, MessageStream, ModelOption, NativeSubagentRun, NativeSyncState, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, WorkHistoryPage, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ChromeText, FullApprovalsView, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, WorkHistoryRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
@@ -246,7 +246,8 @@ import {
 } from "./workfocus.ts"
 import { approvalsColumnMode, approvalsForWorkspace, approvalsPaneLayout, closeFullApprovals, fullApprovalsHeader, fullApprovalsSection, openFullApprovals, workApprovalSection } from "./workapprovals.ts"
 import { nativeSubagentFocusChild, nativeSubagentFocusID, nativeSubagentWorkStatus } from "./nativecards.ts"
-import { directNativeWorkRow, nativeDirectChannel, nativeDirectChatLines } from "./native-direct.ts"
+import { nativeDirectChannel, directNativeWorkRow, nativeDirectChatLines } from "./native-direct.ts"
+import { workDetailFor, workDetailText } from "../work-history.ts"
 import { isWorkActionID, nativeSubagentActions, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
 import {
   accumulateCompletions,
@@ -937,6 +938,24 @@ export function EnsembleV2App() {
   const nativeDirectWork = createMemo(() =>
     directNativeWorkRow(Object.values(state()?.subtasks ?? {}), nativeDirect(), Date.now()),
   )
+  /**
+   * Ticket #222: Work is conversation-scoped on both surfaces. A workspace
+   * group reads the workspace channel; a native direct conversation reads its
+   * durable `dm:` channel. The same Work pane, cards, and history serve both.
+   */
+  const workConversationID = createMemo(() => {
+    const current = surface()
+    if (current?.kind === "workspace") return current.workspaceID
+    if (current?.kind === "agent") return nativeDirect()
+    return undefined
+  })
+  const workTasks = createMemo(() => {
+    const conversation = workConversationID()
+    if (!conversation) return []
+    return Object.values(state()?.subtasks ?? {}).filter(
+      (task) => (task.conversationID ?? task.workspaceID) === conversation,
+    )
+  })
   /** True while this native session is a direct conversation under `on`. */
   const sessionIsNativeDirect = (sessionID?: string) => {
     if (!sessionID || state()?.settings.nativeFirst !== "on") return false
@@ -982,9 +1001,14 @@ export function EnsembleV2App() {
   // workspace surface. At every width the same right switch owns it; below 96
   // columns it renders as a right drawer over the chat. Ticket #185: the full
   // approvals inbox may also open the right column from a direct chat, where
-  // there is no Work body to split against.
+  // there is no Work body to split against. Ticket #222: a native direct
+  // conversation has its own conversation-scoped Work surface.
   const showWorkPane = createMemo(
-    () => paneSides().right && (surface()?.kind === "workspace" || approvalsMode() === "full"),
+    () => paneSides().right && (
+      surface()?.kind === "workspace"
+      || (surface()?.kind === "agent" && Boolean(nativeDirect()))
+      || approvalsMode() === "full"
+    ),
   )
   const railWidth = () => panes().railWidth
   const messageWidth = () => showWorkPane() ? panes().chatContentWidth : panes().chatOnlyContentWidth
@@ -1165,7 +1189,7 @@ export function EnsembleV2App() {
     // memo through activeTasks/state/approvals below.
     workRevision()
     const now = Date.now()
-    const grouped = workViewGroups(activeTasks(), state()?.subtasks ?? {}, {
+    const grouped = workViewGroups(workTasks(), state()?.subtasks ?? {}, {
       now,
       pendingApprovalIDs: pendingApprovalIDs(),
       nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
@@ -1212,7 +1236,7 @@ export function EnsembleV2App() {
     // Ticket #155: track live native activity so a tool event updates the
     // affected card detail without a snapshot or a full Work rebuild.
     const activities = workActivities()
-    const active = activeTasks()
+    const active = workTasks()
     const pendingApprovalSet = pendingApprovalIDs()
     const nativeBlockedSet = nativeBlockedSubtaskIDs()
     const options: WorkCardOptions = {
@@ -1289,7 +1313,7 @@ export function EnsembleV2App() {
     workRevision()
     const now = Date.now()
     const views = workViews()
-    const next = nextWorkInvalidation(activeTasks(), [...views.active.groups, ...views.history.groups], now)
+    const next = nextWorkInvalidation(workTasks(), [...views.active.groups, ...views.history.groups], now)
     if (workExpiryTimer !== undefined) {
       clearTimeout(workExpiryTimer)
       workExpiryTimer = undefined
@@ -2432,7 +2456,8 @@ export function EnsembleV2App() {
       case "agents":
       case "workspaces": return "roster"
       case "chat": return "chat"
-      // Ticket #172: a DM has no Work pane; a hidden drawer has no keys.
+      // Ticket #172/#222: a direct conversation has its own Work pane once it
+      // owns a native channel; a hidden drawer has no keys.
       case "work": return showWorkPane() ? "work" : null
       // The small approvals summary is pane selection; Enter opens full.
       case "approvals": return null
@@ -2441,7 +2466,7 @@ export function EnsembleV2App() {
   // Ticket #172: Work is reachable whenever either view holds work, even when
   // the current page is empty; `f` can then switch to HISTORY.
   const hasWorkZone = () => {
-    if (surface()?.kind !== "workspace") return false
+    if (!workConversationID()) return false
     const views = workViews()
     return views.active.groups.length > 0 || visibleHistoryGroups().length > 0
   }
@@ -2637,6 +2662,13 @@ export function EnsembleV2App() {
       return false
     }
     applyScopedResync(result, target)
+    // Ticket #222: a Work scope repair may have missed terminal rows that
+    // finished while the client was away. Merge the newest page again; the
+    // per-conversation cursor keeps already-loaded older pages in place.
+    if (scopes.includes("work")) {
+      const conversationID = workConversationID()
+      if (conversationID && client.historyFor(conversationID)?.loaded) void loadWorkHistory(conversationID)
+    }
     return true
   }
 
@@ -2657,6 +2689,41 @@ export function EnsembleV2App() {
     }
     return loadSnapshot()
   }
+
+  /**
+   * Ticket #222: HISTORY is a second, bounded read after the bootstrap. A
+   * large retained history never inflates the bootstrap, and a fresh client
+   * gets the same newest page without depending on any prior client state.
+   */
+  const historyLoads = new Map<string, Promise<boolean>>()
+  const loadWorkHistory = (conversationID: string, before?: string): Promise<boolean> => {
+    const key = `${conversationID}\u0000${before ?? ""}`
+    const existing = historyLoads.get(key)
+    if (existing) return existing
+    const task = (async () => {
+      const page = await callRpc<WorkHistoryPage & { version: number; epoch?: number }>(context, "work.history", {
+        directory: directoryOf(context),
+        ...(conversationID.startsWith("dm:") ? { conversationID } : { workspaceID: conversationID }),
+        ...(before ? { before } : {}),
+      })
+      // A stale epoch's cursor and rows belong to another store generation.
+      if (page.epoch !== undefined && lastSnapshotMeta?.epoch !== undefined && page.epoch !== lastSnapshotMeta.epoch) return false
+      client.applyWorkHistory(page)
+      return true
+    })().catch(() => false).finally(() => historyLoads.delete(key))
+    historyLoads.set(key, task)
+    return task
+  }
+  const loadOlderWorkHistory = (conversationID: string): Promise<boolean> => {
+    const current = client.historyFor(conversationID)
+    if (!current?.hasMore || !current.next) return Promise.resolve(false)
+    return loadWorkHistory(conversationID, current.next)
+  }
+  createEffect(() => {
+    const conversationID = workConversationID()
+    if (!conversationID || client.historyFor(conversationID)?.loaded) return
+    void loadWorkHistory(conversationID)
+  })
 
   // Ensure at least one fetch that started at or after this call settles. The
   // coordinator queues a dirty pass when an earlier fetch is still in flight.
@@ -3094,7 +3161,22 @@ export function EnsembleV2App() {
     lastWorkFocus = undefined
     setWorkFocusID(undefined)
   }
-  const moveWorkPage = (delta: number) => selectWorkPage(workPage() + delta)
+  /** Ticket #222: page down past the loaded HISTORY asks the server for the next page. */
+  const moveWorkPage = (delta: number) => {
+    const next = workPage() + delta
+    const pageCount = workViews()[workView()].layout.pages.length
+    const conversationID = workConversationID()
+    if (delta > 0 && next > pageCount && workView() === "history" && conversationID !== undefined) {
+      const current = client.historyFor(conversationID)
+      if (current?.hasMore) {
+        void loadOlderWorkHistory(conversationID).then((loaded) => {
+          if (loaded) setWorkPage(workPage() + delta)
+        })
+        return
+      }
+    }
+    selectWorkPage(next)
+  }
   const workFocusAtLast = () => {
     const last = lastWorkCardFocus(workFocusPages())
     return Boolean(last && last.id === workFocusID())
@@ -5082,6 +5164,16 @@ export function EnsembleV2App() {
         return
       }
       return openResult()
+    },
+    "work.why": () => {
+      const task = selectedTask()
+      if (!task) return
+      const detail = workDetailFor(task, {
+        subtasks: state()?.subtasks ?? {},
+        dispatchGroups: state()?.dispatchGroups ?? {},
+        now: Date.now(),
+      })
+      return openResultModal(`Why this card? · ${task.id}`, workDetailText(detail))
     },
     "work.delegate": () => delegateSelected(),
     "work.reassign": () => reassignSelected(),
@@ -7163,6 +7255,7 @@ export function EnsembleV2App() {
         return workView() === "history" && historyGroupRowFocus() !== undefined ? true : selectedTaskActions().has(entry.id)
       }
       if (entry.id === "work.native") return nativeFocused || selectedTaskActions().has(entry.id)
+      if (entry.id === "work.why") return selectedTask() !== undefined
       if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)
       if (entry.id === "work.approvals") return pendingApprovals().length > 0
       return true

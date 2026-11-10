@@ -218,6 +218,36 @@ export const EnsembleV2Rpc = Rpc.define({
         additionalProperties: false,
       },
     },
+    /** Ticket #222: one bounded page of terminal Work for one conversation. */
+    "work.history": {
+      input: {
+        type: "object",
+        properties: {
+          directory: { type: "string" },
+          workspaceID: { type: "string" },
+          conversationID: { type: "string" },
+          before: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["directory"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          version: { type: "number" },
+          epoch: { type: "number" },
+          conversationID: { type: "string" },
+          tasks: { type: "object", additionalProperties: true },
+          groups: { type: "object", additionalProperties: true },
+          hasMore: { type: "boolean" },
+          next: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["version", "epoch", "conversationID", "tasks", "groups", "hasMore", "limit"],
+        additionalProperties: false,
+      },
+    },
     /** Ticket #141: one paginated durable transcript window. */
     "transcript.window": {
       input: {

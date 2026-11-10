@@ -279,6 +279,106 @@ test("transcript windows page older rows and a result outside the window is fetc
   }
 })
 
+/** Seed native turns in two conversations; terminal rows are already outside the 1.2 s hold. */
+function seedNativeHistory(values: Map<string, unknown>, now: number) {
+  const native = (id: string, channel: string, finishedAt: number, patch: Partial<Subtask> = {}) => task({
+    id,
+    workspaceID: channel,
+    conversationID: channel,
+    workKind: "turn",
+    origin: "native",
+    adopted: true,
+    dispatchGroupID: `dispatch_${id}`,
+    state: "replied",
+    outcome: "succeeded",
+    finishedAt,
+    repliedAt: finishedAt,
+    native: {
+      sessionID: `session_${channel}`,
+      inboxID: `inbox_${id}`,
+      assistantMessageIDs: [`assistant_${id}`],
+      phase: "replied",
+      settledAt: finishedAt,
+    },
+    ...patch,
+  })
+  for (let index = 0; index < 5; index++) {
+    const id = `native_w_${index}`
+    values.set(`v2/subtask/${id}`, native(id, "w", now - 60_000 - index * 1_000))
+  }
+  values.set("v2/subtask/native_dm_w", native("native_dm_w", "dm:a:w", now - 30_000))
+  values.set("v2/subtask/native_dm_other", native("native_dm_other", "dm:a:other", now - 20_000))
+}
+
+test("ticket222: Work history pages terminal native turns and keeps direct/workspace isolated", async () => {
+  const values = new Map<string, unknown>()
+  seed(values, { messages: 10, live: false })
+  const at = Date.now()
+  seedNativeHistory(values, at)
+  const { ctx } = fakeContext(values)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers() as any
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-history-"))
+  try {
+    const first = await handlers["work.history"]({ directory, workspaceID: "w", limit: 2 })
+    assert.equal(first.conversationID, "w")
+    assert.deepEqual(Object.keys(first.tasks).sort(), ["native_w_0", "native_w_1"])
+    assert.equal(first.tasks.native_w_0.status, "replied")
+    assert.ok(first.groups.dispatch_native_w_0, "the page carries its ledger rows")
+    assert.equal(first.hasMore, true)
+    assert.ok(first.next)
+
+    const second = await handlers["work.history"]({ directory, workspaceID: "w", limit: 2, before: first.next })
+    assert.deepEqual(Object.keys(second.tasks).sort(), ["native_w_2", "native_w_3"])
+
+    const last = await handlers["work.history"]({ directory, workspaceID: "w", limit: 2, before: second.next })
+    assert.deepEqual(Object.keys(last.tasks).sort(), ["native_w_4"])
+    assert.equal(last.hasMore, false)
+
+    const direct = await handlers["work.history"]({ directory, conversationID: "dm:a:w", limit: 10 })
+    assert.deepEqual(Object.keys(direct.tasks), ["native_dm_w"], "a direct conversation never sees workspace or another DM")
+
+    const workspace = await handlers["work.history"]({ directory, workspaceID: "w", limit: 10 })
+    assert.deepEqual(Object.keys(workspace.tasks).sort(), ["native_w_0", "native_w_1", "native_w_2", "native_w_3", "native_w_4"], "workspace history never sees direct turns")
+  } finally {
+    await stop()
+  }
+})
+
+test("ticket222: a scoped bootstrap bounds visible Work while history pages the retained terminal rows", async () => {
+  const values = new Map<string, unknown>()
+  seed(values, { messages: 2_000, live: false })
+  const at = Date.now()
+  seedNativeHistory(values, at)
+  values.set("v2/subtask/live", task({
+    id: "live",
+    state: "working",
+    claimedBy: "run",
+    leaseUntil: at + 60_000,
+    attempts: 1,
+    createdAt: at,
+  }))
+  const { ctx } = fakeContext(values)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers() as any
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-history-bootstrap-"))
+  try {
+    const bootstrap = await handlers.bootstrap({ directory, workspaceID: "w" })
+    assert.equal(bootstrap.scoped, true)
+    assert.deepEqual(Object.keys(bootstrap.state.subtasks), ["live"], "terminal native turns stay off the bootstrap")
+
+    const page = await handlers["work.history"]({ directory, workspaceID: "w", limit: 3 })
+    assert.equal(Object.keys(page.tasks).length, 3)
+    assert.ok(Object.keys(page.tasks).includes("native_w_0"))
+    const bytes = Buffer.byteLength(JSON.stringify(page))
+    assert.ok(bytes < 16 * 1024, `a history page stays bounded (${bytes} bytes)`)
+  } finally {
+    await stop()
+  }
+})
+
 test("a gap resync returns only the scopes whose durable state changed after the cursor", async () => {
   const values = new Map<string, unknown>()
   seed(values, { messages: 10, oldTasks: 600, version: 100, live: false })

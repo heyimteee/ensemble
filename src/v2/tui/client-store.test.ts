@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { createInitialState } from "../defaults.ts"
 import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
-import type { Agent, Approval, DispatchGroup, InitJob, Memory, Message, ModelOption, NativeSubagentRun, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
+import type { Agent, Approval, DispatchGroup, InitJob, Memory, Message, ModelOption, NativeSubagentRun, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask, WorkHistoryPage } from "../types.ts"
 import { createClientStore, reduceClientState } from "./client-store.ts"
 import { directMessageChannel } from "../message-channel.ts"
 
@@ -623,19 +623,11 @@ test("a long client session keeps patched transcript and Work memory bounded", (
       attempts: 1,
     })
     state.messages.w1 = Array.from({ length: 500 }, (_, index) => message(`m${index + 1}`, `row ${index + 1}`, { seq: index + 1 }))
-    state.dmTranscripts["w:a1"] = Array.from({ length: 500 }, (_, index) => ({
-      id: `dm${index + 1}`,
-      role: "user" as const,
-      author: "You",
-      text: `dm ${index + 1}`,
-      createdAt: index + 1,
-    }))
   })))
 
   // Review fix: a full snapshot is the legacy recovery path, so it arrives
   // whole; only the scoped patch/window path applies the client bound.
   assert.equal(store.state()!.messages.w1!.length, 500, "a full snapshot keeps the legacy transcript")
-  assert.equal(store.state()!.dmTranscripts["w:a1"]!.length, 500, "direct transcript caches keep the legacy full snapshot")
   assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 500)
   assert.equal(store.windowFor("w1")?.hasMoreOlder, false)
 
@@ -836,4 +828,137 @@ test("ticket213: direct conversation bindings apply and remove by conversation k
   store.applyChanges([{ entity: "binding", op: "remove", workspaceID: "w1", agentID: "a1", kind: "direct" }], 3)
   assert.equal(store.state()!.bindings["dm:a1:w1"], undefined)
   assert.equal(store.state()!.bindings["w1:a1"]?.sessionID, "s_group", "removing a direct binding never drops the group")
+})
+
+const nativeTurn = (id: string, channel: string, finishedAt: number, patch: Partial<Subtask> = {}): Subtask => task(id, {
+  workspaceID: channel,
+  conversationID: channel,
+  workKind: "turn",
+  origin: "native",
+  adopted: true,
+  dispatchGroupID: `dispatch_${id}`,
+  state: "replied",
+  outcome: "succeeded",
+  finishedAt,
+  repliedAt: finishedAt,
+  assigneeID: "a1",
+  native: {
+    sessionID: `session_${channel}`,
+    inboxID: `inbox_${id}`,
+    assistantMessageIDs: [`assistant_${id}`],
+    phase: "replied",
+    settledAt: finishedAt,
+    resultMessageID: `result_${id}`,
+  },
+  ...patch,
+})
+
+const historyPage = (
+  conversationID: string,
+  tasks: Subtask[],
+  options: { hasMore?: boolean; next?: string; limit?: number } = {},
+): WorkHistoryPage => ({
+  conversationID,
+  tasks: Object.fromEntries(tasks.map((row) => [row.id, row])),
+  groups: Object.fromEntries(tasks.map((row) => [row.dispatchGroupID!, dispatchGroup(row.dispatchGroupID!)])),
+  hasMore: options.hasMore ?? false,
+  ...(options.next ? { next: options.next } : {}),
+  limit: options.limit ?? 12,
+})
+
+test("ticket222: a fresh client reads terminal native turns from history, not from a prior client", () => {
+  const now = Date.now()
+  const load = () => {
+    const store = createClientStore()
+    store.applySnapshot(snapshot(stateWith((state) => {
+      state.workspaces.w1 = workspace("w1", "site")
+      state.subtasks.live = task("live", { state: "working", claimedBy: "run", leaseUntil: now + 90_000, attempts: 1 })
+    }), { protocol: 4, epoch: 1 }))
+    store.applyWorkHistory(historyPage("w1", [nativeTurn("done", "w1", now - 1_000)], { hasMore: true, next: "cursor-1", limit: 1 }))
+    return store
+  }
+
+  const first = load()
+  assert.ok(first.state()!.subtasks.done, "the terminal native turn arrives from the server page")
+  assert.equal(first.state()!.subtasks.done!.native?.phase, "replied")
+  assert.deepEqual(first.historyFor("w1"), {
+    conversationID: "w1",
+    hasMore: true,
+    next: "cursor-1",
+    limit: 1,
+    loaded: true,
+  })
+
+  const reloaded = load()
+  assert.deepEqual(Object.keys(reloaded.state()!.subtasks).sort(), Object.keys(first.state()!.subtasks).sort())
+  assert.deepEqual(reloaded.historyFor("w1"), first.historyFor("w1"), "a reload sees the same page and cursor")
+})
+
+test("ticket222: a Work resync or full bootstrap cannot drop retained native history", () => {
+  const now = Date.now()
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.subtasks.live = task("live", { state: "working", claimedBy: "run", leaseUntil: now + 90_000, attempts: 1 })
+  }), { protocol: 4, epoch: 1 }))
+  store.applyWorkHistory(historyPage("w1", [
+    nativeTurn("done", "w1", now - 2_000),
+    nativeTurn("older", "w1", now - 3_000),
+  ], { hasMore: true, next: "cursor-2" }))
+
+  store.applyWorkProjection({ live2: task("live2", { state: "working", claimedBy: "run", leaseUntil: now + 90_000, attempts: 1 }) }, 7)
+  assert.ok(store.state()!.subtasks.done, "a Work resync keeps the loaded page")
+  assert.ok(store.state()!.subtasks.older, "a Work resync keeps older pages too")
+
+  store.applyWorkSnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.subtasks.live2b = task("live2b", { state: "working", claimedBy: "run", leaseUntil: now + 90_000, attempts: 1 })
+  }), { protocol: 4, epoch: 1 }))
+  assert.ok(store.state()!.subtasks.done, "a scoped Work snapshot keeps the loaded page")
+
+  // A scoped bootstrap carries only visible Work; the client must merge the
+  // retained rows it already knows instead of replacing them away.
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.subtasks.live3 = task("live3", { state: "working", claimedBy: "run", leaseUntil: now + 90_000, attempts: 1 })
+  }), { protocol: 4, epoch: 1 }))
+  assert.ok(store.state()!.subtasks.done, "a full bootstrap cannot drop retained native turns")
+  assert.ok(store.state()!.subtasks.live3)
+  assert.equal(store.historyFor("w1")?.next, "cursor-2", "the bootstrap does not discard the history cursor")
+})
+
+test("ticket222: history pages merge without duplicates and keep direct and workspace scopes apart", () => {
+  const now = Date.now()
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+  }), { protocol: 4, epoch: 1 }))
+
+  store.applyWorkHistory(historyPage("w1", [nativeTurn("w_new", "w1", now - 1_000)], { hasMore: true, next: "next-1", limit: 1 }))
+  store.applyWorkHistory(historyPage("w1", [nativeTurn("w_old", "w1", now - 2_000)], { hasMore: false, limit: 1 }))
+  assert.deepEqual(Object.keys(store.state()!.subtasks).sort(), ["w_new", "w_old"])
+  assert.equal(store.historyFor("w1")?.hasMore, false)
+  assert.equal(store.historyFor("w1")?.next, undefined)
+
+  store.applyWorkHistory(historyPage("dm:a1:w1", [nativeTurn("dm_done", "dm:a1:w1", now - 500)], { limit: 5 }))
+  assert.ok(store.state()!.subtasks.dm_done)
+  assert.equal(store.state()!.subtasks.dm_done!.conversationID, "dm:a1:w1")
+  assert.deepEqual(Object.keys(store.state()!.subtasks).sort(), ["dm_done", "w_new", "w_old"], "one Work map holds both scoped pages")
+  assert.equal(store.historyFor("dm:a1:w1")?.hasMore, false)
+  assert.equal(store.historyFor("w1")?.next, undefined, "a direct page never touches the workspace cursor")
+
+  store.applyWorkHistory(historyPage("w1", [nativeTurn("w_new", "w1", now - 1_000)], { limit: 1 }))
+  assert.equal(Object.keys(store.state()!.subtasks).filter((id) => id === "w_new").length, 1, "a repeated page cannot duplicate a row")
+})
+
+test("ticket222: an older history read never regresses a row that already settled", () => {
+  const now = Date.now()
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "site")
+    state.subtasks.turn = nativeTurn("turn", "w1", now - 2_000)
+  }), { protocol: 4, epoch: 1 }))
+  const settled = store.state()!.subtasks.turn
+  store.applyWorkHistory(historyPage("w1", [nativeTurn("turn", "w1", now - 5_000)], { limit: 5 }))
+  assert.equal(store.state()!.subtasks.turn, settled, "a stale page keeps the newer durable row")
 })

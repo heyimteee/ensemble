@@ -125,6 +125,19 @@ export type NativeTurnPhase =
   | "interrupted"
 
 /**
+ * One observed native host event, identity-only. Ticket #222 uses this
+ * timeline for the "Why this card?" detail. It never carries conversation
+ * content or file paths.
+ */
+export type NativeTurnEvent = {
+  type: string
+  at: number
+  phase?: NativeTurnPhase
+  delivery?: string
+  messageID?: Id
+}
+
+/**
  * Host identity and phase for one native turn (ticket #215). `inboxID` is the
  * user message id; `assistantMessageIDs` are the host text message ids. A
  * retry reuses the same assistant id, so these arrays are append-only.
@@ -138,6 +151,22 @@ export type NativeTurnInfo = {
   settledAt?: number
   resultMessageID?: Id
   errorCode?: string
+  /** Ticket #222: bounded, identity-only host event timeline. */
+  events?: NativeTurnEvent[]
+}
+
+/**
+ * Ticket #221: the delivery record for one workspace `send_message` post made
+ * during a turn. It lets an identical final native text dedupe to the same
+ * transcript row and route set instead of posting and routing twice. The text
+ * itself stays in its message row; this record carries only a hash and IDs.
+ */
+export type AgentPostInfo = {
+  messageID: Id
+  /** Hash of the trimmed post text, never the conversation text. */
+  textHash: string
+  /** Agents the post routed to, in prose order after suppressions. */
+  recipientIDs: Id[]
 }
 
 /**
@@ -429,6 +458,11 @@ export type Subtask = {
   adopted?: boolean
   conversationID?: Id
   native?: NativeTurnInfo
+  /**
+   * Ticket #221: the latest workspace tool post made during this turn. A final
+   * native text identical to it reuses its message row and route set.
+   */
+  agentPost?: AgentPostInfo
   /**
    * General-skill leader triage (ticket #103): the turn must read and either
    * use or delegate the listed skills. This is the single triage source of
@@ -722,6 +756,20 @@ export type ScopedResync = {
   meta?: FeedMeta
 }
 
+/**
+ * Ticket #222: one server-paged Work history read for one conversation.
+ * Terminal rows only, inside the durable 24 h retention. `next` is an opaque
+ * cursor from the last row on this page; absent when the page is the end.
+ */
+export type WorkHistoryPage = {
+  conversationID: Id
+  tasks: Record<Id, Subtask>
+  groups: Record<Id, DispatchGroup>
+  hasMore: boolean
+  next?: string
+  limit: number
+}
+
 export type Snapshot = {
   state: {
     version: number
@@ -738,7 +786,6 @@ export type Snapshot = {
     approvals: Record<Id, Approval>
     settings: Settings
     dmQueue: Record<Id, DmQueueEntry>
-    dmTranscripts: Record<string, ChatMessage[]>
     ui: {
       activeWorkspaceID?: Id
       activeAgentID?: Id

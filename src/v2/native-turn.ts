@@ -1,5 +1,5 @@
 import { stableHash } from "./queue.ts"
-import type { Id, NativeTurnPhase, Subtask } from "./types.ts"
+import type { Id, NativeTurnEvent, NativeTurnInfo, NativeTurnPhase, Subtask } from "./types.ts"
 
 /**
  * Ticket #215: pure identity and text helpers for native turn ingestion.
@@ -311,6 +311,30 @@ export function nativeContextAnswer(
 /** True when a stored task is a native turn (never claimed or pumped). */
 export function isNativeTurn(task: Pick<Subtask, "origin" | "native">): boolean {
   return task.origin === "native" || task.native !== undefined
+}
+
+/** Ticket #222: keep the identity-only timeline bounded. */
+export const NATIVE_TURN_EVENT_LIMIT = 32
+
+/**
+ * Append one host event to a turn's metadata timeline. Consecutive duplicates
+ * (a replayed delivery or text event) collapse; the timeline is bounded and
+ * never carries text or file content.
+ */
+export function appendNativeTurnEvent(native: NativeTurnInfo, event: NativeTurnEvent): void {
+  const events = native.events ?? []
+  const previous = events.at(-1)
+  if (
+    previous
+    && previous.type === event.type
+    && previous.phase === event.phase
+    && previous.delivery === event.delivery
+    && previous.messageID === event.messageID
+  ) {
+    native.events = events
+    return
+  }
+  native.events = [...events, event].slice(-NATIVE_TURN_EVENT_LIMIT)
 }
 
 /**
