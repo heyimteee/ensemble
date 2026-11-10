@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { StyledText, TextAttributes, bg as bgStyle, fg as fgStyle } from "@opentui/core"
-import type { Agent, Memory, SkillOption } from "../types.ts"
+import type { Agent, Memory, MessageAttachment, SkillOption } from "../types.ts"
 import { approvalSource } from "../types.ts"
 import type { DispatchLimits } from "../dispatch-budget.ts"
 import { limitsPanelFooter, limitsPanelRows, limitsPanelSubtitle, limitsPanelTitle } from "./limits.ts"
@@ -63,6 +63,8 @@ export type ChatLine = {
   agentID?: string
   text: string
   kind?: string
+  /** Attachment metadata shown as chips under a user row (ticket #223). */
+  attachments?: MessageAttachment[]
   streaming?: boolean
   interrupted?: boolean
   queued?: boolean

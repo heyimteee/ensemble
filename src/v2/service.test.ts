@@ -9156,3 +9156,203 @@ test("ticket214: parallel workspace direct opens create only one direct session"
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test("a direct attachment reaches the agent prompt and the transcript as metadata only", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-attachments-"))
+  const { ctx, prompts } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    const workspaceID = workspace.result.id
+    const source = join(directory, "review-notes.md")
+    writeFileSync(source, "private attachment body")
+    const added = await handlers.invoke({
+      directory,
+      action: "attachment.add",
+      payload: { workspaceID, agentID: agent.result.id, path: source },
+    })
+    assert.equal(added.ok, true)
+    assert.equal(added.result.mime, "text/markdown")
+    assert.equal(added.result.size, "private attachment body".length)
+    assert.equal(JSON.stringify(added.result).includes(directory), false, "the add result carries no store path")
+
+    const sent = await handlers.invoke({
+      directory,
+      action: "chat.send",
+      payload: { workspaceID, agentID: agent.result.id, text: "Review the notes", attachments: [added.result.id] },
+    })
+    assert.equal(sent.ok, true)
+
+    const prompt = prompts.find((entry) => Array.isArray(entry.files) && entry.files.length > 0)
+    assert.ok(prompt, "the direct prompt carries the file attachment")
+    assert.equal(prompt.files[0].name, "review-notes.md")
+    assert.match(prompt.files[0].uri, /^file:\/\//)
+    assert.match(prompt.files[0].description, /text\/markdown/)
+    assert.equal(prompt.files[0].uri.includes("private attachment body"), false)
+
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { workspaceID, agentID: agent.result.id } })
+    const user = context.result.messages.find((message: any) => message.role === "user" && message.text === "Review the notes")
+    if (!user?.attachments) throw new Error("the direct transcript did not store the user line with attachments")
+    assert.deepEqual(user.attachments.map(({ name, mime, size, kind }: any) => ({ name, mime, size, kind })), [
+      { name: "review-notes.md", mime: "text/markdown", size: 23, kind: "file" },
+    ])
+
+    const snapshot = await handlers.snapshot({ directory })
+    const serialized = JSON.stringify(snapshot.state)
+    assert.equal(serialized.includes("private attachment body"), false)
+    assert.equal(serialized.includes(".ensemble/attachments"), false)
+    assert.equal(serialized.includes("review-notes.md"), true, "the display name survives")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a group attachment reaches group prompts and transcript chips", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-attachments-"))
+  const { ctx, prompts } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    const workspaceID = workspace.result.id
+    const source = join(directory, "diagram.png")
+    writeFileSync(source, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]))
+    const added = await handlers.invoke({ directory, action: "attachment.add", payload: { workspaceID, path: source } })
+    assert.equal(added.ok, true)
+    assert.equal(added.result.kind, "image")
+
+    const sent = await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID, text: "Look at this", attachments: [added.result.id] },
+    })
+    assert.equal(sent.ok, true)
+    await waitFor(() => Promise.resolve(prompts.some((entry) => Array.isArray(entry.files) && entry.files.length > 0)))
+    const prompt = prompts.find((entry) => Array.isArray(entry.files) && entry.files.length > 0)
+    assert.equal(prompt.files[0].name, "diagram.png")
+    assert.match(prompt.files[0].uri, /^file:\/\//)
+
+    const snapshot = await handlers.snapshot({ directory })
+    const user = snapshot.state.messages[workspaceID].find((message: any) => message.author === "user")
+    if (!user?.attachments) throw new Error("the group transcript did not store attachment metadata")
+    assert.deepEqual(user.attachments.map(({ name, mime, size, kind }: any) => ({ name, mime, size, kind })), [
+      { name: "diagram.png", mime: "image/png", size: 9, kind: "image" },
+    ])
+    const task = Object.values(snapshot.state.subtasks)[0] as any
+    assert.deepEqual(task.attachments.map(({ name }: any) => name), ["diagram.png"])
+    assert.equal(JSON.stringify(snapshot.state).includes("private attachment body"), false)
+    assert.equal(JSON.stringify(snapshot.state).includes(".ensemble/attachments"), false)
+
+    const deleted = await handlers.invoke({ directory, action: "workspace.delete", payload: { id: workspaceID } })
+    assert.equal(deleted.ok, true)
+    assert.equal(existsSync(join(directory, ".ensemble", "attachments")), false, "conversation cleanup removes the store")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("oversized and too-many attachments are rejected before a prompt", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-attachments-"))
+  const { ctx, prompts } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    const workspaceID = workspace.result.id
+    const big = join(directory, "too-big.bin")
+    writeFileSync(big, Buffer.alloc(10 * 1024 * 1024 + 1))
+    const oversized = await handlers.invoke({ directory, action: "attachment.add", payload: { workspaceID, path: big } })
+    assert.equal(oversized.ok, false)
+    assert.ok(oversized.error)
+    assert.match(oversized.error.message, /too-big\.bin/)
+    assert.match(oversized.error.message, /limit is 10\.0 MB per file/)
+
+    const ids: string[] = []
+    for (let index = 0; index < 9; index += 1) {
+      const source = join(directory, `note-${index}.txt`)
+      writeFileSync(source, `note ${index}`)
+      const added = await handlers.invoke({ directory, action: "attachment.add", payload: { workspaceID, path: source } })
+      assert.equal(added.ok, true)
+      ids.push(added.result.id)
+    }
+    const tooMany = await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID, text: "Too many", attachments: ids },
+    })
+    assert.equal(tooMany.ok, false)
+    assert.ok(tooMany.error)
+    assert.match(tooMany.error.message, /Up to 8 files per message/)
+    assert.equal(prompts.length, 0, "rejection happens before any prompt")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("an attachment-only message can send a clipboard image without text", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-attachments-"))
+  const { ctx, prompts } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id },
+    })
+    const workspaceID = workspace.result.id
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02])
+    const added = await handlers.invoke({
+      directory,
+      action: "attachment.add",
+      payload: { workspaceID, data: png.toString("base64"), mime: "image/png", name: "pasted.png" },
+    })
+    assert.equal(added.ok, true)
+    assert.equal(added.result.name, "pasted.png")
+    assert.equal(added.result.kind, "image")
+
+    const sent = await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID, text: "", attachments: [added.result.id] },
+    })
+    assert.equal(sent.ok, true)
+    await waitFor(() => Promise.resolve(prompts.some((entry) => Array.isArray(entry.files) && entry.files.length > 0)))
+    const prompt = prompts.find((entry) => Array.isArray(entry.files) && entry.files.length > 0)
+    assert.equal(prompt.files[0].name, "pasted.png")
+    const snapshot = await handlers.snapshot({ directory })
+    const user = snapshot.state.messages[workspaceID].find((message: any) => message.author === "user")
+    if (!user?.attachments) throw new Error("the attachment-only send did not store metadata")
+    assert.equal(user.text, "")
+    assert.equal(user.attachments[0].kind, "image")
+    const task = Object.values(snapshot.state.subtasks)[0] as any
+    assert.match(task.title, /Attachment: pasted\.png/)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
