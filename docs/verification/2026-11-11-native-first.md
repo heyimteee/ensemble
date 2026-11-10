@@ -50,7 +50,7 @@ surface; it does not start a second host client or a second fake host.
 
 | Scenario | Result | Evidence |
 |---|---|---|
-| Native direct turn | **Pass** | User row exact on `dm:<agent>:<workspace>`; one exact agent row; native adopted turn; `replied`; 169 ms prompt-to-settled |
+| Native direct turn | **Pass** | User row exact on `dm:<agent>:<workspace>`; one exact agent row; durable native turn; `replied`; 169 ms prompt-to-settled |
 | Native workspace turn | **Pass** | User and agent rows on the workspace channel; native turn; `replied`; 91 ms |
 | User `$Name` mention | **Pass** | Exactly one peer turn under the native turn; same dispatch group; server-owned group budget `maxHops=8`; no agent-authored `taskMaxHops`; 153 ms |
 | Agent final-text `$Name` mention | **Pass** | Final native text is the exact group message; exactly one routed peer turn; same dispatch group; `askerKind=agent`; 215 ms |
@@ -61,7 +61,7 @@ surface; it does not start a second host client or a second fake host.
 | Restart / reconnect | **Pass** | Service restarted with the same state root; bindings, 9 native turns, and terminal phases survived; 0 stuck turns; `native:live`; Work history identical; a post-restart native prompt ingested and settled; service logs recorded both `native.reconcile.done reason=start` and location `reason=reconnect` passes |
 | Work history reload | **Pass** | Workspace 11 terminal tasks over 5 pages; direct 4 tasks over 2 pages; no duplicate rows; fresh bootstrap returns the same ids |
 | Rollback to explicit tools | **Pass** | `nativeFirst:off` + `toolSurface:legacy`; legacy `message.send` task replied; 11 Ensemble tools in the provider request; durable native turns preserved; `on` + `native` restored |
-| Shadow mode | **Pass** | Shadow ingested the fixture turn and recorded a comparison row (`phase:"replied"`, text length 33, planned routes 0) while creating no durable turn, message, patch, or Work card; one `native.shadow.compare` row was logged |
+| Shadow mode | **Pass** | Shadow ingested a `$Name` mention prompt and recorded a comparison row (`phase:"replied"`, planned user routes > 0, routing delta equal to the planned routes) while creating no durable turn, message, patch, or Work card; one `native.shadow.compare` row was logged |
 | Latency / tokens | **Pass (measurement only)** | See the table below; no spec numeric budget exists, so the raw values and the before/after schema comparison are the evidence |
 
 ### Matrix notes

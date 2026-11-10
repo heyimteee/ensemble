@@ -40,7 +40,7 @@ test("h/l and Tab cycle the four settings tabs with wraparound", () => {
 })
 
 test("each tab names its rows and cursor movement clamps at both ends", () => {
-  assert.equal(settingsRowCount("general", counts()), 5, "four identity fields plus the model row")
+  assert.equal(settingsRowCount("general", counts()), 6, "four identity fields plus model and mirror rows")
   assert.equal(settingsRowCount("models", counts({ backups: 2 })), 3, "main plus two backups")
   assert.equal(settingsRowCount("memories", counts({ memories: 4 })), 4)
   assert.equal(settingsRowCount("skillbox", counts({ skills: 7 })), 7)
@@ -48,6 +48,7 @@ test("each tab names its rows and cursor movement clamps at both ends", () => {
   assert.equal(settingsRowKind("general", 0, counts()), "field")
   assert.equal(settingsRowKind("general", 3, counts()), "field")
   assert.equal(settingsRowKind("general", 4, counts()), "model")
+  assert.equal(settingsRowKind("general", 5, counts()), "toggle", "the native mirror row is a toggle")
   assert.equal(settingsFieldAtRow(0), "name")
   assert.equal(settingsFieldAtRow(2), "role")
   assert.equal(settingsFieldAtRow(4), null, "the model row opens the picker, not a text field")

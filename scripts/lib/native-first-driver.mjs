@@ -262,7 +262,7 @@ async function main() {
     const agentRow = messageByID(snapshot, directChannel, task.resultMessageID)
     const userRows = messages.filter((message) => message.author === "user" && message.taskID === task.id)
     const agentRows = messages.filter((message) => message.author === "agent" && message.taskID === task.id)
-    assert("direct turn is a native adopted turn", task.origin === "native" && task.adopted === true && task.workKind === "turn")
+    assert("direct turn is a native turn", task.origin === "native" && task.adopted === undefined && task.workKind === "turn")
     assert("direct turn uses the direct conversation channel", task.conversationID === directChannel)
     assert("direct user row is exact", userRow?.text === marker)
     assert("direct final row is exact", String(agentRow?.text ?? "").trim() === SHORT_REPLY.trim(), `finalChars=${String(agentRow?.text ?? "").length}`)
@@ -646,13 +646,19 @@ async function restart() {
     shadowBefore.settings.nativeFirst === "shadow" && shadowBinding.mode === "shadow",
   )
   const shadowMarker = "shadow-mode-fixture"
-  const shadowInbox = await promptNative(saved.groupSessionID, shadowMarker)
+  const shadowPeerName = String(shadowBefore.agents?.[saved.peerID]?.name ?? "").trim()
+  assert("shadow mention prompt names a roster peer", Boolean(shadowPeerName))
+  const shadowInbox = await promptNative(saved.groupSessionID, `${shadowMarker} ask $${shadowPeerName}`)
   if (typeof client.session.wait === "function") await client.session.wait({ sessionID: saved.groupSessionID }).catch(() => undefined)
   await sleep(1500)
   const shadowDiag = await diagnostic()
   const shadowAfter = shadowDiag.state
   const shadowRows = shadowDiag.native?.shadow?.last ?? []
   const shadowComparison = shadowRows.find((row) => row.inboxID === shadowInbox.id)
+  const shadowUnexplainedMismatch = Boolean(
+    shadowComparison
+    && (!shadowComparison.phaseMatch || !shadowComparison.textMatch || !shadowComparison.routingMatch),
+  )
   const shadowOutcome = {
     ingested: Boolean(shadowComparison) && (shadowDiag.native?.shadow?.comparisons ?? 0) > 0,
     visiblePathUnchanged: shadowOutcomeVisiblePath(shadowBefore, shadowAfter, saved, shadowInbox.id),
@@ -660,13 +666,33 @@ async function restart() {
       shadowComparison
       && shadowComparison.textLength > 0
       && /^[a-f0-9]{32}$/.test(String(shadowComparison.textDigest ?? ""))
+      && shadowComparison.phaseMatch
+      && shadowComparison.textMatch
+      && shadowComparison.routingMatch
+      && !shadowUnexplainedMismatch
       && ["replied", "failed", "interrupted", "cancelled"].includes(shadowComparison.phase),
     ),
+    unexplainedMismatch: shadowUnexplainedMismatch,
+    mentionPrompt: Boolean(shadowComparison && shadowComparison.plannedUserRoutes > 0),
     phase: shadowComparison?.phase,
+    phaseMatch: shadowComparison?.phaseMatch,
     textLength: shadowComparison?.textLength,
+    textMatch: shadowComparison?.textMatch,
+    plannedUserRoutes: shadowComparison?.plannedUserRoutes,
     plannedRoutes: shadowComparison?.plannedRoutes,
+    visibleRoutes: shadowComparison?.visibleRoutes,
+    routingDelta: shadowComparison?.routingDelta,
+    routingMatch: shadowComparison?.routingMatch,
   }
-  const shadowOk = shadowOutcome.ingested && shadowOutcome.visiblePathUnchanged && shadowOutcome.comparisonRows
+  assert(
+    "the shadow mention prompt plans a route delta",
+    shadowOutcome.mentionPrompt && shadowOutcome.routingDelta === shadowOutcome.plannedRoutes,
+    JSON.stringify({ plannedUserRoutes: shadowOutcome.plannedUserRoutes, plannedRoutes: shadowOutcome.plannedRoutes, routingDelta: shadowOutcome.routingDelta }),
+  )
+  const shadowOk = shadowOutcome.ingested
+    && shadowOutcome.visiblePathUnchanged
+    && shadowOutcome.comparisonRows
+    && shadowOutcome.mentionPrompt
   check(
     "shadow ingests, compares, and leaves the visible path unchanged",
     shadowOk,

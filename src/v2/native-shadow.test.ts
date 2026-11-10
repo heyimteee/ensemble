@@ -40,7 +40,8 @@ test("ticket230: comparison rows carry lengths, digests, phases, and counts only
   assert.equal(row.plannedFinalRoutes, 2)
   assert.equal(row.plannedRoutes, 3)
   assert.equal(row.visibleRoutes, 0)
-  assert.equal(row.routingMatch, false)
+  assert.equal(row.routingDelta, 3, "the routing difference is reported as data")
+  assert.equal(row.routingMatch, true, "a delta is expected when the visible path cannot route")
   assert.equal(row.channelKind, "workspace")
   const serialized = JSON.stringify(row)
   assert.equal(serialized.includes("Shadow final answer."), false)
@@ -58,6 +59,7 @@ test("ticket230: an unavailable visible answer is recorded as missing, never gue
   assert.equal(row.visibleTextDigest, undefined)
   assert.equal(row.textMatch, false)
   assert.equal(row.plannedRoutes, 0)
+  assert.equal(row.routingDelta, 0)
   assert.equal(row.routingMatch, true)
   assert.equal(row.channelKind, "workspace")
   assert.deepEqual(buildShadowComparison({

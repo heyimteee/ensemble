@@ -50,7 +50,7 @@ import {
   cleanupConversationAttachments,
   cleanupWorkspaceAttachments,
   formatAttachmentSize,
-  nativePromptAttachments,
+  nativeInboxAttachments,
   promptFilesForAttachments,
   removeStoredAttachment,
   resolveAttachments,
@@ -75,7 +75,7 @@ import {
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { selectWorkHistory, workHistoryGroups } from "./work-history.ts"
-import { chatLineFromMessage, directMessageChannelForBinding } from "./message-channel.ts"
+import { chatLineFromMessage, directMessageChannelForBinding, isDirectMessageChannel } from "./message-channel.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type StoreObserver } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
@@ -86,7 +86,7 @@ import { effectiveToolSurface, isToolSurface } from "./tool-surface.ts"
 import { ensembleTurnContext } from "./turn-context.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
-import { nativeFirstMode, isNativeFirstMode } from "./native-first.ts"
+import { nativeFirstMode, isNativeFirstMode, nativeMirrorEnabled } from "./native-first.ts"
 import { directSessionCutover, selectDirectConversation } from "./direct-session.ts"
 import { bindingConversation, conversationStateKey } from "./conversation-binding.ts"
 import {
@@ -382,6 +382,8 @@ type NativeReconcileCounts = {
   repairedResults: number
   interrupted: number
   skipped: number
+  /** The binding target changed mid-pass; the caller must reconcile again. */
+  targetChanged?: boolean
 }
 
 /**
@@ -1017,7 +1019,16 @@ export class EnsembleV2Service {
     if (isNativeIngestEvent(type)) {
       const sessionID = nativeEventSessionID(event)
       if (sessionID) {
-        await this.enqueueNativeEvent(sessionID, event)
+        // Ticket #215: enqueue, never await, here. One session's settle can be
+        // slow; the host subscription must still deliver the next session's
+        // events. The per-session queue preserves order and owns its errors.
+        void this.enqueueNativeEvent(sessionID, event).catch((error) => {
+          this.logger?.event("warn", "native", "native.event.dispatch.error", {
+            sessionID,
+            type,
+            error,
+          })
+        })
         return
       }
     }
@@ -1850,7 +1861,7 @@ export class EnsembleV2Service {
   ): Promise<any> {
     await this.beginRead(directory, { dmClock: false })
     const state = this.store.read()
-    const direct = request.conversationID?.startsWith("dm:")
+    const direct = request.conversationID ? isDirectMessageChannel(request.conversationID) : false
     const conversationID = direct
       ? request.conversationID!
       : this.readWorkspaceID(state, directory, request.workspaceID ?? request.conversationID)
@@ -2837,6 +2848,7 @@ export class EnsembleV2Service {
       color: String(payload.color ?? "cyan"),
       archived: false,
       pendingSettings: false,
+      nativeMirror: typeof payload.nativeMirror === "boolean" ? payload.nativeMirror : true,
       version: 1,
       createdAt: at,
       updatedAt: at,
@@ -2902,6 +2914,15 @@ export class EnsembleV2Service {
       const next = stringList(payload.skillbox, "skillbox")
       if (next.length !== agent.skillbox.length || next.some((skill) => !agent.skillbox.includes(skill))) { behavioral = true; changed.push("skillbox") }
       agent.skillbox = next
+    }
+    // The native mirror is a privacy choice, not agent behavior: it changes
+    // ingestion only and never queues a settings rollout.
+    if (payload.nativeMirror !== undefined) {
+      if (typeof payload.nativeMirror !== "boolean") {
+        throw Object.assign(new Error("nativeMirror must be true or false."), { code: "invalid_settings" })
+      }
+      if (payload.nativeMirror !== nativeMirrorEnabled(agent)) changed.push("nativeMirror")
+      agent.nativeMirror = payload.nativeMirror
     }
     if (behavioral) {
       agent.version++
@@ -3300,7 +3321,7 @@ export class EnsembleV2Service {
   }
 
   private adoptionNames(target: AdoptionTarget, agent: Agent): { agentName: string; workspaceName?: string } {
-    const workspace = target.workspaceID ? this.store.workspace(target.workspaceID) : undefined
+    const workspace = target.kind === "home" ? undefined : this.store.workspace(target.workspaceID)
     return { agentName: agent.name, ...(workspace ? { workspaceName: workspace.name } : {}) }
   }
 
@@ -3309,10 +3330,7 @@ export class EnsembleV2Service {
     if (!conversation) return "another conversation"
     const agent = this.store.agent(binding.agentID)
     const workspace = conversation.kind === "home" ? undefined : this.store.workspace(conversation.workspaceID)
-    const target: AdoptionTarget = conversation.kind === "home"
-      ? { kind: "home", agentID: binding.agentID }
-      : { kind: conversation.kind, workspaceID: conversation.workspaceID, agentID: binding.agentID }
-    return adoptionConversationName(target, {
+    return adoptionConversationName(conversation, {
       agentName: agent?.name ?? binding.agentID,
       ...(workspace ? { workspaceName: workspace.name } : {}),
     })
@@ -3608,6 +3626,19 @@ export class EnsembleV2Service {
     }
     await this.cancelAgentSubtasks(agentID, "Agent deleted.")
     await this.store.pruneDmForAgent(agentID)
+    // Every conversation binding goes, including workspace direct and home.
+    // Reading the binding map (not one key per workspace) is the difference
+    // between deleting an agent and leaving a direct session attributed to it.
+    for (const binding of this.store.bindings().filter((candidate) => candidate.agentID === agentID)) {
+      if (deleteNativeSessions) {
+        for (const sessionID of [...(binding.history ?? []), binding.sessionID]) {
+          await this.ctx.session.remove({ sessionID }).catch(() => undefined)
+        }
+      }
+      const conversation = bindingConversation(binding)
+      if (conversation) await this.store.removeConversationBinding(agentID, conversation)
+      else await this.store.removeBinding(binding.workspaceID, agentID)
+    }
     for (const candidate of workspaces) {
       if (candidate.memberIDs.includes(agentID)) {
         const workspace = this.store.cloneWorkspace(candidate.id)
@@ -3620,18 +3651,6 @@ export class EnsembleV2Service {
         candidate.directory,
         attachmentConversationKey({ agentID, workspaceID: candidate.id, bindingKey: candidate.id }),
       )
-      const binding = this.store.binding(candidate.id, agentID)
-      if (binding) {
-        if (deleteNativeSessions) {
-          for (const sessionID of [...(binding.history ?? []), binding.sessionID]) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
-        }
-        await this.store.removeBinding(candidate.id, agentID)
-      }
-    }
-    const home = this.store.binding("home", agentID)
-    if (home) {
-      if (deleteNativeSessions) await this.ctx.session.remove({ sessionID: home.sessionID }).catch(() => undefined)
-      await this.store.removeBinding("home", agentID)
     }
     if (agent.homeDirectory) cleanupWorkspaceAttachments(agent.homeDirectory)
     for (const memory of this.store.memories()) {
@@ -5583,7 +5602,7 @@ export class EnsembleV2Service {
     if (patch.nativeFirst !== undefined) this.clearShadowIngestion()
     // Ticket #225: registration is per host location, so a surface change must
     // replace it in place; otherwise the rollback would wait for a restart.
-    if (patch.toolSurface !== undefined || patch.nativeFirst !== undefined) await this.refreshToolSurface()
+    if (patch.toolSurface !== undefined || patch.nativeFirst !== undefined || patch.nativeMentionRouting !== undefined) await this.refreshToolSurface()
     return settings
   }
 
@@ -7098,8 +7117,8 @@ export class EnsembleV2Service {
     const at = now()
     for (const candidate of this.store.subtasks()) {
       if (candidate.state === "replied") continue
-      // Native turns are adopted: no lease, claim, retry, or attempt budget.
-      if (candidate.adopted || isNativeTurn(candidate)) continue
+      // Native turns have no lease, claim, retry, or attempt budget.
+      if (isNativeTurn(candidate)) continue
       // A live lease always wins, even over an exhausted attempt count or an
       // old delivery timestamp: only the owning run, expiry, or a clean stop
       // may release it. A foreign live claim is deferred, never stolen.
@@ -7341,7 +7360,7 @@ export class EnsembleV2Service {
     for (const candidate of tasks) {
       if (candidate.state === "replied") continue
       // Native turns settle only from host terminal events or recovery.
-      if (candidate.adopted || isNativeTurn(candidate)) continue
+      if (isNativeTurn(candidate)) continue
       // Batch reviews close only through ensemble_review.
       if (candidate.handoff?.batch === true) continue
       const children = childrenByParent.get(candidate.id) ?? []
@@ -7438,7 +7457,7 @@ export class EnsembleV2Service {
           if (directory) busyEditDirs.add(directory)
         }
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !task.adopted && !isNativeTurn(task) && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
+          .filter((task) => task.state === "pending" && task.assigneeID && !isNativeTurn(task) && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)
         const skipped = (task: Subtask, reason: string, extra: Record<string, unknown> = {}) => {
           if (task.retryAfter === undefined) return
@@ -7622,6 +7641,15 @@ export class EnsembleV2Service {
   private async applyNativeSubagentPendingState(childSessionID: string): Promise<void> {
     const pending = this.takeNativeSubagentPendingState(childSessionID)
     if (!pending) return
+    const existing = this.store.nativeSubagent(childSessionID)
+    // A start observed before the record existed can be applied after a later
+    // terminal event already settled it. The older start must not reopen a
+    // terminal child (the event-order race that parallel ingestion exposes).
+    if (
+      existing
+      && pending.state === "working"
+      && existing.state !== "working"
+    ) return
     await this.transitionNativeSubagent(childSessionID, pending.state, "late-host-event")
   }
 
@@ -9238,15 +9266,20 @@ export class EnsembleV2Service {
           return
         }
       }
+      // Privacy gate: a native prompt belongs to this agent's own session, so
+      // an off mirror never creates a turn, user row, route, or final row for
+      // it. Managed service prompts above are unaffected: they already own a
+      // durable row and their work must keep mirroring.
+      if (!internal && !nativeMirrorEnabled(target.agent)) {
+        skipped("mirror-off")
+        return
+      }
       const turnID = nativeTurnID(sessionID, inboxID)
       let task = this.store.subtask(turnID)
       const created = !task
       if (!task) {
         const text = String(payload.text ?? "")
-        const attachments = nativePromptAttachments(payload.files).map((attachment, index) => ({
-          ...attachment,
-          id: `att_native_${stableHash(`${inboxID}\0${index}`)}`,
-        }))
+        const attachments = nativeInboxAttachments(payload.files, inboxID)
         task = {
           id: turnID,
           workspaceID: target.channel,
@@ -9265,7 +9298,6 @@ export class EnsembleV2Service {
           createdAt: at,
           workKind: "turn",
           origin: "native",
-          adopted: true,
           conversationID: target.channel,
           dispatchGroupID: nativeTurnGroupID(turnID),
           native: {
@@ -9939,28 +9971,66 @@ export class EnsembleV2Service {
     sessionID: string,
     reason: NativeReconcileReason,
   ): Promise<{ ok: boolean; reason?: string }> {
-    const target = this.nativeIngestTarget(sessionID, { requireMode: false })
-    if (!target) return { ok: true }
     if (nativeFirstMode(this.store.settings()) !== "on") return { ok: true }
     this.beginNativeReconcile(reason)
     try {
-      const messages = await this.nativeContextMessagesForSession(sessionID, reason)
-      if (!messages) {
-        this.endNativeReconcile(false, "context-read")
-        return { ok: false, reason: "context-read" }
+      // Ticket #224 race guard: a binding can change while the transcript read
+      // is in flight (an adoption during a start/reconnect pass). The target
+      // key ties every write to the binding the read was resolved against; a
+      // changed key discards nothing and repeats against the new conversation,
+      // so the old conversation receives no post-adoption row and the new one
+      // still recovers.
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const target = this.nativeIngestTarget(sessionID, { requireMode: false })
+        if (!target) {
+          // A transient remove/save gap during reassignment is not a terminal
+          // "unbound" answer; give the binding write a turn to land.
+          if (attempt < 5) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            continue
+          }
+          this.endNativeReconcile(true, reason)
+          return { ok: true }
+        }
+        const targetKey = this.nativeTargetKey(target)
+        const messages = await this.nativeContextMessagesForSession(sessionID, reason)
+        if (!messages) {
+          this.endNativeReconcile(false, "context-read")
+          return { ok: false, reason: "context-read" }
+        }
+        if (this.nativeTargetKeyForSession(sessionID) !== targetKey) {
+          this.logger?.event("info", "native", "native.reconcile.target_changed", { sessionID, reason, attempt })
+          continue
+        }
+        const counts = await this.applyNativeReconciliation(sessionID, target, messages, reason, targetKey)
+        if (counts.targetChanged) {
+          this.logger?.event("info", "native", "native.reconcile.target_changed", { sessionID, reason, attempt, phase: "apply" })
+          continue
+        }
+        this.endNativeReconcile(true, reason)
+        this.logger?.event("info", "native", "native.reconcile.session", {
+          sessionID,
+          reason,
+          ...counts,
+        })
+        return { ok: true }
       }
-      const counts = await this.applyNativeReconciliation(sessionID, target, messages, reason)
-      this.endNativeReconcile(true, reason)
-      this.logger?.event("info", "native", "native.reconcile.session", {
-        sessionID,
-        reason,
-        ...counts,
-      })
-      return { ok: true }
+      this.endNativeReconcile(false, "target-changed")
+      return { ok: false, reason: "target-changed" }
     } catch (error) {
       this.endNativeReconcile(false, "reconcile-failed")
       throw error
     }
+  }
+
+  /** Identity of one ingestion target: channel, conversation, and agent. */
+  private nativeTargetKey(target: { conversation: BindingConversation; channel: string }): string {
+    return `${target.channel}\0${conversationStateKey(target.conversation)}`
+  }
+
+  private nativeTargetKeyForSession(sessionID: string): string | undefined {
+    const target = this.nativeIngestTarget(sessionID, { requireMode: false })
+    return target ? this.nativeTargetKey(target) : undefined
   }
 
   /**
@@ -9975,6 +10045,7 @@ export class EnsembleV2Service {
     target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
     messages: readonly any[],
     reason: NativeReconcileReason,
+    targetKey: string,
   ): Promise<NativeReconcileCounts> {
     const counts: NativeReconcileCounts = {
       turns: 0,
@@ -9991,6 +10062,7 @@ export class EnsembleV2Service {
       (task) => isNativeTurn(task) && task.native?.sessionID === sessionID && nativePhaseOpen(task.native?.phase),
     )
     for (const group of nativeContextTurnGroups(messages)) {
+      if (this.nativeTargetKeyForSession(sessionID) !== targetKey) return { ...counts, targetChanged: true }
       counts.turns += 1
       const prompt = { metadata: group.metadata }
       if (nativePromptSkipsTurn(prompt)) {
@@ -10005,6 +10077,12 @@ export class EnsembleV2Service {
       // A service prompt with no durable row is identity/onboarding copy and
       // owns no Ensemble turn.
       if (internal && !managedRow) {
+        counts.skipped += 1
+        continue
+      }
+      // Privacy gate: recovery must not recreate a private native prompt's
+      // rows or turn. Managed service prompts keep their recovery path.
+      if (!internal && !nativeMirrorEnabled(target.agent)) {
         counts.skipped += 1
         continue
       }
@@ -10033,6 +10111,7 @@ export class EnsembleV2Service {
             kind: "text",
             taskID: task.id,
             createdAt: group.createdAt ?? task.createdAt,
+            ...(group.attachments.length > 0 ? { attachments: group.attachments } : {}),
             native: { sessionID, inboxID: group.inboxID, turnID: task.id },
           })
           counts.recoveredUserMessages += 1
@@ -10104,6 +10183,7 @@ export class EnsembleV2Service {
     // Existing open turns are the restart/reconnect input even when they use a
     // pre-reconciliation id rather than the deterministic inbox id. Recover
     // them from the same one transcript read; identity still wins.
+    if (this.nativeTargetKeyForSession(sessionID) !== targetKey) return { ...counts, targetChanged: true }
     for (const task of openBefore) {
       if (matched.has(task.id) || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) continue
       const answer = nativeContextTurnAnswer(messages, {
@@ -10148,6 +10228,7 @@ export class EnsembleV2Service {
       assigneeID: target.agent.id,
       title: nativeTurnTitle(group.text),
       instruction: group.text,
+      ...(group.attachments.length > 0 ? { attachments: group.attachments } : {}),
       mode: "research",
       state: group.hasAssistant ? "working" : "pending",
       stage: "initial",
@@ -10158,7 +10239,6 @@ export class EnsembleV2Service {
       createdAt: group.createdAt ?? at,
       workKind: "turn",
       origin: "native",
-      adopted: true,
       conversationID: target.channel,
       dispatchGroupID: nativeTurnGroupID(turnID),
       native: {

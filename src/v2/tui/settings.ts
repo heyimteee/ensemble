@@ -74,9 +74,11 @@ export type GeneralFieldSource = {
   title: string
   role: string
   color: string
+  /** Per-agent native mirror privacy toggle; unset reads as on. */
+  nativeMirror?: boolean
 }
 
-/** General tab rows: identity, role, color, plus the main-model summary. */
+/** General tab rows: identity, role, color, model, and the mirror toggle. */
 export function generalFieldRows(
   agent: GeneralFieldSource,
   mainModel: { providerID: string; modelID: string; variant?: string },
@@ -87,6 +89,7 @@ export function generalFieldRows(
     ["Role", short(agent.role || "(empty)", 100)],
     ["Color", agent.color || "(empty)"],
     ["Model", modelSummary(mainModel)],
+    ["Native mirror", agent.nativeMirror === false ? "off" : "on"],
   ]
 }
 

@@ -8,7 +8,9 @@ test("ticket225: prompt-size regression gate records tool schema, identity, cont
   assert.equal(report.after.toolSurface.count, 5)
   assert.ok(report.after.toolSurface.estimatedTokens < report.before.toolSurface.estimatedTokens * 0.5, benchmarkSummary(report))
   assert.ok(report.after.identity.chars < 6200, `identity stayed compact: ${report.after.identity.chars}`)
-  assert.ok(report.after.turnContext.chars < 1600, `turn context stayed compact: ${report.after.turnContext.chars}`)
+  // The bounded last-20 transcript is part of the delegated context; the
+  // roster/budget block around it stays compact.
+  assert.ok(report.after.turnContext.chars < 3200, `turn context stayed bounded: ${report.after.turnContext.chars}`)
   assert.ok(report.after.totalPrompt.estimatedTokens < report.before.totalPrompt.estimatedTokens * 0.6, benchmarkSummary(report))
   assert.ok(report.reduction.totalPromptPct >= 40, benchmarkSummary(report))
   assert.equal(report.before.toolCalls, 1)

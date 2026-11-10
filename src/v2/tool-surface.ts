@@ -19,8 +19,14 @@ export function isToolSurface(value: unknown): value is ToolSurface {
  * explicit path and therefore the full legacy toolset. An explicit
  * `toolSurface` wins so a rollback can keep native ingestion while restoring
  * the old tools, and a test can select either surface without changing modes.
+ * The mention-routing kill switch takes precedence over both: it restores the
+ * explicit path it turns off.
  */
-export function effectiveToolSurface(settings: Pick<Settings, "nativeFirst" | "toolSurface"> | undefined): ToolSurface {
+export function effectiveToolSurface(settings: Pick<Settings, "nativeFirst" | "toolSurface" | "nativeMentionRouting"> | undefined): ToolSurface {
+  // Ticket #221: the mention-routing kill switch must restore the explicit
+  // path, not just refuse `$Name`. The legacy surface carries `send_message`,
+  // `handoff`, and `delegate`; the native surface deliberately does not.
+  if (nativeFirstMode(settings) === "on" && settings?.nativeMentionRouting === false) return "legacy"
   if (settings?.toolSurface && isToolSurface(settings.toolSurface)) return settings.toolSurface
   return nativeFirstMode(settings) === "on" ? "native" : "legacy"
 }
@@ -32,10 +38,10 @@ export const TOOL_SURFACE_TOOL_NAMES: Record<ToolSurface, readonly string[]> = {
     "workspace_info",
     "list_workspaces",
     "list_agents",
-    "task_status",
     "send_message",
     "handoff",
     "delegate",
+    "task_status",
     "review",
     "ask_person",
     "remember",

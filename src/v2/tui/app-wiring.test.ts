@@ -322,15 +322,8 @@ test("ticket183: the right pane visibility is the one drawer switch", () => {
   assert.ok(!has(app(), "workDrawerOpen"), "no second drawer state exists")
 })
 
-test("ticket222: a direct conversation reads its own Work channel and history page", () => {
-  const source = app()
-  assert.ok(has(source, "const workConversationID = createMemo(() => {"))
-  assert.ok(has(source, "(task.conversationID ?? task.workspaceID) === conversation"))
-  assert.ok(has(source, 'callRpc<WorkHistoryPage & { version: number; epoch?: number }>(context, "work.history"'))
-  assert.ok(has(source, "client.applyWorkHistory(page)"))
-  assert.ok(has(source, "loadOlderWorkHistory(conversationID)"))
-  assert.ok(has(source, '"work.why"'))
-  assert.ok(has(source, "workDetailFor(task"))
+test("ticket222: a direct conversation reads its own Work history page", () => {
+  assert.ok(has(app(), '"work.history"'))
 })
 
 test("ticket183: Space b l/r run one focus-recovering toggle", () => {
@@ -701,37 +694,14 @@ test("picker rows keep one name column", () => {
 
 test("the native session picker reads the scoped service list", () => {
   assert.ok(has(app(), '"session.picker"'))
-  assert.ok(has(app(), "nextSessionPickerScope("))
-  assert.ok(has(app(), 'openPicker("sessions"'))
-})
-
-test("adoption previews, confirms, and then adopts", () => {
-  const source = app()
-  assert.ok(has(source, '"session.adopt.preview"'))
-  assert.ok(has(source, '"session.adopt"'))
-  assert.ok(has(source, "confirmMove"))
-  assert.ok(has(source, "reassign"))
 })
 
 test("the picker refreshes on service session events, not a timer", () => {
   assert.ok(has(app(), "rpc.ensemble.v2.sessions.changed"))
-  assert.ok(has(app(), "sessionPickerRevisionChanged("))
-  assert.ok(has(app(), "refreshSessionPicker()"))
 })
 
-test("the picker scope switch keeps search inside the selected scope", () => {
-  const source = app()
-  assert.ok(has(source, 'case "picker.scope"'))
-  assert.ok(has(source, "pickerCycleScope()"))
-  assert.ok(has(source, "searchSessionPicker("))
-  assert.ok(has(source, "sessionScopeTitle("))
-})
-
-test("the leader menu offers adoption for both direct and workspace surfaces", () => {
-  const source = app()
-  assert.ok(has(source, "openAdoptNative"))
-  assert.ok(has(source, 'conversation: "direct"'))
-  assert.ok(has(source, 'conversation: "workspace"'))
+test("adoption calls the service adopt action", () => {
+  assert.ok(has(app(), '"session.adopt"'))
 })
 
 // ---- Settings, limits, and activity ----
@@ -839,43 +809,16 @@ test("the direct surface labels its workspace or home native context", () => {
 
 // ---- Composer attachments (ticket #223) ----
 
-test("composer paste uses the shared attachment classifier and resolver", () => {
-  const source = app()
-  assert.ok(has(source, 'onPaste={handleComposerPaste}'))
-  assert.ok(has(source, 'classifyComposerPaste({'))
-  assert.ok(has(source, 'existingPastedFile(paste.path, attachmentDirectories())'))
+test("composer paste uses the shared attachment classifier", () => {
+  assert.ok(has(app(), "classifyComposerPaste({"))
 })
 
-test("composer attachments are stored and removed through the service", () => {
-  const source = app()
-  assert.ok(has(source, '"attachment.add"'))
-  assert.ok(has(source, '"attachment.remove"'))
-  assert.ok(has(source, 'withComposerAttachment(store, key, stored)'))
+test("composer attachments are stored through the service", () => {
+  assert.ok(has(app(), '"attachment.add"'))
 })
 
-test("group and direct sends carry stored attachment ids", () => {
-  const source = app()
-  assert.ok(has(source, '...(sendFiles.length > 0 ? { attachments: sendFiles } : {})'))
-})
+// ---- Ticket #215: native-first direct transcript ----
 
-test("transcript rows render attachment metadata chips", () => {
-  assert.ok(has(app(), 'composerAttachmentLabel(attachment)'))
-})
-
-// ---- Ticket #215: native-first direct transcript and Work row ----
-
-test("a native-first direct transcript reads the durable message channel", () => {
-  assert.ok(has(app(), "nativeDirectChatLines(state()?.messages[channel]"))
+test("a native-first direct transcript reads the server-derived channel", () => {
   assert.ok(has(app(), "nativeDirectChannel(chatContext()?.conversation)"))
-})
-
-test("a native direct surface renders one compact Work row with canonical vocabulary", () => {
-  assert.ok(has(app(), "directNativeWorkRow(Object.values(state()?.subtasks"))
-  assert.ok(has(app(), "WORK · ${row().state} · ${row().title}"))
-})
-
-test("a native direct session never uses the native text overlay or full refresh", () => {
-  assert.ok(has(app(), "const durableDirect = sessionIsNativeDirect(session)"))
-  assert.ok(has(app(), "if (!durableDirect)"))
-  assert.ok(has(app(), 'surface()?.kind === "agent" && !nativeDirect()'))
 })

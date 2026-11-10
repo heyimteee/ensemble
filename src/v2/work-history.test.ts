@@ -179,4 +179,10 @@ test("ticket222: why-this-card reports origin, session, inbox, events, routes, a
   assert.match(text, /child │ b · working/)
   assert.match(text, /dispatch_turn │ hops 2\/8 · cmd 22 left · depth 8/)
   assert.doesNotMatch(text, /private title|private instruction/, "the detail never includes conversation content")
+  const queued = workDetailFor({ ...turn, id: "turn_queued", state: "pending", native: { ...turn.native!, phase: "queued" } }, {
+    subtasks: { turn, child },
+    dispatchGroups: { dispatch_turn: group("dispatch_turn") },
+    now,
+  })
+  assert.equal(queued.state, "QUEUED", "Work history uses the same status word as a Work card")
 })

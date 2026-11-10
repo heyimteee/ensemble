@@ -53,7 +53,7 @@ _Avoid_: Task (when referring to the durable unit), job.
 **Work**: A visible unit of execution with an agent, mode, and status. It is either queued or running Subtask work, or a native turn without a lease, claim, or attempts.
 _Avoid_: Task (for the card).
 
-**Tool surface**: The set of Ensemble tools registered in a native session. The native surface keeps only decision tools (task status, batch review, ask-person, memory, share); the legacy surface is the one-release rollback that restores chat routing and explicit delegate/handoff. Roster, conversation, and budget values arrive in the injected `ensemble_turn` block instead of read-only tool calls. See [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md).
+**Tool surface**: The set of Ensemble tools registered in a native session. It is a migration boundary for the agent contract, not a second routing engine or a second source of conversation state. The registered list and rollback policy live in the [implementation notes](docs/implementation.md#native-tools); see [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md) for the routing decision.
 _Avoid_: Tool list (when distinguishing migration surfaces), tool budget.
 
 **Work status**: The observed lifecycle of Work: pending, working, waiting, retrying, needs you, replied, failed, stalled, or cancelled. Failed names a native execution error; stalled names a delivery, lease, or attempt-exhaustion problem. Work status is derived from the durable delivery and execution facts, not read from a stored label.

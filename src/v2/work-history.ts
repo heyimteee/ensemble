@@ -1,6 +1,6 @@
 import { dispatchBudgetLabel, dispatchBudgetSummary } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
-import { FINISHED_RETENTION_MS, deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "./queue.ts"
+import { FINISHED_RETENTION_MS, deriveWorkStatus, isNativeTurn, isTerminalWorkStatus, workStatusWord, type DerivedWorkStatus } from "./queue.ts"
 import type { DispatchGroup, Id, NativeTurnEvent, Subtask } from "./types.ts"
 
 /**
@@ -177,7 +177,7 @@ export function workDetailFor(
   const groups = input.dispatchGroups ?? {}
   const groupID = task.dispatchGroupID ?? resolveDispatchGroupID(task, input.subtasks)
   const group = groupID ? groups[groupID] : undefined
-  const origin = task.origin === "native" || native !== undefined
+  const origin = isNativeTurn(task)
     ? `native · ${task.workKind ?? "turn"}${task.adopted ? " · adopted" : ""}`
     : task.workKind ?? "delegation"
 
@@ -227,7 +227,7 @@ export function workDetailFor(
   return {
     taskID: task.id,
     status,
-    state: status.toUpperCase().replaceAll("_", " "),
+    state: workStatusWord(status),
     sections: [
       { title: "Identity", rows: identity },
       { title: "Event timeline", rows: timeline },

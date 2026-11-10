@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unl
 import { homedir } from "node:os"
 import { basename, extname, isAbsolute, join, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
+import { stableHash } from "./queue.ts"
 import type { Id, MessageAttachment } from "./types.ts"
 
 /**
@@ -188,6 +189,18 @@ function promptDataSize(value: unknown): number | undefined {
  * body in `data`; the size is derived from it when no explicit size field is
  * present, so chips never fall back to zero for a normal attachment.
  */
+/**
+ * Native prompt chips for one inbox. Ids are deterministic from the inbox id
+ * and file index, so an enqueue and a reconciliation recovery of the same
+ * message produce the same chips.
+ */
+export function nativeInboxAttachments(files: readonly NativePromptFile[] | undefined, inboxID: Id): MessageAttachment[] {
+  return nativePromptAttachments(files).map((attachment, index) => ({
+    ...attachment,
+    id: `att_native_${stableHash(`${inboxID}\0${index}`)}`,
+  }))
+}
+
 export function nativePromptAttachments(files: readonly NativePromptFile[] | undefined): MessageAttachment[] {
   if (!Array.isArray(files)) return []
   const chips: MessageAttachment[] = []

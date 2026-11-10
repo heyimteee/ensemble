@@ -128,13 +128,14 @@ const nativeShadowComparison = {
     plannedFinalRoutes: { type: "number" },
     plannedRoutes: { type: "number" },
     visibleRoutes: { type: "number" },
+    routingDelta: { type: "number" },
     routingMatch: { type: "boolean" },
     at: { type: "number" },
   },
   required: [
     "sessionID", "turnID", "inboxID", "conversationID", "channelKind", "phase", "expectedPhase", "phaseMatch",
     "textLength", "textDigest", "visibleHasTurn", "textMatch", "plannedUserRoutes", "plannedFinalRoutes",
-    "plannedRoutes", "visibleRoutes", "routingMatch", "at",
+    "plannedRoutes", "visibleRoutes", "routingDelta", "routingMatch", "at",
   ],
   additionalProperties: false,
 }

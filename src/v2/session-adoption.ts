@@ -1,4 +1,4 @@
-import type { BindingConversation, Id } from "./types.ts"
+import type { BindingConversation, BindingKind, Id } from "./types.ts"
 import { normalizeSessionDirectory } from "./session-picker.ts"
 
 /**
@@ -8,13 +8,10 @@ import { normalizeSessionDirectory } from "./session-picker.ts"
  * a host. The service performs the host calls and writes the binding only
  * after every check passes.
  */
-export type AdoptionConversationKind = "workspace" | "direct" | "home"
+export type AdoptionConversationKind = BindingKind
 
-export type AdoptionTarget = {
-  kind: AdoptionConversationKind
-  agentID: Id
-  workspaceID?: Id
-}
+/** An adoption target is a binding conversation; the agent is its identity. */
+export type AdoptionTarget = BindingConversation
 
 export type AdoptionTargetInput = {
   agentID: Id

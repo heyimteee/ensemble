@@ -231,8 +231,39 @@ consume a hop or the fan-out budget. See [Dispatch budgets](#dispatch-budgets).
 The surface follows the migration setting. `nativeFirst: "on"` selects the
 native list; `off` and `shadow` keep the legacy list. An explicit
 `settings.toolSurface` of `native` or `legacy` overrides the mode for one
-release, which is the rollback path. Both lists are registered per host
-location and are replaced in place when the setting changes.
+release, which is the rollback path. `nativeMentionRouting: false` forces the
+legacy surface so the explicit `ensemble_send_message` path returns with the
+kill switch. Both lists are registered per host location and are replaced in
+place when the setting changes.
+
+### Native mirror privacy
+
+Each agent has a durable `nativeMirror` setting, default on. The agent's
+General settings tab has one toggle row. Off means a prompt typed directly in
+that agent's native session creates no turn, user row, route, or final row;
+service-originated composer prompts still attach to their existing user row
+and still mirror their answer. Reconciliation applies the same gate, so a
+restart cannot recreate private native rows. The setting is not an agent
+behavior change and does not queue a settings rollout.
+
+### Shadow comparison
+
+`nativeFirst: "shadow"` ingests host events into an in-memory sink and records
+one bounded, content-free comparison row per settled turn. Text length and
+digest compare the shadow final against the visible native transcript, phase
+compares against the host terminal event, and routing reports the planner
+count, the visible pre-cutover count (`0` for a native turn), and their delta.
+The delta is expected data, not a mismatch; `routingMatch` only fails when a
+visible route contradicts the planned set.
+
+### Reconciliation target guard
+
+A start, reconnect, or adoption reconciliation captures the binding target
+(channel, conversation, and agent) before its transcript read. If adoption
+rebinds the session while that read is in flight, the pass discards the stale
+target and repeats against the new conversation. Recovery therefore lands in
+the new conversation only, and the old conversation receives no post-adoption
+rows.
 
 Idempotency keys (`work:`/`handoff:`) scope actor, workspace, kind, a hashed run prefix (never the raw parent id), the addressed recipient, and the canonical task/constraints/expected body. Suppression honors the row lifetime: a matching row suppresses resubmission while it is retained (live or terminal; finished rows purge after 24h retention). Intentional re-asks stay explicit: `task.retry`/`task.restart` re-queue the same row, and asking from a different parent/run is a different unit of work by construction. Cancellation is structural: only an explicit `stoppedAt` marker reads `cancelled`; error text is never substring-matched.
 
