@@ -32,10 +32,10 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Verification
 
-- [Native-first cutover verification](verification/2026-11-11-native-first.md): live direct/workspace turns, mention routing, attachments, adoption, retry/interruption, restart, Work history, rollback, latency, and the blockers found there (attachment and shadow fixed in #228/#230)
+- [Native-first cutover verification](verification/2026-11-11-native-first.md): passing live matrix for direct/workspace turns, mention routing, attachments, adoption, retry/interruption, restart/reconnect, Work history, rollback, shadow comparison, latency, and tokens
 - [Native shadow mode](verification/2026-11-11-ticket-230.md): invisible shadow ingestion, content-free comparison rows, no visible writes or routes, and the passing 65/65 + 16/16 live matrix
 - [Native prompt attachment size](verification/2026-11-11-ticket-228.md): host `data` payload derives a bounded positive chip size; live attachment check passes
-- [Native-first child-ticket evidence index](verification/2026-11-11-native-first-children.md): where each #210–#226 verification lives
+- [Native-first child-ticket evidence index](verification/2026-11-11-native-first-children.md): where each #210–#230 verification lives
 - [Native host event contract](verification/2026-11-10-native-host-contract.md): measured OpenCode 2.2.6 order, identities, retry, interruption, background subagent, and move behavior
 - [Composer attachments](verification/2026-11-10-ticket-223.md): path and clipboard-image paste, bounded store, prompt files, transcript chips, cleanup, and terminal limits
 - [Direct native turn ingestion](verification/2026-11-10-ticket-215.md): direct durable messages, exact settlement, Work card, restart recovery, and the nativeFirst rollback
