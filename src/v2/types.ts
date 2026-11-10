@@ -359,12 +359,32 @@ export type Subtask = {
 
 export type HandoffDecision = "delegated" | "started" | "ended" | "dismissed"
 
+/**
+ * The three conversations an agent can bind a native session to (ADR 0009):
+ * the workspace group chat, a workspace direct conversation, and the agent's
+ * home direct conversation.
+ */
+export type BindingKind = "workspace" | "direct" | "home"
+
+/** Native-first migration mode (ADR 0011). */
+export type NativeFirstMode = "off" | "shadow" | "on"
+
+/**
+ * One agent's binding conversation. The agent is part of the identity because
+ * a workspace group has one native session per member agent; the workspace is
+ * the shared channel. Older rows omit `kind` and resolve from `workspaceID`.
+ */
+export type BindingConversation =
+  | { kind: "workspace"; workspaceID: Id; agentID: Id }
+  | { kind: "direct"; workspaceID: Id; agentID: Id }
+  | { kind: "home"; agentID: Id }
+
 export type SessionBinding = {
   workspaceID: Id
   agentID: Id
   sessionID: Id
   history?: Id[]
-  kind?: "workspace" | "home"
+  kind?: BindingKind
   directory?: string
   agentVersion: number
   updatedAt: number
@@ -492,6 +512,12 @@ export type Settings = {
   /** Deprecated: readable for persisted settings, ignored for enforcement. Use dispatchDepth. */
   maxDepth: number
   synthesis: boolean
+  /**
+   * Native-first migration mode (ADR 0011): `off` keeps today's explicit
+   * path, `shadow` compares without changing the visible path, and `on`
+   * enables native-first behavior as each surface cuts over.
+   */
+  nativeFirst?: NativeFirstMode
   /** Dispatch budget tiers (ticket #160); captured by each new root group. */
   dispatchGroupMaxHops: number
   dispatchCommandMaxHops: number
@@ -675,7 +701,7 @@ export type EntityChange =
   | { entity: "approval"; op: "upsert"; approval: Approval }
   | { entity: "approval"; op: "remove"; id: Id }
   | { entity: "binding"; op: "upsert"; binding: SessionBinding }
-  | { entity: "binding"; op: "remove"; workspaceID: Id; agentID: Id }
+  | { entity: "binding"; op: "remove"; workspaceID: Id; agentID: Id; kind?: BindingKind }
   | { entity: "memory"; op: "upsert"; memory: Memory }
   | { entity: "memory"; op: "remove"; id: Id }
   | { entity: "initJob"; op: "upsert"; job: InitJob }

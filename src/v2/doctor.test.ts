@@ -683,3 +683,31 @@ test("ticket182: the doctor detects a child record stuck active past retention",
   assert.ok(mismatch)
   assert.equal(mismatch?.details.state, "working")
 })
+
+test("ticket213: direct conversation bindings validate their key and workspace directory", () => {
+  const site = workspace({ id: "workspace_site", directory: "/projects/site", leaderID: clark.id, memberIDs: [clark.id] })
+  const directKey = `dm:${clark.id}:${site.id}`
+  const healthy = snapshot({
+    agents: [clark],
+    workspaces: [site],
+    bindings: [binding(site.id, clark.id, "ses_direct", { key: directKey, kind: "direct", directory: site.directory })],
+  })
+  const okReport = diagnoseLocations([location(site.directory, healthy, validConfig({ leader: "Clark", members: ["Clark"] }))])
+  assert.equal(okReport.ok, true)
+
+  const badKey = snapshot({
+    agents: [clark],
+    workspaces: [site],
+    bindings: [binding(site.id, clark.id, "ses_direct_bad", { key: "workspace_site:agent_clark", kind: "direct", directory: site.directory })],
+  })
+  const badKeyReport = diagnoseLocations([location(site.directory, badKey, validConfig())])
+  assert.ok(badKeyReport.mismatches.some((mismatch) => mismatch.code === "binding_key_mismatch"))
+
+  const badDirectory = snapshot({
+    agents: [clark],
+    workspaces: [site],
+    bindings: [binding(site.id, clark.id, "ses_direct_dir", { key: directKey, kind: "direct", directory: "/elsewhere" })],
+  })
+  const badDirectoryReport = diagnoseLocations([location(site.directory, badDirectory, validConfig())])
+  assert.ok(badDirectoryReport.mismatches.some((mismatch) => mismatch.code === "binding_field_mismatch"))
+})

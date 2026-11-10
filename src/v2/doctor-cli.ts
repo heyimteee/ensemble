@@ -228,7 +228,7 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
     ) {
       throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid binding entry: ${key}`)
     }
-    if (raw.kind !== undefined && raw.kind !== "workspace" && raw.kind !== "home") {
+    if (raw.kind !== undefined && raw.kind !== "workspace" && raw.kind !== "home" && raw.kind !== "direct") {
       throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid binding kind: ${key}`)
     }
     if (raw.directory !== undefined && typeof raw.directory !== "string") {

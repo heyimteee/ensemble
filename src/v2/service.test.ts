@@ -8402,3 +8402,165 @@ test("ticket191: shutdown release clears terminal retry fields", async () => {
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+/** Ticket #213: one agent with a group, workspace-direct, and home-direct binding. */
+async function seedConversationBindings(ctx: any, directory: string): Promise<void> {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({
+    workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace",
+    directory, agentVersion: 1, updatedAt: 1,
+  })
+  await seed.saveBinding({
+    workspaceID: "w", agentID: "a", sessionID: "s_direct", kind: "direct",
+    directory, agentVersion: 1, updatedAt: 1,
+  })
+  await seed.saveBinding({
+    workspaceID: "home", agentID: "a", sessionID: "s_home", kind: "home",
+    directory: "/home/a", agentVersion: 1, updatedAt: 1,
+  })
+}
+
+test("ticket213: agent.sessionBinding resolves group, workspace-direct, and home-direct conversations", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-213-bindings-"))
+  const { ctx, nativeSessions } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  nativeSessions.set("s_direct", { id: "s_direct" })
+  nativeSessions.set("s_home", { id: "s_home" })
+  await seedConversationBindings(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const group = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "workspace", workspaceID: "w" } })
+    const direct = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "direct", workspaceID: "w" } })
+    const home = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "home" } })
+    assert.equal(group.ok, true)
+    assert.equal(group.result.state, "bound")
+    assert.equal(group.result.mode, "off")
+    assert.equal(group.result.binding.sessionID, "s_group")
+    assert.equal(direct.result.binding.sessionID, "s_direct")
+    assert.equal(home.result.binding.sessionID, "s_home")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket213: resolution reports missing and archived native sessions without dropping the binding", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-213-session-state-"))
+  const { ctx, nativeSessions } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  nativeSessions.set("s_home", { id: "s_home", time: { archived: 5 } })
+  await seedConversationBindings(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const missing = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "direct", workspaceID: "w" } })
+    const archived = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "home" } })
+    assert.equal(missing.result.state, "missing")
+    assert.equal(missing.result.binding.sessionID, "s_direct", "the durable binding is retained")
+    assert.equal(archived.result.state, "session_archived")
+    assert.equal(archived.result.binding.sessionID, "s_home")
+    const snap = await handlers.snapshot({ directory })
+    assert.equal(Object.keys(snap.state.bindings).length, 3, "resolution is read-only")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket213: an old binding without kind resolves as the workspace group", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-213-old-binding-"))
+  const { ctx, nativeSessions } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_old", directory, agentVersion: 1, updatedAt: 1 })
+  nativeSessions.set("s_old", { id: "s_old" })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const resolved = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "workspace", workspaceID: "w" } })
+    assert.equal(resolved.result.state, "bound")
+    assert.equal(resolved.result.conversation.kind, "workspace")
+    assert.equal(resolved.result.binding.sessionID, "s_old")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket213: workspace group selection is unchanged with the flag off and a direct binding present", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-213-flag-off-"))
+  const { ctx, nativeSessions } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  nativeSessions.set("s_direct", { id: "s_direct" })
+  nativeSessions.set("s_home", { id: "s_home" })
+  await seedConversationBindings(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(context.result.sessionID, "s_group", "direct and home bindings never displace the group session")
+
+    const saved = await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow" } })
+    assert.equal(saved.result.nativeFirst, "shadow")
+    const shadow = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "direct", workspaceID: "w" } })
+    assert.equal(shadow.result.mode, "shadow")
+    const invalid = await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "sometimes" } })
+    assert.equal(invalid.ok, false)
+    assert.equal(invalid.error!.code, "invalid_settings")
+    const snap = await handlers.snapshot({ directory })
+    assert.equal(snap.state.settings.nativeFirst, "shadow")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket213: a direct rebind moves the reverse index and keeps the retired session in history", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-213-direct-rebind-"))
+  const { ctx, nativeSessions } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_direct", history: ["s_direct_old"], kind: "direct", directory, agentVersion: 1, updatedAt: 1 })
+  for (const sessionID of ["s_group", "s_direct", "s_direct_old"]) nativeSessions.set(sessionID, { id: sessionID })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const before = await handlers.snapshot({ directory })
+    const rebound = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", conversation: "direct", workspaceID: "w", sessionID: "s_direct_old" },
+    })
+    assert.equal(rebound.ok, true)
+    assert.equal(rebound.result.binding.sessionID, "s_direct_old")
+    assert.deepEqual(rebound.result.binding.history, ["s_direct"])
+    const feed = await handlers["changes.since"]({ directory, epoch: before.epoch, version: before.state.version })
+    assert.equal(feed.reset, false)
+    const bindingChange = feed.entries
+      .flatMap((entry: any) => entry.entities ?? entry.changes)
+      .find((change: any) => change.entity === "binding" && change.op === "upsert" && change.binding.sessionID === "s_direct_old")
+    assert.ok(bindingChange, "the rebind is observable through the patch feed")
+    assert.equal(bindingChange.binding.kind, "direct")
+    const resolved = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "direct", workspaceID: "w" } })
+    assert.equal(resolved.result.binding.sessionID, "s_direct_old")
+    const group = await handlers.invoke({ directory, action: "agent.sessionBinding", payload: { agentID: "a", conversation: "workspace", workspaceID: "w" } })
+    assert.equal(group.result.binding.sessionID, "s_group", "the group binding is untouched")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

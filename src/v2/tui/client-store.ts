@@ -1,6 +1,7 @@
 import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
+import { bindingStateKey, bindingStateKeyFor } from "../conversation-binding.ts"
 import { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
 import { CLIENT_MESSAGE_LIMIT, mergeRetainedWork, projectRetainedWork, trimMessages } from "../scoped-read.ts"
 import { configMetadataApplies } from "./refresh-coordinator.ts"
@@ -50,7 +51,7 @@ function entityChangeKey(change: EntityChange): string | undefined {
     case "approval":
       return `approval\u0000${change.op === "upsert" ? change.approval.id : change.id}`
     case "binding":
-      return `binding\u0000${change.op === "upsert" ? change.binding.workspaceID : change.workspaceID}\u0000${change.op === "upsert" ? change.binding.agentID : change.agentID}`
+      return `binding\u0000${change.op === "upsert" ? bindingStateKey(change.binding) : bindingStateKeyFor(change.workspaceID, change.agentID, change.kind)}`
     case "memory":
       return `memory\u0000${change.op === "upsert" ? change.memory.id : change.id}`
     case "initJob":
@@ -63,8 +64,6 @@ function entityChangeKey(change: EntityChange): string | undefined {
   }
 }
 
-
-const bindingKey = (workspaceID: Id, agentID: Id) => `${workspaceID}:${agentID}`
 
 /**
  * Apply full-entity changes to one branch at a time. Unchanged branches keep
@@ -164,7 +163,9 @@ function reduceEntityChanges(state: SnapshotState, changes: EntityChange[]): Sna
         break
       }
       case "binding": {
-        const key = change.op === "upsert" ? bindingKey(change.binding.workspaceID, change.binding.agentID) : bindingKey(change.workspaceID, change.agentID)
+        const key = change.op === "upsert"
+          ? bindingStateKey(change.binding)
+          : bindingStateKeyFor(change.workspaceID, change.agentID, change.kind)
         if (change.op === "upsert") {
           if (next.bindings[key] === change.binding) break
           copy().bindings = { ...next.bindings, [key]: change.binding }

@@ -1,3 +1,4 @@
+import { bindingConversation, conversationStateKey } from "./conversation-binding.ts"
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
 import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchFanOutCount, dispatchGroupExhausted, dispatchRefusalReasonCode, reconcileLegacyDispatchGroup, reconcileLegacyTaskBudgets, validateContinuation, type ContinuationRefusal, type DispatchRefusal, type DispatchRefusalReason } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
@@ -5,6 +6,7 @@ import { parseWorkKind, workKey } from "./queue.ts"
 import type {
   Agent,
   Approval,
+  BindingConversation,
   ChangeEntry,
   ChangesSince,
   ChatMessage,
@@ -150,6 +152,15 @@ export class V2Store {
    */
   private readonly streaming = new Set<string>()
   /**
+   * Ticket #213: reverse session-to-binding index for ingestion (ADR 0009).
+   * Only current sessions are indexed; retired history stays resolvable
+   * through the slow path. Every binding write rebuilds it in the same
+   * serialized mutation, so a lookup can never observe a half-applied
+   * reassignment. A session claimed by two stored rows is omitted (fail
+   * closed) rather than attributed by storage order.
+   */
+  private readonly sessionBindingKeys = new Map<Id, string>()
+  /**
    * Legacy groups synthesized in memory but not yet written. Reconciliation
    * persists them (and grants live task budgets) on the serialized queue, so
    * `load` and `sync` never write from a read path.
@@ -160,6 +171,32 @@ export class V2Store {
     const key = streamKey(message.workspaceID, message.id)
     if (message.streaming) this.streaming.add(key)
     else this.streaming.delete(key)
+  }
+
+  /**
+   * Rebuild the reverse index from the current binding map. Duplicate current
+   * sessions are dropped instead of picking one: an ambiguous attribution is
+   * worse than a miss for ingestion.
+   */
+  private reindexBindings(): void {
+    const owners = new Map<Id, string>()
+    const duplicates = new Set<Id>()
+    for (const [key, binding] of Object.entries(this.state.bindings)) {
+      const sessionID = binding?.sessionID
+      if (!sessionID) continue
+      if (owners.has(sessionID)) duplicates.add(sessionID)
+      else owners.set(sessionID, key)
+    }
+    for (const sessionID of duplicates) owners.delete(sessionID)
+    this.sessionBindingKeys.clear()
+    for (const [sessionID, key] of owners) this.sessionBindingKeys.set(sessionID, key)
+  }
+
+  /** Storage path keeps legacy group/home rows readable in place. */
+  private bindingStoragePath(binding: SessionBinding): string {
+    return binding.kind === "direct"
+      ? `v2/binding/direct/${binding.workspaceID}/${binding.agentID}`
+      : `v2/binding/${binding.workspaceID}/${binding.agentID}`
   }
 
   constructor(ctx: Ctx, onChange?: (version: number) => void, options: StoreChangeOptions = {}) {
@@ -229,8 +266,10 @@ export class V2Store {
     }
     for (const { value } of await this.scanAll("v2/binding/")) {
       const binding = value as SessionBinding
-      if (binding?.workspaceID && binding?.agentID) this.state.bindings[bindingKey(binding.workspaceID, binding.agentID)] = binding
+      const conversation = binding ? bindingConversation(binding) : undefined
+      if (conversation) this.state.bindings[conversationStateKey(conversation)] = binding
     }
+    this.reindexBindings()
     for (const { value } of await this.scanAll("v2/memory/")) {
       const memory = value as Memory
       if (memory?.id) this.state.memories[memory.id] = memory
@@ -539,8 +578,10 @@ export class V2Store {
     }
     for (const { value } of await this.scanAll("v2/binding/")) {
       const binding = value as SessionBinding
-      if (binding?.workspaceID && binding?.agentID) this.state.bindings[bindingKey(binding.workspaceID, binding.agentID)] = binding
+      const conversation = binding ? bindingConversation(binding) : undefined
+      if (conversation) this.state.bindings[conversationStateKey(conversation)] = binding
     }
+    this.reindexBindings()
     await this.mergeDmScan()
     this.state.version = version
     this.state.updatedAt = Number((meta as any)?.updatedAt ?? this.state.updatedAt)
@@ -701,10 +742,40 @@ export class V2Store {
     return Object.values(this.state.bindings)
   }
 
+  /**
+   * Ticket #213: ingestion resolves a current native session to its binding in
+   * O(1). Retired sessions stay resolvable through binding history for
+   * approval, location, and subagent attribution; that fallback is rare and is
+   * never the ingestion path.
+   */
   bindingForSession(sessionID: string): SessionBinding | undefined {
-    return Object.values(this.state.bindings).find(
-      (item) => item.sessionID === sessionID || (item.history ?? []).includes(sessionID),
-    )
+    const key = this.sessionBindingKeys.get(sessionID)
+    const current = key ? this.state.bindings[key] : undefined
+    if (current?.sessionID === sessionID) return current
+    return Object.values(this.state.bindings).find((item) => (item.history ?? []).includes(sessionID))
+  }
+
+  /** One agent's binding for exactly one conversation. */
+  bindingForConversation(agentID: string, conversation: BindingConversation): SessionBinding | undefined {
+    if (conversation.agentID !== agentID) return undefined
+    return this.state.bindings[conversationStateKey(conversation)]
+  }
+
+  /**
+   * Every agent binding in a conversation. A workspace group has one native
+   * session per member agent; a direct conversation has one binding.
+   */
+  bindingsForConversation(conversation: BindingConversation): SessionBinding[] {
+    if (conversation.kind !== "workspace") {
+      const binding = this.bindingForConversation(conversation.agentID, conversation)
+      return binding ? [binding] : []
+    }
+    return Object.values(this.state.bindings)
+      .filter((binding) => {
+        const resolved = bindingConversation(binding)
+        return resolved?.kind === "workspace" && resolved.workspaceID === conversation.workspaceID
+      })
+      .sort((a, b) => a.agentID.localeCompare(b.agentID))
   }
 
   ui(): SnapshotState["ui"] {
@@ -1174,10 +1245,33 @@ export class V2Store {
 
   async saveBinding(binding: SessionBinding): Promise<void> {
     await this.write(async () => {
-      const key = bindingKey(binding.workspaceID, binding.agentID)
-      this.state.bindings[key] = binding
-      await this.ctx.storage.set(`v2/binding/${binding.workspaceID}/${binding.agentID}`, binding)
-      await this.commit([{ entity: "binding", op: "upsert", binding: structuredClone(binding) }])
+      const conversation = bindingConversation(binding)
+      if (!conversation) throw Object.assign(new Error("Binding does not identify a conversation."), { code: "invalid_binding" })
+      const key = conversationStateKey(conversation)
+      const previous = this.state.bindings[key]
+      // A native session serves one conversation at a time. Reassignment is an
+      // explicit adoption decision (ticket #224); the foundation refuses an
+      // implicit second owner so ingestion is never ambiguous.
+      if (binding.sessionID) {
+        for (const [otherKey, other] of Object.entries(this.state.bindings)) {
+          if (otherKey !== key && other?.sessionID === binding.sessionID) {
+            throw Object.assign(new Error("Session is already bound to another conversation."), { code: "session_already_bound" })
+          }
+        }
+      }
+      const next: SessionBinding = { ...binding }
+      // Keep binding history append-only when a conversation rotates to a new
+      // session, even if the caller omitted it. Existing explicit history is
+      // preserved in its caller-owned order (newest retired session first).
+      if (previous && previous.sessionID && previous.sessionID !== next.sessionID) {
+        const history = next.history ? [...next.history] : []
+        if (!history.includes(previous.sessionID)) history.unshift(previous.sessionID)
+        next.history = history.filter((sessionID, index) => sessionID !== next.sessionID && history.indexOf(sessionID) === index)
+      }
+      this.state.bindings[key] = next
+      await this.ctx.storage.set(this.bindingStoragePath(next), next)
+      this.reindexBindings()
+      await this.commit([{ entity: "binding", op: "upsert", binding: structuredClone(next) }])
     })
   }
 
@@ -1189,8 +1283,10 @@ export class V2Store {
   async refreshBindings(): Promise<void> {
     for (const { value } of await this.scanAll("v2/binding/")) {
       const binding = value as SessionBinding
-      if (binding?.workspaceID && binding?.agentID) this.state.bindings[bindingKey(binding.workspaceID, binding.agentID)] = binding
+      const conversation = binding ? bindingConversation(binding) : undefined
+      if (conversation) this.state.bindings[conversationStateKey(conversation)] = binding
     }
+    this.reindexBindings()
   }
 
   async saveMemory(memory: Memory): Promise<void> {
@@ -1287,7 +1383,29 @@ export class V2Store {
     await this.write(async () => {
       delete this.state.bindings[bindingKey(workspaceID, agentID)]
       await this.ctx.storage.remove(`v2/binding/${workspaceID}/${agentID}`)
+      this.reindexBindings()
       await this.commit([{ entity: "binding", op: "remove", workspaceID, agentID }])
+    })
+  }
+
+  /** Remove one agent's binding for exactly one conversation. */
+  async removeConversationBinding(agentID: string, conversation: BindingConversation): Promise<void> {
+    await this.write(async () => {
+      if (conversation.agentID !== agentID) return
+      const key = conversationStateKey(conversation)
+      delete this.state.bindings[key]
+      const path = conversation.kind === "direct"
+        ? `v2/binding/direct/${conversation.workspaceID}/${agentID}`
+        : `v2/binding/${conversation.kind === "home" ? "home" : conversation.workspaceID}/${agentID}`
+      await this.ctx.storage.remove(path)
+      this.reindexBindings()
+      await this.commit([{
+        entity: "binding",
+        op: "remove",
+        workspaceID: conversation.kind === "home" ? "home" : conversation.workspaceID,
+        agentID,
+        ...(conversation.kind === "direct" ? { kind: "direct" as const } : {}),
+      }])
     })
   }
 
@@ -1301,7 +1419,7 @@ export class V2Store {
       const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
       const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
       const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
-      const bindingAgentIDs = Object.values(this.state.bindings).filter((binding) => binding.workspaceID === workspaceID).map((binding) => binding.agentID)
+      const bindingRows = Object.values(this.state.bindings).filter((binding) => binding.workspaceID === workspaceID)
       const dmTranscriptKeys = Object.keys(this.state.dmTranscripts).filter((key) => key === workspaceID || key.startsWith(`${workspaceID}:`))
       delete this.state.messages[workspaceID]
       for (const key of [...this.streaming]) {
@@ -1312,12 +1430,14 @@ export class V2Store {
       for (const id of initJobIDs) delete this.state.initJobs[id]
       for (const id of nativeSubagentIDs) delete this.state.nativeSubagents[id]
       for (const [key, binding] of Object.entries(this.state.bindings)) if (binding.workspaceID === workspaceID) delete this.state.bindings[key]
+      this.reindexBindings()
       for (const id of memoryIDs) delete this.state.memories[id]
       for (const id of approvalIDs) delete this.state.approvals[id]
       for (const id of dmQueueIDs) delete this.state.dmQueue[id]
       for (const key of dmTranscriptKeys) delete this.state.dmTranscripts[key]
       await this.removePrefixNow(`v2/message/${workspaceID}/`)
       await this.removePrefixNow(`v2/binding/${workspaceID}/`)
+      await this.removePrefixNow(`v2/binding/direct/${workspaceID}/`)
       await this.removePrefixNow(`v2/dm/${workspaceID}/`)
       for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
       for (const id of dispatchGroupIDs) await this.ctx.storage.remove(`v2/dispatchgroup/${id}`)
@@ -1340,7 +1460,13 @@ export class V2Store {
           ...nativeSubagentIDs.map((id) => ({ entity: "nativeSubagent" as const, op: "remove" as const, id })),
           ...memoryIDs.map((id) => ({ entity: "memory" as const, op: "remove" as const, id })),
           ...approvalIDs.map((id) => ({ entity: "approval" as const, op: "remove" as const, id })),
-          ...bindingAgentIDs.map((agentID) => ({ entity: "binding" as const, op: "remove" as const, workspaceID, agentID })),
+          ...bindingRows.map((binding) => ({
+            entity: "binding" as const,
+            op: "remove" as const,
+            workspaceID,
+            agentID: binding.agentID,
+            ...(binding.kind === "direct" ? { kind: "direct" as const } : {}),
+          })),
         ],
         dmQueueIDs.length > 0 || dmTranscriptKeys.length > 0,
       )
@@ -1369,7 +1495,17 @@ export class V2Store {
     if (parts[1] === "native-subagent" && parts[2]) delete this.state.nativeSubagents[parts[2]]
     if (parts[1] === "memory" && parts[2]) delete this.state.memories[parts[2]]
     if (parts[1] === "approval" && parts[2]) delete this.state.approvals[parts[2]]
-    if (parts[1] === "binding" && parts[2] && parts[3]) delete this.state.bindings[`${parts[2]}:${parts[3]}`]
+    if (parts[1] === "binding") {
+      const key = parts[2] === "direct" && parts[3] && parts[4]
+        ? `dm:${parts[4]}:${parts[3]}`
+        : parts[2] && parts[3]
+          ? `${parts[2]}:${parts[3]}`
+          : undefined
+      if (key) {
+        delete this.state.bindings[key]
+        this.reindexBindings()
+      }
+    }
     if (parts[1] === "dmqueue" && parts[2]) delete this.state.dmQueue[parts[2]]
     if (parts[1] === "dm" && parts[2] && parts[3] && parts[4]) {
       const key = `${parts[2]}:${parts[3]}`
@@ -1443,6 +1579,7 @@ export class V2Store {
       this.state = createInitialState()
       this.streaming.clear()
       this.pendingReconciliations.clear()
+      this.reindexBindings()
       await this.commit([])
       // A reset destroys prior entity state, so the ring cannot describe the
       // difference. Keep only the new version and publish an explicit reset.

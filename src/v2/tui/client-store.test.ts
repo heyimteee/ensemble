@@ -791,3 +791,27 @@ test("server-derived counts apply from bootstrap, patches, and revisions without
   store.applyCounts({ w1: { unread: 0, busy: 2 } })
   assert.deepEqual(store.counts(), { w1: { unread: 0, busy: 2 } })
 })
+
+test("ticket213: direct conversation bindings apply and remove by conversation key", () => {
+  const store = createClientStore()
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.bindings["w1:a1"] = binding("a1", "s_group")
+  })))
+  const direct: SessionBinding = {
+    workspaceID: "w1",
+    agentID: "a1",
+    sessionID: "s_direct",
+    kind: "direct",
+    agentVersion: 1,
+    updatedAt: 2,
+  }
+
+  store.applyChanges([{ entity: "binding", op: "upsert", binding: direct }], 2)
+  assert.equal(store.state()!.bindings["dm:a1:w1"]?.sessionID, "s_direct")
+  assert.equal(store.state()!.bindings["w1:a1"]?.sessionID, "s_group", "the group binding is untouched")
+  assert.equal(store.state()!.bindings["dm:a1:w1"], direct)
+
+  store.applyChanges([{ entity: "binding", op: "remove", workspaceID: "w1", agentID: "a1", kind: "direct" }], 3)
+  assert.equal(store.state()!.bindings["dm:a1:w1"], undefined)
+  assert.equal(store.state()!.bindings["w1:a1"]?.sessionID, "s_group", "removing a direct binding never drops the group")
+})
