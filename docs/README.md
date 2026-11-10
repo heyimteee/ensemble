@@ -32,7 +32,8 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Verification
 
-- [Native-first cutover verification](verification/2026-11-11-native-first.md): live direct/workspace turns, mention routing, attachments, adoption, retry/interruption, restart, Work history, rollback, latency, and the open shadow/attachment blockers
+- [Native-first cutover verification](verification/2026-11-11-native-first.md): live direct/workspace turns, mention routing, attachments, adoption, retry/interruption, restart, Work history, rollback, latency, and the blockers found there (shadow open; attachment fixed in #228)
+- [Native prompt attachment size](verification/2026-11-11-ticket-228.md): host `data` payload derives a bounded positive chip size; live attachment check passes
 - [Native-first child-ticket evidence index](verification/2026-11-11-native-first-children.md): where each #210–#226 verification lives
 - [Native host event contract](verification/2026-11-10-native-host-contract.md): measured OpenCode 2.2.6 order, identities, retry, interruption, background subagent, and move behavior
 - [Composer attachments](verification/2026-11-10-ticket-223.md): path and clipboard-image paste, bounded store, prompt files, transcript chips, cleanup, and terminal limits

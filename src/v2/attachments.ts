@@ -130,20 +130,71 @@ export type NativePromptFile = {
   size?: number
   description?: string
   uri?: string
-  data?: string
+  /** Host payload: standard base64, optionally wrapped in a data URL. */
+  data?: string | Uint8Array
+}
+
+/** A chip never reports a size above the attachment bound. */
+function boundedPromptSize(value: unknown): number | undefined {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return undefined
+  return Math.min(Math.floor(numeric), ATTACHMENT_MAX_FILE_BYTES)
+}
+
+function base64PromptSize(value: string): number | undefined {
+  const payload = value.trim().replace(/\s+/g, "")
+  if (!payload || !/^[A-Za-z0-9+/_-]*={0,2}$/.test(payload)) return undefined
+  const unpadded = payload.replace(/=+$/, "")
+  if (!unpadded) return undefined
+  const bytes = Math.floor((unpadded.length * 3) / 4)
+  if (bytes <= 0) return undefined
+  return Math.min(bytes, ATTACHMENT_MAX_FILE_BYTES)
+}
+
+/**
+ * Decoded length of the host's inline file payload. The host sends standard
+ * base64 (sometimes as a data URL); counting the encoded form avoids allocating
+ * file bytes just to render a chip. The result is clamped to the file bound.
+ */
+function promptDataSize(value: unknown): number | undefined {
+  if (value instanceof Uint8Array) {
+    return value.byteLength > 0 ? Math.min(value.byteLength, ATTACHMENT_MAX_FILE_BYTES) : undefined
+  }
+  if (typeof value !== "string") return undefined
+  const raw = value.trim()
+  if (!raw) return undefined
+  if (/^data:/i.test(raw)) {
+    const comma = raw.indexOf(",")
+    if (comma < 0) return undefined
+    const metadata = raw.slice("data:".length, comma).split(";").map((part) => part.trim().toLowerCase())
+    const body = raw.slice(comma + 1)
+    if (metadata.includes("base64")) return base64PromptSize(body)
+    if (!body) return undefined
+    // A percent-encoded data URL is rare but bounded before decoding.
+    if (body.length > ATTACHMENT_MAX_FILE_BYTES * 3) return ATTACHMENT_MAX_FILE_BYTES
+    try {
+      return Math.min(Buffer.byteLength(decodeURIComponent(body)), ATTACHMENT_MAX_FILE_BYTES)
+    } catch {
+      return undefined
+    }
+  }
+  return base64PromptSize(raw)
 }
 
 /**
  * Mirror host prompt files as transcript metadata. This is the contract
  * ingestion tickets (#215/#216) use: name, MIME, and size only; never the
- * host uri, inline data, or the original path.
+ * host uri, inline data, or the original path. The live host carries the file
+ * body in `data`; the size is derived from it when no explicit size field is
+ * present, so chips never fall back to zero for a normal attachment.
  */
 export function nativePromptAttachments(files: readonly NativePromptFile[] | undefined): MessageAttachment[] {
   if (!Array.isArray(files)) return []
   const chips: MessageAttachment[] = []
   for (const [index, file] of files.entries()) {
     const name = safeDisplayName(file?.name) || `attachment-${index + 1}`
-    const size = Math.max(0, Number(file?.dataLength ?? file?.bytes ?? file?.size ?? 0) || 0)
+    const explicit = boundedPromptSize(file?.bytes) ?? boundedPromptSize(file?.size) ?? boundedPromptSize(file?.dataLength)
+    const size = explicit ?? promptDataSize(file?.data) ?? 0
     const mime = String(file?.mime ?? "").includes("/") ? String(file.mime) : mimeForAttachment(name)
     chips.push({ id: `att_prompt_${index}`, name, mime, size, kind: attachmentKind(mime) })
   }

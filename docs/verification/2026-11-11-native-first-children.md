@@ -30,6 +30,7 @@ Tickets that closed with a merge/verification comment on the issue are marked
 | [#224](https://github.com/heyimteee/ensemble/issues/224) | Session picker and adoption | Closed | Issue comment; merge `ddbf0d5`, `1702/1702` |
 | [#225](https://github.com/heyimteee/ensemble/issues/225) | Tool retirement and contract shrink | Closed | [2026-11-11-ticket-225.md](2026-11-11-ticket-225.md); `1798/1798` |
 | [#226](https://github.com/heyimteee/ensemble/issues/226) | Legacy DM transcript contract | Closed | [2026-11-11-ticket-226.md](2026-11-11-ticket-226.md); `1770/1770` |
+| [#228](https://github.com/heyimteee/ensemble/issues/228) | Native prompt attachment size (follow-up) | Fixed | [2026-11-11-ticket-228.md](2026-11-11-ticket-228.md); `1801/1801`; live main 65/65 |
 
 **Gap:** #211, #212, #213, #214, #219, #220, #221, #222, and #224 do not have a
 dedicated committed file. Their evidence is the closing issue comment plus the
