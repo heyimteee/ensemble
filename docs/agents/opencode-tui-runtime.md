@@ -239,6 +239,31 @@ To clear a stale TUI module graph, **fully restart the client**:
 Do not restart unrelated services or the sharing host as a diagnostic; the
 client restart is the targeted remedy for a stale TUI graph.
 
+## Service logs
+
+The service writes structured JSONL beside the TUI log in
+`${XDG_STATE_HOME:-$HOME/.local/state}/ensemble/logs`, overridable with
+`ENSEMBLE_LOG_DIR`. Each process writes `<role>-<date>-<pid>.jsonl` and
+`<role>-failures-<date>-<pid>.jsonl`; `role` separates service from TUI, and
+`instanceID` separates restarts and mounts.
+
+Summarize a directory without dumping its rows:
+
+```sh
+npm run logs:summary -- --dir "${XDG_STATE_HOME:-$HOME/.local/state}/ensemble/logs"
+npm run logs:summary -- --dir <dir> --group <id>
+```
+
+The command is read-only. It reports counts by role, instance, level, event,
+task, and failure, plus feed resets/gaps and dispatch group, hop, exhaustion,
+refusal, continuation, and reconciliation counts; `--json` prints the
+machine-readable form and `--since` scopes a verification run.
+
+Logs carry identifiers, states, counts, and reason codes, not conversation
+content unless `ENSEMBLE_LOG_CONTENT=1` is explicitly enabled. Do not paste or
+attach log content to issues: cite event names, IDs, states, counts, and reason
+codes only, and review any local artifact before sharing it.
+
 ## Verification gates
 
 Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` installs the locked development dependencies. Run from the repository:
