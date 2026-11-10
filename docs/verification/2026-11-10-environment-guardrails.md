@@ -2,8 +2,10 @@
 
 Status: **verified locally on Linux/tmux and on hosted GitHub Actions; the
 controlled live-failure artifact upload, the helper exercises, and the docs
-links are recorded below. Real-model checks, macOS/Herdr, and the user's live
-host were not run.**
+links are recorded below. A post-review repair fixed the inert diff check and
+the artifact log-source privacy bug; the final code run and controlled run are
+recorded below. Real-model checks, macOS/Herdr, and the user's live host were
+not run.**
 Date: 2026-11-10
 Issue: [#208](https://github.com/heyimteee/ensemble/issues/208)
 Parent spec: [#202](https://github.com/heyimteee/ensemble/issues/202)
@@ -14,8 +16,8 @@ Child tickets: [#203](https://github.com/heyimteee/ensemble/issues/203),
 [#207](https://github.com/heyimteee/ensemble/issues/207)
 Branch: `ticket/208-verify-env`
 Worktree: `/home/tristan/dev/ensemble-208`
-Integration branch: `integration/env-guardrails` (normal run at `609e274`;
-this record commit becomes the final tip)
+Integration branch: `integration/env-guardrails` (pre-review run at `609e274`;
+final code tip `6c849f4`; this record commit is the final documentation tip)
 Base: `integration/core-turn-reliability` at `3bfa21f` (this branch is stacked;
 merge the environment branch after #192 lands on `main`)
 
@@ -60,17 +62,21 @@ deterministic fake provider.
 | Command | Result |
 |---|---|
 | `npm run verify` | **Pass** — strict type check; **1618 tests passed, 0 failed, 0 skipped, 0 todo**; 49.2 s test duration, 50.4 s wall clock. |
+| `npm run verify` at the post-review code tip (`6c849f4`) | **Pass** — **1625 tests passed, 0 failed, 0 skipped, 0 todo**, including the committed-whitespace/conflict diff checks and the ambient-log retention regression. |
 | `ENSEMBLE_LIVE_REQUIRE=1 ENSEMBLE_LIVE_ARTIFACTS=/tmp/opencode/verification-208/subagent npm run test:live:subagent` | **Pass** — isolated real OpenCode 2.2.6 host + deterministic fake provider; **40 s wall clock**. Delayed wake-up `native.subagent.wakeup.received` measured **3427 ms**; doctor reported **0 mismatches across 1 location**; logs contained none of the fixture answer markers. |
+| Same probe at the post-review code tip (`6c849f4`) | **Pass** — **35 s wall clock**; delayed wake-up **3427 ms**; doctor **0 mismatches across 1 location**; no answer markers in the service/TUI logs. |
+| `bash scripts/ci-diff-check.sh 3bfa21f HEAD` and `... 609e274 HEAD` | **Pass** — the post-review commit-range check found no whitespace or conflict residue. |
 | `git diff --check` | **Pass** — no whitespace errors or conflict residue. |
 | `bash -n scripts/worktree-create.sh && bash -n scripts/integration-merge.sh` | **Pass**. |
 | Link check over the changed docs | **Pass** — 131 relative links and anchors across 8 files, 0 failures. |
 
 ## Hosted CI
 
-### Normal integration run
+### Pre-review integration run
 
 The `integration/env-guardrails` branch was pushed at `609e274` (branch only;
-`main` was not pushed). The first attempt's `Install tmux and fd` setup step
+`main` was not pushed). This is the pre-review history; the post-review code
+run below is the final gate. The first attempt's `Install tmux and fd` setup step
 stayed in progress for about 20 minutes and was cancelled; attempt 2 used the
 same commit and completed green:
 
@@ -82,7 +88,7 @@ same commit and completed green:
 | `verify` job | **Pass** in 1m19s — `Check whitespace and conflict residue` and `Run npm run verify` succeeded. |
 | `live` job | **Pass** in 9m57s — preflight, fake/empty suite, multi-location probe, and native-subagent probe succeeded. |
 | Native-subagent step | **`Native-subagent live probe`** succeeded with `ENSEMBLE_LIVE_REQUIRE=1`. |
-| Diff-check step | **`Check whitespace and conflict residue`** succeeded and runs `git diff --check`. |
+| Diff-check step | **`Check whitespace and conflict residue`** succeeded. This pre-review run used the bare `git diff --check`; the post-review run uses the range script below. |
 | Artifact upload | **Skipped** on success, as designed. |
 
 The `verify` job completed in **1m19s**. The `live` job stayed inside its
@@ -91,17 +97,42 @@ provider measured locally. Attempt 1 was cancelled after its pre-existing
 `Install tmux and fd` setup step hung; no assertion or check was modified for
 attempt 2.
 
-### Final record run
+### Post-review guardrail repair
 
-This record is committed on top of `609e274` and pushed as the
-`integration/env-guardrails` tip (fast-forward; the integration branch had not
-advanced since the normal run). The run triggered by that push is the final
-gate. Its run id and conclusion are recorded in the #208 handoff because they
-only exist after the record commit is pushed; this file deliberately does not
-embed its own post-commit run id, which would require another commit and
-another run.
+Code review of the first integration run found two real defects in the new
+guardrails, both fixed before the final gate:
 
-### Controlled live failure and artifact upload
+- The verify job's `git diff --check` was bare, so on a clean checkout it
+  compared the worktree to the index and could not see committed whitespace or
+  conflict residue. The final job runs `scripts/ci-diff-check.sh` against the
+  push `before` or pull-request base, with `fetch-depth: 0` and an initial-push
+  fallback. The check was proven against committed trailing whitespace and
+  committed conflict markers.
+- Failure-artifact retention preferred an ambient `ENSEMBLE_LOG_DIR` over the
+  isolated `LIVE_STATE` logs. The final retention reads only the isolated
+  `LIVE_STATE` service logs; a regression test plants an ambient log and
+  proves it is never copied.
+
+The shared worktree helpers were also consolidated, the service map lost its
+duplicated constants, the runtime guide now links to the authoritative harness
+docs, and the integration merge helper checks the merge range. The helper
+exercise evidence below was rerun after those changes.
+
+Final code commit: `6c849f4` (merge of review-fix commit `e9ca31d`). Final
+hosted code run: **42764450341**, commit `6c849f4`.
+
+| Job | Result |
+|---|---|
+| `verify` | **Pass** in 1m21s — `Check whitespace and conflict residue` and `npm run verify` succeeded. |
+| `live` | **Pass** in 10m26s — preflight, fake/empty suite, multi-location probe, and native-subagent probe succeeded. |
+| `Native-subagent live probe` | **Pass** with `ENSEMBLE_LIVE_REQUIRE=1`. |
+| `Upload live failure artifacts` | **Skipped** on success, as designed. |
+
+The record commit is documentation-only and triggers its own final run; that
+run is recorded in the #208 closing comment rather than recursively embedded
+here.
+
+### Pre-review controlled live failure and artifact upload
 
 To prove the failure path without waiting for a real product regression, a
 disposable branch was created from `609e274` with one deliberate failure after
@@ -149,6 +180,30 @@ Privacy scan of the downloaded set:
 - The artifact never contains the isolated HOME, config, project, dependency
   directory, fake-provider URL file, or host descriptors.
 
+### Post-review controlled live failure and artifact upload
+
+After the review repair, a second disposable branch was created from the final
+code tip `6c849f4` with the same deliberate failure after the native-subagent
+probe's last assertion. The branch was pushed as
+`test/202-controlled-failure` and deleted after the evidence was downloaded.
+
+| Item | Value |
+|---|---|
+| Run id | **42764462126** |
+| Commit | `d98a342` |
+| `verify` job | **Pass** in 1m22s, including `git diff --check` and `npm run verify`. |
+| `live` job | **Failed as intended** in 10m26s at `Native-subagent live probe` with `ticket #202 controlled CI failure artifact probe`. |
+| Upload step | **Pass** — `Upload live failure artifacts` ran because the job failed. |
+| Artifact | **`live-failure-artifacts-1`**, 16 files, downloaded to `/tmp/opencode/spec-202/controlled-artifact-final/`. |
+
+The downloaded artifact contains `subagent/meta.txt` (`exit_status: 1`),
+doctor/doctor-failure output with `Mismatches: none`, server/TUI/fake logs,
+three service and three TUI JSONL files, and pane captures. A privacy scan
+found no credentials, host descriptors, `/home/tristan` paths, ambient log
+directory, or user conversation content. The pre-review artifact above remains
+as history; the post-review run is the final evidence for the repaired
+retention path.
+
 ## Helper exercise
 
 Both helpers were run from the ticket worktree against temporary branches and
@@ -173,6 +228,12 @@ imported by the plugin or TUI.
 | Conflicting source branch | **Stopped, exit 1** — `CONFLICT (add/add): Merge conflict in tmp-helper-exercise.txt`; printed the conflicted path and `RESULT conflict`; left the merge in progress. It did not resolve the conflict. |
 | Dirty integration worktree | **Refused, exit 1** — `integration-merge: integration worktree is not clean` with the untracked file listed. |
 | Cleanup | The temporary worktrees and branches were removed; `git worktree list` no longer contains them. The user's existing worktrees were not modified. |
+
+The post-review helper versions were re-exercised against a disposable minimal
+repository: worktree create, existing path/branch refusal, dirty-base refusal,
+unrelated-worktree safety, clean no-ff merge plus verify, dirty/committed-
+whitespace refusal, and a conflict stop with merge-in-progress handling. The
+helpers remained developer tooling only; no plugin or TUI import was added.
 
 ## Docs links
 
@@ -217,8 +278,11 @@ Local artifacts (not committed; review before sharing):
   doctor-failure, fake, log-summary, server, tui), `service-logs/`, and
   `captures/`.
 - `/tmp/opencode/verification-208/ci-artifact/subagent/` — the downloaded
-  `live-failure-artifacts-1` CI artifact from run `42762162487`: `meta.txt`,
-  `logs/`, `service-logs/`, and `captures/`.
+  pre-review `live-failure-artifacts-1` CI artifact from run `42762162487`:
+  `meta.txt`, `logs/`, `service-logs/`, and `captures/`.
+- `/tmp/opencode/spec-202/controlled-artifact-final/live-failure-artifacts-1/subagent/`
+  — the downloaded post-review artifact from run `42764462126`; 16 files,
+  isolated-only service logs, and a clean privacy scan.
 - `/tmp/opencode/verification-208/ci-controlled-live.log` — the controlled
   failure run's live-job log, including the deliberate failure and the
   `retained failure artifacts at .../live-artifacts/subagent` line.
@@ -256,12 +320,11 @@ reason codes rather than attaching content, per the
   assertion passed. It proves retention and upload, not the diagnosis quality
   of a natural product failure. The upload step is intentionally skipped on a
   successful live job.
-- The verify job's `git diff --check` runs on a clean checkout, so it guards
-  the working tree and fails on uncommitted whitespace/conflict residue; a
-  controlled local test showed exit 0 for whitespace already committed in a
-  clean tree and exit 2 for an uncommitted trailing-space line. Catching
-  whitespace that is already in a commit would need a commit-range diff, which
-  #203 did not add.
+- The post-review verify job runs `scripts/ci-diff-check.sh` against the push
+  `before` or pull-request base, with `fetch-depth: 0` and an initial-push
+  fallback. The check was controlled against committed trailing whitespace and
+  committed conflict markers; the pre-review bare `git diff --check` history
+  above is retained to explain the repair.
 - The hosted `verify` job runs on `ubuntu-latest`; GitHub's migration notice
   for that label was the only annotation. The live job is pinned to
   `ubuntu-24.04`.
