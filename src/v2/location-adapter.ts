@@ -18,7 +18,19 @@ const LOCATION_EVENT_TYPES: string[][] = [
   ["session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
   // Ticket #182: host child sessions are the durable identity for native
   // subagent records. The tracker maps them to their parent task and group.
-  ["session.created", "session.deleted"],
+  // Ticket #224: the same subscription refreshes the native session picker on
+  // created, renamed/metadata, archive, move, fork, and delete events.
+  [
+    "session.created",
+    "session.deleted",
+    "session.renamed",
+    "session.metadata.updated",
+    "session.permissions",
+    "session.moved",
+    "session.archived",
+    "session.unarchived",
+    "session.forked",
+  ],
 ]
 
 /**

@@ -455,5 +455,21 @@ export const EnsembleV2Rpc = Rpc.define({
         additionalProperties: false,
       },
     },
+    /**
+     * Ticket #224: a native session lifecycle event changed the picker's
+     * source data. Ephemeral and id-only; the client re-reads one scoped page.
+     */
+    "sessions.changed": {
+      schema: {
+        type: "object",
+        properties: {
+          revision: { type: "number" },
+          kind: { type: "string" },
+          sessionID: { type: "string" },
+        },
+        required: ["revision", "kind"],
+        additionalProperties: false,
+      },
+    },
   },
 })

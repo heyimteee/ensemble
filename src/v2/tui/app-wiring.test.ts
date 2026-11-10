@@ -686,6 +686,43 @@ test("picker rows keep one name column", () => {
   assert.ok(has(app(), "maxWidth: pickerDetailWidth()"))
 })
 
+// ---- Native session picker and adoption (ticket #224) ----
+
+test("the native session picker reads the scoped service list", () => {
+  assert.ok(has(app(), '"session.picker"'))
+  assert.ok(has(app(), "nextSessionPickerScope("))
+  assert.ok(has(app(), 'openPicker("sessions"'))
+})
+
+test("adoption previews, confirms, and then adopts", () => {
+  const source = app()
+  assert.ok(has(source, '"session.adopt.preview"'))
+  assert.ok(has(source, '"session.adopt"'))
+  assert.ok(has(source, "confirmMove"))
+  assert.ok(has(source, "reassign"))
+})
+
+test("the picker refreshes on service session events, not a timer", () => {
+  assert.ok(has(app(), "rpc.ensemble.v2.sessions.changed"))
+  assert.ok(has(app(), "sessionPickerRevisionChanged("))
+  assert.ok(has(app(), "refreshSessionPicker()"))
+})
+
+test("the picker scope switch keeps search inside the selected scope", () => {
+  const source = app()
+  assert.ok(has(source, 'case "picker.scope"'))
+  assert.ok(has(source, "pickerCycleScope()"))
+  assert.ok(has(source, "searchSessionPicker("))
+  assert.ok(has(source, "sessionScopeTitle("))
+})
+
+test("the leader menu offers adoption for both direct and workspace surfaces", () => {
+  const source = app()
+  assert.ok(has(source, "openAdoptNative"))
+  assert.ok(has(source, 'conversation: "direct"'))
+  assert.ok(has(source, 'conversation: "workspace"'))
+})
+
 // ---- Settings, limits, and activity ----
 
 test("chat renders one aggregate activity summary line", () => {
