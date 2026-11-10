@@ -170,6 +170,48 @@ test("native prompt files mirror as metadata chips without uri or data", () => {
   assert.equal(JSON.stringify(chips).includes("c2VjcmV0"), false)
 })
 
+test("a native prompt file derives a positive size from its data payload", () => {
+  const content = "native prompt attachment"
+  const base64 = Buffer.from(content).toString("base64")
+  const chips = nativePromptAttachments([
+    {
+      name: "/private/tmp/fixture.txt",
+      mime: "text/plain",
+      uri: "file:///private/tmp/fixture.txt",
+      data: base64,
+    },
+  ])
+  assert.deepEqual(chips.map(({ name, mime, size, kind }) => ({ name, mime, size, kind })), [
+    { name: "fixture.txt", mime: "text/plain", size: content.length, kind: "file" },
+  ])
+  assert.ok(chips[0].size > 0)
+  const serialized = JSON.stringify(chips)
+  assert.equal(serialized.includes("private"), false)
+  assert.equal(serialized.includes(base64), false)
+  assert.equal(serialized.includes(content), false)
+
+  const dataUrlChips = nativePromptAttachments([
+    { name: "data-url.txt", mime: "text/plain", data: `data:text/plain;base64,${base64}` },
+  ])
+  assert.equal(dataUrlChips[0].size, content.length, "a base64 data URL has the same decoded size")
+  const encodedChips = nativePromptAttachments([
+    { name: "encoded.txt", mime: "text/plain", data: "data:text/plain,hello%20world" },
+  ])
+  assert.equal(encodedChips[0].size, "hello world".length, "a percent-encoded data URL is counted after decoding")
+})
+
+test("explicit native prompt sizes win over the data payload and stay bounded", () => {
+  const base64 = Buffer.from("much longer than the explicit value").toString("base64")
+  const fromBytes = nativePromptAttachments([{ name: "a.txt", mime: "text/plain", bytes: 12, data: base64 }])
+  assert.equal(fromBytes[0].size, 12)
+  const fromSize = nativePromptAttachments([{ name: "a.txt", mime: "text/plain", size: 13, data: base64 }])
+  assert.equal(fromSize[0].size, 13)
+  const fromDataLength = nativePromptAttachments([{ name: "a.txt", mime: "text/plain", dataLength: 14, data: base64 }])
+  assert.equal(fromDataLength[0].size, 14)
+  const oversized = nativePromptAttachments([{ name: "a.bin", mime: "application/octet-stream", bytes: ATTACHMENT_MAX_FILE_BYTES * 10 }])
+  assert.equal(oversized[0].size, ATTACHMENT_MAX_FILE_BYTES, "an explicit size is clamped to the attachment bound")
+})
+
 test("transcript labels show name, mime, and a readable size", () => {
   const attachment: MessageAttachment = { id: "att_a", name: "shot.png", mime: "image/png", size: 2048, kind: "image" }
   assert.match(composerAttachmentLabel(attachment), /shot\.png/)

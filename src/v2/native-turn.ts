@@ -174,6 +174,45 @@ export function nativeContextMessageText(message: any): string {
     .trim()
 }
 
+/** Exact text parts for comparison: same join, no trimming. */
+export function nativeContextMessageTextExact(message: any): string {
+  const content = Array.isArray(message?.content) ? message.content : []
+  return content
+    .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+    .map((part: any) => part.text)
+    .join("\n")
+}
+
+/**
+ * Ticket #230: exact identity-only answer for shadow comparison. It uses the
+ * same selection as the watchdog but preserves the host text byte-for-byte so
+ * the digest comparison is meaningful.
+ */
+export function nativeContextAnswerExact(
+  messages: readonly any[],
+  input: { inboxID?: Id; assistantMessageIDs?: readonly Id[] } = {},
+): string | undefined {
+  if (!Array.isArray(messages)) return undefined
+  const assistantIDs = new Set((input.assistantMessageIDs ?? []).map(String))
+  if (assistantIDs.size > 0) {
+    const matched = messages.find((message) => message?.type === "assistant" && assistantIDs.has(String(message.id)))
+    const text = nativeContextMessageTextExact(matched)
+    if (text.length > 0) return text
+  }
+  if (input.inboxID) {
+    const userIndex = messages.findIndex((message) => message?.type === "user" && String(message.id) === String(input.inboxID))
+    if (userIndex >= 0) {
+      for (const message of messages.slice(userIndex + 1)) {
+        if (message?.type === "assistant") {
+          const text = nativeContextMessageTextExact(message)
+          if (text.length > 0) return text
+        }
+      }
+    }
+  }
+  return undefined
+}
+
 /**
  * Recover one turn's answer from a native `session.context` read. Identity
  * wins: a recorded assistant message id, then the assistant message after the
