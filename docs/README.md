@@ -19,6 +19,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Handoff contract](agents/handoff.md): the detailed mandatory completion-handoff, batch-review, loop-guard, and mention rules
 - [OpenCode/OpenTUI runtime guide](agents/opencode-tui-runtime.md): host contracts, source navigation, and verification
 - [Issue tracker](agents/issue-tracker.md)
+- [Integration workflow](agents/integration-workflow.md): branch, worktree, merge, review, and verification sequence
 - [Labels](agents/triage-labels.md)
 - [Review workflow](agents/review-workflow.md)
 - [Reviewer standards](agents/review-standards.md): judgement calls only; mechanical rules stay in automated checks
