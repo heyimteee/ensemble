@@ -589,6 +589,8 @@ export class EnsembleV2Service {
   private readonly nativeInboxOrder = new Map<string, Array<{ inboxID: string; turn: boolean }>>()
   /** Which kind owns the session's current host execution. */
   private readonly nativeExecutionOwner = new Map<string, "turn" | "skip">()
+  /** Run id whose execution terminal was already observed on this session. */
+  private readonly nativeRunSettled = new Map<string, string>()
   private readonly nativeActiveTurn = new Map<string, string>()
   private readonly nativePendingExecutions = new Map<string, number>()
   private readonly nativeAssistantTurns = new Map<string, string>()
@@ -743,6 +745,7 @@ export class EnsembleV2Service {
       this.nativeRows.clear()
       this.nativeInboxOrder.clear()
       this.nativeExecutionOwner.clear()
+      this.nativeRunSettled.clear()
       this.toolCalls.clear()
       this.nativeSubagentParents.clear()
       this.nativeSubagentActive.clear()
@@ -8164,10 +8167,12 @@ export class EnsembleV2Service {
     // A workspace group session also executes delegated task runs. Their
     // prompts are marked internal and skipped above; their execution, text,
     // and retry events belong to that run, never to a queued native turn
-    // behind it.
-    const runOwnsSession = this.runBySession.has(sessionID)
-    if (runOwnsSession && (
-      type === "session.retry.scheduled"
+    // behind it. Once the run's skipped prompt is consumed, a queued native
+    // turn becomes the order head and must ingest even if run finalization
+    // still holds runBySession for a moment (ticket #216 review).
+    const runID = this.runBySession.get(sessionID)
+    const runOwnsSession = runID !== undefined
+    const runEvent = type === "session.retry.scheduled"
       || type === "session.execution.started"
       || type === "session.execution.succeeded"
       || type === "session.execution.failed"
@@ -8175,7 +8180,24 @@ export class EnsembleV2Service {
       || type === "session.text.started"
       || type === "session.text.delta"
       || type === "session.text.ended"
-    )) return
+    if (runOwnsSession && runEvent && this.nativeRunSettled.get(sessionID) !== runID) {
+      const owner = this.nativeExecutionOwner.get(sessionID)
+      // A native turn that was already active when the run appeared keeps the
+      // execution; otherwise every event before the run's terminal belongs to
+      // the run, even when a user turn is queued behind it.
+      if (owner !== "turn") {
+        const head = this.nativeInboxOrder.get(sessionID)?.[0]
+        if (type === "session.execution.started") {
+          if (head && !head.turn) this.takeNativeInbox(sessionID)
+          this.nativeExecutionOwner.set(sessionID, "skip")
+        } else if (type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") {
+          if (head && !head.turn) this.takeNativeInbox(sessionID)
+          this.nativeExecutionOwner.delete(sessionID)
+          this.nativeRunSettled.set(sessionID, runID)
+        }
+        return
+      }
+    }
 
     if (type === "session.inbox.enqueued") {
       const inboxID = String(data?.inboxID ?? "").trim()
@@ -8183,7 +8205,11 @@ export class EnsembleV2Service {
       const item = data?.item ?? {}
       const payload = item?.payload ?? {}
       const skipped = (reason: string) => {
-        this.rememberNativeInbox(sessionID, inboxID, false)
+        // An enqueue that arrives after a run-owned execution already started
+        // must not leave a stale order entry; the run's events are ignored.
+        if (!(runOwnsSession && this.nativeExecutionOwner.get(sessionID) === "skip")) {
+          this.rememberNativeInbox(sessionID, inboxID, false)
+        }
         const waiting = this.nativePendingExecutions.get(sessionID) ?? 0
         if (waiting > 0) {
           this.nativePendingExecutions.set(sessionID, waiting - 1)
@@ -8470,6 +8496,10 @@ export class EnsembleV2Service {
       if (isNativeTurn(known) && nativePhaseOpen(known.native?.phase)) this.nativeActiveTurn.set(sessionID, known.id)
       return known
     }
+    // Reordered text for a skipped service prompt must not start a native turn
+    // queued behind it.
+    const head = this.nativeInboxOrder.get(sessionID)?.[0]
+    if (head && !head.turn) return undefined
     // Reordered text can precede execution.started; the enqueued turn is the
     // next pending inbox.
     const pending = this.nativePendingInboxes.get(sessionID)?.[0]

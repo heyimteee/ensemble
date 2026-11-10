@@ -10171,6 +10171,120 @@ test("ticket216: a delegated task run on the group session never settles a queue
   }
 })
 
+test("ticket216: a user turn queued during a delegated run starts after the run settles", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-run-queued-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    service.registerLocalRunForTest({
+      id: "run_216a",
+      subtaskID: "task_delegated_216a",
+      workspaceID: "w",
+      agentID: "a",
+      sessionID: "s_group",
+      status: "running",
+      startedAt: 1,
+    })
+    // The run's service prompt is skipped but still occupies host order.
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_run_a",
+      item: { type: "user", delivery: "steer", payload: { text: "run prompt", metadata: { "ensemble.internal": true, "ensemble.mirror": false } } },
+    }, { id: "evt_216_run_a_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_user_a",
+      item: { type: "user", delivery: "queue", payload: { text: "User prompt" } },
+    }, { id: "evt_216_run_a_user", created: 101 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_a_start", created: 102 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mr2a", ordinal: 0 }, { id: "evt_216_run_a_text", created: 103 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mr2a", ordinal: 0, text: "Run answer." }, { id: "evt_216_run_a_end", created: 104 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_a_done", created: 105 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(nativeTurnIn(await snapshotFor(handlers, directory)).native.phase, "queued")
+
+    // Model the run's finally block releasing the session before the queued
+    // host prompt starts.
+    ;(service as any).activeRuns.delete("run_216a")
+    ;(service as any).runBySession.delete("s_group")
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_a_user_start", created: 106 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mu2a", ordinal: 0 }, { id: "evt_216_run_a_user_text", created: 107 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mu2a", ordinal: 0, text: "User answer." }, { id: "evt_216_run_a_user_end", created: 108 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_a_user_done", created: 109 }))
+
+    await waitFor(async () => nativeTurnIn(await snapshotFor(handlers, directory), "replied") !== undefined)
+    const state = await snapshotFor(handlers, directory)
+    const row = (state.messages["w"] ?? []).find((message: any) => message.author === "agent")
+    assert.equal(row.text, "User answer.", "the queued user turn is not blocked by the run's skipped inbox")
+    assert.equal(Object.values(state.subtasks).filter((task: any) => task.origin === "native").length, 1)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: the first user turn after a completed delegated run still starts", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-run-after-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    service.registerLocalRunForTest({
+      id: "run_216b",
+      subtaskID: "task_delegated_216b",
+      workspaceID: "w",
+      agentID: "a",
+      sessionID: "s_group",
+      status: "running",
+      startedAt: 1,
+    })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_run_b",
+      item: { type: "user", delivery: "steer", payload: { text: "run prompt", metadata: { "ensemble.internal": true, "ensemble.mirror": false } } },
+    }, { id: "evt_216_run_b_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_b_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mr2b", ordinal: 0 }, { id: "evt_216_run_b_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mr2b", ordinal: 0, text: "Run answer." }, { id: "evt_216_run_b_end", created: 103 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_b_done", created: 104 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    ;(service as any).activeRuns.delete("run_216b")
+    ;(service as any).runBySession.delete("s_group")
+
+    // The run has fully completed; the next composer prompt is the first turn.
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_user_b",
+      item: { type: "user", delivery: "steer", payload: { text: "User prompt" } },
+    }, { id: "evt_216_run_b_user", created: 105 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_b_user_start", created: 106 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mu2b", ordinal: 0 }, { id: "evt_216_run_b_user_text", created: 107 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mu2b", ordinal: 0, text: "User answer." }, { id: "evt_216_run_b_user_end", created: 108 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_b_user_done", created: 109 }))
+
+    await waitFor(async () => nativeTurnIn(await snapshotFor(handlers, directory), "replied") !== undefined)
+    const state = await snapshotFor(handlers, directory)
+    const row = (state.messages["w"] ?? []).find((message: any) => message.author === "agent")
+    assert.equal(row.text, "User answer.", "the completed run's skipped inbox does not swallow the next turn")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket216: workspace restart recovery settles from the transcript on the group channel", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-216-restart-"))
   const { ctx, nativeSessions, emitEvent } = fakeContext()
