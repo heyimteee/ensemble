@@ -461,19 +461,20 @@ async function main() {
     assert("adoption keeps the previous session in history", (adopted.replacedSessionID === previous.sessionID) && (adopted.history ?? []).includes(previous.sessionID))
     snapshot = await waitFor("the adopted binding", (next) => bindingFor(next, lead.id, workspace.id, "workspace")?.sessionID === created.id, 30_000).then((result) => result.state)
     assert("adoption wrote a visible native heads-up", adopted.headsUp === true)
-    // The synthetic heads-up is itself a host turn. Let it settle before the
-    // next native prompt so the prompt is not queued behind an unclassified
-    // synthetic execution.
-    await waitFor("the adoption heads-up to settle", (next) => {
-      const turns = Object.values(next.subtasks ?? {}).filter((task) => task.origin === "native" && task.native?.sessionID === created.id)
-      return turns.length > 0 && turns.every((task) => !["queued", "working", "retrying"].includes(task.native?.phase))
-    }, 30_000)
+    // Ticket #229: prompt immediately after adoption, while the synthetic
+    // heads-up turn may still be active. The prompt turn must settle with its
+    // own exact answer or stay visibly queued with an execution owner; it must
+    // never remain `pending` with no attribution.
     const marker = "native-adopted-fixture"
     const inbox = await promptNative(created.id, marker)
     const settled = await waitFor("the adopted session turn", (next) => {
       const task = nativeTask(next, created.id, inbox.id)
       return Boolean(task?.native?.phase === "replied" && task.resultMessageID)
     })
+    await waitFor("the adoption heads-up to settle", (next) => {
+      const turns = Object.values(next.subtasks ?? {}).filter((task) => task.origin === "native" && task.native?.sessionID === created.id)
+      return turns.length > 0 && turns.every((task) => !["queued", "working", "retrying"].includes(task.native?.phase))
+    }, 30_000)
     snapshot = settled.state
     const task = nativeTask(snapshot, created.id, inbox.id)
     assert("adopted session ingests into the workspace channel", task.conversationID === workspaceChannel)

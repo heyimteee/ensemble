@@ -38,6 +38,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
   const createdSessionIDs: string[] = []
   const createdSessionInputs: any[] = []
   const nativeSessions = new Map<string, any>()
+  const synthetic: any[] = []
   let sessions = 0
   const handlers: Partial<Handlers> = {}
   const emitted: Array<{ name: string; data: any }> = []
@@ -100,6 +101,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
       instructions: { entry: { put: async (input: any) => { instructions.push(input) } } },
       switchModel: async (input: any) => { modelSwitches.push({ sessionID: String(input.sessionID), model: input.model }) },
       prompt: async (input: any) => { prompts.push({ ...input }) },
+      synthetic: async (input: any) => { synthetic.push({ ...input }); return { id: `synthetic_${synthetic.length}` } },
       update: async (input: any) => { permissionUpdates.push({ sessionID: String(input.sessionID), permissions: input.permissions }) },
       wait: async () => { await new Promise((resolve) => setTimeout(resolve, 5)) },
       context: async () => ({
@@ -142,7 +144,7 @@ function fakeContext(sharedValues?: Map<string, unknown>) {
     skill: { list: async (): Promise<any[]> => [] },
     event,
   }
-  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, permissionUpdates, instructions, modelSwitches, createdSessionIDs, createdSessionInputs, nativeSessions, tools, emitted, emitEvent }
+  return { ctx, handlers: handlers as Handlers, values, removedSessions, interruptedSessions, movedSessions, commands, prompts, synthetic, permissionUpdates, instructions, modelSwitches, createdSessionIDs, createdSessionInputs, nativeSessions, tools, emitted, emitEvent }
 }
 
 /** Shared fixtures for tests that need durable work without exercising setup. */
@@ -12891,5 +12893,98 @@ test("ticket218: native sync reports degraded on a failed read and returns to li
     await stop()
     rmSync(directory, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// ---- Ticket #229: immediate prompt after adoption ------------------------
+
+test("ticket229: a prompt sent immediately after adoption settles as its own native turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-229-adoption-"))
+  const { ctx, nativeSessions, synthetic, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group", location: { directory }, time: { created: 1, updated: 1 } })
+  nativeSessions.set("s_adopted", { id: "s_adopted", location: { directory }, time: { created: 2, updated: 2 } })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    const adopted = await handlers.invoke({
+      directory,
+      action: "session.adopt",
+      payload: { agentID: "a", workspaceID: "w", conversation: "workspace", sessionID: "s_adopted" },
+    })
+    assert.equal(adopted.ok, true)
+    assert.equal(adopted.result.adopted, true)
+    assert.equal(adopted.result.headsUp, true)
+    assert.equal(synthetic.length, 1, "adoption writes the synthetic heads-up")
+
+    // Measured host order for an immediate prompt: the synthetic heads-up
+    // starts one execution, the prompt is enqueued while it runs and is
+    // delivered into the same execution. That execution produces two assistant
+    // messages and one terminal event.
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_adopted",
+      inboxID: "m_headsup",
+      item: { type: "synthetic", delivery: "steer", payload: { text: "Ensemble: this session now serves the group chat." } },
+    }, { id: "evt_229_headsup_enqueue", created: 1000 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_adopted" }, { id: "evt_229_exec_start", created: 1001 }))
+    emitEvent(nativeEvent("session.inbox.delivered", { sessionID: "s_adopted", inboxID: "m_headsup" }, { id: "evt_229_headsup_delivered", created: 1002 }))
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_adopted",
+      inboxID: "m_prompt",
+      item: { type: "user", delivery: "steer", payload: { text: "Immediate prompt" } },
+    }, { id: "evt_229_prompt_enqueue", created: 1003 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_adopted", assistantMessageID: "a_headsup", ordinal: 0 }, { id: "evt_229_headsup_text", created: 1004 }))
+    emitEvent(nativeEvent("session.text.delta", { sessionID: "s_adopted", assistantMessageID: "a_headsup", ordinal: 0, delta: "Heads" }, { id: "evt_229_headsup_delta", created: 1005 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_adopted", assistantMessageID: "a_headsup", ordinal: 0, text: "Heads-up answer." }, { id: "evt_229_headsup_end", created: 1006 }))
+    emitEvent(nativeEvent("session.inbox.delivered", { sessionID: "s_adopted", inboxID: "m_prompt" }, { id: "evt_229_prompt_delivered", created: 1007 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_adopted", assistantMessageID: "a_prompt", ordinal: 0 }, { id: "evt_229_prompt_text", created: 1008 }))
+    emitEvent(nativeEvent("session.text.delta", { sessionID: "s_adopted", assistantMessageID: "a_prompt", ordinal: 0, delta: "Prompt" }, { id: "evt_229_prompt_delta", created: 1009 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_adopted", assistantMessageID: "a_prompt", ordinal: 0, text: "Prompt answer." }, { id: "evt_229_prompt_end", created: 1010 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_adopted" }, { id: "evt_229_exec_done", created: 1011 }))
+
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      const prompt = Object.values(state.subtasks).find(
+        (task: any) => task.origin === "native" && task.native?.inboxID === "m_prompt",
+      ) as any
+      return prompt?.native?.phase === "replied" && Boolean(prompt.resultMessageID)
+    })
+    const state = await snapshotFor(handlers, directory)
+    const turns = Object.values(state.subtasks).filter(
+      (task: any) => task.origin === "native" && task.native?.sessionID === "s_adopted",
+    ) as any[]
+    const headsUp = turns.find((task) => task.native.inboxID === "m_headsup")!
+    const prompt = turns.find((task) => task.native.inboxID === "m_prompt")!
+    assert.equal(headsUp.native.phase, "replied")
+    assert.equal(prompt.native.phase, "replied", "the immediate prompt never remains queued")
+    assert.equal(prompt.native.assistantMessageIDs.length, 1)
+    assert.equal(prompt.native.assistantMessageIDs[0], "a_prompt")
+    assert.equal(headsUp.native.assistantMessageIDs.length, 1, "the heads-up keeps only its own answer")
+    assert.equal(headsUp.native.assistantMessageIDs[0], "a_headsup")
+
+    const rows = state.messages["w"] ?? []
+    const userRows = rows.filter((message: any) => message.author === "user")
+    const agentRows = rows.filter((message: any) => message.author === "agent")
+    assert.equal(userRows.length, 1, "one durable user row for the prompt")
+    assert.equal(userRows[0].taskID, prompt.id)
+    assert.equal(agentRows.length, 2, "each turn owns one exact agent row")
+    const headsUpRow = rows.find((message: any) => message.id === headsUp.resultMessageID)
+    const promptRow = rows.find((message: any) => message.id === prompt.resultMessageID)
+    assert.equal(headsUpRow?.text, "Heads-up answer.")
+    assert.equal(promptRow?.text, "Prompt answer.")
+    assert.equal(headsUpRow?.taskID, headsUp.id)
+    assert.equal(promptRow?.taskID, prompt.id)
+    assert.notEqual(headsUpRow?.id, promptRow?.id)
+    assert.equal(deriveWorkStatus(prompt, Date.now()), "replied")
+    assert.equal(deriveWorkStatus(headsUp, Date.now()), "replied")
+    assert.ok(
+      projectVisibleWork(state, (prompt.finishedAt ?? Date.now()) + 500)[prompt.id],
+      "the settled prompt is a visible Work card",
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
   }
 })
