@@ -6,10 +6,15 @@ import { pathToFileURL } from "node:url"
 /**
  * Ticket #210: the committed native host contract fixture.
  *
- * This suite replays the recorded OpenCode 2.2.6 event stream and asserts the
+ * This suite replays a recorded OpenCode 2.2.x event stream and asserts the
  * contract native-first ingestion depends on. It needs no model, host, network,
  * or credentials. `npm run test:live:probe` runs the same assertions against a
  * fresh live record through `ENSEMBLE_NATIVE_HOST_FIXTURE`.
+ *
+ * The committed fixture was recorded on 2.2.6 (ticket #210). Ticket #233
+ * re-ran the probe on 2.2.7: the contract matched, so both patch releases are
+ * accepted. Do not widen this to a floating range without recording a fresh
+ * probe in docs/verification/2026-11-10-native-host-contract.md.
  */
 
 type Row = Record<string, any>
@@ -44,6 +49,9 @@ const REQUIRED_CASES = [
   "session-list",
   "idle",
 ]
+
+/** Patch releases re-verified against this contract. */
+const SUPPORTED_OPENCODE_VERSIONS = ["2.2.6", "2.2.7"]
 
 function caseRows(name: string): Row[] {
   return rows.filter((row) => row.case === name)
@@ -129,7 +137,10 @@ test("fixture names the verified host versions and contains no private data", ()
   assert.equal(meta.schema, "ensemble.native-host-contract")
   assert.equal(meta.version, 1)
   assert.match(meta.versions.node, /^26\./)
-  assert.equal(meta.versions.opencode, "2.2.6")
+  assert.ok(
+    SUPPORTED_OPENCODE_VERSIONS.includes(meta.versions.opencode),
+    `recorded OpenCode ${meta.versions.opencode} is not in the supported set ${SUPPORTED_OPENCODE_VERSIONS.join(", ")}`,
+  )
   assert.ok(typeof meta.versions.tmux === "string" && meta.versions.tmux.length > 0)
   assert.match(meta.versions.provider, /ensemble-fake/)
   assert.match(meta.declaredTypes, /@opencode\/plugin 2\.2\.1/)
@@ -167,7 +178,7 @@ test("a native direct turn exposes inbox, text, and execution identities", () =>
   const succeeded = indexOf(direct, "session.execution.succeeded")
   assert.ok(created >= 0 && enqueued > created, `order: ${sequence.join(" > ")}`)
   assert.ok(started > enqueued, `execution starts after enqueue: ${sequence.join(" > ")}`)
-  assert.ok(delivered > started, `2.2.6 delivers after execution starts: ${sequence.join(" > ")}`)
+  assert.ok(delivered > started, `the host delivers after execution starts: ${sequence.join(" > ")}`)
   assert.ok(textStarted > delivered, `text starts after delivery: ${sequence.join(" > ")}`)
   assert.ok(textDelta > textStarted && textEnded > textDelta, `text delta/end order: ${sequence.join(" > ")}`)
   assert.ok(succeeded > textEnded, `execution settles after text ends: ${sequence.join(" > ")}`)
@@ -384,7 +395,7 @@ test("session list scopes filter by location, root, child, archive, and search",
   assert.deepEqual(search.sessions, ["s1"])
 })
 
-test("2.2.6 did not emit session.idle or session.status in this headless run", () => {
+test("the recorded headless run did not emit session.idle or session.status", () => {
   assertFalseFinding("idle", "session-idle-observed")
   assert.ok(finding("idle", "session-idle-observed").waitedMs >= 10_000)
   assertFalseFinding("idle", "session-status-events-observed")

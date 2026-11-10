@@ -1,6 +1,6 @@
 # Native host event contract (#210)
 
-Status: **verified on an isolated real OpenCode 2.2.6 host with the deterministic fake provider; replayable fixture and contract test committed; no product behavior changed.**
+Status: **verified on an isolated real OpenCode 2.2.6 host with the deterministic fake provider; replayable fixture and contract test committed; 2.2.7 re-verified on 2026-11-11 with no contract change; no product behavior changed.**
 Date: 2026-11-10
 Issue: [#210](https://github.com/heyimteee/ensemble/issues/210)
 Spec: [#209](https://github.com/heyimteee/ensemble/issues/209)
@@ -18,7 +18,7 @@ is evidence, not a design: ticket #211 owns the ADRs and #212+ owns ingestion.
 | Terminal host | tmux 3.5a |
 | Node | 26.12.1 |
 | npm | 12.2.1 |
-| OpenCode (probe) | `opencode v2.2.6` |
+| OpenCode (probe) | `opencode v2.2.6` (committed fixture); `opencode v2.2.7` re-verified 2026-11-11 |
 | Declared plugin/client types | `@opencode/plugin` 2.2.1, `@opencode/client` 2.2.1 |
 | Provider | local OpenAI-compatible fake provider (`ensemble-fake`); no model API, credentials, or external network |
 | Fixture | `src/v2/fixtures/native-host-contract.jsonl` |
@@ -33,9 +33,24 @@ read the user's live host.
 | Command | Result |
 |---|---|
 | `npm run test:live:probe` | **Pass** — isolated OpenCode 2.2.6 + fake provider; 11 recorded scenarios (304 fixture rows); 14/14 contract tests pass against the fresh record. |
+| `npm run test:live:probe` (2026-11-11) | **Pass** — isolated OpenCode 2.2.7 + fake provider; 14/14 contract tests pass against the fresh record; only the host version string differed. |
 | `npm run verify` | **Pass** — strict type check; **1553 tests passed, 0 failed, 0 skipped, 0 todo** (46.6 s). |
 | `npm run test:live:probe` with `ENSEMBLE_PROBE_WRITE=1` | Regenerates the committed fixture; the committed file in this branch came from that command. |
 | `git diff --check` | **Pass** — no whitespace errors. |
+
+## 2.2.7 re-verification
+
+Ticket [#233](https://github.com/heyimteee/ensemble/issues/233) re-ran the probe
+on an isolated OpenCode **2.2.7** host with the same Node 26.12.1, tmux 3.5a,
+fake provider, and recorded scenarios. The fresh record passed all 14 contract
+tests without a behavioral mismatch: identity and event-order checks held, and
+the busy move was still accepted and queued rather than refused. The only
+difference was the recorded host version string.
+
+`src/v2/native-host-fixture.test.ts` therefore accepts the supported **2.2.6 and
+2.2.7** patch releases. The committed fixture remains the 2.2.6 record above,
+and the 2.2.6 evidence is unchanged. A future host upgrade needs a fresh probe
+and an explicit supported-set change, not a floating version range.
 
 ## Probe method
 
