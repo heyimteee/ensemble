@@ -207,6 +207,7 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.half.down", scope: "normal", contexts: ["work"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
   { id: "work.half.up", scope: "normal", contexts: ["work"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
   { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result or toggle a history group", group: "Open", hint: "enter result/toggle" },
+  { id: "work.why", scope: "normal", contexts: ["work"], keys: ["w"], title: "Why this card?", group: "Open", hint: "w why" },
   // `d` is contextual: delegate here, never the text-buffer delete operator.
   { id: "work.delegate", scope: "normal", contexts: ["work"], keys: ["d"], title: "Delegate work", group: "Work", hint: "d delegate" },
   { id: "work.reassign", scope: "normal", contexts: ["work"], keys: ["t"], title: "Reassign work", group: "Work", hint: "t reassign" },

@@ -183,7 +183,7 @@ test("workspace and direct-chat streams share one coalescer", () => {
 // ---- Three-pane shell, Work layout, and focus ----
 
 test("the Work pane maps active tasks through the view filter", () => {
-  assert.ok(has(app(), "workViewGroups(active"))
+  assert.ok(has(app(), "workViewGroups(workTasks()"))
 })
 
 test("the Work pane receives the dispatch ledger", () => {
@@ -267,7 +267,7 @@ test("Work actions target the focused visible task", () => {
 
 test("ticket187: native subagent records join the Work view model", () => {
   assert.ok(has(app(), "nativeSubagentRuns()"))
-  assert.ok(has(app(), "workViewGroups(activeTasks(), state()?.subtasks ?? {}, {"))
+  assert.ok(has(app(), "workViewGroups(workTasks(), state()?.subtasks ?? {}, {"))
 })
 
 test("ticket187: native cards render through the same card and compact views", () => {
@@ -317,9 +317,20 @@ test("f toggles ACTIVE and HISTORY", () => {
 })
 
 test("ticket183: the right pane visibility is the one drawer switch", () => {
-  assert.ok(has(app(), "paneSides().right && (surface()?.kind === \"workspace\" || approvalsMode() === \"full\")"))
+  assert.ok(has(app(), "(surface()?.kind === \"agent\" && Boolean(nativeDirect()))"))
   assert.ok(has(app(), "<Show when={paneSides().left}>"), "the rail renders only while the left switch is on")
   assert.ok(!has(app(), "workDrawerOpen"), "no second drawer state exists")
+})
+
+test("ticket222: a direct conversation reads its own Work channel and history page", () => {
+  const source = app()
+  assert.ok(has(source, "const workConversationID = createMemo(() => {"))
+  assert.ok(has(source, "(task.conversationID ?? task.workspaceID) === conversation"))
+  assert.ok(has(source, 'callRpc<WorkHistoryPage & { version: number; epoch?: number }>(context, "work.history"'))
+  assert.ok(has(source, "client.applyWorkHistory(page)"))
+  assert.ok(has(source, "loadOlderWorkHistory(conversationID)"))
+  assert.ok(has(source, '"work.why"'))
+  assert.ok(has(source, "workDetailFor(task"))
 })
 
 test("ticket183: Space b l/r run one focus-recovering toggle", () => {
