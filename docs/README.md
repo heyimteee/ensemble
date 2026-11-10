@@ -43,6 +43,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Workspace native turn ingestion](verification/2026-11-11-ticket-216.md): workspace group messages, implicit addressee, subagent children, isolation, bounded stream checkpoints, and the #215 review fixes
 - [Immediate prompt after adoption](verification/2026-11-11-ticket-229.md): steered multi-turn executions settle each participating turn with its own exact row
 - [Tool retirement and contract shrink](verification/2026-11-11-ticket-225.md): native vs legacy tool surfaces, per-turn context injection, measured prompt/schema reduction, and the one-release rollback
+- [Real live workspace-wizard timeout](verification/2026-11-11-ticket-232.md): pane-selection harness sequence, viewport-independent real assertions, and a passing `npm run test:live`
 - [macOS/Herdr manual checklist](verification/macos-herdr-checklist.md): repeatable, manual, and unexecuted until a run is recorded
 - [v6 verification](verification/2026-11-07-v6.md): nine-scene motion parity, Work-card size matrix, load probe, reduced motion, and `NO_COLOR`
 - [v5.9 verification](verification/2026-11-06-v59.md): live-matrix guardrails, CI, reviewer standards, unused checks, and tracker hygiene
