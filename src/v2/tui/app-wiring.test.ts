@@ -784,3 +784,28 @@ test("rail and approvals share the Braille motion tick", () => {
 test("the init row reads durable jobs on the shared motion tick", () => {
   assert.ok(has(app(), "initRowForJob(job, motionFrame(), process.env)"))
 })
+
+// ---- Composer attachments (ticket #223) ----
+
+test("composer paste uses the shared attachment classifier and resolver", () => {
+  const source = app()
+  assert.ok(has(source, 'onPaste={handleComposerPaste}'))
+  assert.ok(has(source, 'classifyComposerPaste({'))
+  assert.ok(has(source, 'existingPastedFile(paste.path, attachmentDirectories())'))
+})
+
+test("composer attachments are stored and removed through the service", () => {
+  const source = app()
+  assert.ok(has(source, '"attachment.add"'))
+  assert.ok(has(source, '"attachment.remove"'))
+  assert.ok(has(source, 'withComposerAttachment(store, key, stored)'))
+})
+
+test("group and direct sends carry stored attachment ids", () => {
+  const source = app()
+  assert.ok(has(source, '...(sendFiles.length > 0 ? { attachments: sendFiles } : {})'))
+})
+
+test("transcript rows render attachment metadata chips", () => {
+  assert.ok(has(app(), 'composerAttachmentLabel(attachment)'))
+})

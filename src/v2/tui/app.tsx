@@ -1,16 +1,28 @@
 import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { unwrap } from "solid-js/store"
-import { SyntaxStyle } from "@opentui/core"
+import { SyntaxStyle, decodePasteBytes } from "@opentui/core"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, NativeSubagentRun, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageAttachment, MessageStream, ModelOption, NativeSubagentRun, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ChromeText, FullApprovalsView, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, WorkHistoryRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, paletteRowTitle, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
+import {
+  attachmentsForDraft,
+  classifyComposerPaste,
+  clipboardImageName,
+  composerAttachmentLabel,
+  describeLocalAttachment,
+  existingPastedFile,
+  removeComposerAttachment,
+  validateAttachmentSelection,
+  withComposerAttachment,
+  type ComposerAttachmentStore,
+} from "../attachments.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
@@ -552,6 +564,7 @@ export function EnsembleV2App() {
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
   const [composerDraft, setComposerDraft] = createSignal("")
   const [composerCursor, setComposerCursor] = createSignal(0)
+  const [composerFiles, setComposerFiles] = createSignal<ComposerAttachmentStore>({})
   const [drafts, setDrafts] = createSignal<DraftStore>({})
   const [composerValidation, setComposerValidation] = createSignal<ComposerValidationState | null>(null)
   const [completion, setCompletion] = createSignal<Completion | null>(null)
@@ -828,6 +841,8 @@ export function EnsembleV2App() {
       : { kind: "workspace", workspaceID: current.workspaceID }
   }
   const currentDraftKey = () => draftKey(currentDraftSurface())
+  /** Ticket #223: attachment drafts follow the same per-surface key as text. */
+  const currentComposerFiles = createMemo(() => attachmentsForDraft(composerFiles(), currentDraftKey() ?? ""))
 
   const interactionOverlay = (): InteractionOverlay => {
     if (wizard()) return "wizard"
@@ -1462,6 +1477,17 @@ export function EnsembleV2App() {
   // row; the compared set covers every rendered field, so this cannot hide a
   // visible change. The cache is pruned to the transcript window.
   const stableLines = (lines: ChatLine[]): ChatLine[] => {
+    const sameAttachments = (left?: MessageAttachment[], right?: MessageAttachment[]) => {
+      if (left === right) return true
+      if ((left?.length ?? 0) !== (right?.length ?? 0)) return false
+      return (left ?? []).every((attachment, index) =>
+        attachment.id === right![index]?.id
+        && attachment.name === right![index]?.name
+        && attachment.mime === right![index]?.mime
+        && attachment.size === right![index]?.size
+        && attachment.kind === right![index]?.kind,
+      )
+    }
     const seen = new Set<string>()
     const next = lines.map((line) => {
       seen.add(line.id)
@@ -1475,7 +1501,8 @@ export function EnsembleV2App() {
         && previous.interrupted === line.interrupted
         && previous.queued === line.queued
         && previous.correlationID === line.correlationID
-        && previous.agentID === line.agentID) return previous
+        && previous.agentID === line.agentID
+        && sameAttachments(previous.attachments, line.attachments)) return previous
       const value = { ...line }
       lineCache.set(line.id, value)
       return value
@@ -1496,6 +1523,7 @@ export function EnsembleV2App() {
         agentID: surfaceAgent()?.id,
         queued: message.queued,
         correlationID: message.correlationID,
+        attachments: message.attachments,
         createdAt: message.createdAt,
       }))
       const live = liveDm()
@@ -1535,6 +1563,7 @@ export function EnsembleV2App() {
       interrupted: message.interrupted,
       correlationID: message.correlationID,
       taskID: message.taskID,
+      attachments: message.attachments,
       createdAt: message.createdAt,
     })))
   })
@@ -3250,9 +3279,109 @@ export function EnsembleV2App() {
     })
   }
 
+  const attachmentRequest = () => {
+    const current = surface()
+    if (!current) return undefined
+    if (current.kind === "workspace") return { workspaceID: current.workspaceID }
+    return { agentID: current.agentID, ...(current.workspaceID ? { workspaceID: current.workspaceID } : {}) }
+  }
+  const attachmentDirectories = () =>
+    [chatContext()?.directory, activeWorkspace()?.directory, process.cwd()]
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+  const attachmentFailure = (error: any) => {
+    const message = error?.message ?? String(error)
+    notify(message, "error")
+    showToast({ title: "Attachment", message, tone: "error" })
+  }
+  const attachmentFits = (candidate: MessageAttachment): boolean => {
+    const failure = validateAttachmentSelection([...currentComposerFiles(), candidate])
+    if (!failure) return true
+    notify(failure.message, "error")
+    showToast({ title: "Attachment", message: failure.message, tone: "error" })
+    return false
+  }
+  const attachPath = async (path: string) => {
+    const request = attachmentRequest()
+    if (!request) return
+    try {
+      const candidate = describeLocalAttachment(path)
+      if (!attachmentFits(candidate)) return
+      const key = currentDraftKey() ?? ""
+      const stored: MessageAttachment = await invoke(context, "attachment.add", { ...request, path })
+      setComposerFiles((store) => withComposerAttachment(store, key, stored))
+      notify(`Attached ${stored.name}`, "success")
+    } catch (error) {
+      attachmentFailure(error)
+    }
+  }
+  const attachClipboardImage = async (bytes: Uint8Array, mime: string, name?: string) => {
+    const request = attachmentRequest()
+    if (!request) return
+    try {
+      const candidate: MessageAttachment = {
+        id: "pending",
+        name: name ?? clipboardImageName(mime),
+        mime,
+        size: bytes.length,
+        kind: mime.startsWith("image/") ? "image" : "file",
+      }
+      if (!attachmentFits(candidate)) return
+      const key = currentDraftKey() ?? ""
+      const stored: MessageAttachment = await invoke(context, "attachment.add", {
+        ...request,
+        data: Buffer.from(bytes).toString("base64"),
+        mime,
+        name: candidate.name,
+      })
+      setComposerFiles((store) => withComposerAttachment(store, key, stored))
+      notify(`Attached ${stored.name}`, "success")
+    } catch (error) {
+      attachmentFailure(error)
+    }
+  }
+  const removeComposerFile = (attachment: MessageAttachment) => {
+    const key = currentDraftKey() ?? ""
+    setComposerFiles((store) => removeComposerAttachment(store, key, attachment.id))
+    const request = attachmentRequest()
+    if (!request) return
+    void invoke(context, "attachment.remove", { ...request, id: attachment.id }).catch(() => undefined)
+  }
+  /**
+   * Ticket #223: a pasted file path becomes a chip instead of raw text, and a
+   * clipboard image is stored before the textarea sees it. A path that does
+   * not name an existing file and ordinary text fall through to the native
+   * textarea paste.
+   */
+  const handleComposerPaste = (event: any) => {
+    const bytes = event?.bytes instanceof Uint8Array ? event.bytes : undefined
+    let text = ""
+    try {
+      text = bytes ? decodePasteBytes(bytes) : ""
+    } catch {}
+    const paste = classifyComposerPaste({
+      text,
+      bytes,
+      mimeType: event?.metadata?.mimeType,
+      kind: event?.metadata?.kind,
+    })
+    if (paste.kind === "image") {
+      event?.preventDefault?.()
+      event?.stopPropagation?.()
+      void attachClipboardImage(paste.bytes, paste.mime, paste.name)
+      return
+    }
+    if (paste.kind !== "path") return
+    const existing = existingPastedFile(paste.path, attachmentDirectories())
+    if (!existing) return
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    void attachPath(existing)
+  }
+
   const send = async (text: string, recipientIDs?: string[], onInvalid?: (message: string) => void): Promise<boolean> => {
     const value = text.trim()
-    if (!value) return false
+    const files = currentComposerFiles()
+    if (!value && files.length === 0) return false
     const current = surface()
     if (!current) {
       onInvalid?.("Open an agent or workspace first.")
@@ -3296,8 +3425,15 @@ export function EnsembleV2App() {
       if (resolvedError) return failure(resolvedError.message)
     }
     return run("Send message", async () => {
+      const sendKey = currentDraftKey() ?? ""
+      const sendFiles = files.map((attachment) => attachment.id)
       if (current.kind === "agent") {
-        await invoke(context, "chat.send", { agentID: current.agentID, workspaceID: current.workspaceID, text: value })
+        await invoke(context, "chat.send", {
+          agentID: current.agentID,
+          workspaceID: current.workspaceID,
+          text: value,
+          ...(sendFiles.length > 0 ? { attachments: sendFiles } : {}),
+        })
         await refreshChat()
       } else {
         const action = plan?.kind === "skills" ? "skill.send" : "message.send"
@@ -3305,8 +3441,12 @@ export function EnsembleV2App() {
           workspaceID: current.workspaceID,
           text: value,
           recipientIDs,
+          ...(sendFiles.length > 0 ? { attachments: sendFiles } : {}),
           ...(ownerSelections ? { ownerSelections } : {}),
         })
+      }
+      if (sendFiles.length > 0) {
+        setComposerFiles((store) => sendFiles.reduce((next, id) => removeComposerAttachment(next, sendKey, id), store))
       }
     })
   }
@@ -3768,7 +3908,8 @@ export function EnsembleV2App() {
 
   const submitComposer = async (value: string) => {
     const text = value.trim()
-    if (!text) return
+    const files = currentComposerFiles()
+    if (!text && files.length === 0) return
     if (completion()) { await selectCompletion(); return }
     if (text === "/") { commandPaletteCompletion("/", 1); return }
     const initIssue = initComposerIssue(text)
@@ -3812,6 +3953,12 @@ export function EnsembleV2App() {
     const name = rawName.startsWith("ctrl+") ? rawName.slice("ctrl+".length) : rawName
     const token = normalizeKeyToken(event)
     const prevent = () => { event?.preventDefault?.(); event?.stopPropagation?.() }
+    if (name === "backspace" && composerDraft() === "" && currentComposerFiles().length > 0) {
+      prevent()
+      const last = currentComposerFiles().at(-1)
+      if (last) removeComposerFile(last)
+      return true
+    }
     const leaveEditor = () => {
       prevent()
       leaveComposer()
@@ -6925,6 +7072,11 @@ export function EnsembleV2App() {
                                           </Show>
                                         )}
                                       </Show>
+                                      <Show when={(message.attachments?.length ?? 0) > 0}>
+                                        <For each={message.attachments}>{(attachment) => (
+                                          <text fg={colors.info} bg={colors.bg} width="100%" truncate>{`▣ ${composerAttachmentLabel(attachment)}`}</text>
+                                        )}</For>
+                                      </Show>
                                     </box>
                                     )
                                   }
@@ -6966,6 +7118,11 @@ export function EnsembleV2App() {
                                         </Show>
                                       }>
                                         <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth()).join("\n")}</text>
+                                      </Show>
+                                      <Show when={(message.attachments?.length ?? 0) > 0}>
+                                        <For each={message.attachments}>{(attachment) => (
+                                          <text fg={colors.info} bg={colors.panel} width="100%" truncate>{`▣ ${composerAttachmentLabel(attachment)}`}</text>
+                                        )}</For>
                                       </Show>
                                     </box>
                                   </box>
@@ -7014,8 +7171,21 @@ export function EnsembleV2App() {
                           )}</For>
                         </box>
                       </Show>
+                      <Show when={currentComposerFiles().length > 0}>
+                        <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1}>
+                          <For each={currentComposerFiles()}>{(attachment) => (
+                            <box
+                              flexDirection="row"
+                              width="100%"
+                              onMouseDown={(event: any) => { event?.preventDefault?.(); removeComposerFile(attachment) }}
+                            >
+                              <text fg={colors.info} bg={colors.bg} width="100%" truncate>{`▣ ${composerAttachmentLabel(attachment)}  [remove]`}</text>
+                            </box>
+                          )}</For>
+                        </box>
+                      </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={composerBorderColor()} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onPaste={handleComposerPaste} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
                     </>
