@@ -418,11 +418,12 @@ export type Subtask = {
   /** Peer-turn record (ticket #57). Present only on workKind "turn". */
   turn?: TurnInfo
   /**
-   * Native-first turn provenance (ADR 0010, ticket #215). Native turns are
-   * adopted `workKind: "turn"` rows: they have no lease, claim, or attempts,
-   * and the queue pump/reaper skip them. `conversationID` is the durable
-   * conversation channel (`dm:<agentID>[:<workspaceID>]`) and doubles as the
-   * task's `workspaceID` so one Work projection serves group and direct.
+   * Native-first turn provenance (ADR 0010, tickets #215/#216). Native turns
+   * are adopted `workKind: "turn"` rows: they have no lease, claim, or
+   * attempts, and the queue pump/reaper skip them. `conversationID` is the
+   * durable conversation channel (the workspace id for a group, or
+   * `dm:<agentID>[:<workspaceID>]` for a direct conversation) and doubles as
+   * the task's `workspaceID` so one Work projection serves group and direct.
    */
   origin?: "native"
   adopted?: boolean

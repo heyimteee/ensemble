@@ -70,6 +70,7 @@ test("ticket215: the direct Work row follows the canonical vocabulary for this c
     task(),
     task({ id: "task_other", conversationID: "dm:a:other", workspaceID: "dm:a:other" }),
     task({ id: "task_group", workspaceID: "w", conversationID: undefined, origin: undefined, native: undefined, workKind: "delegation" }),
+    task({ id: "task_group_native", workspaceID: "w", conversationID: "w" }),
   ], "dm:a:w", 10)
   assert.ok(working)
   assert.equal(working.state, "WORKING")
