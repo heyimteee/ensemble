@@ -211,6 +211,7 @@ test("shell entity mutations publish full-entity upserts without a snapshot fall
       maxDelegations: 10,
       maxDepth: 5,
       synthesis: true,
+      nativeMentionRouting: true,
       dispatchGroupMaxHops: 8,
       dispatchCommandMaxHops: 24,
       dispatchDepth: 8,
