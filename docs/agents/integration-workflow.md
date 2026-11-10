@@ -53,6 +53,7 @@ npm run integration:merge -- ticket/205-integration-helpers
 The merge helper:
 
 - requires a clean integration worktree on the integration branch;
+- checks the source range for whitespace errors and conflict residue;
 - performs `git merge --no-ff` and stops on conflicts, printing the conflicted paths;
 - runs the full `npm run verify` gate in the integration worktree;
 - prints the merge commit, its parents, and the verify result.

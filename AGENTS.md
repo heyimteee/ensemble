@@ -13,6 +13,7 @@ Ensemble extends OpenCode's TUI with persistent agent teams. Keep changes within
 ## Development
 
 - Before changing TUI behavior, diagnosing location divergence, or editing host integration, read [the runtime guide](docs/agents/opencode-tui-runtime.md).
+- Before creating a ticket worktree or merging into an integration branch, follow [the integration workflow](docs/agents/integration-workflow.md).
 - Before changing work lifecycle, delivery or retry, handoffs, completion, batch review, or native-subagent finalization, read [the service map](docs/agents/service-map.md).
 - Before changing the service registry, work recovery, or plugin lifecycle, read [ADR 0003](docs/adr/0003-single-service-and-safe-recovery.md).
 - Use patch/direct file edits; for necessary multi-site scripted edits, inspect a temporary script and run it once. See the guide's editing discipline.

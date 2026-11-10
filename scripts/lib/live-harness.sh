@@ -1618,8 +1618,11 @@ live_retain_failure_artifacts() {
       live_redact <"$file" >"$dest/logs/$name" || true
     done
   fi
-  service_logs="${ENSEMBLE_LOG_DIR:-}"
-  if [[ -z "$service_logs" && -n "$LIVE_STATE" ]]; then
+  # Only the isolated XDG state directory is trusted here. Never fall back to
+  # an ambient ENSEMBLE_LOG_DIR: an exported override can point at real host
+  # logs, which must not cross the CI artifact privacy boundary.
+  service_logs=""
+  if [[ -n "$LIVE_STATE" ]]; then
     service_logs="$LIVE_STATE/ensemble/logs"
   fi
   if [[ -n "$service_logs" && -d "$service_logs" ]]; then
