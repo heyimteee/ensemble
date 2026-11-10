@@ -11,6 +11,7 @@ import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
 import { isSubstantiveReply, planLateSuccessRepair, settlementText, shouldInterruptSettledReply } from "./stream-settlement.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
+import { planMentionRouting, type MentionConversation, type MentionLedgerSnapshot, type MentionRefusal, type MentionRosterEntry } from "./mention-routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, isTerminalWorkStatus, parseWorkKind, stableHash, workKey, type DerivedWorkStatus } from "./queue.ts"
 import {
   activeContinuationGroup,
@@ -5371,6 +5372,14 @@ export class EnsembleV2Service {
       }
       patch.nativeFirst = payload.nativeFirst
     }
+    // Ticket #220: the native mention-routing kill switch is explicit. A
+    // non-boolean value is rejected so a typo cannot silently enable routing.
+    if (payload.nativeMentionRouting !== undefined) {
+      if (typeof payload.nativeMentionRouting !== "boolean") {
+        throw Object.assign(new Error("nativeMentionRouting must be true or false."), { code: "invalid_settings" })
+      }
+      patch.nativeMentionRouting = payload.nativeMentionRouting
+    }
     // Ticket #160: the four dispatch limits are one validated set. A rejected
     // edit changes nothing; existing groups keep the caps they captured, so
     // only new commands observe the new values.
@@ -8135,6 +8144,135 @@ export class EnsembleV2Service {
     return { conversation, channel, agent, directory: binding.directory }
   }
 
+  /**
+   * Ticket #220: plan and apply `$Name` routing for one native user message.
+   *
+   * The #219 planner owns the grammar, sanitization, guards, and server-owned
+   * budget. This method only supplies the conversation, roster, ledger
+   * snapshot, and fan-out cap, then turns admitted routes into normal peer
+   * turns under the native turn. Direct conversations never create work; they
+   * append the planner's visible refusal instead.
+   */
+  private async routeNativeMentions(
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    task: Subtask,
+    text: string,
+    at: number,
+  ): Promise<void> {
+    const state = this.store.read()
+    const workspace = target.conversation.kind === "workspace"
+      ? state.workspaces[target.conversation.workspaceID]
+      : undefined
+    if (target.conversation.kind === "workspace" && !workspace) return
+    const conversation: MentionConversation = workspace
+      ? { kind: "group", workspaceID: workspace.id, sessionAgentID: target.agent.id }
+      : {
+          kind: "direct",
+          agentID: target.agent.id,
+          ...(target.conversation.kind === "direct" ? { workspaceID: target.conversation.workspaceID } : {}),
+        }
+    // Include every roster agent, member or not, archived or not: the parser
+    // matches them and the policy turns each into its specific visible refusal.
+    const roster: MentionRosterEntry[] = Object.values(state.agents).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      member: workspace ? workspace.memberIDs.includes(agent.id) : false,
+      archived: agent.archived,
+    }))
+    const plan = planMentionRouting({
+      text,
+      conversation,
+      roster,
+      fanOutCap: state.settings.maxDelegations,
+      enabled: state.settings.nativeMentionRouting !== false,
+      ...(workspace ? { limits: dispatchLimits(state.settings), ledger: this.nativeMentionLedger(task) } : {}),
+    })
+
+    if (workspace) {
+      for (const route of plan.routes) {
+        await this.createPeerTurn({
+          workspace,
+          parentID: task.id,
+          assigneeID: route.agentID,
+          askerKind: "user",
+          title: nativeTurnTitle(text),
+          instruction: text,
+          mode: "research",
+          dispatchGroupID: task.dispatchGroupID,
+        })
+        this.logger?.event("info", "native", "native.route.created", {
+          sessionID: task.native?.sessionID,
+          turnID: task.id,
+          agentID: route.agentID,
+        })
+      }
+      if (plan.routes.length > 0) this.schedule()
+    }
+    for (const refusal of plan.refusals) {
+      await this.appendNativeMentionRefusal(target, task, refusal, state.settings.maxDelegations, at)
+    }
+  }
+
+  /** Current ledger position for a route under the native turn's root group. */
+  private nativeMentionLedger(task: Subtask): MentionLedgerSnapshot {
+    const state = this.store.read()
+    const limits = dispatchLimits(state.settings)
+    const group = task.dispatchGroupID ? state.dispatchGroups[task.dispatchGroupID] : undefined
+    if (!group) {
+      return {
+        groupUsed: 0,
+        groupMax: limits.groupMaxHops,
+        depth: dispatchChildDepth(task, task.dispatchGroupID, state.subtasks),
+        depthMax: limits.depth,
+      }
+    }
+    const root = group.id === group.rootID ? group : state.dispatchGroups[group.rootID]
+    return {
+      groupUsed: group.usedHops,
+      groupMax: group.maxHops,
+      depth: dispatchChildDepth(task, group.id, state.subtasks),
+      depthMax: group.depthMax,
+      ...(root?.commandUsedHops !== undefined ? { commandUsed: root.commandUsedHops } : {}),
+      ...(root?.commandMaxHops !== undefined ? { commandMax: root.commandMaxHops } : {}),
+      ...(group.closedAt !== undefined ? { closed: true } : {}),
+    }
+  }
+
+  /** Visible transcript notice for one refused native mention. */
+  private async appendNativeMentionRefusal(
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    task: Subtask,
+    refusal: MentionRefusal,
+    fanOutCap: number,
+    at: number,
+  ): Promise<void> {
+    const text = peerRefusalText(refusal.agentName ?? refusal.token, nativeMentionRefusalReason(refusal, fanOutCap))
+    if (target.conversation.kind === "workspace") {
+      const workspace = this.store.workspace(target.conversation.workspaceID)
+      if (!workspace) return
+      await this.appendMessage(workspace, { author: "system", text, kind: "system" })
+    } else {
+      // Direct channels have no workspace row to append through. The
+      // deterministic id keeps a replayed direct notice from duplicating.
+      await this.store.saveChannelMessage(target.channel, {
+        id: `msg_native_route_${stableHash(`native-route-notice:${task.id}:${refusal.reason}:${refusal.start}:${refusal.token}`)}`,
+        author: "system",
+        text,
+        kind: "system",
+        createdAt: at,
+      })
+    }
+    this.logger?.event("info", "native", "native.route.refused", {
+      sessionID: task.native?.sessionID,
+      turnID: task.id,
+      agentID: refusal.agentID,
+      reason: refusal.reason,
+      ...(refusal.layer ? { layer: refusal.layer } : {}),
+      ...(refusal.used !== undefined ? { used: refusal.used } : {}),
+      ...(refusal.max !== undefined ? { max: refusal.max } : {}),
+    })
+  }
+
   private nativeTurnByInbox(inboxID: string): Subtask | undefined {
     return Object.values(this.store.read().subtasks).find((task) => isNativeTurn(task) && task.native?.inboxID === inboxID)
   }
@@ -8292,6 +8430,7 @@ export class EnsembleV2Service {
       }
       const turnID = nativeTurnID(sessionID, inboxID)
       let task = this.store.subtask(turnID)
+      const created = !task
       if (!task) {
         const text = String(payload.text ?? "")
         const attachments = nativePromptAttachments(payload.files).map((attachment, index) => ({
@@ -8360,6 +8499,18 @@ export class EnsembleV2Service {
           ...(task.attachments && task.attachments.length > 0 ? { attachments: task.attachments } : {}),
           native: { sessionID, inboxID, turnID: task.id },
         })
+      }
+      // Ticket #220: route mentions once, when this native turn is first
+      // observed. A replay reuses the turn and must not duplicate work or
+      // refusals. Service prompts and synthetic items are never user messages.
+      if (created && item?.type === "user" && !internal) {
+        if (target.conversation.kind === "workspace") {
+          // ADR 0011: a native turn opens a normal root ledger before any
+          // route is planned, so the preflight sees the same caps a composer
+          // command would capture.
+          await this.ensureDispatchGroupLedger(task.dispatchGroupID, target.channel)
+        }
+        await this.routeNativeMentions(target, task, String(payload.text ?? ""), at)
       }
       const waiting = this.nativePendingExecutions.get(sessionID) ?? 0
       if (waiting > 0 && !this.nativeActiveTurn.has(sessionID)) {
@@ -10228,6 +10379,10 @@ export class EnsembleV2Service {
   private async maybeSynthesize(parentID: string): Promise<void> {
     const stored = this.store.subtask(parentID)
     if (!stored || stored.stage === "synthesis" || stored.state === "replied") return
+    // A native turn is answered by its own host execution, never by child
+    // synthesis. Routed child work must not reassign the session agent or
+    // settle the turn (ticket #220).
+    if (isNativeTurn(stored)) return
     // Ticket #71: batch reviews close only via the review tool once every
     // item is acted on or dismissed — never by child completion.
     if (stored.handoff?.batch === true) return
@@ -10262,5 +10417,40 @@ export class EnsembleV2Service {
       await this.store.saveSubtask(parent)
       await this.appendMessage(workspace, { author: "system", text: "Delegated subtasks completed.", kind: "system", taskID: parent.id })
     }
+  }
+}
+
+/** Visible reason for one refused native mention; names the rule or budget layer. */
+function nativeMentionRefusalReason(refusal: MentionRefusal, fanOutCap: number): string {
+  switch (refusal.reason) {
+    case "unknown":
+      return "no workspace member matches."
+    case "archived":
+      return `${refusal.agentName ?? refusal.token} is archived and cannot take turns.`
+    case "not-a-member":
+      return `${refusal.agentName ?? refusal.token} is not a workspace member; add them to the workspace before mentioning.`
+    case "direct-conversation":
+      return "direct conversations stay one-to-one; no peer turn was created."
+    case "routing-disabled":
+      return "native mention routing is off for this workspace; the mention is a reference."
+    case "cycle":
+      return "routing back would close a cycle in this dispatch group."
+    case "fan-out":
+      return `the delegation limit is ${fanOutCap}.`
+    case "budget":
+      switch (refusal.layer) {
+        case "closed":
+          return "the dispatch group is closed; ask the user to start a new command."
+        case "group":
+          return `the dispatch group is exhausted (${refusal.used ?? 0}/${refusal.max ?? 0} hops).`
+        case "depth":
+          return `the dispatch depth limit is ${refusal.max ?? 0} (next depth ${refusal.used ?? 0}).`
+        case "command":
+          return `the command budget is exhausted (${refusal.used ?? 0}/${refusal.max ?? 0} hops).`
+        default:
+          return "the dispatch budget is exhausted."
+      }
+    default:
+      return "the mention could not be routed."
   }
 }

@@ -6,6 +6,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxDelegations: 10,
   maxDepth: 5,
   synthesis: true,
+  nativeMentionRouting: true,
   dispatchGroupMaxHops: DISPATCH_LIMIT_DEFAULTS.groupMaxHops,
   dispatchCommandMaxHops: DISPATCH_LIMIT_DEFAULTS.commandMaxHops,
   dispatchDepth: DISPATCH_LIMIT_DEFAULTS.depth,
