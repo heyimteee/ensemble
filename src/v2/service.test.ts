@@ -2053,6 +2053,40 @@ test("ticket226: archiving a workspace preserves its direct channel and deletion
   }
 })
 
+test("ticket226: moving a home session into a workspace relocates its direct channel", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-226-move-home-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-226-move-home-dir-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "Home history" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: ["a"], leaderID: "a" } })
+    const moved = await handlers.invoke({ directory, action: "agent.moveHome", payload: { agentID: "a", workspaceID: workspace.result.id } })
+    assert.equal(moved.result.moved, true)
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.messages[directMessageChannel("a")], undefined, "the home channel is moved, not copied")
+    assert.deepEqual(snapshot.state.messages[directMessageChannel("a", workspace.result.id)].map((row: any) => row.text), ["Home history"])
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: workspace.result.id } })
+    assert.deepEqual(
+      (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      ["Home history"],
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test("workspace config is authoritative and can register a workspace on discovery", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
