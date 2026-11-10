@@ -107,8 +107,32 @@ export type WorkNeedsYouContext = {
 /** The durable lifecycle fields the canonical derivation reads. */
 export type WorkLifecycle = Pick<
   Subtask,
-  "id" | "state" | "outcome" | "interrupted" | "approvalID" | "awaitingChildren" | "attempts" | "claimedBy" | "leaseUntil" | "activeRunID" | "retryAfter" | "failure" | "stoppedAt"
+  "id" | "state" | "outcome" | "interrupted" | "approvalID" | "awaitingChildren" | "attempts" | "claimedBy" | "leaseUntil" | "activeRunID" | "retryAfter" | "failure" | "stoppedAt" | "origin" | "native"
 >
+
+/**
+ * Ticket #215: native turns derive from their host phase, never from a lease
+ * or attempt count they do not have. The returned vocabulary is the one in
+ * ADR 0005; `interrupted` is an honest needs-you state, not a failed row.
+ */
+function nativeWorkStatus(task: Pick<WorkLifecycle, "native" | "interrupted">): DerivedWorkStatus {
+  if (task.interrupted || task.native?.phase === "interrupted") return "needs_you"
+  switch (task.native?.phase) {
+    case "working":
+      return "working"
+    case "retrying":
+      return "retrying"
+    case "replied":
+      return "replied"
+    case "failed":
+      return "failed"
+    case "cancelled":
+      return "cancelled"
+    case "queued":
+    default:
+      return "pending"
+  }
+}
 
 /**
  * The single canonical derivation of a work item's visible lifecycle.
@@ -130,6 +154,7 @@ export type WorkLifecycle = Pick<
  * pending; otherwise a durable approval link alone reads needs-you.
  */
 export function deriveWorkStatus(task: WorkLifecycle, now: number, context?: WorkNeedsYouContext): DerivedWorkStatus {
+  if (task.origin === "native" || task.native !== undefined) return nativeWorkStatus(task)
   if (task.state === "replied") {
     if (task.stoppedAt !== undefined) return "cancelled"
     if (task.outcome === "succeeded") return "replied"

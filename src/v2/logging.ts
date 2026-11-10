@@ -29,6 +29,7 @@ export type LogCategory =
   | "host"
   | "dispatch"
   | "failure"
+  | "native"
 
 export type LogFields = Record<string, unknown>
 

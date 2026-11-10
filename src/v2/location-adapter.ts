@@ -1,4 +1,5 @@
 import { EnsembleV2Rpc } from "./rpc.ts"
+import { NATIVE_INGEST_EVENT_TYPES } from "./native-turn.ts"
 import type { EnsembleV2Service } from "./service.ts"
 
 type HostRegistration = { dispose?: () => Promise<void> | void }
@@ -9,16 +10,19 @@ type HostRegistration = { dispose?: () => Promise<void> | void }
  */
 const LOCATION_EVENT_TYPES: string[][] = [
   ["skill.updated", "model.updated", "provider.updated"],
-  ["session.text.delta", "session.idle"],
+  ["session.idle"],
   ["permission.asked", "permission.replied"],
   ["config.updated", "file.edited"],
   // Ticket #155: native tool activity and execution lifecycle for Work cards.
   // `input.started` carries the tool name; `called` carries its input head.
   ["session.tool.input.started", "session.tool.called", "session.tool.progress", "session.tool.success", "session.tool.failed"],
-  ["session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
   // Ticket #182: host child sessions are the durable identity for native
   // subagent records. The tracker maps them to their parent task and group.
   ["session.created", "session.deleted"],
+  // Ticket #215: native turn ingestion is service-owned. Inbox, text, and
+  // execution share one subscription so host order reaches the per-session
+  // queue intact; execution activity still forwards to the group card path.
+  [...NATIVE_INGEST_EVENT_TYPES],
 ]
 
 /**

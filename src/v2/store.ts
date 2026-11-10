@@ -1009,6 +1009,27 @@ export class V2Store {
     })
   }
 
+  /**
+   * Idempotent upsert on a synthetic conversation channel (ticket #215).
+   * Native ingestion derives row ids from host ids, so replaying an event
+   * updates the same row and reuses its sequence instead of appending twice.
+   */
+  async saveChannelMessage(
+    channel: Id,
+    input: Omit<Message, "workspaceID" | "channel" | "seq"> & { workspaceID?: Id },
+  ): Promise<Message> {
+    return this.write(async () => {
+      const message = await this.upsertChannelMessageNow(channel, {
+        ...input,
+        workspaceID: input.workspaceID ?? channel,
+        channel,
+      })
+      await this.commit([{ entity: "message", op: "upsert", message: structuredClone(message) }])
+      this.notify(() => this.observer?.messageSaved?.(message, undefined))
+      return message
+    })
+  }
+
   async saveUi(ui: SnapshotState["ui"]): Promise<void> {
     await this.write(async () => {
       this.state.ui = { ...ui }
