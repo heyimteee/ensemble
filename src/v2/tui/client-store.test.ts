@@ -623,19 +623,11 @@ test("a long client session keeps patched transcript and Work memory bounded", (
       attempts: 1,
     })
     state.messages.w1 = Array.from({ length: 500 }, (_, index) => message(`m${index + 1}`, `row ${index + 1}`, { seq: index + 1 }))
-    state.dmTranscripts["w:a1"] = Array.from({ length: 500 }, (_, index) => ({
-      id: `dm${index + 1}`,
-      role: "user" as const,
-      author: "You",
-      text: `dm ${index + 1}`,
-      createdAt: index + 1,
-    }))
   })))
 
   // Review fix: a full snapshot is the legacy recovery path, so it arrives
   // whole; only the scoped patch/window path applies the client bound.
   assert.equal(store.state()!.messages.w1!.length, 500, "a full snapshot keeps the legacy transcript")
-  assert.equal(store.state()!.dmTranscripts["w:a1"]!.length, 500, "direct transcript caches keep the legacy full snapshot")
   assert.equal(store.state()!.messages.w1!.at(-1)?.seq, 500)
   assert.equal(store.windowFor("w1")?.hasMoreOlder, false)
 

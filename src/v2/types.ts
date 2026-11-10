@@ -773,7 +773,6 @@ export type Snapshot = {
     approvals: Record<Id, Approval>
     settings: Settings
     dmQueue: Record<Id, DmQueueEntry>
-    dmTranscripts: Record<string, ChatMessage[]>
     ui: {
       activeWorkspaceID?: Id
       activeAgentID?: Id

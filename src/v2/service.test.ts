@@ -9,8 +9,8 @@ import { SharedEnsemble } from "./shared-service.ts"
 import { deriveWorkStatus, workKey } from "./queue.ts"
 import { projectVisibleWork } from "./scoped-read.ts"
 import { allWorkGroupsForTasks } from "./work-groups.ts"
-import { V2Store, bindingKey } from "./store.ts"
-import { directMessageChannel } from "./message-channel.ts"
+import { V2Store } from "./store.ts"
+import { chatLineFromMessage, directMessageChannel, isDirectMessageChannel, projectDirectLines } from "./message-channel.ts"
 import { nativeAssistantMessageID, nativeTurnGroupID, nativeTurnID } from "./native-turn.ts"
 import type { Agent, Workspace } from "./types.ts"
 import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
@@ -159,7 +159,7 @@ async function seedWorkspace(store: V2Store, directory: string, patch: Partial<W
 async function seedRebindBinding(
   ctx: any,
   directory: string,
-  binding: { workspaceID: string; sessionID: string; history?: string[]; kind?: "workspace" | "home" },
+  binding: { workspaceID: string; sessionID: string; history?: string[]; kind?: "workspace" | "home" | "direct" },
   nativeSessions?: Map<string, any>,
 ): Promise<void> {
   const seed = new V2Store(ctx)
@@ -1970,6 +1970,123 @@ test("ticket189: agent.rebindSession rebinds the home binding when workspaceID i
   }
 })
 
+test("ticket226: rebinding a direct session leaves the unified channel intact", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-226-rebind-"))
+  const { ctx, nativeSessions } = fakeContext()
+  await seedRebindBinding(ctx, directory, { workspaceID: "w", sessionID: "session_current", history: ["session_old"], kind: "direct" }, nativeSessions)
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.updateSettings({ nativeFirst: "on" })
+  await seed.saveDirectMessage("w", "a", { id: "dm_1", role: "user", author: "You", text: "Direct history", createdAt: 5 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const result = await handlers.invoke({
+      directory,
+      action: "agent.rebindSession",
+      payload: { agentID: "a", workspaceID: "w", conversation: "direct", sessionID: "session_old" },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.result.binding.sessionID, "session_old")
+    const snapshot = await handlers.snapshot({ directory })
+    assert.deepEqual(snapshot.state.messages[directMessageChannel("a", "w")].map((row: any) => row.text), ["Direct history"])
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: "w" } })
+    assert.equal(context.result.conversation.kind, "direct")
+    assert.deepEqual(
+      (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      ["Direct history"],
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket226: archiving an agent preserves its direct channel until deletion", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-226-archive-agent-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: agent.result.id, text: "Keep this" } })
+    const channel = directMessageChannel(agent.result.id)
+    const archived = await handlers.invoke({ directory, action: "agent.archive", payload: { id: agent.result.id } })
+    assert.equal(archived.ok, true)
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.agents[agent.result.id].archived, true)
+    assert.deepEqual(snapshot.state.messages[channel].map((row: any) => row.text), ["Keep this"], "archiving keeps conversation history")
+    const deleted = await handlers.invoke({ directory, action: "agent.delete", payload: { id: agent.result.id } })
+    assert.equal(deleted.ok, true)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.messages[channel], undefined, "deletion prunes the direct channel")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket226: archiving a workspace preserves its direct channel and deletion prunes it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-226-archive-workspace-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const agent = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: [agent.result.id], leaderID: agent.result.id } })
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: agent.result.id, workspaceID: workspace.result.id, text: "Workspace direct" } })
+    const channel = directMessageChannel(agent.result.id, workspace.result.id)
+    const archived = await handlers.invoke({ directory, action: "workspace.archive", payload: { id: workspace.result.id } })
+    assert.equal(archived.ok, true)
+    const snapshot = await handlers.snapshot({ directory })
+    assert.deepEqual(snapshot.state.messages[channel].map((row: any) => row.text), ["Workspace direct"], "archiving keeps the workspace direct history")
+    const deleted = await handlers.invoke({ directory, action: "workspace.delete", payload: { id: workspace.result.id } })
+    assert.equal(deleted.ok, true)
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.messages[channel], undefined, "workspace deletion prunes the direct channel")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket226: moving a home session into a workspace relocates its direct channel", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-226-move-home-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-226-move-home-dir-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "Home history" } })
+    const workspace = await handlers.invoke({ directory, action: "workspace.create", payload: { name: "site", directory, memberIDs: ["a"], leaderID: "a" } })
+    const moved = await handlers.invoke({ directory, action: "agent.moveHome", payload: { agentID: "a", workspaceID: workspace.result.id } })
+    assert.equal(moved.result.moved, true)
+    const snapshot = await handlers.snapshot({ directory })
+    assert.equal(snapshot.state.messages[directMessageChannel("a")], undefined, "the home channel is moved, not copied")
+    assert.deepEqual(snapshot.state.messages[directMessageChannel("a", workspace.result.id)].map((row: any) => row.text), ["Home history"])
+    const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a", workspaceID: workspace.result.id } })
+    assert.deepEqual(
+      (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      ["Home history"],
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test("workspace config is authoritative and can register a workspace on discovery", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const { ctx } = fakeContext()
@@ -3190,11 +3307,77 @@ test("direct chat context does not rewrite identity metadata on every poll", asy
   }
 })
 
-test("ticket212: direct chat prefers the durable channel with the flag on and the legacy store with it off", async () => {
+test("ticket226: service start migrates pre-channel direct lines before serving the direct chat", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-226-migrate-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-226-migrate-home-"))
+  const values = new Map<string, unknown>()
+  const seedCtx = fakeContext(values).ctx
+  const seed = new V2Store(seedCtx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    homeDirectory: home, createdAt: 1, updatedAt: 1,
+  })
+  values.set("v2/dm/home/a/dm_1", {
+    id: "dm_1", role: "user", author: "You", text: "before channels", createdAt: 10, queued: true, bindingKey: "home:a",
+  })
+  values.set("v2/dm/home/a/dm_2", {
+    id: "dm_2", role: "user", author: "You", text: "with attachment", createdAt: 20, bindingKey: "home:a",
+    attachments: [{ id: "att_1", name: "notes.txt", mime: "text/plain", size: 8, kind: "file" }],
+  })
+  values.set("v2/dm/home/a/dm_3", {
+    id: "dm_3", role: "user", author: "You", text: "", createdAt: 30, bindingKey: "home:a",
+    attachments: [{ id: "att_2", name: "shot.png", mime: "image/png", size: 16, kind: "image" }],
+  })
+  values.set("v2/dmqueue/dm_1", {
+    id: "dm_1", agentID: "a", directory: home, text: "before channels", status: "queued", createdAt: 10,
+  })
+
+  const first = fakeContext(values)
+  const service = new EnsembleV2Service(first.ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  let snapshot: any
+  try {
+    const context = await service.handlers().invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    const lines = (context.result.messages as any[]).filter((line) => line.role === "user")
+    assert.deepEqual(lines.map((line) => line.text), ["before channels", "with attachment", ""])
+    assert.equal(lines[0].queued, true, "the queued state comes from the surviving direct queue entry")
+    assert.deepEqual(lines[1].attachments, [{ id: "att_1", name: "notes.txt", mime: "text/plain", size: 8, kind: "file" }])
+    assert.deepEqual(lines[2].attachments, [{ id: "att_2", name: "shot.png", mime: "image/png", size: 16, kind: "image" }], "an attachment-only line survives the migration")
+    snapshot = await service.handlers().snapshot({ directory })
+    assert.deepEqual(snapshot.state.messages[directMessageChannel("a")].map((row: any) => row.text), ["before channels", "with attachment", ""])
+    assert.equal("dmTranscripts" in snapshot.state, false, "the snapshot no longer carries the legacy store")
+    assert.equal(JSON.stringify(snapshot).includes("dmTranscripts"), false)
+    assert.equal((await (first.ctx.storage.scan({ prefix: "v2/dm/" }) as any)).entries.length, 0, "the migrated legacy rows are removed")
+  } finally {
+    await stop()
+  }
+
+  const second = fakeContext(values)
+  const reloaded = new EnsembleV2Service(second.ctx)
+  const stopReloaded = await startServiceForTest(reloaded, reloaded.ctx)
+  try {
+    const context = await reloaded.handlers().invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
+    assert.deepEqual(
+      (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      ["before channels", "with attachment", ""],
+      "a reload reads the unified channel and never re-migrates a duplicate",
+    )
+    const again = await reloaded.handlers().snapshot({ directory })
+    assert.equal(again.state.messages[directMessageChannel("a")].length, 3)
+  } finally {
+    await stopReloaded()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket226: direct chat reads the unified channel before the native-first cutover", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-channel-"))
   const values = new Map<string, unknown>()
   const first = fakeContext(values)
-  const service = new EnsembleV2Service(first.ctx, { dmChannelReads: "on" })
+  const service = new EnsembleV2Service(first.ctx)
   const stop = await startServiceForTest(service, service.ctx)
   let agentID = ""
   try {
@@ -3210,42 +3393,38 @@ test("ticket212: direct chat prefers the durable channel with the flag on and th
       kind: "text",
       createdAt: Date.now() + 1,
     })
-    const on = await service.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
+    const context = await service.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
     assert.deepEqual(
-      (on.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
       ["Dual line", "Durable only"],
-      "the flag-on read includes the durable channel row",
+      "the flag-off path now reads the durable channel",
     )
   } finally {
     await stop()
-  }
-  const second = fakeContext(values)
-  const legacy = new EnsembleV2Service(second.ctx, { dmChannelReads: "off" })
-  const stopLegacy = await startServiceForTest(legacy, legacy.ctx)
-  try {
-    const off = await legacy.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
-    assert.deepEqual(
-      (off.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
-      ["Dual line"],
-      "the flag-off read keeps the legacy store authoritative",
-    )
-  } finally {
-    await stopLegacy()
     rmSync(directory, { recursive: true, force: true })
   }
 })
 
-test("ticket212: rolling the direct read flag back preserves every direct line", async () => {
+test("ticket226: rollback to the previous release's channel-read flag sees every migrated line", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-rollback-"))
   const values = new Map<string, unknown>()
   const first = fakeContext(values)
-  const service = new EnsembleV2Service(first.ctx, { dmChannelReads: "on" })
+  const seedCtx = first.ctx
+  const seed = new V2Store(seedCtx)
+  await seed.load()
+  await seed.saveAgent({
+    id: "a", name: "Nova", title: "", role: "", mainModel: { providerID: "probe", modelID: "probe-model" },
+    backupModels: [], skillbox: [], color: "cyan", archived: false, pendingSettings: false, version: 1,
+    createdAt: 1, updatedAt: 1,
+  })
+  values.set("v2/dm/home/a/dm_legacy", {
+    id: "dm_legacy", role: "user", author: "You", text: "Before migration", createdAt: 1, bindingKey: "home:a",
+  })
+  const service = new EnsembleV2Service(first.ctx)
   const stop = await startServiceForTest(service, service.ctx)
-  let agentID = ""
+  let agentID = "a"
   try {
-    const agent = await service.handlers().invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
-    agentID = agent.result.id
-    const sent = await service.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "Before rollback" } })
+    const sent = await service.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "After migration" } })
     assert.equal(sent.ok, true)
     const patches = first.emitted.filter((event) => event.name === "patches").map((event) => event.data)
     assert.equal(patches.some((batch) => batch.reset === true), false, "a direct message never resets the feed")
@@ -3262,32 +3441,25 @@ test("ticket212: rolling the direct read flag back preserves every direct line",
   } finally {
     await stop()
   }
-  const second = fakeContext(values)
-  const legacy = new EnsembleV2Service(second.ctx, { dmChannelReads: "off" })
-  const stopLegacy = await startServiceForTest(legacy, legacy.ctx)
-  let legacyAgentID = ""
-  try {
-    const context = await legacy.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
-    assert.deepEqual(
-      (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
-      ["Before rollback"],
-      "the rollback path reads the dual-written legacy line",
-    )
-    const sent = await legacy.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "After rollback" } })
-    assert.equal(sent.ok, true)
-    legacyAgentID = agentID
-  } finally {
-    await stopLegacy()
-  }
-  const third = fakeContext(values)
-  const resumed = new EnsembleV2Service(third.ctx, { dmChannelReads: "on" })
+  // The previous release (ticket #212) reads durable channel rows when its
+  // ENSEMBLE_DM_CHANNEL_READS flag is on and merges an empty legacy list after
+  // this migration. This projection is that rollback read contract.
+  const previous = new V2Store(fakeContext(values).ctx)
+  await previous.load()
+  const rows = previous.messages(directMessageChannel(agentID))
+  const rollback = projectDirectLines(rows.map((row) => chatLineFromMessage(row, "Nova")), [])
+  assert.deepEqual(rollback.filter((line) => line.role === "user").map((line) => line.text), [
+    "Before migration",
+    "After migration",
+  ])
+  const resumed = new EnsembleV2Service(fakeContext(values).ctx)
   const stopResumed = await startServiceForTest(resumed, resumed.ctx)
   try {
-    const context = await resumed.handlers().invoke({ directory, action: "chat.context", payload: { agentID: legacyAgentID } })
+    const context = await resumed.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
     assert.deepEqual(
       (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
-      ["Before rollback", "After rollback"],
-      "turning the flag back on sees both the durable and rollback lines without duplication",
+      ["Before migration", "After migration"],
+      "the current release reads the same rows without duplication",
     )
   } finally {
     await stopResumed()
@@ -3365,11 +3537,11 @@ test("a new direct message after restart orders after stored lines even when the
   } finally {
     await stop()
   }
-  // Simulate a restart where the stored transcript carries a timestamp ahead
-  // of the wall clock (e.g. previous clock skew or a future-dated seed).
+  // Simulate a restart where the stored channel carries a timestamp ahead of
+  // the wall clock (e.g. previous clock skew or a future-dated seed).
   const future = Date.now() + 60_000
   for (const [key, value] of [...values.entries()]) {
-    if (key.startsWith("v2/dm/") && value && typeof value === "object") {
+    if (key.startsWith(`v2/message/${directMessageChannel(agentID)}/`) && value && typeof value === "object") {
       values.set(key, { ...(value as Record<string, unknown>), createdAt: future })
     }
   }
@@ -3427,10 +3599,10 @@ test("a queued direct message stays visible as queued, then sent", async () => {
   }
 })
 
-test("a sent direct message ignores a stale persisted queued flag", async () => {
+test("ticket226: a sent direct queue entry never renders the channel line queued", async () => {
   // Ticket #77 root cause of permanently-grey sent lines: chatContext used to
-  // OR the stored line's own `queued` bit, so a line flushed after the fact
-  // stayed queued forever. The queue entry is the single source of truth.
+  // OR a stored line's own `queued` bit. The queue entry is the single source
+  // of truth; a sent entry must leave the durable channel row unqueued.
   const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-stale-"))
   const home = mkdtempSync(join(tmpdir(), "ensemble-home-"))
   const { ctx } = fakeContext()
@@ -3448,9 +3620,9 @@ test("a sent direct message ignores a stale persisted queued flag", async () => 
     const sent = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "a", text: "Sent already" } })
     assert.ok(sent.ok)
     const store = (service as any).store as V2Store
-    const stored = store.snapshot().dmTranscripts[bindingKey("home", "a")].find((message) => message.id === sent.result.id)
-    assert.ok(stored)
-    await store.saveDmMessage("home", "a", { ...stored!, queued: true })
+    await store.saveDmQueueEntry({
+      id: sent.result.id, agentID: "a", directory: home, text: "Sent already", status: "sent", createdAt: 1,
+    })
     const context = await handlers.invoke({ directory, action: "chat.context", payload: { agentID: "a" } })
     const line = (context.result.messages as any[]).find((message) => message.id === sent.result.id)
     assert.equal(line.queued, false)
@@ -6445,11 +6617,12 @@ test("direct conversations reject General skills and /init before creating a DM 
     assert.equal(init.error?.code, "init_direct")
     assert.ok(init.error?.message.includes("workspace group chat"), init.error?.message)
     let next = await handlers.snapshot({ directory })
-    assert.equal(Object.keys(next.state.dmTranscripts).length, 0, "rejected direct messages never persist a line")
+    const directChannel = directMessageChannel("nova", "w")
+    assert.deepEqual(next.state.messages[directChannel] ?? [], [], "rejected direct messages never persist a line")
     const assigned = await handlers.invoke({ directory, action: "chat.send", payload: { agentID: "nova", workspaceID: "w", text: "/review direct-check" } })
     assert.equal(assigned.ok, true, JSON.stringify(assigned.error))
     next = await handlers.snapshot({ directory })
-    assert.ok(Object.values(next.state.dmTranscripts).some((lines: any) => lines.some((line: any) => line.text === "/review direct-check")))
+    assert.ok((next.state.messages[directChannel] ?? []).some((line: any) => line.text === "/review direct-check"))
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -6868,7 +7041,11 @@ test("service routing matrix: skills, explicit recipients, files, and direct con
           }
           assert.deepEqual(next.state.messages.w ?? [], [], `${item.name} appends no group message`)
           assert.deepEqual(Object.values(next.state.subtasks), [], `${item.name} creates no work`)
-          assert.deepEqual(Object.values(next.state.dmTranscripts), [], `${item.name} appends no direct line`)
+          assert.deepEqual(
+            Object.entries(next.state.messages).filter(([channel]) => isDirectMessageChannel(channel)).flatMap(([, lines]) => lines),
+            [],
+            `${item.name} appends no direct line`,
+          )
           return
         }
         assert.equal(response.ok, true, `${item.name}: ${JSON.stringify(response.error)}`)
@@ -6877,7 +7054,9 @@ test("service routing matrix: skills, explicit recipients, files, and direct con
           ? `\n\nReferenced files:\n${item.files.map((file) => `- ${file}`).join("\n")}`
           : ""
         if (item.action === "chat.send") {
-          const lines = Object.values(next.state.dmTranscripts).flat() as any[]
+          const lines = Object.entries(next.state.messages)
+            .filter(([channel]) => isDirectMessageChannel(channel))
+            .flatMap(([, messages]) => messages) as any[]
           assert.deepEqual(lines.map((line) => line.text), [item.text], `${item.name} persists the exact line`)
           assert.ok(prompts.some((prompt) => prompt.text === item.text), `${item.name} prompts the exact text`)
           assert.deepEqual(Object.values(next.state.subtasks), [], `${item.name} creates no group work`)

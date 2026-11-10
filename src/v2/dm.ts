@@ -31,13 +31,15 @@ export function mapNativeChat(messages: any[], agentName: string): ChatMessage[]
 
 export function mergeDmTranscript(stored: ChatMessage[], native: ChatMessage[]): ChatMessage[] {
   const merged: ChatMessage[] = []
+  const visible = (message: ChatMessage | undefined): boolean =>
+    Boolean(message?.text?.trim()) || (message?.attachments?.length ?? 0) > 0
   for (const message of stored) {
-    if (!message?.text || typeof message.text !== "string" || !message.text.trim()) continue
+    if (!visible(message)) continue
     merged.push({ ...message })
   }
   for (const message of native) {
     if (message?.role === "user") continue
-    if (!message?.text || typeof message.text !== "string" || !message.text.trim()) continue
+    if (!visible(message)) continue
     if (message.role !== "assistant" && message.role !== "system") continue
     merged.push({ ...message })
   }
