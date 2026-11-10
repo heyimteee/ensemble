@@ -8,6 +8,7 @@ import { startServiceForTest } from "./test-service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { deriveWorkStatus, workKey } from "./queue.ts"
 import { projectVisibleWork } from "./scoped-read.ts"
+import { allWorkGroupsForTasks } from "./work-groups.ts"
 import { V2Store, bindingKey } from "./store.ts"
 import { directMessageChannel } from "./message-channel.ts"
 import { nativeAssistantMessageID } from "./native-turn.ts"
@@ -9805,5 +9806,762 @@ test("ticket215: native ingestion is off unless nativeFirst is on", async () => 
     await stop()
     rmSync(directory, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// ---- Ticket #216: workspace native turn ingestion ----
+
+async function seedNativeWorkspace(
+  ctx: any,
+  directory: string,
+  sessions: Record<string, string> = { a: "s_group" },
+): Promise<void> {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  for (const agentID of Object.keys(sessions)) {
+    if (agentID !== "a") await seedAgent(seed, { id: agentID, name: agentID.toUpperCase() })
+  }
+  await seedWorkspace(seed, directory, { memberIDs: Object.keys(sessions) })
+  for (const [agentID, sessionID] of Object.entries(sessions)) {
+    await seed.saveBinding({
+      workspaceID: "w",
+      agentID,
+      sessionID,
+      kind: "workspace",
+      directory,
+      agentVersion: 1,
+      updatedAt: 1,
+    })
+  }
+}
+
+function nativeTurnIn(state: any, phase?: string): any | undefined {
+  return Object.values(state.subtasks).find(
+    (task: any) => task.origin === "native" && (phase === undefined || task.native?.phase === phase),
+  ) as any
+}
+
+test("ticket216: a native workspace turn becomes a durable group user row, one exact agent row, and a normal Work card", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-workspace-"))
+  const { ctx, nativeSessions, emitted, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "Ship the release" } },
+    }, { id: "evt_216_enqueue", created: 100 }))
+
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      return (state.messages["w"] ?? []).length === 1
+    })
+    const queued = await snapshotFor(handlers, directory)
+    const user = queued.messages["w"][0]
+    assert.equal(user.author, "user")
+    assert.equal(user.text, "Ship the release")
+    assert.equal(user.workspaceID, "w")
+    assert.equal(user.channel, "w", "the group conversation uses the workspace channel")
+    assert.equal(user.native.inboxID, "m1")
+    const turn = nativeTurnIn(queued)
+    assert.ok(turn, "enqueue opens the durable native turn immediately")
+    assert.equal(turn.adopted, true)
+    assert.equal(turn.workKind, "turn")
+    assert.equal(turn.assigneeID, "a")
+    assert.equal(turn.workspaceID, "w", "the group Work pane filters by workspace id")
+    assert.equal(turn.conversationID, "w")
+    assert.equal(turn.native.sessionID, "s_group")
+    assert.equal(turn.native.phase, "queued")
+    assert.equal(deriveWorkStatus(turn, Date.now()), "pending")
+    assert.ok(projectVisibleWork(queued, Date.now())[turn.id], "the queued turn is a visible Work card")
+    const groups = allWorkGroupsForTasks(Object.values(queued.subtasks), queued.subtasks, { now: Date.now() })
+    const group = groups.find((candidate) => candidate.id === turn.dispatchGroupID)
+    assert.ok(group, "the native turn is its own normal dispatch group")
+    assert.deepEqual(group.tasks.map((task) => task.id), [turn.id])
+    assert.equal(group.active, 1)
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_start", created: 101 }))
+    emitEvent(nativeEvent("session.inbox.delivered", { sessionID: "s_group", inboxID: "m1" }, { id: "evt_216_delivered", created: 102 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0 }, { id: "evt_216_text", created: 103 }))
+    emitEvent(nativeEvent("session.text.delta", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, delta: "Shipped" }, { id: "evt_216_delta", created: 104 }))
+
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      const row = (state.messages["w"] ?? []).find((message: any) => message.author === "agent")
+      return row?.streaming === true && row?.text === "Shipped"
+    })
+    const live = await snapshotFor(handlers, directory)
+    assert.equal(nativeTurnIn(live).native.phase, "working")
+    assert.equal(deriveWorkStatus(nativeTurnIn(live), Date.now()), "working")
+    assert.equal(live.messages["w"].length, 2, "the stream reuses one durable agent row")
+
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, text: "Shipped the release." }, { id: "evt_216_ended", created: 105 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_done", created: 106 }))
+
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      const row = (state.messages["w"] ?? []).find((message: any) => message.author === "agent")
+      return row?.streaming === false && row?.text === "Shipped the release."
+    })
+    const settled = await snapshotFor(handlers, directory)
+    const rows = settled.messages["w"]
+    assert.equal(rows.length, 2, "one durable user row and one durable agent row")
+    const answer = rows.find((message: any) => message.author === "agent")
+    const settledTurn = nativeTurnIn(settled)
+    assert.equal(answer.taskID, settledTurn.id)
+    assert.equal(answer.native.assistantMessageID, "m2")
+    assert.equal(settledTurn.native.phase, "replied")
+    assert.equal(settledTurn.outcome, "succeeded")
+    assert.equal(settledTurn.resultMessageID, answer.id)
+    assert.equal(deriveWorkStatus(settledTurn, Date.now()), "replied")
+    assert.equal(settled.messages["dm:a:w"], undefined, "workspace ingestion never writes the direct channel")
+    assert.ok(emitted.some((event) => event.name === "patches"), "durable rows publish patches")
+    assert.ok(!emitted.some((event) => event.name === "snapshot"), "a normal turn never pushes a full snapshot")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: the session agent is the implicit addressee and no self-turn is created", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-addressee-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group_a", { id: "s_group_a" })
+  nativeSessions.set("s_group_b", { id: "s_group_b" })
+  await seedNativeWorkspace(ctx, directory, { a: "s_group_a", b: "s_group_b" })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group_a",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "Review the release notes" } },
+    }, { id: "evt_216_addressee", created: 100 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+    const state = await snapshotFor(handlers, directory)
+    const turn = nativeTurnIn(state)
+    assert.equal(turn.assigneeID, "a", "the session's own agent is addressed implicitly")
+    assert.equal(turn.creatorType, "user")
+    assert.equal(turn.parentID, undefined, "no self-turn is created")
+    assert.equal(Object.values(state.subtasks).length, 1, "one native prompt mints exactly one turn")
+    assert.equal(Object.values(state.subtasks).filter((task: any) => task.origin === "native").length, 1)
+    assert.equal((state.messages["w"] ?? []).filter((message: any) => message.author === "user").length, 1)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: direct and workspace native conversations stay isolated", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-isolation-"))
+  const home = mkdtempSync(join(tmpdir(), "ensemble-216-isolation-home-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_direct", { id: "s_direct" })
+  nativeSessions.set("s_group", { id: "s_group" })
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed, { homeDirectory: home })
+  await seedWorkspace(seed, directory)
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_direct", kind: "direct", directory, agentVersion: 1, updatedAt: 1 })
+  await seed.saveBinding({ workspaceID: "w", agentID: "a", sessionID: "s_group", kind: "workspace", directory, agentVersion: 1, updatedAt: 1 })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "mg1",
+      item: { type: "user", delivery: "steer", payload: { text: "Group task" } },
+    }, { id: "evt_216_iso_group", created: 100 }))
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_direct",
+      inboxID: "md1",
+      item: { type: "user", delivery: "steer", payload: { text: "Direct task" } },
+    }, { id: "evt_216_iso_direct", created: 101 }))
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      return (state.messages["w"] ?? []).length === 1 && (state.messages["dm:a:w"] ?? []).length === 1
+    })
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_iso_group_start", created: 102 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mg2", ordinal: 0 }, { id: "evt_216_iso_group_text", created: 103 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mg2", ordinal: 0, text: "Group answer." }, { id: "evt_216_iso_group_end", created: 104 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_iso_group_done", created: 105 }))
+    await waitFor(async () => nativeTurnIn(await snapshotFor(handlers, directory), "replied")?.native.inboxID === "mg1")
+
+    const midway = await snapshotFor(handlers, directory)
+    const groupTurn = nativeTurnIn(midway, "replied")
+    assert.equal(groupTurn.workspaceID, "w")
+    assert.equal(groupTurn.conversationID, "w")
+    const directTurn = Object.values(midway.subtasks).find((task: any) => task.native?.inboxID === "md1") as any
+    assert.equal(directTurn.native.phase, "queued", "the group answer never settles the direct turn")
+    assert.deepEqual((midway.messages["w"] ?? []).map((message: any) => [message.author, message.text]), [
+      ["user", "Group task"],
+      ["agent", "Group answer."],
+    ])
+    assert.deepEqual((midway.messages["dm:a:w"] ?? []).map((message: any) => [message.author, message.text]), [
+      ["user", "Direct task"],
+    ])
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_direct" }, { id: "evt_216_iso_direct_start", created: 106 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_direct", assistantMessageID: "md2", ordinal: 0 }, { id: "evt_216_iso_direct_text", created: 107 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_direct", assistantMessageID: "md2", ordinal: 0, text: "Direct answer." }, { id: "evt_216_iso_direct_end", created: 108 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_direct" }, { id: "evt_216_iso_direct_done", created: 109 }))
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      const direct = Object.values(state.subtasks).find((task: any) => task.native?.inboxID === "md1") as any
+      return direct?.native?.phase === "replied"
+    })
+
+    const settled = await snapshotFor(handlers, directory)
+    assert.deepEqual((settled.messages["dm:a:w"] ?? []).map((message: any) => [message.author, message.text]), [
+      ["user", "Direct task"],
+      ["agent", "Direct answer."],
+    ])
+    assert.deepEqual((settled.messages["w"] ?? []).map((message: any) => [message.author, message.text]), [
+      ["user", "Group task"],
+      ["agent", "Group answer."],
+    ])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: native subagent child sessions stay under the parent turn and create no turn of their own", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-subagent-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "Run the review" } },
+    }, { id: "evt_216_sub_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_sub_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0 }, { id: "evt_216_sub_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.delta", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, delta: "Reviewing" }, { id: "evt_216_sub_delta", created: 103 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory), "working")))
+
+    emitEvent(nativeEvent("session.created", { sessionID: "child_216", parentID: "s_group", title: "Check the diff" }, { id: "evt_216_child_created", created: 104 }))
+    await waitFor(async () => Boolean((await snapshotFor(handlers, directory)).nativeSubagents.child_216))
+    const parent = nativeTurnIn(await snapshotFor(handlers, directory), "working")
+    const child = (await snapshotFor(handlers, directory)).nativeSubagents.child_216
+    assert.equal(child.parentSessionID, "s_group")
+    assert.equal(child.parentTaskID, parent.id, "the child belongs to the parent turn")
+    assert.equal(child.dispatchGroupID, parent.dispatchGroupID, "the child renders under the parent dispatch group")
+    assert.equal(child.workspaceID, "w")
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "child_216" }, { id: "evt_216_child_start", created: 105 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "child_216", assistantMessageID: "c2", ordinal: 0 }, { id: "evt_216_child_text", created: 106 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "child_216", assistantMessageID: "c2", ordinal: 0, text: "Child answer." }, { id: "evt_216_child_end", created: 107 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "child_216" }, { id: "evt_216_child_done", created: 108 }))
+    await waitFor(async () => (await snapshotFor(handlers, directory)).nativeSubagents.child_216?.state === "replied")
+
+    const state = await snapshotFor(handlers, directory)
+    assert.equal(Object.values(state.subtasks).filter((task: any) => task.origin === "native").length, 1, "the child creates no native turn")
+    assert.equal((state.messages["w"] ?? []).length, 2, "the child creates no group message rows")
+    assert.equal(state.nativeSubagents.child_216.parentTaskID, parent.id)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: internal service prompts are skipped in a workspace session", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-internal-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m9",
+      item: {
+        type: "user",
+        delivery: "steer",
+        payload: { text: "hidden task prompt", metadata: { "ensemble.internal": true, "ensemble.mirror": false } },
+      },
+    }, { id: "evt_216_internal_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_internal_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m10", ordinal: 0 }, { id: "evt_216_internal_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m10", ordinal: 0, text: "Task output." }, { id: "evt_216_internal_end", created: 103 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_internal_done", created: 104 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const state = await snapshotFor(handlers, directory)
+    assert.equal(state.messages["w"], undefined, "an internal prompt mirrors nothing")
+    assert.equal(Object.values(state.subtasks).filter((task: any) => task.origin === "native").length, 0)
+
+    // A real user prompt after the internal turn still becomes exactly one turn.
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m11",
+      item: { type: "user", delivery: "steer", payload: { text: "Real question" } },
+    }, { id: "evt_216_real_enqueue", created: 105 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+    assert.equal((await snapshotFor(handlers, directory)).messages["w"].length, 1)
+    assert.equal(nativeTurnIn(await snapshotFor(handlers, directory)).native.phase, "queued", "a skipped internal execution never starts the next user turn")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: a delegated task run on the group session never settles a queued native turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-run-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    service.registerLocalRunForTest({
+      id: "run_216",
+      subtaskID: "task_delegated_216",
+      workspaceID: "w",
+      agentID: "a",
+      sessionID: "s_group",
+      status: "running",
+      startedAt: 1,
+    })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m1",
+      item: { type: "user", delivery: "queue", payload: { text: "Queued user prompt" } },
+    }, { id: "evt_216_run_enqueue", created: 100 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+
+    // The delegated run's own execution events carry no inbox identity.
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0 }, { id: "evt_216_run_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, text: "Delegated answer." }, { id: "evt_216_run_end", created: 103 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_done", created: 104 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    const state = await snapshotFor(handlers, directory)
+    const turn = nativeTurnIn(state)
+    assert.equal(turn.native.phase, "queued", "the delegated run never claims the queued native turn")
+    assert.equal((state.messages["w"] ?? []).filter((message: any) => message.author === "user").length, 1)
+    assert.equal((state.messages["w"] ?? []).some((message: any) => message.author === "agent"), false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: a user turn queued during a delegated run starts after the run settles", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-run-queued-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    service.registerLocalRunForTest({
+      id: "run_216a",
+      subtaskID: "task_delegated_216a",
+      workspaceID: "w",
+      agentID: "a",
+      sessionID: "s_group",
+      status: "running",
+      startedAt: 1,
+    })
+    // The run's service prompt is skipped but still occupies host order.
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_run_a",
+      item: { type: "user", delivery: "steer", payload: { text: "run prompt", metadata: { "ensemble.internal": true, "ensemble.mirror": false } } },
+    }, { id: "evt_216_run_a_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_user_a",
+      item: { type: "user", delivery: "queue", payload: { text: "User prompt" } },
+    }, { id: "evt_216_run_a_user", created: 101 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_a_start", created: 102 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mr2a", ordinal: 0 }, { id: "evt_216_run_a_text", created: 103 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mr2a", ordinal: 0, text: "Run answer." }, { id: "evt_216_run_a_end", created: 104 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_a_done", created: 105 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(nativeTurnIn(await snapshotFor(handlers, directory)).native.phase, "queued")
+
+    // Model the run's finally block releasing the session before the queued
+    // host prompt starts.
+    ;(service as any).activeRuns.delete("run_216a")
+    ;(service as any).runBySession.delete("s_group")
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_a_user_start", created: 106 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mu2a", ordinal: 0 }, { id: "evt_216_run_a_user_text", created: 107 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mu2a", ordinal: 0, text: "User answer." }, { id: "evt_216_run_a_user_end", created: 108 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_a_user_done", created: 109 }))
+
+    await waitFor(async () => nativeTurnIn(await snapshotFor(handlers, directory), "replied") !== undefined)
+    const state = await snapshotFor(handlers, directory)
+    const row = (state.messages["w"] ?? []).find((message: any) => message.author === "agent")
+    assert.equal(row.text, "User answer.", "the queued user turn is not blocked by the run's skipped inbox")
+    assert.equal(Object.values(state.subtasks).filter((task: any) => task.origin === "native").length, 1)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: the first user turn after a completed delegated run still starts", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-run-after-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    service.registerLocalRunForTest({
+      id: "run_216b",
+      subtaskID: "task_delegated_216b",
+      workspaceID: "w",
+      agentID: "a",
+      sessionID: "s_group",
+      status: "running",
+      startedAt: 1,
+    })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_run_b",
+      item: { type: "user", delivery: "steer", payload: { text: "run prompt", metadata: { "ensemble.internal": true, "ensemble.mirror": false } } },
+    }, { id: "evt_216_run_b_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_b_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mr2b", ordinal: 0 }, { id: "evt_216_run_b_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mr2b", ordinal: 0, text: "Run answer." }, { id: "evt_216_run_b_end", created: 103 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_b_done", created: 104 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    ;(service as any).activeRuns.delete("run_216b")
+    ;(service as any).runBySession.delete("s_group")
+
+    // The run has fully completed; the next composer prompt is the first turn.
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_user_b",
+      item: { type: "user", delivery: "steer", payload: { text: "User prompt" } },
+    }, { id: "evt_216_run_b_user", created: 105 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_run_b_user_start", created: 106 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "mu2b", ordinal: 0 }, { id: "evt_216_run_b_user_text", created: 107 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "mu2b", ordinal: 0, text: "User answer." }, { id: "evt_216_run_b_user_end", created: 108 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_run_b_user_done", created: 109 }))
+
+    await waitFor(async () => nativeTurnIn(await snapshotFor(handlers, directory), "replied") !== undefined)
+    const state = await snapshotFor(handlers, directory)
+    const row = (state.messages["w"] ?? []).find((message: any) => message.author === "agent")
+    assert.equal(row.text, "User answer.", "the completed run's skipped inbox does not swallow the next turn")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: workspace restart recovery settles from the transcript on the group channel", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-restart-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const first = new EnsembleV2Service(ctx)
+  const stopFirst = await startServiceForTest(first, first.ctx)
+  try {
+    await first.handlers().invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m20",
+      item: { type: "user", delivery: "steer", payload: { text: "Survive restart" } },
+    }, { id: "evt_216_restart_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_restart_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m21", ordinal: 0 }, { id: "evt_216_restart_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.delta", { sessionID: "s_group", assistantMessageID: "m21", ordinal: 0, delta: "Partial" }, { id: "evt_216_restart_delta", created: 103 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(first.handlers(), directory), "working")))
+  } finally {
+    await stopFirst()
+  }
+
+  ;(ctx.session as any).context = async () => ({
+    data: [
+      { id: "m20", type: "user", content: [{ type: "text", text: "Survive restart" }], time: { created: 1 } },
+      { id: "m21", type: "assistant", content: [{ type: "text", text: "Recovered workspace answer" }], time: { created: 2 } },
+      { id: "m22", type: "idle" },
+    ],
+  })
+  const second = new EnsembleV2Service(ctx)
+  const stopSecond = await startServiceForTest(second, second.ctx)
+  try {
+    await waitFor(async () => nativeTurnIn(await snapshotFor(second.handlers(), directory), "replied") !== undefined)
+    const state = await snapshotFor(second.handlers(), directory)
+    const turn = nativeTurnIn(state, "replied")
+    assert.equal(turn.conversationID, "w")
+    const row = (state.messages["w"] ?? []).find((message: any) => message.author === "agent")
+    assert.equal(row.text, "Recovered workspace answer")
+    assert.equal(row.streaming, false)
+    assert.equal(turn.resultMessageID, row.id)
+    assert.equal(state.messages["dm:a:w"], undefined)
+  } finally {
+    await stopSecond()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: workspace native ingestion requires nativeFirst on", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-off-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m30",
+      item: { type: "user", delivery: "steer", payload: { text: "Old path" } },
+    }, { id: "evt_216_off_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_off_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m31", ordinal: 0 }, { id: "evt_216_off_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m31", ordinal: 0, text: "Old answer." }, { id: "evt_216_off_end", created: 103 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_off_done", created: 104 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const off = await snapshotFor(handlers, directory)
+    assert.equal(off.messages["w"], undefined)
+    assert.equal(Object.values(off.subtasks).filter((task: any) => task.origin === "native").length, 0)
+
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m32",
+      item: { type: "user", delivery: "steer", payload: { text: "Live path" } },
+    }, { id: "evt_216_on_enqueue", created: 105 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+    const on = await snapshotFor(handlers, directory)
+    assert.equal(nativeTurnIn(on).native.inboxID, "m32", "turning the flag on ingests the next prompt")
+    assert.equal((on.messages["w"] ?? []).length, 1)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: an internal execution terminal never settles a user turn queued behind it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-order-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_internal",
+      item: {
+        type: "user",
+        delivery: "steer",
+        payload: { text: "identity prompt", metadata: { "ensemble.internal": true, "ensemble.mirror": false } },
+      },
+    }, { id: "evt_216_order_internal", created: 100 }))
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m_user",
+      item: { type: "user", delivery: "queue", payload: { text: "User prompt" } },
+    }, { id: "evt_216_order_user", created: 101 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory))))
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_order_internal_start", created: 102 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "int1", ordinal: 0 }, { id: "evt_216_order_internal_text", created: 103 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "int1", ordinal: 0, text: "Internal output." }, { id: "evt_216_order_internal_end", created: 104 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_order_internal_done", created: 105 }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const midway = await snapshotFor(handlers, directory)
+    assert.equal(nativeTurnIn(midway)?.native.phase, "queued", "the internal terminal leaves the user turn queued")
+    assert.equal((midway.messages["w"] ?? []).some((message: any) => message.author === "agent"), false)
+
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_order_user_start", created: 106 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "u2", ordinal: 0 }, { id: "evt_216_order_user_text", created: 107 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "u2", ordinal: 0, text: "User answer." }, { id: "evt_216_order_user_end", created: 108 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_order_user_done", created: 109 }))
+    await waitFor(async () => nativeTurnIn(await snapshotFor(handlers, directory), "replied")?.native.inboxID === "m_user")
+    const state = await snapshotFor(handlers, directory)
+    const row = state.messages["w"].find((message: any) => message.author === "agent")
+    assert.equal(row.text, "User answer.")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: a cancelled unknown inbox never cancels a live user turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-cancel-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "Keep working" } },
+    }, { id: "evt_216_cancel_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_cancel_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0 }, { id: "evt_216_cancel_text", created: 102 }))
+    emitEvent(nativeEvent("session.text.delta", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, delta: "Partial" }, { id: "evt_216_cancel_delta", created: 103 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory), "working")))
+
+    // An internal/onboarding inbox was never ingested; its cancellation must
+    // never fall back to the session's unrelated live user turn.
+    emitEvent(nativeEvent("session.inbox.cancelled", { sessionID: "s_group", inboxID: "m_internal" }, { id: "evt_216_cancel_other", created: 104 }))
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const active = await snapshotFor(handlers, directory)
+    assert.equal(nativeTurnIn(active).native.phase, "working", "the live user turn keeps running")
+    assert.equal((active.messages["w"] ?? []).find((message: any) => message.author === "agent")?.streaming, true)
+
+    // With no inbox id the host means the session's active turn; that fallback
+    // still settles it honestly.
+    emitEvent(nativeEvent("session.inbox.cancelled", { sessionID: "s_group" }, { id: "evt_216_cancel_active", created: 105 }))
+    await waitFor(async () => nativeTurnIn(await snapshotFor(handlers, directory), "cancelled") !== undefined)
+    const cancelled = await snapshotFor(handlers, directory)
+    assert.equal(deriveWorkStatus(nativeTurnIn(cancelled), Date.now()), "cancelled")
+    assert.equal(cancelled.messages["w"].find((message: any) => message.author === "agent").streaming, false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: late text for a settled turn never affects the next turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-late-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "First question" } },
+    }, { id: "evt_216_late_enqueue_1", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_late_start_1", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0 }, { id: "evt_216_late_text_1", created: 102 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, text: "First answer" }, { id: "evt_216_late_end_1", created: 103 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_late_done_1", created: 104 }))
+    await waitFor(async () => nativeTurnIn(await snapshotFor(handlers, directory), "replied") !== undefined)
+
+    // A late delta for the settled assistant message must not re-arm the
+    // session's active-turn marker.
+    emitEvent(nativeEvent("session.text.delta", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0, delta: " late" }, { id: "evt_216_late_delta", created: 105 }))
+
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m3",
+      item: { type: "user", delivery: "steer", payload: { text: "Second question" } },
+    }, { id: "evt_216_late_enqueue_2", created: 106 }))
+    // Reordered text arrives before the next execution.started.
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m4", ordinal: 0 }, { id: "evt_216_late_text_2", created: 107 }))
+    emitEvent(nativeEvent("session.text.ended", { sessionID: "s_group", assistantMessageID: "m4", ordinal: 0, text: "Second answer" }, { id: "evt_216_late_end_2", created: 108 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_late_start_2", created: 109 }))
+    emitEvent(nativeEvent("session.execution.succeeded", { sessionID: "s_group" }, { id: "evt_216_late_done_2", created: 110 }))
+
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      return Object.values(state.subtasks).filter((task: any) => task.origin === "native" && task.native?.phase === "replied").length === 2
+    })
+    const state = await snapshotFor(handlers, directory)
+    const turns = Object.values(state.subtasks).filter((task: any) => task.origin === "native") as any[]
+    assert.equal(turns.length, 2)
+    const second = turns.find((task) => task.native.inboxID === "m3")!
+    const secondAnswer = state.messages["w"].find((message: any) => message.id === second.resultMessageID)
+    assert.ok(secondAnswer, "the second turn owns its answer row")
+    assert.equal(secondAnswer.text, "Second answer", "reordered text for the second turn is not dropped")
+    assert.equal(state.messages["w"].find((message: any) => message.native?.inboxID === "m1" && message.author === "user").text, "First question")
+    assert.equal(state.messages["w"].find((message: any) => message.id === turns.find((task) => task.native.inboxID === "m1")!.resultMessageID).text, "First answer")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket216: native stream text checkpoints are bounded, not one durable write per delta", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-216-checkpoints-"))
+  const { ctx, nativeSessions, emitEvent } = fakeContext()
+  nativeSessions.set("s_group", { id: "s_group" })
+  await seedNativeWorkspace(ctx, directory)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "Stream a lot" } },
+    }, { id: "evt_216_ckpt_enqueue", created: 100 }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group" }, { id: "evt_216_ckpt_start", created: 101 }))
+    emitEvent(nativeEvent("session.text.started", { sessionID: "s_group", assistantMessageID: "m2", ordinal: 0 }, { id: "evt_216_ckpt_text", created: 102 }))
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      return (state.messages["w"] ?? []).some((message: any) => message.author === "agent" && message.streaming === true)
+    })
+
+    const originalSet = ctx.storage.set
+    let messageWrites = 0
+    ctx.storage.set = async (key: string, value: unknown) => {
+      if (key.startsWith("v2/message/")) messageWrites++
+      return originalSet(key, value)
+    }
+    const deltas = 80
+    for (let index = 0; index < deltas; index++) {
+      emitEvent(nativeEvent("session.text.delta", {
+        sessionID: "s_group",
+        assistantMessageID: "m2",
+        ordinal: 0,
+        delta: "x",
+      }, { id: `evt_216_ckpt_delta_${index}`, created: 103 + index }))
+    }
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      const row = (state.messages["w"] ?? []).find((message: any) => message.author === "agent")
+      return row?.text?.length === deltas
+    })
+    assert.ok(messageWrites > 0, "the stream still checkpoints durable crash recovery text")
+    assert.ok(messageWrites <= 10, `expected bounded checkpoints, saw ${messageWrites} writes for ${deltas} deltas`)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
   }
 })

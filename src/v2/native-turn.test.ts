@@ -9,6 +9,7 @@ import {
   nativeFinalText,
   nativePromptIsInternal,
   nativePromptSkipsTurn,
+  nativePhaseOpen,
   nativeTextForParts,
   nativeTurnGroupID,
   nativeTurnID,
@@ -101,6 +102,16 @@ const nativeTask = (phase: NonNullable<Subtask["native"]>["phase"], patch: Parti
   conversationID: "dm:a:w",
   native: { sessionID: "s1", inboxID: "m1", assistantMessageIDs: [], phase },
   ...patch,
+})
+
+test("ticket216: only queued, working, and retrying native phases accept turn events", () => {
+  assert.equal(nativePhaseOpen("queued"), true)
+  assert.equal(nativePhaseOpen("working"), true)
+  assert.equal(nativePhaseOpen("retrying"), true)
+  for (const settled of ["replied", "failed", "cancelled", "interrupted"] as const) {
+    assert.equal(nativePhaseOpen(settled), false, `${settled} is settled`)
+  }
+  assert.equal(nativePhaseOpen(undefined), false)
 })
 
 test("ticket215: native turns use the canonical Work status vocabulary", () => {
