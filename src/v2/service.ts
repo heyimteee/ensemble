@@ -75,7 +75,7 @@ import {
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { selectWorkHistory, workHistoryGroups } from "./work-history.ts"
-import { chatLineFromMessage, directMessageChannelForBinding, dmChannelReadMode, projectDirectLines, type DmChannelReadMode } from "./message-channel.ts"
+import { chatLineFromMessage, directMessageChannelForBinding } from "./message-channel.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type StoreObserver } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
@@ -695,16 +695,13 @@ export class EnsembleV2Service {
   /** Ticket #217: missing-terminal watchdog bound and per-turn read cap. */
   private readonly nativeTurnWatchdogMs: number
   private readonly nativeTurnWatchdogMaxPasses: number
-  /** Ticket #212: `off`/`shadow` read the legacy DM store; `on` reads durable rows. */
-  private readonly dmChannelReadsOption: DmChannelReadMode | undefined
 
-  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number; nativeTurnWatchdogMs?: number; nativeTurnWatchdogMaxPasses?: number; dmChannelReads?: DmChannelReadMode } = {}) {
+  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number; nativeTurnWatchdogMs?: number; nativeTurnWatchdogMaxPasses?: number } = {}) {
     this.ctx = ctx
     this.heartbeatMs = Math.max(10, Math.floor(options.heartbeatMs ?? HEARTBEAT_MS))
     this.nativeSubagentBarrierMs = Math.max(1, Math.floor(options.nativeSubagentBarrierMs ?? NATIVE_SUBAGENT_BARRIER_MS))
     this.nativeTurnWatchdogMs = Math.max(1, Math.floor(options.nativeTurnWatchdogMs ?? NATIVE_TURN_WATCHDOG_MS))
     this.nativeTurnWatchdogMaxPasses = Math.max(1, Math.floor(options.nativeTurnWatchdogMaxPasses ?? NATIVE_TURN_WATCHDOG_MAX_PASSES))
-    this.dmChannelReadsOption = options.dmChannelReads
     this.catalog = new Catalog(ctx, () => {
       this.publishFeedMetaIfChanged()
     })
@@ -736,6 +733,12 @@ export class EnsembleV2Service {
       observer: this.createStoreObserver(),
     })
     await this.store.load()
+    // Ticket #226: backfill pre-channel direct lines before any reader serves
+    // them. Migration is idempotent; an empty legacy store is a cheap no-op.
+    const directMigration = await this.store.migrateLegacyDirectTranscripts()
+    if (directMigration.channels > 0) {
+      this.logger.event("info", "service", "service.direct.migrated", directMigration)
+    }
     this.refreshDmClock()
     await this.reconcileInitJobs()
     await this.reconcileLoadedNativeSubagents()
@@ -2350,10 +2353,6 @@ export class EnsembleV2Service {
     }
   }
 
-  private dmChannelReads(): DmChannelReadMode {
-    return this.dmChannelReadsOption ?? dmChannelReadMode()
-  }
-
   /** True while this native session is serving a live run or direct prompt. */
   private isSessionBusy(sessionID: string): boolean {
     return this.directBusy.has(sessionID) || [...this.activeRuns.values()].some((run) => run.sessionID === sessionID)
@@ -2381,16 +2380,15 @@ export class EnsembleV2Service {
     const nativeDurable = nativeFirstMode(this.store.settings()) === "on"
       && (target.conversation.kind === "direct" || target.conversation.kind === "home")
     const channel = directMessageChannelForBinding(target.bindingKeyID, agent.id)
-    const legacy = this.store.dmTranscript(target.bindingKeyID, agent.id)
-    const storedBase = nativeDurable || this.dmChannelReads() === "on"
-      ? projectDirectLines(
-          this.store
-            .messages(channel)
-            .map((message) => chatLineFromMessage(message, agent.name)),
-          legacy,
-        )
-      : legacy
-    const stored = storedBase.map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
+    // Ticket #226: every direct reader uses the conversation channel. Before
+    // the native-first cutover the channel still supplies the stored user and
+    // system rows; native assistant text comes from the session transcript so
+    // a rollback never duplicates an answer already captured natively.
+    const stored = this.store
+      .messages(channel)
+      .filter((message) => nativeDurable || message.author !== "agent" || !message.native)
+      .map((message) => chatLineFromMessage(message, agent.name))
+      .map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
     const native = nativeDurable ? [] : mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
     const messages = mergeDmTranscript(stored, native)
     const busy = this.isSessionBusy(target.sessionID)

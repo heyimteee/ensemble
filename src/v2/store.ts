@@ -36,6 +36,17 @@ export function streamKey(workspaceID: string, messageID: string): string {
   return `${workspaceID}\u0000${messageID}`
 }
 
+/**
+ * Ticket #226: the transcript order the pre-channel direct projection used.
+ * Migration assigns sequence numbers in this order, so channel rows and the
+ * legacy view cannot disagree about a line's position.
+ */
+function compareDirectMessages(a: Message, b: Message): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt
+  if (a.author !== b.author) return a.author === "user" ? -1 : 1
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+}
+
 type Ctx = any
 
 /** Counters for the explicit full-state snapshot boundary (ticket #131). */
@@ -350,6 +361,83 @@ export class V2Store {
     this.scopeVersionMap = { shell: this.state.version, work: this.state.version, transcript: this.state.version }
   }
 
+  /**
+   * Ticket #226: one-way backfill from the legacy per-binding direct store
+   * into the unified conversation channels. Phase 1 writes every channel row
+   * with a deterministic sequence; phase 2 removes the legacy keys. A crash
+   * between phases reruns the merge by id, so the worst case is a transient
+   * duplicate storage key, never loss. A direct message id already present on
+   * the channel wins over its legacy copy.
+   */
+  async migrateLegacyDirectTranscripts(): Promise<{ channels: number; backfilled: number; removed: number }> {
+    return this.write(async () => {
+      const legacyEntries = await this.scanAll("v2/dm/")
+      if (legacyEntries.length === 0) return { channels: 0, backfilled: 0, removed: 0 }
+      const byChannel = new Map<Id, { workspaceKey: Id; agentID: Id; messages: ChatMessage[] }>()
+      for (const { key, value } of legacyEntries) {
+        const parts = key.split("/")
+        const workspaceKey = parts[2]
+        const agentID = parts[3]
+        const message = value as ChatMessage
+        if (!workspaceKey || !agentID || !message?.id) continue
+        const channel = directMessageChannelForBinding(workspaceKey, agentID)
+        const entry = byChannel.get(channel) ?? { workspaceKey, agentID, messages: [] }
+        entry.messages.push({ ...message })
+        byChannel.set(channel, entry)
+      }
+      const changes: EntityChange[] = []
+      let backfilled = 0
+      let removed = 0
+      for (const [channel, { workspaceKey, agentID, messages: legacy }] of byChannel) {
+        const persisted = await this.scanAll(`v2/message/${channel}/`)
+        const durable = new Map<Id, Message>()
+        for (const { value } of persisted) {
+          const message = value as Message
+          if (!message?.id || durable.has(message.id)) continue
+          durable.set(message.id, message)
+        }
+        const merged = new Map<Id, Message>()
+        for (const message of durable.values()) {
+          merged.set(message.id, { ...message, channel, workspaceID: message.workspaceID ?? workspaceKey })
+        }
+        let added = 0
+        for (const line of legacy) {
+          if (merged.has(line.id)) continue
+          merged.set(line.id, { ...this.directMessageInput(workspaceKey, agentID, line), seq: 0 })
+          added++
+        }
+        const ordered = [...merged.values()].sort(compareDirectMessages)
+        const desired = new Map<Id, string>()
+        ordered.forEach((message, index) => {
+          message.seq = index + 1
+          desired.set(message.id, `v2/message/${channel}/${String(message.seq).padStart(8, "0")}`)
+        })
+        // Phase 1: every desired row is durable before any superseded key is
+        // removed. Renumbering is visible through the same message patches.
+        for (const message of ordered) {
+          await this.ctx.storage.set(desired.get(message.id)!, message)
+          changes.push({ entity: "message", op: "upsert", message: structuredClone(message) })
+        }
+        const keep = new Set(desired.values())
+        for (const { key } of persisted) {
+          if (!keep.has(key)) await this.ctx.storage.remove(key)
+        }
+        this.state.messages[channel] = ordered
+        this.channelSeq.set(channel, ordered.length + 1)
+        for (const message of ordered) this.trackStreaming(message)
+        delete this.state.dmTranscripts[bindingKey(workspaceKey, agentID)]
+        backfilled += added
+      }
+      // Phase 2 runs only after every channel row above is durable.
+      for (const { key } of legacyEntries) {
+        await this.ctx.storage.remove(key)
+        removed++
+      }
+      await this.commit(changes)
+      return { channels: byChannel.size, backfilled, removed }
+    })
+  }
+
   async saveDmMessage(workspaceKey: string, agentID: string, message: ChatMessage): Promise<void> {
     await this.write(async () => {
       await this.saveDmMessageNow(workspaceKey, agentID, message)
@@ -357,7 +445,7 @@ export class V2Store {
       // conversation channel. The legacy line stays for the rollback path and
       // for readers that have not switched yet.
       const channel = directMessageChannelForBinding(workspaceKey, agentID)
-      const row = await this.upsertChannelMessageNow(channel, this.dmChannelInput(workspaceKey, agentID, message))
+      const row = await this.upsertChannelMessageNow(channel, this.directMessageInput(workspaceKey, agentID, message))
       await this.commit([{ entity: "message", op: "upsert", message: structuredClone(row) }])
     })
   }
@@ -373,7 +461,7 @@ export class V2Store {
     await this.ctx.storage.set(`v2/dm/${workspaceKey}/${agentID}/${message.id}`, { ...message, bindingKey: key })
   }
 
-  private dmChannelInput(workspaceKey: string, agentID: string, message: ChatMessage): Omit<Message, "seq"> {
+  private directMessageInput(workspaceKey: string, agentID: string, message: ChatMessage): Omit<Message, "seq"> {
     return {
       id: message.id,
       workspaceID: workspaceKey,
@@ -383,6 +471,7 @@ export class V2Store {
       text: message.text,
       kind: "text",
       createdAt: message.createdAt,
+      ...(message.attachments && message.attachments.length > 0 ? { attachments: message.attachments } : {}),
       ...(message.correlationID ? { correlationID: message.correlationID } : {}),
     }
   }

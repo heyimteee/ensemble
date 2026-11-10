@@ -174,6 +174,62 @@ test("dm transcripts persist per binding and reload in order", async () => {
   assert.deepEqual(loaded.snapshot().dmTranscripts["w:a"].map((item) => item.text), ["work"])
 })
 
+test("ticket226: migration backfills pre-channel direct rows in order with attachment metadata and removes the legacy store", async () => {
+  const ctx = fakeContext()
+  // Rows written before #212 exist only in the legacy per-binding store.
+  ctx.values.set("v2/dm/home/a/dm_old_2", {
+    id: "dm_old_2", role: "user", author: "You", text: "second", createdAt: 20,
+    attachments: [{ id: "att_1", name: "shot.png", mime: "image/png", size: 12, kind: "image" }],
+    bindingKey: "home:a",
+  })
+  ctx.values.set("v2/dm/home/a/dm_old_1", {
+    id: "dm_old_1", role: "user", author: "You", text: "first", createdAt: 10, bindingKey: "home:a",
+  })
+  // A #212 dual-written row: the durable channel copy wins over its legacy line.
+  ctx.values.set("v2/dm/home/a/dm_new", {
+    id: "dm_new", role: "user", author: "You", text: "stale legacy copy", createdAt: 30, bindingKey: "home:a",
+  })
+  ctx.values.set(`v2/message/${directMessageChannel("a")}/00000009`, {
+    id: "dm_new", workspaceID: "home", channel: directMessageChannel("a"), seq: 9,
+    author: "user", text: "third", kind: "text", createdAt: 30,
+  })
+  const store = new V2Store(ctx)
+  await store.load()
+
+  const migrated = await store.migrateLegacyDirectTranscripts()
+
+  assert.deepEqual(migrated, { channels: 1, backfilled: 2, removed: 3 })
+  const rows = store.messages(directMessageChannel("a"))
+  assert.deepEqual(rows.map((row) => row.text), ["first", "second", "third"])
+  assert.deepEqual(rows.map((row) => row.seq), [1, 2, 3])
+  assert.deepEqual(rows[1]!.attachments, [{ id: "att_1", name: "shot.png", mime: "image/png", size: 12, kind: "image" }])
+  assert.equal((await (ctx.storage.scan({ prefix: "v2/dm/" }) as any)).entries.length, 0, "the legacy store is emptied only after the channel rows are durable")
+
+  // A reload sees the same durable transcript with no duplicate or lost line.
+  const reloaded = new V2Store(ctx)
+  await reloaded.load()
+  assert.deepEqual(reloaded.messages(directMessageChannel("a")).map((row) => row.text), ["first", "second", "third"])
+  const version = reloaded.snapshot().version
+  const again = await reloaded.migrateLegacyDirectTranscripts()
+  assert.deepEqual(again, { channels: 0, backfilled: 0, removed: 0 })
+  assert.equal(reloaded.snapshot().version, version, "a completed migration is a no-op")
+})
+
+test("ticket226: migration keeps a workspace direct conversation on its own channel", async () => {
+  const ctx = fakeContext()
+  ctx.values.set("v2/dm/w/a/dm_work", {
+    id: "dm_work", role: "user", author: "You", text: "workspace direct", createdAt: 5, bindingKey: "w:a",
+  })
+  ctx.values.set("v2/dm/home/a/dm_home", {
+    id: "dm_home", role: "user", author: "You", text: "home direct", createdAt: 6, bindingKey: "home:a",
+  })
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.migrateLegacyDirectTranscripts()
+  assert.deepEqual(store.messages(directMessageChannel("a", "w")).map((row) => row.text), ["workspace direct"])
+  assert.deepEqual(store.messages(directMessageChannel("a")).map((row) => row.text), ["home direct"])
+})
+
 test("ticket212: a direct message writes one durable channel row and the legacy line", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
