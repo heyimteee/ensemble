@@ -11,27 +11,6 @@ import type { ChatMessage, Id, Message } from "./types.ts"
  */
 export const DIRECT_CHANNEL_PREFIX = "dm:"
 
-/** Environment switch for reading direct conversations from durable rows. */
-export const DM_CHANNEL_READS_ENV = "ENSEMBLE_DM_CHANNEL_READS"
-
-/**
- * `off` and `shadow` both keep the legacy direct read path; `shadow` is
- * reserved for the later ingestion compare step. `on` prefers the durable
- * channel rows with a compatibility projection over dual-written legacy lines.
- */
-export type DmChannelReadMode = "off" | "shadow" | "on"
-
-export function dmChannelReadMode(value: string | undefined = process.env[DM_CHANNEL_READS_ENV]): DmChannelReadMode {
-  switch (String(value ?? "").trim().toLowerCase()) {
-    case "on":
-      return "on"
-    case "shadow":
-      return "shadow"
-    default:
-      return "off"
-  }
-}
-
 export function directMessageChannel(agentID: Id, workspaceID?: Id): Id {
   return workspaceID ? `${DIRECT_CHANNEL_PREFIX}${agentID}:${workspaceID}` : `${DIRECT_CHANNEL_PREFIX}${agentID}`
 }
@@ -81,18 +60,22 @@ export function chatLineFromMessage(message: Message, agentName: string): ChatMe
 }
 
 /**
- * Compatibility projection for the legacy DM transcript store. Durable rows
- * win by id; legacy rows fill ids written before the channel existed, so a
- * flag rollback and an in-place upgrade both keep the transcript intact.
+ * Rollback compatibility projection (ticket #226). The #212 reader merges the
+ * durable channel rows with the legacy per-binding store. After the #226
+ * migration the legacy list is always empty, so deploying the previous
+ * release with its channel-read flag on sees the same transcript. Kept as a
+ * pure contract for that rollback path and its test.
  */
 export function projectDirectLines(durable: readonly ChatMessage[], legacy: readonly ChatMessage[]): ChatMessage[] {
   const byID = new Map<Id, ChatMessage>()
+  const visible = (line: ChatMessage | undefined): boolean =>
+    Boolean(line?.text?.trim()) || (line?.attachments?.length ?? 0) > 0
   for (const line of legacy) {
-    if (!line?.text?.trim()) continue
+    if (!visible(line)) continue
     byID.set(line.id, { ...line })
   }
   for (const line of durable) {
-    if (!line?.text?.trim()) continue
+    if (!visible(line)) continue
     byID.set(line.id, { ...line })
   }
   return [...byID.values()].sort((a, b) => {

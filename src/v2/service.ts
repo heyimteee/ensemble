@@ -1724,9 +1724,6 @@ export class EnsembleV2Service {
     return {
       ...state,
       messages: {},
-      // Direct-chat transcripts are native-session detail and unread by the
-      // TUI; scoped reads never carry that unbounded history.
-      dmTranscripts: {},
       subtasks,
       runs: Object.fromEntries(this.activeRuns),
     }
@@ -2367,23 +2364,20 @@ export class EnsembleV2Service {
         .filter((entry) => entry.id && entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID))
         .map((entry) => entry.id),
     )
-    // Ticket #77 root cause of permanently-grey sent lines: the stored DM
-    // line keeps `queued: true` after it was flushed, and `|| message.queued`
-    // made that stale bit outrank the queue's own truth. The queue entry is
+    // Ticket #77 root cause of permanently-grey sent lines: a stored line's
+    // own `queued` bit could outrank the queue's truth. The queue entry is
     // authoritative: a line is queued exactly while its entry is still
     // `queued`; sent/failed/removed entries mean the line renders as sent.
-    // Ticket #212: flag-on reads the same durable channel rows as group
-    // messages, projecting any pre-migration legacy lines behind them.
+    // Ticket #226: every direct read uses the conversation channel.
     // Ticket #215: once native-first is `on`, a direct conversation reads its
-    // durable channel and never polls the native transcript. The old merge
-    // path remains available whenever the flag is off or shadowed.
+    // durable channel and never polls the native transcript. Before the
+    // cutover, native assistant text still comes from the session transcript.
     const nativeDurable = nativeFirstMode(this.store.settings()) === "on"
       && (target.conversation.kind === "direct" || target.conversation.kind === "home")
     const channel = directMessageChannelForBinding(target.bindingKeyID, agent.id)
-    // Ticket #226: every direct reader uses the conversation channel. Before
-    // the native-first cutover the channel still supplies the stored user and
-    // system rows; native assistant text comes from the session transcript so
-    // a rollback never duplicates an answer already captured natively.
+    // The channel supplies stored user and system rows before the cutover.
+    // Native agent rows are skipped there so a rollback never duplicates an
+    // answer that the session transcript still provides.
     const stored = this.store
       .messages(channel)
       .filter((message) => nativeDurable || message.author !== "agent" || !message.native)
@@ -2392,7 +2386,7 @@ export class EnsembleV2Service {
     const native = nativeDurable ? [] : mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
     const messages = mergeDmTranscript(stored, native)
     const busy = this.isSessionBusy(target.sessionID)
-    const queued = this.store.dmQueue().filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID)).length
+    const queued = queuedIDs.size
     // Ticket #214: the direct surface labels the native context it is bound
     // to. `sharedSession` marks the pre-cutover rollback, where direct chat is
     // still served by the group session.
@@ -2525,7 +2519,7 @@ export class EnsembleV2Service {
       correlationID,
       ...(attachments.length > 0 ? { attachments } : {}),
     }
-    await this.store.saveDmMessage(workspaceKey, agent.id, line)
+    await this.store.saveDirectMessage(workspaceKey, agent.id, line)
     if (busy) {
       const entry: DmQueueEntry = {
         id: line.id,
@@ -2579,7 +2573,7 @@ export class EnsembleV2Service {
     const targets = id ? queued.filter((entry) => entry.id === id) : queued.slice(0, 1)
     for (const entry of targets) {
       await this.store.removeDmQueueEntry(entry.id)
-      await this.store.removeDmMessage(workspaceKey, agent.id, entry.id)
+      await this.store.removeDirectMessage(workspaceKey, agent.id, entry.id)
     }
     return { removed: targets.length }
   }
@@ -2598,7 +2592,13 @@ export class EnsembleV2Service {
     if (!home) return { moved: false }
     await this.ctx.session.move({ sessionID: home.sessionID, directory: workspace.directory })
     await this.store.removeBinding("home", agent.id)
-    await this.store.moveDmTranscript("home", agent.id, workspace.id)
+    // The pre-cutover move keeps the visible direct history by relocating its
+    // unified channel. The native-first cutover path below deliberately keeps
+    // the home channel on its own conversation (ticket #214).
+    await this.store.moveDirectChannel(
+      directMessageChannelForBinding("home", agent.id),
+      directMessageChannelForBinding(workspace.id, agent.id),
+    )
     this.refreshDmClock()
     await this.store.saveBinding({ workspaceID: workspace.id, agentID: agent.id, sessionID: home.sessionID, kind: "workspace", directory: workspace.directory, agentVersion: agent.version, updatedAt: now() })
     agent.homeSessionID = undefined
@@ -2703,8 +2703,6 @@ export class EnsembleV2Service {
         entry.status = "failed"
       }
       await this.store.saveDmQueueEntry(entry)
-      const stored = this.store.dmTranscript(workspaceKey, agentID).find((message) => message.id === entry.id)
-      if (stored) await this.store.saveDmMessage(workspaceKey, agentID, { ...stored, queued: false })
     }
   }
 
