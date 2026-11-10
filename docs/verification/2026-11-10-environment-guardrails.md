@@ -23,7 +23,8 @@ merge the environment branch after #192 lands on `main`)
 
 This record proves the environment guardrails added by the child tickets:
 
-1. The hosted `verify` job runs `git diff --check` and the full
+1. The hosted `verify` job runs the commit-range diff check
+   (`scripts/ci-diff-check.sh`, backed by `git diff --check`) and the full
    `npm run verify` gate.
 2. The hosted `live` job runs the isolated native-subagent probe with
    `ENSEMBLE_LIVE_REQUIRE=1` and the pinned Node/OpenCode/tmux/fd toolset.
@@ -68,7 +69,7 @@ deterministic fake provider.
 | `bash scripts/ci-diff-check.sh 3bfa21f HEAD` and `... 609e274 HEAD` | **Pass** — the post-review commit-range check found no whitespace or conflict residue. |
 | `git diff --check` | **Pass** — no whitespace errors or conflict residue. |
 | `bash -n scripts/worktree-create.sh && bash -n scripts/integration-merge.sh` | **Pass**. |
-| Link check over the changed docs | **Pass** — 131 relative links and anchors across 8 files, 0 failures. |
+| Link check over the changed docs | **Pass** — 134 relative links and anchors across 8 files, 0 failures. |
 
 ## Hosted CI
 
@@ -153,7 +154,7 @@ evidence was downloaded. The run was:
 | `verify` job | **Pass** in 1m15s, including `git diff --check` and `npm run verify`. |
 | `live` job | **Failed as intended** in 10m32s at `Native-subagent live probe` with `ticket #208 controlled CI failure artifact probe`; the probe's own assertions had already logged `native subagent probe passed (barrier)`. |
 | Upload step | **Pass** — `Upload live failure artifacts` ran because the job failed. |
-| Artifact | **`live-failure-artifacts-1`** (artifact id `13739070371`), 19,545 bytes, 15 files, seven-day retention. |
+| Artifact | **`live-failure-artifacts-1`** (artifact id `13739070371`), 19,545 bytes, 16 files, seven-day retention. |
 
 The downloaded artifact was inspected for the expected files and for private
 material:
@@ -191,10 +192,10 @@ probe's last assertion. The branch was pushed as
 |---|---|
 | Run id | **42764462126** |
 | Commit | `d98a342` |
-| `verify` job | **Pass** in 1m22s, including `git diff --check` and `npm run verify`. |
+| `verify` job | **Pass** in 1m22s, including `scripts/ci-diff-check.sh` and `npm run verify`. |
 | `live` job | **Failed as intended** in 10m26s at `Native-subagent live probe` with `ticket #202 controlled CI failure artifact probe`. |
 | Upload step | **Pass** — `Upload live failure artifacts` ran because the job failed. |
-| Artifact | **`live-failure-artifacts-1`**, 16 files, downloaded to `/tmp/opencode/spec-202/controlled-artifact-final/`. |
+| Artifact | **`live-failure-artifacts-1`** (artifact id `13739323370`), 19,465 bytes, 16 files, downloaded to `/tmp/opencode/spec-202/controlled-artifact-final/`. |
 
 The downloaded artifact contains `subagent/meta.txt` (`exit_status: 1`),
 doctor/doctor-failure output with `Mismatches: none`, server/TUI/fake logs,
@@ -232,8 +233,14 @@ imported by the plugin or TUI.
 The post-review helper versions were re-exercised against a disposable minimal
 repository: worktree create, existing path/branch refusal, dirty-base refusal,
 unrelated-worktree safety, clean no-ff merge plus verify, dirty/committed-
-whitespace refusal, and a conflict stop with merge-in-progress handling. The
-helpers remained developer tooling only; no plugin or TUI import was added.
+whitespace refusal, and a conflict stop with merge-in-progress handling. Both
+exercises exited 0. The clean merge produced merge commit `f195440`; the
+committed-whitespace source was refused before any merge; the conflict left
+`MERGE_HEAD` in progress; and a forced verify failure retained the merge
+commit. Evidence:
+`/tmp/opencode/verification-208/postreview-worktree-exercise.txt` and
+`postreview-merge-exercise.txt`. The helpers remained developer tooling only;
+no plugin or TUI import was added.
 
 ## Docs links
 
@@ -247,7 +254,7 @@ node /tmp/opencode/verification-208/check-links.mjs \
   AGENTS.md docs/README.md docs/agents/service-map.md \
   docs/agents/integration-workflow.md docs/agents/opencode-tui-runtime.md \
   docs/agents/review-standards.md scripts/README.md
-# checked 131 links across 8 files; failures=0
+# checked 134 links across 8 files; failures=0
 ```
 
 The reviewed files were `AGENTS.md`, `docs/README.md`,
@@ -273,6 +280,10 @@ Local artifacts (not committed; review before sharing):
 - `/tmp/opencode/verification-208/worktree-*.txt`,
   `merge-clean.txt`, `merge-conflict.txt`, `merge-dirty.txt`, and
   `link-check-final.txt` — helper and docs evidence.
+- `/tmp/opencode/verification-208/postreview-verify-6c849f4.txt`,
+  `postreview-subagent-console.txt`, `postreview-worktree-exercise.txt`, and
+  `postreview-merge-exercise.txt` — post-review local verify, probe, and helper
+  evidence.
 - `/tmp/opencode/207-fail-artifacts3/artifact-probe/` — the #207 local
   controlled-failure set used as prior evidence: `meta.txt`, `logs/` (doctor,
   doctor-failure, fake, log-summary, server, tui), `service-logs/`, and
