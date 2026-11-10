@@ -102,6 +102,9 @@ test("general rows summarize identity, role, color, and model with clear labels"
   }
   const byLabel = new Map(rows)
   assert.equal(byLabel.get("Model"), "ensemble-fake/ensemble-fake-model", "model reads provider/model")
+  assert.equal(byLabel.get("Native mirror"), "on", "an unset mirror defaults on")
+  const off = generalFieldRows({ name: "FakeAgent", title: "", role: "", color: "cyan", nativeMirror: false }, { providerID: "p", modelID: "m" })
+  assert.equal(new Map(off).get("Native mirror"), "off")
   const long = generalFieldRows(
     { name: "A", title: "", role: `x`.repeat(200), color: "cyan" },
     { providerID: "p", modelID: "m" },

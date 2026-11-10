@@ -86,6 +86,20 @@ test("focus changes outside the composer keep the current mode and blur the edit
   assert.deepEqual(rail.intents, [{ type: "blur-editor" }])
 })
 
+test("ticket232: opening a chat target selects the column; Enter enters before chat keys apply", () => {
+  // Agent/workspace creation focuses chat in the shared pane-selection
+  // grammar. A chat-local key such as `n` is not live until Enter enters.
+  const selected = reduce(initialInteractionState(), { type: "focus.set", focus: "chat" })
+  assert.equal(selected.state.focus, "chat")
+  assert.equal(selected.state.pane, "chat")
+  assert.equal(selected.state.paneMode, "select")
+  const entered = reduce(selected.state, { type: "pane.enter" })
+  assert.equal(entered.state.focus, "chat")
+  assert.equal(entered.state.paneMode, "interact")
+  const alreadyInteracting = reduce(entered.state, { type: "pane.enter" })
+  assert.equal(alreadyInteracting.state.paneMode, "interact", "Enter is safe when chat already owns focus")
+})
+
 test("leaving the Ensemble route resets Normal and clears every transient field", () => {
   const before = initialInteractionState({
     mode: "insert",

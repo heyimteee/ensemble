@@ -54,6 +54,12 @@ export type Agent = {
   color: string
   archived: boolean
   pendingSettings: boolean
+  /**
+   * Per-agent native mirror (privacy toggle). Unset means on: native user and
+   * final rows mirror into the agent's conversation. `false` keeps the native
+   * session private while service-originated work still mirrors.
+   */
+  nativeMirror?: boolean
   homeSessionID?: Id
   homeDirectory?: string
   version: number
@@ -114,9 +120,85 @@ export type InitJob = {
 
 export type MessageKind = "text" | "task" | "approval" | "system"
 
+/** Native turn lifecycle (ADR 0010, tickets #215/#216/#217). */
+export type NativeTurnPhase =
+  | "queued"
+  | "working"
+  | "retrying"
+  | "replied"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+
+/**
+ * One observed native host event, identity-only. Ticket #222 uses this
+ * timeline for the "Why this card?" detail. It never carries conversation
+ * content or file paths.
+ */
+export type NativeTurnEvent = {
+  type: string
+  at: number
+  phase?: NativeTurnPhase
+  delivery?: string
+  messageID?: Id
+}
+
+/**
+ * Host identity and phase for one native turn (ticket #215). `inboxID` is the
+ * user message id; `assistantMessageIDs` are the host text message ids. A
+ * retry reuses the same assistant id, so these arrays are append-only.
+ */
+export type NativeTurnInfo = {
+  sessionID: Id
+  inboxID?: Id
+  assistantMessageIDs: Id[]
+  phase: NativeTurnPhase
+  startedAt?: number
+  settledAt?: number
+  resultMessageID?: Id
+  errorCode?: string
+  /** Ticket #222: bounded, identity-only host event timeline. */
+  events?: NativeTurnEvent[]
+}
+
+/**
+ * Ticket #221: the delivery record for one workspace `send_message` post made
+ * during a turn. It lets an identical final native text dedupe to the same
+ * transcript row and route set instead of posting and routing twice. The text
+ * itself stays in its message row; this record carries only a hash and IDs.
+ */
+export type AgentPostInfo = {
+  messageID: Id
+  /** Hash of the trimmed post text, never the conversation text. */
+  textHash: string
+  /** Agents the post routed to, in prose order after suppressions. */
+  recipientIDs: Id[]
+}
+
+/**
+ * Metadata for one attachment (ticket #223). The durable row and the snapshot
+ * carry display facts only: no bytes, no store path, and no source path. The
+ * service resolves the stored file by conversation id at prompt time.
+ */
+export type MessageAttachment = {
+  id: Id
+  /** Original basename shown in the chip; never a filesystem path. */
+  name: string
+  mime: string
+  size: number
+  kind: "file" | "image"
+}
+
 export type Message = {
   id: Id
   workspaceID: Id
+  /**
+   * Conversation channel (ticket #212). Group rows omit it and use
+   * `workspaceID`; direct rows carry `dm:<agentID>[:<workspaceID>]` so the
+   * same durable row, patch, window, retention, and client bound serve both
+   * conversation kinds without overloading the workspace id.
+   */
+  channel?: Id
   seq: number
   author: "user" | "agent" | "system"
   agentID?: Id
@@ -138,12 +220,29 @@ export type Message = {
    * Free-form copy is never inspected.
    */
   notice?: "retry" | "failure"
+  /**
+   * Attachment metadata for one row (ticket #223). Files live in the bounded
+   * conversation store; the transcript and snapshot never carry bytes or
+   * absolute paths.
+   */
+  attachments?: MessageAttachment[]
   createdAt: number
   /** Last wall-clock write (delta or finalize). Drives stream staleness so
     * long live streams stay visible while fresh and orphaned rows expire. */
   updatedAt?: number
   /** Correlation ID linking handoff ask/ack/relay/notice legs. */
   correlationID?: string
+  /**
+   * Native host identity for an ingested row (ticket #215). The turn link is
+   * also carried by `taskID`; these ids make duplicate and reconciliation
+   * checks exact without reading text.
+   */
+  native?: {
+    sessionID?: Id
+    inboxID?: Id
+    assistantMessageID?: Id
+    turnID?: Id
+  }
 }
 
 /**
@@ -272,6 +371,12 @@ export type Subtask = {
   assigneeID?: Id
   title: string
   instruction: string
+  /**
+   * Attachment metadata copied from the originating user message (ticket
+   * #223). The prompt payload resolves each id against the conversation
+   * store; the durable row never carries bytes or paths.
+   */
+  attachments?: MessageAttachment[]
   constraints?: string
   expected?: string
   mode: "research" | "edit"
@@ -348,6 +453,24 @@ export type Subtask = {
   /** Peer-turn record (ticket #57). Present only on workKind "turn". */
   turn?: TurnInfo
   /**
+   * Native-first turn provenance (ADR 0010, tickets #215/#216). Native turns
+   * are `workKind: "turn"` rows: they have no lease, claim, or attempts, and
+   * the queue pump/reaper skip them. `conversationID` is the durable
+   * conversation channel (the workspace id for a group, or
+   * `dm:<agentID>[:<workspaceID>]` for a direct conversation) and doubles as
+   * the task's `workspaceID` so one Work projection serves group and direct.
+   */
+  origin?: "native"
+  /** Legacy marker; writing it does not make a turn native. Use `origin`. */
+  adopted?: boolean
+  conversationID?: Id
+  native?: NativeTurnInfo
+  /**
+   * Ticket #221: the latest workspace tool post made during this turn. A final
+   * native text identical to it reuses its message row and route set.
+   */
+  agentPost?: AgentPostInfo
+  /**
    * General-skill leader triage (ticket #103): the turn must read and either
    * use or delegate the listed skills. This is the single triage source of
    * truth: a non-empty grant identifies a leader triage task. The host session
@@ -359,12 +482,45 @@ export type Subtask = {
 
 export type HandoffDecision = "delegated" | "started" | "ended" | "dismissed"
 
+/**
+ * The three conversations an agent can bind a native session to (ADR 0009):
+ * the workspace group chat, a workspace direct conversation, and the agent's
+ * home direct conversation.
+ */
+export type BindingKind = "workspace" | "direct" | "home"
+
+/** Native-first migration mode (ADR 0011). */
+export type NativeFirstMode = "off" | "shadow" | "on"
+
+/**
+ * Ticket #218: one service-owned native sync state for the statusline and
+ * support reads. `reconciling` is a bounded start/reconnect/adoption/watchdog
+ * pass; `degraded` means a transcript read failed and ingestion may have gaps.
+ */
+export type NativeSyncState = "live" | "reconciling" | "degraded"
+
+export type NativeSyncStatus = {
+  state: NativeSyncState
+  /** Reason code only; never content or a path. */
+  reason?: string
+}
+
+/**
+ * One agent's binding conversation. The agent is part of the identity because
+ * a workspace group has one native session per member agent; the workspace is
+ * the shared channel. Older rows omit `kind` and resolve from `workspaceID`.
+ */
+export type BindingConversation =
+  | { kind: "workspace"; workspaceID: Id; agentID: Id }
+  | { kind: "direct"; workspaceID: Id; agentID: Id }
+  | { kind: "home"; agentID: Id }
+
 export type SessionBinding = {
   workspaceID: Id
   agentID: Id
   sessionID: Id
   history?: Id[]
-  kind?: "workspace" | "home"
+  kind?: BindingKind
   directory?: string
   agentVersion: number
   updatedAt: number
@@ -435,6 +591,8 @@ export type DmQueueEntry = {
   workspaceID?: Id
   directory: string
   text: string
+  /** Attachment metadata carried with a queued direct send (ticket #223). */
+  attachments?: MessageAttachment[]
   status: "queued" | "sent" | "failed"
   createdAt: number
   /** Sender of a direct agent-to-agent message (envelope addressing). */
@@ -492,6 +650,26 @@ export type Settings = {
   /** Deprecated: readable for persisted settings, ignored for enforcement. Use dispatchDepth. */
   maxDepth: number
   synthesis: boolean
+  /**
+   * Native-first migration mode (ADR 0011): `off` keeps today's explicit
+   * path, `shadow` compares without changing the visible path, and `on`
+   * enables native-first behavior as each surface cuts over.
+   */
+  nativeFirst?: NativeFirstMode
+  /**
+   * Native mention-routing kill switch (ADR 0011). Routing runs only under
+   * `nativeFirst: "on"`; `false` keeps native messages posting, turns `$Name`
+   * into a reference, and appends a visible refusal instead of creating work.
+   * User/operator-owned; agents cannot write settings.
+   */
+  nativeMentionRouting?: boolean
+  /**
+   * Tool-surface migration setting (ticket #225): `native` keeps only the
+   * decision tools, `legacy` restores the one-release explicit surface. Unset
+   * follows the native-first mode: `on` selects `native`, `off`/`shadow`
+   * select `legacy`.
+   */
+  toolSurface?: "native" | "legacy"
   /** Dispatch budget tiers (ticket #160); captured by each new root group. */
   dispatchGroupMaxHops: number
   dispatchCommandMaxHops: number
@@ -504,10 +682,34 @@ export type ChatMessage = {
   role: "user" | "assistant" | "system"
   author: string
   text: string
+  /** Attachment metadata for a durable direct row (ticket #223). */
+  attachments?: MessageAttachment[]
   createdAt: number
   queued?: boolean
   /** Correlation ID of a direct agent-to-agent envelope, when present. */
   correlationID?: string
+}
+
+/**
+ * Ticket #214: which native context a direct chat is bound to. `kind` names
+ * the binding conversation; `context` is the file-access scope. `sharedSession`
+ * marks the pre-cutover rollback, where direct chat is served by the group
+ * session instead of its own.
+ */
+export type ChatConversationContext = {
+  kind: BindingKind
+  workspaceID?: Id
+  workspaceName?: string
+  context: "workspace" | "home"
+  sessionID: Id
+  sharedSession: boolean
+  /**
+   * Ticket #215: when set, the direct transcript is durable and lives on this
+   * channel. The TUI reads the same message rows and patches as a group chat;
+   * there is no native-text poll or live overlay on this path.
+   */
+  channel?: Id
+  durable?: boolean
 }
 
 export type ChatContext = {
@@ -518,6 +720,7 @@ export type ChatContext = {
   busy: boolean
   messages: ChatMessage[]
   queued: number
+  conversation: ChatConversationContext
 }
 
 /** Server-derived rail counts (ticket #141); never computed by client scans. */
@@ -567,6 +770,20 @@ export type ScopedResync = {
   meta?: FeedMeta
 }
 
+/**
+ * Ticket #222: one server-paged Work history read for one conversation.
+ * Terminal rows only, inside the durable 24 h retention. `next` is an opaque
+ * cursor from the last row on this page; absent when the page is the end.
+ */
+export type WorkHistoryPage = {
+  conversationID: Id
+  tasks: Record<Id, Subtask>
+  groups: Record<Id, DispatchGroup>
+  hasMore: boolean
+  next?: string
+  limit: number
+}
+
 export type Snapshot = {
   state: {
     version: number
@@ -583,7 +800,6 @@ export type Snapshot = {
     approvals: Record<Id, Approval>
     settings: Settings
     dmQueue: Record<Id, DmQueueEntry>
-    dmTranscripts: Record<string, ChatMessage[]>
     ui: {
       activeWorkspaceID?: Id
       activeAgentID?: Id
@@ -629,6 +845,8 @@ export type Snapshot = {
   configRevision?: number
   protocol?: number
   epoch?: number
+  /** Ticket #218: service-owned native reconciliation state. */
+  nativeSync?: NativeSyncStatus
   /**
    * Ticket #141 scoped bootstrap metadata. `scoped` means the state carries
    * shell entities, the visible Work projection, and one transcript window
@@ -647,6 +865,8 @@ export type Revision = {
   configRevision: number
   protocol: number
   epoch: number
+  /** Ticket #218: native sync state rides the cheap heartbeat. */
+  nativeSync?: NativeSyncStatus
   /** Ticket #141: server-derived counts; absent on older servers. */
   counts?: Record<Id, WorkspaceCounts>
   scopeVersions?: ScopeVersions
@@ -667,7 +887,7 @@ export type EntityChange =
   | { entity: "dispatchGroup"; op: "upsert"; group: DispatchGroup }
   | { entity: "dispatchGroup"; op: "remove"; id: Id }
   | { entity: "message"; op: "upsert"; message: Message }
-  | { entity: "message"; op: "remove"; workspaceID: Id; id: Id }
+  | { entity: "message"; op: "remove"; workspaceID: Id; channel?: Id; id: Id }
   | { entity: "agent"; op: "upsert"; agent: Agent }
   | { entity: "agent"; op: "remove"; id: Id }
   | { entity: "workspace"; op: "upsert"; workspace: Workspace }
@@ -675,7 +895,7 @@ export type EntityChange =
   | { entity: "approval"; op: "upsert"; approval: Approval }
   | { entity: "approval"; op: "remove"; id: Id }
   | { entity: "binding"; op: "upsert"; binding: SessionBinding }
-  | { entity: "binding"; op: "remove"; workspaceID: Id; agentID: Id }
+  | { entity: "binding"; op: "remove"; workspaceID: Id; agentID: Id; kind?: BindingKind }
   | { entity: "memory"; op: "upsert"; memory: Memory }
   | { entity: "memory"; op: "remove"; id: Id }
   | { entity: "initJob"; op: "upsert"; job: InitJob }

@@ -228,7 +228,7 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
     ) {
       throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid binding entry: ${key}`)
     }
-    if (raw.kind !== undefined && raw.kind !== "workspace" && raw.kind !== "home") {
+    if (raw.kind !== undefined && raw.kind !== "workspace" && raw.kind !== "home" && raw.kind !== "direct") {
       throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid binding kind: ${key}`)
     }
     if (raw.directory !== undefined && typeof raw.directory !== "string") {
@@ -308,6 +308,23 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
         ? { kind: failureKind, ...(typeof raw.failure.reason === "string" ? { reason: raw.failure.reason } : {}) }
         : undefined
       const number = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) ? value : undefined
+      const nativePhase = raw.native?.phase === "queued" || raw.native?.phase === "working" || raw.native?.phase === "retrying"
+        || raw.native?.phase === "replied" || raw.native?.phase === "failed" || raw.native?.phase === "cancelled" || raw.native?.phase === "interrupted"
+        ? raw.native.phase
+        : undefined
+      const native = nativePhase && typeof raw.native?.sessionID === "string"
+        ? {
+            sessionID: raw.native.sessionID,
+            ...(typeof raw.native.inboxID === "string" ? { inboxID: raw.native.inboxID } : {}),
+            ...(Array.isArray(raw.native.assistantMessageIDs)
+              ? { assistantMessageIDs: raw.native.assistantMessageIDs.filter((value: unknown) => typeof value === "string") }
+              : {}),
+            phase: nativePhase,
+            ...(typeof raw.native.resultMessageID === "string" ? { resultMessageID: raw.native.resultMessageID } : {}),
+            ...(number(raw.native.startedAt) !== undefined ? { startedAt: number(raw.native.startedAt) } : {}),
+            ...(number(raw.native.settledAt) !== undefined ? { settledAt: number(raw.native.settledAt) } : {}),
+          }
+        : undefined
       subtasks[id] = {
         id: raw.id,
         ...(typeof raw.workspaceID === "string" ? { workspaceID: raw.workspaceID } : {}),
@@ -340,6 +357,11 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
         ...(number(raw.repliedAt) !== undefined ? { repliedAt: number(raw.repliedAt) } : {}),
         ...(number(raw.stoppedAt) !== undefined ? { stoppedAt: number(raw.stoppedAt) } : {}),
         ...(failure ? { failure } : {}),
+        ...(raw.origin === "native" ? { origin: "native" as const } : {}),
+        ...(typeof raw.adopted === "boolean" ? { adopted: raw.adopted } : {}),
+        ...(typeof raw.conversationID === "string" ? { conversationID: raw.conversationID } : {}),
+        ...(typeof raw.resultMessageID === "string" ? { resultMessageID: raw.resultMessageID } : {}),
+        ...(native ? { native } : {}),
       }
     }
   }
@@ -391,6 +413,59 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
       }
     }
   }
+  // Ticket #218: native identity rows and support facts. Only rows that carry
+  // a host inbox/assistant/turn id are copied; conversation text never enters
+  // the doctor seam.
+  let nativeRows: DoctorSnapshot["nativeRows"]
+  if (state.messages !== undefined) {
+    if (!state.messages || typeof state.messages !== "object" || Array.isArray(state.messages)) {
+      throw new DoctorError("snapshot_invalid", `Snapshot for ${directory} has an invalid messages map.`)
+    }
+    nativeRows = []
+    for (const [workspaceID, list] of Object.entries<any>(state.messages)) {
+      if (!Array.isArray(list)) continue
+      for (const raw of list) {
+        if (!raw || typeof raw.id !== "string" || !raw.native || typeof raw.native !== "object") continue
+        const inboxID = typeof raw.native.inboxID === "string" ? raw.native.inboxID : undefined
+        const assistantMessageID = typeof raw.native.assistantMessageID === "string" ? raw.native.assistantMessageID : undefined
+        const turnID = typeof raw.native.turnID === "string" ? raw.native.turnID : undefined
+        if (!inboxID && !assistantMessageID && !turnID) continue
+        nativeRows.push({
+          id: raw.id,
+          author: raw.author === "agent" ? "agent" : raw.author === "system" ? "system" : "user",
+          channel: typeof raw.channel === "string" ? raw.channel : workspaceID,
+          ...(typeof raw.taskID === "string" ? { taskID: raw.taskID } : {}),
+          ...(inboxID ? { inboxID } : {}),
+          ...(assistantMessageID ? { assistantMessageID } : {}),
+          ...(turnID ? { turnID } : {}),
+          ...(raw.streaming === true ? { streaming: true } : {}),
+        })
+      }
+    }
+  }
+  let nativeSync: DoctorSnapshot["nativeSync"]
+  let nativeWatchdog: DoctorSnapshot["nativeWatchdog"]
+  const nativeSupport = (output as any)?.native
+  if (nativeSupport && typeof nativeSupport === "object") {
+    const sync = nativeSupport.sync
+    if (sync?.state === "live" || sync?.state === "reconciling" || sync?.state === "degraded") {
+      nativeSync = { state: sync.state, ...(typeof sync.reason === "string" ? { reason: sync.reason } : {}) }
+    }
+    const watchdog = nativeSupport.watchdog
+    if (watchdog && typeof watchdog === "object") {
+      const maxPasses = typeof watchdog.maxPasses === "number" && Number.isFinite(watchdog.maxPasses) ? watchdog.maxPasses : undefined
+      nativeWatchdog = {}
+      for (const [turnID, raw] of Object.entries<any>(watchdog.turns ?? {})) {
+        if (!raw || typeof raw.passes !== "number" || !Number.isFinite(raw.passes)) continue
+        nativeWatchdog[turnID] = {
+          passes: raw.passes,
+          ...(maxPasses !== undefined ? { maxPasses } : {}),
+          ...(typeof raw.lastActivityAt === "number" && Number.isFinite(raw.lastActivityAt) ? { lastActivityAt: raw.lastActivityAt } : {}),
+          ...(raw.held === true ? { held: true } : {}),
+        }
+      }
+    }
+  }
   return {
     agents,
     workspaces,
@@ -399,6 +474,9 @@ function normalizeSnapshot(output: unknown, directory: string): DoctorSnapshot {
     ...(subtasks ? { subtasks } : {}),
     ...(recoveries ? { recoveries } : {}),
     ...(nativeSubagents ? { nativeSubagents } : {}),
+    ...(nativeRows !== undefined ? { nativeRows } : {}),
+    ...(nativeSync ? { nativeSync } : {}),
+    ...(nativeWatchdog ? { nativeWatchdog } : {}),
   }
 }
 
@@ -539,6 +617,7 @@ function renderHuman(report: DoctorReport): string {
       lines.push(`      configVersion: ${workspace.configVersion ?? "missing"}; synthesis=${workspace.synthesis}; paused=${workspace.paused}; archived=${workspace.archived}`)
     }
     lines.push(`  Dispatch: groups=${location.dispatch.groups} roots=${location.dispatch.roots} continuations=${location.dispatch.continuations} active=${location.dispatch.activeGroups} exhausted=${location.dispatch.exhaustedGroups} closed=${location.dispatch.closedGroups} hops=${location.dispatch.usedHops}/${location.dispatch.maxHops} command=${location.dispatch.commandUsedHops}/${location.dispatch.commandMaxHops}`)
+    lines.push(`  Native: sync=${location.native.sync} activeTurns=${location.native.activeTurns} duplicates=${location.native.duplicates} missingResults=${location.native.missingResults} orphanRoutes=${location.native.orphanRoutes} stuckTurns=${location.native.stuckTurns}`)
     lines.push(`  Bindings (${location.bindings.length}):`)
     if (location.bindings.length === 0) lines.push("    none")
     for (const binding of location.bindings) {

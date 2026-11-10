@@ -4,6 +4,8 @@
 
 Status: **developer preview**, compatibility recorded against OpenCode 2.2.1. The v2 runtime is the default. The v1 preview was removed. The v5.8 live matrix ran on OpenCode 2.2.5.
 
+> **Native-first decisions (2026-11-10).** [ADR 0009](adr/0009-conversation-identity-and-sessions.md), [ADR 0010](adr/0010-native-turn-ingestion.md), and [ADR 0011](adr/0011-mention-routing-and-budgets.md) record the decided conversation/session, ingestion, and routing model. Where this document describes the current v2 path that differs (one workspace session per agent, a DM reusing it, TUI transcript reads, explicit `maxHops`), the ADR is authoritative for the target; implementation lands under tickets #212–#227.
+
 ## Architecture
 
 ```text
@@ -59,7 +61,7 @@ Workspace {
 
 - One canonical directory maps to one active workspace.
 - Switching workspace changes the chat, Work pane, and directory for new runs.
-- Sessions are bound to `workspace + agent`, so switching does not discard them.
+- Sessions are bound to `workspace + agent` in the current path; [ADR 0009](adr/0009-conversation-identity-and-sessions.md) replaces that key with a conversation binding.
 - `<workspace>/.ensemble/config.json` is authoritative for workspace name, leader, members, synthesis, and paused state. OpenCode storage remains authoritative for agents, messages, subtasks, approvals, memories, bindings, and history.
 - Valid config files discovered in a directory register a workspace automatically; invalid config is rejected and the last good state is kept.
 - `.ensemble/` is created when a workspace is created, is added to `.gitignore`, and contains only config, handoffs, and init metadata. Conversation history stays in OpenCode storage.
@@ -109,6 +111,8 @@ Agent {
 - See [ADR 0007](adr/0007-apply-agent-behavior-in-place.md).
 
 ## Group chat
+
+Native-first target: `$Name` in sanitized native prose is the routing operator; the current tool path below remains during migration. See [ADR 0011](adr/0011-mention-routing-and-budgets.md).
 
 The transcript is shared and attributed:
 
@@ -169,6 +173,8 @@ The authoritative boundary and its trade-offs are recorded in [ADR 0001: Native-
 
 ## Direct chats and sessions
 
+Native-first target: each direct conversation has its own native session and Work history; the current path below reuses the workspace session until #214. See [ADR 0009](adr/0009-conversation-identity-and-sessions.md).
+
 - Every agent has a direct chat. If the agent belongs to the active workspace, the DM uses that workspace’s native session; otherwise it uses a no-workspace session in `~/.ensemble/agents/<id>/`.
 - Direct chat messages are queued while the agent is running and flushed when the native session becomes idle.
 - Native session transcripts are authoritative; Ensemble stores only queue and UI state.
@@ -185,29 +191,79 @@ handoffs/            typed Markdown handoffs
 init.json            AGENTS.md block version
 ```
 
-`I`, `:init`, or a message-start `/init` appends a visible `/init` audit line and starts a System Agent init job. An init alias attached to an agent anchor is rejected as a mixed solo request; a prose `/init` is ordinary text. The job creates a temporary native session in the workspace, calls native `/init` with the full `initInstructions()` text (inspect the project, preserve project guidance, replace one Ensemble block), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the current `<!-- ensemble:start v4 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
+`I`, `:init`, or a message-start `/init` appends a visible `/init` audit line and starts a System Agent init job. An init alias attached to an agent anchor is rejected as a mixed solo request; a prose `/init` is ordinary text. The job creates a temporary native session in the workspace, calls native `/init` with the full `initInstructions()` text (inspect the project, preserve project guidance, replace one Ensemble block), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the current `<!-- ensemble:start v5 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
 
 Reset is available through the `/reset-ensemble` composer command, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
 ## Native tools
 
-Read-only tools are available in every native session:
+Ticket #225 retires the chat-routing surface on the native-first path. The
+normal path is prose: an agent's final native text is the group message, and
+`$Name` in a workspace group routes peer turns with server-assigned budgets.
+The service injects a compact `ensemble_turn` block with the roster,
+conversation, and dispatch budget each turn, so no read-only roster tool call
+is required.
 
-- `ensemble_workspace_info`
-- `ensemble_list_workspaces`
-- `ensemble_list_agents`
+The native tool surface keeps only decisions the server cannot infer safely:
+
 - `ensemble_task_status`
-
-Write tools are registered globally but refuse outside an Ensemble-bound session:
-
-- `ensemble_send_message`
-- `ensemble_handoff`
-- `ensemble_delegate`
+- `ensemble_review`
 - `ensemble_ask_person`
 - `ensemble_remember`
 - `ensemble_share`
 
-`ensemble_send_message` posts to the group or sends a direct agent message (member DMs deliver with an envelope carrying addressing, correlation, ordering, and delivery state; cross-boundary contact requires an `outside_roster` approval). A group post that names `$Name`/`!Name` mentions also creates one peer turn per named member: a durable `turn` work item through the same queue, lease, retry, and recovery machinery as delegations, with per-agent serialization, unified depth and per-run caps, idempotency, and visible per-recipient refusals (unknown/archived/outside-roster mentions never abort the remaining peers). The recipient's reply in the asking transcript is the relay, attributed via `answeredByID` and linked by correlationID, with no second leg. `ensemble_handoff` validates a typed Markdown file under `.ensemble/handoffs/` as structured frontmatter and creates a handoff hop: a queued unit of work routed to the named recipient, acknowledged in the group chat, retried within its attempt budget and deadline, and relayed back into the asking conversation (or failed visibly there). Every delegation and handoff requires `maxHops`; the group's depth ceiling and the per-run fan-out cap (three handoffs) still apply. Relay and failure-notice legs are messages, not work rows, so they never consume a hop or the fan-out budget. `ensemble_delegate` remains the leader-only work-creating tool and is the only path that can open a continuation group. See [Dispatch budgets](#dispatch-budgets).
+`ensemble_delegate` and `ensemble_handoff` stay on the legacy surface while the
+migration flag carries the explicit path. `ensemble_send_message` is a
+compatibility shim there, not a native-first tool; it still posts to the group
+or sends a direct agent message (member DMs deliver with an envelope carrying
+addressing, correlation, ordering, and delivery state; cross-boundary contact
+requires an `outside_roster` approval). A post that names `$Name`/`!Name`
+mentions creates one peer turn per named member through the same queue, lease,
+retry, and recovery machinery as delegations, with per-agent serialization,
+unified depth and per-run caps, idempotency, and visible per-recipient refusals.
+The recipient's reply is the relay, attributed via `answeredByID` and linked by
+correlationID, with no second leg. `ensemble_handoff` validates a typed Markdown
+file under `.ensemble/handoffs/` and creates a handoff hop; every delegation and
+handoff requires `maxHops`; the group depth ceiling and per-run fan-out cap still
+apply. Relay and failure-notice legs are messages, not work rows, so they never
+consume a hop or the fan-out budget. See [Dispatch budgets](#dispatch-budgets).
+
+The surface follows the migration setting. `nativeFirst: "on"` selects the
+native list; `off` and `shadow` keep the legacy list. An explicit
+`settings.toolSurface` of `native` or `legacy` overrides the mode for one
+release, which is the rollback path. `nativeMentionRouting: false` forces the
+legacy surface so the explicit `ensemble_send_message` path returns with the
+kill switch. Both lists are registered per host location and are replaced in
+place when the setting changes.
+
+### Native mirror privacy
+
+Each agent has a durable `nativeMirror` setting, default on. The agent's
+General settings tab has one toggle row. Off means a prompt typed directly in
+that agent's native session creates no turn, user row, route, or final row;
+service-originated composer prompts still attach to their existing user row
+and still mirror their answer. Reconciliation applies the same gate, so a
+restart cannot recreate private native rows. The setting is not an agent
+behavior change and does not queue a settings rollout.
+
+### Shadow comparison
+
+`nativeFirst: "shadow"` ingests host events into an in-memory sink and records
+one bounded, content-free comparison row per settled turn. Text length and
+digest compare the shadow final against the visible native transcript, phase
+compares against the host terminal event, and routing reports the planner
+count, the visible pre-cutover count (`0` for a native turn), and their delta.
+The delta is expected data, not a mismatch; `routingMatch` only fails when a
+visible route contradicts the planned set.
+
+### Reconciliation target guard
+
+A start, reconnect, or adoption reconciliation captures the binding target
+(channel, conversation, and agent) before its transcript read. If adoption
+rebinds the session while that read is in flight, the pass discards the stale
+target and repeats against the new conversation. Recovery therefore lands in
+the new conversation only, and the old conversation receives no post-adoption
+rows.
 
 Idempotency keys (`work:`/`handoff:`) scope actor, workspace, kind, a hashed run prefix (never the raw parent id), the addressed recipient, and the canonical task/constraints/expected body. Suppression honors the row lifetime: a matching row suppresses resubmission while it is retained (live or terminal; finished rows purge after 24h retention). Intentional re-asks stay explicit: `task.retry`/`task.restart` re-queue the same row, and asking from a different parent/run is a different unit of work by construction. Cancellation is structural: only an explicit `stoppedAt` marker reads `cancelled`; error text is never substring-matched.
 

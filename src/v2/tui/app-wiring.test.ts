@@ -183,7 +183,7 @@ test("workspace and direct-chat streams share one coalescer", () => {
 // ---- Three-pane shell, Work layout, and focus ----
 
 test("the Work pane maps active tasks through the view filter", () => {
-  assert.ok(has(app(), "workViewGroups(active"))
+  assert.ok(has(app(), "workViewGroups(workTasks()"))
 })
 
 test("the Work pane receives the dispatch ledger", () => {
@@ -267,7 +267,7 @@ test("Work actions target the focused visible task", () => {
 
 test("ticket187: native subagent records join the Work view model", () => {
   assert.ok(has(app(), "nativeSubagentRuns()"))
-  assert.ok(has(app(), "workViewGroups(activeTasks(), state()?.subtasks ?? {}, {"))
+  assert.ok(has(app(), "workViewGroups(workTasks(), state()?.subtasks ?? {}, {"))
 })
 
 test("ticket187: native cards render through the same card and compact views", () => {
@@ -317,9 +317,13 @@ test("f toggles ACTIVE and HISTORY", () => {
 })
 
 test("ticket183: the right pane visibility is the one drawer switch", () => {
-  assert.ok(has(app(), "paneSides().right && (surface()?.kind === \"workspace\" || approvalsMode() === \"full\")"))
+  assert.ok(has(app(), "(surface()?.kind === \"agent\" && Boolean(nativeDirect()))"))
   assert.ok(has(app(), "<Show when={paneSides().left}>"), "the rail renders only while the left switch is on")
   assert.ok(!has(app(), "workDrawerOpen"), "no second drawer state exists")
+})
+
+test("ticket222: a direct conversation reads its own Work history page", () => {
+  assert.ok(has(app(), '"work.history"'))
 })
 
 test("ticket183: Space b l/r run one focus-recovering toggle", () => {
@@ -686,6 +690,20 @@ test("picker rows keep one name column", () => {
   assert.ok(has(app(), "maxWidth: pickerDetailWidth()"))
 })
 
+// ---- Native session picker and adoption (ticket #224) ----
+
+test("the native session picker reads the scoped service list", () => {
+  assert.ok(has(app(), '"session.picker"'))
+})
+
+test("the picker refreshes on service session events, not a timer", () => {
+  assert.ok(has(app(), "rpc.ensemble.v2.sessions.changed"))
+})
+
+test("adoption calls the service adopt action", () => {
+  assert.ok(has(app(), '"session.adopt"'))
+})
+
 // ---- Settings, limits, and activity ----
 
 test("chat renders one aggregate activity summary line", () => {
@@ -783,4 +801,24 @@ test("rail and approvals share the Braille motion tick", () => {
 
 test("the init row reads durable jobs on the shared motion tick", () => {
   assert.ok(has(app(), "initRowForJob(job, motionFrame(), process.env)"))
+})
+
+test("the direct surface labels its workspace or home native context", () => {
+  assert.ok(has(app(), "directConversationParts(chatContext()?.conversation"))
+})
+
+// ---- Composer attachments (ticket #223) ----
+
+test("composer paste uses the shared attachment classifier", () => {
+  assert.ok(has(app(), "classifyComposerPaste({"))
+})
+
+test("composer attachments are stored through the service", () => {
+  assert.ok(has(app(), '"attachment.add"'))
+})
+
+// ---- Ticket #215: native-first direct transcript ----
+
+test("a native-first direct transcript reads the server-derived channel", () => {
+  assert.ok(has(app(), "nativeDirectChannel(chatContext()?.conversation)"))
 })

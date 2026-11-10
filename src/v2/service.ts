@@ -5,12 +5,13 @@ import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, reconcileEnsembleInstructions, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
-import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
+import { ENSEMBLE_BLOCK_VERSION, agentIdentity, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
 import { isSubstantiveReply, planLateSuccessRepair, settlementText, shouldInterruptSettledReply } from "./stream-settlement.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
+import { planMentionRouting, type MentionConversation, type MentionLedgerSnapshot, type MentionRefusal, type MentionRosterEntry } from "./mention-routing.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, HEARTBEAT_MS, LEASE_MS, MAX_ATTEMPTS, claimWon, correlationIDForKey, deriveWorkStatus, isTerminalWorkStatus, parseWorkKind, stableHash, workKey, type DerivedWorkStatus } from "./queue.ts"
 import {
   activeContinuationGroup,
@@ -42,6 +43,20 @@ import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } fr
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
+import {
+  DEFAULT_ATTACHMENT_LIMITS,
+  attachmentConversationKey,
+  attachmentError,
+  cleanupConversationAttachments,
+  cleanupWorkspaceAttachments,
+  formatAttachmentSize,
+  nativeInboxAttachments,
+  promptFilesForAttachments,
+  removeStoredAttachment,
+  resolveAttachments,
+  storeAttachment,
+  validateAttachmentSelection,
+} from "./attachments.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
 import { RecentHostEvents, retryEventKey } from "./host-events.ts"
@@ -59,18 +74,86 @@ import {
 } from "./native-subagents.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
+import { selectWorkHistory, workHistoryGroups } from "./work-history.ts"
+import { chatLineFromMessage, directMessageChannelForBinding, isDirectMessageChannel } from "./message-channel.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type StoreObserver } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
 import { createLogRateLimiter, createLogger, defaultLogDirectory, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { createStoreObserver, dispatchGroupEvent, dispatchHopEvent } from "./log-events.ts"
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
+import { effectiveToolSurface, isToolSurface } from "./tool-surface.ts"
+import { ensembleTurnContext } from "./turn-context.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
+import { nativeFirstMode, isNativeFirstMode, nativeMirrorEnabled } from "./native-first.ts"
+import { directSessionCutover, selectDirectConversation } from "./direct-session.ts"
+import { bindingConversation, conversationStateKey } from "./conversation-binding.ts"
+import {
+  MAX_SESSION_PICKER_LIMIT,
+  defaultSessionPickerScope,
+  normalizeSessionPickerScope,
+  sessionPickerCandidates,
+  sessionPickerEventRefresh,
+  sessionPickerListInputs,
+  type NativeSessionListing,
+  type SessionPickerBindingView,
+  type SessionPickerDirectoryContext,
+  type SessionPickerScope,
+} from "./session-picker.ts"
+import {
+  adoptionBlockerCode,
+  adoptionConversationName,
+  adoptionHeadsUp,
+  adoptionTargetDirectory,
+  planSessionAdoption,
+  resolveAdoptionTarget,
+  sessionMoveConfirmed,
+  type AdoptionTarget,
+} from "./session-adoption.ts"
+import {
+  NATIVE_INTERNAL_PROMPT_METADATA,
+  NATIVE_MESSAGE_ID_METADATA,
+  NATIVE_SKIP_TURN_METADATA,
+  isNativeIngestEvent,
+  isNativeTurn,
+  appendNativeTurnEvent,
+  nativeAssistantMessageID,
+  nativeContextAnswer,
+  nativeContextAnswerExact,
+  nativeContextTurnAnswer,
+  nativeContextTurnGroups,
+  nativeContextTurnSettled,
+  nativeEventAt,
+  nativeEventData,
+  nativeEventSessionID,
+  nativeEventType,
+  nativeFinalText,
+  nativeInterruptionSettlement,
+  nativePhaseOpen,
+  nativePromptIsInternal,
+  nativePromptSkipsTurn,
+  nativeTextForParts,
+  nativeTurnGroupID,
+  nativeTurnID,
+  nativeTurnTitle,
+  nativeUserMessageID,
+  type NativeContextTurn,
+  type NativeTextState,
+} from "./native-turn.ts"
+import {
+  SHADOW_COMPARISON_LIMIT,
+  buildShadowComparison,
+  type ShadowComparison,
+  type ShadowSession,
+  type ShadowTurn,
+} from "./native-shadow.ts"
 import type {
   Agent,
   Approval,
+  BindingConversation,
   ChangesSince,
+  ChatConversationContext,
   DispatchGroup,
   DmQueueEntry,
   FeedMeta,
@@ -80,11 +163,14 @@ import type {
   Memory,
   MemoryScope,
   Message,
+  MessageAttachment,
   MessageStream,
   ModelRef,
   NativeSubagentRun,
   NativeSubagentSource,
   NativeSubagentState,
+  NativeSyncState,
+  NativeSyncStatus,
   PatchBatch,
   Revision,
   ScopeName,
@@ -166,6 +252,8 @@ type RpcInput = {
   version?: number
   workspaceID?: string
   beforeSeq?: number
+  before?: string
+  conversationID?: string
   limit?: number
   messageID?: string
   scopes?: string[]
@@ -189,6 +277,8 @@ function rpcInput(value: unknown): RpcInput {
   if (input.workspaceID !== undefined && typeof input.workspaceID !== "string") throw invalidInput("workspaceID must be a string.")
   if (input.messageID !== undefined && typeof input.messageID !== "string") throw invalidInput("messageID must be a string.")
   if (input.beforeSeq !== undefined && typeof input.beforeSeq !== "number") throw invalidInput("beforeSeq must be a number.")
+  if (input.before !== undefined && typeof input.before !== "string") throw invalidInput("before must be a string.")
+  if (input.conversationID !== undefined && typeof input.conversationID !== "string") throw invalidInput("conversationID must be a string.")
   if (input.limit !== undefined && typeof input.limit !== "number") throw invalidInput("limit must be a number.")
   if (input.scopes !== undefined && !Array.isArray(input.scopes)) throw invalidInput("scopes must be a list.")
   for (const field of ["level", "cat", "event", "taskID", "instanceID"] as const) {
@@ -202,6 +292,8 @@ function rpcInput(value: unknown): RpcInput {
     version: input.version as number | undefined,
     workspaceID: input.workspaceID as string | undefined,
     beforeSeq: input.beforeSeq as number | undefined,
+    before: input.before as string | undefined,
+    conversationID: input.conversationID as string | undefined,
     limit: input.limit as number | undefined,
     messageID: input.messageID as string | undefined,
     scopes: input.scopes as string[] | undefined,
@@ -235,6 +327,12 @@ function now(): number {
   return Date.now()
 }
 
+/** Reason code for a host failure; never the host's message or a path. */
+function nativeErrorCode(error: any): string {
+  const code = String(error?.code ?? error?.type ?? error?.name ?? "").trim()
+  return code || "native-error"
+}
+
 /**
  * Ticket #134: maintenance is timer-driven and serialized, never a snapshot
  * side effect. Config discovery is additionally throttled because it reads
@@ -244,6 +342,15 @@ const MAINTENANCE_INTERVAL_MS = 1_000
 const CONFIG_DISCOVERY_MS = 1_000
 /** Live-text crash checkpoints; no coordination version or patch is written. */
 const STREAM_CHECKPOINT_MS = 250
+/** Bounded per-session enqueue-order bookkeeping for native attribution. */
+const NATIVE_INBOX_ORDER_LIMIT = 64
+/**
+ * Ticket #217: bounded missing-terminal reconciliation. An open native turn
+ * with no host event for this long gets at most a few transcript reads; it is
+ * never settled on the timer alone.
+ */
+const NATIVE_TURN_WATCHDOG_MS = 60_000
+const NATIVE_TURN_WATCHDOG_MAX_PASSES = 3
 /** Bounded in-flight tool-name/input head registry for activity labels. */
 const TRACKED_TOOL_CALLS = 256
 /**
@@ -261,6 +368,22 @@ type LegacyFailureCause = {
   reason?: string
   /** Lease evidence only the reaper records; native failures never carry it. */
   previousClaim?: string
+}
+
+/** Ticket #218: why one bounded native reconciliation pass ran. */
+type NativeReconcileReason = "start" | "reconnect" | "adoption" | "watchdog"
+
+/** Ticket #218: content-free reconciliation counts, safe for logs and replies. */
+type NativeReconcileCounts = {
+  turns: number
+  recoveredTurns: number
+  recoveredUserMessages: number
+  recoveredAssistantMessages: number
+  repairedResults: number
+  interrupted: number
+  skipped: number
+  /** The binding target changed mid-pass; the caller must reconcile again. */
+  targetChanged?: boolean
 }
 
 /**
@@ -330,6 +453,27 @@ function listData(value: any): any[] {
 
 function jsonSafe<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+/**
+ * Attachment references from a client payload. The client sends stored ids;
+ * the service re-reads durable metadata so a caller cannot spoof a name, size,
+ * or path (ticket #223).
+ */
+function attachmentIDs(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const ids: string[] = []
+  for (const item of value) {
+    const id = typeof item === "string" ? item : item && typeof item === "object" ? (item as { id?: unknown }).id : undefined
+    if (typeof id === "string" && id.trim()) ids.push(id.trim())
+  }
+  return [...new Set(ids)]
+}
+
+/** A work title for an attachment-only message; never a filesystem path. */
+function attachmentMessageTitle(attachments: readonly MessageAttachment[]): string {
+  if (attachments.length === 1) return `Attachment: ${attachments[0].name}`
+  return `${attachments.length} attachments`
 }
 
 function sameModel(a: ModelRef, b: ModelRef): boolean {
@@ -449,6 +593,12 @@ export class EnsembleV2Service {
   private maintenanceTimer: ReturnType<typeof setInterval> | undefined
   private maintenanceWaiters: Array<() => void> = []
   private viewDirectory: string | undefined
+  /**
+   * Ticket #224: monotonic refresher for the native session picker. It moves
+   * on claimed host session lifecycle events and on adoption, never on a
+   * timer.
+   */
+  private sessionPickerRevision = 0
   private configDirty = true
   private lastConfigPassAt = 0
   /** Terminal rows already checked for legacy failure evidence (ticket #168). */
@@ -462,6 +612,8 @@ export class EnsembleV2Service {
   private readonly identityVersions = new Map<string, number>()
   private readonly homeBindingPromises = new Map<string, Promise<{ sessionID: string; directory: string }>>()
   private readonly bindingPromises = new Map<string, Promise<{ sessionID: string } | undefined>>()
+  /** Ticket #214: one in-flight workspace-direct session per agent/workspace. */
+  private readonly directBindingPromises = new Map<string, Promise<{ sessionID: string }>>()
   private readonly workspaceEpoch = new Map<string, number>()
   private lastDmAt = 0
   private dmNow(): number {
@@ -481,6 +633,70 @@ export class EnsembleV2Service {
   /** Coalesced ephemeral live text, keyed by workspace + message id. */
   private readonly pendingStreams = new Map<string, MessageStream>()
   private streamTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Ticket #215: native direct ingestion is service-owned and serial per
+   * session. Events for different sessions run in parallel; the store still
+   * serializes every durable write.
+   */
+  private readonly nativeQueues = new Map<string, Promise<void>>()
+  private readonly nativePendingInboxes = new Map<string, string[]>()
+  /** Host enqueue order per session: native turns vs skipped service prompts. */
+  private readonly nativeInboxOrder = new Map<string, Array<{ inboxID: string; turn: boolean }>>()
+  /** Which kind owns the session's current host execution. */
+  private readonly nativeExecutionOwner = new Map<string, "turn" | "skip">()
+  /** Turns answered by the session's current host execution, in answer order. */
+  private readonly nativeExecutionTurns = new Map<string, string[]>()
+  /** Queued turns the host delivered into an already-running execution. */
+  private readonly nativeSteeredInboxes = new Map<string, string[]>()
+  /** Run id whose execution terminal was already observed on this session. */
+  private readonly nativeRunSettled = new Map<string, string>()
+  private readonly nativeActiveTurn = new Map<string, string>()
+  private readonly nativePendingExecutions = new Map<string, number>()
+  private readonly nativeAssistantTurns = new Map<string, string>()
+  /**
+   * Ticket #230: shadow ingestion is in-memory only. It reuses native turn
+   * identities and the pure text/router helpers, writes no durable row,
+   * publishes no patch, and routes no work. State is cleared on settle, mode
+   * change, and service stop.
+   */
+  private readonly shadowSessions = new Map<string, ShadowSession>()
+  private readonly shadowTurns = new Map<string, ShadowTurn>()
+  private readonly shadowComparisons: ShadowComparison[] = []
+  private shadowComparisonTotal = 0
+  /** In-memory authoritative text parts per turn; durable only at settle. */
+  private readonly nativeText = new Map<string, NativeTextState>()
+  /** Durable streaming row per turn, so deltas never open a second row. */
+  private readonly nativeRows = new Map<string, { message: Message; channel: string; lastSave: number; checkpointTimer?: ReturnType<typeof setTimeout> }>()
+  /**
+   * Ticket #217: last local receipt and reconciliation count per open native
+   * turn. Local time, not host event time, so clock skew never arms the
+   * watchdog early. In-memory only.
+   */
+  private readonly nativeWatchdog = new Map<string, { lastActivityAt: number; passes: number }>()
+  /** Ticket #217: parent turns held for a live background child, bounded. */
+  private readonly nativeDeferredSettlements = new Map<string, {
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string }
+    at: number
+    deadline: number
+    timer?: ReturnType<typeof setTimeout>
+  }>()
+  /** Delivery state is informational for now; terminal events settle turns. */
+  private readonly nativeDelivery = new Map<string, string>()
+  /**
+   * Ticket #218: reconciliation is a bounded start/reconnect/adoption pass,
+   * plus the #217 watchdog. The queue keeps it ordered with ingestion events;
+   * the run map coalesces a trigger already in flight.
+   */
+  private readonly nativeReconcileRuns = new Map<string, Promise<{ ok: boolean; reason?: string }>>()
+  /**
+   * Ticket #218: the first location attach follows service start, which
+   * already reconciled. Every later attach is a reconnect or a new location
+   * and gets one bounded pass over the bound sessions.
+   */
+  private nativeLocationAttached = false
+  private readonly nativeSync: NativeSyncStatus = { state: "live" }
+  private nativeReconcilePending = 0
+  private nativeReconcileFailures = 0
   /**
    * Ticket #155: in-flight tool names and input heads, keyed by
    * session/message/call. `session.tool.called` carries the input but not the
@@ -541,11 +757,16 @@ export class EnsembleV2Service {
   private readonly heartbeatMs: number
   /** Ticket #188: how long a parent run may hold for missing child terminal events. */
   private readonly nativeSubagentBarrierMs: number
+  /** Ticket #217: missing-terminal watchdog bound and per-turn read cap. */
+  private readonly nativeTurnWatchdogMs: number
+  private readonly nativeTurnWatchdogMaxPasses: number
 
-  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number } = {}) {
+  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number; nativeTurnWatchdogMs?: number; nativeTurnWatchdogMaxPasses?: number } = {}) {
     this.ctx = ctx
     this.heartbeatMs = Math.max(10, Math.floor(options.heartbeatMs ?? HEARTBEAT_MS))
     this.nativeSubagentBarrierMs = Math.max(1, Math.floor(options.nativeSubagentBarrierMs ?? NATIVE_SUBAGENT_BARRIER_MS))
+    this.nativeTurnWatchdogMs = Math.max(1, Math.floor(options.nativeTurnWatchdogMs ?? NATIVE_TURN_WATCHDOG_MS))
+    this.nativeTurnWatchdogMaxPasses = Math.max(1, Math.floor(options.nativeTurnWatchdogMaxPasses ?? NATIVE_TURN_WATCHDOG_MAX_PASSES))
     this.catalog = new Catalog(ctx, () => {
       this.publishFeedMetaIfChanged()
     })
@@ -577,9 +798,24 @@ export class EnsembleV2Service {
       observer: this.createStoreObserver(),
     })
     await this.store.load()
+    // Ticket #226: backfill pre-channel direct lines before any reader serves
+    // them. Migration is idempotent; an empty legacy store is a cheap no-op.
+    const directMigration = await this.store.migrateLegacyDirectTranscripts()
+    if (directMigration.channels > 0) {
+      this.logger.event("info", "service", "service.direct.migrated", directMigration)
+    }
     this.refreshDmClock()
     await this.reconcileInitJobs()
     await this.reconcileLoadedNativeSubagents()
+    // Ticket #218: one reconciliation pass over every bound native session on
+    // service start. It recovers missing turns/rows, repairs terminal results,
+    // and only interrupts an answerless turn when the transcript confirms it.
+    // `off`/`shadow` keep the pre-native-first restart recovery only.
+    if (nativeFirstMode(this.store.settings()) === "on") {
+      await this.reconcileNativeBindings("start")
+    } else {
+      await this.recoverNativeTurns()
+    }
     // Ticket #148: restart recovery is lease-safe. Load leaves `working` rows
     // untouched; reapAndRetire() requeues only an expired/missing lease with
     // no live local run, and reconcileWaitingWork() repairs a working row
@@ -613,6 +849,26 @@ export class EnsembleV2Service {
       this.streamTimer = undefined
       this.pendingStreams.clear()
       this.workActivity.dispose()
+      for (const live of this.nativeRows.values()) {
+        if (live.checkpointTimer !== undefined) clearTimeout(live.checkpointTimer)
+      }
+      this.nativeRows.clear()
+      this.nativeInboxOrder.clear()
+      this.nativeExecutionOwner.clear()
+      this.nativeExecutionTurns.clear()
+      this.nativeSteeredInboxes.clear()
+      this.nativeRunSettled.clear()
+      this.nativeWatchdog.clear()
+      this.nativeReconcileRuns.clear()
+      this.clearShadowState()
+      this.nativeLocationAttached = false
+      this.nativeReconcilePending = 0
+      this.nativeReconcileFailures = 0
+      this.setNativeSync("live")
+      for (const pending of this.nativeDeferredSettlements.values()) {
+        if (pending.timer !== undefined) clearTimeout(pending.timer)
+      }
+      this.nativeDeferredSettlements.clear()
       this.toolCalls.clear()
       this.nativeSubagentParents.clear()
       this.nativeSubagentActive.clear()
@@ -645,11 +901,12 @@ export class EnsembleV2Service {
     revision: (input: unknown) => Promise<Revision>
     "changes.since": (input: unknown) => Promise<ChangesSince>
     "work.project": (input: unknown) => Promise<any>
+    "work.history": (input: unknown) => Promise<any>
     "transcript.window": (input: unknown) => Promise<any>
     "message.get": (input: unknown) => Promise<any>
     "logs.recent": (input: unknown) => Promise<any>
     resync: (input: unknown) => Promise<ScopedResync>
-    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string; recoveries?: unknown[]; logs?: unknown; service?: unknown }>
+    diagnostic: (input: unknown) => Promise<any>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
@@ -661,6 +918,15 @@ export class EnsembleV2Service {
       revision: async (input) => this.revision(rpcInput(input).directory),
       "changes.since": async (input) => this.changesSince(rpcInput(input)),
       "work.project": async (input) => this.workProject(rpcInput(input).directory),
+      "work.history": async (input) => {
+        const request = rpcInput(input)
+        return this.workHistoryPage(request.directory, {
+          ...(request.workspaceID ? { workspaceID: request.workspaceID } : {}),
+          ...(request.conversationID ? { conversationID: request.conversationID } : {}),
+          ...(request.before ? { before: request.before } : {}),
+          ...(request.limit !== undefined ? { limit: request.limit } : {}),
+        })
+      },
       "transcript.window": async (input) => {
         const request = rpcInput(input)
         return this.transcriptWindow(request.directory, request.workspaceID, request.beforeSeq, request.limit)
@@ -707,6 +973,16 @@ export class EnsembleV2Service {
    */
   trackLocation(ctx: any, directory?: string): void {
     if (ctx) this.locations.set(ctx, directory)
+    if (!directory) return
+    // Ticket #218: the first attach follows service start, which already
+    // reconciled. Every later attach is a reconnect or a new location and
+    // reconciles each bound session once.
+    if (!this.nativeLocationAttached) {
+      this.nativeLocationAttached = true
+      return
+    }
+    if (nativeFirstMode(this.store?.settings()) !== "on") return
+    void this.reconcileNativeBindings("reconnect", { directory })
   }
 
   async untrackLocation(ctx: any): Promise<void> {
@@ -732,6 +1008,30 @@ export class EnsembleV2Service {
     if (this.stopped) return
     if (!this.recentHostEvents.claim(event)) return
     const type = String(event?.type ?? "")
+    // Ticket #224: the picker refreshes from claimed session lifecycle events,
+    // not a timer. One signal per event, once across every attached location.
+    if (sessionPickerEventRefresh(type)) {
+      this.sessionPickerChanged(type, typeof event?.data?.sessionID === "string" ? event.data.sessionID : undefined)
+    }
+    // Ticket #215: native turn ingestion shares the one service writer. The
+    // per-session queue preserves event order; a duplicate id was already
+    // claimed above and deterministic durable ids cover replays without one.
+    if (isNativeIngestEvent(type)) {
+      const sessionID = nativeEventSessionID(event)
+      if (sessionID) {
+        // Ticket #215: enqueue, never await, here. One session's settle can be
+        // slow; the host subscription must still deliver the next session's
+        // events. The per-session queue preserves order and owns its errors.
+        void this.enqueueNativeEvent(sessionID, event).catch((error) => {
+          this.logger?.event("warn", "native", "native.event.dispatch.error", {
+            sessionID,
+            type,
+            error,
+          })
+        })
+        return
+      }
+    }
     if (type === "skill.updated" || type === "model.updated" || type === "provider.updated") {
       void this.catalog.refresh(location)
       return
@@ -751,6 +1051,13 @@ export class EnsembleV2Service {
     // subagent records. `parentID` maps a child to its Ensemble parent task.
     if (type === "session.created") {
       await this.handleNativeSubagentCreated(event)
+      // Ticket #218: a bound session reappearing after a host reconnect gets
+      // one transcript reconciliation. The first creation is unbound and is
+      // ignored here; adoption owns that path.
+      const sessionID = nativeEventSessionID(event)
+      if (sessionID && this.store.bindingForSession(sessionID) && nativeFirstMode(this.store.settings()) === "on") {
+        void this.reconcileNativeSession(sessionID, "reconnect")
+      }
       return
     }
     if (type === "session.deleted") {
@@ -815,6 +1122,23 @@ export class EnsembleV2Service {
   ): void {
     for (const registration of this.registrations) {
       void registration?.events?.emit?.("changed", { version, ...scope })?.catch?.(() => undefined)
+    }
+  }
+
+  /**
+   * Ticket #224: one ephemeral picker refresh signal. It carries ids and a
+   * revision only; the client re-reads the scoped list and never receives
+   * conversation content. No durable version moves.
+   */
+  private sessionPickerChanged(kind: string, sessionID?: string): void {
+    this.sessionPickerRevision += 1
+    const payload = {
+      revision: this.sessionPickerRevision,
+      kind,
+      ...(sessionID ? { sessionID } : {}),
+    }
+    for (const registration of this.registrations) {
+      void registration?.events?.emit?.("sessions.changed", payload)?.catch?.(() => undefined)
     }
   }
 
@@ -1114,7 +1438,14 @@ export class EnsembleV2Service {
     if (run) return { workspaceID: run.workspaceID, agentID: run.agentID, subtaskID: run.subtaskID }
     const binding = this.store.bindingForSession(sessionID)
     if (!binding) return undefined
-    return { workspaceID: binding.workspaceID, agentID: binding.agentID }
+    const conversation = bindingConversation(binding)
+    if (!conversation) return undefined
+    // Ticket #214: only a workspace group binding owns a group channel. A
+    // direct conversation's host activity must never surface in that channel.
+    return {
+      workspaceID: conversation.kind === "workspace" ? conversation.workspaceID : undefined,
+      agentID: binding.agentID,
+    }
   }
 
   /** True while the host waits on a user decision for this session. */
@@ -1271,6 +1602,7 @@ export class EnsembleV2Service {
     await this.reconcileTerminalWork()
     await this.reapAndRetire()
     await this.reconcileWaitingWork()
+    await this.reconcileNativeWatchdog(at)
     await this.settleTerminalStreams()
   }
 
@@ -1322,6 +1654,7 @@ export class EnsembleV2Service {
       configRevision: this.configFingerprint(directory, local.workspaceDirectories),
       protocol: ENSEMBLE_PROTOCOL_VERSION,
       epoch: this.epochValue,
+      nativeSync: { ...this.nativeSync },
       counts: workspaceCounts(state),
       scopeVersions: this.store.scopeVersions(),
       gate: this.tier3Gate(state),
@@ -1388,6 +1721,7 @@ export class EnsembleV2Service {
       configRevision: this.configFingerprint(directory, this.activeWorkspaceDirectories(state)),
       protocol: ENSEMBLE_PROTOCOL_VERSION,
       epoch: this.epochValue,
+      nativeSync: { ...this.nativeSync },
     }
     if (this.lastConfigError) payload.configError = this.lastConfigError
     if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
@@ -1496,9 +1830,6 @@ export class EnsembleV2Service {
     return {
       ...state,
       messages: {},
-      // Direct-chat transcripts are native-session detail and unread by the
-      // TUI; scoped reads never carry that unbounded history.
-      dmTranscripts: {},
       subtasks,
       runs: Object.fromEntries(this.activeRuns),
     }
@@ -1515,6 +1846,45 @@ export class EnsembleV2Service {
       counts: workspaceCounts(state),
       tasks,
       groups: this.dispatchGroupsFor(tasks, state.dispatchGroups),
+    })
+  }
+
+  /**
+   * Ticket #222: one bounded, conversation-scoped page of terminal Work from
+   * the durable store. A large history never rides on the bootstrap or a Work
+   * resync; a fresh client asks for this page instead of depending on an
+   * earlier client's retained rows.
+   */
+  private async workHistoryPage(
+    directory: string,
+    request: { workspaceID?: string; conversationID?: string; before?: string; limit?: number },
+  ): Promise<any> {
+    await this.beginRead(directory, { dmClock: false })
+    const state = this.store.read()
+    const direct = request.conversationID ? isDirectMessageChannel(request.conversationID) : false
+    const conversationID = direct
+      ? request.conversationID!
+      : this.readWorkspaceID(state, directory, request.workspaceID ?? request.conversationID)
+    if (!conversationID) throw Object.assign(new Error("Conversation not found."), { code: "not_found" })
+    const at = Date.now()
+    const page = selectWorkHistory(Object.values(state.subtasks), {
+      conversationID,
+      now: at,
+      ...(request.before ? { before: request.before } : {}),
+      ...(request.limit !== undefined ? { limit: request.limit } : {}),
+    })
+    const tasks: Record<string, Subtask> = {}
+    for (const task of page.tasks) tasks[task.id] = { ...task, status: deriveWorkStatus(task, at) } as Subtask
+    const groups = workHistoryGroups(page.tasks, state.dispatchGroups)
+    return jsonSafe({
+      version: state.version,
+      epoch: this.epochValue,
+      conversationID,
+      tasks,
+      groups,
+      hasMore: page.hasMore,
+      ...(page.next ? { next: page.next } : {}),
+      limit: page.limit,
     })
   }
 
@@ -1659,7 +2029,7 @@ export class EnsembleV2Service {
     return jsonSafe(payload)
   }
 
-  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; recoveries: Array<{ taskID: string; from?: string; to?: string; reason?: string; at?: number }>; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; recoveries: Array<{ taskID: string; from?: string; to?: string; reason?: string; at?: number }>; native: { sync: NativeSyncStatus; watchdog: { maxPasses: number; turns: Record<string, { passes: number; lastActivityAt?: number; held?: boolean }> }; shadow: { activeTurns: number; activeSessions: number; comparisons: number; last: ShadowComparison[] } }; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
     await this.store.sync()
     this.refreshDmClock()
     this.noteViewDirectory(directory)
@@ -1694,6 +2064,31 @@ export class EnsembleV2Service {
         groups: Object.values(state.dispatchGroups).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)),
       },
       recoveries,
+      // Ticket #218: in-memory native support facts only. The sync label is a
+      // state/reason code; the watchdog map carries turn ids, pass counts, and
+      // whether a background child currently holds the turn.
+      native: {
+        sync: { ...this.nativeSync },
+        watchdog: {
+          maxPasses: this.nativeTurnWatchdogMaxPasses,
+          turns: Object.fromEntries([...this.nativeWatchdog].map(([turnID, state]) => [
+            turnID,
+            {
+              passes: state.passes,
+              lastActivityAt: state.lastActivityAt,
+              ...(this.nativeDeferredSettlements.has(turnID) ? { held: true } : {}),
+            },
+          ])),
+        },
+        // Ticket #230: bounded, content-free shadow comparison rows. IDs,
+        // phases, lengths, digests, and route counts only.
+        shadow: {
+          activeTurns: this.shadowTurns.size,
+          activeSessions: this.shadowSessions.size,
+          comparisons: this.shadowComparisonTotal,
+          last: this.shadowComparisons.slice(-8),
+        },
+      },
       ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
       ...(this.logger ? { logs: this.logger.stats() } : {}),
       service: {
@@ -1713,7 +2108,7 @@ export class EnsembleV2Service {
     // reports its suppressed total to the viewer instead of losing it.
     this.feedResetLimiter.flush()
     const levels = ["error", "warn", "info", "debug", "trace"]
-    const categories = ["service", "task", "retry", "approval", "message", "feed", "refresh", "tui", "host", "dispatch", "failure"]
+    const categories = ["service", "task", "retry", "approval", "message", "feed", "refresh", "tui", "host", "dispatch", "failure", "native"]
     if (input.level && !levels.includes(input.level)) throw invalidInput(`level must be one of ${levels.join(", ")}.`)
     if (input.cat && !categories.includes(input.cat)) throw invalidInput(`cat must be one of ${categories.join(", ")}.`)
     const entries = logger.recent({
@@ -1757,12 +2152,18 @@ export class EnsembleV2Service {
       case "agent.create": return this.createAgent(payload)
       case "agent.update": return this.updateAgent(payload)
       case "agent.rebindSession": return this.rebindAgentSession(payload)
+      case "agent.sessionBinding": return this.resolveAgentSessionBinding(payload)
       case "agent.archive": return this.archiveAgent(payload.id, payload.replacementLeaderID)
       case "agent.delete": return this.deleteAgent(payload.id, payload.replacementLeaderID, Boolean(payload.deleteNativeSessions))
       case "agent.moveHome": return this.moveHomeSession(payload.agentID, payload.workspaceID)
+      case "session.picker": return this.nativeSessionPicker(directory, payload)
+      case "session.adopt.preview": return this.previewNativeSessionAdoption(directory, payload)
+      case "session.adopt": return this.adoptNativeSession(directory, payload)
       case "chat.context": return this.chatContext(payload.agentID, payload.workspaceID)
-      case "chat.send": return this.chatSend(payload.agentID, payload.workspaceID, payload.text)
+      case "chat.send": return this.chatSend(payload.agentID, payload.workspaceID, payload.text, undefined, attachmentIDs(payload.attachments))
       case "chat.removeQueued": return this.removeQueuedDm(payload.agentID, payload.workspaceID, payload.id)
+      case "attachment.add": return this.addAttachment(payload)
+      case "attachment.remove": return this.removeAttachment(payload)
       case "workspace.create": return this.createWorkspace(directory, payload)
       case "workspace.update": return this.updateWorkspace(payload)
       case "workspace.activate": return this.activateWorkspace(payload.id)
@@ -1791,21 +2192,7 @@ export class EnsembleV2Service {
   }
 
   private identityForAgent(agent: Agent): string {
-    return [
-      `<ensemble_persona name="${agent.name}">`,
-      agent.role || "You are a focused teammate.",
-      "</ensemble_persona>",
-      "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
-      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path, recipient, and required maxHops. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
-      "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work). Your turn context shows task, group, command, and depth budgets; successful results show what remains. You cannot raise a ceiling. When a budget is exhausted, return your result to the leader; only the leader may open a linked continuation group with ensemble_delegate's continuationOf plus a required groupMaxHops tier. When the command or continuation cap is reached, ask the user to start a new command for a fresh budget.",
-      "Answer first: write your own answer in the group chat before handing off. A handoff forwards a completed result or clearly scoped work; it is never a substitute for answering your assignment.",
-      "A `/skill` token in a user message is a deliberate skill request. When it applies to your part, load that skill with the native skill tool rather than treating it as prose.",
-      "When a user message addresses multiple agents, handle only the part addressed to you. Do not delegate or duplicate another addressed agent's part; use ensemble_task_status and ensemble_workspace_info when you need coordination state.",
-      "End-of-turn handoff (mandatory): every non-leader turn must end with a handoff to another member — hand off explicitly with ensemble_handoff, or the server hands your finished turn to the workspace leader automatically and the group shows `Handed to $Name`. The leader may end turns normally or hand off voluntarily. A batch review turn lists every pending completion: decide each item with ensemble_review (delegate, start, end, or dismiss) — a delegate decision requires maxHops for the recipient — and the batch closes only when every item is decided; non-leaders hand it onward to the leader.",
-      "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
-      "",
-      ensembleBlock(),
-    ].join("\n")
+    return agentIdentity(agent)
   }
 
   private async ensureHomeBinding(agent: Agent): Promise<{ sessionID: string; directory: string }> {
@@ -1856,16 +2243,26 @@ export class EnsembleV2Service {
     return { sessionID: created.id, directory }
   }
 
-  private chatSession(agent: Agent, workspaceID?: string): { workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number } {
+  /**
+   * Ticket #214: resolve which conversation a direct chat serves. The choice
+   * reads live membership and the native-first mode; it never trusts a stale
+   * surface workspace. `bindingKeyID` stays the legacy DM transcript/queue key
+   * (workspace id or `home`) so a rollback keeps the same history.
+   */
+  private chatTarget(agent: Agent, workspaceID?: string): {
+    conversation: BindingConversation
+    workspace?: Workspace
+    bindingKeyID: string
+    directory: string
+  } {
     const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
-    if (workspace && workspace.memberIDs.includes(agent.id)) {
-      const binding = this.store.binding(workspace.id, agent.id)
-      if (binding) return { workspace, sessionID: binding.sessionID, directory: workspace.directory, bindingKeyID: workspace.id, bindingVersion: binding.agentVersion }
-      return { workspace, sessionID: "", directory: workspace.directory, bindingKeyID: workspace.id }
+    const member = workspace?.memberIDs.includes(agent.id) ?? false
+    const mode = nativeFirstMode(this.store.settings())
+    const conversation = selectDirectConversation({ agentID: agent.id, workspaceID: workspace?.id, workspaceMember: member, mode })
+    if (conversation.kind === "home" || !workspace) {
+      return { conversation: { kind: "home", agentID: agent.id }, bindingKeyID: "home", directory: agent.homeDirectory ?? homedir() }
     }
-    const home = this.store.binding("home", agent.id)
-    if (home) return { workspace: workspace && workspace.memberIDs.includes(agent.id) ? workspace : undefined, sessionID: home.sessionID, directory: home.directory ?? agent.homeDirectory ?? homedir(), bindingKeyID: "home", bindingVersion: home.agentVersion }
-    return { workspace, sessionID: "", directory: workspace && workspace.memberIDs.includes(agent.id) ? workspace.directory : agent.homeDirectory ?? homedir(), bindingKeyID: workspace && workspace.memberIDs.includes(agent.id) ? workspace.id : "home" }
+    return { conversation, workspace, bindingKeyID: workspace.id, directory: workspace.directory }
   }
 
   /**
@@ -1895,15 +2292,56 @@ export class EnsembleV2Service {
    * conversation on an unavailable API.
    */
   private async nativeSessionMissing(sessionID: string): Promise<boolean> {
+    return !(await this.nativeSessionDetails(sessionID)).found
+  }
+
+  /**
+   * One host read for binding resolution: existence plus the host's archived
+   * marker. `session.get` is optional on older hosts; an unavailable API fails
+   * open, matching the rotation policy. Ticket #224 also reads the root
+   * parent, location, title, and recency for the picker and adoption rules.
+   */
+  private async nativeSessionDetails(sessionID: string): Promise<{
+    found: boolean
+    archived: boolean
+    sessionID: string
+    parentID?: string
+    title?: string
+    directory?: string
+    updatedAt?: number
+    busy?: boolean
+  }> {
     const get = this.ctx.session?.get
-    if (typeof get !== "function") return false
+    if (typeof get !== "function") return { found: true, archived: false, sessionID }
     try {
       const info = unwrap<any>(await get.call(this.ctx.session, { sessionID }))
-      return !info || (typeof info === "object" && !info.id)
+      const resolvedID = String(info?.id ?? info?.sessionID ?? sessionID)
+      if (!info || (typeof info === "object" && !info.id && !info.sessionID)) {
+        return { found: false, archived: false, sessionID }
+      }
+      return {
+        found: true,
+        archived: Boolean(info.archived) || Boolean(info.time?.archived),
+        sessionID: resolvedID,
+        parentID: typeof info.parentID === "string" && info.parentID.length > 0 ? info.parentID : undefined,
+        title: typeof info.title === "string" ? info.title : undefined,
+        directory: typeof info.location?.directory === "string"
+          ? info.location.directory
+          : typeof info.directory === "string"
+            ? info.directory
+            : undefined,
+        updatedAt: typeof info.time?.updated === "number"
+          ? info.time.updated
+          : typeof info.updatedAt === "number"
+            ? info.updatedAt
+            : undefined,
+        busy: info.active?.type === "running" || info.status === "running" || info.busy === true || undefined,
+      }
     } catch (error: any) {
       const reason = String(error?._tag ?? error?.code ?? error?.type ?? "")
       const status = Number(error?.status ?? error?.statusCode ?? 0)
-      return reason === "SessionNotFoundError" || reason === "session_not_found" || reason === "not_found" || status === 404
+      const missing = reason === "SessionNotFoundError" || reason === "session_not_found" || reason === "not_found" || status === 404
+      return { found: !missing, archived: false, sessionID }
     }
   }
 
@@ -1973,27 +2411,65 @@ export class EnsembleV2Service {
     await this.store.saveAgent(current)
   }
 
-  private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{ workspace?: Workspace; sessionID: string; directory: string; bindingKeyID: string; bindingVersion?: number }> {
-    const target = this.chatSession(agent, workspaceID)
-    if (target.sessionID) {
-      const binding = this.store.binding(target.bindingKeyID, agent.id)
-      if (binding && !(await this.nativeSessionMissing(binding.sessionID))) {
-        await this.refreshAgentSession(binding, agent)
-        await this.ensureIdentity(binding.sessionID, agent, binding.agentVersion)
-        return { ...target, sessionID: binding.sessionID, bindingVersion: binding.agentVersion }
+  private async ensureChatSession(agent: Agent, workspaceID?: string): Promise<{
+    workspace?: Workspace
+    conversation: BindingConversation
+    sessionID: string
+    directory: string
+    bindingKeyID: string
+    bindingVersion?: number
+  }> {
+    const target = this.chatTarget(agent, workspaceID)
+    const binding = this.store.bindingForConversation(agent.id, target.conversation)
+    if (binding && !(await this.nativeSessionMissing(binding.sessionID))) {
+      await this.refreshAgentSession(binding, agent)
+      // A workspace directory is the file-access scope. Keep the direct
+      // binding's recorded directory truthful without rotating the session.
+      if (target.workspace && binding.directory !== target.workspace.directory) {
+        binding.directory = target.workspace.directory
+        binding.updatedAt = now()
+        await this.store.saveBinding(binding)
+      }
+      await this.ensureIdentity(binding.sessionID, agent, binding.agentVersion)
+      return {
+        ...target,
+        sessionID: binding.sessionID,
+        directory: target.conversation.kind === "home" ? binding.directory ?? target.directory : target.directory,
+        bindingVersion: binding.agentVersion,
       }
     }
-    if (target.workspace) {
-      const binding = await this.ensureBinding(target.workspace, agent)
-      if (!binding) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
-      const stored = this.store.binding(target.workspace.id, agent.id)
-      await this.ensureIdentity(binding.sessionID, agent, stored?.agentVersion)
-      return { ...target, sessionID: binding.sessionID, bindingKeyID: target.workspace.id, bindingVersion: stored?.agentVersion }
+    if (target.conversation.kind === "direct" && target.workspace) {
+      // Ticket #214: direct chat in a workspace gets its own session in the
+      // workspace directory. It is created even when the group session exists;
+      // the two conversations never share native context.
+      const created = await this.ensureDirectBinding(target.workspace, agent)
+      const stored = this.store.bindingForConversation(agent.id, target.conversation)
+      await this.ensureIdentity(created.sessionID, agent, stored?.agentVersion)
+      return { ...target, sessionID: created.sessionID, bindingVersion: stored?.agentVersion }
+    }
+    if (target.conversation.kind === "workspace" && target.workspace) {
+      const created = await this.ensureBinding(target.workspace, agent)
+      if (!created) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
+      const stored = this.store.bindingForConversation(agent.id, target.conversation)
+      await this.ensureIdentity(created.sessionID, agent, stored?.agentVersion)
+      return { ...target, sessionID: created.sessionID, bindingVersion: stored?.agentVersion }
     }
     const home = await this.ensureHomeBinding(agent)
-    const binding = this.store.binding("home", agent.id)
-    await this.ensureIdentity(home.sessionID, agent, binding?.agentVersion)
-    return { workspace: undefined, sessionID: home.sessionID, directory: home.directory, bindingKeyID: "home", bindingVersion: binding?.agentVersion }
+    const stored = this.store.bindingForConversation(agent.id, { kind: "home", agentID: agent.id })
+    await this.ensureIdentity(home.sessionID, agent, stored?.agentVersion)
+    return {
+      workspace: undefined,
+      conversation: { kind: "home", agentID: agent.id },
+      sessionID: home.sessionID,
+      directory: home.directory,
+      bindingKeyID: "home",
+      bindingVersion: stored?.agentVersion,
+    }
+  }
+
+  /** True while this native session is serving a live run or direct prompt. */
+  private isSessionBusy(sessionID: string): boolean {
+    return this.directBusy.has(sessionID) || [...this.activeRuns.values()].some((run) => run.sessionID === sessionID)
   }
 
   private async chatContext(agentID: string, workspaceID?: string): Promise<any> {
@@ -2005,29 +2481,128 @@ export class EnsembleV2Service {
         .filter((entry) => entry.id && entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID))
         .map((entry) => entry.id),
     )
-    // Ticket #77 root cause of permanently-grey sent lines: the stored DM
-    // line keeps `queued: true` after it was flushed, and `|| message.queued`
-    // made that stale bit outrank the queue's own truth. The queue entry is
+    // Ticket #77 root cause of permanently-grey sent lines: a stored line's
+    // own `queued` bit could outrank the queue's truth. The queue entry is
     // authoritative: a line is queued exactly while its entry is still
     // `queued`; sent/failed/removed entries mean the line renders as sent.
-    const stored = this.store.dmTranscript(target.bindingKeyID, agent.id).map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
-    const native = mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
+    // Ticket #226: every direct read uses the conversation channel.
+    // Ticket #215: once native-first is `on`, a direct conversation reads its
+    // durable channel and never polls the native transcript. Before the
+    // cutover, native assistant text still comes from the session transcript.
+    const nativeDurable = nativeFirstMode(this.store.settings()) === "on"
+      && (target.conversation.kind === "direct" || target.conversation.kind === "home")
+    const channel = directMessageChannelForBinding(target.bindingKeyID, agent.id)
+    // The channel supplies stored user and system rows before the cutover.
+    // Native agent rows are skipped there so a rollback never duplicates an
+    // answer that the session transcript still provides.
+    const stored = this.store
+      .messages(channel)
+      .filter((message) => nativeDurable || message.author !== "agent" || !message.native)
+      .map((message) => chatLineFromMessage(message, agent.name))
+      .map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
+    const native = nativeDurable ? [] : mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
     const messages = mergeDmTranscript(stored, native)
-    const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
-    const queued = this.store.dmQueue().filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID)).length
-    return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages, queued }
+    const busy = this.isSessionBusy(target.sessionID)
+    const queued = queuedIDs.size
+    // Ticket #214: the direct surface labels the native context it is bound
+    // to. `sharedSession` marks the pre-cutover rollback, where direct chat is
+    // still served by the group session.
+    const conversation: ChatConversationContext = {
+      kind: target.conversation.kind,
+      ...(target.conversation.kind === "home" ? {} : { workspaceID: target.conversation.workspaceID }),
+      ...(target.workspace ? { workspaceName: target.workspace.name } : {}),
+      context: target.conversation.kind === "home" ? "home" : "workspace",
+      sessionID: target.sessionID,
+      sharedSession: target.conversation.kind === "workspace",
+      ...(nativeDurable ? { channel, durable: true } : {}),
+    }
+    return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages, queued, conversation }
   }
 
-  private async chatSend(agentID: string, workspaceID: string | undefined, text: string, envelope?: { fromID?: string; correlationID?: string }): Promise<any> {
+  /**
+   * Ticket #223: attachments live under the conversation's own `.ensemble`
+   * area. Group rows use the workspace; a direct row uses the workspace when
+   * the agent is a member and the agent home otherwise. The key is derived
+   * from the same binding decision the send uses, never from client input.
+   */
+  private attachmentTarget(payload: Json): { directory: string; conversationKey: string; agentID?: Id; workspaceID?: Id } {
+    const workspaceID = typeof payload.workspaceID === "string" && payload.workspaceID ? payload.workspaceID : undefined
+    const agentID = typeof payload.agentID === "string" && payload.agentID ? payload.agentID : undefined
+    if (agentID) {
+      const agent = this.store.agent(agentID)
+      if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+      const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
+      if (workspaceID && !workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+      const target = this.chatTarget(agent, workspace?.id)
+      const workspaceDirect = target.workspace?.id
+      return {
+        directory: target.directory,
+        conversationKey: attachmentConversationKey({
+          agentID: agent.id,
+          workspaceID: workspaceDirect,
+          bindingKey: workspaceDirect ? target.bindingKeyID : "home",
+        }),
+        agentID: agent.id,
+        workspaceID: workspaceDirect,
+      }
+    }
+    const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
+    if (!workspace || workspace.archived) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+    return {
+      directory: workspace.directory,
+      conversationKey: attachmentConversationKey({ workspaceID: workspace.id }),
+      workspaceID: workspace.id,
+    }
+  }
+
+  private decodeAttachmentData(value: unknown): Uint8Array {
+    if (typeof value !== "string" || !value) throw attachmentError("invalid", "The clipboard image had no bytes.")
+    const base64 = value.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "")
+    if (base64.length > Math.ceil((DEFAULT_ATTACHMENT_LIMITS.maxFileBytes * 4) / 3) + 8) {
+      throw attachmentError("too_large", `The clipboard image is larger than ${formatAttachmentSize(DEFAULT_ATTACHMENT_LIMITS.maxFileBytes)}.`)
+    }
+    let bytes: Buffer
+    try {
+      bytes = Buffer.from(base64, "base64")
+    } catch {
+      throw attachmentError("invalid", "The clipboard image could not be decoded.")
+    }
+    if (bytes.length === 0) throw attachmentError("invalid", "The clipboard image had no bytes.")
+    return new Uint8Array(bytes)
+  }
+
+  /** Copy a pasted path or clipboard image into the bounded conversation store. */
+  private async addAttachment(payload: Json): Promise<MessageAttachment> {
+    const target = this.attachmentTarget(payload)
+    const bytes = payload.data !== undefined ? this.decodeAttachmentData(payload.data) : undefined
+    const stored = storeAttachment({
+      directory: target.directory,
+      conversationKey: target.conversationKey,
+      ...(bytes ? { bytes } : {}),
+      ...(!bytes && typeof payload.path === "string" && payload.path ? { sourcePath: payload.path } : {}),
+      ...(typeof payload.name === "string" && payload.name ? { name: payload.name } : {}),
+      ...(typeof payload.mime === "string" && payload.mime ? { mime: payload.mime } : {}),
+    })
+    return stored.attachment
+  }
+
+  private removeAttachment(payload: Json): { removed: boolean } {
+    const target = this.attachmentTarget(payload)
+    const id = typeof payload.id === "string" ? payload.id : ""
+    if (!id) throw attachmentError("invalid", "Attachment id is required.")
+    return { removed: removeStoredAttachment(target.directory, target.conversationKey, id) }
+  }
+
+  private async chatSend(agentID: string, workspaceID: string | undefined, text: string, envelope?: { fromID?: string; correlationID?: string }, attachmentList: string[] = []): Promise<any> {
     const value = String(text ?? "").trim()
-    if (!value) throw Object.assign(new Error("Message is empty."), { code: "empty" })
+    if (!value && attachmentList.length === 0) throw Object.assign(new Error("Message is empty."), { code: "empty" })
     const state = this.store.read()
     const agent = state.agents[agentID]
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     // Ticket #103: direct conversations have no leader triage. General
     // skills are rejected before a DM line or prompt is created; the DM
     // agent's own assigned skills pass through unchanged.
-    if (!envelope?.fromID) {
+    if (!envelope?.fromID && value) {
       const issue = directSkillIssue({
         text: value,
         agent,
@@ -2039,10 +2614,29 @@ export class EnsembleV2Service {
     }
     const target = await this.ensureChatSession(agent, workspaceID)
     const workspaceKey = target.bindingKeyID
-    const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
+    // Ticket #223: attachments use the same conversation the direct send
+    // resolves to. Ticket #214: the binding decision is `ensureChatSession`'s,
+    // so a workspace-direct send cannot read the group store.
+    const conversationKey = attachmentConversationKey({
+      agentID: agent.id,
+      workspaceID: target.workspace?.id,
+      bindingKey: workspaceKey,
+    })
+    const attachments = resolveAttachments(target.directory, conversationKey, attachmentList)
+    const promptFiles = promptFilesForAttachments(target.directory, conversationKey, attachments)
+    const busy = this.isSessionBusy(target.sessionID)
     const correlationID = envelope?.correlationID ?? newCorrelationID()
-    const line = { id: id("dm"), role: "user" as const, author: "You", text: value, createdAt: this.dmNow(), queued: busy, correlationID }
-    await this.store.saveDmMessage(workspaceKey, agent.id, line)
+    const line = {
+      id: id("dm"),
+      role: "user" as const,
+      author: "You",
+      text: value,
+      createdAt: this.dmNow(),
+      queued: busy,
+      correlationID,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    }
+    await this.store.saveDirectMessage(workspaceKey, agent.id, line)
     if (busy) {
       const entry: DmQueueEntry = {
         id: line.id,
@@ -2050,6 +2644,7 @@ export class EnsembleV2Service {
         workspaceID: workspaceKey === "home" ? undefined : workspaceKey,
         directory: target.directory,
         text: value,
+        ...(attachments.length > 0 ? { attachments } : {}),
         status: "queued",
         createdAt: line.createdAt,
         fromID: envelope?.fromID,
@@ -2060,7 +2655,13 @@ export class EnsembleV2Service {
     }
     this.directBusy.add(target.sessionID)
     try {
-      await this.ctx.session.prompt({ sessionID: target.sessionID, text: value, delivery: "queue" })
+      await this.ctx.session.prompt({
+        sessionID: target.sessionID,
+        text: value || "See the attached file.",
+        delivery: "queue",
+        metadata: { [NATIVE_INTERNAL_PROMPT_METADATA]: true, [NATIVE_MESSAGE_ID_METADATA]: line.id },
+        ...(promptFiles.length > 0 ? { files: promptFiles } : {}),
+      })
     } catch (error) {
       this.directBusy.delete(target.sessionID)
       throw error
@@ -2089,7 +2690,7 @@ export class EnsembleV2Service {
     const targets = id ? queued.filter((entry) => entry.id === id) : queued.slice(0, 1)
     for (const entry of targets) {
       await this.store.removeDmQueueEntry(entry.id)
-      await this.store.removeDmMessage(workspaceKey, agent.id, entry.id)
+      await this.store.removeDirectMessage(workspaceKey, agent.id, entry.id)
     }
     return { removed: targets.length }
   }
@@ -2099,16 +2700,66 @@ export class EnsembleV2Service {
     const workspace = this.store.workspace(workspaceID)
     if (!agent || !workspace) throw Object.assign(new Error("Agent or workspace not found."), { code: "not_found" })
     if (!workspace.memberIDs.includes(agent.id)) throw Object.assign(new Error("The agent is not a member."), { code: "not_member" })
+    // Ticket #214: after the cutover the home binding is the home-direct
+    // conversation, so moving it targets the workspace-direct conversation
+    // instead of silently turning it into the group session.
+    if (directSessionCutover(nativeFirstMode(this.store.settings()))) return this.moveHomeSessionToDirect(agent, workspace)
     if (this.store.binding(workspace.id, agent.id)) return { moved: false }
     const home = this.store.binding("home", agent.id)
     if (!home) return { moved: false }
     await this.ctx.session.move({ sessionID: home.sessionID, directory: workspace.directory })
     await this.store.removeBinding("home", agent.id)
-    await this.store.moveDmTranscript("home", agent.id, workspace.id)
+    // The pre-cutover move keeps the visible direct history by relocating its
+    // unified channel. The native-first cutover path below deliberately keeps
+    // the home channel on its own conversation (ticket #214).
+    await this.store.moveDirectChannel(
+      directMessageChannelForBinding("home", agent.id),
+      directMessageChannelForBinding(workspace.id, agent.id),
+    )
     this.refreshDmClock()
     await this.store.saveBinding({ workspaceID: workspace.id, agentID: agent.id, sessionID: home.sessionID, kind: "workspace", directory: workspace.directory, agentVersion: agent.version, updatedAt: now() })
     agent.homeSessionID = undefined
     await this.store.saveAgent(agent)
+    return { moved: true }
+  }
+
+  /**
+   * Ticket #214: moving an idle home-direct session into a workspace direct
+   * conversation. The home transcript stays on its own channel; only the
+   * session and its future file access move. A busy session is refused because
+   * the host would only queue the move.
+   */
+  private async moveHomeSessionToDirect(agent: Agent, workspace: Workspace): Promise<any> {
+    const directConversation: BindingConversation = { kind: "direct", workspaceID: workspace.id, agentID: agent.id }
+    if (this.store.bindingForConversation(agent.id, directConversation)) return { moved: false }
+    const homeConversation: BindingConversation = { kind: "home", agentID: agent.id }
+    const home = this.store.bindingForConversation(agent.id, homeConversation)
+    if (!home) return { moved: false }
+    if (this.isSessionBusy(home.sessionID)) {
+      throw Object.assign(new Error("The direct session is busy."), { code: "session_busy" })
+    }
+    await this.ctx.session.move({ sessionID: home.sessionID, directory: workspace.directory })
+    await this.store.removeConversationBinding(agent.id, homeConversation)
+    await this.store.saveBinding({
+      workspaceID: workspace.id,
+      agentID: agent.id,
+      sessionID: home.sessionID,
+      history: home.history,
+      kind: "direct",
+      directory: workspace.directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    })
+    const current = this.store.cloneAgent(agent.id)
+    if (current) {
+      current.homeSessionID = undefined
+      await this.store.saveAgent(current)
+    }
+    this.logger?.event("info", "service", "agent.direct.session.moved", {
+      agentID: agent.id,
+      workspaceID: workspace.id,
+      sessionID: home.sessionID,
+    })
     return { moved: true }
   }
 
@@ -2118,6 +2769,22 @@ export class EnsembleV2Service {
     const candidates = this.store.dmQueue()
       .filter((entry) => entry.agentID === agentID && entry.status === "queued" && (entry.workspaceID ?? "home") === workspaceKey)
       .sort((a, b) => a.createdAt - b.createdAt)
+    if (candidates.length === 0) return
+    const agent = this.store.agent(agentID)
+    if (agent) {
+      try {
+        const target = await this.ensureChatSession(agent, workspaceID)
+        // A workspace queue belongs to the workspace-direct conversation. A
+        // former member keeps the text parked instead of spilling it into the
+        // home context.
+        if (workspaceID && target.conversation.kind === "home") return
+        // Ticket #214: a group turn settling must not race a direct answer that
+        // still owns the direct session. The direct wait drains its own queue.
+        if (this.isSessionBusy(target.sessionID)) return
+      } catch {
+        // The per-entry path records a resolution failure on each candidate.
+      }
+    }
     for (const candidate of candidates) {
       const entry = this.store.cloneDmQueueEntry(candidate.id)
       if (!entry) continue
@@ -2125,9 +2792,24 @@ export class EnsembleV2Service {
         const agent = this.store.agent(agentID)
         if (!agent) throw new Error("Agent not found.")
         const target = await this.ensureChatSession(agent, workspaceID)
+        const conversationKey = attachmentConversationKey({
+          agentID,
+          workspaceID: target.workspace?.id,
+          bindingKey: target.bindingKeyID,
+        })
+        const attachments = entry.attachments ?? []
+        const promptFiles = promptFilesForAttachments(target.directory, conversationKey, attachments)
+        const failure = validateAttachmentSelection(attachments)
+        if (failure) throw attachmentError(failure.code, failure.message)
         this.directBusy.add(target.sessionID)
         try {
-          await this.ctx.session.prompt({ sessionID: target.sessionID, text: entry.text, delivery: "queue" })
+          await this.ctx.session.prompt({
+            sessionID: target.sessionID,
+            text: entry.text || "See the attached file.",
+            delivery: "queue",
+            metadata: { [NATIVE_INTERNAL_PROMPT_METADATA]: true, [NATIVE_MESSAGE_ID_METADATA]: entry.id },
+            ...(promptFiles.length > 0 ? { files: promptFiles } : {}),
+          })
         } catch (error) {
           this.directBusy.delete(target.sessionID)
           throw error
@@ -2138,8 +2820,6 @@ export class EnsembleV2Service {
         entry.status = "failed"
       }
       await this.store.saveDmQueueEntry(entry)
-      const stored = this.store.dmTranscript(workspaceKey, agentID).find((message) => message.id === entry.id)
-      if (stored) await this.store.saveDmMessage(workspaceKey, agentID, { ...stored, queued: false })
     }
   }
 
@@ -2168,6 +2848,7 @@ export class EnsembleV2Service {
       color: String(payload.color ?? "cyan"),
       archived: false,
       pendingSettings: false,
+      nativeMirror: typeof payload.nativeMirror === "boolean" ? payload.nativeMirror : true,
       version: 1,
       createdAt: at,
       updatedAt: at,
@@ -2184,7 +2865,12 @@ export class EnsembleV2Service {
     const home = await this.ensureHomeBinding(agent)
     const latest = this.store.agent(agent.id)
     if (!latest || latest.archived) return
-    await this.ctx.session.prompt({ sessionID: home.sessionID, text: onboardingPrompt(agent), delivery: "steer" })
+    await this.ctx.session.prompt({
+      sessionID: home.sessionID,
+      text: onboardingPrompt(agent),
+      delivery: "steer",
+      metadata: { [NATIVE_INTERNAL_PROMPT_METADATA]: true, [NATIVE_SKIP_TURN_METADATA]: false },
+    })
   }
 
   private async updateAgent(payload: Json): Promise<Agent> {
@@ -2229,6 +2915,15 @@ export class EnsembleV2Service {
       if (next.length !== agent.skillbox.length || next.some((skill) => !agent.skillbox.includes(skill))) { behavioral = true; changed.push("skillbox") }
       agent.skillbox = next
     }
+    // The native mirror is a privacy choice, not agent behavior: it changes
+    // ingestion only and never queues a settings rollout.
+    if (payload.nativeMirror !== undefined) {
+      if (typeof payload.nativeMirror !== "boolean") {
+        throw Object.assign(new Error("nativeMirror must be true or false."), { code: "invalid_settings" })
+      }
+      if (payload.nativeMirror !== nativeMirrorEnabled(agent)) changed.push("nativeMirror")
+      agent.nativeMirror = payload.nativeMirror
+    }
     if (behavioral) {
       agent.version++
       agent.pendingSettings = true
@@ -2248,6 +2943,563 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Ticket #213: parse the requested binding conversation. Group and direct
+   * both need a workspace; a direct request without one resolves the agent's
+   * home conversation. Selection policy stays with #214; this only names the
+   * conversation to resolve.
+   */
+  private conversationFromRequest(payload: Json): BindingConversation {
+    const agentID = String(payload.agentID ?? "").trim()
+    if (!agentID) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    const workspace = payload.workspaceID === undefined || payload.workspaceID === null
+      ? ""
+      : String(payload.workspaceID).trim()
+    const requested = payload.conversation ?? "workspace"
+    if (requested === "workspace") {
+      if (!workspace || workspace === "home") {
+        throw Object.assign(new Error("A workspace group conversation requires a workspace."), { code: "invalid_conversation" })
+      }
+      return { kind: "workspace", workspaceID: workspace, agentID }
+    }
+    if (requested === "direct") {
+      if (!workspace || workspace === "home") return { kind: "home", agentID }
+      return { kind: "direct", workspaceID: workspace, agentID }
+    }
+    if (requested === "home") return { kind: "home", agentID }
+    throw Object.assign(new Error("Unknown conversation kind."), { code: "invalid_conversation" })
+  }
+
+  /**
+   * Ticket #224: the native session picker read path. Recent roots in the
+   * selected scope, searched inside that scope, with enough binding state for
+   * the UI to mark what is already in use. It never writes and never reads a
+   * transcript.
+   */
+  private async nativeSessionPicker(directory: string, payload: Json): Promise<any> {
+    const agent = this.store.agent(String(payload.agentID ?? "").trim())
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    if (agent.archived) throw Object.assign(new Error("The agent is archived."), { code: "agent_archived" })
+    const resolved = this.adoptionTarget(agent, payload, directory)
+    const scope = normalizeSessionPickerScope(payload.scope, defaultSessionPickerScope(resolved.target))
+    const query = typeof payload.query === "string" ? payload.query : ""
+    const limit = typeof payload.limit === "number" && Number.isFinite(payload.limit) ? payload.limit : undefined
+    const listings = await this.nativeSessionList(scope, resolved.context, query, limit)
+    const bindings = this.sessionPickerBindingViews(resolved.conversation)
+    const sessions = sessionPickerCandidates(listings, {
+      scope,
+      context: resolved.context,
+      query,
+      ...(limit !== undefined ? { limit } : {}),
+      bindings,
+    })
+    return {
+      agentID: agent.id,
+      target: resolved.target,
+      conversation: adoptionConversationName(resolved.target, this.adoptionNames(resolved.target, agent)),
+      scope,
+      query,
+      defaultScope: defaultSessionPickerScope(resolved.target),
+      sessions,
+      count: sessions.length,
+      revision: this.sessionPickerRevision,
+    }
+  }
+
+  /**
+   * Ticket #224: read-only adoption preview. The TUI uses it to explain a
+   * required move or reassignment before asking for confirmation; it performs
+   * no host mutation and writes no binding.
+   */
+  private async previewNativeSessionAdoption(directory: string, payload: Json): Promise<any> {
+    const state = await this.adoptionState(directory, payload)
+    const { agent, resolved, session, plan, currentBinding, owner } = state
+    return {
+      agentID: agent.id,
+      target: resolved.target,
+      conversation: adoptionConversationName(resolved.target, this.adoptionNames(resolved.target, agent)),
+      currentSessionID: currentBinding?.sessionID,
+      history: currentBinding?.history ?? [],
+      session: {
+        sessionID: session.sessionID,
+        found: session.found,
+        archived: Boolean(session.archived),
+        child: Boolean(session.parentID),
+        busy: Boolean(session.busy),
+      },
+      plan,
+      blockers: plan.blockers,
+      code: adoptionBlockerCode(plan),
+      message: this.adoptionRefusalMessage(plan),
+      reassignFrom: owner
+        ? {
+            agentID: owner.binding.agentID,
+            sessionID: owner.binding.sessionID,
+            conversation: this.conversationLabel(owner.binding),
+          }
+        : undefined,
+    }
+  }
+
+  /**
+   * Ticket #224: adopt one existing session into exactly one conversation.
+   *
+   * The binding is written only after the host confirms the session exists, is
+   * a root, is not archived or busy, is not owned elsewhere (unless explicitly
+   * reassigned), and has reached the conversation directory when a move was
+   * required. A failed move aborts before any binding write.
+   */
+  private async adoptNativeSession(directory: string, payload: Json): Promise<any> {
+    const state = await this.adoptionState(directory, payload)
+    const { agent, resolved, session, plan, currentBinding, owner } = state
+    const conversationName = adoptionConversationName(resolved.target, this.adoptionNames(resolved.target, agent))
+    if (plan.unchanged) {
+      return {
+        adopted: false,
+        state: "unchanged",
+        agentID: agent.id,
+        target: resolved.target,
+        conversation: conversationName,
+        binding: currentBinding,
+      }
+    }
+    const refusal = this.adoptionRefusal(plan)
+    if (refusal) throw refusal
+    if (!plan.canAdopt) {
+      throw Object.assign(new Error("The session cannot be adopted into that conversation."), { code: "session_adoption_refused" })
+    }
+    // A reassignment creates the previous conversation's fresh session before
+    // any move or behavior write, so a host failure aborts the whole adoption.
+    let replacement: SessionBinding | undefined
+    let sourceAgent: Agent | undefined
+    if (owner) {
+      sourceAgent = this.store.agent(owner.binding.agentID)
+      if (!sourceAgent) {
+        throw Object.assign(new Error("The previous owner agent no longer exists; the binding was not changed."), { code: "session_reassignment_failed" })
+      }
+      replacement = await this.createReplacementSession(sourceAgent, owner.binding, session.sessionID)
+    }
+    try {
+      if (plan.moveRequired) {
+        try {
+          await this.ctx.session.move({ sessionID: session.sessionID, directory: resolved.directory })
+        } catch {
+          throw Object.assign(new Error("The native session could not be moved; the binding was not changed."), { code: "session_move_failed" })
+        }
+        const after = await this.nativeSessionDetails(session.sessionID)
+        if (!after.found || after.archived || !sessionMoveConfirmed(after.directory, resolved.directory)) {
+          throw Object.assign(new Error("The native session did not move to the conversation directory; the binding was not changed."), { code: "session_move_unconfirmed" })
+        }
+      }
+      if (!(await this.applyAgentBehavior(session.sessionID, agent))) {
+        throw Object.assign(new Error("Could not apply the agent settings to the adopted session."), { code: "session_apply_failed" })
+      }
+    } catch (error) {
+      if (replacement) await this.ctx.session.remove({ sessionID: replacement.sessionID }).catch(() => undefined)
+      throw error
+    }
+    const replacedSessionID = currentBinding?.sessionID
+    const history = [...(currentBinding?.history ?? [])]
+    if (replacedSessionID && replacedSessionID !== session.sessionID && !history.includes(replacedSessionID)) history.unshift(replacedSessionID)
+    const binding: SessionBinding = {
+      workspaceID: resolved.target.kind === "home" ? "home" : String(resolved.target.workspaceID),
+      agentID: agent.id,
+      sessionID: session.sessionID,
+      history: history.filter((sessionID) => sessionID && sessionID !== session.sessionID),
+      kind: resolved.target.kind,
+      directory: resolved.directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
+
+    if (owner && replacement && sourceAgent) {
+      const sourceConversation = owner.conversation
+      const sourceConversationKey = conversationStateKey(sourceConversation)
+      try {
+        await this.store.removeConversationBinding(owner.binding.agentID, sourceConversation)
+      } catch (error) {
+        await this.ctx.session.remove({ sessionID: replacement.sessionID }).catch(() => undefined)
+        throw error
+      }
+      try {
+        await this.store.saveBinding(replacement)
+        await this.store.saveBinding(binding)
+      } catch {
+        // Restore the previous owner and drop the throwaway replacement: an
+        // adoption either moves the session or changes nothing.
+        await this.store.removeConversationBinding(owner.binding.agentID, sourceConversation).catch(() => undefined)
+        await this.store.saveBinding(owner.binding).catch(() => undefined)
+        await this.ctx.session.remove({ sessionID: replacement.sessionID }).catch(() => undefined)
+        this.logger?.event("warn", "service", "native.session.adoption.failed", {
+          agentID: agent.id,
+          sessionID: session.sessionID,
+          previousConversation: sourceConversationKey,
+        })
+        throw Object.assign(new Error("The binding update failed; no conversation was reassigned."), { code: "session_adoption_failed" })
+      }
+      await this.ctx.session.instructions.entry.put({
+        sessionID: replacement.sessionID,
+        key: "ensemble.v2.identity",
+        value: this.identityForAgent(sourceAgent),
+      }).catch(() => undefined)
+    } else {
+      await this.store.saveBinding(binding)
+    }
+    // Ticket #218: adoption reconciles the adopted session once before the
+    // visible heads-up, so missed turns or rows from before the bind are
+    // recovered under the new conversation identity.
+    if (nativeFirstMode(this.store.settings()) === "on") {
+      await this.reconcileNativeSession(session.sessionID, "adoption").catch(() => undefined)
+    }
+    await this.clearPendingSettings(agent.id)
+
+    const synthetic = this.ctx.session?.synthetic
+    let headsUp = false
+    if (typeof synthetic === "function") {
+      try {
+        await synthetic.call(this.ctx.session, {
+          sessionID: session.sessionID,
+          text: adoptionHeadsUp(resolved.target, this.adoptionNames(resolved.target, agent)),
+          description: "Ensemble session adoption",
+        })
+        headsUp = true
+      } catch {
+        // The binding is already correct; the heads-up is best effort.
+      }
+    }
+    this.logger?.event("info", "service", "native.session.adopted", {
+      agentID: agent.id,
+      conversation: resolved.target.kind,
+      sessionID: session.sessionID,
+      replacedSessionID,
+      moved: plan.moveRequired,
+      reassigned: Boolean(owner),
+      headsUp,
+    })
+    this.sessionPickerChanged("session.adopted", session.sessionID)
+    return {
+      adopted: true,
+      state: "adopted",
+      agentID: agent.id,
+      target: resolved.target,
+      conversation: conversationName,
+      binding,
+      replacedSessionID,
+      history: binding.history ?? [],
+      moved: plan.moveRequired,
+      reassigned: owner
+        ? {
+            agentID: owner.binding.agentID,
+            sessionID: owner.binding.sessionID,
+            conversation: this.conversationLabel(owner.binding),
+            replacementSessionID: replacement?.sessionID,
+          }
+        : undefined,
+      headsUp,
+    }
+  }
+
+  /**
+   * Shared target and plan resolution for picker, preview, and adoption.
+   * `adoptionState` only reads: host `session.get` and the durable bindings.
+   */
+  private async adoptionState(projectDirectory: string, payload: Json): Promise<{
+    agent: Agent
+    resolved: ReturnType<EnsembleV2Service["adoptionTarget"]>
+    session: Awaited<ReturnType<EnsembleV2Service["nativeSessionInfo"]>>
+    currentBinding?: SessionBinding
+    owner?: { binding: SessionBinding; conversation: BindingConversation }
+    plan: ReturnType<typeof planSessionAdoption>
+  }> {
+    const agent = this.store.agent(String(payload.agentID ?? "").trim())
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    if (agent.archived) throw Object.assign(new Error("The agent is archived."), { code: "agent_archived" })
+    const sessionID = String(payload.sessionID ?? "").trim()
+    if (!sessionID) throw Object.assign(new Error("Choose a native session to adopt."), { code: "invalid_session" })
+    const resolved = this.adoptionTarget(agent, payload, projectDirectory)
+    const currentBinding = this.store.bindingForConversation(agent.id, resolved.conversation)
+    const session = await this.nativeSessionInfo(sessionID)
+    const targetKey = conversationStateKey(resolved.conversation)
+    let owner: { binding: SessionBinding; conversation: BindingConversation } | undefined
+    for (const binding of this.store.bindings()) {
+      if (binding.sessionID !== sessionID) continue
+      const conversation = bindingConversation(binding)
+      if (!conversation) continue
+      if (conversationStateKey(conversation) === targetKey) continue
+      owner = { binding, conversation }
+      break
+    }
+    const plan = planSessionAdoption({
+      target: resolved.target,
+      session: {
+        sessionID: session.sessionID,
+        found: session.found,
+        archived: session.archived,
+        parentID: session.parentID,
+        directory: session.directory,
+        busy: session.busy,
+      },
+      targetDirectory: resolved.directory,
+      ...(currentBinding?.sessionID ? { currentSessionID: currentBinding.sessionID } : {}),
+      ...(owner ? { boundElsewhere: { agentID: owner.binding.agentID, conversation: owner.conversation } } : {}),
+      reassign: payload.reassign === true,
+      confirmMove: payload.confirmMove === true,
+    })
+    return { agent, resolved, session, currentBinding, owner, plan }
+  }
+
+  private adoptionRefusal(plan: ReturnType<typeof planSessionAdoption>): Error | undefined {
+    const code = adoptionBlockerCode(plan)
+    if (!code) return undefined
+    return Object.assign(new Error(this.adoptionRefusalMessage(plan)), { code })
+  }
+
+  private adoptionRefusalMessage(plan: ReturnType<typeof planSessionAdoption>): string | undefined {
+    const code = adoptionBlockerCode(plan)
+    if (!code) return undefined
+    switch (code) {
+      case "session_not_found":
+        return "The selected native session no longer exists."
+      case "session_archived":
+        return "The selected native session is archived. Unarchive it before adopting."
+      case "session_child":
+        return "A subagent child session cannot serve a conversation."
+      case "session_busy":
+        return "The selected native session is busy. Wait for it to settle before adopting it."
+      case "session_already_bound":
+        return "That native session already serves another conversation. Confirm reassignment to move it."
+      case "move_confirmation_required":
+        return "This native session must move to the conversation's directory. Confirm the move first."
+      default:
+        return "The session cannot be adopted into that conversation."
+    }
+  }
+
+  /**
+   * Resolve the conversation an adoption targets and every directory the
+   * picker scopes need. The target is always an agent's conversation, never a
+   * bare session (ADR 0009).
+   */
+  private adoptionTarget(agent: Agent, payload: Json, projectDirectory: string): {
+    target: AdoptionTarget
+    conversation: BindingConversation
+    workspace?: Workspace
+    directory: string
+    context: SessionPickerDirectoryContext
+  } {
+    const rawWorkspace = payload.workspaceID === undefined || payload.workspaceID === null ? "" : String(payload.workspaceID).trim()
+    const workspace = rawWorkspace && rawWorkspace !== "home" ? this.store.workspace(rawWorkspace) : undefined
+    if (rawWorkspace && rawWorkspace !== "home" && !workspace) {
+      throw Object.assign(new Error("Workspace not found."), { code: "workspace_not_found" })
+    }
+    const member = workspace?.memberIDs.includes(agent.id) ?? false
+    const resolved = resolveAdoptionTarget({
+      agentID: agent.id,
+      workspaceID: workspace?.id,
+      conversation: payload.conversation,
+      workspaceMember: member,
+    })
+    if (!resolved.ok) throw Object.assign(new Error(resolved.message), { code: resolved.code })
+    const homeDirectory = agent.homeDirectory ?? join(homedir(), ".ensemble", "agents", agent.id)
+    const directory = adoptionTargetDirectory(resolved.target, {
+      workspaceDirectory: workspace?.directory,
+      homeDirectory,
+    })
+    if (!directory) {
+      throw Object.assign(new Error("The conversation directory is unavailable."), { code: "directory_unavailable" })
+    }
+    return {
+      target: resolved.target,
+      conversation: resolved.conversation,
+      workspace,
+      directory,
+      context: {
+        projectDirectory,
+        workspaceDirectory: workspace?.directory,
+        directDirectory: resolved.target.kind === "workspace" ? homeDirectory : directory,
+      },
+    }
+  }
+
+  private adoptionNames(target: AdoptionTarget, agent: Agent): { agentName: string; workspaceName?: string } {
+    const workspace = target.kind === "home" ? undefined : this.store.workspace(target.workspaceID)
+    return { agentName: agent.name, ...(workspace ? { workspaceName: workspace.name } : {}) }
+  }
+
+  private conversationLabel(binding: SessionBinding): string {
+    const conversation = bindingConversation(binding)
+    if (!conversation) return "another conversation"
+    const agent = this.store.agent(binding.agentID)
+    const workspace = conversation.kind === "home" ? undefined : this.store.workspace(conversation.workspaceID)
+    return adoptionConversationName(conversation, {
+      agentName: agent?.name ?? binding.agentID,
+      ...(workspace ? { workspaceName: workspace.name } : {}),
+    })
+  }
+
+  private sessionPickerBindingViews(target: BindingConversation): Record<string, SessionPickerBindingView | undefined> {
+    const targetKey = conversationStateKey(target)
+    const views: Record<string, SessionPickerBindingView | undefined> = {}
+    for (const binding of this.store.bindings()) {
+      const conversation = bindingConversation(binding)
+      const label = this.conversationLabel(binding)
+      const current = conversation ? conversationStateKey(conversation) === targetKey : false
+      if (binding.sessionID) views[binding.sessionID] = { conversation: label, current }
+      for (const retired of binding.history ?? []) {
+        if (!retired || views[retired]) continue
+        views[retired] = { conversation: label, current: false, retired: true }
+      }
+    }
+    return views
+  }
+
+  /**
+   * One session's host read for picker and adoption: existence, archive
+   * marker, parent (child), location, title, recency, and an explicit busy
+   * hint when the host provides one. Never a transcript read.
+   */
+  private async nativeSessionInfo(sessionID: string): Promise<{
+    found: boolean
+    archived: boolean
+    sessionID: string
+    parentID?: string
+    title?: string
+    directory?: string
+    updatedAt?: number
+    busy?: boolean
+  }> {
+    const details = await this.nativeSessionDetails(sessionID)
+    return { ...details, busy: Boolean(details.busy) || this.isSessionBusy(sessionID) }
+  }
+
+  /**
+   * Host `session.list` for one picker scope. Roots only, unarchived only; a
+   * missing location contributes no rows rather than failing the picker, but
+   * a host without `session.list` refuses explicitly.
+   */
+  private async nativeSessionList(
+    scope: SessionPickerScope,
+    context: SessionPickerDirectoryContext,
+    query: string,
+    limit?: number,
+  ): Promise<NativeSessionListing[]> {
+    const list = this.ctx.session?.list
+    if (typeof list !== "function") {
+      throw Object.assign(new Error("The host does not expose native session listing."), { code: "session_list_unavailable" })
+    }
+    const requests = sessionPickerListInputs(scope, context, query, limit ?? MAX_SESSION_PICKER_LIMIT)
+    if (requests.length === 0) return []
+    const rows = new Map<string, NativeSessionListing>()
+    for (const input of requests) {
+      let response: any
+      try {
+        response = await list.call(this.ctx.session, input)
+      } catch {
+        this.logger?.event("debug", "service", "native.session.picker.list_failed", { scope })
+        continue
+      }
+      const value = unwrap<any>(response)
+      const data = Array.isArray(value) ? value : Array.isArray(value?.data) ? value.data : []
+      for (const info of data) {
+        const listing = this.nativeSessionListing(info)
+        // A scoped host response is authoritative for its directory; use the
+        // requested location when the row omits one so scope never drops a
+        // valid result.
+        if (!listing.directory && input.directory) listing.directory = input.directory
+        if (!listing.sessionID || rows.has(listing.sessionID)) continue
+        rows.set(listing.sessionID, listing)
+      }
+    }
+    return [...rows.values()]
+  }
+
+  private nativeSessionListing(info: any): NativeSessionListing {
+    return {
+      sessionID: String(info?.id ?? info?.sessionID ?? ""),
+      title: typeof info?.title === "string" ? info.title : undefined,
+      directory: typeof info?.location?.directory === "string"
+        ? info.location.directory
+        : typeof info?.directory === "string"
+          ? info.directory
+          : undefined,
+      updatedAt: typeof info?.time?.updated === "number"
+        ? info.time.updated
+        : typeof info?.updatedAt === "number"
+          ? info.updatedAt
+          : undefined,
+      archived: Boolean(info?.archived) || Boolean(info?.time?.archived),
+      parentID: typeof info?.parentID === "string" && info.parentID.length > 0 ? info.parentID : undefined,
+    }
+  }
+
+  /**
+   * Ticket #224: when a session is reassigned, its previous conversation gets
+   * a fresh session and keeps the adopted id in append-only history. Created
+   * before any binding write so a host failure aborts the whole adoption.
+   */
+  private async createReplacementSession(
+    agent: Agent,
+    owner: SessionBinding,
+    adoptedSessionID: string,
+  ): Promise<SessionBinding> {
+    const conversation = bindingConversation(owner)
+    if (!conversation) {
+      throw Object.assign(new Error("The previous binding is invalid; the binding was not changed."), { code: "session_reassignment_failed" })
+    }
+    const workspace = conversation.kind === "home" ? undefined : this.store.workspace(conversation.workspaceID)
+    const directory = owner.directory ?? workspace?.directory ?? agent.homeDirectory ?? join(homedir(), ".ensemble", "agents", agent.id)
+    const title = conversation.kind === "workspace"
+      ? `${agent.name} · ${workspace?.name ?? "workspace"}`
+      : conversation.kind === "direct"
+        ? `${agent.name} · direct · ${workspace?.name ?? "workspace"}`
+        : `${agent.name} · direct`
+    const created = unwrap<any>(await this.ctx.session.create({
+      title,
+      agent: "build",
+      model: {
+        providerID: agent.mainModel.providerID,
+        id: agent.mainModel.modelID,
+        ...(agent.mainModel.variant ? { variant: agent.mainModel.variant } : {}),
+      },
+      permissions: skillPermissions(agent.skillbox),
+      location: { directory },
+    }))
+    if (!created?.id) {
+      throw Object.assign(new Error("Could not create a replacement session; the binding was not changed."), { code: "session_reassignment_failed" })
+    }
+    const history = [adoptedSessionID, ...(owner.history ?? [])]
+      .filter((sessionID, index, all) => sessionID && sessionID !== created.id && all.indexOf(sessionID) === index)
+    return {
+      workspaceID: conversation.kind === "home" ? "home" : conversation.workspaceID,
+      agentID: agent.id,
+      sessionID: created.id,
+      history,
+      kind: conversation.kind,
+      directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
+  }
+
+  /**
+   * Ticket #213 read-only resolution: name the conversation, its current
+   * binding, and whether the bound native session still exists. It never
+   * creates, rotates, or rebinds a session, so it is safe to expose before the
+   * #214 direct-chat cutover.
+   */
+  private async resolveAgentSessionBinding(payload: Json): Promise<any> {    const agent = this.store.agent(String(payload.agentID ?? ""))
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    const conversation = this.conversationFromRequest(payload)
+    const mode = nativeFirstMode(this.store.settings())
+    const binding = this.store.bindingForConversation(agent.id, conversation)
+    if (!binding) return { mode, agentID: agent.id, conversation, state: "unbound" }
+    if (agent.archived) return { mode, agentID: agent.id, conversation, state: "agent_archived", binding }
+    const details = await this.nativeSessionDetails(binding.sessionID)
+    if (!details.found) return { mode, agentID: agent.id, conversation, state: "missing", binding }
+    if (details.archived) return { mode, agentID: agent.id, conversation, state: "session_archived", binding }
+    return { mode, agentID: agent.id, conversation, state: "bound", binding }
+  }
+
+  /**
    * Ticket #189 maintenance action: point a binding at a session it already
    * owns. Only history/current sessions are selectable so a stale or foreign
    * id can never hijack an agent. IDs only reach the audit log.
@@ -2256,10 +3508,34 @@ export class EnsembleV2Service {
     const agent = this.store.agent(payload.agentID)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     const rawWorkspaceID = payload.workspaceID
-    const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null || String(rawWorkspaceID).length === 0
-      ? "home"
-      : String(rawWorkspaceID)
-    const binding = this.store.binding(workspaceID, agent.id)
+    const rawConversation = payload.conversation
+    let conversation: BindingConversation
+    if (rawConversation === "direct") {
+      const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null || String(rawWorkspaceID).length === 0
+        ? ""
+        : String(rawWorkspaceID)
+      if (!workspaceID || workspaceID === "home") {
+        throw Object.assign(new Error("A workspace direct conversation requires a workspace."), { code: "invalid_conversation" })
+      }
+      conversation = { kind: "direct", workspaceID, agentID: agent.id }
+    } else if (rawConversation === "home") {
+      conversation = { kind: "home", agentID: agent.id }
+    } else if (rawConversation === "workspace") {
+      const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null ? "" : String(rawWorkspaceID)
+      if (!workspaceID || workspaceID === "home") {
+        throw Object.assign(new Error("A workspace group conversation requires a workspace."), { code: "invalid_conversation" })
+      }
+      conversation = { kind: "workspace", workspaceID, agentID: agent.id }
+    } else {
+      // Legacy payload: an omitted workspace means the home binding.
+      const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null || String(rawWorkspaceID).length === 0
+        ? "home"
+        : String(rawWorkspaceID)
+      conversation = workspaceID === "home"
+        ? { kind: "home", agentID: agent.id }
+        : { kind: "workspace", workspaceID, agentID: agent.id }
+    }
+    const binding = this.store.bindingForConversation(agent.id, conversation)
     if (!binding) throw Object.assign(new Error("Session binding not found."), { code: "not_found" })
     const target = String(payload.sessionID ?? "").trim()
     const history = binding.history ?? []
@@ -2288,6 +3564,7 @@ export class EnsembleV2Service {
     this.logger?.event("info", "service", "agent.session.rebound", {
       agentID: agent.id,
       workspaceID: binding.workspaceID,
+      conversation: conversation.kind,
       fromSessionID,
       sessionID: target,
     })
@@ -2349,6 +3626,19 @@ export class EnsembleV2Service {
     }
     await this.cancelAgentSubtasks(agentID, "Agent deleted.")
     await this.store.pruneDmForAgent(agentID)
+    // Every conversation binding goes, including workspace direct and home.
+    // Reading the binding map (not one key per workspace) is the difference
+    // between deleting an agent and leaving a direct session attributed to it.
+    for (const binding of this.store.bindings().filter((candidate) => candidate.agentID === agentID)) {
+      if (deleteNativeSessions) {
+        for (const sessionID of [...(binding.history ?? []), binding.sessionID]) {
+          await this.ctx.session.remove({ sessionID }).catch(() => undefined)
+        }
+      }
+      const conversation = bindingConversation(binding)
+      if (conversation) await this.store.removeConversationBinding(agentID, conversation)
+      else await this.store.removeBinding(binding.workspaceID, agentID)
+    }
     for (const candidate of workspaces) {
       if (candidate.memberIDs.includes(agentID)) {
         const workspace = this.store.cloneWorkspace(candidate.id)
@@ -2357,19 +3647,12 @@ export class EnsembleV2Service {
         await this.store.saveWorkspace(workspace)
         writeWorkspaceConfig(workspace, this.store.read().agents)
       }
-      const binding = this.store.binding(candidate.id, agentID)
-      if (binding) {
-        if (deleteNativeSessions) {
-          for (const sessionID of [...(binding.history ?? []), binding.sessionID]) await this.ctx.session.remove({ sessionID }).catch(() => undefined)
-        }
-        await this.store.removeBinding(candidate.id, agentID)
-      }
+      cleanupConversationAttachments(
+        candidate.directory,
+        attachmentConversationKey({ agentID, workspaceID: candidate.id, bindingKey: candidate.id }),
+      )
     }
-    const home = this.store.binding("home", agentID)
-    if (home) {
-      if (deleteNativeSessions) await this.ctx.session.remove({ sessionID: home.sessionID }).catch(() => undefined)
-      await this.store.removeBinding("home", agentID)
-    }
+    if (agent.homeDirectory) cleanupWorkspaceAttachments(agent.homeDirectory)
     for (const memory of this.store.memories()) {
       if (memory.agentID === agentID) {
         const stored = this.store.cloneMemory(memory.id)
@@ -2888,9 +4171,14 @@ export class EnsembleV2Service {
       const workspace = entry.value as Workspace
       try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
       try { unlinkSync(join(workspace.directory, ".ensemble", "init.json")) } catch {}
+      cleanupWorkspaceAttachments(workspace.directory)
       if (deleteHandoffs) {
         try { rmSync(join(workspace.directory, ".ensemble", "handoffs"), { recursive: true, force: true }) } catch {}
       }
+    }
+    for (const entry of await this.scanStorage("v2/agent/")) {
+      const agent = entry.value as Agent
+      if (agent.homeDirectory) cleanupWorkspaceAttachments(agent.homeDirectory)
     }
     for (const entry of await this.scanStorage("v2/")) await this.ctx.storage.remove(entry.key).catch(() => undefined)
     await this.ctx.storage.remove("v2/meta").catch(() => undefined)
@@ -2947,6 +4235,7 @@ export class EnsembleV2Service {
       }
     }
     try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
+    cleanupWorkspaceAttachments(workspace.directory)
     const ui = this.store.ui()
     if (ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...ui, activeWorkspaceID: undefined })
     await this.store.pruneWorkspace(workspaceID)
@@ -3038,7 +4327,11 @@ export class EnsembleV2Service {
     if (!workspace || workspace.archived) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     if (workspace.paused) throw Object.assign(new Error("This workspace is paused. Resume it before sending work."), { code: "workspace_paused" })
     const text = String(payload.text ?? "").trim()
-    if (!text) throw Object.assign(new Error("Message is empty."), { code: "empty" })
+    const attachmentList = attachmentIDs(payload.attachments)
+    if (!text && attachmentList.length === 0) throw Object.assign(new Error("Message is empty."), { code: "empty" })
+    const conversationKey = attachmentConversationKey({ workspaceID: workspace.id })
+    const attachments = resolveAttachments(workspace.directory, conversationKey, attachmentList)
+    const promptText = text || "See the attached files."
     // Ticket #101: the server re-runs the shared planner against authoritative
     // workspace state before touching the transcript or the queue. Any invalid
     // skill/owner pair rejects the whole message atomically. Ticket #103 adds
@@ -3047,7 +4340,7 @@ export class EnsembleV2Service {
       ? Object.fromEntries(Object.entries(payload.ownerSelections as Record<string, unknown>).map(([key, value]) => [String(key), String(value)]))
       : undefined
     const plan = planSkillInvocation({
-      text,
+      text: promptText,
       workspace,
       agents: state.agents,
       skills: this.catalog.skillOptions,
@@ -3070,11 +4363,11 @@ export class EnsembleV2Service {
     const skillRecipients = plan.kind === "skills" ? plan.recipients : []
     const skillRecipient = new Map(skillRecipients.map((recipient) => [recipient.agentID, recipient]))
     const explicitIDs = Array.isArray(payload.recipientIDs) ? [...new Set(payload.recipientIDs.map(String))] : []
-    const references = workspaceFileReferences(text, workspace.directory)
+    const references = workspaceFileReferences(promptText, workspace.directory)
     // Deliberate skill delivery keeps the exact user text as the instruction;
     // the planner has already validated every addressed skill/owner pair.
     // File references are context for every prompt, including skill prompts.
-    const instruction = references.length === 0 ? text : `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}`
+    const instruction = references.length === 0 ? promptText : `${promptText}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}`
     // One user command mints exactly one dispatch group; every recipient in
     // this fan-out (and every descendant hop) inherits it. A second command
     // mints a second group even while the first is still active.
@@ -3092,7 +4385,7 @@ export class EnsembleV2Service {
     }
     if (explicitIDs.length > 0) {
       const valid: string[] = []
-      await this.appendMessage(workspace, { author: "user", text, kind: "text" })
+      await this.appendMessage(workspace, { author: "user", text, kind: "text", ...(attachments.length > 0 ? { attachments } : {}) })
       for (const agentID of explicitIDs) {
         const agent = state.agents[agentID]
         if (agent && !agent.archived && workspace.memberIDs.includes(agentID)) {
@@ -3116,11 +4409,12 @@ export class EnsembleV2Service {
           workspace,
           assigneeID: agentID,
           creatorType: "user",
-          title: recipient ? skillWorkTitle(text, recipient) : text.slice(0, 80),
+          title: recipient ? skillWorkTitle(text || promptText, recipient) : text.slice(0, 80) || attachmentMessageTitle(attachments),
           instruction,
           mode: payload.mode === "edit" ? "edit" : "research",
           skillGrants: recipient?.generalSkills,
           dispatchGroupID,
+          ...(attachments.length > 0 ? { attachments } : {}),
         })
       }
       this.schedule()
@@ -3151,16 +4445,17 @@ export class EnsembleV2Service {
     if (mentioned.length === 0 && archivedRefs.length === 0 && unknown.length === 0 && outsideRefs.length === 0 && skillRecipients.length === 0) {
       // No addressee named: the leader takes the turn, exactly as before.
       const recipients = visibleRecipients(text, workspace, state.agents)
-      await this.appendMessage(workspace, { author: "user", text, kind: "text" })
+      await this.appendMessage(workspace, { author: "user", text, kind: "text", ...(attachments.length > 0 ? { attachments } : {}) })
       for (const agentID of recipients) {
         await this.createSubtask({
           workspace,
           assigneeID: agentID,
           creatorType: "user",
-          title: text.slice(0, 80),
+          title: text.slice(0, 80) || attachmentMessageTitle(attachments),
           instruction,
           mode: payload.mode === "edit" ? "edit" : "research",
           dispatchGroupID,
+          ...(attachments.length > 0 ? { attachments } : {}),
         })
       }
       this.schedule()
@@ -3171,7 +4466,7 @@ export class EnsembleV2Service {
       }
       return { recipients }
     }
-    await this.appendMessage(workspace, { author: "user", text, kind: "text" })
+    await this.appendMessage(workspace, { author: "user", text, kind: "text", ...(attachments.length > 0 ? { attachments } : {}) })
     for (const agent of archivedRefs) {
       await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, `${agent.name} is archived and cannot take turns.`), kind: "system" })
     }
@@ -3204,11 +4499,12 @@ export class EnsembleV2Service {
         workspace,
         assigneeID: agentID,
         askerKind: "user",
-        title: recipient ? skillWorkTitle(text, recipient) : text.slice(0, 80),
+        title: recipient ? skillWorkTitle(text || promptText, recipient) : text.slice(0, 80) || attachmentMessageTitle(attachments),
         instruction,
         mode: payload.mode === "edit" ? "edit" : "research",
         skillGrants: recipient?.generalSkills,
         dispatchGroupID,
+        ...(attachments.length > 0 ? { attachments } : {}),
       })
     }
     this.schedule()
@@ -3451,6 +4747,7 @@ export class EnsembleV2Service {
     creatorAgentID?: string
     title: string
     instruction: string
+    attachments?: MessageAttachment[]
     constraints?: string
     expected?: string
     mode?: "research" | "edit"
@@ -3498,6 +4795,7 @@ export class EnsembleV2Service {
       instruction: input.instruction,
       constraints: input.constraints,
       expected: input.expected,
+      attachmentIDs: input.attachments?.map((attachment) => attachment.id),
     })
     // Idempotency: resubmitting the same run-scoped work returns the existing
     // item instead of executing twice — while its row is retained, live or
@@ -3515,6 +4813,7 @@ export class EnsembleV2Service {
       assigneeID: input.assigneeID,
       title: input.title,
       instruction: input.instruction,
+      ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
       constraints: input.constraints,
       expected: input.expected,
       mode: input.mode ?? "research",
@@ -3575,6 +4874,7 @@ export class EnsembleV2Service {
     correlationID?: string
     title: string
     instruction: string
+    attachments?: MessageAttachment[]
     constraints?: string
     expected?: string
     mode?: "research" | "edit"
@@ -3589,6 +4889,7 @@ export class EnsembleV2Service {
       creatorAgentID: input.askerID,
       title: input.title,
       instruction: input.instruction,
+      attachments: input.attachments,
       constraints: input.constraints,
       expected: input.expected,
       mode: input.mode,
@@ -3607,6 +4908,7 @@ export class EnsembleV2Service {
     creatorAgentID?: string
     title: string
     instruction: string
+    attachments?: MessageAttachment[]
     constraints?: string
     expected?: string
     mode?: "research" | "edit"
@@ -3617,7 +4919,7 @@ export class EnsembleV2Service {
     return (await this.createWorkItem(input)).subtask
   }
 
-  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; notice?: Message["notice"]; correlationID?: string; updatedAt?: number }): Promise<Message> {
+  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; notice?: Message["notice"]; correlationID?: string; updatedAt?: number; attachments?: MessageAttachment[] }): Promise<Message> {
     return this.store.appendMessage(workspace.id, {
       id: id("msg"),
       author: input.author,
@@ -3630,6 +4932,7 @@ export class EnsembleV2Service {
       interrupted: input.interrupted,
       notice: input.notice,
       correlationID: input.correlationID,
+      ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
       createdAt: now(),
       ...(input.updatedAt !== undefined ? { updatedAt: input.updatedAt } : {}),
     })
@@ -4245,6 +5548,30 @@ export class EnsembleV2Service {
     if (payload.maxDelegations !== undefined) patch.maxDelegations = Math.max(1, Number(payload.maxDelegations))
     if (payload.maxDepth !== undefined) patch.maxDepth = Math.max(1, Number(payload.maxDepth))
     if (payload.synthesis !== undefined) patch.synthesis = Boolean(payload.synthesis)
+    // Ticket #213: the native-first migration mode is a closed set. An
+    // unknown value is rejected so a typo cannot silently change ingestion.
+    if (payload.nativeFirst !== undefined) {
+      if (!isNativeFirstMode(payload.nativeFirst)) {
+        throw Object.assign(new Error("nativeFirst must be off, shadow, or on."), { code: "invalid_settings" })
+      }
+      patch.nativeFirst = payload.nativeFirst
+    }
+    // Ticket #220: the native mention-routing kill switch is explicit. A
+    // non-boolean value is rejected so a typo cannot silently enable routing.
+    if (payload.nativeMentionRouting !== undefined) {
+      if (typeof payload.nativeMentionRouting !== "boolean") {
+        throw Object.assign(new Error("nativeMentionRouting must be true or false."), { code: "invalid_settings" })
+      }
+      patch.nativeMentionRouting = payload.nativeMentionRouting
+    }
+    // Ticket #225: the tool-surface rollback is a closed setting. An unknown
+    // value is rejected so a typo cannot keep the old tools by accident.
+    if (payload.toolSurface !== undefined) {
+      if (!isToolSurface(payload.toolSurface)) {
+        throw Object.assign(new Error("toolSurface must be native or legacy."), { code: "invalid_settings" })
+      }
+      patch.toolSurface = payload.toolSurface
+    }
     // Ticket #160: the four dispatch limits are one validated set. A rejected
     // edit changes nothing; existing groups keep the caps they captured, so
     // only new commands observe the new values.
@@ -4269,7 +5596,25 @@ export class EnsembleV2Service {
       }
       Object.assign(patch, dispatchLimitSettings(validation.limits))
     }
-    return this.store.updateSettings(patch)
+    const settings = await this.store.updateSettings(patch)
+    // Ticket #230: an in-flight shadow turn belongs to the previous mode. Drop
+    // it rather than comparing it under a different visible path.
+    if (patch.nativeFirst !== undefined) this.clearShadowIngestion()
+    // Ticket #225: registration is per host location, so a surface change must
+    // replace it in place; otherwise the rollback would wait for a restart.
+    if (patch.toolSurface !== undefined || patch.nativeFirst !== undefined || patch.nativeMentionRouting !== undefined) await this.refreshToolSurface()
+    return settings
+  }
+
+  /** Re-register every attached location after a tool-surface setting change. */
+  private async refreshToolSurface(): Promise<void> {
+    for (const ctx of [...this.toolRegistrations.keys()]) {
+      const handle = this.toolRegistrations.get(ctx)
+      this.toolRegistrations.delete(ctx)
+      try { await handle?.dispose?.() } catch {}
+      if (this.stopped) return
+      try { await this.installToolsFor(ctx) } catch {}
+    }
   }
 
   private toolSession(state: SnapshotState, sessionID: string): { workspace?: Workspace; agent?: Agent } {
@@ -4296,7 +5641,8 @@ export class EnsembleV2Service {
   async installToolsFor(ctx: any): Promise<HostRegistration> {
     const existing = this.toolRegistrations.get(ctx)
     if (existing) return existing
-    const registration = await ctx.tool.transform((editor: any) => registerEnsembleTools(editor, this.toolHandlers()))
+    const surface = effectiveToolSurface(this.store.settings())
+    const registration = await ctx.tool.transform((editor: any) => registerEnsembleTools(editor, this.toolHandlers(), surface))
     const handle = this.hostRegistration(registration, this.toolRegistrations, ctx)
     this.toolRegistrations.set(ctx, handle)
     return handle
@@ -4465,7 +5811,20 @@ export class EnsembleV2Service {
       const workspace = input.id ? state.workspaces[String(input.id)] : found.workspace
       if (!workspace) return { content: "Workspace not found." }
       if (workspace.id !== found.workspace.id) return { content: "Cross-workspace posts require ensemble_share approval." }
-      await this.appendMessage(workspace, { author: "agent", agentID: found.agent.id, text, kind: "text" })
+      // Ticket #221: a post from a live native turn anchors to that turn and
+      // its dispatch group. A delegated run anchors to its own task. The
+      // anchor is also the delivery record a matching final text dedupes on.
+      const run = this.runForSession(state, context.sessionID)
+      const runTask = run ? state.subtasks[run.subtaskID] : undefined
+      const nativeTurn = runTask ? undefined : this.nativeActiveTurnTurn(context.sessionID)
+      const anchorTask = runTask ?? (nativeTurn && nativeTurn.conversationID === workspace.id ? nativeTurn : undefined)
+      const post = await this.appendMessage(workspace, {
+        author: "agent",
+        agentID: found.agent.id,
+        text,
+        kind: "text",
+        ...(anchorTask ? { taskID: anchorTask.id } : {}),
+      })
       // Agent-to-agent asks from the group chat: `$Name`/`!Name` mentions in
       // an agent post create peer turns through the same queue, caps, and
       // approvals as user mentions. Reply text alone never creates turns, so
@@ -4487,12 +5846,10 @@ export class EnsembleV2Service {
       for (const token of unknown) {
         await this.appendMessage(workspace, { author: "system", text: peerRefusalText(bareMentionToken(token), "no workspace member matches."), kind: "system" })
       }
-      const run = this.runForSession(state, context.sessionID)
-      const runTask = run ? state.subtasks[run.subtaskID] : undefined
       // One agent post is one dispatch: its mentions and approvals share one
       // group even when the post comes from outside a live run.
-      const dispatchGroupID = runTask ? resolveDispatchGroupID(runTask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
-      const askingDepth = runTask ? dispatchDepthFor(runTask, state.subtasks) : 0
+      const dispatchGroupID = anchorTask ? resolveDispatchGroupID(anchorTask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
+      const askingDepth = anchorTask ? dispatchDepthFor(anchorTask, state.subtasks) : 0
       const peerDepthMax = state.dispatchGroups[dispatchGroupID]?.depthMax ?? dispatchLimits(state.settings).depth
       // Outside-roster contact follows the existing approval model: the user
       // consents first, then the approved turn runs through the same queue.
@@ -4514,7 +5871,7 @@ export class EnsembleV2Service {
             instruction: text,
             mode: "research",
             correlationID,
-            parentID: run?.subtaskID,
+            parentID: anchorTask?.id,
             senderID: found.agent.id,
             depth: askingDepth + 1,
             dispatchGroupID,
@@ -4523,9 +5880,10 @@ export class EnsembleV2Service {
           createdAt: now(),
         }
         await this.store.saveApproval(approval)
-        await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${agent.name}`, kind: "approval", taskID: run?.subtaskID })
+        await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${agent.name}`, kind: "approval", taskID: anchorTask?.id })
       }
       const created: string[] = []
+      const createdAgentIDs: string[] = []
       const refused: string[] = []
       const refusalNotes: string[] = []
       const noteRefusal = (name: string, reason: string): void => {
@@ -4555,7 +5913,7 @@ export class EnsembleV2Service {
         }
         const { deduped } = await this.createPeerTurn({
           workspace,
-          parentID: run?.subtaskID,
+          parentID: anchorTask?.id,
           assigneeID: agentID,
           askerKind: "agent",
           askerID: found.agent.id,
@@ -4565,8 +5923,10 @@ export class EnsembleV2Service {
           dispatchGroupID,
         })
         created.push(agent.name)
+        createdAgentIDs.push(agentID)
         void deduped
       }
+      if (anchorTask) await this.recordAgentPost(anchorTask, post, text, createdAgentIDs)
       this.schedule()
       if (created.length === 0 && outsideRefs.length === 0) {
         const detail = refusalNotes.length > 0 ? ` ${refusalNotes[0]}` : ""
@@ -5757,6 +7117,8 @@ export class EnsembleV2Service {
     const at = now()
     for (const candidate of this.store.subtasks()) {
       if (candidate.state === "replied") continue
+      // Native turns have no lease, claim, retry, or attempt budget.
+      if (isNativeTurn(candidate)) continue
       // A live lease always wins, even over an exhausted attempt count or an
       // old delivery timestamp: only the owning run, expiry, or a clean stop
       // may release it. A foreign live claim is deferred, never stolen.
@@ -5997,6 +7359,8 @@ export class EnsembleV2Service {
     }
     for (const candidate of tasks) {
       if (candidate.state === "replied") continue
+      // Native turns settle only from host terminal events or recovery.
+      if (isNativeTurn(candidate)) continue
       // Batch reviews close only through ensemble_review.
       if (candidate.handoff?.batch === true) continue
       const children = childrenByParent.get(candidate.id) ?? []
@@ -6093,7 +7457,7 @@ export class EnsembleV2Service {
           if (directory) busyEditDirs.add(directory)
         }
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
+          .filter((task) => task.state === "pending" && task.assigneeID && !isNativeTurn(task) && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)
         const skipped = (task: Subtask, reason: string, extra: Record<string, unknown> = {}) => {
           if (task.retryAfter === undefined) return
@@ -6277,6 +7641,15 @@ export class EnsembleV2Service {
   private async applyNativeSubagentPendingState(childSessionID: string): Promise<void> {
     const pending = this.takeNativeSubagentPendingState(childSessionID)
     if (!pending) return
+    const existing = this.store.nativeSubagent(childSessionID)
+    // A start observed before the record existed can be applied after a later
+    // terminal event already settled it. The older start must not reopen a
+    // terminal child (the event-order race that parallel ingestion exposes).
+    if (
+      existing
+      && pending.state === "working"
+      && existing.state !== "working"
+    ) return
     await this.transitionNativeSubagent(childSessionID, pending.state, "late-host-event")
   }
 
@@ -6650,6 +8023,20 @@ export class EnsembleV2Service {
     }
     this.logNativeSubagent("native.subagent.finished", next, { fromState: existing.state, reason })
     this.notifyNativeSubagentWaiters(next.parentSessionID)
+    if (state !== "working") await this.releaseNativeTurnSettlements(next.parentSessionID)
+  }
+
+  /**
+   * Ticket #217: a terminal child wakes any parent native turn held for it.
+   * The parent still settles only after every child mapped to that turn ends.
+   */
+  private async releaseNativeTurnSettlements(parentSessionID: string): Promise<void> {
+    if (this.nativeDeferredSettlements.size === 0) return
+    for (const turnID of [...this.nativeDeferredSettlements.keys()]) {
+      const task = this.store.subtask(turnID)
+      if (!task?.native || task.native.sessionID !== parentSessionID) continue
+      await this.flushNativeDeferredSettlement(turnID, "child-terminal")
+    }
   }
 
   private async closeNativeSubagentsForTask(taskID: string, reason: string): Promise<void> {
@@ -6935,6 +8322,2455 @@ export class EnsembleV2Service {
       return
     }
     this.clearWorkActivity(sessionID, "terminal")
+  }
+
+  // ---- Ticket #215: service-owned native turn ingestion -------------------
+
+  /**
+   * Serialize one session's host events. Different sessions process in
+   * parallel; durable writes still serialize through the store. An ingestion
+   * failure is logged by id and never breaks the host subscription.
+   */
+  private enqueueNativeEvent(sessionID: string, event: any): Promise<void> {
+    const previous = this.nativeQueues.get(sessionID) ?? Promise.resolve()
+    const handle = async () => {
+      if (this.stopped) return
+      await this.handleNativeIngestEvent(event)
+    }
+    const next = previous.then(handle, handle).catch((error) => {
+      this.logger?.event("warn", "native", "native.event.error", {
+        sessionID,
+        type: nativeEventType(event),
+        error,
+      })
+    }).finally(() => {
+      if (this.nativeQueues.get(sessionID) === next) this.nativeQueues.delete(sessionID)
+    })
+    this.nativeQueues.set(sessionID, next)
+    return next
+  }
+
+  /**
+   * Resolve one native session to its binding conversation (ADR 0009). The
+   * reverse binding index makes this O(1); an unbound or malformed session is
+   * ignored rather than guessed into a conversation. Workspace group, workspace
+   * direct, and home direct share this one ingestion path (tickets #215/#216).
+   */
+  private nativeIngestTarget(
+    sessionID: string,
+    options: { requireMode?: boolean } = {},
+  ): { conversation: BindingConversation; channel: string; agent: Agent; directory?: string } | undefined {
+    if (options.requireMode !== false && nativeFirstMode(this.store.settings()) !== "on") return undefined
+    const binding = this.store.bindingForSession(sessionID)
+    if (!binding || binding.sessionID !== sessionID) return undefined
+    const conversation = bindingConversation(binding)
+    if (!conversation) return undefined
+    const agent = this.store.agent(binding.agentID)
+    if (!agent) return undefined
+    let channel: string
+    if (conversation.kind === "workspace") {
+      const workspace = this.store.workspace(conversation.workspaceID)
+      if (!workspace || workspace.archived) return undefined
+      channel = workspace.id
+    } else {
+      channel = directMessageChannelForBinding(conversation.kind === "home" ? "home" : conversation.workspaceID, binding.agentID)
+    }
+    return { conversation, channel, agent, directory: binding.directory }
+  }
+
+  /**
+   * Ticket #221: record the latest workspace post from a turn so an identical
+   * final text can dedupe to its row and route set. The record carries a hash
+   * and recipient IDs only, never a second copy of the conversation text.
+   */
+  private async recordAgentPost(anchor: Subtask, post: Message, text: string, recipientIDs: Id[]): Promise<void> {
+    await this.store.saveAgentPost(anchor.id, {
+      messageID: post.id,
+      textHash: stableHash(text.trim()),
+      recipientIDs: [...new Set(recipientIDs)],
+    })
+  }
+
+  /**
+   * Ticket #220: plan and apply `$Name` routing for one native user message.
+   *
+   * The #219 planner owns the grammar, sanitization, guards, and server-owned
+   * budget. This method only supplies the conversation, roster, ledger
+   * snapshot, and fan-out cap, then turns admitted routes into normal peer
+   * turns under the native turn. Direct conversations never create work; they
+   * append the planner's visible refusal instead.
+   */
+  private async routeNativeMentions(
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    task: Subtask,
+    text: string,
+    at: number,
+  ): Promise<void> {
+    const state = this.store.read()
+    const workspace = target.conversation.kind === "workspace"
+      ? state.workspaces[target.conversation.workspaceID]
+      : undefined
+    if (target.conversation.kind === "workspace" && !workspace) return
+    const conversation: MentionConversation = workspace
+      ? { kind: "group", workspaceID: workspace.id, sessionAgentID: target.agent.id }
+      : {
+          kind: "direct",
+          agentID: target.agent.id,
+          ...(target.conversation.kind === "direct" ? { workspaceID: target.conversation.workspaceID } : {}),
+        }
+    // Include every roster agent, member or not, archived or not: the parser
+    // matches them and the policy turns each into its specific visible refusal.
+    const roster: MentionRosterEntry[] = Object.values(state.agents).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      member: workspace ? workspace.memberIDs.includes(agent.id) : false,
+      archived: agent.archived,
+    }))
+    const plan = planMentionRouting({
+      text,
+      conversation,
+      roster,
+      fanOutCap: state.settings.maxDelegations,
+      enabled: state.settings.nativeMentionRouting !== false,
+      ...(workspace ? { limits: dispatchLimits(state.settings), ledger: this.nativeMentionLedger(task) } : {}),
+    })
+
+    if (workspace) {
+      for (const route of plan.routes) {
+        const routed = await this.createPeerTurn({
+          workspace,
+          parentID: task.id,
+          assigneeID: route.agentID,
+          askerKind: "user",
+          title: nativeTurnTitle(text),
+          instruction: text,
+          mode: "research",
+          dispatchGroupID: task.dispatchGroupID,
+        })
+        this.logger?.event("info", "native", "native.route.created", {
+          sessionID: task.native?.sessionID,
+          turnID: task.id,
+          inboxID: task.native?.inboxID,
+          routeTaskID: routed.subtask.id,
+          source: "native-user",
+          agentID: route.agentID,
+        })
+      }
+      if (plan.routes.length > 0) this.schedule()
+    }
+    for (const refusal of plan.refusals) {
+      await this.appendNativeMentionRefusal(target, task, refusal, state.settings.maxDelegations, at, "native-user")
+    }
+  }
+
+  /**
+   * Ticket #221: plan and apply `$Name` routing from an agent's exact final
+   * native text. The final text is the group message; `send_message` is not
+   * required for chat. The #219 planner supplies the sanitized-prose grammar,
+   * self/duplicate/reply-to-sender suppression, fan-out cap, cycle guard, and
+   * server-owned budget. This method supplies the turn anchor, sender, group
+   * trail, roster, and ledger, then creates normal peer turns under the turn.
+   *
+   * A tool post recorded on the same turn dedupes a byte-identical final text
+   * to one transcript row and one route set. Direct conversations never route.
+   */
+  private async routeAgentFinalMentions(
+    task: Subtask,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    text: string,
+    finalRowID: Id | undefined,
+    at: number,
+  ): Promise<boolean> {
+    if (nativeFirstMode(this.store.settings()) !== "on") return false
+    if (!text.trim()) return false
+    const state = this.store.read()
+    const post = task.agentPost
+    if (post && finalRowID && post.textHash === stableHash(text.trim())) {
+      // The tool post is already the visible message and already routed. Keep
+      // the finalized native row (the canonical turn result) and remove the
+      // duplicate row; never route the same text twice.
+      if (post.messageID !== finalRowID) await this.store.removeMessage(target.channel, post.messageID)
+      this.logger?.event("info", "native", "native.route.deduped", {
+        ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+        turnID: task.id,
+        messageID: finalRowID,
+        recipients: post.recipientIDs.length,
+      })
+      return false
+    }
+
+    const workspace = state.workspaces[task.workspaceID]
+    if (target.conversation.kind === "workspace" && !workspace) return false
+    const conversation: MentionConversation = target.conversation.kind === "workspace"
+      ? { kind: "group", workspaceID: target.conversation.workspaceID, sessionAgentID: target.agent.id }
+      : target.conversation.kind === "direct"
+        ? { kind: "direct", agentID: target.agent.id, workspaceID: target.conversation.workspaceID }
+        : { kind: "direct", agentID: target.agent.id }
+    const roster: MentionRosterEntry[] = Object.values(state.agents).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      member: workspace ? workspace.memberIDs.includes(agent.id) : false,
+      archived: agent.archived,
+    }))
+    const replyToSenderID = agentFinalReplyTo(task)
+    const groupTrail = agentFinalGroupTrail(task, state.subtasks)
+    const plan = planMentionRouting({
+      text,
+      conversation,
+      roster,
+      fanOutCap: state.settings.maxDelegations,
+      enabled: state.settings.nativeMentionRouting !== false,
+      senderID: target.agent.id,
+      ...(replyToSenderID ? { replyToSenderID } : {}),
+      ...(groupTrail.length > 0 ? { groupTrail } : {}),
+      ...(workspace ? { limits: dispatchLimits(state.settings), ledger: this.nativeMentionLedger(task) } : {}),
+    })
+
+    const excluded = plan.excluded.reduce<Record<string, number>>((counts, span) => {
+      counts[span.kind] = (counts[span.kind] ?? 0) + 1
+      return counts
+    }, {})
+    if (plan.routes.length + plan.suppressed.length + plan.refusals.length > 0 || plan.excluded.length > 0) {
+      this.logger?.event("info", "native", "native.route.planned", {
+        ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+        turnID: task.id,
+        source: "agent-final",
+        senderID: target.agent.id,
+        ...(replyToSenderID ? { replyToSenderID } : {}),
+        groupTrail: groupTrail.length,
+        routes: plan.routes.length,
+        suppressed: plan.suppressed.length,
+        refusals: plan.refusals.length,
+        excluded,
+        ...(plan.budget.kind === "workspace"
+          ? {
+              groupRemaining: plan.budget.groupRemaining,
+              delegationTaskMaxHops: plan.budget.delegationTaskMaxHops,
+            }
+          : {}),
+      })
+    }
+    for (const suppression of plan.suppressed) {
+      this.logger?.event("info", "native", "native.route.suppressed", {
+        ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+        turnID: task.id,
+        source: "agent-final",
+        agentID: suppression.agentID,
+        reason: suppression.reason,
+      })
+    }
+
+    if (workspace && plan.routes.length > 0) {
+      await this.ensureDispatchGroupLedger(task.dispatchGroupID, workspace.id)
+      for (const route of plan.routes) {
+        const { subtask, deduped } = await this.createPeerTurn({
+          workspace,
+          parentID: task.id,
+          assigneeID: route.agentID,
+          askerKind: "agent",
+          askerID: target.agent.id,
+          title: text.slice(0, 80),
+          instruction: text,
+          mode: "research",
+          dispatchGroupID: task.dispatchGroupID,
+        })
+        this.logger?.event("info", "native", "native.route.created", {
+          ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+          turnID: task.id,
+          source: "agent-final",
+          recipientID: route.agentID,
+          taskID: subtask.id,
+          ...(deduped ? { deduped } : {}),
+        })
+      }
+    }
+    for (const refusal of plan.refusals) {
+      await this.appendNativeMentionRefusal(target, task, refusal, state.settings.maxDelegations, at, "agent-final")
+    }
+    return Boolean(workspace) && plan.routes.length > 0
+  }
+
+  /** Current ledger position for a route under the native turn's root group. */
+  private nativeMentionLedger(task: Subtask): MentionLedgerSnapshot {
+    const state = this.store.read()
+    const limits = dispatchLimits(state.settings)
+    const group = task.dispatchGroupID ? state.dispatchGroups[task.dispatchGroupID] : undefined
+    if (!group) {
+      return {
+        groupUsed: 0,
+        groupMax: limits.groupMaxHops,
+        depth: dispatchChildDepth(task, task.dispatchGroupID, state.subtasks),
+        depthMax: limits.depth,
+      }
+    }
+    const root = group.id === group.rootID ? group : state.dispatchGroups[group.rootID]
+    return {
+      groupUsed: group.usedHops,
+      groupMax: group.maxHops,
+      depth: dispatchChildDepth(task, group.id, state.subtasks),
+      depthMax: group.depthMax,
+      ...(root?.commandUsedHops !== undefined ? { commandUsed: root.commandUsedHops } : {}),
+      ...(root?.commandMaxHops !== undefined ? { commandMax: root.commandMaxHops } : {}),
+      ...(group.closedAt !== undefined ? { closed: true } : {}),
+    }
+  }
+
+  /** Visible transcript notice for one refused native mention. */
+  private async appendNativeMentionRefusal(
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    task: Subtask,
+    refusal: MentionRefusal,
+    fanOutCap: number,
+    at: number,
+    source: "native-user" | "agent-final",
+  ): Promise<void> {
+    const text = peerRefusalText(refusal.agentName ?? refusal.token, nativeMentionRefusalReason(refusal, fanOutCap))
+    if (target.conversation.kind === "workspace") {
+      const workspace = this.store.workspace(target.conversation.workspaceID)
+      if (!workspace) return
+      await this.appendMessage(workspace, { author: "system", text, kind: "system" })
+    } else {
+      // Direct channels have no workspace row to append through. The
+      // deterministic id keeps a replayed direct notice from duplicating.
+      await this.store.saveChannelMessage(target.channel, {
+        id: `msg_native_route_${stableHash(`native-route-notice:${task.id}:${refusal.reason}:${refusal.start}:${refusal.token}`)}`,
+        author: "system",
+        text,
+        kind: "system",
+        createdAt: at,
+      })
+    }
+    this.logger?.event("info", "native", "native.route.refused", {
+      sessionID: task.native?.sessionID,
+      turnID: task.id,
+      source,
+      agentID: refusal.agentID,
+      reason: refusal.reason,
+      ...(refusal.layer ? { layer: refusal.layer } : {}),
+      ...(refusal.used !== undefined ? { used: refusal.used } : {}),
+      ...(refusal.max !== undefined ? { max: refusal.max } : {}),
+    })
+  }
+
+  // ---- Ticket #230: invisible shadow ingestion ---------------------------
+
+  private shadowSession(sessionID: string): ShadowSession {
+    let session = this.shadowSessions.get(sessionID)
+    if (!session) {
+      session = {
+        pending: [],
+        executionTurns: [],
+        executionSkip: false,
+        assistantTurns: {},
+        steered: [],
+        pendingExecutions: 0,
+      }
+      this.shadowSessions.set(sessionID, session)
+    }
+    return session
+  }
+
+  /** Drop in-flight shadow turns but keep the bounded comparison rows. */
+  private clearShadowIngestion(): void {
+    this.shadowSessions.clear()
+    this.shadowTurns.clear()
+  }
+
+  /** Full stop/restart cleanup: no shadow state or comparisons survive. */
+  private clearShadowState(): void {
+    this.clearShadowIngestion()
+    this.shadowComparisons.length = 0
+    this.shadowComparisonTotal = 0
+  }
+
+  private maybeClearShadowSession(sessionID: string): void {
+    const session = this.shadowSessions.get(sessionID)
+    if (!session) return
+    if (
+      session.pending.length === 0
+      && session.executionTurns.length === 0
+      && session.steered.length === 0
+      && !session.executionSkip
+      && Object.keys(session.assistantTurns).length === 0
+    ) {
+      this.shadowSessions.delete(sessionID)
+    }
+  }
+
+  private shadowTurnByInbox(sessionID: string, inboxID: string): ShadowTurn | undefined {
+    const turnID = nativeTurnID(sessionID, inboxID)
+    return this.shadowTurns.get(turnID)
+  }
+
+  /**
+   * Count what the #219 planner would route without admitting anything. This
+   * is the shadow routing comparison: the visible path routes nothing.
+   */
+  private planShadowRoutes(
+    target: { conversation: BindingConversation; channel: string; agent: Agent },
+    text: string,
+    source: "native-user" | "agent-final",
+  ): number {
+    if (!String(text ?? "").trim()) return 0
+    const state = this.store.read()
+    const workspace = target.conversation.kind === "workspace"
+      ? state.workspaces[target.conversation.workspaceID]
+      : undefined
+    if (target.conversation.kind === "workspace" && !workspace) return 0
+    const conversation: MentionConversation = workspace
+      ? { kind: "group", workspaceID: workspace.id, sessionAgentID: target.agent.id }
+      : {
+          kind: "direct",
+          agentID: target.agent.id,
+          ...(target.conversation.kind === "direct" ? { workspaceID: target.conversation.workspaceID } : {}),
+        }
+    const roster: MentionRosterEntry[] = Object.values(state.agents).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      member: workspace ? workspace.memberIDs.includes(agent.id) : false,
+      archived: agent.archived,
+    }))
+    const limits = dispatchLimits(state.settings)
+    const ledger = {
+      groupUsed: 0,
+      groupMax: limits.groupMaxHops,
+      depth: 0,
+      depthMax: limits.depth,
+    }
+    const plan = planMentionRouting({
+      text: String(text),
+      conversation,
+      roster,
+      fanOutCap: state.settings.maxDelegations,
+      enabled: state.settings.nativeMentionRouting !== false,
+      ...(workspace ? { limits, ledger } : {}),
+      ...(source === "agent-final" ? { senderID: target.agent.id } : {}),
+    })
+    return plan.routes.length
+  }
+
+  /**
+   * Read the native transcript once at shadow settle for the visible-path
+   * comparison. This is never called per delta or on a heartbeat.
+   */
+  private async shadowVisibleText(turn: ShadowTurn): Promise<string | undefined> {
+    try {
+      const messages = listData(await this.ctx.session.context({ sessionID: turn.sessionID }))
+      return nativeContextAnswerExact(messages, {
+        inboxID: turn.inboxID,
+        assistantMessageIDs: turn.assistantMessageIDs,
+      })
+    } catch {
+      return undefined
+    }
+  }
+
+  private recordShadowComparison(row: ShadowComparison): void {
+    this.shadowComparisonTotal++
+    this.shadowComparisons.push(row)
+    while (this.shadowComparisons.length > SHADOW_COMPARISON_LIMIT) this.shadowComparisons.shift()
+    this.logger?.event("info", "native", "native.shadow.compare", { ...row })
+    this.logger?.event("info", "native", "native.shadow.turn.cleared", {
+      sessionID: row.sessionID,
+      turnID: row.turnID,
+      inboxID: row.inboxID,
+      phase: row.phase,
+    })
+  }
+
+  private async settleShadowTurn(
+    turn: ShadowTurn,
+    target: { conversation: BindingConversation; channel: string; agent: Agent },
+    outcome: "succeeded" | "failed" | "interrupted" | "cancelled",
+    at: number,
+  ): Promise<void> {
+    const expectedPhase = outcome === "succeeded"
+      ? "replied"
+      : outcome
+    const final = nativeFinalText(turn.text)
+    const visibleText = await this.shadowVisibleText(turn)
+    let text = final.complete ? final.text : final.text || nativeTextForParts(turn.text)
+    if (!final.complete && visibleText !== undefined) text = visibleText
+    turn.phase = expectedPhase
+    turn.finalRoutes = this.planShadowRoutes(target, text, "agent-final")
+    this.recordShadowComparison(buildShadowComparison({
+      turn,
+      text,
+      ...(visibleText !== undefined ? { visibleText } : {}),
+      expectedPhase,
+      at,
+    }))
+    this.shadowTurns.delete(turn.turnID)
+  }
+
+  /**
+   * Process one host event into the invisible shadow sink. This mirrors the
+   * #215/#216 turn/part semantics with the shared pure helpers and never calls
+   * a durable writer, scheduler, or router.
+   */
+  private async handleNativeShadowEvent(
+    event: any,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+  ): Promise<void> {
+    const type = nativeEventType(event)
+    const data = nativeEventData(event)
+    const sessionID = nativeEventSessionID(event)
+    if (!sessionID) return
+    const at = nativeEventAt(event, now())
+    const session = this.shadowSession(sessionID)
+
+    if (type === "session.inbox.enqueued") {
+      const inboxID = String(data?.inboxID ?? "").trim()
+      if (!inboxID) return
+      const item = data?.item ?? {}
+      const payload = item?.payload ?? {}
+      if (nativePromptSkipsTurn(payload) || nativePromptIsInternal(payload) || item?.type !== "user") {
+        session.pending.push({ inboxID, turn: false })
+        return
+      }
+      const turnID = nativeTurnID(sessionID, inboxID)
+      if (this.shadowTurns.has(turnID)) return
+      const turn: ShadowTurn = {
+        turnID,
+        sessionID,
+        inboxID,
+        conversation: target.conversation,
+        channel: target.channel,
+        agentID: target.agent.id,
+        phase: "queued",
+        text: {},
+        assistantMessageIDs: [],
+        startedAt: at,
+        userRoutes: 0,
+        finalRoutes: 0,
+      }
+      const text = String(payload.text ?? "")
+      turn.userRoutes = this.planShadowRoutes(target, text, "native-user")
+      this.shadowTurns.set(turnID, turn)
+      session.pending.push({ inboxID, turn: true })
+      this.logger?.event("info", "native", "native.shadow.ingested", {
+        sessionID,
+        turnID,
+        inboxID,
+        conversationID: target.channel,
+        channelKind: target.conversation.kind,
+        phase: "queued",
+      })
+      if (session.pendingExecutions > 0 && session.executionTurns.length === 0) {
+        session.pendingExecutions--
+        session.executionTurns = [turnID]
+        turn.phase = "working"
+      }
+      return
+    }
+
+    if (type === "session.execution.started") {
+      if (session.executionTurns.length > 0) return
+      const next = session.pending.shift()
+      if (!next) {
+        session.pendingExecutions++
+        return
+      }
+      if (!next.turn) {
+        session.executionSkip = true
+        return
+      }
+      const turn = this.shadowTurnByInbox(sessionID, next.inboxID)
+      if (!turn) {
+        session.executionSkip = true
+        return
+      }
+      session.executionSkip = false
+      session.executionTurns = [turn.turnID]
+      turn.phase = "working"
+      turn.startedAt = at
+      return
+    }
+
+    if (type === "session.inbox.delivered" || type === "session.inbox.delivery.changed") {
+      if (type !== "session.inbox.delivered") return
+      const inboxID = String(data?.inboxID ?? "").trim()
+      if (!inboxID || session.executionTurns.length === 0) return
+      const turn = this.shadowTurnByInbox(sessionID, inboxID)
+      if (turn && !session.executionTurns.includes(turn.turnID) && !session.steered.includes(inboxID)) {
+        session.steered.push(inboxID)
+      }
+      return
+    }
+
+    if (type === "session.inbox.cancelled") {
+      const inboxID = String(data?.inboxID ?? "").trim()
+      const turn = inboxID
+        ? this.shadowTurnByInbox(sessionID, inboxID)
+        : (session.executionTurns.length > 0 ? this.shadowTurns.get(session.executionTurns.at(-1)!) : undefined)
+      if (!turn) return
+      await this.settleShadowTurn(turn, target, "cancelled", at)
+      session.executionTurns = session.executionTurns.filter((turnID) => turnID !== turn.turnID)
+      session.steered = session.steered.filter((candidate) => candidate !== inboxID)
+      session.pending = session.pending.filter((entry) => entry.inboxID !== inboxID)
+      for (const assistantID of Object.keys(session.assistantTurns)) {
+        if (!this.shadowTurns.has(session.assistantTurns[assistantID]!)) delete session.assistantTurns[assistantID]
+      }
+      this.maybeClearShadowSession(sessionID)
+      return
+    }
+
+    if (type === "session.retry.scheduled") {
+      if (session.executionSkip) return
+      const turn = session.executionTurns.length > 0
+        ? this.shadowTurns.get(session.executionTurns.at(-1)!)
+        : undefined
+      if (turn) turn.phase = "retrying"
+      return
+    }
+
+    if (type === "session.text.started" || type === "session.text.delta" || type === "session.text.ended") {
+      if (session.executionSkip) return
+      const assistantID = String(data?.assistantMessageID ?? "").trim()
+      if (!assistantID) return
+      let turnID: string | undefined = session.assistantTurns[assistantID]
+      if (!turnID && type === "session.text.started" && session.steered.length > 0) {
+        const inboxID = session.steered.shift()!
+        const steered = this.shadowTurnByInbox(sessionID, inboxID)
+        if (steered) {
+          turnID = steered.turnID
+          session.executionTurns.push(steered.turnID)
+        }
+      }
+      turnID ??= session.executionTurns.at(-1)
+      if (!turnID) {
+        const next = session.pending.shift()
+        if (next?.turn) {
+          const pending = this.shadowTurnByInbox(sessionID, next.inboxID)
+          if (pending) {
+            turnID = pending.turnID
+            session.executionTurns = [pending.turnID]
+          }
+        }
+      }
+      const turn = turnID ? this.shadowTurns.get(turnID) : undefined
+      if (!turn) return
+      const ordinal = Math.max(0, Math.floor(Number(data?.ordinal ?? 0) || 0))
+      const part = (turn.text[assistantID] ??= { started: [], deltas: {}, ended: {} })
+      if (!part.started.includes(ordinal)) part.started.push(ordinal)
+      if (type === "session.text.delta") {
+        part.deltas[ordinal] = (part.deltas[ordinal] ?? "") + String(data?.delta ?? "")
+      } else if (type === "session.text.ended") {
+        part.ended[ordinal] = String(data?.text ?? "")
+      }
+      if (!turn.assistantMessageIDs.includes(assistantID)) turn.assistantMessageIDs.push(assistantID)
+      session.assistantTurns[assistantID] = turn.turnID
+      if (turn.phase === "queued") turn.phase = "working"
+      return
+    }
+
+    if (
+      type === "session.execution.succeeded" ||
+      type === "session.execution.failed" ||
+      type === "session.execution.interrupted"
+    ) {
+      if (session.executionSkip) {
+        session.executionSkip = false
+        session.executionTurns = []
+        session.steered = []
+        this.maybeClearShadowSession(sessionID)
+        return
+      }
+      const outcome = type === "session.execution.succeeded"
+        ? "succeeded"
+        : type === "session.execution.failed"
+          ? "failed"
+          : "interrupted"
+      const turns = session.executionTurns
+        .map((turnID) => this.shadowTurns.get(turnID))
+        .filter((turn): turn is ShadowTurn => Boolean(turn))
+      if (turns.length === 0) {
+        const next = session.pending.shift()
+        if (next?.turn) {
+          const turn = this.shadowTurnByInbox(sessionID, next.inboxID)
+          if (turn) turns.push(turn)
+        }
+      }
+      for (const turn of turns) await this.settleShadowTurn(turn, target, outcome, at)
+      session.executionTurns = []
+      session.steered = []
+      for (const assistantID of Object.keys(session.assistantTurns)) {
+        if (!this.shadowTurns.has(session.assistantTurns[assistantID]!)) delete session.assistantTurns[assistantID]
+      }
+      this.maybeClearShadowSession(sessionID)
+      return
+    }
+  }
+
+  private nativeTurnByInbox(inboxID: string): Subtask | undefined {
+    return Object.values(this.store.read().subtasks).find((task) => isNativeTurn(task) && task.native?.inboxID === inboxID)
+  }
+
+  private nativeTurnByInboxForSession(sessionID: string, inboxID: string): Subtask | undefined {
+    return Object.values(this.store.read().subtasks).find(
+      (task) => isNativeTurn(task) && task.native?.sessionID === sessionID && task.native?.inboxID === inboxID,
+    )
+  }
+
+  private nativeTurnByAssistant(assistantMessageID: string): Subtask | undefined {
+    return Object.values(this.store.read().subtasks).find(
+      (task) => isNativeTurn(task) && (task.native?.assistantMessageIDs ?? []).includes(assistantMessageID),
+    )
+  }
+
+  private nativeTextState(turnID: string): NativeTextState {
+    let state = this.nativeText.get(turnID)
+    if (!state) {
+      state = {}
+      this.nativeText.set(turnID, state)
+    }
+    return state
+  }
+
+  private nativeDisplayText(turnID: string): string {
+    return nativeTextForParts(this.nativeText.get(turnID) ?? {})
+  }
+
+  private consumeNativeInbox(sessionID: string, inboxID: string): void {
+    const pending = this.nativePendingInboxes.get(sessionID)
+    if (!pending) return
+    const index = pending.indexOf(inboxID)
+    if (index >= 0) pending.splice(0, index + 1)
+    if (pending.length === 0) this.nativePendingInboxes.delete(sessionID)
+  }
+
+  /** Remember an enqueued prompt's kind in host order, bounded per session. */
+  private rememberNativeInbox(sessionID: string, inboxID: string, turn: boolean): void {
+    const order = this.nativeInboxOrder.get(sessionID) ?? []
+    if (!order.some((item) => item.inboxID === inboxID)) order.push({ inboxID, turn })
+    while (order.length > NATIVE_INBOX_ORDER_LIMIT) order.shift()
+    this.nativeInboxOrder.set(sessionID, order)
+  }
+
+  /** Drop one inbox that settled or cancelled before an execution claimed it. */
+  private forgetNativeInbox(sessionID: string, inboxID: string): void {
+    const order = this.nativeInboxOrder.get(sessionID)
+    if (!order) return
+    const index = order.findIndex((item) => item.inboxID === inboxID)
+    if (index >= 0) order.splice(index, 1)
+    if (order.length === 0) this.nativeInboxOrder.delete(sessionID)
+  }
+
+  /** Claim the next execution's inbox in host order. */
+  private takeNativeInbox(sessionID: string): { inboxID: string; turn: boolean } | undefined {
+    const order = this.nativeInboxOrder.get(sessionID)
+    if (!order || order.length === 0) return undefined
+    const item = order.shift()!
+    if (order.length === 0) this.nativeInboxOrder.delete(sessionID)
+    return item
+  }
+
+  /** Record that a turn is answering inside the session's current execution. */
+  private rememberNativeExecutionTurn(sessionID: string, turnID: string): void {
+    const turns = this.nativeExecutionTurns.get(sessionID) ?? []
+    if (!turns.includes(turnID)) turns.push(turnID)
+    this.nativeExecutionTurns.set(sessionID, turns)
+  }
+
+  /** Start a new host execution, replacing settled bookkeeping. */
+  private beginNativeExecution(sessionID: string, turnID?: string): void {
+    this.nativeExecutionTurns.set(sessionID, turnID ? [turnID] : [])
+    this.nativeSteeredInboxes.delete(sessionID)
+  }
+
+  /** Open turns participating in the current execution, in answer order. */
+  private openNativeExecutionTurns(sessionID: string): Subtask[] {
+    const turns: Subtask[] = []
+    for (const turnID of this.nativeExecutionTurns.get(sessionID) ?? []) {
+      const task = this.store.subtask(turnID)
+      if (task && isNativeTurn(task) && nativePhaseOpen(task.native?.phase)) turns.push(task)
+    }
+    return turns
+  }
+
+  /** The turn currently answering in the session's execution. */
+  private nativeExecutionCurrentTurn(sessionID: string): Subtask | undefined {
+    return this.openNativeExecutionTurns(sessionID).at(-1)
+  }
+
+  /**
+   * Remember a queued turn the host delivered into a running execution. The
+   * next new assistant message after that delivery answers this inbox, not the
+   * turn that opened the execution (ticket #229).
+   */
+  private rememberNativeSteeredInbox(sessionID: string, inboxID: string): void {
+    const inboxes = this.nativeSteeredInboxes.get(sessionID) ?? []
+    if (!inboxes.includes(inboxID)) inboxes.push(inboxID)
+    this.nativeSteeredInboxes.set(sessionID, inboxes)
+  }
+
+  private takeNativeSteeredInbox(sessionID: string): string | undefined {
+    const inboxes = this.nativeSteeredInboxes.get(sessionID)
+    if (!inboxes || inboxes.length === 0) return undefined
+    const inboxID = inboxes.shift()!
+    if (inboxes.length === 0) this.nativeSteeredInboxes.delete(sessionID)
+    return inboxID
+  }
+
+  /** Drop a settled turn from the execution and steered bookkeeping. */
+  private forgetNativeExecutionTurn(task: Subtask): void {
+    const sessionID = task.native?.sessionID
+    if (!sessionID) return
+    const turns = this.nativeExecutionTurns.get(sessionID)
+    if (turns) {
+      const next = turns.filter((turnID) => turnID !== task.id)
+      if (next.length === 0) this.nativeExecutionTurns.delete(sessionID)
+      else this.nativeExecutionTurns.set(sessionID, next)
+    }
+    const inboxID = task.native?.inboxID
+    const steered = this.nativeSteeredInboxes.get(sessionID)
+    if (inboxID && steered) {
+      const next = steered.filter((candidate) => candidate !== inboxID)
+      if (next.length === 0) this.nativeSteeredInboxes.delete(sessionID)
+      else this.nativeSteeredInboxes.set(sessionID, next)
+    }
+  }
+
+  /**
+   * Settle every open turn the current execution answered, in answer order.
+   * One host execution can carry more than one inbox: a prompt delivered while
+   * a synthetic adoption heads-up runs is steered into that execution and
+   * produces an additional assistant message. Returns false when no execution
+   * participant is open, so the caller falls back to the single-turn path.
+   */
+  private async settleNativeExecution(
+    sessionID: string,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    outcome: "succeeded" | "failed" | "interrupted" | "cancelled",
+    at: number,
+    error?: any,
+  ): Promise<boolean> {
+    const participants = this.openNativeExecutionTurns(sessionID)
+    this.nativeExecutionTurns.delete(sessionID)
+    this.nativeSteeredInboxes.delete(sessionID)
+    if (participants.length === 0) return false
+    for (const task of participants) {
+      if (outcome === "succeeded") await this.settleOrDeferNativeTurn(task, target, outcome, at, error)
+      else await this.settleNativeTurn(task, target, outcome, at, error)
+    }
+    return true
+  }
+
+  /**
+   * Process one host event. Legacy group text/execution handling still runs
+   * for every session; the native branch runs only for a session bound to a
+   * workspace group, workspace direct, or home direct conversation under
+   * nativeFirst `on` (ADR 0009/0010).
+   */
+  private async handleNativeIngestEvent(event: any): Promise<void> {
+    const type = nativeEventType(event)
+    const data = nativeEventData(event)
+    const sessionID = nativeEventSessionID(event)
+    if (!sessionID) return
+    if (type === "session.text.delta") await this.handleStreamEvent(event)
+    if (type === "session.execution.started" || type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") {
+      await this.handleNativeSubagentExecution(event)
+      this.handleExecutionActivityEvent(event)
+    }
+    // Ticket #230: `shadow` ingests into the invisible sink and returns before
+    // any durable write, patch, Work row, or route. The visible path below is
+    // reached only by `on`; `off` simply stops here.
+    const mode = nativeFirstMode(this.store.settings())
+    if (mode === "shadow") {
+      const shadowTarget = this.nativeIngestTarget(sessionID, { requireMode: false })
+      if (shadowTarget) await this.handleNativeShadowEvent(event, shadowTarget)
+      return
+    }
+    const target = this.nativeIngestTarget(sessionID)
+    if (!target) return
+    const at = nativeEventAt(event, now())
+
+    // A workspace group session also executes delegated task runs. Their
+    // prompts are marked internal and skipped above; their execution, text,
+    // and retry events belong to that run, never to a queued native turn
+    // behind it. Once the run's skipped prompt is consumed, a queued native
+    // turn becomes the order head and must ingest even if run finalization
+    // still holds runBySession for a moment (ticket #216 review).
+    const runID = this.runBySession.get(sessionID)
+    const runOwnsSession = runID !== undefined
+    const runEvent = type === "session.retry.scheduled"
+      || type === "session.execution.started"
+      || type === "session.execution.succeeded"
+      || type === "session.execution.failed"
+      || type === "session.execution.interrupted"
+      || type === "session.text.started"
+      || type === "session.text.delta"
+      || type === "session.text.ended"
+    if (runOwnsSession && runEvent && this.nativeRunSettled.get(sessionID) !== runID) {
+      const owner = this.nativeExecutionOwner.get(sessionID)
+      // A native turn that was already active when the run appeared keeps the
+      // execution; otherwise every event before the run's terminal belongs to
+      // the run, even when a user turn is queued behind it.
+      if (owner !== "turn") {
+        const head = this.nativeInboxOrder.get(sessionID)?.[0]
+        if (type === "session.execution.started") {
+          if (head && !head.turn) this.takeNativeInbox(sessionID)
+          this.beginNativeExecution(sessionID)
+          this.nativeExecutionOwner.set(sessionID, "skip")
+        } else if (type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") {
+          if (head && !head.turn) this.takeNativeInbox(sessionID)
+          this.beginNativeExecution(sessionID)
+          this.nativeExecutionOwner.delete(sessionID)
+          this.nativeRunSettled.set(sessionID, runID)
+        }
+        return
+      }
+    }
+
+    if (type === "session.inbox.enqueued") {
+      const inboxID = String(data?.inboxID ?? "").trim()
+      if (!inboxID) return
+      const item = data?.item ?? {}
+      const payload = item?.payload ?? {}
+      const skipped = (reason: string) => {
+        // An enqueue that arrives after a run-owned execution already started
+        // must not leave a stale order entry; the run's events are ignored.
+        if (!(runOwnsSession && this.nativeExecutionOwner.get(sessionID) === "skip")) {
+          this.rememberNativeInbox(sessionID, inboxID, false)
+        }
+        const waiting = this.nativePendingExecutions.get(sessionID) ?? 0
+        if (waiting > 0) {
+          this.nativePendingExecutions.set(sessionID, waiting - 1)
+          // The execution.started event arrived before this enqueue; it belongs
+          // to the skipped prompt, not to a user turn behind it.
+          this.beginNativeExecution(sessionID)
+          this.nativeExecutionOwner.set(sessionID, "skip")
+        }
+        this.logger?.event("debug", "native", "native.turn.skipped", { sessionID, inboxID, ...(reason ? { reason } : {}) })
+      }
+      if (nativePromptSkipsTurn(payload)) {
+        skipped("")
+        return
+      }
+      const internal = nativePromptIsInternal(payload)
+      const managedMessageID = typeof payload.metadata?.[NATIVE_MESSAGE_ID_METADATA] === "string"
+        ? payload.metadata[NATIVE_MESSAGE_ID_METADATA]
+        : undefined
+      if (internal) {
+        // A service prompt attaches to the user row the service already wrote
+        // for this conversation. With no managed row there is nothing to
+        // mirror or attach, so the turn is ignored.
+        const text = String(payload.text ?? "")
+        const managed = managedMessageID
+          ? this.store.message(target.channel, managedMessageID) !== undefined
+          : this.store.messages(target.channel).some(
+              (message) => message.author === "user" && message.kind === "text" && message.text === text,
+            )
+        if (!managed) {
+          skipped("internal")
+          return
+        }
+      }
+      // Privacy gate: a native prompt belongs to this agent's own session, so
+      // an off mirror never creates a turn, user row, route, or final row for
+      // it. Managed service prompts above are unaffected: they already own a
+      // durable row and their work must keep mirroring.
+      if (!internal && !nativeMirrorEnabled(target.agent)) {
+        skipped("mirror-off")
+        return
+      }
+      const turnID = nativeTurnID(sessionID, inboxID)
+      let task = this.store.subtask(turnID)
+      const created = !task
+      if (!task) {
+        const text = String(payload.text ?? "")
+        const attachments = nativeInboxAttachments(payload.files, inboxID)
+        task = {
+          id: turnID,
+          workspaceID: target.channel,
+          creatorType: "user",
+          assigneeID: target.agent.id,
+          title: nativeTurnTitle(text),
+          instruction: text,
+          ...(attachments.length > 0 ? { attachments } : {}),
+          mode: "research",
+          state: "pending",
+          stage: "initial",
+          outcome: "pending",
+          interrupted: false,
+          awaitingChildren: false,
+          attempts: 0,
+          createdAt: at,
+          workKind: "turn",
+          origin: "native",
+          conversationID: target.channel,
+          dispatchGroupID: nativeTurnGroupID(turnID),
+          native: {
+            sessionID,
+            inboxID,
+            assistantMessageIDs: [],
+            phase: "queued",
+            events: [{ type: "session.inbox.enqueued", at, phase: "queued" }],
+          },
+        }
+        await this.store.saveSubtask(task)
+        this.logger?.event("info", "native", "native.turn.enqueued", {
+          sessionID,
+          turnID,
+          inboxID,
+          channel: target.channel,
+        })
+      } else if (!nativePhaseOpen(task.native?.phase)) {
+        // A duplicate enqueue for a settled turn is harmless.
+        return
+      }
+      this.touchNativeWatchdog(task.id)
+      this.rememberNativeInbox(sessionID, inboxID, true)
+      const pending = this.nativePendingInboxes.get(sessionID) ?? []
+      if (!pending.includes(inboxID)) pending.push(inboxID)
+      this.nativePendingInboxes.set(sessionID, pending)
+      if (internal && managedMessageID) {
+        const row = this.store.cloneMessage(target.channel, managedMessageID)
+        if (row) {
+          row.taskID = task.id
+          row.native = { sessionID, inboxID, turnID: task.id }
+          await this.store.saveMessage(row)
+        }
+      } else if (item?.type === "user" && !internal) {
+        await this.store.saveChannelMessage(target.channel, {
+          id: nativeUserMessageID(inboxID),
+          author: "user",
+          text: String(payload.text ?? ""),
+          kind: "text",
+          taskID: task.id,
+          createdAt: task.createdAt,
+          ...(task.attachments && task.attachments.length > 0 ? { attachments: task.attachments } : {}),
+          native: { sessionID, inboxID, turnID: task.id },
+        })
+      }
+      // Ticket #220: route mentions once, when this native turn is first
+      // observed. A replay reuses the turn and must not duplicate work or
+      // refusals. Service prompts and synthetic items are never user messages.
+      if (created && item?.type === "user" && !internal) {
+        if (target.conversation.kind === "workspace") {
+          // ADR 0011: a native turn opens a normal root ledger before any
+          // route is planned, so the preflight sees the same caps a composer
+          // command would capture.
+          await this.ensureDispatchGroupLedger(task.dispatchGroupID, target.channel)
+        }
+        await this.routeNativeMentions(target, task, String(payload.text ?? ""), at)
+      }
+      const waiting = this.nativePendingExecutions.get(sessionID) ?? 0
+      if (waiting > 0 && !this.nativeActiveTurn.has(sessionID)) {
+        this.nativePendingExecutions.set(sessionID, waiting - 1)
+        this.beginNativeExecution(sessionID, task.id)
+        this.nativeExecutionOwner.set(sessionID, "turn")
+        await this.startNativeTurn(sessionID, task, at)
+      }
+      return
+    }
+
+    if (type === "session.execution.started") {
+      const active = this.nativeActiveTurnTurn(sessionID)
+      if (active) {
+        // A text event already started this execution, or the host repeated
+        // the start. Consume only the head that belongs to the active turn.
+        this.nativeExecutionOwner.set(sessionID, "turn")
+        if (this.openNativeExecutionTurns(sessionID).length === 0) this.beginNativeExecution(sessionID, active.id)
+        else this.rememberNativeExecutionTurn(sessionID, active.id)
+        const head = this.nativeInboxOrder.get(sessionID)?.[0]
+        if (head?.turn && head.inboxID === active.native?.inboxID) this.takeNativeInbox(sessionID)
+        return
+      }
+      const next = this.takeNativeInbox(sessionID)
+      if (next) {
+        this.nativeExecutionOwner.set(sessionID, next.turn ? "turn" : "skip")
+        if (!next.turn) {
+          this.beginNativeExecution(sessionID)
+          return
+        }
+        const task = this.store.subtask(nativeTurnID(sessionID, next.inboxID))
+        if (task) {
+          this.beginNativeExecution(sessionID, task.id)
+          await this.startNativeTurn(sessionID, task, at)
+          return
+        }
+      }
+      // Reordered: no enqueue seen yet. The next enqueue consumes this start.
+      this.beginNativeExecution(sessionID)
+      this.nativeExecutionOwner.set(sessionID, "turn")
+      await this.startNativeTurn(sessionID, undefined, at)
+      return
+    }
+
+    if (type === "session.inbox.delivered" || type === "session.inbox.delivery.changed") {
+      const inboxID = String(data?.inboxID ?? "").trim()
+      if (inboxID) {
+        const delivery = String(data?.delivery ?? data?.item?.delivery ?? "delivered")
+        this.nativeDelivery.set(inboxID, delivery)
+        const task = this.nativeTurnByInbox(inboxID)
+        if (task && isNativeTurn(task) && nativePhaseOpen(task.native?.phase)) {
+          await this.updateNativeTurn(task, (next) => {
+            appendNativeTurnEvent(next.native!, {
+              type,
+              at,
+              ...(next.native?.phase ? { phase: next.native.phase } : {}),
+              delivery,
+            })
+          })
+          // The host accepted a queued prompt into an execution that is still
+          // running. Its next assistant message answers this turn, not the one
+          // that opened the execution (ticket #229).
+          if (type === "session.inbox.delivered") {
+            const participants = this.openNativeExecutionTurns(sessionID)
+            if (
+              participants.length > 0
+              && this.nativeExecutionOwner.get(sessionID) === "turn"
+              && !participants.some((participant) => participant.id === task.id)
+            ) {
+              this.rememberNativeSteeredInbox(sessionID, inboxID)
+              this.logger?.event("info", "native", "native.turn.steered", {
+                sessionID,
+                turnID: task.id,
+                inboxID,
+              })
+            }
+          }
+        }
+      }
+      return
+    }
+
+    if (type === "session.inbox.cancelled") {
+      const inboxID = String(data?.inboxID ?? "").trim()
+      // An inbox id names exactly one prompt. A cancelled internal/onboarding
+      // prompt was never ingested, so it must not fall back to the session's
+      // unrelated live user turn. Only a cancellation with no inbox id means
+      // the session's active turn (ticket #215 review).
+      const task = inboxID
+        ? this.nativeTurnByInbox(inboxID)
+        : this.nativeActiveTurnTurn(sessionID)
+      if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) {
+        if (inboxID) this.forgetNativeInbox(sessionID, inboxID)
+        return
+      }
+      if (inboxID) this.consumeNativeInbox(sessionID, inboxID)
+      await this.settleNativeTurn(task, target, "cancelled", at)
+      return
+    }
+
+    if (type === "session.retry.scheduled") {
+      if (this.nativeExecutionOwner.get(sessionID) === "skip") return
+      const task = this.nativeExecutionCurrentTurn(sessionID) ?? this.nativeTerminalTurn(sessionID)
+      if (!task) return
+      const row = await this.ensureNativeAgentRow(task, target, at)
+      if (row) this.queueNativeStream(task)
+      this.touchNativeWatchdog(task.id)
+      await this.updateNativeTurn(task, (next) => {
+        next.native = { ...next.native!, phase: "retrying" }
+        appendNativeTurnEvent(next.native, { type: "session.retry.scheduled", at, phase: "retrying" })
+        next.state = "working"
+        next.outcome = "pending"
+      })
+      return
+    }
+
+    if (type === "session.execution.succeeded") {
+      if (this.nativeExecutionOwner.get(sessionID) === "skip") {
+        this.nativeExecutionOwner.delete(sessionID)
+        this.beginNativeExecution(sessionID)
+        return
+      }
+      const settled = await this.settleNativeExecution(sessionID, target, "succeeded", at)
+      if (!settled) {
+        const task = this.nativeTerminalTurn(sessionID)
+        if (task) await this.settleOrDeferNativeTurn(task, target, "succeeded", at)
+      }
+      return
+    }
+    if (type === "session.execution.failed") {
+      if (this.nativeExecutionOwner.get(sessionID) === "skip") {
+        this.nativeExecutionOwner.delete(sessionID)
+        this.beginNativeExecution(sessionID)
+        return
+      }
+      const settled = await this.settleNativeExecution(sessionID, target, "failed", at, data?.error)
+      if (!settled) {
+        const task = this.nativeTerminalTurn(sessionID)
+        if (task) await this.settleNativeTurn(task, target, "failed", at, data?.error)
+      }
+      return
+    }
+    if (type === "session.execution.interrupted") {
+      if (this.nativeExecutionOwner.get(sessionID) === "skip") {
+        this.nativeExecutionOwner.delete(sessionID)
+        this.beginNativeExecution(sessionID)
+        return
+      }
+      // Ticket #217: a user interrupt is cancelled; shutdown/inactivity keep
+      // partial work and ask the user. The reason is a code, never copy.
+      const reason = String(data?.reason ?? "unknown")
+      const outcome = nativeInterruptionSettlement(reason)
+      const participants = this.openNativeExecutionTurns(sessionID)
+      for (const task of participants) {
+        this.logger?.event("info", "native", "native.turn.interruption", {
+          sessionID,
+          turnID: task.id,
+          reason,
+          phase: outcome,
+        })
+      }
+      const settled = await this.settleNativeExecution(sessionID, target, outcome, at)
+      if (!settled) {
+        const task = this.nativeTerminalTurn(sessionID)
+        if (task) {
+          this.logger?.event("info", "native", "native.turn.interruption", {
+            sessionID,
+            turnID: task.id,
+            reason,
+            phase: outcome,
+          })
+          await this.settleNativeTurn(task, target, outcome, at)
+        }
+      }
+      return
+    }
+
+    if (type === "session.text.started" || type === "session.text.delta" || type === "session.text.ended") {
+      const assistantID = String(data?.assistantMessageID ?? "").trim()
+      if (!assistantID) return
+      const task = await this.nativeTextTurn(sessionID, assistantID, at)
+      if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return
+      this.touchNativeWatchdog(task.id)
+      const ordinal = Math.max(0, Math.floor(Number(data?.ordinal ?? 0) || 0))
+      const state = this.nativeTextState(task.id)
+      const part = (state[assistantID] ??= { started: [], deltas: {}, ended: {} })
+      if (!part.started.includes(ordinal)) part.started.push(ordinal)
+      if (type === "session.text.delta") {
+        part.deltas[ordinal] = (part.deltas[ordinal] ?? "") + String(data?.delta ?? "")
+      } else if (type === "session.text.ended") {
+        part.ended[ordinal] = String(data?.text ?? "")
+      }
+      this.nativeAssistantTurns.set(assistantID, task.id)
+      let current = task
+      if (!(current.native?.assistantMessageIDs ?? []).includes(assistantID)) {
+        current = await this.updateNativeTurn(current, (next) => {
+          next.native!.assistantMessageIDs = [...(next.native!.assistantMessageIDs ?? []), assistantID]
+          if (next.native!.phase === "queued") next.native!.phase = "working"
+          next.native!.startedAt ??= at
+          appendNativeTurnEvent(next.native!, { type: "session.text.started", at, phase: "working", messageID: assistantID })
+          next.state = "working"
+          next.outcome = "pending"
+        })
+      }
+      const row = await this.ensureNativeAgentRow(current, target, at)
+      if (row) this.queueNativeStream(current)
+      return
+    }
+  }
+
+  /**
+   * The session's open turn. A settled marker is stale: keeping it would let a
+   * late text event or a replayed terminal event claim the next turn, so it is
+   * dropped here before any fallback (ticket #215 review).
+   */
+  private nativeActiveTurnTurn(sessionID: string): Subtask | undefined {
+    const id = this.nativeActiveTurn.get(sessionID)
+    const task = id ? this.store.subtask(id) : undefined
+    if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) {
+      if (id) this.nativeActiveTurn.delete(sessionID)
+      return undefined
+    }
+    return task
+  }
+
+  /** Active turn, or the next queued inbox when a terminal event arrived early. */
+  private nativeTerminalTurn(sessionID: string): Subtask | undefined {
+    // The most recent turn answering in this execution is the retry/terminal
+    // target; a steered prompt is the current turn even before its own event.
+    const execution = this.nativeExecutionCurrentTurn(sessionID)
+    if (execution) return execution
+    const active = this.nativeActiveTurnTurn(sessionID)
+    if (active) return active
+    // The next enqueued prompt may be a skipped internal one. Its execution
+    // terminal must not settle a user turn queued behind it; consuming the
+    // head keeps the order aligned for the next real execution.
+    const head = this.nativeInboxOrder.get(sessionID)?.[0]
+    if (head && !head.turn) {
+      this.takeNativeInbox(sessionID)
+      return undefined
+    }
+    const next = this.nativePendingInboxes.get(sessionID)?.[0]
+    const task = next ? this.store.subtask(nativeTurnID(sessionID, next)) : undefined
+    if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return undefined
+    this.nativeActiveTurn.set(sessionID, task.id)
+    return task
+  }
+
+  /** Add a turn to the current execution, or begin one when none is open. */
+  private joinNativeExecution(sessionID: string, task: Subtask): void {
+    if (this.openNativeExecutionTurns(sessionID).length === 0) this.beginNativeExecution(sessionID, task.id)
+    else this.rememberNativeExecutionTurn(sessionID, task.id)
+  }
+
+  /**
+   * Find (or lazily start) the turn a text event belongs to. Identity wins: a
+   * recorded assistant message id resolves to its own turn, even when another
+   * turn is currently active. A queued turn delivered into a running execution
+   * owns the next new assistant message. A late text event for a settled turn
+   * therefore returns that settled turn and never attaches to the next turn or
+   * pins the active marker (tickets #218, #215 review, #229).
+   */
+  private async nativeTextTurn(sessionID: string, assistantMessageID: string, at: number): Promise<Subtask | undefined> {
+    // Text from a skipped internal execution belongs to that service prompt,
+    // never to a user turn queued behind it.
+    if (this.nativeExecutionOwner.get(sessionID) === "skip") return undefined
+    const mapped = this.nativeAssistantTurns.get(assistantMessageID)
+    const known = mapped ? this.store.subtask(mapped) : this.nativeTurnByAssistant(assistantMessageID)
+    if (known && isNativeTurn(known)) {
+      if (!nativePhaseOpen(known.native?.phase)) return known
+      this.joinNativeExecution(sessionID, known)
+      this.nativeActiveTurn.set(sessionID, known.id)
+      return known
+    }
+    // A prompt delivered into an already-running execution answers with the
+    // next new assistant message; the execution's opening turn owns the
+    // messages before that delivery.
+    const steeredInbox = this.takeNativeSteeredInbox(sessionID)
+    if (steeredInbox) {
+      const steered = this.store.subtask(nativeTurnID(sessionID, steeredInbox))
+      if (steered && isNativeTurn(steered) && nativePhaseOpen(steered.native?.phase)) {
+        this.joinNativeExecution(sessionID, steered)
+        this.consumeNativeInbox(sessionID, steeredInbox)
+        this.nativeActiveTurn.set(sessionID, steered.id)
+        await this.ensureNativeAgentRow(steered, this.nativeIngestTarget(sessionID)!, at)
+        return steered
+      }
+    }
+    const execution = this.nativeExecutionCurrentTurn(sessionID)
+    if (execution) return execution
+    const active = this.nativeActiveTurnTurn(sessionID)
+    if (active) return active
+    // Reordered text for a skipped service prompt must not start a native turn
+    // queued behind it.
+    const head = this.nativeInboxOrder.get(sessionID)?.[0]
+    if (head && !head.turn) return undefined
+    // Reordered text can precede execution.started; the enqueued turn is the
+    // next pending inbox.
+    const pending = this.nativePendingInboxes.get(sessionID)?.[0]
+    const task = pending ? this.store.subtask(nativeTurnID(sessionID, pending)) : undefined
+    if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return undefined
+    this.joinNativeExecution(sessionID, task)
+    this.nativeActiveTurn.set(sessionID, task.id)
+    await this.ensureNativeAgentRow(task, this.nativeIngestTarget(sessionID)!, at)
+    return task
+  }
+
+  private async ensureNativeTurnTask(task: Subtask, at: number): Promise<void> {
+    if (task.native?.phase === "working" && task.state === "working") return
+    await this.updateNativeTurn(task, (next) => {
+      next.native = {
+        ...next.native!,
+        phase: "working",
+        startedAt: next.native!.startedAt ?? at,
+      }
+      appendNativeTurnEvent(next.native, { type: "session.execution.started", at, phase: "working" })
+      next.state = "working"
+      next.outcome = "pending"
+      next.interrupted = false
+    })
+  }
+
+  private async startNativeTurn(sessionID: string, explicit: Subtask | undefined, at: number): Promise<void> {
+    const target = this.nativeIngestTarget(sessionID)
+    if (!target) return
+    let task = explicit
+    if (!task) {
+      const next = this.nativePendingInboxes.get(sessionID)?.[0]
+      if (!next) {
+        this.nativePendingExecutions.set(sessionID, (this.nativePendingExecutions.get(sessionID) ?? 0) + 1)
+        return
+      }
+      task = this.store.subtask(nativeTurnID(sessionID, next))
+    }
+    if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return
+    this.touchNativeWatchdog(task.id)
+    this.joinNativeExecution(sessionID, task)
+    if (this.nativeActiveTurn.get(sessionID) === task.id) {
+      this.consumeNativeInbox(sessionID, task.native?.inboxID ?? "")
+      if (task.native?.phase === "working") {
+        await this.injectNativeTurnContext(task, target)
+        await this.ensureNativeAgentRow(task, target, at)
+        return
+      }
+    }
+    this.nativeActiveTurn.set(sessionID, task.id)
+    this.consumeNativeInbox(sessionID, task.native?.inboxID ?? "")
+    await this.ensureNativeTurnTask(task, at)
+    await this.injectNativeTurnContext(task, target)
+    await this.ensureNativeAgentRow(task, target, at)
+  }
+
+  /**
+   * Ticket #225: replace the retired read-only roster tools with one compact
+   * per-turn block. The host applies instruction entries before the model
+   * turn; this is the same entry surface delegated runs already use.
+   */
+  private async injectNativeTurnContext(
+    task: Subtask,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+  ): Promise<void> {
+    const sessionID = task.native?.sessionID
+    if (!sessionID) return
+    const state = this.store.read()
+    const workspace = target.conversation.kind === "workspace"
+      ? state.workspaces[target.conversation.workspaceID]
+      : undefined
+    const group = task.dispatchGroupID ? state.dispatchGroups[task.dispatchGroupID] : undefined
+    const budget: DispatchBudgetState | undefined = workspace && group
+      ? dispatchBudgetState({
+          group,
+          groups: state.dispatchGroups,
+          task,
+          subtasks: state.subtasks,
+          nextDepth: dispatchDepthFor(task, state.subtasks),
+        })
+      : undefined
+    const value = ensembleTurnContext({
+      agent: target.agent,
+      conversation: {
+        kind: target.conversation.kind,
+        ...(workspace ? { workspaceID: workspace.id } : {}),
+      },
+      ...(workspace ? { workspace } : {}),
+      agents: state.agents,
+      routing: workspace !== undefined && state.settings.nativeMentionRouting !== false,
+      ...(budget ? { budget } : {}),
+    })
+    await this.ctx.session.instructions.entry.put({
+      sessionID,
+      key: "ensemble.v2.context",
+      value,
+    }).catch(() => undefined)
+  }
+
+  private async updateNativeTurn(task: Subtask, mutate: (next: Subtask) => void): Promise<Subtask> {
+    const next = this.store.cloneSubtask(task.id) ?? { ...task }
+    mutate(next)
+    await this.store.saveSubtask(next)
+    return next
+  }
+
+  /**
+   * Open or update the one durable agent row for a turn. The row exists from
+   * execution start with `streaming: true`; a duplicate start or delta reuses
+   * it. A settled row is never reopened.
+   *
+   * Deltas update accumulated text in memory; the coalesced stream event and a
+   * bounded crash checkpoint carry it (ADR 0010). Only a metadata change —
+   * a new assistant message id or host identity — writes the durable row here,
+   * so a delta burst is never one store write per delta (ticket #215 review).
+   */
+  private async ensureNativeAgentRow(task: Subtask, target: { channel: string; agent: Agent }, at: number): Promise<Message | undefined> {
+    if (!isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return undefined
+    const rowID = nativeAssistantMessageID(task.id)
+    const assistantID = task.native?.assistantMessageIDs?.at(-1)
+    const native = {
+      sessionID: task.native!.sessionID,
+      turnID: task.id,
+      ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+      ...(assistantID ? { assistantMessageID: assistantID } : {}),
+    }
+    const row = this.store.cloneMessage(target.channel, rowID)
+    if (row) {
+      if (!row.streaming) return row
+      const metadataChanged = row.native?.sessionID !== native.sessionID
+        || row.native?.turnID !== native.turnID
+        || row.native?.inboxID !== native.inboxID
+        || row.native?.assistantMessageID !== native.assistantMessageID
+      row.text = this.nativeDisplayText(task.id)
+      row.updatedAt = at
+      row.streaming = true
+      row.native = native
+      const live = this.nativeRows.get(task.id)
+      this.nativeRows.set(task.id, {
+        message: row,
+        channel: target.channel,
+        lastSave: live?.lastSave ?? 0,
+        ...(live?.checkpointTimer ? { checkpointTimer: live.checkpointTimer } : {}),
+      })
+      if (metadataChanged) await this.store.saveMessage(row)
+      return row
+    }
+    const created = await this.store.saveChannelMessage(target.channel, {
+      id: rowID,
+      author: "agent",
+      agentID: target.agent.id,
+      text: this.nativeDisplayText(task.id),
+      kind: "text",
+      taskID: task.id,
+      streaming: true,
+      createdAt: at,
+      updatedAt: now(),
+      native,
+    })
+    this.nativeRows.set(task.id, { message: created, channel: target.channel, lastSave: 0 })
+    return created
+  }
+
+  private queueNativeStream(task: Subtask): void {
+    if (!nativePhaseOpen(task.native?.phase)) return
+    const live = this.nativeRows.get(task.id)
+    if (!live || !live.message.streaming) return
+    const text = this.nativeDisplayText(task.id)
+    const message = live.message
+    message.text = text
+    message.streaming = true
+    message.updatedAt = now()
+    this.queueStream(message)
+    // Empty display text carries no crash-recovery value and would consume the
+    // first checkpoint before any delta arrived.
+    if (!text) return
+    const at = now()
+    if (live.lastSave === 0 || at - live.lastSave >= STREAM_CHECKPOINT_MS) {
+      this.checkpointNativeRow(live)
+      return
+    }
+    // Coalesce the tail of a delta burst into one bounded checkpoint. Without
+    // the trailing write the last delta of a quiet stream would never reach a
+    // snapshot.
+    if (live.checkpointTimer !== undefined) return
+    const delay = Math.max(0, STREAM_CHECKPOINT_MS - (at - live.lastSave))
+    const timer = setTimeout(() => {
+      const current = this.nativeRows.get(task.id)
+      if (!current || current.checkpointTimer !== timer) return
+      current.checkpointTimer = undefined
+      this.checkpointNativeRow(current)
+    }, delay)
+    timer.unref?.()
+    live.checkpointTimer = timer
+  }
+
+  /** One bounded durable checkpoint for the live native row. */
+  private checkpointNativeRow(live: { message: Message; channel: string; lastSave: number }): void {
+    if (!live.message.streaming || !this.store.isStreaming(live.channel, live.message.id)) return
+    live.lastSave = now()
+    void this.store.checkpointMessage(live.message).catch(() => undefined)
+  }
+
+  /** Cancel a pending trailing checkpoint and drop the live row bookkeeping. */
+  private clearNativeCheckpoint(turnID: string): void {
+    const live = this.nativeRows.get(turnID)
+    if (!live) return
+    if (live.checkpointTimer !== undefined) clearTimeout(live.checkpointTimer)
+    this.nativeRows.delete(turnID)
+  }
+
+  /**
+   * Ticket #218: set the operator-visible native sync state. Only a state or
+   * reason change is logged, with ids/counts/reason codes and never content.
+   */
+  private setNativeSync(state: NativeSyncState, reason?: string): void {
+    const nextReason = state === "live" ? undefined : reason
+    if (this.nativeSync.state === state && this.nativeSync.reason === nextReason) return
+    this.nativeSync.state = state
+    if (nextReason) this.nativeSync.reason = nextReason
+    else delete this.nativeSync.reason
+    this.logger?.event(state === "degraded" ? "warn" : "debug", "native", "native.sync", {
+      state,
+      ...(nextReason ? { reason: nextReason } : {}),
+    })
+  }
+
+  private beginNativeReconcile(reason: NativeReconcileReason): void {
+    this.nativeReconcilePending += 1
+    if (this.nativeReconcilePending !== 1) return
+    this.nativeReconcileFailures = 0
+    this.setNativeSync("reconciling", reason)
+  }
+
+  private endNativeReconcile(ok: boolean, reason: string): void {
+    if (!ok) this.nativeReconcileFailures += 1
+    this.nativeReconcilePending = Math.max(0, this.nativeReconcilePending - 1)
+    if (this.nativeReconcilePending > 0) return
+    const failures = this.nativeReconcileFailures
+    this.nativeReconcileFailures = 0
+    if (failures > 0) this.setNativeSync("degraded", reason)
+    else this.setNativeSync("live")
+  }
+
+  /**
+   * Ticket #218: one bounded transcription reconciliation pass over every
+   * bound session, optionally restricted to one location's reconnect. It is
+   * called on service start, a location re-attach, and adoption only; it is
+   * never part of a snapshot, heartbeat, or steady-state loop.
+   */
+  private async reconcileNativeBindings(
+    reason: Exclude<NativeReconcileReason, "watchdog">,
+    options: { directory?: string } = {},
+  ): Promise<void> {
+    if (this.stopped) return
+    if (nativeFirstMode(this.store.settings()) !== "on") {
+      if (reason === "start") await this.recoverNativeTurns()
+      return
+    }
+    const bindings = this.store.bindings().filter((binding) => binding.sessionID)
+    const sessions = [...new Set(bindings.map((binding) => binding.sessionID))]
+    if (sessions.length === 0) {
+      this.setNativeSync("live")
+      return
+    }
+    this.logger?.event("debug", "native", "native.reconcile.start", {
+      reason,
+      sessions: sessions.length,
+      scope: options.directory ? "location" : "all",
+    })
+    const results = await Promise.all(sessions.map((sessionID) => this.reconcileNativeSession(sessionID, reason)))
+    const failures = results.filter((result) => !result.ok).length
+    this.logger?.event(failures > 0 ? "warn" : "info", "native", "native.reconcile.done", {
+      reason,
+      sessions: sessions.length,
+      failures,
+    })
+  }
+
+  /**
+   * Reconcile one session once. The run is serialized behind that session's
+   * ingestion queue, so a transcript read cannot interleave with host events.
+   * Concurrent triggers coalesce into the run already in flight.
+   */
+  private reconcileNativeSession(
+    sessionID: string,
+    reason: NativeReconcileReason,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const existing = this.nativeReconcileRuns.get(sessionID)
+    if (existing) return existing
+    let run!: Promise<{ ok: boolean; reason?: string }>
+    run = (async () => {
+      const previous = this.nativeQueues.get(sessionID) ?? Promise.resolve()
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      this.nativeQueues.set(sessionID, gate)
+      try {
+        await previous
+        if (this.stopped) return { ok: true }
+        return await this.runNativeReconcile(sessionID, reason)
+      } catch (error) {
+        this.logger?.event("warn", "native", "native.turn.reconcile.error", {
+          sessionID,
+          reason,
+          errorCode: nativeErrorCode(error),
+        })
+        return { ok: false, reason: "reconcile-failed" }
+      } finally {
+        release()
+        if (this.nativeQueues.get(sessionID) === gate) this.nativeQueues.delete(sessionID)
+        if (this.nativeReconcileRuns.get(sessionID) === run) this.nativeReconcileRuns.delete(sessionID)
+      }
+    })()
+    this.nativeReconcileRuns.set(sessionID, run)
+    return run
+  }
+
+  private async runNativeReconcile(
+    sessionID: string,
+    reason: NativeReconcileReason,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    if (nativeFirstMode(this.store.settings()) !== "on") return { ok: true }
+    this.beginNativeReconcile(reason)
+    try {
+      // Ticket #224 race guard: a binding can change while the transcript read
+      // is in flight (an adoption during a start/reconnect pass). The target
+      // key ties every write to the binding the read was resolved against; a
+      // changed key discards nothing and repeats against the new conversation,
+      // so the old conversation receives no post-adoption row and the new one
+      // still recovers.
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const target = this.nativeIngestTarget(sessionID, { requireMode: false })
+        if (!target) {
+          // A transient remove/save gap during reassignment is not a terminal
+          // "unbound" answer; give the binding write a turn to land.
+          if (attempt < 5) {
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            continue
+          }
+          this.endNativeReconcile(true, reason)
+          return { ok: true }
+        }
+        const targetKey = this.nativeTargetKey(target)
+        const messages = await this.nativeContextMessagesForSession(sessionID, reason)
+        if (!messages) {
+          this.endNativeReconcile(false, "context-read")
+          return { ok: false, reason: "context-read" }
+        }
+        if (this.nativeTargetKeyForSession(sessionID) !== targetKey) {
+          this.logger?.event("info", "native", "native.reconcile.target_changed", { sessionID, reason, attempt })
+          continue
+        }
+        const counts = await this.applyNativeReconciliation(sessionID, target, messages, reason, targetKey)
+        if (counts.targetChanged) {
+          this.logger?.event("info", "native", "native.reconcile.target_changed", { sessionID, reason, attempt, phase: "apply" })
+          continue
+        }
+        this.endNativeReconcile(true, reason)
+        this.logger?.event("info", "native", "native.reconcile.session", {
+          sessionID,
+          reason,
+          ...counts,
+        })
+        return { ok: true }
+      }
+      this.endNativeReconcile(false, "target-changed")
+      return { ok: false, reason: "target-changed" }
+    } catch (error) {
+      this.endNativeReconcile(false, "reconcile-failed")
+      throw error
+    }
+  }
+
+  /** Identity of one ingestion target: channel, conversation, and agent. */
+  private nativeTargetKey(target: { conversation: BindingConversation; channel: string }): string {
+    return `${target.channel}\0${conversationStateKey(target.conversation)}`
+  }
+
+  private nativeTargetKeyForSession(sessionID: string): string | undefined {
+    const target = this.nativeIngestTarget(sessionID, { requireMode: false })
+    return target ? this.nativeTargetKey(target) : undefined
+  }
+
+  /**
+   * Apply one transcript snapshot. Identity is the host inbox id; assistant
+   * text belongs to the turn opened by the preceding user/synthetic message.
+   * A missing turn or row is recreated deterministically, a terminal turn with
+   * a missing result is repaired, and an answerless turn is interrupted only
+   * when the transcript's idle marker confirms settlement.
+   */
+  private async applyNativeReconciliation(
+    sessionID: string,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    messages: readonly any[],
+    reason: NativeReconcileReason,
+    targetKey: string,
+  ): Promise<NativeReconcileCounts> {
+    const counts: NativeReconcileCounts = {
+      turns: 0,
+      recoveredTurns: 0,
+      recoveredUserMessages: 0,
+      recoveredAssistantMessages: 0,
+      repairedResults: 0,
+      interrupted: 0,
+      skipped: 0,
+    }
+    const at = now()
+    const matched = new Set<string>()
+    const openBefore = Object.values(this.store.read().subtasks).filter(
+      (task) => isNativeTurn(task) && task.native?.sessionID === sessionID && nativePhaseOpen(task.native?.phase),
+    )
+    for (const group of nativeContextTurnGroups(messages)) {
+      if (this.nativeTargetKeyForSession(sessionID) !== targetKey) return { ...counts, targetChanged: true }
+      counts.turns += 1
+      const prompt = { metadata: group.metadata }
+      if (nativePromptSkipsTurn(prompt)) {
+        counts.skipped += 1
+        continue
+      }
+      const internal = nativePromptIsInternal(prompt)
+      const managedID = typeof group.metadata?.[NATIVE_MESSAGE_ID_METADATA] === "string"
+        ? String(group.metadata[NATIVE_MESSAGE_ID_METADATA])
+        : undefined
+      const managedRow = managedID ? this.store.message(target.channel, managedID) : undefined
+      // A service prompt with no durable row is identity/onboarding copy and
+      // owns no Ensemble turn.
+      if (internal && !managedRow) {
+        counts.skipped += 1
+        continue
+      }
+      // Privacy gate: recovery must not recreate a private native prompt's
+      // rows or turn. Managed service prompts keep their recovery path.
+      if (!internal && !nativeMirrorEnabled(target.agent)) {
+        counts.skipped += 1
+        continue
+      }
+      const turnID = nativeTurnID(sessionID, group.inboxID)
+      let task = this.store.subtask(turnID) ?? this.nativeTurnByInboxForSession(sessionID, group.inboxID)
+      if (!task) {
+        task = await this.createReconciledNativeTurn(sessionID, target, group, at)
+        counts.recoveredTurns += 1
+        this.logger?.event("info", "native", "native.turn.recovered", {
+          sessionID,
+          turnID,
+          inboxID: group.inboxID,
+          reason: "missing-enqueue",
+        })
+      }
+      matched.add(task.id)
+      task = await this.mergeReconciledAssistantIDs(task, group, at)
+      if (group.itemType === "user") {
+        const rowID = internal && managedRow ? managedRow.id : nativeUserMessageID(group.inboxID)
+        const row = this.store.message(target.channel, rowID)
+        if (!row) {
+          await this.store.saveChannelMessage(target.channel, {
+            id: rowID,
+            author: "user",
+            text: group.text,
+            kind: "text",
+            taskID: task.id,
+            createdAt: group.createdAt ?? task.createdAt,
+            ...(group.attachments.length > 0 ? { attachments: group.attachments } : {}),
+            native: { sessionID, inboxID: group.inboxID, turnID: task.id },
+          })
+          counts.recoveredUserMessages += 1
+          this.logger?.event("info", "native", "native.message.recovered", {
+            sessionID,
+            turnID: task.id,
+            inboxID: group.inboxID,
+            messageID: rowID,
+            author: "user",
+            reason: "missing-row",
+          })
+        } else if (internal && managedRow && (row.taskID !== task.id || row.native?.turnID !== task.id)) {
+          const linked = this.store.cloneMessage(target.channel, row.id)!
+          linked.taskID = task.id
+          linked.native = { sessionID, inboxID: group.inboxID, turnID: task.id }
+          await this.store.saveMessage(linked)
+          counts.recoveredUserMessages += 1
+        }
+      }
+      const phase = task.native?.phase
+      if (nativePhaseOpen(phase)) {
+        if (group.hasAssistant && group.assistantText) {
+          if (this.nativeTurnIsLive(sessionID, task, group, at)) {
+            this.adoptReconciledPendingTurn(sessionID, task)
+            continue
+          }
+          const rowExisted = this.store.message(target.channel, nativeAssistantMessageID(task.id)) !== undefined
+          this.seedNativeRecoveredAnswer(task, group.assistantText)
+          await this.settleNativeTurn(task, target, "succeeded", at)
+          if (!rowExisted) {
+            counts.recoveredAssistantMessages += 1
+            this.logger?.event("info", "native", "native.message.recovered", {
+              sessionID,
+              turnID: task.id,
+              inboxID: group.inboxID,
+              assistantMessageID: group.assistantMessageIDs.at(-1),
+              author: "agent",
+              reason: "missing-result",
+            })
+          }
+          continue
+        }
+        if (group.hasAssistant && group.settled) {
+          // Tool-only success: no text row is the honest result.
+          if (this.nativeTurnIsLive(sessionID, task, group, at)) {
+            this.adoptReconciledPendingTurn(sessionID, task)
+            continue
+          }
+          this.seedNativeRecoveredAnswer(task, "")
+          await this.settleNativeTurn(task, target, "succeeded", at)
+          continue
+        }
+        if (group.settled) {
+          if (!this.nativeTurnIsLive(sessionID, task, group, at)) {
+            await this.markNativeInterrupted(task, "reconcile-no-answer")
+            counts.interrupted += 1
+          }
+          continue
+        }
+        // No terminal evidence yet: keep the turn open, but make any later
+        // host event attach to the same recovered inbox.
+        this.adoptReconciledPendingTurn(sessionID, task)
+        continue
+      }
+      if (await this.repairNativeTerminalResult(task, target, group, at)) {
+        counts.repairedResults += 1
+      }
+    }
+    // Existing open turns are the restart/reconnect input even when they use a
+    // pre-reconciliation id rather than the deterministic inbox id. Recover
+    // them from the same one transcript read; identity still wins.
+    if (this.nativeTargetKeyForSession(sessionID) !== targetKey) return { ...counts, targetChanged: true }
+    for (const task of openBefore) {
+      if (matched.has(task.id) || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) continue
+      const answer = nativeContextTurnAnswer(messages, {
+        ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+        assistantMessageIDs: task.native?.assistantMessageIDs ?? [],
+      })
+      if (answer !== undefined) {
+        const rowExisted = this.store.message(target.channel, nativeAssistantMessageID(task.id)) !== undefined
+        this.seedNativeRecoveredAnswer(task, answer)
+        await this.settleNativeTurn(task, target, "succeeded", at)
+        if (!rowExisted) counts.recoveredAssistantMessages += 1
+      } else if (nativeContextTurnSettled(messages, task.native?.inboxID)) {
+        await this.markNativeInterrupted(task, "reconcile-no-answer")
+        counts.interrupted += 1
+      } else {
+        this.adoptReconciledPendingTurn(sessionID, task)
+      }
+    }
+    if (counts.recoveredTurns + counts.recoveredUserMessages + counts.recoveredAssistantMessages + counts.repairedResults + counts.interrupted > 0) {
+      this.logger?.event("info", "native", "native.turn.reconcile.summary", {
+        sessionID,
+        reason,
+        ...counts,
+      })
+    }
+    return counts
+  }
+
+  /** Recreate one turn from context using the same deterministic ids as events. */
+  private async createReconciledNativeTurn(
+    sessionID: string,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    group: NativeContextTurn,
+    at: number,
+  ): Promise<Subtask> {
+    const phase: NonNullable<Subtask["native"]>["phase"] = group.hasAssistant ? "working" : "queued"
+    const turnID = nativeTurnID(sessionID, group.inboxID)
+    const task: Subtask = {
+      id: turnID,
+      workspaceID: target.channel,
+      creatorType: "user",
+      assigneeID: target.agent.id,
+      title: nativeTurnTitle(group.text),
+      instruction: group.text,
+      ...(group.attachments.length > 0 ? { attachments: group.attachments } : {}),
+      mode: "research",
+      state: group.hasAssistant ? "working" : "pending",
+      stage: "initial",
+      outcome: "pending",
+      interrupted: false,
+      awaitingChildren: false,
+      attempts: 0,
+      createdAt: group.createdAt ?? at,
+      workKind: "turn",
+      origin: "native",
+      conversationID: target.channel,
+      dispatchGroupID: nativeTurnGroupID(turnID),
+      native: {
+        sessionID,
+        inboxID: group.inboxID,
+        assistantMessageIDs: [...group.assistantMessageIDs],
+        phase,
+        ...(group.hasAssistant ? { startedAt: at } : {}),
+      },
+    }
+    if (target.conversation.kind === "workspace") {
+      await this.ensureDispatchGroupLedger(task.dispatchGroupID, target.channel)
+    }
+    await this.store.saveSubtask(task)
+    return task
+  }
+
+  /** Merge assistant identities discovered in context into the durable turn. */
+  private async mergeReconciledAssistantIDs(task: Subtask, group: NativeContextTurn, at: number): Promise<Subtask> {
+    const existing = task.native?.assistantMessageIDs ?? []
+    const missing = group.assistantMessageIDs.filter((assistantID) => !existing.includes(assistantID))
+    if (missing.length === 0) return task
+    const next = this.store.cloneSubtask(task.id) ?? { ...task }
+    next.native = {
+      ...next.native!,
+      assistantMessageIDs: [...existing, ...missing],
+      ...(next.native!.startedAt === undefined ? { startedAt: at } : {}),
+    }
+    if (next.native.phase === "queued") {
+      next.native.phase = "working"
+      next.state = "working"
+      next.outcome = "pending"
+    }
+    await this.store.saveSubtask(next)
+    return next
+  }
+
+  /**
+   * A turn with a recorded local/held execution, or one whose last host event
+   * is still inside the watchdog bound, may still be running. A transcript
+   * idle marker overrides that: it is terminal evidence.
+   */
+  private nativeTurnIsLive(sessionID: string, task: Subtask, group: NativeContextTurn, at: number): boolean {
+    if (group.settled) return false
+    if (this.nativeDeferredSettlements.has(task.id)) return true
+    if (this.nativeActiveTurnTurn(sessionID)?.id === task.id) return true
+    const watchdog = this.nativeWatchdog.get(task.id)
+    return watchdog !== undefined && at - watchdog.lastActivityAt < this.nativeTurnWatchdogMs
+  }
+
+  private adoptReconciledPendingTurn(sessionID: string, task: Subtask): void {
+    const inboxID = task.native?.inboxID
+    if (!inboxID) return
+    this.rememberNativeInbox(sessionID, inboxID, true)
+    const pending = this.nativePendingInboxes.get(sessionID) ?? []
+    if (!pending.includes(inboxID)) pending.push(inboxID)
+    this.nativePendingInboxes.set(sessionID, pending)
+    this.touchNativeWatchdog(task.id)
+  }
+
+  /**
+   * Repair a terminal turn whose result row is missing, streaming, empty, or
+   * drifted. The native context is authoritative; identity and ids are never
+   * guessed from time.
+   */
+  private async repairNativeTerminalResult(
+    task: Subtask,
+    target: { channel: string; agent: Agent },
+    group: NativeContextTurn,
+    at: number,
+  ): Promise<boolean> {
+    const text = group.assistantText
+    const rowID = nativeAssistantMessageID(task.id)
+    const declaredID = task.native?.resultMessageID
+    const declared = declaredID ? this.store.message(target.channel, declaredID) : undefined
+    const deterministic = this.store.message(target.channel, rowID)
+    const row = declared ?? deterministic
+    if (!text) {
+      // A dangling result reference is worse than no reference. The doctor
+      // reports a terminal turn with no answer separately.
+      if (declaredID && !declared) {
+        const next = this.store.cloneSubtask(task.id) ?? { ...task }
+        next.native = { ...next.native!, resultMessageID: undefined }
+        next.resultMessageID = undefined
+        await this.store.saveSubtask(next)
+        return true
+      }
+      return false
+    }
+    if (row && row.streaming !== true && row.text === text && declaredID === row.id) return false
+    let repaired: Message | undefined
+    if (row) {
+      this.dropStream(row)
+      const next = this.store.cloneMessage(target.channel, row.id)!
+      next.streaming = false
+      next.text = text
+      next.updatedAt = at
+      next.interrupted = task.native?.phase === "interrupted"
+      await this.store.saveMessage(next)
+      repaired = next
+    } else {
+      repaired = await this.store.saveChannelMessage(target.channel, {
+        id: rowID,
+        author: "agent",
+        agentID: target.agent.id,
+        text,
+        kind: "text",
+        taskID: task.id,
+        streaming: false,
+        createdAt: group.createdAt ?? task.createdAt,
+        updatedAt: at,
+        interrupted: task.native?.phase === "interrupted",
+        native: {
+          sessionID: task.native!.sessionID,
+          turnID: task.id,
+          ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+          ...(group.assistantMessageIDs.length > 0 ? { assistantMessageID: group.assistantMessageIDs.at(-1) } : {}),
+        },
+      })
+    }
+    if (!repaired) return false
+    const next = this.store.cloneSubtask(task.id) ?? { ...task }
+    next.native = { ...next.native!, resultMessageID: repaired.id }
+    next.resultMessageID = repaired.id
+    await this.store.saveSubtask(next)
+    this.logger?.event("info", "native", "native.turn.result.repaired", {
+      sessionID: next.native.sessionID,
+      turnID: next.id,
+      inboxID: next.native.inboxID,
+      assistantMessageID: group.assistantMessageIDs.at(-1),
+      messageID: repaired.id,
+      phase: next.native.phase,
+      reason: "missing-result",
+    })
+    return true
+  }
+
+  /** Read one bound session's transcript once, only as a reconciliation input. */
+  private async nativeContextRead(task: Subtask): Promise<string | undefined> {
+    const messages = await this.nativeContextMessages(task)
+    if (!messages) return undefined
+    const answer = nativeContextAnswer(messages, {
+      ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+      assistantMessageIDs: task.native?.assistantMessageIDs ?? [],
+    })
+    this.logger?.event("debug", "native", "native.turn.reconciled", {
+      sessionID: task.native?.sessionID,
+      turnID: task.id,
+      found: answer !== undefined,
+    })
+    return answer
+  }
+
+  private async nativeContextMessagesForSession(
+    sessionID: string,
+    reason: NativeReconcileReason,
+    turnID?: string,
+  ): Promise<any[] | undefined> {
+    try {
+      return listData(await this.ctx.session.context({ sessionID }))
+    } catch (error) {
+      this.logger?.event("warn", "native", "native.turn.reconcile.error", {
+        sessionID,
+        ...(turnID ? { turnID } : {}),
+        reason,
+        errorCode: nativeErrorCode(error),
+      })
+      return undefined
+    }
+  }
+
+  private async nativeContextMessages(task: Subtask): Promise<any[] | undefined> {
+    const sessionID = task.native?.sessionID
+    if (!sessionID) return undefined
+    return this.nativeContextMessagesForSession(sessionID, "watchdog", task.id)
+  }
+
+  /**
+   * Ticket #217: a missing terminal event is reconciled only from identity
+   * matches in one transcript read. The watchdog waits a bound per turn,
+   * performs at most a few reads, and never interrupts on time alone. An
+   * answer settles `replied`; a host idle marker after this turn's user row
+   * without an answer settles `needs_you` as a confirmed interruption.
+   */
+  private async reconcileNativeWatchdog(at: number): Promise<void> {
+    if (this.stopped || this.nativeWatchdog.size === 0) return
+    for (const [turnID, state] of [...this.nativeWatchdog]) {
+      const task = this.store.subtask(turnID)
+      if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) {
+        this.nativeWatchdog.delete(turnID)
+        continue
+      }
+      if (this.nativeDeferredSettlements.has(turnID)) continue
+      if (at - state.lastActivityAt < this.nativeTurnWatchdogMs) continue
+      if (state.passes >= this.nativeTurnWatchdogMaxPasses) continue
+      state.passes += 1
+      state.lastActivityAt = at
+      const target = this.nativeIngestTarget(task.native!.sessionID, { requireMode: false })
+      if (!target || target.channel !== task.conversationID) continue
+      this.beginNativeReconcile("watchdog")
+      const messages = await this.nativeContextMessages(task)
+      if (!messages) {
+        this.endNativeReconcile(false, "context-read")
+        continue
+      }
+      this.endNativeReconcile(true, "watchdog")
+      const answer = nativeContextTurnAnswer(messages, {
+        ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+        assistantMessageIDs: task.native?.assistantMessageIDs ?? [],
+      })
+      this.logger?.event("debug", "native", "native.turn.watchdog", {
+        sessionID: task.native!.sessionID,
+        turnID: task.id,
+        pass: state.passes,
+        found: answer !== undefined,
+        settled: answer === undefined ? nativeContextTurnSettled(messages, task.native?.inboxID) : undefined,
+      })
+      if (answer !== undefined) {
+        this.seedNativeRecoveredAnswer(task, answer)
+        await this.settleNativeTurn(task, target, "succeeded", now())
+        continue
+      }
+      if (nativeContextTurnSettled(messages, task.native?.inboxID)) {
+        await this.markNativeInterrupted(task, "watchdog-no-answer")
+      }
+    }
+  }
+
+  private touchNativeWatchdog(turnID: string): void {
+    this.nativeWatchdog.set(turnID, { lastActivityAt: now(), passes: 0 })
+  }
+
+  /** Rebuild only the final answer for a turn recovered from the transcript. */
+  private seedNativeRecoveredAnswer(task: Subtask, answer: string): void {
+    const state = this.nativeTextState(task.id)
+    // The transcript answer is authoritative; discard any partial stream state
+    // so settlement cannot read the transcript a second time.
+    for (const key of Object.keys(state)) delete state[key]
+    const assistantID = task.native?.assistantMessageIDs?.at(-1) ?? "recovered"
+    state[assistantID] = { started: [0], deltas: {}, ended: { 0: answer } }
+  }
+
+  /**
+   * Ticket #217: a successful parent execution can finish before a background
+   * native child. Hold the same durable turn working until every child mapped
+   * to it is terminal, or until the existing #188 barrier bound expires. The
+   * answer is already complete; the hold only delays settlement. A synthetic
+   * completion still becomes a second parent turn after the first settles.
+   */
+  private async settleOrDeferNativeTurn(
+    task: Subtask,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    outcome: "succeeded" | "failed" | "interrupted" | "cancelled",
+    at: number,
+    error?: any,
+  ): Promise<void> {
+    if (outcome !== "succeeded") {
+      await this.settleNativeTurn(task, target, outcome, at, error)
+      return
+    }
+    if (this.deferNativeTurnForChildren(task, target, at)) return
+    await this.settleNativeTurn(task, target, outcome, at)
+  }
+
+  private deferNativeTurnForChildren(
+    task: Subtask,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    at: number,
+  ): boolean {
+    const sessionID = task.native?.sessionID
+    if (!sessionID) return false
+    if (this.nativeDeferredSettlements.has(task.id)) return true
+    const active = this.activeNativeChildrenForTask(sessionID, task.id)
+    if (active.length === 0) return false
+    const timer = setTimeout(() => {
+      void this.flushNativeDeferredSettlement(task.id, "barrier-timeout")
+    }, this.nativeSubagentBarrierMs)
+    if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
+      ;(timer as unknown as { unref: () => void }).unref()
+    }
+    this.nativeDeferredSettlements.set(task.id, { target, at, deadline: now() + this.nativeSubagentBarrierMs, timer })
+    this.logger?.event("info", "native", "native.turn.barrier.waiting", {
+      sessionID,
+      turnID: task.id,
+      childSessionIDs: active.map((run) => run.childSessionID),
+      count: active.length,
+      durationMs: this.nativeSubagentBarrierMs,
+    })
+    return true
+  }
+
+  /** Release a held parent turn when its children finish or its bound expires. */
+  private async flushNativeDeferredSettlement(turnID: string, reason: "child-terminal" | "barrier-timeout"): Promise<void> {
+    if (this.stopped) return
+    const pending = this.nativeDeferredSettlements.get(turnID)
+    if (!pending) return
+    const task = this.store.subtask(turnID)
+    if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) {
+      if (pending.timer !== undefined) clearTimeout(pending.timer)
+      this.nativeDeferredSettlements.delete(turnID)
+      return
+    }
+    const active = this.activeNativeChildrenForTask(task.native!.sessionID, task.id)
+    if (reason !== "barrier-timeout" && active.length > 0) return
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
+    this.nativeDeferredSettlements.delete(turnID)
+    if (reason === "barrier-timeout") {
+      this.logger?.event("warn", "native", "native.turn.barrier.timeout", {
+        sessionID: task.native!.sessionID,
+        turnID: task.id,
+        childSessionIDs: active.map((run) => run.childSessionID),
+        count: active.length,
+        durationMs: Math.max(0, now() - (pending.deadline - this.nativeSubagentBarrierMs)),
+      })
+    }
+    await this.settleNativeTurn(task, pending.target, "succeeded", pending.at)
+  }
+
+  /**
+   * Settle one turn from terminal host evidence. The durable row is written
+   * before the live overlay is dropped, so the transcript never has a
+   * clear-before-write gap.
+   */
+  private async settleNativeTurn(
+    task: Subtask,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    outcome: "succeeded" | "failed" | "interrupted" | "cancelled",
+    at: number,
+    error?: any,
+  ): Promise<void> {
+    if (!isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return
+    // Cancel the trailing stream checkpoint before any await. Settlement owns
+    // the exact final row; a queued partial checkpoint must never overwrite it.
+    this.clearNativeCheckpoint(task.id)
+    const state = this.nativeText.get(task.id) ?? {}
+    let text = ""
+    if (outcome === "succeeded") {
+      const final = nativeFinalText(state)
+      text = final.text
+      if (!final.complete) {
+        const recovered = await this.nativeContextRead(task)
+        if (recovered !== undefined) text = recovered
+        else text = final.text || this.nativeDisplayText(task.id)
+      }
+    } else {
+      // Failure/cancellation/interruption preserve whatever partial text the
+      // host already ended or streamed; they never invent a new answer.
+      text = this.nativeDisplayText(task.id)
+    }
+    const rowID = nativeAssistantMessageID(task.id)
+    let row = this.store.cloneMessage(target.channel, rowID)
+    if (row) {
+      this.dropStream(row)
+      row.streaming = false
+      row.updatedAt = at
+      row.text = text
+      row.interrupted = outcome === "interrupted"
+      row.native = {
+        sessionID: task.native!.sessionID,
+        turnID: task.id,
+        ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+        ...(task.native?.assistantMessageIDs?.length ? { assistantMessageID: task.native.assistantMessageIDs.at(-1) } : {}),
+      }
+      if (!text) {
+        await this.store.removeMessage(target.channel, row.id)
+        row = undefined
+      } else {
+        await this.store.saveMessage(row)
+      }
+    } else if (text && outcome === "succeeded") {
+      row = await this.store.saveChannelMessage(target.channel, {
+        id: rowID,
+        author: "agent",
+        agentID: target.agent.id,
+        text,
+        kind: "text",
+        taskID: task.id,
+        streaming: false,
+        createdAt: at,
+        updatedAt: at,
+        native: {
+          sessionID: task.native!.sessionID,
+          turnID: task.id,
+          ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+          ...(task.native?.assistantMessageIDs?.length ? { assistantMessageID: task.native.assistantMessageIDs.at(-1) } : {}),
+        },
+      })
+    }
+    const next = this.store.cloneSubtask(task.id) ?? { ...task }
+    next.native = {
+      ...next.native!,
+      phase: outcome === "succeeded" ? "replied" : outcome,
+      settledAt: at,
+      ...(row ? { resultMessageID: row.id } : {}),
+    }
+    appendNativeTurnEvent(next.native, {
+      type: outcome === "cancelled" ? "session.inbox.cancelled" : `session.execution.${outcome}`,
+      at,
+      phase: next.native.phase,
+    })
+    if (outcome === "succeeded" || outcome === "failed" || outcome === "cancelled") {
+      next.state = "replied"
+      next.outcome = outcome === "succeeded" ? "succeeded" : "failed"
+      next.interrupted = false
+      next.repliedAt = at
+      next.finishedAt = at
+      if (row) next.resultMessageID = row.id
+    } else {
+      next.state = "working"
+      next.outcome = "pending"
+      next.interrupted = true
+    }
+    if (outcome === "failed") {
+      const code = String(error?.type ?? error?.code ?? "native-error")
+      next.failure = { kind: "native", reason: code }
+      next.error = code
+      next.native.errorCode = code
+    } else if (outcome === "succeeded") {
+      next.failure = undefined
+      next.error = undefined
+    } else if (outcome === "cancelled") {
+      next.stoppedAt = at
+    }
+    await this.store.saveSubtask(next)
+    this.noteWorkChanged(next)
+    this.logger?.event("info", "native", "native.turn.settled", {
+      sessionID: next.native.sessionID,
+      turnID: next.id,
+      inboxID: next.native.inboxID,
+      phase: next.native.phase,
+      resultMessageID: next.native.resultMessageID,
+      outcome,
+    })
+    // Ticket #221: the exact final native text is the group message; `$Name`
+    // in it routes normal peer turns under this turn and its dispatch group.
+    if (outcome === "succeeded" && text) {
+      const routed = await this.routeAgentFinalMentions(next, target, text, row?.id, at)
+      if (routed) this.schedule()
+    }
+    this.cleanupNativeTurnMemory(next)
+  }
+
+  private cleanupNativeTurnMemory(task: Subtask): void {
+    this.nativeText.delete(task.id)
+    this.nativeWatchdog.delete(task.id)
+    const deferred = this.nativeDeferredSettlements.get(task.id)
+    if (deferred) {
+      if (deferred.timer !== undefined) clearTimeout(deferred.timer)
+      this.nativeDeferredSettlements.delete(task.id)
+    }
+    this.clearNativeCheckpoint(task.id)
+    if (task.native?.sessionID) this.nativeExecutionOwner.delete(task.native.sessionID)
+    this.forgetNativeExecutionTurn(task)
+    for (const assistantID of task.native?.assistantMessageIDs ?? []) this.nativeAssistantTurns.delete(assistantID)
+    if (this.nativeActiveTurn.get(task.native?.sessionID ?? "") === task.id) {
+      this.nativeActiveTurn.delete(task.native!.sessionID)
+    }
+    if (task.native?.inboxID) {
+      this.consumeNativeInbox(task.native.sessionID, task.native.inboxID)
+      this.forgetNativeInbox(task.native.sessionID, task.native.inboxID)
+    }
+  }
+
+  /**
+   * Restart recovery (ticket #215): an open native turn either recovers its
+   * real answer from one transcript read or becomes an honest needs-you
+   * interruption. A durable partial answer is preserved, never erased.
+   */
+  private async recoverNativeTurns(): Promise<void> {
+    const open = Object.values(this.store.read().subtasks).filter(
+      (task) => isNativeTurn(task) && nativePhaseOpen(task.native?.phase),
+    )
+    for (const task of open) {
+      const target = this.nativeIngestTarget(task.native!.sessionID, { requireMode: false })
+      if (!target || target.channel !== task.conversationID) {
+        await this.markNativeInterrupted(task, "unbound-session")
+        continue
+      }
+      const messages = await this.nativeContextMessages(task)
+      if (!messages) continue
+      const answer = nativeContextAnswer(messages, {
+        ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+        assistantMessageIDs: task.native?.assistantMessageIDs ?? [],
+      })
+      this.logger?.event("debug", "native", "native.turn.reconciled", {
+        sessionID: task.native?.sessionID,
+        turnID: task.id,
+        found: answer !== undefined,
+        confirmed: answer === undefined ? nativeContextTurnSettled(messages, task.native?.inboxID) : undefined,
+      })
+      if (answer !== undefined) {
+        // The in-memory parts are gone after restart; rebuild only the final.
+        this.seedNativeRecoveredAnswer(task, answer)
+        await this.settleNativeTurn(task, target, "succeeded", now())
+      } else if (nativeContextTurnSettled(messages, task.native?.inboxID)) {
+        // Reconciliation confirmed the host settled this turn without an
+        // answer. Time alone never interrupts (ticket #218, ADR 0010 §7).
+        await this.markNativeInterrupted(task, "restart-no-answer")
+      }
+    }
+  }
+
+  private async markNativeInterrupted(task: Subtask, reason?: string): Promise<void> {
+    this.clearNativeCheckpoint(task.id)
+    const target = this.nativeIngestTarget(task.native!.sessionID, { requireMode: false })
+    const at = now()
+    if (target) {
+      const rowID = nativeAssistantMessageID(task.id)
+      const row = this.store.cloneMessage(target.channel, rowID)
+      if (row && row.streaming) {
+        this.dropStream(row)
+        row.streaming = false
+        row.interrupted = true
+        row.updatedAt = at
+        await this.store.saveMessage(row)
+      }
+    }
+    const next = this.store.cloneSubtask(task.id) ?? { ...task }
+    next.native = { ...next.native!, phase: "interrupted", settledAt: at }
+    appendNativeTurnEvent(next.native, { type: "native.turn.recovered", at, phase: "interrupted" })
+    next.state = "working"
+    next.outcome = "pending"
+    next.interrupted = true
+    await this.store.saveSubtask(next)
+    this.noteWorkChanged(next)
+    this.logger?.event("warn", "native", "native.turn.interrupted", {
+      sessionID: next.native.sessionID,
+      turnID: next.id,
+      inboxID: next.native.inboxID,
+      ...(reason ? { reason } : {}),
+    })
+    this.cleanupNativeTurnMemory(next)
   }
 
   private async handleStreamEvent(event: any): Promise<void> {
@@ -7356,6 +11192,11 @@ export class EnsembleV2Service {
         })
         granted = true
       }
+      const attachmentFiles = promptFilesForAttachments(
+        workspace.directory,
+        attachmentConversationKey({ workspaceID: workspace.id }),
+        task.attachments,
+      )
       const models = [agent.mainModel, ...agent.backupModels]
       let result: { text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any } | undefined
       for (let index = 0; index < models.length; index++) {
@@ -7381,7 +11222,13 @@ export class EnsembleV2Service {
         await this.ctx.session.switchModel({ sessionID: binding.sessionID, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } }).catch(() => undefined)
         attemptStartedAt = now()
         failureContext.startedAt = attemptStartedAt
-        await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined), delivery: "steer" })
+        await this.ctx.session.prompt({
+          sessionID: binding.sessionID,
+          text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined),
+          delivery: "steer",
+          metadata: { [NATIVE_INTERNAL_PROMPT_METADATA]: true, [NATIVE_SKIP_TURN_METADATA]: false },
+          ...(attachmentFiles.length > 0 ? { files: attachmentFiles } : {}),
+        })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
         let messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)
@@ -7550,6 +11397,16 @@ export class EnsembleV2Service {
         currentTask.error = undefined
         await this.store.saveSubtask(currentTask)
         await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
+        // Ticket #221: route only after the reply is durable, so a quickly
+        // finishing peer cannot synthesize the parent mid-settlement.
+        const routed = await this.routeAgentFinalMentions(
+          currentTask,
+          { conversation: { kind: "workspace", workspaceID: workspace.id, agentID: agent.id }, channel: workspace.id, agent },
+          result?.text ?? "",
+          live?.id,
+          now(),
+        )
+        if (routed) this.schedule()
         await this.maybeSynthesize(currentTask.id)
         return
       }
@@ -7577,6 +11434,18 @@ export class EnsembleV2Service {
       await this.store.saveSubtask(currentTask)
       this.noteWorkChanged(currentTask)
       await this.clearSupersededNotices(currentTask)
+      // Ticket #221: the exact final text routes `$Name` peer work under this
+      // turn. It is agent prose, so the original final text — not the
+      // display-normalized reply — is the routing input. A matching tool post
+      // from this run dedupes to the live row and its existing route set.
+      const routed = await this.routeAgentFinalMentions(
+        currentTask,
+        { conversation: { kind: "workspace", workspaceID: workspace.id, agentID: agent.id }, channel: workspace.id, agent },
+        result?.text ?? "",
+        currentTask.resultMessageID ?? live?.id,
+        now(),
+      )
+      if (routed) this.schedule()
       // Ticket #169: a success that follows a retry/stall/terminal-failed
       // state is a recovery. The card ends replied and the repair is audited
       // with structured state only; the answer itself never enters the log.
@@ -7659,6 +11528,68 @@ export class EnsembleV2Service {
       this.runBySession.delete(binding.sessionID)
       await this.flushDmQueue(agent.id, task.workspaceID).catch(() => undefined)
     }
+  }
+
+  /**
+   * Ticket #214: one direct session per agent and workspace. It runs in the
+   * workspace directory (so project files stay reachable) but is a different
+   * conversation from the group binding, which is never rotated here.
+   */
+  private async ensureDirectBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string }> {
+    const conversation: BindingConversation = { kind: "direct", workspaceID: workspace.id, agentID: agent.id }
+    const existing = this.store.bindingForConversation(agent.id, conversation)
+    if (existing && !(await this.nativeSessionMissing(existing.sessionID))) {
+      const saved = await this.refreshAgentSession(existing, agent)
+      if (!saved && existing.directory !== workspace.directory) {
+        existing.directory = workspace.directory
+        existing.updatedAt = now()
+        await this.store.saveBinding(existing)
+      }
+      return { sessionID: existing.sessionID }
+    }
+    const key = `direct:${workspace.id}:${agent.id}`
+    const inFlight = this.directBindingPromises.get(key)
+    if (inFlight) return inFlight
+    const promise = this.createDirectBinding(workspace, agent)
+    this.directBindingPromises.set(key, promise)
+    try { return await promise } finally { this.directBindingPromises.delete(key) }
+  }
+
+  private async createDirectBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string }> {
+    const conversation: BindingConversation = { kind: "direct", workspaceID: workspace.id, agentID: agent.id }
+    const existing = this.store.bindingForConversation(agent.id, conversation)
+    const created = unwrap<any>(await this.ctx.session.create({
+      title: `${agent.name} · direct · ${workspace.name}`,
+      agent: "build",
+      model: { providerID: agent.mainModel.providerID, id: agent.mainModel.modelID, ...(agent.mainModel.variant ? { variant: agent.mainModel.variant } : {}) },
+      permissions: skillPermissions(agent.skillbox),
+      location: { directory: workspace.directory },
+    }))
+    if (!created?.id) throw Object.assign(new Error("Could not create a native session."), { code: "session_error" })
+    const binding: SessionBinding = {
+      workspaceID: workspace.id,
+      agentID: agent.id,
+      sessionID: created.id,
+      history: existing ? [...(existing.history ?? []), existing.sessionID] : [],
+      kind: "direct",
+      directory: workspace.directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
+    await this.store.saveBinding(binding)
+    // A replaced direct session can never answer a pending host decision.
+    if (existing && existing.sessionID !== created.id) {
+      await this.settleNativeForSession(existing.sessionID, "Session ended before the permission was answered.")
+    }
+    await this.ctx.session.instructions.entry.put({ sessionID: created.id, key: "ensemble.v2.identity", value: this.identityForAgent(agent) }).catch(() => undefined)
+    await this.clearPendingSettings(agent.id)
+    this.logger?.event("info", "service", "agent.direct.session.created", {
+      agentID: agent.id,
+      workspaceID: workspace.id,
+      sessionID: created.id,
+      replacedSessionID: existing?.sessionID,
+    })
+    return { sessionID: created.id }
   }
 
   private async ensureBinding(workspace: Workspace, agent: Agent): Promise<{ sessionID: string } | undefined> {
@@ -8013,6 +11944,10 @@ export class EnsembleV2Service {
   private async maybeSynthesize(parentID: string): Promise<void> {
     const stored = this.store.subtask(parentID)
     if (!stored || stored.stage === "synthesis" || stored.state === "replied") return
+    // A native turn is answered by its own host execution, never by child
+    // synthesis. Routed child work must not reassign the session agent or
+    // settle the turn (ticket #220).
+    if (isNativeTurn(stored)) return
     // Ticket #71: batch reviews close only via the review tool once every
     // item is acted on or dismissed — never by child completion.
     if (stored.handoff?.batch === true) return
@@ -8047,5 +11982,70 @@ export class EnsembleV2Service {
       await this.store.saveSubtask(parent)
       await this.appendMessage(workspace, { author: "system", text: "Delegated subtasks completed.", kind: "system", taskID: parent.id })
     }
+  }
+}
+
+/**
+ * Ticket #221: the agent a turn answers immediately. A peer turn or explicit
+ * handoff returns to its sender; a user command has no agent sender. This is
+ * the reply-to-sender loop guard input.
+ */
+function agentFinalReplyTo(task: Subtask): Id | undefined {
+  if (task.handoff?.senderID) return task.handoff.senderID
+  if (task.turn?.askerID) return task.turn.askerID
+  return task.creatorType === "agent" ? task.creatorAgentID : undefined
+}
+
+/**
+ * Ticket #221: agent ancestors in the same dispatch group. Routing back to one
+ * would close a cycle, so the #219 planner refuses it visibly.
+ */
+function agentFinalGroupTrail(task: Subtask, subtasks: Record<Id, Subtask>): Id[] {
+  const trail: Id[] = []
+  const seen = new Set<Id>([task.id])
+  let parentID = task.parentID
+  while (parentID) {
+    const parent = subtasks[parentID]
+    if (!parent || seen.has(parent.id)) break
+    seen.add(parent.id)
+    if (task.dispatchGroupID && parent.dispatchGroupID && parent.dispatchGroupID !== task.dispatchGroupID) break
+    if (parent.assigneeID) trail.push(parent.assigneeID)
+    parentID = parent.parentID
+  }
+  return trail
+}
+
+/** Visible reason for one refused native mention; names the rule or budget layer. */
+function nativeMentionRefusalReason(refusal: MentionRefusal, fanOutCap: number): string {
+  switch (refusal.reason) {
+    case "unknown":
+      return "no workspace member matches."
+    case "archived":
+      return `${refusal.agentName ?? refusal.token} is archived and cannot take turns.`
+    case "not-a-member":
+      return `${refusal.agentName ?? refusal.token} is not a workspace member; add them to the workspace before mentioning.`
+    case "direct-conversation":
+      return "direct conversations stay one-to-one; no peer turn was created."
+    case "routing-disabled":
+      return "native mention routing is off for this workspace; the mention is a reference."
+    case "cycle":
+      return "routing back would close a cycle in this dispatch group."
+    case "fan-out":
+      return `the delegation limit is ${fanOutCap}.`
+    case "budget":
+      switch (refusal.layer) {
+        case "closed":
+          return "the dispatch group is closed; ask the user to start a new command."
+        case "group":
+          return `the dispatch group is exhausted (${refusal.used ?? 0}/${refusal.max ?? 0} hops).`
+        case "depth":
+          return `the dispatch depth limit is ${refusal.max ?? 0} (next depth ${refusal.used ?? 0}).`
+        case "command":
+          return `the command budget is exhausted (${refusal.used ?? 0}/${refusal.max ?? 0} hops).`
+        default:
+          return "the dispatch budget is exhausted."
+      }
+    default:
+      return "the mention could not be routed."
   }
 }

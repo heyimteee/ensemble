@@ -171,13 +171,13 @@ live_assert_absence "$LIVE_TUI_SESSION" "Reply interrupted." "no interrupted pla
 live_assert_absence "$LIVE_TUI_SESSION" "FAILED" "no false failed card in the lifecycle run"
 
 # HISTORY keeps both completed groups.
-live_key "$LIVE_TUI_SESSION" Tab
-for _ in $(seq 1 4); do
-  if live_capture "$LIVE_TUI_SESSION" | grep -qF "NORMAL  │ Work list"; then break; fi
-  live_key "$LIVE_TUI_SESSION" Tab
-  sleep 0.3
-done
+# Ticket #234: `NORMAL  │ Work list` is shared by pane selection and Work
+# interaction, and `f` is a Work-interaction key. Use the shared helper to
+# Enter the pane, then require `j/k cards` so the history toggle cannot run
+# from selection mode.
+live_focus_work_interact "$LIVE_TUI_SESSION"
 live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Work list" 10 "Work focus after the lifecycle run"
+live_require_text "$LIVE_TUI_SESSION" "j/k cards" 10 "Work interaction owns its card grammar"
 live_key "$LIVE_TUI_SESSION" "f"
 live_require_text "$LIVE_TUI_SESSION" "WORK HISTORY │" 10 "completed lifecycle groups move to HISTORY"
 live_require_text "$LIVE_TUI_SESSION" "lease-first" 10 "long-run card is retained in HISTORY"

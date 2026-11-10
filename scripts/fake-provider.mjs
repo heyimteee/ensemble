@@ -18,6 +18,10 @@ const FAKE_BUBBLE_PROMPT = "fake-bubble-fixture"
 const FAKE_QUEUE_HOLD_PROMPT = "fake-queue-hold"
 const FAKE_QUEUE_HOLD_LONG_PROMPT = "fake-queue-hold-long"
 const FAKE_ASK_PROMPT = "fake-ask-person"
+// Ticket #225: deterministic tool-surface benchmark. The marker names the
+// peer so the same fake provider can drive a native final-text route or a
+// send_message tool call without knowing the workspace roster.
+const FAKE_BENCHMARK_RE = /fake-benchmark-(native|legacy):([A-Za-z][A-Za-z0-9_-]*)/
 // One-shot reduced-motion fixture: a normal 5 s stream so the Work card is
 // observable on frame 0 without making the trigger sticky in session history.
 const FAKE_MOTION_PROMPT = "fake-motion-static"
@@ -29,6 +33,23 @@ const FAKE_NATIVE_ERROR_PROMPT = "fake-native-error"
 // which is exactly the early-finalization condition the barrier must cover.
 const FAKE_SUBAGENT_PROMPT = "fake-subagent-parent-fixture"
 const FAKE_SUBAGENT_CHILD_PROMPT = "fake-subagent-child-hold-fixture"
+// Ticket #210: real host retry fixture. The first streaming request returns a
+// retryable 429 with a zero delay; the host schedules `session.retry.scheduled`
+// and the next request answers normally. Non-streaming title/aux requests are
+// not counted, so the probe's single turn retries exactly once.
+const FAKE_RETRY_PROMPT = "fake-retry-fixture"
+// Ticket #210: a bounded stream long enough to interrupt mid-text and short
+// enough that a missed interrupt still settles in a few seconds.
+const FAKE_INTERRUPT_PROMPT = "fake-interrupt-hold-fixture"
+const INTERRUPT_HOLD_CHUNKS = 90
+// Ticket #227: deterministic agent final-text mention routing. The trigger names
+// the peer; the reply body is the final native text the service routes from.
+const FAKE_MENTION_FINAL_RE = /fake-mention-final:([A-Za-z][A-Za-z0-9_-]*)/
+const FAKE_MENTION_FINAL_MARKER = "AGENT_FINAL_MENTION_MARKER"
+// Ticket #227 keeps the retry state visible long enough to assert `retrying`.
+// #210's probe leaves the default zero-delay behavior unchanged.
+const RETRY_AFTER_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_RETRY_DELAY_MS ?? "0"))
+const retryFixtureAttempts = new Map()
 const SUBAGENT_CHILD_DELAY_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_SUBAGENT_CHILD_DELAY_MS ?? "120"))
 const SUBAGENT_CHILD_MARKDOWN = [
   "# Subagent child fixture",
@@ -168,6 +189,16 @@ const QUEUE_HOLD_LONG_MARKDOWN = [
     { length: 400 },
     (_, index) => `long hold line ${index + 1} keeps this second dispatch group live while the first group is cancelled.`,
   ),
+  "",
+].join("\n")
+
+// Ticket #210: a bounded stream long enough to interrupt mid-text and short
+// enough that a missed interrupt still settles in a few seconds.
+const INTERRUPT_HOLD_MARKDOWN = [
+  "# Interrupt Hold Fixture",
+  "",
+  "INTERRUPT_HOLD_MARKER",
+  ...Array.from({ length: INTERRUPT_HOLD_CHUNKS }, (_, index) => `interrupt line ${index + 1} keeps this native turn streaming until the probe interrupts it.`),
   "",
 ].join("\n")
 
@@ -520,10 +551,23 @@ const server = createServer(async (request, response) => {
     const latestUserText = lastUser >= 0 ? textOf(messages[lastUser]?.content) : ""
     const subagentChild = latestUserText.includes(FAKE_SUBAGENT_CHILD_PROMPT)
     const subagentParent = latestUserText.includes(FAKE_SUBAGENT_PROMPT)
+    const retryFixture = latestUserText.includes(FAKE_RETRY_PROMPT)
+    const interruptHold = latestUserText.includes(FAKE_INTERRUPT_PROMPT)
+    const finalMention = latestUserText.match(FAKE_MENTION_FINAL_RE)
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
+    const benchmark = latestUserText.match(FAKE_BENCHMARK_RE)
+    const benchmarkMode = benchmark?.[1]
+    const benchmarkPeer = benchmark?.[2]
     const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
     const answered = /User answer:/i.test(latestUserText)
     const toolResult = lastUser >= 0 && messages.slice(lastUser + 1).some((message) => message?.role === "tool")
+    // Ticket #225 benchmark metrics: shapes, sizes, and counts only. Never log
+    // message content, file bytes, or paths.
+    const toolSchemas = Array.isArray(body?.tools) ? body.tools : body?.tools ? Object.values(body.tools) : []
+    const ensembleSchemas = toolSchemas.filter((tool) => String(tool?.function?.name ?? tool?.name ?? "").startsWith("ensemble_"))
+    const messagesChars = JSON.stringify(messages).length
+    const toolSchemaChars = JSON.stringify(toolSchemas).length
+    const ensembleToolSchemaChars = JSON.stringify(ensembleSchemas).length
     const taskTitles = [...prompt.matchAll(/title="([^"]+)"/g)]
     const taskTitle = taskTitles.at(-1)?.[1] ?? ""
     // One ask per distinct user request. The native session accumulates
@@ -554,6 +598,10 @@ const server = createServer(async (request, response) => {
       ? COMPACTION_SUMMARY
       : subagentChild
       ? SUBAGENT_CHILD_MARKDOWN
+      : interruptHold
+      ? INTERRUPT_HOLD_MARKDOWN
+      : finalMention
+      ? `${FAKE_MENTION_FINAL_MARKER} — $${finalMention[1]} please pick up the follow-up.\n`
       : leaseHold
       ? LEASE_HOLD_MARKDOWN
       : motion
@@ -599,8 +647,33 @@ const server = createServer(async (request, response) => {
       budget: budget ? `${budget.chain}:${budget.consumed}/${budget.total}:${budget.mode}` : "",
       budgetGroup: budget ? latestDispatchGroup(prompt) ?? "" : "",
       reviewItems: reviewItems.length,
+      toolCount: toolSchemas.length,
+      toolSchemaChars,
+      ensembleToolCount: ensembleSchemas.length,
+      ensembleToolSchemaChars,
+      messagesChars,
+      promptChars: prompt.length,
+      hasTurnContext: JSON.stringify(body).includes("<ensemble_turn"),
+      hasBudgetContext: JSON.stringify(body).includes("<ensemble_dispatch_budget"),
+      estimatedPromptTokens: Math.ceil((messagesChars + toolSchemaChars) / 4),
       promptTail: prompt.slice(-120),
     })
+    // Ticket #210: one retryable 429 per fixture text, counted only for
+    // streaming model requests. The host schedules a retry and then succeeds.
+    if (body?.stream !== false && retryFixture) {
+      const key = latestUserText
+      const attempt = (retryFixtureAttempts.get(key) ?? 0) + 1
+      retryFixtureAttempts.set(key, attempt)
+      log("retry_fixture", { request: requestID, attempt })
+      if (attempt === 1) {
+        response.writeHead(429, {
+          "Content-Type": "application/json",
+          "Retry-After": String(Math.ceil(RETRY_AFTER_MS / 1000)),
+        })
+        response.end(JSON.stringify({ error: { message: "fake retry fixture", type: "rate_limit_exceeded" } }))
+        return
+      }
+    }
     // A real native error fixture: the host turn fails before any text stream.
     if (body?.stream !== false && latestUserText.includes(FAKE_NATIVE_ERROR_PROMPT)) {
       log("native_error", { request: requestID })
@@ -706,6 +779,28 @@ const server = createServer(async (request, response) => {
           return
         }
         log("review_skip", { request: requestID, reason: "duplicate_batch", batch: reviewBatch })
+        await streamCompletion(response, SHORT_REPLY, requestID)
+        return
+      }
+      // Ticket #225: the same coordination operation through the two surfaces.
+      // Native answers once with `$Peer`; legacy calls send_message and needs a
+      // second model turn after the tool result.
+      if (body?.stream !== false && benchmarkMode === "legacy" && !toolResult && benchmarkPeer) {
+        await streamToolCall(
+          response,
+          requestID,
+          "ensemble_send_message",
+          { kind: "workspace", text: `$${benchmarkPeer} please verify the benchmark route.` },
+          "benchmark_tool_call",
+          { surface: "legacy" },
+        )
+        return
+      }
+      if (body?.stream !== false && benchmarkMode === "native" && benchmarkPeer) {
+        await streamCompletion(response, `$${benchmarkPeer} please verify the benchmark route.`, requestID)
+        return
+      }
+      if (body?.stream !== false && benchmarkMode === "legacy" && toolResult) {
         await streamCompletion(response, SHORT_REPLY, requestID)
         return
       }

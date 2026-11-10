@@ -25,21 +25,36 @@ _Avoid_: Toolbox (when referring to assigned skills).
 **Workspace**: A directory-bound project room with a group chat, a roster, and exactly one leader. One canonical directory belongs to one workspace.
 _Avoid_: Channel, room, group (when referring to this concept).
 
-**Group chat**: The shared transcript of a workspace where the user and agents communicate. It is the primary interface; native sessions are execution detail underneath.
+**Group chat**: The shared transcript of a workspace where the user and agents communicate. The group chat and the workspace group's native session are two views of one conversation: the native session is where the agent works, and the group chat is the durable team record and router.
 
 **Leader**: The workspace member responsible for receiving unaddressed messages, coordinating work, and delegating subtasks. Leadership does not confer additional permissions.
 
-**Mention**: An explicit recipient reference introduced with `$` and associated with an agent's lasting identity. `!` is accepted as an alias. `@` is reserved for workspace file references only.
+**Mention**: An agent name introduced with the routing operator (`$`, or `!` as its alias). A mention routes work only in a workspace group conversation; a bare name is a reference, and a direct conversation never routes. `@` is reserved for workspace file references only.
+_Avoid_: Bare-name mention (for a reference), @mention (for an agent).
 
-**Direct conversation**: A private conversation between the user and one agent, separate from a workspace group chat.
+**Routing operator**: The `$` prefix that turns a known agent name in sanitized prose into a work recipient; `!` is an accepted alias. It applies only to prose, so code blocks, inline code, URLs, and file paths never route. Without the operator, a name is only a reference. See [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md).
+_Avoid_: Mention sigil, @-mention.
+
+**Direct conversation**: A private conversation between the user and one agent, separate from a workspace group chat. It has its own conversation channel, native session, and Work history, and it never shares the group session.
+
+**Conversation channel**: The durable identity that scopes one conversation's transcript, messages, native turns, and Work history. Group and direct conversations are separate channels, so a message or Work card belongs to exactly one conversation.
+_Avoid_: Thread, room.
+
+**Direct session**: The native session bound to one direct conversation. A workspace direct session runs in the workspace directory; a home direct session runs in the agent's home directory. It is never the workspace group session.
+_Avoid_: DM session (when distinguishing the two direct kinds), private group session.
 
 **Handoff**: A visible request from one agent to another, with a recipient, typed task, constraints, expected answer, and status.
 
-**Subtask**: A unit of work inside a workspace with an assignee, typed instructions, and exactly one visible state: pending, working, or replied.
+**Subtask**: A unit of work with an assignee, typed instructions, and one stored state: pending, working, or replied. Its visible lifecycle is Work status. A native turn is a Subtask of kind turn; it is adopted rather than queued.
+_Avoid_: Task (when referring to the durable unit), job.
 
 **Task tree**: The parent/child relationship between a user request, a leader's delegation, worker subtasks, and an optional leader synthesis.
 
-**Work**: A queued or running execution of a subtask, with an agent, mode, and status.
+**Work**: A visible unit of execution with an agent, mode, and status. It is either queued or running Subtask work, or a native turn without a lease, claim, or attempts.
+_Avoid_: Task (for the card).
+
+**Tool surface**: The set of Ensemble tools registered in a native session. It is a migration boundary for the agent contract, not a second routing engine or a second source of conversation state. The registered list and rollback policy live in the [implementation notes](docs/implementation.md#native-tools); see [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md) for the routing decision.
+_Avoid_: Tool list (when distinguishing migration surfaces), tool budget.
 
 **Work status**: The observed lifecycle of Work: pending, working, waiting, retrying, needs you, replied, failed, stalled, or cancelled. Failed names a native execution error; stalled names a delivery, lease, or attempt-exhaustion problem. Work status is derived from the durable delivery and execution facts, not read from a stored label.
 _Avoid_: Task state (when referring to the derived lifecycle), timeout error (for a stall).
@@ -48,8 +63,11 @@ _Avoid_: Task state (when referring to the derived lifecycle), timeout error (fo
 
 **Rail**: The left navigation surface, split into Agents grouped by primary workspace and a separate Workspaces section. It is navigation over the roster and workspace list, not a second store.
 
-**Work pane**: The right surface that shows dispatch groups of Work in ACTIVE and HISTORY views. It is a view over the task graph, not a separate task store or scheduler.
+**Work pane**: The right surface that shows dispatch groups of Work in ACTIVE and HISTORY views, with HISTORY read from the conversation's Work history page. It is a view over the task graph, not a separate task store or scheduler.
 _Avoid_: Task board (for the pane), subtask list (when referring to the grouped surface).
+
+**Work history page**: The server-paged record of a conversation's terminal Work cards. It is a read of durable Work, independent of ACTIVE and of any client's earlier state, not a second store.
+_Avoid_: Archive (for terminal Work), task log.
 
 **Dispatch group**: The set of Subtasks caused by one dispatch action: one user command plus every descendant handoff, delegation, peer turn, synthesis, completion hop, and group-scoped completion batch it caused. A new command mints a new root group; a continuation group is a linked segment of the same command. A legacy task without a stored group derives one from its root ancestor.
 _Avoid_: Batch (for the whole dispatch), run (a single execution, not the fan-out).
@@ -86,9 +104,14 @@ _Avoid_: Batch (for the whole dispatch), run (a single execution, not the fan-ou
 
 **Memory provenance**: The recorded origin of a memory: Automatically learned or Manually added. Later edits do not erase its origin.
 
-**Native session**: An OpenCode session in which an agent's execution and tool activity can be inspected through OpenCode's existing interface. A workspace binds one native session per agent.
+**Native session**: An OpenCode session in which an agent's execution and tool activity can be inspected through OpenCode's existing interface. A conversation's bound session belongs to exactly one agent and one conversation. An agent has one native session per conversation rather than one workspace session shared by both; a workspace therefore binds one native session per agent per conversation (a group session and a direct session), not one per agent. See [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md).
+_Avoid_: Agent session (when the conversation is the identity), shared session (when two conversations would share one).
 
-**Session binding**: The association between a workspace, an agent, and that agent's persistent native session and behavioral version.
+**Native turn**: One prompt-and-execution cycle in a conversation's native session: the inbox item that started it, the agent execution, and the terminal result. A native turn is durable Work; a host retry stays inside the same turn. See [ADR 0010](docs/adr/0010-native-turn-ingestion.md).
+_Avoid_: Native message (for the turn), run (when including retries).
+
+**Session binding**: The association between an agent, a conversation, and that conversation's native session and behavioral version. Each agent has its own binding for the group conversation and for its direct conversation.
+_Avoid_: Workspace session (when the binding is per agent and conversation).
 
 **Mode**: The global interaction state—Normal, Insert, Visual, or Command—that decides whether keys act on lists or type into the focused text editor.
 

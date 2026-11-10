@@ -1,10 +1,12 @@
 import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
+import { bindingStateKey, bindingStateKeyFor } from "../conversation-binding.ts"
 import { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
 import { CLIENT_MESSAGE_LIMIT, mergeRetainedWork, projectRetainedWork, trimMessages } from "../scoped-read.ts"
+import { messageChannel } from "../message-channel.ts"
 import { configMetadataApplies } from "./refresh-coordinator.ts"
-import type { DispatchGroup, EntityChange, FeedMeta, Id, Message, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, TranscriptWindow, WorkspaceCounts } from "../types.ts"
+import type { DispatchGroup, EntityChange, FeedMeta, Id, Message, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, TranscriptWindow, WorkHistoryPage, WorkspaceCounts } from "../types.ts"
 
 /**
  * Durable client updates. A snapshot is the only full replacement; every
@@ -18,6 +20,7 @@ export type ClientStateUpdate =
   | { type: "message.stream"; workspaceID: Id; id: Id; text: string; updatedAt: number }
   | { type: "entity.changes"; changes: EntityChange[]; version?: number; updatedAt?: number }
   | { type: "work.snapshot"; subtasks: Record<Id, Subtask>; groups?: Record<Id, DispatchGroup>; version: number; updatedAt?: number }
+  | { type: "work.history"; subtasks: Record<Id, Subtask>; groups?: Record<Id, DispatchGroup> }
   | { type: "shell.snapshot"; state: SnapshotState }
   | { type: "transcript.window"; workspaceID: Id; messages: Message[]; mode: "replace" | "older" }
 
@@ -42,7 +45,7 @@ function entityChangeKey(change: EntityChange): string | undefined {
     case "dispatchGroup":
       return `dispatchGroup\u0000${change.op === "upsert" ? change.group.id : change.id}`
     case "message":
-      return `message\u0000${change.op === "upsert" ? change.message.workspaceID : change.workspaceID}\u0000${change.op === "upsert" ? change.message.id : change.id}`
+      return `message\u0000${change.op === "upsert" ? messageChannel(change.message) : change.channel ?? change.workspaceID}\u0000${change.op === "upsert" ? change.message.id : change.id}`
     case "agent":
       return `agent\u0000${change.op === "upsert" ? change.agent.id : change.id}`
     case "workspace":
@@ -50,7 +53,7 @@ function entityChangeKey(change: EntityChange): string | undefined {
     case "approval":
       return `approval\u0000${change.op === "upsert" ? change.approval.id : change.id}`
     case "binding":
-      return `binding\u0000${change.op === "upsert" ? change.binding.workspaceID : change.workspaceID}\u0000${change.op === "upsert" ? change.binding.agentID : change.agentID}`
+      return `binding\u0000${change.op === "upsert" ? bindingStateKey(change.binding) : bindingStateKeyFor(change.workspaceID, change.agentID, change.kind)}`
     case "memory":
       return `memory\u0000${change.op === "upsert" ? change.memory.id : change.id}`
     case "initJob":
@@ -64,7 +67,58 @@ function entityChangeKey(change: EntityChange): string | undefined {
 }
 
 
-const bindingKey = (workspaceID: Id, agentID: Id) => `${workspaceID}:${agentID}`
+/**
+ * Ticket #222: a history page fills rows the client does not have and only
+ * replaces a row when the page carries a later settlement. A live patch is
+ * never regressed by a slower history read.
+ */
+function historyTaskSupersedes(current: Subtask, next: Subtask): boolean {
+  const at = (task: Subtask) => task.native?.settledAt ?? task.finishedAt ?? task.repliedAt ?? task.stoppedAt
+  const currentAt = at(current)
+  const nextAt = at(next)
+  if (nextAt === undefined) return false
+  return currentAt === undefined || nextAt > currentAt
+}
+
+function mergeHistoryWork(
+  state: SnapshotState,
+  tasks: Record<Id, Subtask>,
+  groups: Record<Id, DispatchGroup> | undefined,
+): SnapshotState {
+  let subtasks = state.subtasks
+  for (const [id, task] of Object.entries(tasks)) {
+    const current = subtasks[id]
+    if (current !== undefined && !historyTaskSupersedes(current, task)) continue
+    if (subtasks === state.subtasks) subtasks = { ...state.subtasks }
+    subtasks[id] = task
+  }
+  let nextGroups = state.dispatchGroups
+  if (groups) {
+    for (const [id, group] of Object.entries(groups)) {
+      if (nextGroups[id] !== undefined) continue
+      if (nextGroups === state.dispatchGroups) nextGroups = { ...state.dispatchGroups }
+      nextGroups[id] = group
+    }
+  }
+  if (subtasks === state.subtasks && nextGroups === state.dispatchGroups) return state
+  return { ...state, subtasks, dispatchGroups: nextGroups }
+}
+
+/** Keep ledger rows only for retained tasks (plus their continuation roots). */
+function retainedDispatchGroups(
+  tasks: Record<Id, Subtask>,
+  groups: Record<Id, DispatchGroup>,
+): Record<Id, DispatchGroup> {
+  const keep: Record<Id, DispatchGroup> = {}
+  for (const task of Object.values(tasks)) {
+    const group = task.dispatchGroupID ? groups[task.dispatchGroupID] : undefined
+    if (!group) continue
+    keep[group.id] = group
+    const root = group.rootID !== group.id ? groups[group.rootID] : undefined
+    if (root) keep[root.id] = root
+  }
+  return keep
+}
 
 /**
  * Apply full-entity changes to one branch at a time. Unchanged branches keep
@@ -107,22 +161,22 @@ function reduceEntityChanges(state: SnapshotState, changes: EntityChange[]): Sna
         break
       }
       case "message": {
-        const workspaceID = change.op === "upsert" ? change.message.workspaceID : change.workspaceID
+        const channel = change.op === "upsert" ? messageChannel(change.message) : change.channel ?? change.workspaceID
         const messageID = change.op === "upsert" ? change.message.id : change.id
-        const list = next.messages[workspaceID] ?? []
+        const list = next.messages[channel] ?? []
         const index = list.findIndex((message) => message.id === messageID)
         if (change.op === "upsert") {
           if (index >= 0 && list[index] === change.message) break
           const messages = index >= 0 ? list.slice() : [...list, change.message]
           if (index >= 0) messages[index] = change.message
           messages.sort((a, b) => a.seq - b.seq)
-          copy().messages = { ...next.messages, [workspaceID]: messages }
+          copy().messages = { ...next.messages, [channel]: messages }
         } else {
           if (index < 0) break
           const messages = list.filter((message) => message.id !== messageID)
           const map = { ...next.messages }
-          if (messages.length === 0) delete map[workspaceID]
-          else map[workspaceID] = messages
+          if (messages.length === 0) delete map[channel]
+          else map[channel] = messages
           copy().messages = map
         }
         break
@@ -164,7 +218,9 @@ function reduceEntityChanges(state: SnapshotState, changes: EntityChange[]): Sna
         break
       }
       case "binding": {
-        const key = change.op === "upsert" ? bindingKey(change.binding.workspaceID, change.binding.agentID) : bindingKey(change.workspaceID, change.agentID)
+        const key = change.op === "upsert"
+          ? bindingStateKey(change.binding)
+          : bindingStateKeyFor(change.workspaceID, change.agentID, change.kind)
         if (change.op === "upsert") {
           if (next.bindings[key] === change.binding) break
           copy().bindings = { ...next.bindings, [key]: change.binding }
@@ -281,6 +337,8 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
         updatedAt: update.updatedAt ?? state.updatedAt,
       }
     }
+    case "work.history":
+      return mergeHistoryWork(state, update.subtasks, update.groups)
     case "shell.snapshot": {
       const shell = update.state
       return {
@@ -294,7 +352,6 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
         memories: shell.memories,
         approvals: shell.approvals,
         dmQueue: shell.dmQueue,
-        dmTranscripts: shell.dmTranscripts,
         settings: shell.settings,
         ui: shell.ui,
         runs: shell.runs,
@@ -337,13 +394,6 @@ export function boundClientState(
     messages[workspaceID] = bounded
   }
   if (messages) next = { ...next, messages }
-  let transcripts: SnapshotState["dmTranscripts"] | undefined
-  for (const [key, list] of Object.entries(state.dmTranscripts)) {
-    if (list.length <= CLIENT_MESSAGE_LIMIT) continue
-    transcripts ??= { ...state.dmTranscripts }
-    transcripts[key] = list.slice(-CLIENT_MESSAGE_LIMIT)
-  }
-  if (transcripts) next = { ...next, dmTranscripts: transcripts }
   // Ticket #172: keep retained finished rows for HISTORY, on the same 24 h
   // retention as the durable store. The visible projection still bounds the
   // active Work payload.
@@ -385,6 +435,12 @@ export type ClientStore = {
   applyWorkSnapshot: (snapshot: Snapshot) => void
   /** Scoped Work projection resync (tickets #141/#160). */
   applyWorkProjection: (tasks: Record<Id, Subtask>, version: number, groups?: Record<Id, DispatchGroup>) => void
+  /** Ticket #222: merge one server-paged terminal Work page. */
+  applyWorkHistory: (page: WorkHistoryPage) => void
+  /** Ticket #222: paging state for one conversation's HISTORY. */
+  historyFor: (conversationID: Id) => ClientWorkHistory | undefined
+  /** Drop history cursors (an epoch or recovery replacement). */
+  resetWorkHistory: () => void
   /** Scoped shell resync: replace shell entities, keep Work and transcript. */
   applyShellSnapshot: (state: SnapshotState) => void
   /** Merge one durable transcript page; "older" keeps the paged range. */
@@ -394,6 +450,15 @@ export type ClientStore = {
   /** Apply server-derived counts from a patch, changes.since, or heartbeat. */
   applyCounts: (counts: Record<Id, WorkspaceCounts> | undefined) => void
   reset: () => void
+}
+
+/** Ticket #222: loaded range of one conversation's server-paged HISTORY. */
+export type ClientWorkHistory = {
+  conversationID: Id
+  hasMore: boolean
+  next?: string
+  limit: number
+  loaded: true
 }
 
 /**
@@ -418,6 +483,8 @@ export function createClientStore(): ClientStore {
   const [epoch, setEpoch] = createSignal<number | undefined>(undefined)
   const [counts, setCounts] = createSignal<Record<Id, WorkspaceCounts> | undefined>(undefined)
   const [windows, setWindows] = createSignal<Record<Id, ClientTranscriptWindow>>({})
+  /** Ticket #222: per-conversation HISTORY paging cursors. */
+  const [workHistory, setWorkHistory] = createSignal<Record<Id, ClientWorkHistory>>({})
   /** Workspaces whose loaded window is anchored on an older page. */
   const pagedOlder = new Set<Id>()
   /** Short-lived delete tombstones keyed by durable entity identity. */
@@ -555,21 +622,43 @@ export function createClientStore(): ClientStore {
     transcriptAnchored: (workspaceID) => pagedOlder.has(workspaceID),
     applySnapshot: (snapshot) => {
       batch(() => {
-        const scopedWorkspace = snapshot.window ? Object.keys(snapshot.state.messages)[0] : undefined
+        const previous = data.loaded ? data.state : undefined
+        const epochChanged = epoch() !== undefined && snapshot.epoch !== undefined && epoch() !== snapshot.epoch
+        // Ticket #222: a scoped bootstrap (or any full replacement) may carry
+        // only visible Work. Merge retained finished rows so a client's loaded
+        // HISTORY cannot be dropped by a refresh.
+        let applied = snapshot
+        if (previous) {
+          const mergedTasks = mergeRetainedWork(snapshot.state.subtasks, previous.subtasks)
+          if (Object.keys(mergedTasks).some((id) => !(id in snapshot.state.subtasks))) {
+            const ledger = {
+              ...snapshot.state.dispatchGroups,
+              ...retainedDispatchGroups(mergedTasks, previous.dispatchGroups),
+            }
+            applied = {
+              ...snapshot,
+              state: { ...snapshot.state, subtasks: mergedTasks, dispatchGroups: ledger },
+            }
+          }
+        }
+        const scopedWorkspace = applied.window ? Object.keys(applied.state.messages)[0] : undefined
         const nextWindows: Record<Id, ClientTranscriptWindow> = {}
-        for (const [workspaceID, list] of Object.entries(snapshot.state.messages)) {
-          nextWindows[workspaceID] = scopedWorkspace === workspaceID && snapshot.window
-            ? { ...snapshot.window }
+        for (const [workspaceID, list] of Object.entries(applied.state.messages)) {
+          nextWindows[workspaceID] = scopedWorkspace === workspaceID && applied.window
+            ? { ...applied.window }
             : windowFrom(list, false)
         }
         // A snapshot is the legacy full-state recovery path: apply it whole.
-        apply({ type: "snapshot", snapshot })
+        apply({ type: "snapshot", snapshot: applied })
         setWindows(nextWindows)
-        setCounts(snapshot.counts)
+        setCounts(applied.counts)
         pagedOlder.clear()
         clearTombstones()
+        // A new epoch invalidates an opaque cursor. A version-only snapshot
+        // replacement keeps it: history rows are durable, not cursor-scoped.
+        if (epochChanged) setWorkHistory({})
         setData("loaded", true)
-        applyMetadata(snapshot)
+        applyMetadata(applied)
       })
     },
     applyMetadata,
@@ -610,6 +699,23 @@ export function createClientStore(): ClientStore {
       })
       clearTombstones()
     },
+    applyWorkHistory: (page) => {
+      batch(() => {
+        apply({ type: "work.history", subtasks: page.tasks, groups: page.groups })
+        setWorkHistory((current) => ({
+          ...current,
+          [page.conversationID]: {
+            conversationID: page.conversationID,
+            hasMore: page.hasMore,
+            ...(page.next ? { next: page.next } : {}),
+            limit: page.limit,
+            loaded: true,
+          },
+        }))
+      })
+    },
+    historyFor: (conversationID) => workHistory()[conversationID],
+    resetWorkHistory: () => setWorkHistory({}),
     applyShellSnapshot: (state) => {
       apply({ type: "shell.snapshot", state })
       clearTombstones()
@@ -646,6 +752,7 @@ export function createClientStore(): ClientStore {
         setEpoch(undefined)
         setCounts(undefined)
         setWindows({})
+        setWorkHistory({})
         pagedOlder.clear()
         clearTombstones()
       })

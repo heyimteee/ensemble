@@ -1,20 +1,34 @@
 import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { unwrap } from "solid-js/store"
-import { SyntaxStyle } from "@opentui/core"
+import { SyntaxStyle, decodePasteBytes } from "@opentui/core"
 import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageStream, ModelOption, NativeSubagentRun, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, Workspace, WorkspaceCounts } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageAttachment, MessageStream, ModelOption, NativeSubagentRun, NativeSyncState, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, WorkHistoryPage, Workspace, WorkspaceCounts } from "../types.ts"
+import { nativeFirstMode } from "../native-first.ts"
+import { isDirectMessageChannel } from "../message-channel.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ChromeText, FullApprovalsView, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, WorkHistoryRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
 import { dispatchLimits } from "../dispatch-budget.ts"
 import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeComposerHeight, composerTrigger, composerValidationBorder, composerValidationReducer, fileReferenceTokenAt, paletteRowTitle, parseSlashCommand, replaceFileReference, type ComposerValidationState, type FileReferenceToken } from "./composer.ts"
+import {
+  attachmentsForDraft,
+  classifyComposerPaste,
+  clipboardImageName,
+  composerAttachmentLabel,
+  describeLocalAttachment,
+  existingPastedFile,
+  removeComposerAttachment,
+  validateAttachmentSelection,
+  withComposerAttachment,
+  type ComposerAttachmentStore,
+} from "../attachments.ts"
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
-import { agentName, alignedDetailRows, busyCount, fuzzyMatch, headerQueuedSuffix, isWorkingTask, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
+import { agentName, alignedDetailRows, busyCount, directConversationParts, fuzzyMatch, headerQueuedSuffix, isWorkingTask, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import {
   RAIL_PULSE_STEP_MS,
@@ -39,6 +53,12 @@ import {
   toggleCollapsedRailGroup,
 } from "./railmodel.ts"
 import { boundSessionID, missingNativeSessionMessage, nativePickerCandidates, nativeSessionRoute, pickerCandidateRows, pickerWindow, stablePickerItems, toggleSelected, type PickerCandidate } from "./picker.ts"
+import {
+  nextSessionPickerScope,
+  sessionPickerRevisionChanged,
+  type SessionPickerCandidate,
+  type SessionPickerScope,
+} from "../session-picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import {
   addWizardMemory,
@@ -228,6 +248,8 @@ import {
 } from "./workfocus.ts"
 import { approvalsColumnMode, approvalsForWorkspace, approvalsPaneLayout, closeFullApprovals, fullApprovalsHeader, fullApprovalsSection, openFullApprovals, workApprovalSection } from "./workapprovals.ts"
 import { nativeSubagentFocusChild, nativeSubagentFocusID, nativeSubagentWorkStatus } from "./nativecards.ts"
+import { nativeDirectChannel, directNativeWorkRow, nativeDirectChatLines } from "./native-direct.ts"
+import { workDetailFor, workDetailText } from "../work-history.ts"
 import { isWorkActionID, nativeSubagentActions, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
 import {
   accumulateCompletions,
@@ -246,7 +268,7 @@ import {
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat"
 type PickerState = {
-  mode: "members" | "leader" | "workspace" | "choice" | "agent" | "native"
+  mode: "members" | "leader" | "workspace" | "choice" | "agent" | "native" | "sessions"
   title: string
   candidates: PickerCandidate[]
   selected: Set<string>
@@ -254,6 +276,17 @@ type PickerState = {
   query: string
   /** A `/` filter owns the keyboard until Enter or Esc. */
   filtering: boolean
+  /** Ticket #224: target and scope for the native session picker. */
+  native?: {
+    agentID: string
+    conversation: "workspace" | "direct" | "home"
+    workspaceID?: string
+    scope: SessionPickerScope
+    /** The committed server search for this scope; empty means recent rows. */
+    query?: string
+    /** Bumped on every reload so a stale response cannot repaint. */
+    generation: number
+  }
   resolve: (value: string[] | undefined) => void
 }
 
@@ -552,6 +585,7 @@ export function EnsembleV2App() {
   const [workspaceFilter, setWorkspaceFilter] = createSignal("")
   const [composerDraft, setComposerDraft] = createSignal("")
   const [composerCursor, setComposerCursor] = createSignal(0)
+  const [composerFiles, setComposerFiles] = createSignal<ComposerAttachmentStore>({})
   const [drafts, setDrafts] = createSignal<DraftStore>({})
   const [composerValidation, setComposerValidation] = createSignal<ComposerValidationState | null>(null)
   const [completion, setCompletion] = createSignal<Completion | null>(null)
@@ -569,6 +603,8 @@ export function EnsembleV2App() {
   // next such instant; it is not an animation clock and never rebuilds the
   // animated glyph or tide cells.
   const [workRevision, setWorkRevision] = createSignal(0)
+  /** Ticket #218: service-owned native reconciliation state for the statusline. */
+  const [nativeSyncState, setNativeSyncState] = createSignal<NativeSyncState>("live")
   // Ticket #155: the last coalesced native activity per task. The Work-pane
   // memo reads this signal, so a tool event rebuilds only the affected card
   // detail (the identity cache keeps every unchanged card).
@@ -828,6 +864,8 @@ export function EnsembleV2App() {
       : { kind: "workspace", workspaceID: current.workspaceID }
   }
   const currentDraftKey = () => draftKey(currentDraftSurface())
+  /** Ticket #223: attachment drafts follow the same per-surface key as text. */
+  const currentComposerFiles = createMemo(() => attachmentsForDraft(composerFiles(), currentDraftKey() ?? ""))
 
   const interactionOverlay = (): InteractionOverlay => {
     if (wizard()) return "wizard"
@@ -853,6 +891,8 @@ export function EnsembleV2App() {
   // a completed response. The metadata of the last applied snapshot decides
   // version application and catalog/config refreshes.
   let lastSnapshotMeta: SnapshotMeta | undefined = undefined
+  /** Ticket #224: last picker refresh revision applied from the service. */
+  let lastSessionPickerRevision: number | undefined = undefined
   // Ticket #138: a forced replacement is used for an epoch change or a feed
   // reset; the version guard cannot express "same version, discard state".
   let forceSnapshotReplace = false
@@ -893,6 +933,38 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? Object.values(state()?.subtasks ?? {}).filter((task) => task.workspaceID === workspace.id) : []
   })
+  // Ticket #215: a native-first direct conversation reads the same durable
+  // channel and Work rows as the group surface. The channel is server-derived
+  // from the conversation binding, never from client guesswork.
+  const nativeDirect = createMemo(() => nativeDirectChannel(chatContext()?.conversation))
+  const nativeDirectWork = createMemo(() =>
+    directNativeWorkRow(Object.values(state()?.subtasks ?? {}), nativeDirect(), Date.now()),
+  )
+  /**
+   * Ticket #222: Work is conversation-scoped on both surfaces. A workspace
+   * group reads the workspace channel; a native direct conversation reads its
+   * durable `dm:` channel. The same Work pane, cards, and history serve both.
+   */
+  const workConversationID = createMemo(() => {
+    const current = surface()
+    if (current?.kind === "workspace") return current.workspaceID
+    if (current?.kind === "agent") return nativeDirect()
+    return undefined
+  })
+  const workTasks = createMemo(() => {
+    const conversation = workConversationID()
+    if (!conversation) return []
+    return Object.values(state()?.subtasks ?? {}).filter(
+      (task) => (task.conversationID ?? task.workspaceID) === conversation,
+    )
+  })
+  /**
+   * True while the open chat context is the server-derived durable direct
+   * conversation. `conversation.channel` is set only under native-first `on`,
+   * so the client never re-derives the answer from bindings or a raw setting.
+   */
+  const sessionIsDurableDirect = (sessionID?: string) =>
+    Boolean(sessionID) && chatContext()?.sessionID === sessionID && nativeDirect() !== undefined
   /**
    * Ticket #187: durable native child sessions for this workspace. A record
    * carries its workspace, with the parent task as fallback when the host
@@ -930,9 +1002,14 @@ export function EnsembleV2App() {
   // workspace surface. At every width the same right switch owns it; below 96
   // columns it renders as a right drawer over the chat. Ticket #185: the full
   // approvals inbox may also open the right column from a direct chat, where
-  // there is no Work body to split against.
+  // there is no Work body to split against. Ticket #222: a native direct
+  // conversation has its own conversation-scoped Work surface.
   const showWorkPane = createMemo(
-    () => paneSides().right && (surface()?.kind === "workspace" || approvalsMode() === "full"),
+    () => paneSides().right && (
+      surface()?.kind === "workspace"
+      || (surface()?.kind === "agent" && Boolean(nativeDirect()))
+      || approvalsMode() === "full"
+    ),
   )
   const railWidth = () => panes().railWidth
   const messageWidth = () => showWorkPane() ? panes().chatContentWidth : panes().chatOnlyContentWidth
@@ -1113,7 +1190,7 @@ export function EnsembleV2App() {
     // memo through activeTasks/state/approvals below.
     workRevision()
     const now = Date.now()
-    const grouped = workViewGroups(activeTasks(), state()?.subtasks ?? {}, {
+    const grouped = workViewGroups(workTasks(), state()?.subtasks ?? {}, {
       now,
       pendingApprovalIDs: pendingApprovalIDs(),
       nativeBlockedSubtaskIDs: nativeBlockedSubtaskIDs(),
@@ -1160,7 +1237,7 @@ export function EnsembleV2App() {
     // Ticket #155: track live native activity so a tool event updates the
     // affected card detail without a snapshot or a full Work rebuild.
     const activities = workActivities()
-    const active = activeTasks()
+    const active = workTasks()
     const pendingApprovalSet = pendingApprovalIDs()
     const nativeBlockedSet = nativeBlockedSubtaskIDs()
     const options: WorkCardOptions = {
@@ -1237,7 +1314,7 @@ export function EnsembleV2App() {
     workRevision()
     const now = Date.now()
     const views = workViews()
-    const next = nextWorkInvalidation(activeTasks(), [...views.active.groups, ...views.history.groups], now)
+    const next = nextWorkInvalidation(workTasks(), [...views.active.groups, ...views.history.groups], now)
     if (workExpiryTimer !== undefined) {
       clearTimeout(workExpiryTimer)
       workExpiryTimer = undefined
@@ -1462,6 +1539,17 @@ export function EnsembleV2App() {
   // row; the compared set covers every rendered field, so this cannot hide a
   // visible change. The cache is pruned to the transcript window.
   const stableLines = (lines: ChatLine[]): ChatLine[] => {
+    const sameAttachments = (left?: MessageAttachment[], right?: MessageAttachment[]) => {
+      if (left === right) return true
+      if ((left?.length ?? 0) !== (right?.length ?? 0)) return false
+      return (left ?? []).every((attachment, index) =>
+        attachment.id === right![index]?.id
+        && attachment.name === right![index]?.name
+        && attachment.mime === right![index]?.mime
+        && attachment.size === right![index]?.size
+        && attachment.kind === right![index]?.kind,
+      )
+    }
     const seen = new Set<string>()
     const next = lines.map((line) => {
       seen.add(line.id)
@@ -1475,7 +1563,8 @@ export function EnsembleV2App() {
         && previous.interrupted === line.interrupted
         && previous.queued === line.queued
         && previous.correlationID === line.correlationID
-        && previous.agentID === line.agentID) return previous
+        && previous.agentID === line.agentID
+        && sameAttachments(previous.attachments, line.attachments)) return previous
       const value = { ...line }
       lineCache.set(line.id, value)
       return value
@@ -1488,18 +1577,24 @@ export function EnsembleV2App() {
   // so the UI renders exactly what the service reports.
   const chatLines = createMemo<ChatLine[]>(() => {
     if (surface()?.kind === "agent") {
-      const messages: ChatLine[] = (chatContext()?.messages ?? []).slice(-TRANSCRIPT_WINDOW).map((message: ChatMessage) => ({
-        id: message.id,
-        author: message.author,
-        role: transcriptRole(message.role),
-        text: message.role === "assistant" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
-        agentID: surfaceAgent()?.id,
-        queued: message.queued,
-        correlationID: message.correlationID,
-        createdAt: message.createdAt,
-      }))
+      const channel = nativeDirect()
+      const messages: ChatLine[] = channel
+        ? nativeDirectChatLines(state()?.messages[channel] ?? [], surfaceAgent()?.name ?? "Agent", TRANSCRIPT_WINDOW).map((line) =>
+            line.role === "agent" ? { ...line, text: normalizeAgentMentions(line.text, activeAgents()).text } : line,
+          )
+        : (chatContext()?.messages ?? []).slice(-TRANSCRIPT_WINDOW).map((message: ChatMessage) => ({
+            id: message.id,
+            author: message.author,
+            role: transcriptRole(message.role),
+            text: message.role === "assistant" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
+            agentID: surfaceAgent()?.id,
+            queued: message.queued,
+            correlationID: message.correlationID,
+            attachments: message.attachments,
+            createdAt: message.createdAt,
+          }))
       const live = liveDm()
-      if (live && chatContext()?.sessionID === live.sessionID) {
+      if (!channel && live && chatContext()?.sessionID === live.sessionID) {
         messages.push({ id: "live", author: surfaceAgent()?.name ?? "Agent", role: "agent" as const, text: live.text, agentID: surfaceAgent()?.id, createdAt: Date.now(), streaming: true })
       }
       // Slice C: the relevant direct surface carries one assignment line per
@@ -1535,6 +1630,7 @@ export function EnsembleV2App() {
       interrupted: message.interrupted,
       correlationID: message.correlationID,
       taskID: message.taskID,
+      attachments: message.attachments,
       createdAt: message.createdAt,
     })))
   })
@@ -2361,7 +2457,8 @@ export function EnsembleV2App() {
       case "agents":
       case "workspaces": return "roster"
       case "chat": return "chat"
-      // Ticket #172: a DM has no Work pane; a hidden drawer has no keys.
+      // Ticket #172/#222: a direct conversation has its own Work pane once it
+      // owns a native channel; a hidden drawer has no keys.
       case "work": return showWorkPane() ? "work" : null
       // The small approvals summary is pane selection; Enter opens full.
       case "approvals": return null
@@ -2370,7 +2467,7 @@ export function EnsembleV2App() {
   // Ticket #172: Work is reachable whenever either view holds work, even when
   // the current page is empty; `f` can then switch to HISTORY.
   const hasWorkZone = () => {
-    if (surface()?.kind !== "workspace") return false
+    if (!workConversationID()) return false
     const views = workViews()
     return views.active.groups.length > 0 || visibleHistoryGroups().length > 0
   }
@@ -2482,7 +2579,7 @@ export function EnsembleV2App() {
       if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(null)
       if (!surface()) setSurface(null)
     }
-    if (surface()?.kind === "agent") chatRefresh.request()
+    if (surface()?.kind === "agent" && !nativeDirect()) chatRefresh.request()
     refreshGit()
     const current = surface()
     if (current?.kind === "workspace" && !next.state.workspaces[current.workspaceID]) setSurface(null)
@@ -2566,6 +2663,13 @@ export function EnsembleV2App() {
       return false
     }
     applyScopedResync(result, target)
+    // Ticket #222: a Work scope repair may have missed terminal rows that
+    // finished while the client was away. Merge the newest page again; the
+    // per-conversation cursor keeps already-loaded older pages in place.
+    if (scopes.includes("work")) {
+      const conversationID = workConversationID()
+      if (conversationID && client.historyFor(conversationID)?.loaded) void loadWorkHistory(conversationID)
+    }
     return true
   }
 
@@ -2586,6 +2690,41 @@ export function EnsembleV2App() {
     }
     return loadSnapshot()
   }
+
+  /**
+   * Ticket #222: HISTORY is a second, bounded read after the bootstrap. A
+   * large retained history never inflates the bootstrap, and a fresh client
+   * gets the same newest page without depending on any prior client state.
+   */
+  const historyLoads = new Map<string, Promise<boolean>>()
+  const loadWorkHistory = (conversationID: string, before?: string): Promise<boolean> => {
+    const key = `${conversationID}\u0000${before ?? ""}`
+    const existing = historyLoads.get(key)
+    if (existing) return existing
+    const task = (async () => {
+      const page = await callRpc<WorkHistoryPage & { version: number; epoch?: number }>(context, "work.history", {
+        directory: directoryOf(context),
+        ...(isDirectMessageChannel(conversationID) ? { conversationID } : { workspaceID: conversationID }),
+        ...(before ? { before } : {}),
+      })
+      // A stale epoch's cursor and rows belong to another store generation.
+      if (page.epoch !== undefined && lastSnapshotMeta?.epoch !== undefined && page.epoch !== lastSnapshotMeta.epoch) return false
+      client.applyWorkHistory(page)
+      return true
+    })().catch(() => false).finally(() => historyLoads.delete(key))
+    historyLoads.set(key, task)
+    return task
+  }
+  const loadOlderWorkHistory = (conversationID: string): Promise<boolean> => {
+    const current = client.historyFor(conversationID)
+    if (!current?.hasMore || !current.next) return Promise.resolve(false)
+    return loadWorkHistory(conversationID, current.next)
+  }
+  createEffect(() => {
+    const conversationID = workConversationID()
+    if (!conversationID || client.historyFor(conversationID)?.loaded) return
+    void loadWorkHistory(conversationID)
+  })
 
   // Ensure at least one fetch that started at or after this call settles. The
   // coordinator queues a dirty pass when an earlier fetch is still in flight.
@@ -3023,7 +3162,22 @@ export function EnsembleV2App() {
     lastWorkFocus = undefined
     setWorkFocusID(undefined)
   }
-  const moveWorkPage = (delta: number) => selectWorkPage(workPage() + delta)
+  /** Ticket #222: page down past the loaded HISTORY asks the server for the next page. */
+  const moveWorkPage = (delta: number) => {
+    const next = workPage() + delta
+    const pageCount = workViews()[workView()].layout.pages.length
+    const conversationID = workConversationID()
+    if (delta > 0 && next > pageCount && workView() === "history" && conversationID !== undefined) {
+      const current = client.historyFor(conversationID)
+      if (current?.hasMore) {
+        void loadOlderWorkHistory(conversationID).then((loaded) => {
+          if (loaded) setWorkPage(workPage() + delta)
+        })
+        return
+      }
+    }
+    selectWorkPage(next)
+  }
   const workFocusAtLast = () => {
     const last = lastWorkCardFocus(workFocusPages())
     return Boolean(last && last.id === workFocusID())
@@ -3250,9 +3404,109 @@ export function EnsembleV2App() {
     })
   }
 
+  const attachmentRequest = () => {
+    const current = surface()
+    if (!current) return undefined
+    if (current.kind === "workspace") return { workspaceID: current.workspaceID }
+    return { agentID: current.agentID, ...(current.workspaceID ? { workspaceID: current.workspaceID } : {}) }
+  }
+  const attachmentDirectories = () =>
+    [chatContext()?.directory, activeWorkspace()?.directory, process.cwd()]
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+  const attachmentFailure = (error: any) => {
+    const message = error?.message ?? String(error)
+    notify(message, "error")
+    showToast({ title: "Attachment", message, tone: "error" })
+  }
+  const attachmentFits = (candidate: MessageAttachment): boolean => {
+    const failure = validateAttachmentSelection([...currentComposerFiles(), candidate])
+    if (!failure) return true
+    notify(failure.message, "error")
+    showToast({ title: "Attachment", message: failure.message, tone: "error" })
+    return false
+  }
+  const attachPath = async (path: string) => {
+    const request = attachmentRequest()
+    if (!request) return
+    try {
+      const candidate = describeLocalAttachment(path)
+      if (!attachmentFits(candidate)) return
+      const key = currentDraftKey() ?? ""
+      const stored: MessageAttachment = await invoke(context, "attachment.add", { ...request, path })
+      setComposerFiles((store) => withComposerAttachment(store, key, stored))
+      notify(`Attached ${stored.name}`, "success")
+    } catch (error) {
+      attachmentFailure(error)
+    }
+  }
+  const attachClipboardImage = async (bytes: Uint8Array, mime: string, name?: string) => {
+    const request = attachmentRequest()
+    if (!request) return
+    try {
+      const candidate: MessageAttachment = {
+        id: "pending",
+        name: name ?? clipboardImageName(mime),
+        mime,
+        size: bytes.length,
+        kind: mime.startsWith("image/") ? "image" : "file",
+      }
+      if (!attachmentFits(candidate)) return
+      const key = currentDraftKey() ?? ""
+      const stored: MessageAttachment = await invoke(context, "attachment.add", {
+        ...request,
+        data: Buffer.from(bytes).toString("base64"),
+        mime,
+        name: candidate.name,
+      })
+      setComposerFiles((store) => withComposerAttachment(store, key, stored))
+      notify(`Attached ${stored.name}`, "success")
+    } catch (error) {
+      attachmentFailure(error)
+    }
+  }
+  const removeComposerFile = (attachment: MessageAttachment) => {
+    const key = currentDraftKey() ?? ""
+    setComposerFiles((store) => removeComposerAttachment(store, key, attachment.id))
+    const request = attachmentRequest()
+    if (!request) return
+    void invoke(context, "attachment.remove", { ...request, id: attachment.id }).catch(() => undefined)
+  }
+  /**
+   * Ticket #223: a pasted file path becomes a chip instead of raw text, and a
+   * clipboard image is stored before the textarea sees it. A path that does
+   * not name an existing file and ordinary text fall through to the native
+   * textarea paste.
+   */
+  const handleComposerPaste = (event: any) => {
+    const bytes = event?.bytes instanceof Uint8Array ? event.bytes : undefined
+    let text = ""
+    try {
+      text = bytes ? decodePasteBytes(bytes) : ""
+    } catch {}
+    const paste = classifyComposerPaste({
+      text,
+      bytes,
+      mimeType: event?.metadata?.mimeType,
+      kind: event?.metadata?.kind,
+    })
+    if (paste.kind === "image") {
+      event?.preventDefault?.()
+      event?.stopPropagation?.()
+      void attachClipboardImage(paste.bytes, paste.mime, paste.name)
+      return
+    }
+    if (paste.kind !== "path") return
+    const existing = existingPastedFile(paste.path, attachmentDirectories())
+    if (!existing) return
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    void attachPath(existing)
+  }
+
   const send = async (text: string, recipientIDs?: string[], onInvalid?: (message: string) => void): Promise<boolean> => {
     const value = text.trim()
-    if (!value) return false
+    const files = currentComposerFiles()
+    if (!value && files.length === 0) return false
     const current = surface()
     if (!current) {
       onInvalid?.("Open an agent or workspace first.")
@@ -3296,8 +3550,15 @@ export function EnsembleV2App() {
       if (resolvedError) return failure(resolvedError.message)
     }
     return run("Send message", async () => {
+      const sendKey = currentDraftKey() ?? ""
+      const sendFiles = files.map((attachment) => attachment.id)
       if (current.kind === "agent") {
-        await invoke(context, "chat.send", { agentID: current.agentID, workspaceID: current.workspaceID, text: value })
+        await invoke(context, "chat.send", {
+          agentID: current.agentID,
+          workspaceID: current.workspaceID,
+          text: value,
+          ...(sendFiles.length > 0 ? { attachments: sendFiles } : {}),
+        })
         await refreshChat()
       } else {
         const action = plan?.kind === "skills" ? "skill.send" : "message.send"
@@ -3305,8 +3566,12 @@ export function EnsembleV2App() {
           workspaceID: current.workspaceID,
           text: value,
           recipientIDs,
+          ...(sendFiles.length > 0 ? { attachments: sendFiles } : {}),
           ...(ownerSelections ? { ownerSelections } : {}),
         })
+      }
+      if (sendFiles.length > 0) {
+        setComposerFiles((store) => sendFiles.reduce((next, id) => removeComposerAttachment(next, sendKey, id), store))
       }
     })
   }
@@ -3357,8 +3622,12 @@ export function EnsembleV2App() {
     const data = event?.data ?? event
     const session = String(data?.sessionID ?? "")
     const delta = String(data?.delta ?? "")
+    // Ticket #215: a native-first direct session streams through the durable
+    // message channel and patch feed. It never uses the native-text overlay,
+    // never re-reads chat.context, and never forces a full snapshot.
+    const durableDirect = sessionIsDurableDirect(session)
     if (event?.type === "session.text.delta" && session && delta) {
-      if (chatContext()?.sessionID === session && surface()?.kind === "agent") {
+      if (!durableDirect && chatContext()?.sessionID === session && surface()?.kind === "agent") {
         const current = liveDm()
         dmStream.push(session, (previous) => (previous ?? (current?.sessionID === session ? current.text : "")) + delta)
       }
@@ -3368,8 +3637,10 @@ export function EnsembleV2App() {
       // coalesced clear event is still in transit. A terminal/needs-you card
       // also ignores any entry that remains.
       setWorkActivities((current) => clearWorkActivitiesForSession(current, session))
-      if (chatContext()?.sessionID === session) { dmStream.clear(); setLiveDm(null); void refreshChat() }
-      void refresh()
+      if (!durableDirect) {
+        if (chatContext()?.sessionID === session) { dmStream.clear(); setLiveDm(null); void refreshChat() }
+        void refresh()
+      }
     }
   }
 
@@ -3768,7 +4039,8 @@ export function EnsembleV2App() {
 
   const submitComposer = async (value: string) => {
     const text = value.trim()
-    if (!text) return
+    const files = currentComposerFiles()
+    if (!text && files.length === 0) return
     if (completion()) { await selectCompletion(); return }
     if (text === "/") { commandPaletteCompletion("/", 1); return }
     const initIssue = initComposerIssue(text)
@@ -3812,6 +4084,12 @@ export function EnsembleV2App() {
     const name = rawName.startsWith("ctrl+") ? rawName.slice("ctrl+".length) : rawName
     const token = normalizeKeyToken(event)
     const prevent = () => { event?.preventDefault?.(); event?.stopPropagation?.() }
+    if (name === "backspace" && composerDraft() === "" && currentComposerFiles().length > 0) {
+      prevent()
+      const last = currentComposerFiles().at(-1)
+      if (last) removeComposerFile(last)
+      return true
+    }
     const leaveEditor = () => {
       prevent()
       leaveComposer()
@@ -4080,6 +4358,165 @@ export function EnsembleV2App() {
     navigateToNativeSession(sessionID)
   }
 
+  // ---- Ticket #224: native session picker and adoption ----
+  type AdoptionRequest = { agentID: string; conversation: "workspace" | "direct" | "home"; workspaceID?: string }
+  const sessionScopeTitle = (scope: SessionPickerScope): string =>
+    `Native session · ${scope.charAt(0).toUpperCase()}${scope.slice(1)}`
+  const sessionCandidateRows = (sessions: readonly SessionPickerCandidate[]): PickerCandidate[] =>
+    sessions.map((session) => ({ id: session.id, label: session.label, detail: session.detail }))
+
+  const loadSessionPicker = async (
+    request: AdoptionRequest,
+    scope: SessionPickerScope,
+    query = "",
+  ): Promise<{ scope: SessionPickerScope; sessions: SessionPickerCandidate[] }> => {
+    const result = await invoke(context, "session.picker", { ...request, scope, query })
+    return { scope: (result?.scope ?? scope) as SessionPickerScope, sessions: Array.isArray(result?.sessions) ? result.sessions : [] }
+  }
+
+  /**
+   * Ticket #224: the picker defaults to recent sessions in the target
+   * conversation's scope. A required move or reassignment is previewed on the
+   * server and confirmed here before the adopt call; a refusal is a visible
+   * toast, never a silent no-op.
+   */
+  const adoptNativeSession = async (request: AdoptionRequest, sessionID: string): Promise<void> => {
+    let preview: any
+    try {
+      preview = await invoke(context, "session.adopt.preview", { ...request, sessionID })
+    } catch (error) {
+      showError(error)
+      return
+    }
+    if (preview?.plan?.rejected) {
+      showToast({ title: "Ensemble", message: preview.message ?? "That native session cannot be adopted.", tone: "warning" })
+      return
+    }
+    if (preview?.plan?.unchanged) {
+      showToast({ title: "Ensemble", message: `This native session already serves ${preview.conversation}.`, tone: "info" })
+      return
+    }
+    const confirmations: string[] = []
+    if (preview?.plan?.moveRequired) {
+      confirmations.push(`This native session must move into the directory for ${preview.conversation}. The binding changes only after the move is confirmed.`)
+    }
+    if (preview?.plan?.needsReassign) {
+      confirmations.push(`This native session currently serves ${preview.reassignFrom?.conversation ?? "another conversation"}. Reassigning it gives that conversation a fresh session and keeps this one in its binding history.`)
+    }
+    let confirmMove = false
+    let reassign = false
+    if (confirmations.length > 0) {
+      const confirmed = await openConfirm("Adopt native session", confirmations.join("\n\n"))
+      if (!confirmed) return
+      confirmMove = Boolean(preview?.plan?.moveRequired)
+      reassign = Boolean(preview?.plan?.needsReassign)
+    }
+    try {
+      const adopted = await invoke(context, "session.adopt", { ...request, sessionID, confirmMove, reassign })
+      showToast({ title: "Ensemble", message: `Native session adopted into ${adopted?.conversation ?? "the conversation"}.`, tone: "info" })
+    } catch (error) {
+      showError(error)
+    }
+  }
+
+  const openSessionPicker = async (request: AdoptionRequest): Promise<void> => {
+    const defaultScope: SessionPickerScope = request.conversation === "workspace" ? "workspace" : "direct"
+    let loaded: Awaited<ReturnType<typeof loadSessionPicker>>
+    try {
+      loaded = await loadSessionPicker(request, defaultScope)
+    } catch (error) {
+      showError(error)
+      return
+    }
+    if (loaded.sessions.length === 0) {
+      showToast({ title: "Ensemble", message: `No native sessions in the ${loaded.scope} scope.`, tone: "info" })
+      return
+    }
+    const selected = await openPicker("sessions", {
+      rows: sessionCandidateRows(loaded.sessions),
+      native: { ...request, scope: loaded.scope, query: "", generation: 1 },
+    })
+    if (!selected?.[0]) return
+    await adoptNativeSession(request, selected[0])
+  }
+
+  /** Ticket #224: adopt into the current surface. A group chat picks the agent first. */
+  const openAdoptNative = async (): Promise<void> => {
+    const current = surface()
+    if (current?.kind === "agent") {
+      const workspaceID = current.workspaceID ?? activeWorkspace()?.id
+      await openSessionPicker({ agentID: current.agentID, conversation: "direct", ...(workspaceID ? { workspaceID } : {}) })
+      return
+    }
+    if (current?.kind !== "workspace") {
+      showToast({ title: "Ensemble", message: "Open a workspace or agent first.", tone: "warning" })
+      return
+    }
+    const selected = await openPicker("native")
+    const agentID = selected?.[0]
+    if (!agentID) return
+    await openSessionPicker({ agentID, conversation: "workspace", workspaceID: current.workspaceID })
+  }
+
+  /**
+   * Ticket #224: one reload path for the open session picker. Every trigger
+   * bumps the generation, applies the requested scope/query, and drops a
+   * response that arrives after a newer reload.
+   */
+  const reloadSessionPicker = (
+    current: PickerState,
+    options: {
+      scope: SessionPickerScope
+      query?: string
+      native?: Partial<NonNullable<PickerState["native"]>>
+      picker?: Partial<PickerState>
+    },
+  ): void => {
+    if (!current.native || current.mode !== "sessions") return
+    const generation = current.native.generation + 1
+    const query = options.query ?? current.native.query ?? ""
+    const native = { ...current.native, ...(options.native ?? {}), scope: options.scope, query, generation }
+    setPicker({ ...current, ...(options.picker ?? {}), native, cursor: 0 })
+    void loadSessionPicker(native, options.scope, query)
+      .then((loaded) => {
+        const live = picker()
+        if (!live?.native || live.native.generation !== generation) return
+        setPicker({ ...live, candidates: sessionCandidateRows(loaded.sessions), cursor: 0 })
+      })
+      .catch((error) => showError(error))
+  }
+
+  /** Ticket #224: refresh the open picker on a claimed host session event. */
+  const refreshSessionPicker = (): void => {
+    const current = picker()
+    if (!current?.native) return
+    reloadSessionPicker(current, { scope: current.native.scope })
+  }
+
+  /**
+   * Ticket #224: run the committed filter against the whole selected scope,
+   * so search is not limited to the first recent page. Typing still narrows
+   * the visible rows locally; Enter asks the service for the full scope.
+   */
+  const searchSessionPicker = (query: string): void => {
+    const current = picker()
+    if (!current?.native) return
+    reloadSessionPicker(current, { scope: current.native.scope, query })
+  }
+
+  /** Ticket #224: one-key scope switch; search applies to the new scope. */
+  const pickerCycleScope = (): void => {
+    const current = picker()
+    if (!current?.native) return
+    const scope = nextSessionPickerScope(current.native.scope)
+    reloadSessionPicker(current, {
+      scope,
+      query: "",
+      native: { scope, query: "" },
+      picker: { title: sessionScopeTitle(scope), query: "", filtering: false },
+    })
+  }
+
   const restoreSettingsFocus = () => {
     const target = settingsReturnFocus
     // Ticket #180/#186: a pane restoration keeps the select/interact mode it
@@ -4132,6 +4569,14 @@ export function EnsembleV2App() {
     if (settingsFeedback()?.kind === "saved") clearSettingsFeedback()
   }
 
+  /** General-tab privacy control: one durable per-agent native mirror toggle. */
+  const toggleNativeMirror = () => {
+    const agent = draft()
+    if (!agent) return
+    setDraft({ ...agent, nativeMirror: agent.nativeMirror === false })
+    markSettingsDirty()
+  }
+
   const closeSettings = async () => {
     if (dirty()) {
       const discard = await openConfirm("Discard changes?", "This agent has unsaved settings.")
@@ -4145,7 +4590,7 @@ export function EnsembleV2App() {
     if (!agent.name.trim()) throw new Error("Agent name is required.")
     clearSettingsFeedback()
     const ok = await run("Save settings", async () => {
-      await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color })
+      await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color, nativeMirror: agent.nativeMirror !== false })
       // Restore the pre-#124 save-then-close flow. The confirmation is one
       // one-shot toast after the surface closes; the statusline remains the
       // modal fallback, so save never has two competing feedback channels.
@@ -4441,6 +4886,7 @@ export function EnsembleV2App() {
       return
     }
     if (kind === "model") { await editModelRow(0); return }
+    if (kind === "toggle") { toggleNativeMirror(); return }
     if (kind === "backup") { await editModelRow(cursor); return }
     if (kind === "memory") {
       const memory = filteredMemories()[cursor]
@@ -4728,6 +5174,16 @@ export function EnsembleV2App() {
       }
       return openResult()
     },
+    "work.why": () => {
+      const task = selectedTask()
+      if (!task) return
+      const detail = workDetailFor(task, {
+        subtasks: state()?.subtasks ?? {},
+        dispatchGroups: state()?.dispatchGroups ?? {},
+        now: Date.now(),
+      })
+      return openResultModal(`Why this card? · ${task.id}`, workDetailText(detail))
+    },
     "work.delegate": () => delegateSelected(),
     "work.reassign": () => reassignSelected(),
     "work.retry": () => retrySelected(),
@@ -4791,6 +5247,7 @@ export function EnsembleV2App() {
     "leader.pause": () => togglePause(),
     "leader.init": () => initEnsemble(),
     "leader.native": () => openNative(),
+    "leader.adopt": () => { void openAdoptNative() },
     "leader.delegate": () => delegateSelected(),
     "leader.reassign": () => reassignSelected(),
     "leader.retry": () => retrySelected(),
@@ -4826,6 +5283,9 @@ export function EnsembleV2App() {
     heartbeatCheck = (async () => {
       try {
         const revision = await callRpc<Revision>(context, "revision", { directory: directoryOf(context) })
+        // Ticket #218: the heartbeat carries the service-owned sync state. It
+        // is a state label only; native content never rides this call.
+        setNativeSyncState(revision.nativeSync?.state ?? "live")
         // Ticket #141: counts are server-derived and refreshed on every beat;
         // the client never scans all messages or tasks for the rail. The gate
         // rides the same beat so a growing workspace switches read paths.
@@ -4855,7 +5315,9 @@ export function EnsembleV2App() {
         if (lastSnapshotMeta && (revision.catalogRevision !== lastSnapshotMeta.catalogRevision || revision.configRevision !== lastSnapshotMeta.configRevision)) {
           snapshotRefresh.request()
         }
-        if (surface()?.kind === "agent") chatRefresh.request()
+        // Ticket #215: a native-first direct transcript is durable and
+        // patch-driven, so the heartbeat never polls chat.context for it.
+        if (surface()?.kind === "agent" && !nativeDirect()) chatRefresh.request()
       } catch {
         // The revision RPC is an optimization; keep the snapshot path as the
         // fallback whenever it is unavailable.
@@ -4930,7 +5392,19 @@ export function EnsembleV2App() {
       // snapshot while the version guard still prevents an older response
       // from repainting newer state.
       if (type === "server.connected") {
+        // Ticket #224: a restarted service restarts the picker revision.
+        lastSessionPickerRevision = undefined
         void checkRevision(true)
+        return
+      }
+      // Ticket #224: the service emits one id-only refresh signal per claimed
+      // session lifecycle event. Refresh an open session picker without a
+      // snapshot and without a timer.
+      if (type === "rpc.ensemble.v2.sessions.changed") {
+        const payload = details?.data && typeof details.data === "object" ? details.data : details
+        if (!sessionPickerRevisionChanged(lastSessionPickerRevision, payload?.revision)) return
+        lastSessionPickerRevision = payload.revision
+        if (picker()?.mode === "sessions") refreshSessionPicker()
         return
       }
       // Ticket #155: coalesced native tool activity is version-neutral. It
@@ -5287,11 +5761,13 @@ export function EnsembleV2App() {
     clearPendingChord()
   }
 
-  const openPicker = (mode: PickerState["mode"], options: { selected?: string[]; candidates?: string[] } = {}): Promise<string[] | undefined> => new Promise((resolve) => {
+  const openPicker = (mode: PickerState["mode"], options: { selected?: string[]; candidates?: string[]; rows?: PickerCandidate[]; native?: PickerState["native"] } = {}): Promise<string[] | undefined> => new Promise((resolve) => {
     // Overlays never steal Enter/focus while a wizard owns the keyboard.
     if (wizard()) { resolve(undefined); return }
     clearPendingChord()
-    const candidates = mode === "workspace"
+    const candidates = mode === "sessions"
+      ? (options.rows ?? [])
+      : mode === "workspace"
       ? workspaces().map((workspace) => ({ id: workspace.id, label: chromeJoin([`#${workspace.name}`, workspaceLabel(workspace.directory)]) }))
       : mode === "leader"
         ? (options.candidates ?? []).map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent)).map((agent) => ({ id: agent.id, label: agent.name }))
@@ -5306,12 +5782,15 @@ export function EnsembleV2App() {
           : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
     const next: PickerState = {
       mode,
-      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : mode === "native" ? "Native session" : "Switch workspace",
+      title: mode === "sessions"
+        ? sessionScopeTitle(options.native?.scope ?? "direct")
+        : mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : mode === "native" ? "Native session" : "Switch workspace",
       candidates,
       selected: new Set(options.selected ?? []),
       cursor: 0,
       query: "",
       filtering: false,
+      ...(mode === "sessions" && options.native ? { native: options.native } : {}),
       resolve,
     }
     setModal(true)
@@ -6141,6 +6620,8 @@ export function EnsembleV2App() {
     }
     if (edit.done) {
       setPicker({ ...state, filtering: false, query: edit.query, cursor: 0 })
+      // Ticket #224: a committed session filter searches the whole scope.
+      if (state.mode === "sessions" && state.native) searchSessionPicker(edit.query)
       return
     }
     setPicker({ ...state, query: edit.query, cursor: 0 })
@@ -6425,6 +6906,7 @@ export function EnsembleV2App() {
       case "picker.activate": return pickerActivate()
       case "picker.toggle": return pickerToggle()
       case "picker.filter": return beginPickerFilter()
+      case "picker.scope": return pickerCycleScope()
       case "picker.cancel": return finishPicker(undefined)
       case "confirm.accept": case "confirm.accept.enter": return finishConfirm(true)
       case "confirm.reject": case "confirm.reject.escape": return finishConfirm(false)
@@ -6629,7 +7111,10 @@ export function EnsembleV2App() {
     if (!current) return "No chat open"
     if (current.kind === "agent") {
       const workspace = current.workspaceID ? state()?.workspaces[current.workspaceID] : undefined
-      return chromeJoin([surfaceAgent()?.name ?? "Agent", "direct", workspace ? `#${workspace.name}` : "no workspace"])
+      // Ticket #214: the label comes from the service's resolved conversation,
+      // not the surface's remembered workspace, so a membership change cannot
+      // leave the header claiming the wrong native context.
+      return chromeJoin([surfaceAgent()?.name ?? "Agent", ...directConversationParts(chatContext()?.conversation, workspace?.name)])
     }
     const workspace = state()?.workspaces[current.workspaceID]
     if (!workspace) return "Workspace"
@@ -6779,6 +7264,7 @@ export function EnsembleV2App() {
         return workView() === "history" && historyGroupRowFocus() !== undefined ? true : selectedTaskActions().has(entry.id)
       }
       if (entry.id === "work.native") return nativeFocused || selectedTaskActions().has(entry.id)
+      if (entry.id === "work.why") return selectedTask() !== undefined
       if (isWorkActionID(entry.id)) return selectedTaskActions().has(entry.id)
       if (entry.id === "work.approvals") return pendingApprovals().length > 0
       return true
@@ -6801,6 +7287,8 @@ export function EnsembleV2App() {
     visualKind: interaction().selection?.kind,
     leader: leaderMode(),
     context: statusContext(),
+    // Ticket #218: native sync is relevant only when native-first is on.
+    ...(nativeFirstMode(state()?.settings) === "on" ? { nativeSync: nativeSyncState() } : {}),
     // Insert without a target only replaces the typing hints with a notice;
     // git, position, selection size, and the pending chord stay visible.
     notice: insertWithoutTarget(interaction()) ? "no text target" : undefined,
@@ -6868,6 +7356,19 @@ export function EnsembleV2App() {
           </Show>
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chatOwnsFocus() ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chatOwnsFocus() || composerActive() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
+            <Show when={nativeDirectWork()}>
+              {(row) => (
+                <ChromeText
+                  colors={colors}
+                  fg={row().needsYou ? colors.warn : row().status === "replied" ? colors.good : colors.muted}
+                  bg={colors.bg}
+                  width="100%"
+                  truncate
+                  flexShrink={0}
+                  text={`WORK · ${row().state} · ${row().title}`}
+                />
+              )}
+            </Show>
             <Show when={limitsOpen()} fallback={
               <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
@@ -6925,6 +7426,11 @@ export function EnsembleV2App() {
                                           </Show>
                                         )}
                                       </Show>
+                                      <Show when={(message.attachments?.length ?? 0) > 0}>
+                                        <For each={message.attachments}>{(attachment) => (
+                                          <text fg={colors.info} bg={colors.bg} width="100%" truncate>{`▣ ${composerAttachmentLabel(attachment)}`}</text>
+                                        )}</For>
+                                      </Show>
                                     </box>
                                     )
                                   }
@@ -6966,6 +7472,11 @@ export function EnsembleV2App() {
                                         </Show>
                                       }>
                                         <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth()).join("\n")}</text>
+                                      </Show>
+                                      <Show when={(message.attachments?.length ?? 0) > 0}>
+                                        <For each={message.attachments}>{(attachment) => (
+                                          <text fg={colors.info} bg={colors.panel} width="100%" truncate>{`▣ ${composerAttachmentLabel(attachment)}`}</text>
+                                        )}</For>
                                       </Show>
                                     </box>
                                   </box>
@@ -7014,8 +7525,21 @@ export function EnsembleV2App() {
                           )}</For>
                         </box>
                       </Show>
+                      <Show when={currentComposerFiles().length > 0}>
+                        <box flexShrink={0} flexDirection="column" paddingLeft={1} paddingRight={1}>
+                          <For each={currentComposerFiles()}>{(attachment) => (
+                            <box
+                              flexDirection="row"
+                              width="100%"
+                              onMouseDown={(event: any) => { event?.preventDefault?.(); removeComposerFile(attachment) }}
+                            >
+                              <text fg={colors.info} bg={colors.bg} width="100%" truncate>{`▣ ${composerAttachmentLabel(attachment)}  [remove]`}</text>
+                            </box>
+                          )}</For>
+                        </box>
+                      </Show>
                       <box flexShrink={0} border borderStyle="single" borderColor={composerBorderColor()} backgroundColor={colors.bg} paddingLeft={1} paddingRight={1}>
-                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
+                        <textarea ref={(value: any) => { composerRef = value; applyEditorCaret(value) }} initialValue={composerDraft()} placeholder="Message…  $agent │ @file │ /command" width="100%" height={composerHeight()} backgroundColor={colors.bg} textColor={colors.text} onPaste={handleComposerPaste} onContentChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerDraft(value); setComposerCursor(cursor); setDrafts((store) => updateDraft(store, currentDraftKey(), value)); if (composerRef) composerRef.height = computeComposerHeight(value, Math.max(12, messageWidth() - 6)); handleComposerInput(value, cursor) }} onCursorChange={() => { const value = String(composerRef?.plainText ?? ""); const cursor = Number(composerRef?.cursorOffset ?? value.length); setComposerCursor(cursor); const current = completion(); if (current?.kind === "command") commandPaletteCompletion(value, cursor); else if (current?.kind === "file") syncFileCompletion(value, cursor, current) }} onSubmit={() => { void submitComposer(String(composerRef?.plainText ?? "")).catch(showError) }} keyBindings={[{ name: "return", action: "submit" }, { name: "return", shift: true, action: "newline" }, { name: "kpenter", action: "submit" }, { name: "kpenter", shift: true, action: "newline" }]} />
                       </box>
                       <ChromeText colors={colors} fg={composerActive() ? colors.warn : colors.muted} bg={colors.bg} width="100%" truncate text={composerActive() && interaction().mode === "visual" ? chromeJoin(["COMPOSER", interaction().selection?.kind === "line" ? "V-LINE" : "VISUAL", composerInlineHint()].filter(Boolean)) : composerActive() ? chromeJoin(["COMPOSER", interaction().mode === "normal" ? "NORMAL" : "", composerInlineHint()].filter(Boolean)) : composerInlineHint()} />
                     </>

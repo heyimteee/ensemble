@@ -107,8 +107,32 @@ export type WorkNeedsYouContext = {
 /** The durable lifecycle fields the canonical derivation reads. */
 export type WorkLifecycle = Pick<
   Subtask,
-  "id" | "state" | "outcome" | "interrupted" | "approvalID" | "awaitingChildren" | "attempts" | "claimedBy" | "leaseUntil" | "activeRunID" | "retryAfter" | "failure" | "stoppedAt"
+  "id" | "state" | "outcome" | "interrupted" | "approvalID" | "awaitingChildren" | "attempts" | "claimedBy" | "leaseUntil" | "activeRunID" | "retryAfter" | "failure" | "stoppedAt" | "origin" | "native"
 >
+
+/**
+ * Ticket #215: native turns derive from their host phase, never from a lease
+ * or attempt count they do not have. The returned vocabulary is the one in
+ * ADR 0005; `interrupted` is an honest needs-you state, not a failed row.
+ */
+function nativeWorkStatus(task: Pick<WorkLifecycle, "native" | "interrupted">): DerivedWorkStatus {
+  if (task.interrupted || task.native?.phase === "interrupted") return "needs_you"
+  switch (task.native?.phase) {
+    case "working":
+      return "working"
+    case "retrying":
+      return "retrying"
+    case "replied":
+      return "replied"
+    case "failed":
+      return "failed"
+    case "cancelled":
+      return "cancelled"
+    case "queued":
+    default:
+      return "pending"
+  }
+}
 
 /**
  * The single canonical derivation of a work item's visible lifecycle.
@@ -130,6 +154,7 @@ export type WorkLifecycle = Pick<
  * pending; otherwise a durable approval link alone reads needs-you.
  */
 export function deriveWorkStatus(task: WorkLifecycle, now: number, context?: WorkNeedsYouContext): DerivedWorkStatus {
+  if (isNativeTurn(task)) return nativeWorkStatus(task)
   if (task.state === "replied") {
     if (task.stoppedAt !== undefined) return "cancelled"
     if (task.outcome === "succeeded") return "replied"
@@ -156,6 +181,36 @@ export function deriveWorkStatus(task: WorkLifecycle, now: number, context?: Wor
 /** Stable short hash for idempotency-key segments. Never interpolate raw ids. */
 export function stableHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32)
+}
+
+/** True when a stored task is a native turn (never claimed or pumped). */
+export function isNativeTurn(task: { origin?: string; native?: unknown }): boolean {
+  return task.origin === "native" || task.native !== undefined
+}
+
+/** The uppercase status word shared by Work cards and Work history. */
+export function workStatusWord(status: DerivedWorkStatus, needsYou = false): string {
+  if (needsYou) return "NEEDS YOU"
+  switch (status) {
+    case "pending":
+      return "QUEUED"
+    case "working":
+      return "WORKING"
+    case "waiting":
+      return "WAITING"
+    case "retrying":
+      return "RETRYING"
+    case "needs_you":
+      return "NEEDS YOU"
+    case "replied":
+      return "REPLIED"
+    case "failed":
+      return "FAILED"
+    case "stalled":
+      return "STALLED"
+    case "cancelled":
+      return "CANCELLED"
+  }
 }
 
 /** Boundary validation for the domain union. Unknown values are rejected. */
@@ -204,10 +259,19 @@ export function workKey(input: {
   instruction: string
   constraints?: string
   expected?: string
+  /**
+   * Stored attachment ids (ticket #223). Two otherwise-identical sends with
+   * different files are different work, so idempotent resubmission cannot
+   * silently drop the new attachment set.
+   */
+  attachmentIDs?: readonly string[]
 }): string {
   const run = runPrefixHash(input.parentID, input.dispatchGroupID)
+  const attachmentKey = input.attachmentIDs && input.attachmentIDs.length > 0
+    ? `\0${[...new Set(input.attachmentIDs)].sort().join(",")}`
+    : ""
   const body = stableHash(
-    [input.assigneeID, canonicalField(input.title), canonicalField(input.instruction), canonicalField(input.constraints), canonicalField(input.expected)].join("\0"),
+    [input.assigneeID, canonicalField(input.title), canonicalField(input.instruction), canonicalField(input.constraints), canonicalField(input.expected)].join("\0") + attachmentKey,
   )
   return `work:${input.workspaceID}:${input.kind}:${input.actor}:${run}:${input.assigneeID}:${body}`
 }

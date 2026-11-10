@@ -211,6 +211,7 @@ test("shell entity mutations publish full-entity upserts without a snapshot fall
       maxDelegations: 10,
       maxDepth: 5,
       synthesis: true,
+      nativeMentionRouting: true,
       dispatchGroupMaxHops: 8,
       dispatchCommandMaxHops: 24,
       dispatchDepth: 8,
@@ -439,4 +440,22 @@ test("a foreign write makes the change feed reset and the synced store keeps the
   const result = reader.changesSince(1, baseline)
   assert.equal(result.reset, true, "the local ring cannot describe a foreign version")
   assert.equal(result.version, reader.version())
+})
+
+test("ticket213: direct conversation bindings publish upserts and removes without a snapshot reset", async () => {
+  const ctx = fakeContext()
+  const batches: PatchBatch[] = []
+  const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
+  const direct = binding({ sessionID: "s_direct", kind: "direct" })
+
+  await store.saveBinding(direct)
+  store.publishPending()
+  const upserts = batches.flatMap((batch) => batch.entries.flatMap((entry) => entry.entities ?? entry.changes))
+  assert.deepEqual(upserts, [{ entity: "binding", op: "upsert", binding: direct }])
+
+  await store.removeConversationBinding("a", { kind: "direct", workspaceID: "w", agentID: "a" })
+  store.publishPending()
+  const changes = batches.flatMap((batch) => batch.entries.flatMap((entry) => entry.entities ?? entry.changes))
+  assert.deepEqual(changes.at(-1), { entity: "binding", op: "remove", workspaceID: "w", agentID: "a", kind: "direct" })
+  assert.ok(batches.every((batch) => batch.reset !== true), "binding patches never force a full snapshot")
 })

@@ -34,6 +34,22 @@ export function hostEventKey(event: any): string | undefined {
       if (sessionID && created !== undefined) return `${type}:${sessionID}:${created}:${String(data.delta ?? "")}`
       return undefined
     }
+    case "session.inbox.enqueued":
+      return sessionID && data?.inboxID ? `${type}:${sessionID}:${String(data.inboxID)}` : undefined
+    case "session.inbox.delivered":
+    case "session.inbox.cancelled":
+      return sessionID && data?.inboxID ? `${type}:${sessionID}:${String(data.inboxID)}` : undefined
+    case "session.inbox.delivery.changed":
+      return sessionID && data?.inboxID
+        ? `${type}:${sessionID}:${String(data.inboxID)}:${String(data.delivery ?? "")}`
+        : undefined
+    // text.started/ended are deliberately not keyed without a host event id:
+    // a retry reuses the assistant message id and ordinal, and the replayed
+    // ended part is authoritative replacement text, not a duplicate.
+    case "session.retry.scheduled":
+      return sessionID && data?.assistantMessageID
+        ? `${type}:${sessionID}:${String(data.assistantMessageID)}:${String(data.attempt ?? "")}`
+        : undefined
     case "session.idle":
       return sessionID && created !== undefined ? `${type}:${sessionID}:${created}` : undefined
     case "permission.asked":
@@ -62,6 +78,15 @@ export function hostEventKey(event: any): string | undefined {
         ? `${type}:${sessionID}:${String(data?.parentID ?? "")}:${String(created ?? "")}`
         : undefined
     case "session.deleted":
+      return sessionID ? `${type}:${sessionID}:${String(created ?? "")}` : undefined
+    case "session.moved":
+    case "session.archived":
+    case "session.unarchived":
+    case "session.renamed":
+    case "session.metadata.updated":
+    case "session.permissions":
+    case "session.forked":
+    case "session.updated":
       return sessionID ? `${type}:${sessionID}:${String(created ?? "")}` : undefined
     case "config.updated":
       return created !== undefined ? `${type}:${created}` : undefined

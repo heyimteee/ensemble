@@ -108,6 +108,7 @@ const LEADER: readonly KeyEntry[] = [
   { id: "leader.pause", scope: "leader", contexts: SURFACES, keys: ["p"], title: "Pause / resume", group: "State" },
   { id: "leader.init", scope: "leader", contexts: SURFACES, keys: ["i"], title: "Init workspace files", group: "State" },
   { id: "leader.native", scope: "leader", contexts: SURFACES, keys: ["o"], title: "Native session", group: "Navigate" },
+  { id: "leader.adopt", scope: "leader", contexts: SURFACES, keys: ["shift+o"], title: "Adopt native session", group: "Navigate" },
   { id: "leader.delegate", scope: "leader", contexts: SURFACES, keys: ["d"], title: "Delegate", group: "Work" },
   { id: "leader.reassign", scope: "leader", contexts: SURFACES, keys: ["t"], title: "Reassign", group: "Work" },
   { id: "leader.retry", scope: "leader", contexts: SURFACES, keys: ["r"], title: "Retry", group: "Work" },
@@ -206,6 +207,7 @@ const NORMAL: readonly KeyEntry[] = [
   { id: "work.half.down", scope: "normal", contexts: ["work"], keys: ["ctrl+d"], title: "Half page down", group: "Navigation", hint: "ctrl+d/u page" },
   { id: "work.half.up", scope: "normal", contexts: ["work"], keys: ["ctrl+u"], title: "Half page up", group: "Navigation" },
   { id: "work.open", scope: "normal", contexts: ["work"], keys: ["enter"], title: "Open work result or toggle a history group", group: "Open", hint: "enter result/toggle" },
+  { id: "work.why", scope: "normal", contexts: ["work"], keys: ["w"], title: "Why this card?", group: "Open", hint: "w why" },
   // `d` is contextual: delegate here, never the text-buffer delete operator.
   { id: "work.delegate", scope: "normal", contexts: ["work"], keys: ["d"], title: "Delegate work", group: "Work", hint: "d delegate" },
   { id: "work.reassign", scope: "normal", contexts: ["work"], keys: ["t"], title: "Reassign work", group: "Work", hint: "t reassign" },
@@ -289,6 +291,7 @@ const DIALOG: readonly KeyEntry[] = [
   { id: "picker.activate", scope: "normal", contexts: ["picker"], keys: ["enter"], title: "Select", group: "Open", hint: "enter select" },
   { id: "picker.toggle", scope: "normal", contexts: ["picker"], keys: ["space"], title: "Toggle item", group: "Select", hint: "space toggle", requires: "multi" },
   { id: "picker.filter", scope: "normal", contexts: ["picker"], keys: ["/"], title: "Filter items", group: "Search", hint: "/ filter" },
+  { id: "picker.scope", scope: "normal", contexts: ["picker"], keys: ["tab"], title: "Change session scope", group: "Search", hint: "tab scope" },
   { id: "picker.cancel", scope: "normal", contexts: ["picker"], keys: ["escape"], title: "Cancel", group: "Navigation", hint: "esc cancel" },
 
   // Confirm ---------------------------------------------------------------

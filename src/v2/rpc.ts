@@ -95,6 +95,51 @@ const tier3Gate = {
   additionalProperties: false,
 }
 
+/** Ticket #218: service-owned native sync label carried by snapshot/revision. */
+const nativeSync = {
+  type: "object",
+  properties: {
+    state: { type: "string", enum: ["live", "reconciling", "degraded"] },
+    reason: { type: "string" },
+  },
+  required: ["state"],
+  additionalProperties: false,
+}
+
+/** Ticket #230: one content-free shadow comparison row. */
+const nativeShadowComparison = {
+  type: "object",
+  properties: {
+    sessionID: { type: "string" },
+    turnID: { type: "string" },
+    inboxID: { type: "string" },
+    conversationID: { type: "string" },
+    channelKind: { type: "string", enum: ["workspace", "direct", "home"] },
+    phase: { type: "string", enum: ["queued", "working", "retrying", "replied", "failed", "cancelled", "interrupted"] },
+    expectedPhase: { type: "string", enum: ["queued", "working", "retrying", "replied", "failed", "cancelled", "interrupted"] },
+    phaseMatch: { type: "boolean" },
+    textLength: { type: "number" },
+    textDigest: { type: "string" },
+    visibleTextLength: { type: "number" },
+    visibleTextDigest: { type: "string" },
+    visibleHasTurn: { type: "boolean" },
+    textMatch: { type: "boolean" },
+    plannedUserRoutes: { type: "number" },
+    plannedFinalRoutes: { type: "number" },
+    plannedRoutes: { type: "number" },
+    visibleRoutes: { type: "number" },
+    routingDelta: { type: "number" },
+    routingMatch: { type: "boolean" },
+    at: { type: "number" },
+  },
+  required: [
+    "sessionID", "turnID", "inboxID", "conversationID", "channelKind", "phase", "expectedPhase", "phaseMatch",
+    "textLength", "textDigest", "visibleHasTurn", "textMatch", "plannedUserRoutes", "plannedFinalRoutes",
+    "plannedRoutes", "visibleRoutes", "routingDelta", "routingMatch", "at",
+  ],
+  additionalProperties: false,
+}
+
 const patchFields = {
   epoch: { type: "number" },
   from: { type: "number" },
@@ -124,6 +169,7 @@ export const EnsembleV2Rpc = Rpc.define({
           configRevision: { type: "number" },
           protocol: { type: "number" },
           epoch: { type: "number" },
+          nativeSync,
           counts,
         },
         required: ["state", "models", "skills", "directory"],
@@ -151,6 +197,7 @@ export const EnsembleV2Rpc = Rpc.define({
           configRevision: { type: "number" },
           protocol: { type: "number" },
           epoch: { type: "number" },
+          nativeSync,
           scoped: { type: "boolean" },
           window: {
             type: "object",
@@ -180,6 +227,7 @@ export const EnsembleV2Rpc = Rpc.define({
           configRevision: { type: "number" },
           protocol: { type: "number" },
           epoch: { type: "number" },
+          nativeSync,
           counts,
           scopeVersions,
           gate: tier3Gate,
@@ -201,6 +249,36 @@ export const EnsembleV2Rpc = Rpc.define({
           groups: { type: "object", additionalProperties: true },
         },
         required: ["version", "epoch", "counts", "tasks", "groups"],
+        additionalProperties: false,
+      },
+    },
+    /** Ticket #222: one bounded page of terminal Work for one conversation. */
+    "work.history": {
+      input: {
+        type: "object",
+        properties: {
+          directory: { type: "string" },
+          workspaceID: { type: "string" },
+          conversationID: { type: "string" },
+          before: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["directory"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          version: { type: "number" },
+          epoch: { type: "number" },
+          conversationID: { type: "string" },
+          tasks: { type: "object", additionalProperties: true },
+          groups: { type: "object", additionalProperties: true },
+          hasMore: { type: "boolean" },
+          next: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["version", "epoch", "conversationID", "tasks", "groups", "hasMore", "limit"],
         additionalProperties: false,
       },
     },
@@ -351,6 +429,34 @@ export const EnsembleV2Rpc = Rpc.define({
           },
           logs: { type: "object", additionalProperties: true },
           service: { type: "object", additionalProperties: true },
+          native: {
+            type: "object",
+            properties: {
+              sync: nativeSync,
+              watchdog: {
+                type: "object",
+                properties: {
+                  maxPasses: { type: "number" },
+                  turns: { type: "object", additionalProperties: { type: "object", additionalProperties: true } },
+                },
+                required: ["maxPasses", "turns"],
+                additionalProperties: false,
+              },
+              shadow: {
+                type: "object",
+                properties: {
+                  activeTurns: { type: "number" },
+                  activeSessions: { type: "number" },
+                  comparisons: { type: "number" },
+                  last: { type: "array", items: nativeShadowComparison },
+                },
+                required: ["activeTurns", "activeSessions", "comparisons", "last"],
+                additionalProperties: false,
+              },
+            },
+            required: ["sync", "watchdog", "shadow"],
+            additionalProperties: false,
+          },
           clones: {
             type: "object",
             properties: {
@@ -452,6 +558,22 @@ export const EnsembleV2Rpc = Rpc.define({
           updatedAt: { type: "number" },
         },
         required: ["epoch", "workspaceID", "taskID", "sessionID", "label", "status", "updatedAt"],
+        additionalProperties: false,
+      },
+    },
+    /**
+     * Ticket #224: a native session lifecycle event changed the picker's
+     * source data. Ephemeral and id-only; the client re-reads one scoped page.
+     */
+    "sessions.changed": {
+      schema: {
+        type: "object",
+        properties: {
+          revision: { type: "number" },
+          kind: { type: "string" },
+          sessionID: { type: "string" },
+        },
+        required: ["revision", "kind"],
         additionalProperties: false,
       },
     },

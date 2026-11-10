@@ -6,10 +6,12 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 
 > **Status: developer preview.** The v2 runtime is the default. It is not published, versioned, or licensed. Compatibility is recorded against OpenCode 2.2.1; the v5.8 live matrix was run on OpenCode 2.2.5.
 
+> **Native-first decisions.** The conversation/session, ingestion, and mention-routing decisions for native-first coordination are recorded in [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md), [ADR 0010](docs/adr/0010-native-turn-ingestion.md), and [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md). Product behavior follows in tickets #212–#227.
+
 ## What it does
 
 - **Three panes.** The left rail splits into grouped Agents above Workspaces, the selected chat is in the center with the composer pinned below it, and a dedicated Work pane stays on the right. Below 118 columns the shell compacts; below 96 columns Work becomes a right drawer.
-- **Direct chats and group chats.** Selecting an agent opens its DM; selecting a workspace opens the group chat. Each agent has one native session per workspace, plus a no-workspace DM under `~/.ensemble/agents/<id>/`.
+- **Direct chats and group chats.** Selecting an agent opens its DM; selecting a workspace opens the group chat. Each agent currently has one native session per workspace, plus a no-workspace DM under `~/.ensemble/agents/<id>/`; native-first separates these into one session per agent per conversation ([ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md)).
 - **Workspaces are directories.** One workspace belongs to one project directory. Directory history restores the last chat, task, and focused pane.
 - **Agents group by workspace.** Each agent appears once under its primary workspace group (active workspace, then most recent membership, then Homeless). Group headers collapse with `z` or a click and the state survives restarts; the subline shows only the role.
 - **New agents start with no workspace.** Creating an agent opens a direct chat in its own `.ensemble` home. Add it to a workspace with `e` on the workspace; you can move its no-workspace session into the workspace.
@@ -155,7 +157,12 @@ Every requested directory is queried on the **one selected service**, sequential
 ## Documentation
 
 - [v2 implementation notes](docs/implementation.md)
+- [ADR index](docs/adr/README.md): every accepted architecture decision
 - [ADR 0004: dispatch budgets and continuation](docs/adr/0004-dispatch-budgets-and-continuation.md)
+- [ADR 0009: conversation identity and sessions](docs/adr/0009-conversation-identity-and-sessions.md)
+- [ADR 0010: native turn ingestion](docs/adr/0010-native-turn-ingestion.md)
+- [ADR 0011: mention routing and budgets](docs/adr/0011-mention-routing-and-budgets.md)
+- [Native host event contract](docs/verification/2026-11-10-native-host-contract.md)
 - [Workspace v2 verification](docs/verification/2026-11-09-workspace-v2.md)
 - [Dispatch budget verification](docs/verification/2026-11-08-dispatch-budgets.md)
 - [v5.8 verification record](docs/verification/2026-11-05-v58.md)
