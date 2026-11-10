@@ -5,7 +5,7 @@ import { usePlugin } from "@opencode/plugin/tui"
 import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
-import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageAttachment, MessageStream, ModelOption, NativeSubagentRun, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, WorkHistoryPage, Workspace, WorkspaceCounts } from "../types.ts"
+import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageAttachment, MessageStream, ModelOption, NativeSubagentRun, NativeSyncState, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, WorkHistoryPage, Workspace, WorkspaceCounts } from "../types.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ChromeText, FullApprovalsView, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, WorkHistoryRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
@@ -601,6 +601,8 @@ export function EnsembleV2App() {
   // next such instant; it is not an animation clock and never rebuilds the
   // animated glyph or tide cells.
   const [workRevision, setWorkRevision] = createSignal(0)
+  /** Ticket #218: service-owned native reconciliation state for the statusline. */
+  const [nativeSyncState, setNativeSyncState] = createSignal<NativeSyncState>("live")
   // Ticket #155: the last coalesced native activity per task. The Work-pane
   // memo reads this signal, so a tool event rebuilds only the affected card
   // detail (the identity cache keeps every unchanged card).
@@ -5272,6 +5274,9 @@ export function EnsembleV2App() {
     heartbeatCheck = (async () => {
       try {
         const revision = await callRpc<Revision>(context, "revision", { directory: directoryOf(context) })
+        // Ticket #218: the heartbeat carries the service-owned sync state. It
+        // is a state label only; native content never rides this call.
+        setNativeSyncState(revision.nativeSync?.state ?? "live")
         // Ticket #141: counts are server-derived and refreshed on every beat;
         // the client never scans all messages or tasks for the rail. The gate
         // rides the same beat so a growing workspace switches read paths.
@@ -7273,6 +7278,8 @@ export function EnsembleV2App() {
     visualKind: interaction().selection?.kind,
     leader: leaderMode(),
     context: statusContext(),
+    // Ticket #218: native sync is relevant only when native-first is on.
+    ...(state()?.settings.nativeFirst === "on" ? { nativeSync: nativeSyncState() } : {}),
     // Insert without a target only replaces the typing hints with a notice;
     // git, position, selection size, and the pending chord stay visible.
     notice: insertWithoutTarget(interaction()) ? "no text target" : undefined,

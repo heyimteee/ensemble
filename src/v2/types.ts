@@ -486,6 +486,19 @@ export type BindingKind = "workspace" | "direct" | "home"
 export type NativeFirstMode = "off" | "shadow" | "on"
 
 /**
+ * Ticket #218: one service-owned native sync state for the statusline and
+ * support reads. `reconciling` is a bounded start/reconnect/adoption/watchdog
+ * pass; `degraded` means a transcript read failed and ingestion may have gaps.
+ */
+export type NativeSyncState = "live" | "reconciling" | "degraded"
+
+export type NativeSyncStatus = {
+  state: NativeSyncState
+  /** Reason code only; never content or a path. */
+  reason?: string
+}
+
+/**
  * One agent's binding conversation. The agent is part of the identity because
  * a workspace group has one native session per member agent; the workspace is
  * the shared channel. Older rows omit `kind` and resolve from `workspaceID`.
@@ -818,6 +831,8 @@ export type Snapshot = {
   configRevision?: number
   protocol?: number
   epoch?: number
+  /** Ticket #218: service-owned native reconciliation state. */
+  nativeSync?: NativeSyncStatus
   /**
    * Ticket #141 scoped bootstrap metadata. `scoped` means the state carries
    * shell entities, the visible Work projection, and one transcript window
@@ -836,6 +851,8 @@ export type Revision = {
   configRevision: number
   protocol: number
   epoch: number
+  /** Ticket #218: native sync state rides the cheap heartbeat. */
+  nativeSync?: NativeSyncStatus
   /** Ticket #141: server-derived counts; absent on older servers. */
   counts?: Record<Id, WorkspaceCounts>
   scopeVersions?: ScopeVersions

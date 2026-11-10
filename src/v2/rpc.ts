@@ -95,6 +95,17 @@ const tier3Gate = {
   additionalProperties: false,
 }
 
+/** Ticket #218: service-owned native sync label carried by snapshot/revision. */
+const nativeSync = {
+  type: "object",
+  properties: {
+    state: { type: "string", enum: ["live", "reconciling", "degraded"] },
+    reason: { type: "string" },
+  },
+  required: ["state"],
+  additionalProperties: false,
+}
+
 const patchFields = {
   epoch: { type: "number" },
   from: { type: "number" },
@@ -124,6 +135,7 @@ export const EnsembleV2Rpc = Rpc.define({
           configRevision: { type: "number" },
           protocol: { type: "number" },
           epoch: { type: "number" },
+          nativeSync,
           counts,
         },
         required: ["state", "models", "skills", "directory"],
@@ -151,6 +163,7 @@ export const EnsembleV2Rpc = Rpc.define({
           configRevision: { type: "number" },
           protocol: { type: "number" },
           epoch: { type: "number" },
+          nativeSync,
           scoped: { type: "boolean" },
           window: {
             type: "object",
@@ -180,6 +193,7 @@ export const EnsembleV2Rpc = Rpc.define({
           configRevision: { type: "number" },
           protocol: { type: "number" },
           epoch: { type: "number" },
+          nativeSync,
           counts,
           scopeVersions,
           gate: tier3Gate,
@@ -381,6 +395,23 @@ export const EnsembleV2Rpc = Rpc.define({
           },
           logs: { type: "object", additionalProperties: true },
           service: { type: "object", additionalProperties: true },
+          native: {
+            type: "object",
+            properties: {
+              sync: nativeSync,
+              watchdog: {
+                type: "object",
+                properties: {
+                  maxPasses: { type: "number" },
+                  turns: { type: "object", additionalProperties: { type: "object", additionalProperties: true } },
+                },
+                required: ["maxPasses", "turns"],
+                additionalProperties: false,
+              },
+            },
+            required: ["sync", "watchdog"],
+            additionalProperties: false,
+          },
           clones: {
             type: "object",
             properties: {
