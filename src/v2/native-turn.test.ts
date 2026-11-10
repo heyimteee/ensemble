@@ -6,7 +6,10 @@ import {
   NATIVE_INTERNAL_PROMPT_METADATA,
   nativeAssistantMessageID,
   nativeContextAnswer,
+  nativeContextTurnAnswer,
+  nativeContextTurnSettled,
   nativeFinalText,
+  nativeInterruptionSettlement,
   nativePromptIsInternal,
   nativePromptSkipsTurn,
   nativePhaseOpen,
@@ -74,6 +77,27 @@ test("ticket215: context reconciliation prefers recorded assistant ids", () => {
   assert.equal(nativeContextAnswer(messages, { inboxID: "m1" }), "first answer")
   assert.equal(nativeContextAnswer(messages, {}), "second answer")
   assert.equal(nativeContextAnswer([{ id: "m1", type: "idle" }]), undefined)
+})
+
+test("ticket217: interruption reasons distinguish cancellation from needs-you", () => {
+  assert.equal(nativeInterruptionSettlement("user"), "cancelled")
+  for (const reason of ["shutdown", "inactivity", "superseded", "", undefined, "future-reason"]) {
+    assert.equal(nativeInterruptionSettlement(reason), "interrupted", `${String(reason)} asks the user`)
+  }
+})
+
+test("ticket217: strict context recovery never attributes an unrelated answer or guesses settlement", () => {
+  const messages = [
+    { id: "m1", type: "user", content: [{ type: "text", text: "older question" }] },
+    { id: "m2", type: "assistant", content: [{ type: "text", text: "older answer" }] },
+    { id: "m3", type: "idle" },
+    { id: "m4", type: "user", content: [{ type: "text", text: "current question" }] },
+  ]
+  assert.equal(nativeContextTurnAnswer(messages, { inboxID: "m4" }), undefined, "an older answer is not this turn's")
+  assert.equal(nativeContextAnswer(messages, { inboxID: "m4" }), "older answer", "the legacy fallback is unchanged")
+  assert.equal(nativeContextTurnSettled(messages, "m4"), false, "no idle marker after this turn")
+  assert.equal(nativeContextTurnSettled(messages, "m1"), true, "the idle marker follows the older turn")
+  assert.equal(nativeContextTurnSettled(messages, "missing"), false)
 })
 
 test("ticket215: a Work title is one bounded line and never empty", () => {

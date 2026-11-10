@@ -114,7 +114,7 @@ export type InitJob = {
 
 export type MessageKind = "text" | "task" | "approval" | "system"
 
-/** Native turn lifecycle (ADR 0010). Retry/interruption nuance is ticket #217. */
+/** Native turn lifecycle (ADR 0010, tickets #215/#216/#217). */
 export type NativeTurnPhase =
   | "queued"
   | "working"

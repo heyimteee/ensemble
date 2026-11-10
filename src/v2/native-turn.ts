@@ -177,10 +177,10 @@ export function nativeContextMessageText(message: any): string {
 /**
  * Recover one turn's answer from a native `session.context` read. Identity
  * wins: a recorded assistant message id, then the assistant message after the
- * inbox user message, then the last assistant message in the transcript.
- * Context order is the host's chronological order; ids are never sorted.
+ * inbox user message. This variant never falls back to an unrelated assistant
+ * row, so a watchdog cannot attribute an older answer to the wrong turn.
  */
-export function nativeContextAnswer(
+export function nativeContextTurnAnswer(
   messages: readonly any[],
   input: { inboxID?: Id; assistantMessageIDs?: readonly Id[] } = {},
 ): string | undefined {
@@ -202,6 +202,36 @@ export function nativeContextAnswer(
       }
     }
   }
+  return undefined
+}
+
+/**
+ * Ticket #217: reconciliation evidence that one inbox's execution reached a
+ * terminal point without an answer. The host writes a `idle` marker after a
+ * settled turn even when the idle event was not delivered. The marker must come
+ * after this turn's own user row; a missing marker means the turn may still be
+ * running and must not be guessed into an interruption.
+ */
+export function nativeContextTurnSettled(messages: readonly any[], inboxID: Id | undefined): boolean {
+  if (!Array.isArray(messages) || !inboxID) return false
+  const userIndex = messages.findIndex((message) => message?.type === "user" && String(message.id) === String(inboxID))
+  if (userIndex < 0) return false
+  return messages.slice(userIndex + 1).some((message) => message?.type === "idle")
+}
+
+/**
+ * Recover one turn's answer from a native `session.context` read. Identity
+ * wins: a recorded assistant message id, then the assistant message after the
+ * inbox user message, then the last assistant message in the transcript.
+ * Context order is the host's chronological order; ids are never sorted.
+ */
+export function nativeContextAnswer(
+  messages: readonly any[],
+  input: { inboxID?: Id; assistantMessageIDs?: readonly Id[] } = {},
+): string | undefined {
+  if (!Array.isArray(messages)) return undefined
+  const identified = nativeContextTurnAnswer(messages, input)
+  if (identified !== undefined) return identified
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]
     if (message?.type !== "assistant") continue
@@ -241,8 +271,18 @@ export function appendNativeTurnEvent(native: NativeTurnInfo, event: NativeTurnE
 }
 
 /**
+ * Ticket #217: a user interrupt is a cancellation, not a lost-work
+ * interruption. Shutdown, inactivity, superseded, and unknown reasons preserve
+ * partial work and ask the user. The host's reason vocabulary is finite, but an
+ * unknown value is treated conservatively as an interruption.
+ */
+export function nativeInterruptionSettlement(reason: unknown): "cancelled" | "interrupted" {
+  return String(reason ?? "") === "user" ? "cancelled" : "interrupted"
+}
+
+/**
  * Native phases that still expect host events. `interrupted` is a settled
- * needs-you state; retry/interruption nuance belongs to ticket #217.
+ * needs-you state; a user interrupt settles `cancelled` instead (ticket #217).
  */
 export function nativePhaseOpen(phase: NativeTurnPhase | undefined): boolean {
   return phase === "queued" || phase === "working" || phase === "retrying"
