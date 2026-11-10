@@ -8,6 +8,7 @@ import { startServiceForTest } from "./test-service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { workKey } from "./queue.ts"
 import { V2Store, bindingKey } from "./store.ts"
+import { directMessageChannel } from "./message-channel.ts"
 import type { Agent, Workspace } from "./types.ts"
 import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
 import { ENSEMBLE_BLOCK_VERSION } from "./init-block.ts"
@@ -3181,6 +3182,111 @@ test("direct chat context does not rewrite identity metadata on every poll", asy
     await stop()
     rmSync(directory, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("ticket212: direct chat prefers the durable channel with the flag on and the legacy store with it off", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-channel-"))
+  const values = new Map<string, unknown>()
+  const first = fakeContext(values)
+  const service = new EnsembleV2Service(first.ctx, { dmChannelReads: "on" })
+  const stop = await startServiceForTest(service, service.ctx)
+  let agentID = ""
+  try {
+    const agent = await service.handlers().invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    agentID = agent.result.id
+    await service.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "Dual line" } })
+    const store = (service as any).store as V2Store
+    await store.appendChannelMessage(directMessageChannel(agentID), {
+      id: "dm_durable_only",
+      workspaceID: "home",
+      author: "user",
+      text: "Durable only",
+      kind: "text",
+      createdAt: Date.now() + 1,
+    })
+    const on = await service.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
+    assert.deepEqual(
+      (on.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      ["Dual line", "Durable only"],
+      "the flag-on read includes the durable channel row",
+    )
+  } finally {
+    await stop()
+  }
+  const second = fakeContext(values)
+  const legacy = new EnsembleV2Service(second.ctx, { dmChannelReads: "off" })
+  const stopLegacy = await startServiceForTest(legacy, legacy.ctx)
+  try {
+    const off = await legacy.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
+    assert.deepEqual(
+      (off.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      ["Dual line"],
+      "the flag-off read keeps the legacy store authoritative",
+    )
+  } finally {
+    await stopLegacy()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket212: rolling the direct read flag back preserves every direct line", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-rollback-"))
+  const values = new Map<string, unknown>()
+  const first = fakeContext(values)
+  const service = new EnsembleV2Service(first.ctx, { dmChannelReads: "on" })
+  const stop = await startServiceForTest(service, service.ctx)
+  let agentID = ""
+  try {
+    const agent = await service.handlers().invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    agentID = agent.result.id
+    const sent = await service.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "Before rollback" } })
+    assert.equal(sent.ok, true)
+    const patches = first.emitted.filter((event) => event.name === "patches").map((event) => event.data)
+    assert.equal(patches.some((batch) => batch.reset === true), false, "a direct message never resets the feed")
+    assert.ok(
+      patches.some((batch) => batch.entries.some((entry: any) =>
+        (entry.entities ?? []).some((change: any) =>
+          change.entity === "message"
+          && change.op === "upsert"
+          && change.message.channel === directMessageChannel(agentID),
+        ),
+      )),
+      "the direct message travels as a durable message patch",
+    )
+  } finally {
+    await stop()
+  }
+  const second = fakeContext(values)
+  const legacy = new EnsembleV2Service(second.ctx, { dmChannelReads: "off" })
+  const stopLegacy = await startServiceForTest(legacy, legacy.ctx)
+  let legacyAgentID = ""
+  try {
+    const context = await legacy.handlers().invoke({ directory, action: "chat.context", payload: { agentID } })
+    assert.deepEqual(
+      (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      ["Before rollback"],
+      "the rollback path reads the dual-written legacy line",
+    )
+    const sent = await legacy.handlers().invoke({ directory, action: "chat.send", payload: { agentID, text: "After rollback" } })
+    assert.equal(sent.ok, true)
+    legacyAgentID = agentID
+  } finally {
+    await stopLegacy()
+  }
+  const third = fakeContext(values)
+  const resumed = new EnsembleV2Service(third.ctx, { dmChannelReads: "on" })
+  const stopResumed = await startServiceForTest(resumed, resumed.ctx)
+  try {
+    const context = await resumed.handlers().invoke({ directory, action: "chat.context", payload: { agentID: legacyAgentID } })
+    assert.deepEqual(
+      (context.result.messages as any[]).filter((line) => line.role === "user").map((line) => line.text),
+      ["Before rollback", "After rollback"],
+      "turning the flag back on sees both the durable and rollback lines without duplication",
+    )
+  } finally {
+    await stopResumed()
+    rmSync(directory, { recursive: true, force: true })
   }
 })
 

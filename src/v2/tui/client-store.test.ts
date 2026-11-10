@@ -5,6 +5,7 @@ import { createInitialState } from "../defaults.ts"
 import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
 import type { Agent, Approval, DispatchGroup, InitJob, Memory, Message, ModelOption, NativeSubagentRun, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask } from "../types.ts"
 import { createClientStore, reduceClientState } from "./client-store.ts"
+import { directMessageChannel } from "../message-channel.ts"
 
 const agent = (id: string, name: string): Agent => ({
   id,
@@ -432,6 +433,27 @@ test("message patches upsert by id, preserve order, and remove without duplicati
 
   store.applyChanges([{ entity: "message", op: "remove", workspaceID: "w1", id: "m2" }], 7)
   assert.deepEqual(store.state()!.messages.w1?.map((row) => row.id), ["m1", "m3"])
+})
+
+test("ticket212: direct channel patches land under the channel and respect the client bound", () => {
+  const store = createClientStore()
+  const channel = directMessageChannel("a")
+  store.applySnapshot(snapshot(stateWith((state) => {
+    state.messages[channel] = [message("dm_1", "hello", { workspaceID: "home", channel, seq: 1 })]
+  })))
+  for (let seq = 2; seq <= CLIENT_MESSAGE_LIMIT + 20; seq++) {
+    store.applyChanges([{
+      entity: "message",
+      op: "upsert",
+      message: message(`dm_${seq}`, `row ${seq}`, { workspaceID: "home", channel, seq }),
+    }], seq)
+  }
+  assert.equal(store.state()!.messages[channel]?.length, CLIENT_MESSAGE_LIMIT, "a direct transcript is bounded like a group transcript")
+  assert.equal(store.state()!.messages.home, undefined, "a direct row never leaks into a workspace transcript")
+  assert.equal(store.state()!.messages[channel]?.at(-1)?.text, `row ${CLIENT_MESSAGE_LIMIT + 20}`)
+
+  store.applyChanges([{ entity: "message", op: "remove", workspaceID: channel, channel, id: `dm_${CLIENT_MESSAGE_LIMIT + 20}` }], 400)
+  assert.equal(store.state()!.messages[channel]?.some((row) => row.id === `dm_${CLIENT_MESSAGE_LIMIT + 20}`), false)
 })
 
 test("an ephemeral stream updates only the visible live row and never bumps the version", () => {

@@ -1,6 +1,7 @@
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
 import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchFanOutCount, dispatchGroupExhausted, dispatchRefusalReasonCode, reconcileLegacyDispatchGroup, reconcileLegacyTaskBudgets, validateContinuation, type ContinuationRefusal, type DispatchRefusal, type DispatchRefusalReason } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
+import { directMessageChannelForBinding, isDirectMessageChannel, messageChannel, parseDirectMessageChannel } from "./message-channel.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
   Agent,
@@ -150,6 +151,12 @@ export class V2Store {
    */
   private readonly streaming = new Set<string>()
   /**
+   * Next sequence per non-workspace conversation channel (ticket #212). Group
+   * channels keep `workspace.nextSeq`; direct channels have no workspace row,
+   * so their monotonic sequence lives here and is reseeded from loaded rows.
+   */
+  private readonly channelSeq = new Map<Id, number>()
+  /**
    * Legacy groups synthesized in memory but not yet written. Reconciliation
    * persists them (and grants live task budgets) on the serialized queue, so
    * `load` and `sync` never write from a read path.
@@ -157,9 +164,23 @@ export class V2Store {
   private readonly pendingReconciliations = new Set<Id>()
 
   private trackStreaming(message: Message): void {
-    const key = streamKey(message.workspaceID, message.id)
+    const key = streamKey(messageChannel(message), message.id)
     if (message.streaming) this.streaming.add(key)
     else this.streaming.delete(key)
+  }
+
+  /** Next per-channel sequence; group channels keep using `workspace.nextSeq`. */
+  private nextChannelSeq(channel: Id): number {
+    let next = this.channelSeq.get(channel)
+    if (next === undefined) {
+      let max = 0
+      for (const message of this.state.messages[channel] ?? []) {
+        if (message.seq > max) max = message.seq
+      }
+      next = max + 1
+    }
+    this.channelSeq.set(channel, next + 1)
+    return next
   }
 
   constructor(ctx: Ctx, onChange?: (version: number) => void, options: StoreChangeOptions = {}) {
@@ -182,6 +203,7 @@ export class V2Store {
   async load(): Promise<void> {
     this.state = createInitialState()
     this.streaming.clear()
+    this.channelSeq.clear()
     this.pendingReconciliations.clear()
     const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
     if (meta && typeof meta === "object") {
@@ -201,7 +223,7 @@ export class V2Store {
     for (const { value } of await this.scanAll("v2/message/")) {
       const message = value as Message
       if (!message?.workspaceID) continue
-      const list = (this.state.messages[message.workspaceID] ??= [])
+      const list = (this.state.messages[messageChannel(message)] ??= [])
       list.push(message)
       // Ticket #148: live rows survive load. The service settles terminal,
       // expired, or stale rows from this index after load; load never decides
@@ -289,9 +311,18 @@ export class V2Store {
   }
 
   async saveDmMessage(workspaceKey: string, agentID: string, message: ChatMessage): Promise<void> {
-    await this.write(() => this.saveDmMessageNow(workspaceKey, agentID, message))
+    await this.write(async () => {
+      await this.saveDmMessageNow(workspaceKey, agentID, message)
+      // Ticket #212: one durable row per direct message, keyed by the direct
+      // conversation channel. The legacy line stays for the rollback path and
+      // for readers that have not switched yet.
+      const channel = directMessageChannelForBinding(workspaceKey, agentID)
+      const row = await this.upsertChannelMessageNow(channel, this.dmChannelInput(workspaceKey, agentID, message))
+      await this.commit([{ entity: "message", op: "upsert", message: structuredClone(row) }])
+    })
   }
 
+  /** Legacy DM transcript write; callers commit and dual-write the channel row. */
   private async saveDmMessageNow(workspaceKey: string, agentID: string, message: ChatMessage): Promise<void> {
     const key = bindingKey(workspaceKey, agentID)
     const list = (this.state.dmTranscripts[key] ??= [])
@@ -300,7 +331,48 @@ export class V2Store {
     else list.push({ ...message })
     list.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     await this.ctx.storage.set(`v2/dm/${workspaceKey}/${agentID}/${message.id}`, { ...message, bindingKey: key })
-    await this.commit([])
+  }
+
+  private dmChannelInput(workspaceKey: string, agentID: string, message: ChatMessage): Omit<Message, "seq"> {
+    return {
+      id: message.id,
+      workspaceID: workspaceKey,
+      channel: directMessageChannelForBinding(workspaceKey, agentID),
+      author: message.role === "user" ? "user" : message.role === "assistant" ? "agent" : "system",
+      ...(message.role === "assistant" ? { agentID } : {}),
+      text: message.text,
+      kind: "text",
+      createdAt: message.createdAt,
+      ...(message.correlationID ? { correlationID: message.correlationID } : {}),
+    }
+  }
+
+  /** Upsert one durable channel row, reusing its sequence on update. */
+  private async upsertChannelMessageNow(channel: Id, input: Omit<Message, "seq">): Promise<Message> {
+    const list = (this.state.messages[channel] ??= [])
+    const index = list.findIndex((item) => item.id === input.id)
+    const message: Message = index >= 0
+      ? { ...input, channel, seq: list[index]!.seq }
+      : { ...input, channel, seq: this.nextChannelSeq(channel) }
+    if (index >= 0) list[index] = message
+    else list.push(message)
+    list.sort((a, b) => a.seq - b.seq)
+    this.trackStreaming(message)
+    await this.ctx.storage.set(`v2/message/${channel}/${String(message.seq).padStart(8, "0")}`, message)
+    return message
+  }
+
+  private async removeChannelMessageNow(channel: Id, id: Id): Promise<EntityChange | undefined> {
+    const list = this.state.messages[channel]
+    if (!list) return undefined
+    const index = list.findIndex((item) => item.id === id)
+    if (index < 0) return undefined
+    const previous = list[index]!
+    list.splice(index, 1)
+    this.trackStreaming(previous)
+    if (list.length === 0) delete this.state.messages[channel]
+    await this.ctx.storage.remove(`v2/message/${channel}/${String(previous.seq).padStart(8, "0")}`)
+    return { entity: "message", op: "remove", workspaceID: channel, ...(previous.channel ? { channel: previous.channel } : {}), id }
   }
 
   async removeDmMessage(workspaceKey: string, agentID: string, id: string): Promise<void> {
@@ -313,7 +385,8 @@ export class V2Store {
         if (list.length === 0) delete this.state.dmTranscripts[key]
       }
       await this.ctx.storage.remove(`v2/dm/${workspaceKey}/${agentID}/${id}`)
-      await this.commit([])
+      const change = await this.removeChannelMessageNow(directMessageChannelForBinding(workspaceKey, agentID), id)
+      await this.commit(change ? [change] : [])
     })
   }
 
@@ -345,13 +418,23 @@ export class V2Store {
       // Phase 2 runs only after every new key is durable.
       delete this.state.dmTranscripts[fromKey]
       await this.removePrefixNow(`v2/dm/${fromWorkspaceKey}/${agentID}/`)
+      // The durable channel rows for the old binding are intentionally left
+      // in place: ticket #214 owns conversation moves, and the read projection
+      // keeps the moved legacy lines visible without data loss.
+      await this.commit([])
     })
   }
 
-  /** Highest stored DM `createdAt` across all transcripts (0 when empty). */
+  /** Highest stored direct `createdAt` across legacy and channel rows (0 when empty). */
   dmMaxCreatedAt(): number {
     let max = 0
     for (const list of Object.values(this.state.dmTranscripts)) {
+      for (const message of list) {
+        if (typeof message?.createdAt === "number" && message.createdAt > max) max = message.createdAt
+      }
+    }
+    for (const [channel, list] of Object.entries(this.state.messages)) {
+      if (!isDirectMessageChannel(channel)) continue
       for (const message of list) {
         if (typeof message?.createdAt === "number" && message.createdAt > max) max = message.createdAt
       }
@@ -392,7 +475,22 @@ export class V2Store {
       for (const key of Object.keys(this.state.dmTranscripts)) {
         if (key.endsWith(`:${agentID}`)) delete this.state.dmTranscripts[key]
       }
-      await this.commit([])
+      const channels = Object.keys(this.state.messages).filter(
+        (channel) => parseDirectMessageChannel(channel)?.agentID === agentID,
+      )
+      const removed = channels.flatMap((channel) => [...(this.state.messages[channel] ?? [])])
+      for (const channel of channels) delete this.state.messages[channel]
+      for (const message of removed) this.streaming.delete(streamKey(messageChannel(message), message.id))
+      for (const channel of channels) await this.removePrefixNow(`v2/message/${channel}/`)
+      await this.commit(
+        removed.map((message) => ({
+          entity: "message" as const,
+          op: "remove" as const,
+          workspaceID: messageChannel(message),
+          channel: messageChannel(message),
+          id: message.id,
+        })),
+      )
     })
   }
 
@@ -508,17 +606,18 @@ export class V2Store {
     for (const { value } of await this.scanAll("v2/message/")) {
       const message = value as Message
       if (!message?.workspaceID || !message?.id) continue
-      let ids = knownMessages.get(message.workspaceID)
+      const channel = messageChannel(message)
+      let ids = knownMessages.get(channel)
       if (!ids) {
         ids = new Set<string>()
-        knownMessages.set(message.workspaceID, ids)
+        knownMessages.set(channel, ids)
       }
       // Merge by id in one pass: the stored scan is linear and the local id
       // index turns the duplicate check into O(1) instead of a list scan per
       // foreign row (the old merge was quadratic at 10k messages).
       if (ids.has(message.id)) continue
       ids.add(message.id)
-      const list = (this.state.messages[message.workspaceID] ??= [])
+      const list = (this.state.messages[channel] ??= [])
       list.push(message)
       this.trackStreaming(message)
     }
@@ -811,6 +910,27 @@ export class V2Store {
       this.trackStreaming(message)
       await this.ctx.storage.set(`v2/message/${workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
       await this.ctx.storage.set(`v2/workspace/${workspaceID}`, workspace)
+      await this.commit([{ entity: "message", op: "upsert", message: structuredClone(message) }])
+      this.notify(() => this.observer?.messageAppended?.(message))
+      return message
+    })
+  }
+
+  /**
+   * Append to a synthetic conversation channel (ticket #212). The row is the
+   * same `Message` entity as a workspace group row, so patches, windows,
+   * retention, and client bounds apply unchanged.
+   */
+  async appendChannelMessage(
+    channel: string,
+    input: Omit<Message, "workspaceID" | "channel" | "seq"> & { workspaceID?: Id },
+  ): Promise<Message> {
+    return this.write(async () => {
+      const message = await this.upsertChannelMessageNow(channel, {
+        ...input,
+        workspaceID: input.workspaceID ?? channel,
+        channel,
+      })
       await this.commit([{ entity: "message", op: "upsert", message: structuredClone(message) }])
       this.notify(() => this.observer?.messageAppended?.(message))
       return message
@@ -1219,14 +1339,15 @@ export class V2Store {
 
   async saveMessage(message: Message): Promise<void> {
     await this.write(async () => {
-      const list = (this.state.messages[message.workspaceID] ??= [])
+      const channel = messageChannel(message)
+      const list = (this.state.messages[channel] ??= [])
       const index = list.findIndex((item) => item.id === message.id)
       const previous = index >= 0 ? list[index] : undefined
       if (index >= 0) list[index] = message
       else list.push(message)
       list.sort((a, b) => a.seq - b.seq)
       this.trackStreaming(message)
-      await this.ctx.storage.set(`v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`, message)
+      await this.ctx.storage.set(`v2/message/${channel}/${String(message.seq).padStart(8, "0")}`, message)
       await this.commit([{ entity: "message", op: "upsert", message: structuredClone(message) }])
       this.notify(() => this.observer?.messageSaved?.(message, previous))
     })
@@ -1238,16 +1359,25 @@ export class V2Store {
    * numbers are not reused. The change feed carries a message remove, so
    * clients drop the row without losing the agent's answer.
    */
-  async removeMessage(workspaceID: string, messageID: string): Promise<void> {
+  async removeMessage(channel: string, messageID: string): Promise<void> {
     await this.write(async () => {
-      const list = this.state.messages[workspaceID] ?? []
+      const list = this.state.messages[channel] ?? []
       const index = list.findIndex((item) => item.id === messageID)
       if (index < 0) return
       const previous = list[index]!
       list.splice(index, 1)
       this.trackStreaming(previous)
-      await this.ctx.storage.remove(`v2/message/${workspaceID}/${String(previous.seq).padStart(8, "0")}`)
-      await this.commit([{ entity: "message", op: "remove", workspaceID, id: messageID }])
+      const resolved = messageChannel(previous)
+      await this.ctx.storage.remove(`v2/message/${resolved}/${String(previous.seq).padStart(8, "0")}`)
+      await this.commit([
+        {
+          entity: "message",
+          op: "remove",
+          workspaceID: channel,
+          ...(previous.channel ? { channel: previous.channel } : {}),
+          id: messageID,
+        },
+      ])
       this.notify(() => this.observer?.messageRemoved?.(previous))
     })
   }
@@ -1260,14 +1390,15 @@ export class V2Store {
    */
   async checkpointMessage(message: Message): Promise<void> {
     await this.write(async () => {
-      const list = (this.state.messages[message.workspaceID] ??= [])
+      const channel = messageChannel(message)
+      const list = (this.state.messages[channel] ??= [])
       const index = list.findIndex((item) => item.id === message.id)
       if (index >= 0) list[index] = message
       else list.push(message)
       list.sort((a, b) => a.seq - b.seq)
       this.trackStreaming(message)
       await this.ctx.storage.set(
-        `v2/message/${message.workspaceID}/${String(message.seq).padStart(8, "0")}`,
+        `v2/message/${channel}/${String(message.seq).padStart(8, "0")}`,
         structuredClone(message),
       )
     })
@@ -1293,7 +1424,16 @@ export class V2Store {
 
   async pruneWorkspace(workspaceID: string): Promise<void> {
     await this.write(async () => {
-      const messages = [...(this.state.messages[workspaceID] ?? [])]
+      // Group messages use the workspace id as their channel; a workspace
+      // direct conversation uses `dm:<agentID>:<workspaceID>`. Retention must
+      // cover both without touching home direct channels.
+      const messageChannels = [
+        workspaceID,
+        ...Object.keys(this.state.messages).filter(
+          (channel) => parseDirectMessageChannel(channel)?.workspaceID === workspaceID,
+        ),
+      ]
+      const messages = messageChannels.flatMap((channel) => [...(this.state.messages[channel] ?? [])])
       const subtaskIDs = Object.values(this.state.subtasks).filter((subtask) => subtask.workspaceID === workspaceID).map((subtask) => subtask.id)
       const dispatchGroupIDs = Object.values(this.state.dispatchGroups).filter((group) => group.workspaceID === workspaceID).map((group) => group.id)
       const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
@@ -1303,9 +1443,9 @@ export class V2Store {
       const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
       const bindingAgentIDs = Object.values(this.state.bindings).filter((binding) => binding.workspaceID === workspaceID).map((binding) => binding.agentID)
       const dmTranscriptKeys = Object.keys(this.state.dmTranscripts).filter((key) => key === workspaceID || key.startsWith(`${workspaceID}:`))
-      delete this.state.messages[workspaceID]
+      for (const channel of messageChannels) delete this.state.messages[channel]
       for (const key of [...this.streaming]) {
-        if (key.startsWith(`${workspaceID}\u0000`)) this.streaming.delete(key)
+        if (messageChannels.some((channel) => key.startsWith(`${channel}\u0000`))) this.streaming.delete(key)
       }
       for (const id of subtaskIDs) delete this.state.subtasks[id]
       for (const id of dispatchGroupIDs) delete this.state.dispatchGroups[id]
@@ -1316,7 +1456,7 @@ export class V2Store {
       for (const id of approvalIDs) delete this.state.approvals[id]
       for (const id of dmQueueIDs) delete this.state.dmQueue[id]
       for (const key of dmTranscriptKeys) delete this.state.dmTranscripts[key]
-      await this.removePrefixNow(`v2/message/${workspaceID}/`)
+      for (const channel of messageChannels) await this.removePrefixNow(`v2/message/${channel}/`)
       await this.removePrefixNow(`v2/binding/${workspaceID}/`)
       await this.removePrefixNow(`v2/dm/${workspaceID}/`)
       for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
@@ -1333,7 +1473,13 @@ export class V2Store {
       await this.commit(
         [
           { entity: "workspace" as const, op: "remove" as const, id: workspaceID },
-          ...messages.map((message) => ({ entity: "message" as const, op: "remove" as const, workspaceID, id: message.id })),
+          ...messages.map((message) => ({
+            entity: "message" as const,
+            op: "remove" as const,
+            workspaceID: messageChannel(message),
+            ...(message.channel ? { channel: message.channel } : {}),
+            id: message.id,
+          })),
           ...subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
           ...dispatchGroupIDs.map((id) => ({ entity: "dispatchGroup" as const, op: "remove" as const, id })),
           ...initJobIDs.map((id) => ({ entity: "initJob" as const, op: "remove" as const, id })),
@@ -1442,6 +1588,7 @@ export class V2Store {
       await this.ctx.storage.remove("v2/meta")
       this.state = createInitialState()
       this.streaming.clear()
+      this.channelSeq.clear()
       this.pendingReconciliations.clear()
       await this.commit([])
       // A reset destroys prior entity state, so the ring cannot describe the

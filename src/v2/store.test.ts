@@ -1,7 +1,9 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { V2Store } from "./store.ts"
-import type { Agent, Message, NativeSubagentRun, Subtask, Workspace } from "./types.ts"
+import { directMessageChannel } from "./message-channel.ts"
+import { CLIENT_MESSAGE_LIMIT, TRANSCRIPT_WINDOW, transcriptWindow, trimMessages } from "./scoped-read.ts"
+import type { Agent, Message, NativeSubagentRun, PatchBatch, Subtask, Workspace } from "./types.ts"
 
 function fakeContext() {
   const values = new Map<string, unknown>()
@@ -170,6 +172,120 @@ test("dm transcripts persist per binding and reload in order", async () => {
   await loaded.load()
   assert.deepEqual(loaded.snapshot().dmTranscripts["home:a"].map((item) => item.text), ["one", "two"])
   assert.deepEqual(loaded.snapshot().dmTranscripts["w:a"].map((item) => item.text), ["work"])
+})
+
+test("ticket212: a direct message writes one durable channel row and the legacy line", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
+  const channel = directMessageChannel("a")
+  const rows = store.messages(channel)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.channel, channel)
+  assert.equal(rows[0]!.text, "hello")
+  assert.equal(rows[0]!.author, "user")
+  assert.deepEqual(store.dmTranscript("home", "a").map((line) => line.text), ["hello"], "the legacy transcript is dual-written")
+  const loaded = new V2Store(ctx)
+  await loaded.load()
+  assert.equal(loaded.messages(channel).length, 1, "the durable channel row survives reload")
+  assert.equal(loaded.messages(channel)[0]!.text, "hello")
+})
+
+test("ticket212: a direct channel row updates in place and removes from both stores", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
+  const channel = directMessageChannel("a")
+  const seq = store.messages(channel)[0]!.seq
+  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "edited", createdAt: 1 })
+  assert.equal(store.messages(channel).length, 1)
+  assert.equal(store.messages(channel)[0]!.text, "edited")
+  assert.equal(store.messages(channel)[0]!.seq, seq, "an update keeps the durable row sequence")
+  await store.removeDmMessage("home", "a", "dm_1")
+  assert.equal(store.messages(channel).length, 0)
+  assert.deepEqual(store.dmTranscript("home", "a"), [])
+})
+
+test("ticket212: direct channel sequence continues after reload", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.appendChannelMessage(directMessageChannel("a"), { id: "dm_1", workspaceID: "home", author: "user", text: "one", kind: "text", createdAt: 1 })
+  await store.appendChannelMessage(directMessageChannel("a"), { id: "dm_2", workspaceID: "home", author: "user", text: "two", kind: "text", createdAt: 2 })
+  const loaded = new V2Store(ctx)
+  await loaded.load()
+  await loaded.appendChannelMessage(directMessageChannel("a"), { id: "dm_3", workspaceID: "home", author: "user", text: "three", kind: "text", createdAt: 3 })
+  assert.deepEqual(loaded.messages(directMessageChannel("a")).map((row) => row.seq), [1, 2, 3])
+})
+
+test("ticket212: a direct message patch is a message entity and never a snapshot reset", async () => {
+  const ctx = fakeContext()
+  const batches: PatchBatch[] = []
+  const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
+  await store.load()
+  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
+  await store.settled()
+  const batch = batches.at(-1)!
+  assert.equal(batch.reset, undefined)
+  assert.equal(batch.entries.length, 1)
+  const entry = batch.entries[0]!
+  assert.equal(entry.nonEntity, undefined, "a direct message is patchable entity state")
+  const upsert = entry.entities?.find((change) => change.entity === "message" && change.op === "upsert")
+  assert.equal(upsert?.message.channel, directMessageChannel("a"))
+  assert.equal(upsert?.message.text, "hello")
+  await store.removeDmMessage("home", "a", "dm_1")
+  await store.settled()
+  const remove = batches.at(-1)!.entries[0]!.entities?.find((change) => change.entity === "message" && change.op === "remove")
+  assert.equal(remove?.channel, directMessageChannel("a"), "a direct remove names its channel")
+})
+
+test("ticket212: direct channel rows use the same transcript window and client bound", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  const channel = directMessageChannel("a")
+  for (let index = 1; index <= 45; index++) {
+    await store.appendChannelMessage(channel, {
+      id: `dm_${index}`,
+      workspaceID: "home",
+      author: "user",
+      text: `line ${index}`,
+      kind: "text",
+      createdAt: index,
+    })
+  }
+  const window = transcriptWindow(store.messages(channel), {})
+  assert.equal(window.messages.length, TRANSCRIPT_WINDOW)
+  assert.equal(window.messages[0]!.text, "line 6")
+  assert.equal(window.hasMoreOlder, true)
+  assert.equal(trimMessages(store.messages(channel), CLIENT_MESSAGE_LIMIT).length, 45)
+})
+
+test("ticket212: pruning a workspace removes its direct channel but keeps home", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveWorkspace(workspace())
+  await store.saveDmMessage("w", "a", { id: "dm_w", role: "user", author: "You", text: "workspace", createdAt: 1 })
+  await store.saveDmMessage("home", "a", { id: "dm_h", role: "user", author: "You", text: "home", createdAt: 2 })
+  await store.pruneWorkspace("w")
+  assert.equal(store.messages(directMessageChannel("a", "w")).length, 0)
+  assert.deepEqual(store.messages(directMessageChannel("a")).map((row) => row.text), ["home"])
+})
+
+test("ticket212: pruning an agent removes every direct channel for that agent", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.saveDmMessage("home", "a", { id: "dm_home", role: "user", author: "You", text: "home", createdAt: 1 })
+  await store.saveWorkspace(workspace({ memberIDs: ["a", "b"] }))
+  await store.saveDmMessage("w", "a", { id: "dm_work", role: "user", author: "You", text: "work", createdAt: 2 })
+  await store.pruneDmForAgent("a")
+  assert.equal(store.messages(directMessageChannel("a")).length, 0)
+  assert.equal(store.messages(directMessageChannel("a", "w")).length, 0)
+  assert.deepEqual(store.dmTranscript("home", "a"), [])
 })
 
 test("pruning a workspace removes its dm transcripts", async () => {
