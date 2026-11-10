@@ -66,7 +66,8 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   `ENSEMBLE_SUBAGENT_EXPECT=early` to run the pre-barrier baseline against an
   older tree; it records that the parent replies before the child succeeds and
   stops before the post-barrier assertions. The probe defaults
-  `ENSEMBLE_LOG_LEVEL=debug` for its isolated service logs.
+  `ENSEMBLE_LOG_LEVEL=debug` for its isolated service logs. On the local
+  Linux/tmux host it takes about 36 seconds (Node 26.12.1, OpenCode 2.2.6).
 - `npm run test:live:lifecycle`: a full wall-clock fake run that streams for
   about 5m40s across the old five-minute delivery deadline while the service
   heartbeat renews its 60-second lease. A second delivery sent immediately
@@ -133,18 +134,22 @@ retries. A failing scenario stops the run and later scenarios are reported as
 
 ## CI
 
-CI keeps the existing `verify` job (`npm ci` then `npm run verify`) and adds a
-`live` job on every push and pull request. The live job pins the host toolset:
-Ubuntu 24.04, Node 26.12.1 through `actions/setup-node`, OpenCode 2.2.6 through
+CI keeps the `verify` job (`npm ci`, then `git diff --check`, then
+`npm run verify`) and a `live` job on every push and pull request. The live job
+pins the host toolset: Ubuntu 24.04, Node 26.12.1 through
+`actions/setup-node`, OpenCode 2.2.6 through
 `npm install --global @opencode/cli@2.2.6`, the runner's `tmux`, and fd 10.2.0
 from its release archive. It then runs `npm run test:live:preflight` (fake
-scope), `npm run test:live:fake:all`, and
-`npm run test:live:multilocation`; all steps set `ENSEMBLE_LIVE_REQUIRE=1`. The
+scope), `npm run test:live:fake:all`, `npm run test:live:multilocation`, and
+`npm run test:live:subagent`; all live steps set `ENSEMBLE_LIVE_REQUIRE=1`. The
 preflight prints the resolved versions and fails if a required tool is missing
-or the pinned Node/OpenCode version differs. The fake/empty and multi-location
-suites do not use fd; the job still installs it so the same pinned toolset can
-validate the full local matrix with `npm run test:live:preflight -- all`.
-Real-model checks stay local and are never required in CI.
+or the pinned Node/OpenCode version differs. The native-subagent probe reuses
+that pinned host and its deterministic fake provider, takes about 36 seconds on
+the local Linux/tmux host (Node 26.12.1, OpenCode 2.2.6), and never calls a real
+model or the user's live host. The fake/empty and multi-location suites do not
+use fd; the job still installs it so the same pinned toolset can validate the
+full local matrix with `npm run test:live:preflight -- all`. Real-model checks
+stay local and are never required in CI.
 
 ## Skip versus fail
 
@@ -165,14 +170,18 @@ restating it.
 The equivalent local CI check is:
 
 ```sh
+git diff --check
 ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:preflight
 ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:fake:all
+ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:multilocation
+ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:subagent
 ```
 
 The deterministic suite takes about 7 minutes on the v5.9 local Linux/tmux
 host (fake scenario ~6m45s including the native-failure retry fixture, empty
-catalog ~10s). GitHub Actions adds `npm ci` and tool-install time; the live
-job timeout is 30 minutes.
+catalog ~10s). The native-subagent probe adds about 36 seconds, so the live job
+stays well inside its 30-minute timeout; GitHub Actions adds `npm ci` and
+tool-install time.
 
 All scenarios and the latency probe source `scripts/lib/live-harness.sh`.
 Each run owns a temporary project and HOME, plus isolated XDG

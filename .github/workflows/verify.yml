@@ -22,6 +22,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      - name: Check whitespace and conflict residue
+        run: git diff --check
       - run: npm run verify
 
   live:
@@ -61,3 +63,7 @@ jobs:
         env:
           ENSEMBLE_LIVE_REQUIRE: "1"
         run: npm run test:live:multilocation
+      - name: Native-subagent live probe
+        env:
+          ENSEMBLE_LIVE_REQUIRE: "1"
+        run: npm run test:live:subagent
