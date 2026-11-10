@@ -6,6 +6,7 @@ import { directMessageChannelForBinding, isDirectMessageChannel, messageChannel,
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
   Agent,
+  AgentPostInfo,
   Approval,
   BindingConversation,
   ChangeEntry,
@@ -1044,6 +1045,24 @@ export class V2Store {
       await this.ctx.storage.set(`v2/subtask/${subtask.id}`, subtask)
       await this.commit([{ entity: "subtask", op: "upsert", task: structuredClone(subtask) }])
       this.notify(() => this.observer?.subtask?.(subtask, previous))
+    })
+  }
+
+  /**
+   * Ticket #221: write only a turn's tool-post delivery record. A full subtask
+   * clone could race a native text event and revert host identity; this
+   * mutation touches one field and preserves concurrent updates.
+   */
+  async saveAgentPost(subtaskID: string, agentPost: AgentPostInfo): Promise<void> {
+    await this.write(async () => {
+      const previous = this.state.subtasks[subtaskID]
+      if (!previous) return
+      const next = structuredClone(previous)
+      next.agentPost = agentPost
+      this.state.subtasks[subtaskID] = next
+      await this.ctx.storage.set(`v2/subtask/${subtaskID}`, next)
+      await this.commit([{ entity: "subtask", op: "upsert", task: structuredClone(next) }])
+      this.notify(() => this.observer?.subtask?.(next, previous))
     })
   }
 
