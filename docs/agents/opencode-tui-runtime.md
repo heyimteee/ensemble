@@ -187,6 +187,28 @@ maintenance pass and logged as `dispatch.group.reconciled`; no in-flight work
 is retroactively refused. The team contract is bumped and stale workspace
 blocks are rewritten.
 
+## Native-first sessions and turns
+
+**Decisions:** [ADR 0009](../adr/0009-conversation-identity-and-sessions.md)
+binds one native session per agent per conversation; [ADR 0010](../adr/0010-native-turn-ingestion.md)
+makes the service the only ingestion writer; [ADR 0011](../adr/0011-mention-routing-and-budgets.md)
+defines `$Name` routing and server-owned budgets.
+
+- The host identifies a turn by the inbox/user message id and the assistant
+  message id, never by time. `session.execution.started` precedes delivery, and
+  a host retry reuses the assistant message id.
+- Settlement is `session.execution.succeeded|failed|interrupted`. The measured
+  headless host did not deliver `session.idle`, `session.status`, or the
+  `session.synthetic` event; do not build a settlement path on them. See the
+  [native host contract](../verification/2026-11-10-native-host-contract.md).
+- The TUI does not poll the native transcript. The service writes the durable
+  message before clearing the stream overlay, and `session.context` is read
+  only for reconciliation or fallback.
+- A background subagent completion is a second parent turn, not the first
+  turn's result.
+- A move while busy is queued by the host, so adoption updates a binding only
+  after the move is confirmed.
+
 ## Navigate installed package source
 
 Run from the repository after `npm ci`:

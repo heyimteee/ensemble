@@ -5,7 +5,7 @@ Ensemble uses a **single-context** domain vocabulary.
 ## Before exploration or writing
 
 1. Read the root `GLOSSARY.md`. If a future `GLOSSARY-MAP.md` exists, follow it to the relevant glossary instead.
-2. Read relevant ADRs under `docs/adr/` if present.
+2. Read relevant ADRs under [docs/adr](../adr/README.md) if present.
 3. Use glossary terms consistently in specifications, issue titles, tests, and documentation.
 4. Surface conflicts with an existing ADR before proposing a conflicting change.
 
