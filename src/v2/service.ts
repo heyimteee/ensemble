@@ -84,7 +84,29 @@ import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDec
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import { nativeFirstMode, isNativeFirstMode } from "./native-first.ts"
 import { directSessionCutover, selectDirectConversation } from "./direct-session.ts"
-import { bindingConversation } from "./conversation-binding.ts"
+import { bindingConversation, conversationStateKey } from "./conversation-binding.ts"
+import {
+  MAX_SESSION_PICKER_LIMIT,
+  defaultSessionPickerScope,
+  normalizeSessionPickerScope,
+  sessionPickerCandidates,
+  sessionPickerEventRefresh,
+  sessionPickerListInputs,
+  type NativeSessionListing,
+  type SessionPickerBindingView,
+  type SessionPickerDirectoryContext,
+  type SessionPickerScope,
+} from "./session-picker.ts"
+import {
+  adoptionBlockerCode,
+  adoptionConversationName,
+  adoptionHeadsUp,
+  adoptionTargetDirectory,
+  planSessionAdoption,
+  resolveAdoptionTarget,
+  sessionMoveConfirmed,
+  type AdoptionTarget,
+} from "./session-adoption.ts"
 import {
   NATIVE_INTERNAL_PROMPT_METADATA,
   NATIVE_MESSAGE_ID_METADATA,
@@ -514,6 +536,12 @@ export class EnsembleV2Service {
   private maintenanceTimer: ReturnType<typeof setInterval> | undefined
   private maintenanceWaiters: Array<() => void> = []
   private viewDirectory: string | undefined
+  /**
+   * Ticket #224: monotonic refresher for the native session picker. It moves
+   * on claimed host session lifecycle events and on adoption, never on a
+   * timer.
+   */
+  private sessionPickerRevision = 0
   private configDirty = true
   private lastConfigPassAt = 0
   /** Terminal rows already checked for legacy failure evidence (ticket #168). */
@@ -822,6 +850,11 @@ export class EnsembleV2Service {
     if (this.stopped) return
     if (!this.recentHostEvents.claim(event)) return
     const type = String(event?.type ?? "")
+    // Ticket #224: the picker refreshes from claimed session lifecycle events,
+    // not a timer. One signal per event, once across every attached location.
+    if (sessionPickerEventRefresh(type)) {
+      this.sessionPickerChanged(type, typeof event?.data?.sessionID === "string" ? event.data.sessionID : undefined)
+    }
     // Ticket #215: native turn ingestion shares the one service writer. The
     // per-session queue preserves event order; a duplicate id was already
     // claimed above and deterministic durable ids cover replays without one.
@@ -915,6 +948,23 @@ export class EnsembleV2Service {
   ): void {
     for (const registration of this.registrations) {
       void registration?.events?.emit?.("changed", { version, ...scope })?.catch?.(() => undefined)
+    }
+  }
+
+  /**
+   * Ticket #224: one ephemeral picker refresh signal. It carries ids and a
+   * revision only; the client re-reads the scoped list and never receives
+   * conversation content. No durable version moves.
+   */
+  private sessionPickerChanged(kind: string, sessionID?: string): void {
+    this.sessionPickerRevision += 1
+    const payload = {
+      revision: this.sessionPickerRevision,
+      kind,
+      ...(sessionID ? { sessionID } : {}),
+    }
+    for (const registration of this.registrations) {
+      void registration?.events?.emit?.("sessions.changed", payload)?.catch?.(() => undefined)
     }
   }
 
@@ -1868,6 +1918,9 @@ export class EnsembleV2Service {
       case "agent.archive": return this.archiveAgent(payload.id, payload.replacementLeaderID)
       case "agent.delete": return this.deleteAgent(payload.id, payload.replacementLeaderID, Boolean(payload.deleteNativeSessions))
       case "agent.moveHome": return this.moveHomeSession(payload.agentID, payload.workspaceID)
+      case "session.picker": return this.nativeSessionPicker(directory, payload)
+      case "session.adopt.preview": return this.previewNativeSessionAdoption(directory, payload)
+      case "session.adopt": return this.adoptNativeSession(directory, payload)
       case "chat.context": return this.chatContext(payload.agentID, payload.workspaceID)
       case "chat.send": return this.chatSend(payload.agentID, payload.workspaceID, payload.text, undefined, attachmentIDs(payload.attachments))
       case "chat.removeQueued": return this.removeQueuedDm(payload.agentID, payload.workspaceID, payload.id)
@@ -2021,20 +2074,50 @@ export class EnsembleV2Service {
   /**
    * One host read for binding resolution: existence plus the host's archived
    * marker. `session.get` is optional on older hosts; an unavailable API fails
-   * open, matching the rotation policy.
+   * open, matching the rotation policy. Ticket #224 also reads the root
+   * parent, location, title, and recency for the picker and adoption rules.
    */
-  private async nativeSessionDetails(sessionID: string): Promise<{ found: boolean; archived: boolean }> {
+  private async nativeSessionDetails(sessionID: string): Promise<{
+    found: boolean
+    archived: boolean
+    sessionID: string
+    parentID?: string
+    title?: string
+    directory?: string
+    updatedAt?: number
+    busy?: boolean
+  }> {
     const get = this.ctx.session?.get
-    if (typeof get !== "function") return { found: true, archived: false }
+    if (typeof get !== "function") return { found: true, archived: false, sessionID }
     try {
       const info = unwrap<any>(await get.call(this.ctx.session, { sessionID }))
-      if (!info || (typeof info === "object" && !info.id)) return { found: false, archived: false }
-      return { found: true, archived: Boolean(info.archived) || Boolean(info.time?.archived) }
+      const resolvedID = String(info?.id ?? info?.sessionID ?? sessionID)
+      if (!info || (typeof info === "object" && !info.id && !info.sessionID)) {
+        return { found: false, archived: false, sessionID }
+      }
+      return {
+        found: true,
+        archived: Boolean(info.archived) || Boolean(info.time?.archived),
+        sessionID: resolvedID,
+        parentID: typeof info.parentID === "string" && info.parentID.length > 0 ? info.parentID : undefined,
+        title: typeof info.title === "string" ? info.title : undefined,
+        directory: typeof info.location?.directory === "string"
+          ? info.location.directory
+          : typeof info.directory === "string"
+            ? info.directory
+            : undefined,
+        updatedAt: typeof info.time?.updated === "number"
+          ? info.time.updated
+          : typeof info.updatedAt === "number"
+            ? info.updatedAt
+            : undefined,
+        busy: info.active?.type === "running" || info.status === "running" || info.busy === true || undefined,
+      }
     } catch (error: any) {
       const reason = String(error?._tag ?? error?.code ?? error?.type ?? "")
       const status = Number(error?.status ?? error?.statusCode ?? 0)
       const missing = reason === "SessionNotFoundError" || reason === "session_not_found" || reason === "not_found" || status === 404
-      return { found: !missing, archived: false }
+      return { found: !missing, archived: false, sessionID }
     }
   }
 
@@ -2657,13 +2740,520 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Ticket #224: the native session picker read path. Recent roots in the
+   * selected scope, searched inside that scope, with enough binding state for
+   * the UI to mark what is already in use. It never writes and never reads a
+   * transcript.
+   */
+  private async nativeSessionPicker(directory: string, payload: Json): Promise<any> {
+    const agent = this.store.agent(String(payload.agentID ?? "").trim())
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    if (agent.archived) throw Object.assign(new Error("The agent is archived."), { code: "agent_archived" })
+    const resolved = this.adoptionTarget(agent, payload, directory)
+    const scope = normalizeSessionPickerScope(payload.scope, defaultSessionPickerScope(resolved.target))
+    const query = typeof payload.query === "string" ? payload.query : ""
+    const limit = typeof payload.limit === "number" && Number.isFinite(payload.limit) ? payload.limit : undefined
+    const listings = await this.nativeSessionList(scope, resolved.context, query, limit)
+    const bindings = this.sessionPickerBindingViews(resolved.conversation)
+    const sessions = sessionPickerCandidates(listings, {
+      scope,
+      context: resolved.context,
+      query,
+      ...(limit !== undefined ? { limit } : {}),
+      bindings,
+    })
+    return {
+      agentID: agent.id,
+      target: resolved.target,
+      conversation: adoptionConversationName(resolved.target, this.adoptionNames(resolved.target, agent)),
+      scope,
+      query,
+      defaultScope: defaultSessionPickerScope(resolved.target),
+      sessions,
+      count: sessions.length,
+      revision: this.sessionPickerRevision,
+    }
+  }
+
+  /**
+   * Ticket #224: read-only adoption preview. The TUI uses it to explain a
+   * required move or reassignment before asking for confirmation; it performs
+   * no host mutation and writes no binding.
+   */
+  private async previewNativeSessionAdoption(directory: string, payload: Json): Promise<any> {
+    const state = await this.adoptionState(directory, payload)
+    const { agent, resolved, session, plan, currentBinding, owner } = state
+    return {
+      agentID: agent.id,
+      target: resolved.target,
+      conversation: adoptionConversationName(resolved.target, this.adoptionNames(resolved.target, agent)),
+      currentSessionID: currentBinding?.sessionID,
+      history: currentBinding?.history ?? [],
+      session: {
+        sessionID: session.sessionID,
+        found: session.found,
+        archived: Boolean(session.archived),
+        child: Boolean(session.parentID),
+        busy: Boolean(session.busy),
+      },
+      plan,
+      blockers: plan.blockers,
+      code: adoptionBlockerCode(plan),
+      message: this.adoptionRefusalMessage(plan),
+      reassignFrom: owner
+        ? {
+            agentID: owner.binding.agentID,
+            sessionID: owner.binding.sessionID,
+            conversation: this.conversationLabel(owner.binding),
+          }
+        : undefined,
+    }
+  }
+
+  /**
+   * Ticket #224: adopt one existing session into exactly one conversation.
+   *
+   * The binding is written only after the host confirms the session exists, is
+   * a root, is not archived or busy, is not owned elsewhere (unless explicitly
+   * reassigned), and has reached the conversation directory when a move was
+   * required. A failed move aborts before any binding write.
+   */
+  private async adoptNativeSession(directory: string, payload: Json): Promise<any> {
+    const state = await this.adoptionState(directory, payload)
+    const { agent, resolved, session, plan, currentBinding, owner } = state
+    const conversationName = adoptionConversationName(resolved.target, this.adoptionNames(resolved.target, agent))
+    if (plan.unchanged) {
+      return {
+        adopted: false,
+        state: "unchanged",
+        agentID: agent.id,
+        target: resolved.target,
+        conversation: conversationName,
+        binding: currentBinding,
+      }
+    }
+    const refusal = this.adoptionRefusal(plan)
+    if (refusal) throw refusal
+    if (!plan.canAdopt) {
+      throw Object.assign(new Error("The session cannot be adopted into that conversation."), { code: "session_adoption_refused" })
+    }
+    // A reassignment creates the previous conversation's fresh session before
+    // any move or behavior write, so a host failure aborts the whole adoption.
+    let replacement: SessionBinding | undefined
+    let sourceAgent: Agent | undefined
+    if (owner) {
+      sourceAgent = this.store.agent(owner.binding.agentID)
+      if (!sourceAgent) {
+        throw Object.assign(new Error("The previous owner agent no longer exists; the binding was not changed."), { code: "session_reassignment_failed" })
+      }
+      replacement = await this.createReplacementSession(sourceAgent, owner.binding, session.sessionID)
+    }
+    try {
+      if (plan.moveRequired) {
+        try {
+          await this.ctx.session.move({ sessionID: session.sessionID, directory: resolved.directory })
+        } catch {
+          throw Object.assign(new Error("The native session could not be moved; the binding was not changed."), { code: "session_move_failed" })
+        }
+        const after = await this.nativeSessionDetails(session.sessionID)
+        if (!after.found || after.archived || !sessionMoveConfirmed(after.directory, resolved.directory)) {
+          throw Object.assign(new Error("The native session did not move to the conversation directory; the binding was not changed."), { code: "session_move_unconfirmed" })
+        }
+      }
+      if (!(await this.applyAgentBehavior(session.sessionID, agent))) {
+        throw Object.assign(new Error("Could not apply the agent settings to the adopted session."), { code: "session_apply_failed" })
+      }
+    } catch (error) {
+      if (replacement) await this.ctx.session.remove({ sessionID: replacement.sessionID }).catch(() => undefined)
+      throw error
+    }
+    const replacedSessionID = currentBinding?.sessionID
+    const history = [...(currentBinding?.history ?? [])]
+    if (replacedSessionID && replacedSessionID !== session.sessionID && !history.includes(replacedSessionID)) history.unshift(replacedSessionID)
+    const binding: SessionBinding = {
+      workspaceID: resolved.target.kind === "home" ? "home" : String(resolved.target.workspaceID),
+      agentID: agent.id,
+      sessionID: session.sessionID,
+      history: history.filter((sessionID) => sessionID && sessionID !== session.sessionID),
+      kind: resolved.target.kind,
+      directory: resolved.directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
+
+    if (owner && replacement && sourceAgent) {
+      const sourceConversation = owner.conversation
+      const sourceConversationKey = conversationStateKey(sourceConversation)
+      try {
+        await this.store.removeConversationBinding(owner.binding.agentID, sourceConversation)
+      } catch (error) {
+        await this.ctx.session.remove({ sessionID: replacement.sessionID }).catch(() => undefined)
+        throw error
+      }
+      try {
+        await this.store.saveBinding(replacement)
+        await this.store.saveBinding(binding)
+      } catch {
+        // Restore the previous owner and drop the throwaway replacement: an
+        // adoption either moves the session or changes nothing.
+        await this.store.removeConversationBinding(owner.binding.agentID, sourceConversation).catch(() => undefined)
+        await this.store.saveBinding(owner.binding).catch(() => undefined)
+        await this.ctx.session.remove({ sessionID: replacement.sessionID }).catch(() => undefined)
+        this.logger?.event("warn", "service", "native.session.adoption.failed", {
+          agentID: agent.id,
+          sessionID: session.sessionID,
+          previousConversation: sourceConversationKey,
+        })
+        throw Object.assign(new Error("The binding update failed; no conversation was reassigned."), { code: "session_adoption_failed" })
+      }
+      await this.ctx.session.instructions.entry.put({
+        sessionID: replacement.sessionID,
+        key: "ensemble.v2.identity",
+        value: this.identityForAgent(sourceAgent),
+      }).catch(() => undefined)
+    } else {
+      await this.store.saveBinding(binding)
+    }
+    await this.clearPendingSettings(agent.id)
+
+    const synthetic = this.ctx.session?.synthetic
+    let headsUp = false
+    if (typeof synthetic === "function") {
+      try {
+        await synthetic.call(this.ctx.session, {
+          sessionID: session.sessionID,
+          text: adoptionHeadsUp(resolved.target, this.adoptionNames(resolved.target, agent)),
+          description: "Ensemble session adoption",
+        })
+        headsUp = true
+      } catch {
+        // The binding is already correct; the heads-up is best effort.
+      }
+    }
+    this.logger?.event("info", "service", "native.session.adopted", {
+      agentID: agent.id,
+      conversation: resolved.target.kind,
+      sessionID: session.sessionID,
+      replacedSessionID,
+      moved: plan.moveRequired,
+      reassigned: Boolean(owner),
+      headsUp,
+    })
+    this.sessionPickerChanged("session.adopted", session.sessionID)
+    return {
+      adopted: true,
+      state: "adopted",
+      agentID: agent.id,
+      target: resolved.target,
+      conversation: conversationName,
+      binding,
+      replacedSessionID,
+      history: binding.history ?? [],
+      moved: plan.moveRequired,
+      reassigned: owner
+        ? {
+            agentID: owner.binding.agentID,
+            sessionID: owner.binding.sessionID,
+            conversation: this.conversationLabel(owner.binding),
+            replacementSessionID: replacement?.sessionID,
+          }
+        : undefined,
+      headsUp,
+    }
+  }
+
+  /**
+   * Shared target and plan resolution for picker, preview, and adoption.
+   * `adoptionState` only reads: host `session.get` and the durable bindings.
+   */
+  private async adoptionState(projectDirectory: string, payload: Json): Promise<{
+    agent: Agent
+    resolved: ReturnType<EnsembleV2Service["adoptionTarget"]>
+    session: Awaited<ReturnType<EnsembleV2Service["nativeSessionInfo"]>>
+    currentBinding?: SessionBinding
+    owner?: { binding: SessionBinding; conversation: BindingConversation }
+    plan: ReturnType<typeof planSessionAdoption>
+  }> {
+    const agent = this.store.agent(String(payload.agentID ?? "").trim())
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    if (agent.archived) throw Object.assign(new Error("The agent is archived."), { code: "agent_archived" })
+    const sessionID = String(payload.sessionID ?? "").trim()
+    if (!sessionID) throw Object.assign(new Error("Choose a native session to adopt."), { code: "invalid_session" })
+    const resolved = this.adoptionTarget(agent, payload, projectDirectory)
+    const currentBinding = this.store.bindingForConversation(agent.id, resolved.conversation)
+    const session = await this.nativeSessionInfo(sessionID)
+    const targetKey = conversationStateKey(resolved.conversation)
+    let owner: { binding: SessionBinding; conversation: BindingConversation } | undefined
+    for (const binding of this.store.bindings()) {
+      if (binding.sessionID !== sessionID) continue
+      const conversation = bindingConversation(binding)
+      if (!conversation) continue
+      if (conversationStateKey(conversation) === targetKey) continue
+      owner = { binding, conversation }
+      break
+    }
+    const plan = planSessionAdoption({
+      target: resolved.target,
+      session: {
+        sessionID: session.sessionID,
+        found: session.found,
+        archived: session.archived,
+        parentID: session.parentID,
+        directory: session.directory,
+        busy: session.busy,
+      },
+      targetDirectory: resolved.directory,
+      ...(currentBinding?.sessionID ? { currentSessionID: currentBinding.sessionID } : {}),
+      ...(owner ? { boundElsewhere: { agentID: owner.binding.agentID, conversation: owner.conversation } } : {}),
+      reassign: payload.reassign === true,
+      confirmMove: payload.confirmMove === true,
+    })
+    return { agent, resolved, session, currentBinding, owner, plan }
+  }
+
+  private adoptionRefusal(plan: ReturnType<typeof planSessionAdoption>): Error | undefined {
+    const code = adoptionBlockerCode(plan)
+    if (!code) return undefined
+    return Object.assign(new Error(this.adoptionRefusalMessage(plan)), { code })
+  }
+
+  private adoptionRefusalMessage(plan: ReturnType<typeof planSessionAdoption>): string | undefined {
+    const code = adoptionBlockerCode(plan)
+    if (!code) return undefined
+    switch (code) {
+      case "session_not_found":
+        return "The selected native session no longer exists."
+      case "session_archived":
+        return "The selected native session is archived. Unarchive it before adopting."
+      case "session_child":
+        return "A subagent child session cannot serve a conversation."
+      case "session_busy":
+        return "The selected native session is busy. Wait for it to settle before adopting it."
+      case "session_already_bound":
+        return "That native session already serves another conversation. Confirm reassignment to move it."
+      case "move_confirmation_required":
+        return "This native session must move to the conversation's directory. Confirm the move first."
+      default:
+        return "The session cannot be adopted into that conversation."
+    }
+  }
+
+  /**
+   * Resolve the conversation an adoption targets and every directory the
+   * picker scopes need. The target is always an agent's conversation, never a
+   * bare session (ADR 0009).
+   */
+  private adoptionTarget(agent: Agent, payload: Json, projectDirectory: string): {
+    target: AdoptionTarget
+    conversation: BindingConversation
+    workspace?: Workspace
+    directory: string
+    context: SessionPickerDirectoryContext
+  } {
+    const rawWorkspace = payload.workspaceID === undefined || payload.workspaceID === null ? "" : String(payload.workspaceID).trim()
+    const workspace = rawWorkspace && rawWorkspace !== "home" ? this.store.workspace(rawWorkspace) : undefined
+    if (rawWorkspace && rawWorkspace !== "home" && !workspace) {
+      throw Object.assign(new Error("Workspace not found."), { code: "workspace_not_found" })
+    }
+    const member = workspace?.memberIDs.includes(agent.id) ?? false
+    const resolved = resolveAdoptionTarget({
+      agentID: agent.id,
+      workspaceID: workspace?.id,
+      conversation: payload.conversation,
+      workspaceMember: member,
+    })
+    if (!resolved.ok) throw Object.assign(new Error(resolved.message), { code: resolved.code })
+    const homeDirectory = agent.homeDirectory ?? join(homedir(), ".ensemble", "agents", agent.id)
+    const directory = adoptionTargetDirectory(resolved.target, {
+      workspaceDirectory: workspace?.directory,
+      homeDirectory,
+    })
+    if (!directory) {
+      throw Object.assign(new Error("The conversation directory is unavailable."), { code: "directory_unavailable" })
+    }
+    return {
+      target: resolved.target,
+      conversation: resolved.conversation,
+      workspace,
+      directory,
+      context: {
+        projectDirectory,
+        workspaceDirectory: workspace?.directory,
+        directDirectory: resolved.target.kind === "workspace" ? homeDirectory : directory,
+      },
+    }
+  }
+
+  private adoptionNames(target: AdoptionTarget, agent: Agent): { agentName: string; workspaceName?: string } {
+    const workspace = target.workspaceID ? this.store.workspace(target.workspaceID) : undefined
+    return { agentName: agent.name, ...(workspace ? { workspaceName: workspace.name } : {}) }
+  }
+
+  private conversationLabel(binding: SessionBinding): string {
+    const conversation = bindingConversation(binding)
+    if (!conversation) return "another conversation"
+    const agent = this.store.agent(binding.agentID)
+    const workspace = conversation.kind === "home" ? undefined : this.store.workspace(conversation.workspaceID)
+    const target: AdoptionTarget = conversation.kind === "home"
+      ? { kind: "home", agentID: binding.agentID }
+      : { kind: conversation.kind, workspaceID: conversation.workspaceID, agentID: binding.agentID }
+    return adoptionConversationName(target, {
+      agentName: agent?.name ?? binding.agentID,
+      ...(workspace ? { workspaceName: workspace.name } : {}),
+    })
+  }
+
+  private sessionPickerBindingViews(target: BindingConversation): Record<string, SessionPickerBindingView | undefined> {
+    const targetKey = conversationStateKey(target)
+    const views: Record<string, SessionPickerBindingView | undefined> = {}
+    for (const binding of this.store.bindings()) {
+      const conversation = bindingConversation(binding)
+      const label = this.conversationLabel(binding)
+      const current = conversation ? conversationStateKey(conversation) === targetKey : false
+      if (binding.sessionID) views[binding.sessionID] = { conversation: label, current }
+      for (const retired of binding.history ?? []) {
+        if (!retired || views[retired]) continue
+        views[retired] = { conversation: label, current: false, retired: true }
+      }
+    }
+    return views
+  }
+
+  /**
+   * One session's host read for picker and adoption: existence, archive
+   * marker, parent (child), location, title, recency, and an explicit busy
+   * hint when the host provides one. Never a transcript read.
+   */
+  private async nativeSessionInfo(sessionID: string): Promise<{
+    found: boolean
+    archived: boolean
+    sessionID: string
+    parentID?: string
+    title?: string
+    directory?: string
+    updatedAt?: number
+    busy?: boolean
+  }> {
+    const details = await this.nativeSessionDetails(sessionID)
+    return { ...details, busy: Boolean(details.busy) || this.isSessionBusy(sessionID) }
+  }
+
+  /**
+   * Host `session.list` for one picker scope. Roots only, unarchived only; a
+   * missing location contributes no rows rather than failing the picker, but
+   * a host without `session.list` refuses explicitly.
+   */
+  private async nativeSessionList(
+    scope: SessionPickerScope,
+    context: SessionPickerDirectoryContext,
+    query: string,
+    limit?: number,
+  ): Promise<NativeSessionListing[]> {
+    const list = this.ctx.session?.list
+    if (typeof list !== "function") {
+      throw Object.assign(new Error("The host does not expose native session listing."), { code: "session_list_unavailable" })
+    }
+    const requests = sessionPickerListInputs(scope, context, query, limit ?? MAX_SESSION_PICKER_LIMIT)
+    if (requests.length === 0) return []
+    const rows = new Map<string, NativeSessionListing>()
+    for (const input of requests) {
+      let response: any
+      try {
+        response = await list.call(this.ctx.session, input)
+      } catch {
+        this.logger?.event("debug", "service", "native.session.picker.list_failed", { scope })
+        continue
+      }
+      const value = unwrap<any>(response)
+      const data = Array.isArray(value) ? value : Array.isArray(value?.data) ? value.data : []
+      for (const info of data) {
+        const listing = this.nativeSessionListing(info)
+        // A scoped host response is authoritative for its directory; use the
+        // requested location when the row omits one so scope never drops a
+        // valid result.
+        if (!listing.directory && input.directory) listing.directory = input.directory
+        if (!listing.sessionID || rows.has(listing.sessionID)) continue
+        rows.set(listing.sessionID, listing)
+      }
+    }
+    return [...rows.values()]
+  }
+
+  private nativeSessionListing(info: any): NativeSessionListing {
+    return {
+      sessionID: String(info?.id ?? info?.sessionID ?? ""),
+      title: typeof info?.title === "string" ? info.title : undefined,
+      directory: typeof info?.location?.directory === "string"
+        ? info.location.directory
+        : typeof info?.directory === "string"
+          ? info.directory
+          : undefined,
+      updatedAt: typeof info?.time?.updated === "number"
+        ? info.time.updated
+        : typeof info?.updatedAt === "number"
+          ? info.updatedAt
+          : undefined,
+      archived: Boolean(info?.archived) || Boolean(info?.time?.archived),
+      parentID: typeof info?.parentID === "string" && info.parentID.length > 0 ? info.parentID : undefined,
+    }
+  }
+
+  /**
+   * Ticket #224: when a session is reassigned, its previous conversation gets
+   * a fresh session and keeps the adopted id in append-only history. Created
+   * before any binding write so a host failure aborts the whole adoption.
+   */
+  private async createReplacementSession(
+    agent: Agent,
+    owner: SessionBinding,
+    adoptedSessionID: string,
+  ): Promise<SessionBinding> {
+    const conversation = bindingConversation(owner)
+    if (!conversation) {
+      throw Object.assign(new Error("The previous binding is invalid; the binding was not changed."), { code: "session_reassignment_failed" })
+    }
+    const workspace = conversation.kind === "home" ? undefined : this.store.workspace(conversation.workspaceID)
+    const directory = owner.directory ?? workspace?.directory ?? agent.homeDirectory ?? join(homedir(), ".ensemble", "agents", agent.id)
+    const title = conversation.kind === "workspace"
+      ? `${agent.name} · ${workspace?.name ?? "workspace"}`
+      : conversation.kind === "direct"
+        ? `${agent.name} · direct · ${workspace?.name ?? "workspace"}`
+        : `${agent.name} · direct`
+    const created = unwrap<any>(await this.ctx.session.create({
+      title,
+      agent: "build",
+      model: {
+        providerID: agent.mainModel.providerID,
+        id: agent.mainModel.modelID,
+        ...(agent.mainModel.variant ? { variant: agent.mainModel.variant } : {}),
+      },
+      permissions: skillPermissions(agent.skillbox),
+      location: { directory },
+    }))
+    if (!created?.id) {
+      throw Object.assign(new Error("Could not create a replacement session; the binding was not changed."), { code: "session_reassignment_failed" })
+    }
+    const history = [adoptedSessionID, ...(owner.history ?? [])]
+      .filter((sessionID, index, all) => sessionID && sessionID !== created.id && all.indexOf(sessionID) === index)
+    return {
+      workspaceID: conversation.kind === "home" ? "home" : conversation.workspaceID,
+      agentID: agent.id,
+      sessionID: created.id,
+      history,
+      kind: conversation.kind,
+      directory,
+      agentVersion: agent.version,
+      updatedAt: now(),
+    }
+  }
+
+  /**
    * Ticket #213 read-only resolution: name the conversation, its current
    * binding, and whether the bound native session still exists. It never
    * creates, rotates, or rebinds a session, so it is safe to expose before the
    * #214 direct-chat cutover.
    */
-  private async resolveAgentSessionBinding(payload: Json): Promise<any> {
-    const agent = this.store.agent(String(payload.agentID ?? ""))
+  private async resolveAgentSessionBinding(payload: Json): Promise<any> {    const agent = this.store.agent(String(payload.agentID ?? ""))
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     const conversation = this.conversationFromRequest(payload)
     const mode = nativeFirstMode(this.store.settings())

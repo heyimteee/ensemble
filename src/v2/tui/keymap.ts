@@ -108,6 +108,7 @@ const LEADER: readonly KeyEntry[] = [
   { id: "leader.pause", scope: "leader", contexts: SURFACES, keys: ["p"], title: "Pause / resume", group: "State" },
   { id: "leader.init", scope: "leader", contexts: SURFACES, keys: ["i"], title: "Init workspace files", group: "State" },
   { id: "leader.native", scope: "leader", contexts: SURFACES, keys: ["o"], title: "Native session", group: "Navigate" },
+  { id: "leader.adopt", scope: "leader", contexts: SURFACES, keys: ["shift+o"], title: "Adopt native session", group: "Navigate" },
   { id: "leader.delegate", scope: "leader", contexts: SURFACES, keys: ["d"], title: "Delegate", group: "Work" },
   { id: "leader.reassign", scope: "leader", contexts: SURFACES, keys: ["t"], title: "Reassign", group: "Work" },
   { id: "leader.retry", scope: "leader", contexts: SURFACES, keys: ["r"], title: "Retry", group: "Work" },
@@ -289,6 +290,7 @@ const DIALOG: readonly KeyEntry[] = [
   { id: "picker.activate", scope: "normal", contexts: ["picker"], keys: ["enter"], title: "Select", group: "Open", hint: "enter select" },
   { id: "picker.toggle", scope: "normal", contexts: ["picker"], keys: ["space"], title: "Toggle item", group: "Select", hint: "space toggle", requires: "multi" },
   { id: "picker.filter", scope: "normal", contexts: ["picker"], keys: ["/"], title: "Filter items", group: "Search", hint: "/ filter" },
+  { id: "picker.scope", scope: "normal", contexts: ["picker"], keys: ["tab"], title: "Change session scope", group: "Search", hint: "tab scope" },
   { id: "picker.cancel", scope: "normal", contexts: ["picker"], keys: ["escape"], title: "Cancel", group: "Navigation", hint: "esc cancel" },
 
   // Confirm ---------------------------------------------------------------

@@ -51,6 +51,12 @@ import {
   toggleCollapsedRailGroup,
 } from "./railmodel.ts"
 import { boundSessionID, missingNativeSessionMessage, nativePickerCandidates, nativeSessionRoute, pickerCandidateRows, pickerWindow, stablePickerItems, toggleSelected, type PickerCandidate } from "./picker.ts"
+import {
+  nextSessionPickerScope,
+  sessionPickerRevisionChanged,
+  type SessionPickerCandidate,
+  type SessionPickerScope,
+} from "../session-picker.ts"
 import { markdownStyles } from "./syntax.ts"
 import {
   addWizardMemory,
@@ -259,7 +265,7 @@ import {
 type Surface = { kind: "agent"; agentID: string; workspaceID?: string } | { kind: "workspace"; workspaceID: string }
 type FocusArea = "rail" | "chat"
 type PickerState = {
-  mode: "members" | "leader" | "workspace" | "choice" | "agent" | "native"
+  mode: "members" | "leader" | "workspace" | "choice" | "agent" | "native" | "sessions"
   title: string
   candidates: PickerCandidate[]
   selected: Set<string>
@@ -267,6 +273,17 @@ type PickerState = {
   query: string
   /** A `/` filter owns the keyboard until Enter or Esc. */
   filtering: boolean
+  /** Ticket #224: target and scope for the native session picker. */
+  native?: {
+    agentID: string
+    conversation: "workspace" | "direct" | "home"
+    workspaceID?: string
+    scope: SessionPickerScope
+    /** The committed server search for this scope; empty means recent rows. */
+    query?: string
+    /** Bumped on every reload so a stale response cannot repaint. */
+    generation: number
+  }
   resolve: (value: string[] | undefined) => void
 }
 
@@ -869,6 +886,8 @@ export function EnsembleV2App() {
   // a completed response. The metadata of the last applied snapshot decides
   // version application and catalog/config refreshes.
   let lastSnapshotMeta: SnapshotMeta | undefined = undefined
+  /** Ticket #224: last picker refresh revision applied from the service. */
+  let lastSessionPickerRevision: number | undefined = undefined
   // Ticket #138: a forced replacement is used for an epoch change or a feed
   // reset; the version guard cannot express "same version, discard state".
   let forceSnapshotReplace = false
@@ -4254,6 +4273,166 @@ export function EnsembleV2App() {
     navigateToNativeSession(sessionID)
   }
 
+  // ---- Ticket #224: native session picker and adoption ----
+  type AdoptionRequest = { agentID: string; conversation: "workspace" | "direct" | "home"; workspaceID?: string }
+  const sessionScopeTitle = (scope: SessionPickerScope): string =>
+    `Native session · ${scope.charAt(0).toUpperCase()}${scope.slice(1)}`
+  const sessionCandidateRows = (sessions: readonly SessionPickerCandidate[]): PickerCandidate[] =>
+    sessions.map((session) => ({ id: session.id, label: session.label, detail: session.detail }))
+
+  const loadSessionPicker = async (
+    request: AdoptionRequest,
+    scope: SessionPickerScope,
+    query = "",
+  ): Promise<{ scope: SessionPickerScope; sessions: SessionPickerCandidate[] }> => {
+    const result = await invoke(context, "session.picker", { ...request, scope, query })
+    return { scope: (result?.scope ?? scope) as SessionPickerScope, sessions: Array.isArray(result?.sessions) ? result.sessions : [] }
+  }
+
+  /**
+   * Ticket #224: the picker defaults to recent sessions in the target
+   * conversation's scope. A required move or reassignment is previewed on the
+   * server and confirmed here before the adopt call; a refusal is a visible
+   * toast, never a silent no-op.
+   */
+  const adoptNativeSession = async (request: AdoptionRequest, sessionID: string): Promise<void> => {
+    let preview: any
+    try {
+      preview = await invoke(context, "session.adopt.preview", { ...request, sessionID })
+    } catch (error) {
+      showError(error)
+      return
+    }
+    if (preview?.plan?.rejected) {
+      showToast({ title: "Ensemble", message: preview.message ?? "That native session cannot be adopted.", tone: "warning" })
+      return
+    }
+    if (preview?.plan?.unchanged) {
+      showToast({ title: "Ensemble", message: `This native session already serves ${preview.conversation}.`, tone: "info" })
+      return
+    }
+    const confirmations: string[] = []
+    if (preview?.plan?.moveRequired) {
+      confirmations.push(`This native session must move into the directory for ${preview.conversation}. The binding changes only after the move is confirmed.`)
+    }
+    if (preview?.plan?.needsReassign) {
+      confirmations.push(`This native session currently serves ${preview.reassignFrom?.conversation ?? "another conversation"}. Reassigning it gives that conversation a fresh session and keeps this one in its binding history.`)
+    }
+    let confirmMove = false
+    let reassign = false
+    if (confirmations.length > 0) {
+      const confirmed = await openConfirm("Adopt native session", confirmations.join("\n\n"))
+      if (!confirmed) return
+      confirmMove = Boolean(preview?.plan?.moveRequired)
+      reassign = Boolean(preview?.plan?.needsReassign)
+    }
+    try {
+      const adopted = await invoke(context, "session.adopt", { ...request, sessionID, confirmMove, reassign })
+      showToast({ title: "Ensemble", message: `Native session adopted into ${adopted?.conversation ?? "the conversation"}.`, tone: "info" })
+    } catch (error) {
+      showError(error)
+    }
+  }
+
+  const openSessionPicker = async (request: AdoptionRequest): Promise<void> => {
+    const defaultScope: SessionPickerScope = request.conversation === "workspace" ? "workspace" : "direct"
+    let loaded: Awaited<ReturnType<typeof loadSessionPicker>>
+    try {
+      loaded = await loadSessionPicker(request, defaultScope)
+    } catch (error) {
+      showError(error)
+      return
+    }
+    if (loaded.sessions.length === 0) {
+      showToast({ title: "Ensemble", message: `No native sessions in the ${loaded.scope} scope.`, tone: "info" })
+      return
+    }
+    const selected = await openPicker("sessions", {
+      rows: sessionCandidateRows(loaded.sessions),
+      native: { ...request, scope: loaded.scope, query: "", generation: 1 },
+    })
+    if (!selected?.[0]) return
+    await adoptNativeSession(request, selected[0])
+  }
+
+  /** Ticket #224: adopt into the current surface. A group chat picks the agent first. */
+  const openAdoptNative = async (): Promise<void> => {
+    const current = surface()
+    if (current?.kind === "agent") {
+      const workspaceID = current.workspaceID ?? activeWorkspace()?.id
+      await openSessionPicker({ agentID: current.agentID, conversation: "direct", ...(workspaceID ? { workspaceID } : {}) })
+      return
+    }
+    if (current?.kind !== "workspace") {
+      showToast({ title: "Ensemble", message: "Open a workspace or agent first.", tone: "warning" })
+      return
+    }
+    const selected = await openPicker("native")
+    const agentID = selected?.[0]
+    if (!agentID) return
+    await openSessionPicker({ agentID, conversation: "workspace", workspaceID: current.workspaceID })
+  }
+
+  /**
+   * Ticket #224: refresh the open picker on a claimed host session event. The
+   * generation guard drops a response that arrives after a newer reload.
+   */
+  const refreshSessionPicker = (): void => {
+    const current = picker()
+    if (!current?.native || current.mode !== "sessions") return
+    const generation = current.native.generation + 1
+    setPicker({ ...current, native: { ...current.native, generation }, cursor: 0 })
+    void loadSessionPicker(current.native, current.native.scope, current.native.query ?? "")
+      .then((loaded) => {
+        const live = picker()
+        if (!live?.native || live.native.generation !== generation) return
+        setPicker({ ...live, candidates: sessionCandidateRows(loaded.sessions), cursor: 0 })
+      })
+      .catch((error) => showError(error))
+  }
+
+  /**
+   * Ticket #224: run the committed filter against the whole selected scope,
+   * so search is not limited to the first recent page. Typing still narrows
+   * the visible rows locally; Enter asks the service for the full scope.
+   */
+  const searchSessionPicker = (query: string): void => {
+    const current = picker()
+    if (!current?.native || current.mode !== "sessions") return
+    const generation = current.native.generation + 1
+    setPicker({ ...current, native: { ...current.native, query, generation }, cursor: 0 })
+    void loadSessionPicker(current.native, current.native.scope, query)
+      .then((loaded) => {
+        const live = picker()
+        if (!live?.native || live.native.generation !== generation) return
+        setPicker({ ...live, candidates: sessionCandidateRows(loaded.sessions), cursor: 0 })
+      })
+      .catch((error) => showError(error))
+  }
+
+  /** Ticket #224: one-key scope switch; search applies to the new scope. */
+  const pickerCycleScope = (): void => {
+    const current = picker()
+    if (!current?.native || current.mode !== "sessions") return
+    const scope = nextSessionPickerScope(current.native.scope)
+    const generation = current.native.generation + 1
+    setPicker({
+      ...current,
+      title: sessionScopeTitle(scope),
+      native: { ...current.native, scope, query: "", generation },
+      query: "",
+      filtering: false,
+      cursor: 0,
+    })
+    void loadSessionPicker(current.native, scope)
+      .then((loaded) => {
+        const live = picker()
+        if (!live?.native || live.native.generation !== generation) return
+        setPicker({ ...live, candidates: sessionCandidateRows(loaded.sessions), cursor: 0 })
+      })
+      .catch((error) => showError(error))
+  }
+
   const restoreSettingsFocus = () => {
     const target = settingsReturnFocus
     // Ticket #180/#186: a pane restoration keeps the select/interact mode it
@@ -4965,6 +5144,7 @@ export function EnsembleV2App() {
     "leader.pause": () => togglePause(),
     "leader.init": () => initEnsemble(),
     "leader.native": () => openNative(),
+    "leader.adopt": () => { void openAdoptNative() },
     "leader.delegate": () => delegateSelected(),
     "leader.reassign": () => reassignSelected(),
     "leader.retry": () => retrySelected(),
@@ -5106,7 +5286,19 @@ export function EnsembleV2App() {
       // snapshot while the version guard still prevents an older response
       // from repainting newer state.
       if (type === "server.connected") {
+        // Ticket #224: a restarted service restarts the picker revision.
+        lastSessionPickerRevision = undefined
         void checkRevision(true)
+        return
+      }
+      // Ticket #224: the service emits one id-only refresh signal per claimed
+      // session lifecycle event. Refresh an open session picker without a
+      // snapshot and without a timer.
+      if (type === "rpc.ensemble.v2.sessions.changed") {
+        const payload = details?.data && typeof details.data === "object" ? details.data : details
+        if (!sessionPickerRevisionChanged(lastSessionPickerRevision, payload?.revision)) return
+        lastSessionPickerRevision = payload.revision
+        if (picker()?.mode === "sessions") refreshSessionPicker()
         return
       }
       // Ticket #155: coalesced native tool activity is version-neutral. It
@@ -5463,11 +5655,13 @@ export function EnsembleV2App() {
     clearPendingChord()
   }
 
-  const openPicker = (mode: PickerState["mode"], options: { selected?: string[]; candidates?: string[] } = {}): Promise<string[] | undefined> => new Promise((resolve) => {
+  const openPicker = (mode: PickerState["mode"], options: { selected?: string[]; candidates?: string[]; rows?: PickerCandidate[]; native?: PickerState["native"] } = {}): Promise<string[] | undefined> => new Promise((resolve) => {
     // Overlays never steal Enter/focus while a wizard owns the keyboard.
     if (wizard()) { resolve(undefined); return }
     clearPendingChord()
-    const candidates = mode === "workspace"
+    const candidates = mode === "sessions"
+      ? (options.rows ?? [])
+      : mode === "workspace"
       ? workspaces().map((workspace) => ({ id: workspace.id, label: chromeJoin([`#${workspace.name}`, workspaceLabel(workspace.directory)]) }))
       : mode === "leader"
         ? (options.candidates ?? []).map((id) => rosterAgents().find((agent) => agent.id === id)).filter((agent): agent is Agent => Boolean(agent)).map((agent) => ({ id: agent.id, label: agent.name }))
@@ -5482,12 +5676,15 @@ export function EnsembleV2App() {
           : rosterAgents().map((agent) => ({ id: agent.id, label: agent.name }))
     const next: PickerState = {
       mode,
-      title: mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : mode === "native" ? "Native session" : "Switch workspace",
+      title: mode === "sessions"
+        ? sessionScopeTitle(options.native?.scope ?? "direct")
+        : mode === "members" ? "Workspace members" : mode === "leader" ? "Workspace leader" : mode === "agent" ? "Open agent" : mode === "native" ? "Native session" : "Switch workspace",
       candidates,
       selected: new Set(options.selected ?? []),
       cursor: 0,
       query: "",
       filtering: false,
+      ...(mode === "sessions" && options.native ? { native: options.native } : {}),
       resolve,
     }
     setModal(true)
@@ -6317,6 +6514,8 @@ export function EnsembleV2App() {
     }
     if (edit.done) {
       setPicker({ ...state, filtering: false, query: edit.query, cursor: 0 })
+      // Ticket #224: a committed session filter searches the whole scope.
+      if (state.mode === "sessions" && state.native) searchSessionPicker(edit.query)
       return
     }
     setPicker({ ...state, query: edit.query, cursor: 0 })
@@ -6601,6 +6800,7 @@ export function EnsembleV2App() {
       case "picker.activate": return pickerActivate()
       case "picker.toggle": return pickerToggle()
       case "picker.filter": return beginPickerFilter()
+      case "picker.scope": return pickerCycleScope()
       case "picker.cancel": return finishPicker(undefined)
       case "confirm.accept": case "confirm.accept.enter": return finishConfirm(true)
       case "confirm.reject": case "confirm.reject.escape": return finishConfirm(false)

@@ -18,7 +18,19 @@ const LOCATION_EVENT_TYPES: string[][] = [
   ["session.tool.input.started", "session.tool.called", "session.tool.progress", "session.tool.success", "session.tool.failed"],
   // Ticket #182: host child sessions are the durable identity for native
   // subagent records. The tracker maps them to their parent task and group.
-  ["session.created", "session.deleted"],
+  // Ticket #224: the same subscription refreshes the native session picker on
+  // created, renamed/metadata, archive, move, fork, and delete events.
+  [
+    "session.created",
+    "session.deleted",
+    "session.renamed",
+    "session.metadata.updated",
+    "session.permissions",
+    "session.moved",
+    "session.archived",
+    "session.unarchived",
+    "session.forked",
+  ],
   // Ticket #215: native turn ingestion is service-owned. Inbox, text, and
   // execution share one subscription so host order reaches the per-session
   // queue intact; execution activity still forwards to the group card path.
