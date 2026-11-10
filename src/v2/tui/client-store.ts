@@ -352,7 +352,6 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
         memories: shell.memories,
         approvals: shell.approvals,
         dmQueue: shell.dmQueue,
-        dmTranscripts: shell.dmTranscripts,
         settings: shell.settings,
         ui: shell.ui,
         runs: shell.runs,
@@ -395,13 +394,6 @@ export function boundClientState(
     messages[workspaceID] = bounded
   }
   if (messages) next = { ...next, messages }
-  let transcripts: SnapshotState["dmTranscripts"] | undefined
-  for (const [key, list] of Object.entries(state.dmTranscripts)) {
-    if (list.length <= CLIENT_MESSAGE_LIMIT) continue
-    transcripts ??= { ...state.dmTranscripts }
-    transcripts[key] = list.slice(-CLIENT_MESSAGE_LIMIT)
-  }
-  if (transcripts) next = { ...next, dmTranscripts: transcripts }
   // Ticket #172: keep retained finished rows for HISTORY, on the same 24 h
   // retention as the durable store. The visible projection still bounds the
   // active Work payload.

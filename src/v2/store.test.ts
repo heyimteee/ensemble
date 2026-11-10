@@ -162,50 +162,112 @@ test("messages are ordered by sequence after reload", async () => {
   assert.deepEqual(loaded.snapshot().messages.w.map((item) => item.text), ["two", "one"])
 })
 
-test("dm transcripts persist per binding and reload in order", async () => {
+test("ticket226: direct messages persist on the conversation channel and reload in order", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
-  await store.saveDmMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
-  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
-  await store.saveDmMessage("w", "a", { id: "dm_3", role: "user", author: "You", text: "work", createdAt: 3 })
+  await store.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
+  await store.saveDirectMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
+  await store.saveDirectMessage("w", "a", { id: "dm_3", role: "user", author: "You", text: "work", createdAt: 3 })
   const loaded = new V2Store(ctx)
   await loaded.load()
-  assert.deepEqual(loaded.snapshot().dmTranscripts["home:a"].map((item) => item.text), ["one", "two"])
-  assert.deepEqual(loaded.snapshot().dmTranscripts["w:a"].map((item) => item.text), ["work"])
+  assert.deepEqual(loaded.messages(directMessageChannel("a")).map((row) => row.text), ["one", "two"])
+  assert.deepEqual(loaded.messages(directMessageChannel("a", "w")).map((row) => row.text), ["work"])
+  assert.equal("dmTranscripts" in loaded.snapshot(), false, "the snapshot no longer carries a legacy direct store")
+  const legacy = await (ctx.storage.scan({ prefix: "v2/dm/" }) as any)
+  assert.equal(legacy.entries.length, 0, "a direct write creates no second transcript")
 })
 
-test("ticket212: a direct message writes one durable channel row and the legacy line", async () => {
+test("ticket226: migration backfills pre-channel direct rows in order with attachment metadata and removes the legacy store", async () => {
+  const ctx = fakeContext()
+  // Rows written before #212 exist only in the legacy per-binding store.
+  ctx.values.set("v2/dm/home/a/dm_old_2", {
+    id: "dm_old_2", role: "user", author: "You", text: "second", createdAt: 20,
+    attachments: [{ id: "att_1", name: "shot.png", mime: "image/png", size: 12, kind: "image" }],
+    bindingKey: "home:a",
+  })
+  ctx.values.set("v2/dm/home/a/dm_old_1", {
+    id: "dm_old_1", role: "user", author: "You", text: "first", createdAt: 10, bindingKey: "home:a",
+  })
+  // A #212 dual-written row: the durable channel copy wins over its legacy line.
+  ctx.values.set("v2/dm/home/a/dm_new", {
+    id: "dm_new", role: "user", author: "You", text: "stale legacy copy", createdAt: 30, bindingKey: "home:a",
+  })
+  ctx.values.set(`v2/message/${directMessageChannel("a")}/00000009`, {
+    id: "dm_new", workspaceID: "home", channel: directMessageChannel("a"), seq: 9,
+    author: "user", text: "third", kind: "text", createdAt: 30,
+  })
+  // A malformed legacy key is left alone rather than deleted unmigrated.
+  ctx.values.set("v2/dm/broken", { text: "unmapped" })
+  const store = new V2Store(ctx)
+  await store.load()
+
+  const migrated = await store.migrateLegacyDirectTranscripts()
+
+  assert.deepEqual(migrated, { channels: 1, backfilled: 2, removed: 3 })
+  assert.deepEqual(ctx.values.get("v2/dm/broken"), { text: "unmapped" })
+  const rows = store.messages(directMessageChannel("a"))
+  assert.deepEqual(rows.map((row) => row.text), ["first", "second", "third"])
+  assert.deepEqual(rows.map((row) => row.seq), [1, 2, 3])
+  assert.deepEqual(rows[1]!.attachments, [{ id: "att_1", name: "shot.png", mime: "image/png", size: 12, kind: "image" }])
+  const remainingLegacy = await (ctx.storage.scan({ prefix: "v2/dm/" }) as any)
+  assert.deepEqual(remainingLegacy.entries.map((entry: any) => entry.key), ["v2/dm/broken"], "only mapped legacy rows are removed")
+
+  // A reload sees the same durable transcript with no duplicate or lost line.
+  const reloaded = new V2Store(ctx)
+  await reloaded.load()
+  assert.deepEqual(reloaded.messages(directMessageChannel("a")).map((row) => row.text), ["first", "second", "third"])
+  const version = reloaded.snapshot().version
+  const again = await reloaded.migrateLegacyDirectTranscripts()
+  assert.deepEqual(again, { channels: 0, backfilled: 0, removed: 0 })
+  assert.equal(reloaded.snapshot().version, version, "a completed migration is a no-op")
+})
+
+test("ticket226: migration keeps a workspace direct conversation on its own channel", async () => {
+  const ctx = fakeContext()
+  ctx.values.set("v2/dm/w/a/dm_work", {
+    id: "dm_work", role: "user", author: "You", text: "workspace direct", createdAt: 5, bindingKey: "w:a",
+  })
+  ctx.values.set("v2/dm/home/a/dm_home", {
+    id: "dm_home", role: "user", author: "You", text: "home direct", createdAt: 6, bindingKey: "home:a",
+  })
+  const store = new V2Store(ctx)
+  await store.load()
+  await store.migrateLegacyDirectTranscripts()
+  assert.deepEqual(store.messages(directMessageChannel("a", "w")).map((row) => row.text), ["workspace direct"])
+  assert.deepEqual(store.messages(directMessageChannel("a")).map((row) => row.text), ["home direct"])
+})
+
+test("ticket226: a direct message writes exactly one durable channel row", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.load()
-  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
+  await store.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
   const channel = directMessageChannel("a")
   const rows = store.messages(channel)
   assert.equal(rows.length, 1)
   assert.equal(rows[0]!.channel, channel)
   assert.equal(rows[0]!.text, "hello")
   assert.equal(rows[0]!.author, "user")
-  assert.deepEqual(store.dmTranscript("home", "a").map((line) => line.text), ["hello"], "the legacy transcript is dual-written")
+  assert.equal((await (ctx.storage.scan({ prefix: "v2/dm/" }) as any)).entries.length, 0, "there is no legacy line to dual-write")
   const loaded = new V2Store(ctx)
   await loaded.load()
   assert.equal(loaded.messages(channel).length, 1, "the durable channel row survives reload")
   assert.equal(loaded.messages(channel)[0]!.text, "hello")
 })
 
-test("ticket212: a direct channel row updates in place and removes from both stores", async () => {
+test("ticket226: a direct channel row updates in place and removes from the channel", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.load()
-  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
+  await store.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
   const channel = directMessageChannel("a")
   const seq = store.messages(channel)[0]!.seq
-  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "edited", createdAt: 1 })
+  await store.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "edited", createdAt: 1 })
   assert.equal(store.messages(channel).length, 1)
   assert.equal(store.messages(channel)[0]!.text, "edited")
   assert.equal(store.messages(channel)[0]!.seq, seq, "an update keeps the durable row sequence")
-  await store.removeDmMessage("home", "a", "dm_1")
+  await store.removeDirectMessage("home", "a", "dm_1")
   assert.equal(store.messages(channel).length, 0)
-  assert.deepEqual(store.dmTranscript("home", "a"), [])
 })
 
 test("ticket212: direct channel sequence continues after reload", async () => {
@@ -220,12 +282,12 @@ test("ticket212: direct channel sequence continues after reload", async () => {
   assert.deepEqual(loaded.messages(directMessageChannel("a")).map((row) => row.seq), [1, 2, 3])
 })
 
-test("ticket212: a direct message patch is a message entity and never a snapshot reset", async () => {
+test("ticket226: a direct message patch is a message entity and never a snapshot reset", async () => {
   const ctx = fakeContext()
   const batches: PatchBatch[] = []
   const store = new V2Store(ctx, undefined, { epoch: 1, onPatch: (batch) => batches.push(batch) })
   await store.load()
-  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
+  await store.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hello", createdAt: 1 })
   await store.settled()
   const batch = batches.at(-1)!
   assert.equal(batch.reset, undefined)
@@ -235,7 +297,7 @@ test("ticket212: a direct message patch is a message entity and never a snapshot
   const upsert = entry.entities?.find((change) => change.entity === "message" && change.op === "upsert")
   assert.equal(upsert?.message.channel, directMessageChannel("a"))
   assert.equal(upsert?.message.text, "hello")
-  await store.removeDmMessage("home", "a", "dm_1")
+  await store.removeDirectMessage("home", "a", "dm_1")
   await store.settled()
   const remove = batches.at(-1)!.entries[0]!.entities?.find((change) => change.entity === "message" && change.op === "remove")
   assert.equal(remove?.channel, directMessageChannel("a"), "a direct remove names its channel")
@@ -263,38 +325,52 @@ test("ticket212: direct channel rows use the same transcript window and client b
   assert.equal(trimMessages(store.messages(channel), CLIENT_MESSAGE_LIMIT).length, 45)
 })
 
-test("ticket212: pruning a workspace removes its direct channel but keeps home", async () => {
+test("ticket226: pruning a workspace removes its direct channel and queue but keeps home", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.load()
   await store.saveWorkspace(workspace())
-  await store.saveDmMessage("w", "a", { id: "dm_w", role: "user", author: "You", text: "workspace", createdAt: 1 })
-  await store.saveDmMessage("home", "a", { id: "dm_h", role: "user", author: "You", text: "home", createdAt: 2 })
+  await store.saveDirectMessage("w", "a", { id: "dm_w", role: "user", author: "You", text: "workspace", createdAt: 1 })
+  await store.saveDirectMessage("home", "a", { id: "dm_h", role: "user", author: "You", text: "home", createdAt: 2 })
+  await store.saveDmQueueEntry({ id: "dm_w", agentID: "a", workspaceID: "w", directory: "/repo", text: "workspace", status: "queued", createdAt: 1 })
+  await store.saveDmQueueEntry({ id: "dm_h", agentID: "a", directory: "/home/a", text: "home", status: "queued", createdAt: 2 })
   await store.pruneWorkspace("w")
   assert.equal(store.messages(directMessageChannel("a", "w")).length, 0)
   assert.deepEqual(store.messages(directMessageChannel("a")).map((row) => row.text), ["home"])
+  assert.equal(store.dmQueueEntry("dm_w"), undefined, "the workspace queue entry is pruned with its channel")
+  assert.ok(store.dmQueueEntry("dm_h"), "the home queue entry survives a workspace prune")
 })
 
-test("ticket212: pruning an agent removes every direct channel for that agent", async () => {
+test("ticket226: pruning an agent removes every direct channel and queue entry for that agent", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.load()
-  await store.saveDmMessage("home", "a", { id: "dm_home", role: "user", author: "You", text: "home", createdAt: 1 })
+  await store.saveDirectMessage("home", "a", { id: "dm_home", role: "user", author: "You", text: "home", createdAt: 1 })
   await store.saveWorkspace(workspace({ memberIDs: ["a", "b"] }))
-  await store.saveDmMessage("w", "a", { id: "dm_work", role: "user", author: "You", text: "work", createdAt: 2 })
+  await store.saveDirectMessage("w", "a", { id: "dm_work", role: "user", author: "You", text: "work", createdAt: 2 })
+  await store.saveDirectMessage("home", "b", { id: "dm_other", role: "user", author: "You", text: "other", createdAt: 3 })
+  await store.saveDmQueueEntry({ id: "dm_home", agentID: "a", directory: "/home/a", text: "home", status: "queued", createdAt: 1 })
+  await store.saveDmQueueEntry({ id: "dm_work", agentID: "a", workspaceID: "w", directory: "/repo", text: "work", status: "queued", createdAt: 2 })
+  await store.saveDmQueueEntry({ id: "dm_other", agentID: "b", directory: "/home/b", text: "other", status: "queued", createdAt: 3 })
   await store.pruneDmForAgent("a")
   assert.equal(store.messages(directMessageChannel("a")).length, 0)
   assert.equal(store.messages(directMessageChannel("a", "w")).length, 0)
-  assert.deepEqual(store.dmTranscript("home", "a"), [])
+  assert.deepEqual(store.messages(directMessageChannel("b")).map((row) => row.text), ["other"], "another agent's conversation survives")
+  assert.equal(store.dmQueueEntry("dm_home"), undefined)
+  assert.equal(store.dmQueueEntry("dm_work"), undefined)
+  assert.ok(store.dmQueueEntry("dm_other"), "another agent's queue entry survives")
 })
 
-test("pruning a workspace removes its dm transcripts", async () => {
+test("ticket226: reset drops every direct channel and queue entry", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
-  await store.saveWorkspace(workspace())
-  await store.saveDmMessage("w", "a", { id: "dm_1", role: "user", author: "You", text: "hi", createdAt: 1 })
-  await store.pruneWorkspace("w")
-  assert.equal(store.snapshot().dmTranscripts["w:a"], undefined)
+  await store.load()
+  await store.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "hi", createdAt: 1 })
+  await store.saveDmQueueEntry({ id: "dm_1", agentID: "a", directory: "/home/a", text: "hi", status: "queued", createdAt: 1 })
+  await store.reset()
+  assert.deepEqual(Object.keys(store.read().messages), [])
+  assert.deepEqual(Object.keys(store.read().dmQueue), [])
+  assert.equal((await (ctx.storage.scan({ prefix: "v2/dm/" }) as any)).entries.length, 0, "a reset also clears a leftover legacy store")
 })
 
 test("sync refreshes bindings even when the global version is already current", async () => {
@@ -434,62 +510,65 @@ test("sync adopts a foreign claim when this instance holds none", async () => {
   assert.equal(idle.snapshot().subtasks.t.claimedBy, "run_foreign")
 })
 
-test("sync picks up dm lines written by another store through the shared ingest", async () => {
+test("ticket226: sync picks up direct channel rows written by another store", async () => {
   const ctx = fakeContext()
   const writer = new V2Store(ctx)
   await writer.load()
-  await writer.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
+  await writer.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
   const reader = new V2Store(ctx)
   await reader.load()
-  assert.deepEqual(reader.snapshot().dmTranscripts["home:a"].map((item) => item.text), ["one"])
-  await writer.saveDmMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
+  assert.deepEqual(reader.messages(directMessageChannel("a")).map((row) => row.text), ["one"])
+  await writer.saveDirectMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
   const changed = await reader.sync()
   assert.equal(changed, true)
-  assert.deepEqual(reader.snapshot().dmTranscripts["home:a"].map((item) => item.text), ["one", "two"])
+  assert.deepEqual(reader.messages(directMessageChannel("a")).map((row) => row.text), ["one", "two"])
 })
 
-test("moving a dm transcript copies before deleting and is idempotent", async () => {
+test("ticket226: moving a direct channel merges by transcript order and is idempotent", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.load()
-  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
-  await store.saveDmMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
-  await store.moveDmTranscript("home", "a", "w")
-  assert.deepEqual(store.snapshot().dmTranscripts["w:a"].map((item) => item.text), ["one", "two"])
-  assert.equal(store.snapshot().dmTranscripts["home:a"], undefined)
+  await store.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 10 })
+  await store.saveDirectMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 20 })
+  await store.appendChannelMessage(directMessageChannel("a", "w"), {
+    id: "dm_3", workspaceID: "w", author: "user", text: "three", kind: "text", createdAt: 30,
+  })
+  await store.moveDirectChannel(directMessageChannel("a"), directMessageChannel("a", "w"))
+  const moved = store.messages(directMessageChannel("a", "w"))
+  assert.deepEqual(moved.map((row) => row.text), ["one", "two", "three"])
+  assert.deepEqual(moved.map((row) => row.seq), [1, 2, 3])
+  assert.equal(store.messages(directMessageChannel("a")).length, 0)
   // Retry after completion is a no-op and keeps the transcript intact.
-  await store.moveDmTranscript("home", "a", "w")
-  assert.deepEqual(store.snapshot().dmTranscripts["w:a"].map((item) => item.text), ["one", "two"])
+  await store.moveDirectChannel(directMessageChannel("a"), directMessageChannel("a", "w"))
+  assert.deepEqual(store.messages(directMessageChannel("a", "w")).map((row) => row.text), ["one", "two", "three"])
 })
 
-test("moving an empty dm transcript is a no-op", async () => {
+test("ticket226: moving an empty direct channel is a no-op", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.load()
-  await store.moveDmTranscript("home", "a", "w")
-  assert.equal(store.snapshot().dmTranscripts["home:a"], undefined)
-  assert.equal(store.snapshot().dmTranscripts["w:a"], undefined)
-  await store.moveDmTranscript("home", "a", "w")
-  assert.equal(store.snapshot().dmTranscripts["w:a"], undefined)
+  await store.moveDirectChannel(directMessageChannel("a"), directMessageChannel("a", "w"))
+  assert.equal(store.messages(directMessageChannel("a")).length, 0)
+  assert.equal(store.messages(directMessageChannel("a", "w")).length, 0)
 })
 
-test("retrying a move after an interruption between phases loses nothing", async () => {
+test("ticket226: retrying a direct channel move after a partial copy loses nothing", async () => {
   const ctx = fakeContext()
   const store = new V2Store(ctx)
   await store.load()
-  await store.saveDmMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
-  await store.saveDmMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
-  // Simulate a crash after phase 1 (new keys written) before phase 2
-  // (old keys deleted): both copies exist in storage.
-  for (const { key, value } of await (store as any).scanAll("v2/dm/home/a/")) {
-    const id = key.split("/").at(-1)
-    await ctx.storage.set(`v2/dm/w/a/${id}`, { ...(value as object), bindingKey: "w:a" })
+  await store.saveDirectMessage("home", "a", { id: "dm_1", role: "user", author: "You", text: "one", createdAt: 1 })
+  await store.saveDirectMessage("home", "a", { id: "dm_2", role: "user", author: "You", text: "two", createdAt: 2 })
+  // Simulate a crash after phase 1 (new keys written) before phase 2 (old
+  // keys deleted): both copies exist in storage.
+  for (const { value } of await (store as any).scanAll(`v2/message/${directMessageChannel("a")}/`)) {
+    const row = value as Message
+    await ctx.storage.set(`v2/message/${directMessageChannel("a", "w")}/${String(row.seq).padStart(8, "0")}`, { ...row, channel: directMessageChannel("a", "w") })
   }
-  await store.moveDmTranscript("home", "a", "w")
+  await store.moveDirectChannel(directMessageChannel("a"), directMessageChannel("a", "w"))
   const snapshot = store.snapshot()
-  assert.deepEqual(snapshot.dmTranscripts["w:a"].map((item) => item.text), ["one", "two"])
-  assert.equal(snapshot.dmTranscripts["home:a"], undefined)
-  const remaining = await (store as any).scanAll("v2/dm/home/a/")
+  assert.deepEqual(snapshot.messages[directMessageChannel("a", "w")].map((row) => row.text), ["one", "two"])
+  assert.equal(snapshot.messages[directMessageChannel("a")], undefined)
+  const remaining = await (store as any).scanAll(`v2/message/${directMessageChannel("a")}/`)
   assert.equal(remaining.length, 0)
 })
 

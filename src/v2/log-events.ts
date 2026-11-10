@@ -210,7 +210,10 @@ export function createStoreObserver(logger: EnsembleLogger): StoreObserver {
       if (!previous) {
         logger.event("info", "task", "task.created", {
           ...base,
-          title: next.title,
+          // Ticket #218: a native turn's title is conversation content. Native
+          // reconciliation and support logs carry ids, counts, and reason
+          // codes only, so the title never enters this row.
+          ...(next.origin === "native" ? {} : { title: next.title }),
           queueKey: next.queueKey,
           state: next.state,
           outcome: next.outcome,

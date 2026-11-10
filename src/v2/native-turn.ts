@@ -206,6 +206,73 @@ export function nativeContextTurnAnswer(
 }
 
 /**
+ * Ticket #218: one turn discovered in a native `session.context` read. The
+ * grouping is identity-based: a user or synthetic message opens the turn, the
+ * assistant messages after it belong to that turn, and an idle marker confirms
+ * the host settled it. Context ids are allocation-ordered, so the transcript
+ * array order is the only order used here.
+ */
+export type NativeContextTurn = {
+  inboxID: Id
+  itemType: "user" | "synthetic"
+  /** Prompt text joined from text parts; empty for an attachment-only prompt. */
+  text: string
+  metadata?: Record<string, unknown>
+  createdAt?: number
+  assistantMessageIDs: Id[]
+  /** Joined assistant text for this turn; empty when no text part exists. */
+  assistantText: string
+  hasAssistant: boolean
+  /** An idle marker follows this turn in the native transcript. */
+  settled: boolean
+}
+
+export function nativeContextTurnGroups(messages: readonly any[]): NativeContextTurn[] {
+  const turns: NativeContextTurn[] = []
+  const seen = new Set<string>()
+  let current: NativeContextTurn | undefined
+  for (const message of messages) {
+    const type = String(message?.type ?? "")
+    if (type === "user" || type === "synthetic") {
+      const inboxID = String(message?.id ?? "").trim()
+      if (!inboxID || seen.has(inboxID)) {
+        current = undefined
+        continue
+      }
+      seen.add(inboxID)
+      const createdAt = Number(message?.time?.created)
+      const metadata = message?.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata)
+        ? message.metadata as Record<string, unknown>
+        : undefined
+      current = {
+        inboxID,
+        itemType: type,
+        text: nativeContextMessageText(message),
+        ...(metadata ? { metadata } : {}),
+        ...(Number.isFinite(createdAt) && createdAt > 0 ? { createdAt } : {}),
+        assistantMessageIDs: [],
+        assistantText: "",
+        hasAssistant: false,
+        settled: false,
+      }
+      turns.push(current)
+      continue
+    }
+    if (!current) continue
+    if (type === "assistant") {
+      current.hasAssistant = true
+      const assistantID = String(message?.id ?? "").trim()
+      if (assistantID && !current.assistantMessageIDs.includes(assistantID)) current.assistantMessageIDs.push(assistantID)
+      const text = nativeContextMessageText(message)
+      if (text) current.assistantText = current.assistantText ? `${current.assistantText}\n${text}` : text
+    } else if (type === "idle") {
+      current.settled = true
+    }
+  }
+  return turns
+}
+
+/**
  * Ticket #217: reconciliation evidence that one inbox's execution reached a
  * terminal point without an answer. The host writes a `idle` marker after a
  * settled turn even when the idle event was not delivered. The marker must come

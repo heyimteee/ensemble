@@ -3,6 +3,9 @@ import assert from "node:assert/strict"
 import { diagnoseLocations, type DoctorBinding, type DoctorConfigRead, type DoctorLocationInput, type DoctorNativeSubagent, type DoctorSnapshot, type DoctorSubtask, type DoctorWorkspace } from "./doctor.ts"
 import type { DispatchGroup } from "./types.ts"
 
+const nativePhaseOpenTest = (phase: NonNullable<DoctorSubtask["native"]>["phase"]): boolean =>
+  phase === "queued" || phase === "working" || phase === "retrying"
+
 const service = { id: "svc-1", pid: 100, version: "2.2.3" }
 
 function agent(id: string, name: string, archived = false) {
@@ -20,7 +23,7 @@ function workspace(input: Partial<DoctorWorkspace> & Pick<DoctorWorkspace, "id" 
   }
 }
 
-function binding(workspaceID: string, agentID: string, sessionID = `ses_${agentID}`, extra: Partial<DoctorBinding> = {}): DoctorBinding {
+function binding(workspaceID: string, agentID: string, sessionID = `ses_${agentID}_${workspaceID}`, extra: Partial<DoctorBinding> = {}): DoctorBinding {
   return {
     key: `${workspaceID}:${agentID}`,
     workspaceID,
@@ -39,6 +42,9 @@ function snapshot(input: {
   dispatchGroups?: DispatchGroup[]
   subtasks?: DoctorSubtask[]
   nativeSubagents?: DoctorNativeSubagent[]
+  nativeRows?: DoctorSnapshot["nativeRows"]
+  nativeSync?: DoctorSnapshot["nativeSync"]
+  nativeWatchdog?: DoctorSnapshot["nativeWatchdog"]
 }): DoctorSnapshot {
   return {
     agents: Object.fromEntries(input.agents.map((item) => [item.id, item])),
@@ -47,6 +53,9 @@ function snapshot(input: {
     ...(input.dispatchGroups ? { dispatchGroups: Object.fromEntries(input.dispatchGroups.map((item) => [item.id, item])) } : {}),
     ...(input.subtasks ? { subtasks: Object.fromEntries(input.subtasks.map((item) => [item.id, item])) } : {}),
     ...(input.nativeSubagents ? { nativeSubagents: Object.fromEntries(input.nativeSubagents.map((item) => [item.childSessionID, item])) } : {}),
+    ...(input.nativeRows ? { nativeRows: input.nativeRows } : {}),
+    ...(input.nativeSync ? { nativeSync: input.nativeSync } : {}),
+    ...(input.nativeWatchdog ? { nativeWatchdog: input.nativeWatchdog } : {}),
   }
 }
 
@@ -710,4 +719,110 @@ test("ticket213: direct conversation bindings validate their key and workspace d
   })
   const badDirectoryReport = diagnoseLocations([location(site.directory, badDirectory, validConfig())])
   assert.ok(badDirectoryReport.mismatches.some((mismatch) => mismatch.code === "binding_field_mismatch"))
+})
+
+test("ticket218: native invariants report active, duplicate, missing-result, orphan-route, and stuck turns", () => {
+  const now = 1_000_000
+  const nativeTask = (id: string, input: {
+    sessionID: string
+    inboxID: string
+    phase: NonNullable<DoctorSubtask["native"]>["phase"]
+    assistantMessageIDs?: string[]
+    startedAt?: number
+    resultMessageID?: string
+  }): DoctorSubtask => ({
+    id,
+    workspaceID: "dm:a:w",
+    creatorType: "user",
+    origin: "native",
+    adopted: true,
+    conversationID: "dm:a:w",
+    state: nativePhaseOpenTest(input.phase) ? "working" : "replied",
+    outcome: nativePhaseOpenTest(input.phase) ? "pending" : "succeeded",
+    interrupted: false,
+    attempts: 0,
+    createdAt: now - 60_000,
+    native: {
+      sessionID: input.sessionID,
+      inboxID: input.inboxID,
+      assistantMessageIDs: input.assistantMessageIDs ?? [],
+      phase: input.phase,
+      ...(input.startedAt !== undefined ? { startedAt: input.startedAt } : {}),
+      ...(input.resultMessageID !== undefined ? { resultMessageID: input.resultMessageID } : {}),
+    },
+  })
+  const snap = snapshot({
+    agents: [clark],
+    workspaces: [site],
+    bindings: [binding(site.id, clark.id)],
+    subtasks: [
+      nativeTask("turn_active", { sessionID: "s1", inboxID: "m1", phase: "working" }),
+      nativeTask("turn_duplicate", { sessionID: "s1", inboxID: "m1", phase: "working" }),
+      nativeTask("turn_missing", { sessionID: "s2", inboxID: "m2", phase: "replied", assistantMessageIDs: ["a2"] }),
+      {
+        id: "route_orphan",
+        workspaceID: site.id,
+        parentID: "task_native_missing",
+        dispatchGroupID: "group_native_missing",
+        creatorType: "user",
+        state: "pending",
+        outcome: "pending",
+        interrupted: false,
+        attempts: 0,
+        createdAt: now,
+      },
+      nativeTask("turn_stuck", { sessionID: "s3", inboxID: "m3", phase: "working", startedAt: now - 900_000 }),
+      nativeTask("turn_held", { sessionID: "s4", inboxID: "m4", phase: "working" }),
+      nativeTask("turn_healthy", { sessionID: "s5", inboxID: "m5", phase: "working" }),
+    ],
+    nativeRows: [
+      { id: "u1", author: "user", channel: "dm:a:w", inboxID: "m1" },
+      { id: "u1b", author: "user", channel: "dm:a:w", inboxID: "m1" },
+      { id: "r1", author: "agent", channel: "dm:a:w", taskID: "turn_missing", assistantMessageID: "a2" },
+    ],
+    nativeSync: { state: "degraded", reason: "context-read" },
+    nativeWatchdog: {
+      turn_stuck: { passes: 3, maxPasses: 3, lastActivityAt: now - 900_000 },
+      turn_held: { passes: 3, maxPasses: 3, held: true },
+      turn_healthy: { passes: 1, maxPasses: 3, lastActivityAt: now - 1_000 },
+    },
+  })
+  const report = diagnoseLocations([{ ...location(site.directory, snap, validConfig()), now }])
+  assert.deepEqual(report.locations[0]?.native, {
+    sync: "degraded",
+    activeTurns: 5,
+    duplicates: 3,
+    missingResults: 1,
+    orphanRoutes: 1,
+    stuckTurns: 1,
+  })
+  const codes = new Set(report.mismatches.map((mismatch) => mismatch.code))
+  assert.equal(codes.has("native_turn_duplicate"), true)
+  assert.equal(codes.has("native_turn_missing_result"), true)
+  assert.equal(codes.has("native_route_orphaned"), true)
+  assert.equal(codes.has("native_turn_stuck"), true)
+  assert.equal(
+    report.mismatches.filter((mismatch) => mismatch.code === "native_turn_stuck").length,
+    1,
+    "a held turn and a turn inside its watchdog bound are healthy",
+  )
+  assert.ok(report.mismatches.every((mismatch) => mismatch.remediation.length > 0))
+  assert.equal(JSON.stringify(report.mismatches).includes("PRIVATE"), false, "native invariants carry ids only")
+})
+
+test("ticket218: one native session cannot serve two conversation bindings", () => {
+  const snap = snapshot({
+    agents: [clark, jessy],
+    workspaces: [site],
+    bindings: [
+      binding(site.id, clark.id, "s_shared"),
+      binding(site.id, jessy.id, "s_shared"),
+    ],
+  })
+  const report = diagnoseLocations([location(site.directory, snap)])
+  assert.equal(report.locations[0]?.native.duplicates, 1)
+  const duplicate = report.mismatches.find((mismatch) => mismatch.code === "native_turn_duplicate")
+  assert.equal(duplicate?.details.kind, "binding-session")
+  assert.equal(duplicate?.details.sessionID, "s_shared")
+  assert.deepEqual(duplicate?.details.bindingKeys, [`${site.id}:${clark.id}`, `${site.id}:${jessy.id}`])
 })

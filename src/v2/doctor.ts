@@ -1,7 +1,8 @@
 import { dispatchGroupState, dispatchHopCount, dispatchLedgerSummary, isRootGroup, type DispatchLedgerSummary } from "./dispatch-budget.ts"
 import { bindingConversation, conversationStateKey } from "./conversation-binding.ts"
+import { nativePhaseOpen } from "./native-turn.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, deriveWorkStatus, isDerivedWorkStatus, type DerivedWorkStatus } from "./queue.ts"
-import type { DispatchGroup, NativeSubagentSource, NativeSubagentState, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
+import type { DispatchGroup, NativeSubagentSource, NativeSubagentState, NativeSyncState, NativeSyncStatus, NativeTurnPhase, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
 import type { WorkspaceConfig } from "./workspace-config.ts"
 
 export type ServiceIdentity = {
@@ -70,6 +71,20 @@ export type DoctorSubtask = {
   repliedAt?: number
   stoppedAt?: number
   failure?: { kind: WorkFailureKind; reason?: string }
+  /** Ticket #218: native turn provenance and identity facts only. */
+  origin?: "native"
+  adopted?: boolean
+  conversationID?: string
+  resultMessageID?: string
+  native?: {
+    sessionID: string
+    inboxID?: string
+    assistantMessageIDs?: string[]
+    phase: NativeTurnPhase
+    resultMessageID?: string
+    startedAt?: number
+    settledAt?: number
+  }
 }
 
 /** One `task.recovered` audit row projected for the doctor (IDs and codes only). */
@@ -98,6 +113,36 @@ export type DoctorNativeSubagent = {
   source?: NativeSubagentSource
 }
 
+/** Ticket #218: one durable row carrying native host identity (ids only). */
+export type DoctorNativeRow = {
+  id: string
+  author: "user" | "agent" | "system"
+  channel?: string
+  taskID?: string
+  inboxID?: string
+  assistantMessageID?: string
+  turnID?: string
+  streaming?: boolean
+}
+
+/** Ticket #218: in-memory watchdog facts the service exposes read-only. */
+export type DoctorNativeWatchdog = {
+  passes: number
+  maxPasses?: number
+  lastActivityAt?: number
+  held?: boolean
+}
+
+/** Ticket #218: content-free native support counts for one location. */
+export type DoctorNativeReport = {
+  sync: NativeSyncState
+  activeTurns: number
+  duplicates: number
+  missingResults: number
+  orphanRoutes: number
+  stuckTurns: number
+}
+
 export type DoctorSnapshot = {
   agents: Record<string, DoctorAgent>
   workspaces: Record<string, DoctorWorkspace>
@@ -110,6 +155,10 @@ export type DoctorSnapshot = {
   recoveries?: DoctorRecovery[]
   /** Ticket #182 native child records; absent on older services. */
   nativeSubagents?: Record<string, DoctorNativeSubagent>
+  /** Ticket #218 native identity rows and reconciliation facts. */
+  nativeRows?: DoctorNativeRow[]
+  nativeSync?: NativeSyncStatus
+  nativeWatchdog?: Record<string, DoctorNativeWatchdog>
 }
 
 export type DoctorConfigRead =
@@ -173,6 +222,8 @@ export type DoctorLocationReport = {
   config: DoctorConfigReport
   /** Compact dispatch-ledger view (ticket #163); zeroed when no ledger exists. */
   dispatch: DispatchLedgerSummary
+  /** Ticket #218: native sync and invariant counts (ids only). */
+  native: DoctorNativeReport
   mismatches: DoctorMismatch[]
 }
 
@@ -321,6 +372,14 @@ const remediation: Record<string, string> = {
     "A native subagent record disagrees with its parent task's workspace or dispatch group. Reopen the parent session so the child is remapped, or remove the contradictory child record.",
   native_subagent_stale:
     "An active native subagent record is older than the 24h retention window. Check whether its child native session still exists; close the record if the child is gone, and never keep a stale card active.",
+  native_turn_duplicate:
+    "Native turns or rows share an inbox id, assistant message id, active session, or result row. Let the service reconcile the session once; do not delete a row to hide the duplicate.",
+  native_turn_missing_result:
+    "A terminal native turn has no durable result row or names a missing one. Let the service reconcile the session from the native transcript, or reopen the session so reconciliation repairs the result; never fabricate answer text.",
+  native_route_orphaned:
+    "A routed child names a native parent turn that does not exist. Restore the parent turn or dismiss the orphaned route; do not re-point it at an unrelated turn.",
+  native_turn_stuck:
+    "An open native turn outlived the watchdog read bound with no terminal evidence and no live child hold. Check the host session transcript and the native sync state; let reconciliation settle it or interrupt it honestly. Never guess a result from time.",
   binding_unknown_workspace:
     "A session binding points at a workspace that no longer exists. Remove or repair the orphaned binding by recreating the workspace; do not hand-edit OpenCode storage.",
   binding_unknown_agent:
@@ -605,6 +664,241 @@ function checkNativeSubagents(input: DoctorLocationInput, add: (
 }
 
 /**
+ * Ticket #218: native turn invariants over ids and lifecycle fields only.
+ * Reports one active turn per session, duplicate inbox/assistant/result ids,
+ * terminal turns without a result, routed children whose parent is missing,
+ * and stuck turns. A turn held for a live background child, or still inside
+ * the watchdog's read bound, is healthy.
+ */
+function checkNativeTurns(input: DoctorLocationInput, add: (
+  indexes: number[],
+  code: string,
+  details: Record<string, unknown>,
+  message: string,
+  scope?: DoctorMismatch["scope"],
+) => void, index: number): DoctorNativeReport {
+  const tasks = input.snapshot.subtasks ?? {}
+  const rows = input.snapshot.nativeRows ?? []
+  const now = input.now ?? Date.now()
+  const report: DoctorNativeReport = {
+    sync: input.snapshot.nativeSync?.state ?? "live",
+    activeTurns: 0,
+    duplicates: 0,
+    missingResults: 0,
+    orphanRoutes: 0,
+    stuckTurns: 0,
+  }
+  const nativeTurns = Object.values(tasks)
+    .filter((task) => task.origin === "native" || task.native !== undefined)
+    .sort((a, b) => a.id.localeCompare(b.id))
+  const nativeTaskIDs = new Set(nativeTurns.map((task) => task.id))
+  // ADR 0010 §9: one session must serve exactly one conversation binding.
+  const sessionBindings = new Map<string, string[]>()
+  for (const [key, binding] of Object.entries(input.snapshot.bindings)) {
+    if (!binding.sessionID) continue
+    const bucket = sessionBindings.get(binding.sessionID) ?? []
+    bucket.push(key)
+    sessionBindings.set(binding.sessionID, bucket)
+  }
+  for (const [sessionID, keys] of sessionBindings) {
+    if (keys.length < 2) continue
+    report.duplicates += 1
+    add(
+      [index],
+      "native_turn_duplicate",
+      { kind: "binding-session", sessionID, bindingKeys: keys.sort() },
+      `Native session ${sessionID} is bound to ${keys.length} conversations.`,
+      "storage",
+    )
+  }
+  const inboxIndex = new Map<string, DoctorSubtask[]>()
+  const assistantIndex = new Map<string, DoctorSubtask[]>()
+  const activeIndex = new Map<string, DoctorSubtask[]>()
+  for (const task of nativeTurns) {
+    const native = task.native
+    if (!native) continue
+    if (nativePhaseOpen(native.phase)) {
+      report.activeTurns += 1
+      const active = activeIndex.get(native.sessionID) ?? []
+      active.push(task)
+      activeIndex.set(native.sessionID, active)
+    }
+    if (native.inboxID) {
+      const key = `${native.sessionID}\0${native.inboxID}`
+      const bucket = inboxIndex.get(key) ?? []
+      bucket.push(task)
+      inboxIndex.set(key, bucket)
+    }
+    for (const assistantMessageID of native.assistantMessageIDs ?? []) {
+      const key = `${native.sessionID}\0${assistantMessageID}`
+      const bucket = assistantIndex.get(key) ?? []
+      bucket.push(task)
+      assistantIndex.set(key, bucket)
+    }
+  }
+  const flagTurnDuplicates = (kind: "inbox" | "assistant", entries: Map<string, DoctorSubtask[]>) => {
+    for (const [key, bucket] of entries) {
+      if (bucket.length < 2) continue
+      report.duplicates += 1
+      const [sessionID, identity] = key.split("\0")
+      add(
+        [index],
+        "native_turn_duplicate",
+        {
+          kind,
+          sessionID,
+          ...(kind === "inbox" ? { inboxID: identity } : { assistantMessageID: identity }),
+          turnIDs: bucket.map((task) => task.id).sort(),
+        },
+        `Native ${kind} identity ${identity} is claimed by ${bucket.length} turns.`,
+        "storage",
+      )
+    }
+  }
+  flagTurnDuplicates("inbox", inboxIndex)
+  flagTurnDuplicates("assistant", assistantIndex)
+  for (const [sessionID, bucket] of activeIndex) {
+    if (bucket.length < 2) continue
+    report.duplicates += 1
+    add(
+      [index],
+      "native_turn_duplicate",
+      { kind: "active", sessionID, turnIDs: bucket.map((task) => task.id).sort() },
+      `Session ${sessionID} has ${bucket.length} open native turns.`,
+      "storage",
+    )
+  }
+  // Ticket #218: message identity belongs to the same invariant family. Only
+  // rows that carry native identity participate, so ordinary messages are never
+  // inspected.
+  const userRows = new Map<string, DoctorNativeRow[]>()
+  const resultRows = new Map<string, DoctorNativeRow[]>()
+  const assistantRows = new Map<string, DoctorNativeRow[]>()
+  for (const row of rows) {
+    if (row.author === "user" && row.inboxID) {
+      const key = `${row.channel ?? ""}\0${row.inboxID}`
+      const bucket = userRows.get(key) ?? []
+      bucket.push(row)
+      userRows.set(key, bucket)
+    }
+    if (row.author === "agent" && row.taskID && nativeTaskIDs.has(row.taskID)) {
+      const key = `${row.channel ?? ""}\0${row.taskID}`
+      const bucket = resultRows.get(key) ?? []
+      bucket.push(row)
+      resultRows.set(key, bucket)
+    }
+    if (row.author === "agent" && row.assistantMessageID) {
+      const key = `${row.channel ?? ""}\0${row.assistantMessageID}`
+      const bucket = assistantRows.get(key) ?? []
+      bucket.push(row)
+      assistantRows.set(key, bucket)
+    }
+  }
+  const flagRowDuplicates = (kind: "user-row" | "result-row" | "assistant-row", entries: Map<string, DoctorNativeRow[]>) => {
+    for (const [key, bucket] of entries) {
+      const distinct = [...new Set(bucket.map((row) => row.id))]
+      if (distinct.length < 2) continue
+      report.duplicates += 1
+      const [channel, identity] = key.split("\0")
+      add(
+        [index],
+        "native_turn_duplicate",
+        { kind, channel, identity, messageIDs: distinct.sort() },
+        `Native ${kind} identity ${identity} is carried by ${distinct.length} message rows.`,
+        "storage",
+      )
+    }
+  }
+  flagRowDuplicates("user-row", userRows)
+  flagRowDuplicates("result-row", resultRows)
+  flagRowDuplicates("assistant-row", assistantRows)
+
+  const rowIDs = new Set(rows.map((row) => row.id))
+  for (const task of nativeTurns) {
+    const native = task.native
+    if (!native) continue
+    const declared = native.resultMessageID ?? task.resultMessageID
+    const dangling = declared !== undefined && input.snapshot.nativeRows !== undefined && !rowIDs.has(declared)
+    const missingSuccessful = native.phase === "replied"
+      && (native.assistantMessageIDs?.length ?? 0) > 0
+      && declared === undefined
+    if (!dangling && !missingSuccessful) continue
+    report.missingResults += 1
+    add(
+      [index],
+      "native_turn_missing_result",
+      {
+        sessionID: native.sessionID,
+        turnID: task.id,
+        inboxID: native.inboxID,
+        phase: native.phase,
+        resultMessageID: declared ?? null,
+        problem: dangling ? "dangling-result" : "missing-result",
+      },
+      `Native turn ${task.id} is terminal without a durable result row.`,
+      "storage",
+    )
+  }
+
+  for (const task of Object.values(tasks).sort((a, b) => a.id.localeCompare(b.id))) {
+    if (!task.parentID || task.parentID === task.id) continue
+    if (task.origin === "native" || task.native !== undefined) continue
+    if (tasks[task.parentID]) continue
+    const nativeParent = task.parentID.startsWith("task_native_")
+    const nativeGroup = (task.dispatchGroupID ?? "").startsWith("group_native_")
+    if (!nativeParent && !nativeGroup) continue
+    report.orphanRoutes += 1
+    add(
+      [index],
+      "native_route_orphaned",
+      {
+        turnID: task.parentID,
+        routeTaskID: task.id,
+        workspaceID: task.workspaceID,
+        dispatchGroupID: task.dispatchGroupID,
+      },
+      `Routed task ${task.id} names missing native turn ${task.parentID}.`,
+      "storage",
+    )
+  }
+
+  const workingChildren = new Set(
+    Object.values(input.snapshot.nativeSubagents ?? {})
+      .filter((run) => run.state === "working" && run.parentTaskID !== undefined)
+      .map((run) => run.parentTaskID!),
+  )
+  for (const task of nativeTurns) {
+    const native = task.native
+    if (!native || !nativePhaseOpen(native.phase)) continue
+    const watchdog = input.snapshot.nativeWatchdog?.[task.id]
+    if (watchdog?.held === true || workingChildren.has(task.id)) continue
+    const exhausted = watchdog?.maxPasses !== undefined && watchdog.passes >= watchdog.maxPasses
+    const startedAt = native.startedAt ?? task.createdAt
+    const ageMs = startedAt !== undefined ? Math.max(0, now - startedAt) : 0
+    const stale = ageMs >= FINISHED_RETENTION_MS
+    if (!exhausted && !stale) continue
+    report.stuckTurns += 1
+    add(
+      [index],
+      "native_turn_stuck",
+      {
+        sessionID: native.sessionID,
+        turnID: task.id,
+        inboxID: native.inboxID,
+        phase: native.phase,
+        passes: watchdog?.passes,
+        maxPasses: watchdog?.maxPasses,
+        ageMs,
+        reason: exhausted ? "watchdog-exhausted" : "stale",
+      },
+      `Native turn ${task.id} is ${native.phase} without terminal evidence after ${Math.round(ageMs / 1_000)}s.`,
+      "storage",
+    )
+  }
+  return report
+}
+
+/**
  * Walk the parent chain from one group to the root it declares. Returns a
  * reason code when the chain is broken; IDs only, no task content.
  */
@@ -885,6 +1179,8 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
     // Ticket #182: native child records must agree with their parent task,
     // workspace, and dispatch group, and cannot stay active past retention.
     checkNativeSubagents(input, add, index)
+    // Ticket #218: native turn/result/route invariants and the sync label.
+    const native = checkNativeTurns(input, add, index)
 
     for (const item of Object.values(input.snapshot.bindings).sort((a, b) => a.key.localeCompare(b.key))) {
       const conversation = bindingConversation(item)
@@ -1010,6 +1306,7 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
       bindings: sortedBindings(input),
       config,
       dispatch: dispatchLedgerSummary(dispatchGroups),
+      native,
       mismatches: [],
     }
   })

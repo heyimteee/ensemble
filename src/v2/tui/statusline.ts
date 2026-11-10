@@ -14,6 +14,7 @@
  */
 
 import type { GitState } from "./git.ts"
+import type { NativeSyncState } from "../types.ts"
 import type {
   InteractionFocus,
   InteractionMode,
@@ -119,7 +120,7 @@ export type StatuslinePart = {
   /** Extra inner padding cells on each side of a chip part. */
   padding?: number
 }
-export type StatuslineSegmentKind = "mode" | "context" | "selection" | "git" | "position" | "chord" | "notice" | "hint"
+export type StatuslineSegmentKind = "mode" | "context" | "native" | "selection" | "git" | "position" | "chord" | "notice" | "hint"
 export type StatuslineSegment = { kind: StatuslineSegmentKind; parts: StatuslinePart[] }
 
 /** Theme chip role for the current mode. */
@@ -140,6 +141,23 @@ export function modeSegment(mode: InteractionMode, visualKind?: InteractionSelec
 
 export function contextSegment(context: string): StatuslineSegment {
   return { kind: "context", parts: [{ text: context, tone: "muted" }] }
+}
+
+/**
+ * Ticket #218: native sync state is a live operator signal, not chat content.
+ * It shows only when native-first is on; the reason code stays in the logs and
+ * heartbeat payload, never in the statusline.
+ */
+export function nativeSyncSegment(state: NativeSyncState): StatuslineSegment {
+  const tone: StatuslineTone = state === "live" ? "good" : state === "degraded" ? "bad" : "warn"
+  return {
+    kind: "native",
+    parts: [
+      { text: "native", tone: "muted" },
+      { text: ":", tone: "faint" },
+      { text: state, tone },
+    ],
+  }
 }
 
 export function gitSegments(git: GitState | null): StatuslineSegment {
@@ -199,6 +217,8 @@ export type StatuslineRow1Input = {
   /** The leader menu is open; the chip uses the leader accent. */
   leader?: boolean
   context: string
+  /** Ticket #218: native sync state; absent when native-first is off. */
+  nativeSync?: NativeSyncState
   git?: GitState | null
   position?: string
   /** Visual selection size, e.g. `3 chars` or `2 lines`. */
@@ -211,6 +231,7 @@ export type StatuslineRow1Input = {
 
 export function buildStatuslineSegments(input: StatuslineRow1Input, separator: string = chromeSeparator()): StatuslineSegment[] {
   const segments: StatuslineSegment[] = [modeSegment(input.mode, input.visualKind, input.leader), contextSegment(input.context)]
+  if (input.nativeSync) segments.push(nativeSyncSegment(input.nativeSync))
   if (input.selectionSize) segments.push(selectionSegment(input.selectionSize))
   if (input.git !== undefined) segments.push(gitSegments(input.git))
   if (input.position) segments.push(positionSegment(input.position))

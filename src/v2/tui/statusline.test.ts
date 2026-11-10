@@ -13,6 +13,7 @@ import {
   listPosition,
   modeChipRole,
   modeLabel,
+  nativeSyncSegment,
   statuslineRow1,
   statuslineRow2,
   statuslineRow2Parts,
@@ -264,4 +265,18 @@ test("transcript position is a real scroll percentage, not a boolean label", () 
   assert.equal(transcriptPosition(-10, 500, 100), "0%", "negative scroll clamps to the top")
   assert.equal(transcriptPosition(0, 80, 100), "100%", "content shorter than the viewport is fully visible")
   assert.equal(transcriptPosition(0, 0, 0), "100%")
+})
+
+test("ticket218: native sync shows live, reconciling, or degraded and never carries a reason", () => {
+  assert.deepEqual(nativeSyncSegment("live").parts.map((part) => [part.text, part.tone]), [
+    ["native", "muted"],
+    [":", "faint"],
+    ["live", "good"],
+  ])
+  assert.equal(nativeSyncSegment("reconciling").parts.at(-1)?.tone, "warn")
+  assert.equal(nativeSyncSegment("degraded").parts.at(-1)?.tone, "bad")
+  const segments = buildStatuslineSegments({ mode: "normal", context: "Roster", nativeSync: "degraded", git: null })
+  assert.deepEqual(segments.map((segment) => segment.kind), ["mode", "context", "native", "git"])
+  assert.equal(statuslineRow1({ mode: "normal", context: "Roster", nativeSync: "reconciling" }).includes("native:reconciling"), true)
+  assert.deepEqual(buildStatuslineSegments({ mode: "normal", context: "Roster" }).map((segment) => segment.kind), ["mode", "context"])
 })

@@ -7,6 +7,7 @@ import {
   nativeAssistantMessageID,
   nativeContextAnswer,
   nativeContextTurnAnswer,
+  nativeContextTurnGroups,
   nativeContextTurnSettled,
   nativeFinalText,
   nativeInterruptionSettlement,
@@ -161,4 +162,56 @@ test("ticket215: native turns use the canonical Work status vocabulary", () => {
     "replied",
     "a recovered answer clears an earlier interruption",
   )
+})
+
+test("ticket218: context grouping is identity-based and stops at the next opener", () => {
+  const messages = [
+    { id: "m1", type: "user", content: [{ type: "text", text: "first" }], time: { created: 10 } },
+    { id: "m2", type: "assistant", content: [{ type: "text", text: "part one" }] },
+    { id: "m3", type: "assistant", content: [{ type: "text", text: "part two" }] },
+    { type: "idle" },
+    { id: "m4", type: "synthetic", content: [{ type: "text", text: "child finished" }], metadata: { childID: "c1" } },
+    { id: "m5", type: "assistant", content: [{ type: "text", text: "synthetic answer" }] },
+  ]
+  const turns = nativeContextTurnGroups(messages)
+  assert.equal(turns.length, 2)
+  assert.deepEqual(turns[0], {
+    inboxID: "m1",
+    itemType: "user",
+    text: "first",
+    createdAt: 10,
+    assistantMessageIDs: ["m2", "m3"],
+    assistantText: "part one\npart two",
+    hasAssistant: true,
+    settled: true,
+  })
+  assert.equal(turns[1]?.inboxID, "m4")
+  assert.equal(turns[1]?.itemType, "synthetic")
+  assert.deepEqual(turns[1]?.metadata, { childID: "c1" })
+  assert.equal(turns[1]?.settled, false)
+  assert.equal(turns[1]?.text, "child finished")
+})
+
+test("ticket218: toolkit-only and duplicate context entries stay bounded to one turn", () => {
+  const messages = [
+    { id: "m1", type: "user", content: [] },
+    { id: "m2", type: "assistant", content: [{ type: "tool", name: "read" }] },
+    { id: "m1", type: "user", content: [{ type: "text", text: "duplicate" }] },
+    { id: "m3", type: "assistant", content: [{ type: "text", text: "ignored duplicate answer" }] },
+  ]
+  const turns = nativeContextTurnGroups(messages)
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0]?.hasAssistant, true)
+  assert.equal(turns[0]?.assistantText, "")
+  assert.equal(turns[0]?.metadata, undefined)
+})
+
+test("ticket218: prompt metadata survives context reconciliation for internal/skip decisions", () => {
+  const messages = [
+    { id: "m1", type: "user", metadata: { "ensemble.internal": true, "ensemble.messageID": "msg_1" }, content: [{ type: "text", text: "composer" }] },
+    { id: "m2", type: "user", metadata: { "ensemble.mirror": false }, content: [{ type: "text", text: "onboarding" }] },
+  ]
+  const turns = nativeContextTurnGroups(messages)
+  assert.equal(nativePromptIsInternal({ metadata: turns[0]?.metadata }), true)
+  assert.equal(nativePromptSkipsTurn({ metadata: turns[1]?.metadata }), true)
 })

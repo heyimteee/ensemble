@@ -75,7 +75,7 @@ import {
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { selectWorkHistory, workHistoryGroups } from "./work-history.ts"
-import { chatLineFromMessage, directMessageChannelForBinding, dmChannelReadMode, projectDirectLines, type DmChannelReadMode } from "./message-channel.ts"
+import { chatLineFromMessage, directMessageChannelForBinding } from "./message-channel.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type StoreObserver } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
@@ -121,6 +121,7 @@ import {
   nativeAssistantMessageID,
   nativeContextAnswer,
   nativeContextTurnAnswer,
+  nativeContextTurnGroups,
   nativeContextTurnSettled,
   nativeEventAt,
   nativeEventData,
@@ -136,6 +137,7 @@ import {
   nativeTurnID,
   nativeTurnTitle,
   nativeUserMessageID,
+  type NativeContextTurn,
   type NativeTextState,
 } from "./native-turn.ts"
 import type {
@@ -159,6 +161,8 @@ import type {
   NativeSubagentRun,
   NativeSubagentSource,
   NativeSubagentState,
+  NativeSyncState,
+  NativeSyncStatus,
   PatchBatch,
   Revision,
   ScopeName,
@@ -315,6 +319,12 @@ function now(): number {
   return Date.now()
 }
 
+/** Reason code for a host failure; never the host's message or a path. */
+function nativeErrorCode(error: any): string {
+  const code = String(error?.code ?? error?.type ?? error?.name ?? "").trim()
+  return code || "native-error"
+}
+
 /**
  * Ticket #134: maintenance is timer-driven and serialized, never a snapshot
  * side effect. Config discovery is additionally throttled because it reads
@@ -350,6 +360,20 @@ type LegacyFailureCause = {
   reason?: string
   /** Lease evidence only the reaper records; native failures never carry it. */
   previousClaim?: string
+}
+
+/** Ticket #218: why one bounded native reconciliation pass ran. */
+type NativeReconcileReason = "start" | "reconnect" | "adoption" | "watchdog"
+
+/** Ticket #218: content-free reconciliation counts, safe for logs and replies. */
+type NativeReconcileCounts = {
+  turns: number
+  recoveredTurns: number
+  recoveredUserMessages: number
+  recoveredAssistantMessages: number
+  repairedResults: number
+  interrupted: number
+  skipped: number
 }
 
 /**
@@ -635,6 +659,21 @@ export class EnsembleV2Service {
   /** Delivery state is informational for now; terminal events settle turns. */
   private readonly nativeDelivery = new Map<string, string>()
   /**
+   * Ticket #218: reconciliation is a bounded start/reconnect/adoption pass,
+   * plus the #217 watchdog. The queue keeps it ordered with ingestion events;
+   * the run map coalesces a trigger already in flight.
+   */
+  private readonly nativeReconcileRuns = new Map<string, Promise<{ ok: boolean; reason?: string }>>()
+  /**
+   * Ticket #218: the first location attach follows service start, which
+   * already reconciled. Every later attach is a reconnect or a new location
+   * and gets one bounded pass over the bound sessions.
+   */
+  private nativeLocationAttached = false
+  private readonly nativeSync: NativeSyncStatus = { state: "live" }
+  private nativeReconcilePending = 0
+  private nativeReconcileFailures = 0
+  /**
    * Ticket #155: in-flight tool names and input heads, keyed by
    * session/message/call. `session.tool.called` carries the input but not the
    * name; the host's `session.tool.input.started` event supplies it.
@@ -697,16 +736,13 @@ export class EnsembleV2Service {
   /** Ticket #217: missing-terminal watchdog bound and per-turn read cap. */
   private readonly nativeTurnWatchdogMs: number
   private readonly nativeTurnWatchdogMaxPasses: number
-  /** Ticket #212: `off`/`shadow` read the legacy DM store; `on` reads durable rows. */
-  private readonly dmChannelReadsOption: DmChannelReadMode | undefined
 
-  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number; nativeTurnWatchdogMs?: number; nativeTurnWatchdogMaxPasses?: number; dmChannelReads?: DmChannelReadMode } = {}) {
+  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number; nativeTurnWatchdogMs?: number; nativeTurnWatchdogMaxPasses?: number } = {}) {
     this.ctx = ctx
     this.heartbeatMs = Math.max(10, Math.floor(options.heartbeatMs ?? HEARTBEAT_MS))
     this.nativeSubagentBarrierMs = Math.max(1, Math.floor(options.nativeSubagentBarrierMs ?? NATIVE_SUBAGENT_BARRIER_MS))
     this.nativeTurnWatchdogMs = Math.max(1, Math.floor(options.nativeTurnWatchdogMs ?? NATIVE_TURN_WATCHDOG_MS))
     this.nativeTurnWatchdogMaxPasses = Math.max(1, Math.floor(options.nativeTurnWatchdogMaxPasses ?? NATIVE_TURN_WATCHDOG_MAX_PASSES))
-    this.dmChannelReadsOption = options.dmChannelReads
     this.catalog = new Catalog(ctx, () => {
       this.publishFeedMetaIfChanged()
     })
@@ -738,13 +774,24 @@ export class EnsembleV2Service {
       observer: this.createStoreObserver(),
     })
     await this.store.load()
+    // Ticket #226: backfill pre-channel direct lines before any reader serves
+    // them. Migration is idempotent; an empty legacy store is a cheap no-op.
+    const directMigration = await this.store.migrateLegacyDirectTranscripts()
+    if (directMigration.channels > 0) {
+      this.logger.event("info", "service", "service.direct.migrated", directMigration)
+    }
     this.refreshDmClock()
     await this.reconcileInitJobs()
     await this.reconcileLoadedNativeSubagents()
-    // Ticket #215: an active native direct turn must not survive a restart as
-    // a stuck streaming row. Recover the recorded answer or mark it
-    // interrupted after one bounded transcript read.
-    await this.recoverNativeTurns()
+    // Ticket #218: one reconciliation pass over every bound native session on
+    // service start. It recovers missing turns/rows, repairs terminal results,
+    // and only interrupts an answerless turn when the transcript confirms it.
+    // `off`/`shadow` keep the pre-native-first restart recovery only.
+    if (nativeFirstMode(this.store.settings()) === "on") {
+      await this.reconcileNativeBindings("start")
+    } else {
+      await this.recoverNativeTurns()
+    }
     // Ticket #148: restart recovery is lease-safe. Load leaves `working` rows
     // untouched; reapAndRetire() requeues only an expired/missing lease with
     // no live local run, and reconcileWaitingWork() repairs a working row
@@ -786,6 +833,11 @@ export class EnsembleV2Service {
       this.nativeExecutionOwner.clear()
       this.nativeRunSettled.clear()
       this.nativeWatchdog.clear()
+      this.nativeReconcileRuns.clear()
+      this.nativeLocationAttached = false
+      this.nativeReconcilePending = 0
+      this.nativeReconcileFailures = 0
+      this.setNativeSync("live")
       for (const pending of this.nativeDeferredSettlements.values()) {
         if (pending.timer !== undefined) clearTimeout(pending.timer)
       }
@@ -894,6 +946,16 @@ export class EnsembleV2Service {
    */
   trackLocation(ctx: any, directory?: string): void {
     if (ctx) this.locations.set(ctx, directory)
+    if (!directory) return
+    // Ticket #218: the first attach follows service start, which already
+    // reconciled. Every later attach is a reconnect or a new location and
+    // reconciles each bound session once.
+    if (!this.nativeLocationAttached) {
+      this.nativeLocationAttached = true
+      return
+    }
+    if (nativeFirstMode(this.store?.settings()) !== "on") return
+    void this.reconcileNativeBindings("reconnect", { directory })
   }
 
   async untrackLocation(ctx: any): Promise<void> {
@@ -953,6 +1015,13 @@ export class EnsembleV2Service {
     // subagent records. `parentID` maps a child to its Ensemble parent task.
     if (type === "session.created") {
       await this.handleNativeSubagentCreated(event)
+      // Ticket #218: a bound session reappearing after a host reconnect gets
+      // one transcript reconciliation. The first creation is unbound and is
+      // ignored here; adoption owns that path.
+      const sessionID = nativeEventSessionID(event)
+      if (sessionID && this.store.bindingForSession(sessionID) && nativeFirstMode(this.store.settings()) === "on") {
+        void this.reconcileNativeSession(sessionID, "reconnect")
+      }
       return
     }
     if (type === "session.deleted") {
@@ -1549,6 +1618,7 @@ export class EnsembleV2Service {
       configRevision: this.configFingerprint(directory, local.workspaceDirectories),
       protocol: ENSEMBLE_PROTOCOL_VERSION,
       epoch: this.epochValue,
+      nativeSync: { ...this.nativeSync },
       counts: workspaceCounts(state),
       scopeVersions: this.store.scopeVersions(),
       gate: this.tier3Gate(state),
@@ -1615,6 +1685,7 @@ export class EnsembleV2Service {
       configRevision: this.configFingerprint(directory, this.activeWorkspaceDirectories(state)),
       protocol: ENSEMBLE_PROTOCOL_VERSION,
       epoch: this.epochValue,
+      nativeSync: { ...this.nativeSync },
     }
     if (this.lastConfigError) payload.configError = this.lastConfigError
     if (this.catalog.lastError) payload.modelsError = this.catalog.lastError
@@ -1723,9 +1794,6 @@ export class EnsembleV2Service {
     return {
       ...state,
       messages: {},
-      // Direct-chat transcripts are native-session detail and unread by the
-      // TUI; scoped reads never carry that unbounded history.
-      dmTranscripts: {},
       subtasks,
       runs: Object.fromEntries(this.activeRuns),
     }
@@ -1925,7 +1993,7 @@ export class EnsembleV2Service {
     return jsonSafe(payload)
   }
 
-  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; recoveries: Array<{ taskID: string; from?: string; to?: string; reason?: string; at?: number }>; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; recoveries: Array<{ taskID: string; from?: string; to?: string; reason?: string; at?: number }>; native: { sync: NativeSyncStatus; watchdog: { maxPasses: number; turns: Record<string, { passes: number; lastActivityAt?: number; held?: boolean }> } }; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
     await this.store.sync()
     this.refreshDmClock()
     this.noteViewDirectory(directory)
@@ -1960,6 +2028,23 @@ export class EnsembleV2Service {
         groups: Object.values(state.dispatchGroups).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)),
       },
       recoveries,
+      // Ticket #218: in-memory native support facts only. The sync label is a
+      // state/reason code; the watchdog map carries turn ids, pass counts, and
+      // whether a background child currently holds the turn.
+      native: {
+        sync: { ...this.nativeSync },
+        watchdog: {
+          maxPasses: this.nativeTurnWatchdogMaxPasses,
+          turns: Object.fromEntries([...this.nativeWatchdog].map(([turnID, state]) => [
+            turnID,
+            {
+              passes: state.passes,
+              lastActivityAt: state.lastActivityAt,
+              ...(this.nativeDeferredSettlements.has(turnID) ? { held: true } : {}),
+            },
+          ])),
+        },
+      },
       ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
       ...(this.logger ? { logs: this.logger.stats() } : {}),
       service: {
@@ -1979,7 +2064,7 @@ export class EnsembleV2Service {
     // reports its suppressed total to the viewer instead of losing it.
     this.feedResetLimiter.flush()
     const levels = ["error", "warn", "info", "debug", "trace"]
-    const categories = ["service", "task", "retry", "approval", "message", "feed", "refresh", "tui", "host", "dispatch", "failure"]
+    const categories = ["service", "task", "retry", "approval", "message", "feed", "refresh", "tui", "host", "dispatch", "failure", "native"]
     if (input.level && !levels.includes(input.level)) throw invalidInput(`level must be one of ${levels.join(", ")}.`)
     if (input.cat && !categories.includes(input.cat)) throw invalidInput(`cat must be one of ${categories.join(", ")}.`)
     const entries = logger.recent({
@@ -2338,10 +2423,6 @@ export class EnsembleV2Service {
     }
   }
 
-  private dmChannelReads(): DmChannelReadMode {
-    return this.dmChannelReadsOption ?? dmChannelReadMode()
-  }
-
   /** True while this native session is serving a live run or direct prompt. */
   private isSessionBusy(sessionID: string): boolean {
     return this.directBusy.has(sessionID) || [...this.activeRuns.values()].some((run) => run.sessionID === sessionID)
@@ -2356,33 +2437,29 @@ export class EnsembleV2Service {
         .filter((entry) => entry.id && entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID))
         .map((entry) => entry.id),
     )
-    // Ticket #77 root cause of permanently-grey sent lines: the stored DM
-    // line keeps `queued: true` after it was flushed, and `|| message.queued`
-    // made that stale bit outrank the queue's own truth. The queue entry is
+    // Ticket #77 root cause of permanently-grey sent lines: a stored line's
+    // own `queued` bit could outrank the queue's truth. The queue entry is
     // authoritative: a line is queued exactly while its entry is still
     // `queued`; sent/failed/removed entries mean the line renders as sent.
-    // Ticket #212: flag-on reads the same durable channel rows as group
-    // messages, projecting any pre-migration legacy lines behind them.
+    // Ticket #226: every direct read uses the conversation channel.
     // Ticket #215: once native-first is `on`, a direct conversation reads its
-    // durable channel and never polls the native transcript. The old merge
-    // path remains available whenever the flag is off or shadowed.
+    // durable channel and never polls the native transcript. Before the
+    // cutover, native assistant text still comes from the session transcript.
     const nativeDurable = nativeFirstMode(this.store.settings()) === "on"
       && (target.conversation.kind === "direct" || target.conversation.kind === "home")
     const channel = directMessageChannelForBinding(target.bindingKeyID, agent.id)
-    const legacy = this.store.dmTranscript(target.bindingKeyID, agent.id)
-    const storedBase = nativeDurable || this.dmChannelReads() === "on"
-      ? projectDirectLines(
-          this.store
-            .messages(channel)
-            .map((message) => chatLineFromMessage(message, agent.name)),
-          legacy,
-        )
-      : legacy
-    const stored = storedBase.map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
+    // The channel supplies stored user and system rows before the cutover.
+    // Native agent rows are skipped there so a rollback never duplicates an
+    // answer that the session transcript still provides.
+    const stored = this.store
+      .messages(channel)
+      .filter((message) => nativeDurable || message.author !== "agent" || !message.native)
+      .map((message) => chatLineFromMessage(message, agent.name))
+      .map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
     const native = nativeDurable ? [] : mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
     const messages = mergeDmTranscript(stored, native)
     const busy = this.isSessionBusy(target.sessionID)
-    const queued = this.store.dmQueue().filter((entry) => entry.agentID === agent.id && entry.status === "queued" && (entry.workspaceID ?? "home") === (target.bindingKeyID === "home" ? "home" : target.bindingKeyID)).length
+    const queued = queuedIDs.size
     // Ticket #214: the direct surface labels the native context it is bound
     // to. `sharedSession` marks the pre-cutover rollback, where direct chat is
     // still served by the group session.
@@ -2515,7 +2592,7 @@ export class EnsembleV2Service {
       correlationID,
       ...(attachments.length > 0 ? { attachments } : {}),
     }
-    await this.store.saveDmMessage(workspaceKey, agent.id, line)
+    await this.store.saveDirectMessage(workspaceKey, agent.id, line)
     if (busy) {
       const entry: DmQueueEntry = {
         id: line.id,
@@ -2569,7 +2646,7 @@ export class EnsembleV2Service {
     const targets = id ? queued.filter((entry) => entry.id === id) : queued.slice(0, 1)
     for (const entry of targets) {
       await this.store.removeDmQueueEntry(entry.id)
-      await this.store.removeDmMessage(workspaceKey, agent.id, entry.id)
+      await this.store.removeDirectMessage(workspaceKey, agent.id, entry.id)
     }
     return { removed: targets.length }
   }
@@ -2588,7 +2665,13 @@ export class EnsembleV2Service {
     if (!home) return { moved: false }
     await this.ctx.session.move({ sessionID: home.sessionID, directory: workspace.directory })
     await this.store.removeBinding("home", agent.id)
-    await this.store.moveDmTranscript("home", agent.id, workspace.id)
+    // The pre-cutover move keeps the visible direct history by relocating its
+    // unified channel. The native-first cutover path below deliberately keeps
+    // the home channel on its own conversation (ticket #214).
+    await this.store.moveDirectChannel(
+      directMessageChannelForBinding("home", agent.id),
+      directMessageChannelForBinding(workspace.id, agent.id),
+    )
     this.refreshDmClock()
     await this.store.saveBinding({ workspaceID: workspace.id, agentID: agent.id, sessionID: home.sessionID, kind: "workspace", directory: workspace.directory, agentVersion: agent.version, updatedAt: now() })
     agent.homeSessionID = undefined
@@ -2693,8 +2776,6 @@ export class EnsembleV2Service {
         entry.status = "failed"
       }
       await this.store.saveDmQueueEntry(entry)
-      const stored = this.store.dmTranscript(workspaceKey, agentID).find((message) => message.id === entry.id)
-      if (stored) await this.store.saveDmMessage(workspaceKey, agentID, { ...stored, queued: false })
     }
   }
 
@@ -3008,6 +3089,12 @@ export class EnsembleV2Service {
       }).catch(() => undefined)
     } else {
       await this.store.saveBinding(binding)
+    }
+    // Ticket #218: adoption reconciles the adopted session once before the
+    // visible heads-up, so missed turns or rows from before the bind are
+    // recovered under the new conversation identity.
+    if (nativeFirstMode(this.store.settings()) === "on") {
+      await this.reconcileNativeSession(session.sessionID, "adoption").catch(() => undefined)
     }
     await this.clearPendingSettings(agent.id)
 
@@ -8286,7 +8373,7 @@ export class EnsembleV2Service {
 
     if (workspace) {
       for (const route of plan.routes) {
-        await this.createPeerTurn({
+        const routed = await this.createPeerTurn({
           workspace,
           parentID: task.id,
           assigneeID: route.agentID,
@@ -8299,6 +8386,8 @@ export class EnsembleV2Service {
         this.logger?.event("info", "native", "native.route.created", {
           sessionID: task.native?.sessionID,
           turnID: task.id,
+          inboxID: task.native?.inboxID,
+          routeTaskID: routed.subtask.id,
           source: "native-user",
           agentID: route.agentID,
         })
@@ -8501,6 +8590,12 @@ export class EnsembleV2Service {
 
   private nativeTurnByInbox(inboxID: string): Subtask | undefined {
     return Object.values(this.store.read().subtasks).find((task) => isNativeTurn(task) && task.native?.inboxID === inboxID)
+  }
+
+  private nativeTurnByInboxForSession(sessionID: string, inboxID: string): Subtask | undefined {
+    return Object.values(this.store.read().subtasks).find(
+      (task) => isNativeTurn(task) && task.native?.sessionID === sessionID && task.native?.inboxID === inboxID,
+    )
   }
 
   private nativeTurnByAssistant(assistantMessageID: string): Subtask | undefined {
@@ -8936,23 +9031,25 @@ export class EnsembleV2Service {
   }
 
   /**
-   * Find (or lazily start) the turn a text event belongs to. Identity is the
-   * assistant message id; the session's active turn is only the fallback for
-   * the first event of a turn. A settled turn is returned for an idempotent
-   * no-op but never becomes the active marker again.
+   * Find (or lazily start) the turn a text event belongs to. Identity wins: a
+   * recorded assistant message id resolves to its own turn, even when another
+   * turn is currently active. A late text event for a settled turn therefore
+   * returns that settled turn and never attaches to the next turn or pins the
+   * active marker (ticket #218, #215 review).
    */
   private async nativeTextTurn(sessionID: string, assistantMessageID: string, at: number): Promise<Subtask | undefined> {
     // Text from a skipped internal execution belongs to that service prompt,
     // never to a user turn queued behind it.
     if (this.nativeExecutionOwner.get(sessionID) === "skip") return undefined
-    const active = this.nativeActiveTurnTurn(sessionID)
-    if (active) return active
     const mapped = this.nativeAssistantTurns.get(assistantMessageID)
     const known = mapped ? this.store.subtask(mapped) : this.nativeTurnByAssistant(assistantMessageID)
-    if (known) {
-      if (isNativeTurn(known) && nativePhaseOpen(known.native?.phase)) this.nativeActiveTurn.set(sessionID, known.id)
+    if (known && isNativeTurn(known)) {
+      if (!nativePhaseOpen(known.native?.phase)) return known
+      this.nativeActiveTurn.set(sessionID, known.id)
       return known
     }
+    const active = this.nativeActiveTurnTurn(sessionID)
+    if (active) return active
     // Reordered text for a skipped service prompt must not start a native turn
     // queued behind it.
     const head = this.nativeInboxOrder.get(sessionID)?.[0]
@@ -9166,6 +9263,473 @@ export class EnsembleV2Service {
     this.nativeRows.delete(turnID)
   }
 
+  /**
+   * Ticket #218: set the operator-visible native sync state. Only a state or
+   * reason change is logged, with ids/counts/reason codes and never content.
+   */
+  private setNativeSync(state: NativeSyncState, reason?: string): void {
+    const nextReason = state === "live" ? undefined : reason
+    if (this.nativeSync.state === state && this.nativeSync.reason === nextReason) return
+    this.nativeSync.state = state
+    if (nextReason) this.nativeSync.reason = nextReason
+    else delete this.nativeSync.reason
+    this.logger?.event(state === "degraded" ? "warn" : "debug", "native", "native.sync", {
+      state,
+      ...(nextReason ? { reason: nextReason } : {}),
+    })
+  }
+
+  private beginNativeReconcile(reason: NativeReconcileReason): void {
+    this.nativeReconcilePending += 1
+    if (this.nativeReconcilePending !== 1) return
+    this.nativeReconcileFailures = 0
+    this.setNativeSync("reconciling", reason)
+  }
+
+  private endNativeReconcile(ok: boolean, reason: string): void {
+    if (!ok) this.nativeReconcileFailures += 1
+    this.nativeReconcilePending = Math.max(0, this.nativeReconcilePending - 1)
+    if (this.nativeReconcilePending > 0) return
+    const failures = this.nativeReconcileFailures
+    this.nativeReconcileFailures = 0
+    if (failures > 0) this.setNativeSync("degraded", reason)
+    else this.setNativeSync("live")
+  }
+
+  /**
+   * Ticket #218: one bounded transcription reconciliation pass over every
+   * bound session, optionally restricted to one location's reconnect. It is
+   * called on service start, a location re-attach, and adoption only; it is
+   * never part of a snapshot, heartbeat, or steady-state loop.
+   */
+  private async reconcileNativeBindings(
+    reason: Exclude<NativeReconcileReason, "watchdog">,
+    options: { directory?: string } = {},
+  ): Promise<void> {
+    if (this.stopped) return
+    if (nativeFirstMode(this.store.settings()) !== "on") {
+      if (reason === "start") await this.recoverNativeTurns()
+      return
+    }
+    const bindings = this.store.bindings().filter((binding) => binding.sessionID)
+    const sessions = [...new Set(bindings.map((binding) => binding.sessionID))]
+    if (sessions.length === 0) {
+      this.setNativeSync("live")
+      return
+    }
+    this.logger?.event("debug", "native", "native.reconcile.start", {
+      reason,
+      sessions: sessions.length,
+      scope: options.directory ? "location" : "all",
+    })
+    const results = await Promise.all(sessions.map((sessionID) => this.reconcileNativeSession(sessionID, reason)))
+    const failures = results.filter((result) => !result.ok).length
+    this.logger?.event(failures > 0 ? "warn" : "info", "native", "native.reconcile.done", {
+      reason,
+      sessions: sessions.length,
+      failures,
+    })
+  }
+
+  /**
+   * Reconcile one session once. The run is serialized behind that session's
+   * ingestion queue, so a transcript read cannot interleave with host events.
+   * Concurrent triggers coalesce into the run already in flight.
+   */
+  private reconcileNativeSession(
+    sessionID: string,
+    reason: NativeReconcileReason,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const existing = this.nativeReconcileRuns.get(sessionID)
+    if (existing) return existing
+    let run!: Promise<{ ok: boolean; reason?: string }>
+    run = (async () => {
+      const previous = this.nativeQueues.get(sessionID) ?? Promise.resolve()
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      this.nativeQueues.set(sessionID, gate)
+      try {
+        await previous
+        if (this.stopped) return { ok: true }
+        return await this.runNativeReconcile(sessionID, reason)
+      } catch (error) {
+        this.logger?.event("warn", "native", "native.turn.reconcile.error", {
+          sessionID,
+          reason,
+          errorCode: nativeErrorCode(error),
+        })
+        return { ok: false, reason: "reconcile-failed" }
+      } finally {
+        release()
+        if (this.nativeQueues.get(sessionID) === gate) this.nativeQueues.delete(sessionID)
+        if (this.nativeReconcileRuns.get(sessionID) === run) this.nativeReconcileRuns.delete(sessionID)
+      }
+    })()
+    this.nativeReconcileRuns.set(sessionID, run)
+    return run
+  }
+
+  private async runNativeReconcile(
+    sessionID: string,
+    reason: NativeReconcileReason,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const target = this.nativeIngestTarget(sessionID, { requireMode: false })
+    if (!target) return { ok: true }
+    if (nativeFirstMode(this.store.settings()) !== "on") return { ok: true }
+    this.beginNativeReconcile(reason)
+    try {
+      const messages = await this.nativeContextMessagesForSession(sessionID, reason)
+      if (!messages) {
+        this.endNativeReconcile(false, "context-read")
+        return { ok: false, reason: "context-read" }
+      }
+      const counts = await this.applyNativeReconciliation(sessionID, target, messages, reason)
+      this.endNativeReconcile(true, reason)
+      this.logger?.event("info", "native", "native.reconcile.session", {
+        sessionID,
+        reason,
+        ...counts,
+      })
+      return { ok: true }
+    } catch (error) {
+      this.endNativeReconcile(false, "reconcile-failed")
+      throw error
+    }
+  }
+
+  /**
+   * Apply one transcript snapshot. Identity is the host inbox id; assistant
+   * text belongs to the turn opened by the preceding user/synthetic message.
+   * A missing turn or row is recreated deterministically, a terminal turn with
+   * a missing result is repaired, and an answerless turn is interrupted only
+   * when the transcript's idle marker confirms settlement.
+   */
+  private async applyNativeReconciliation(
+    sessionID: string,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    messages: readonly any[],
+    reason: NativeReconcileReason,
+  ): Promise<NativeReconcileCounts> {
+    const counts: NativeReconcileCounts = {
+      turns: 0,
+      recoveredTurns: 0,
+      recoveredUserMessages: 0,
+      recoveredAssistantMessages: 0,
+      repairedResults: 0,
+      interrupted: 0,
+      skipped: 0,
+    }
+    const at = now()
+    const matched = new Set<string>()
+    const openBefore = Object.values(this.store.read().subtasks).filter(
+      (task) => isNativeTurn(task) && task.native?.sessionID === sessionID && nativePhaseOpen(task.native?.phase),
+    )
+    for (const group of nativeContextTurnGroups(messages)) {
+      counts.turns += 1
+      const prompt = { metadata: group.metadata }
+      if (nativePromptSkipsTurn(prompt)) {
+        counts.skipped += 1
+        continue
+      }
+      const internal = nativePromptIsInternal(prompt)
+      const managedID = typeof group.metadata?.[NATIVE_MESSAGE_ID_METADATA] === "string"
+        ? String(group.metadata[NATIVE_MESSAGE_ID_METADATA])
+        : undefined
+      const managedRow = managedID ? this.store.message(target.channel, managedID) : undefined
+      // A service prompt with no durable row is identity/onboarding copy and
+      // owns no Ensemble turn.
+      if (internal && !managedRow) {
+        counts.skipped += 1
+        continue
+      }
+      const turnID = nativeTurnID(sessionID, group.inboxID)
+      let task = this.store.subtask(turnID) ?? this.nativeTurnByInboxForSession(sessionID, group.inboxID)
+      if (!task) {
+        task = await this.createReconciledNativeTurn(sessionID, target, group, at)
+        counts.recoveredTurns += 1
+        this.logger?.event("info", "native", "native.turn.recovered", {
+          sessionID,
+          turnID,
+          inboxID: group.inboxID,
+          reason: "missing-enqueue",
+        })
+      }
+      matched.add(task.id)
+      task = await this.mergeReconciledAssistantIDs(task, group, at)
+      if (group.itemType === "user") {
+        const rowID = internal && managedRow ? managedRow.id : nativeUserMessageID(group.inboxID)
+        const row = this.store.message(target.channel, rowID)
+        if (!row) {
+          await this.store.saveChannelMessage(target.channel, {
+            id: rowID,
+            author: "user",
+            text: group.text,
+            kind: "text",
+            taskID: task.id,
+            createdAt: group.createdAt ?? task.createdAt,
+            native: { sessionID, inboxID: group.inboxID, turnID: task.id },
+          })
+          counts.recoveredUserMessages += 1
+          this.logger?.event("info", "native", "native.message.recovered", {
+            sessionID,
+            turnID: task.id,
+            inboxID: group.inboxID,
+            messageID: rowID,
+            author: "user",
+            reason: "missing-row",
+          })
+        } else if (internal && managedRow && (row.taskID !== task.id || row.native?.turnID !== task.id)) {
+          const linked = this.store.cloneMessage(target.channel, row.id)!
+          linked.taskID = task.id
+          linked.native = { sessionID, inboxID: group.inboxID, turnID: task.id }
+          await this.store.saveMessage(linked)
+          counts.recoveredUserMessages += 1
+        }
+      }
+      const phase = task.native?.phase
+      if (nativePhaseOpen(phase)) {
+        if (group.hasAssistant && group.assistantText) {
+          if (this.nativeTurnIsLive(sessionID, task, group, at)) {
+            this.adoptReconciledPendingTurn(sessionID, task)
+            continue
+          }
+          const rowExisted = this.store.message(target.channel, nativeAssistantMessageID(task.id)) !== undefined
+          this.seedNativeRecoveredAnswer(task, group.assistantText)
+          await this.settleNativeTurn(task, target, "succeeded", at)
+          if (!rowExisted) {
+            counts.recoveredAssistantMessages += 1
+            this.logger?.event("info", "native", "native.message.recovered", {
+              sessionID,
+              turnID: task.id,
+              inboxID: group.inboxID,
+              assistantMessageID: group.assistantMessageIDs.at(-1),
+              author: "agent",
+              reason: "missing-result",
+            })
+          }
+          continue
+        }
+        if (group.hasAssistant && group.settled) {
+          // Tool-only success: no text row is the honest result.
+          if (this.nativeTurnIsLive(sessionID, task, group, at)) {
+            this.adoptReconciledPendingTurn(sessionID, task)
+            continue
+          }
+          this.seedNativeRecoveredAnswer(task, "")
+          await this.settleNativeTurn(task, target, "succeeded", at)
+          continue
+        }
+        if (group.settled) {
+          if (!this.nativeTurnIsLive(sessionID, task, group, at)) {
+            await this.markNativeInterrupted(task, "reconcile-no-answer")
+            counts.interrupted += 1
+          }
+          continue
+        }
+        // No terminal evidence yet: keep the turn open, but make any later
+        // host event attach to the same recovered inbox.
+        this.adoptReconciledPendingTurn(sessionID, task)
+        continue
+      }
+      if (await this.repairNativeTerminalResult(task, target, group, at)) {
+        counts.repairedResults += 1
+      }
+    }
+    // Existing open turns are the restart/reconnect input even when they use a
+    // pre-reconciliation id rather than the deterministic inbox id. Recover
+    // them from the same one transcript read; identity still wins.
+    for (const task of openBefore) {
+      if (matched.has(task.id) || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) continue
+      const answer = nativeContextTurnAnswer(messages, {
+        ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+        assistantMessageIDs: task.native?.assistantMessageIDs ?? [],
+      })
+      if (answer !== undefined) {
+        const rowExisted = this.store.message(target.channel, nativeAssistantMessageID(task.id)) !== undefined
+        this.seedNativeRecoveredAnswer(task, answer)
+        await this.settleNativeTurn(task, target, "succeeded", at)
+        if (!rowExisted) counts.recoveredAssistantMessages += 1
+      } else if (nativeContextTurnSettled(messages, task.native?.inboxID)) {
+        await this.markNativeInterrupted(task, "reconcile-no-answer")
+        counts.interrupted += 1
+      } else {
+        this.adoptReconciledPendingTurn(sessionID, task)
+      }
+    }
+    if (counts.recoveredTurns + counts.recoveredUserMessages + counts.recoveredAssistantMessages + counts.repairedResults + counts.interrupted > 0) {
+      this.logger?.event("info", "native", "native.turn.reconcile.summary", {
+        sessionID,
+        reason,
+        ...counts,
+      })
+    }
+    return counts
+  }
+
+  /** Recreate one turn from context using the same deterministic ids as events. */
+  private async createReconciledNativeTurn(
+    sessionID: string,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    group: NativeContextTurn,
+    at: number,
+  ): Promise<Subtask> {
+    const phase: NonNullable<Subtask["native"]>["phase"] = group.hasAssistant ? "working" : "queued"
+    const turnID = nativeTurnID(sessionID, group.inboxID)
+    const task: Subtask = {
+      id: turnID,
+      workspaceID: target.channel,
+      creatorType: "user",
+      assigneeID: target.agent.id,
+      title: nativeTurnTitle(group.text),
+      instruction: group.text,
+      mode: "research",
+      state: group.hasAssistant ? "working" : "pending",
+      stage: "initial",
+      outcome: "pending",
+      interrupted: false,
+      awaitingChildren: false,
+      attempts: 0,
+      createdAt: group.createdAt ?? at,
+      workKind: "turn",
+      origin: "native",
+      adopted: true,
+      conversationID: target.channel,
+      dispatchGroupID: nativeTurnGroupID(turnID),
+      native: {
+        sessionID,
+        inboxID: group.inboxID,
+        assistantMessageIDs: [...group.assistantMessageIDs],
+        phase,
+        ...(group.hasAssistant ? { startedAt: at } : {}),
+      },
+    }
+    if (target.conversation.kind === "workspace") {
+      await this.ensureDispatchGroupLedger(task.dispatchGroupID, target.channel)
+    }
+    await this.store.saveSubtask(task)
+    return task
+  }
+
+  /** Merge assistant identities discovered in context into the durable turn. */
+  private async mergeReconciledAssistantIDs(task: Subtask, group: NativeContextTurn, at: number): Promise<Subtask> {
+    const existing = task.native?.assistantMessageIDs ?? []
+    const missing = group.assistantMessageIDs.filter((assistantID) => !existing.includes(assistantID))
+    if (missing.length === 0) return task
+    const next = this.store.cloneSubtask(task.id) ?? { ...task }
+    next.native = {
+      ...next.native!,
+      assistantMessageIDs: [...existing, ...missing],
+      ...(next.native!.startedAt === undefined ? { startedAt: at } : {}),
+    }
+    if (next.native.phase === "queued") {
+      next.native.phase = "working"
+      next.state = "working"
+      next.outcome = "pending"
+    }
+    await this.store.saveSubtask(next)
+    return next
+  }
+
+  /**
+   * A turn with a recorded local/held execution, or one whose last host event
+   * is still inside the watchdog bound, may still be running. A transcript
+   * idle marker overrides that: it is terminal evidence.
+   */
+  private nativeTurnIsLive(sessionID: string, task: Subtask, group: NativeContextTurn, at: number): boolean {
+    if (group.settled) return false
+    if (this.nativeDeferredSettlements.has(task.id)) return true
+    if (this.nativeActiveTurnTurn(sessionID)?.id === task.id) return true
+    const watchdog = this.nativeWatchdog.get(task.id)
+    return watchdog !== undefined && at - watchdog.lastActivityAt < this.nativeTurnWatchdogMs
+  }
+
+  private adoptReconciledPendingTurn(sessionID: string, task: Subtask): void {
+    const inboxID = task.native?.inboxID
+    if (!inboxID) return
+    this.rememberNativeInbox(sessionID, inboxID, true)
+    const pending = this.nativePendingInboxes.get(sessionID) ?? []
+    if (!pending.includes(inboxID)) pending.push(inboxID)
+    this.nativePendingInboxes.set(sessionID, pending)
+    this.touchNativeWatchdog(task.id)
+  }
+
+  /**
+   * Repair a terminal turn whose result row is missing, streaming, empty, or
+   * drifted. The native context is authoritative; identity and ids are never
+   * guessed from time.
+   */
+  private async repairNativeTerminalResult(
+    task: Subtask,
+    target: { channel: string; agent: Agent },
+    group: NativeContextTurn,
+    at: number,
+  ): Promise<boolean> {
+    const text = group.assistantText
+    const rowID = nativeAssistantMessageID(task.id)
+    const declaredID = task.native?.resultMessageID
+    const declared = declaredID ? this.store.message(target.channel, declaredID) : undefined
+    const deterministic = this.store.message(target.channel, rowID)
+    const row = declared ?? deterministic
+    if (!text) {
+      // A dangling result reference is worse than no reference. The doctor
+      // reports a terminal turn with no answer separately.
+      if (declaredID && !declared) {
+        const next = this.store.cloneSubtask(task.id) ?? { ...task }
+        next.native = { ...next.native!, resultMessageID: undefined }
+        next.resultMessageID = undefined
+        await this.store.saveSubtask(next)
+        return true
+      }
+      return false
+    }
+    if (row && row.streaming !== true && row.text === text && declaredID === row.id) return false
+    let repaired: Message | undefined
+    if (row) {
+      this.dropStream(row)
+      const next = this.store.cloneMessage(target.channel, row.id)!
+      next.streaming = false
+      next.text = text
+      next.updatedAt = at
+      next.interrupted = task.native?.phase === "interrupted"
+      await this.store.saveMessage(next)
+      repaired = next
+    } else {
+      repaired = await this.store.saveChannelMessage(target.channel, {
+        id: rowID,
+        author: "agent",
+        agentID: target.agent.id,
+        text,
+        kind: "text",
+        taskID: task.id,
+        streaming: false,
+        createdAt: group.createdAt ?? task.createdAt,
+        updatedAt: at,
+        interrupted: task.native?.phase === "interrupted",
+        native: {
+          sessionID: task.native!.sessionID,
+          turnID: task.id,
+          ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+          ...(group.assistantMessageIDs.length > 0 ? { assistantMessageID: group.assistantMessageIDs.at(-1) } : {}),
+        },
+      })
+    }
+    if (!repaired) return false
+    const next = this.store.cloneSubtask(task.id) ?? { ...task }
+    next.native = { ...next.native!, resultMessageID: repaired.id }
+    next.resultMessageID = repaired.id
+    await this.store.saveSubtask(next)
+    this.logger?.event("info", "native", "native.turn.result.repaired", {
+      sessionID: next.native.sessionID,
+      turnID: next.id,
+      inboxID: next.native.inboxID,
+      assistantMessageID: group.assistantMessageIDs.at(-1),
+      messageID: repaired.id,
+      phase: next.native.phase,
+      reason: "missing-result",
+    })
+    return true
+  }
+
   /** Read one bound session's transcript once, only as a reconciliation input. */
   private async nativeContextRead(task: Subtask): Promise<string | undefined> {
     const messages = await this.nativeContextMessages(task)
@@ -9182,15 +9746,28 @@ export class EnsembleV2Service {
     return answer
   }
 
-  private async nativeContextMessages(task: Subtask): Promise<any[] | undefined> {
-    const sessionID = task.native?.sessionID
-    if (!sessionID) return undefined
+  private async nativeContextMessagesForSession(
+    sessionID: string,
+    reason: NativeReconcileReason,
+    turnID?: string,
+  ): Promise<any[] | undefined> {
     try {
       return listData(await this.ctx.session.context({ sessionID }))
     } catch (error) {
-      this.logger?.event("warn", "native", "native.turn.reconcile.error", { sessionID, turnID: task.id, error })
+      this.logger?.event("warn", "native", "native.turn.reconcile.error", {
+        sessionID,
+        ...(turnID ? { turnID } : {}),
+        reason,
+        errorCode: nativeErrorCode(error),
+      })
       return undefined
     }
+  }
+
+  private async nativeContextMessages(task: Subtask): Promise<any[] | undefined> {
+    const sessionID = task.native?.sessionID
+    if (!sessionID) return undefined
+    return this.nativeContextMessagesForSession(sessionID, "watchdog", task.id)
   }
 
   /**
@@ -9215,8 +9792,13 @@ export class EnsembleV2Service {
       state.lastActivityAt = at
       const target = this.nativeIngestTarget(task.native!.sessionID, { requireMode: false })
       if (!target || target.channel !== task.conversationID) continue
+      this.beginNativeReconcile("watchdog")
       const messages = await this.nativeContextMessages(task)
-      if (!messages) continue
+      if (!messages) {
+        this.endNativeReconcile(false, "context-read")
+        continue
+      }
+      this.endNativeReconcile(true, "watchdog")
       const answer = nativeContextTurnAnswer(messages, {
         ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
         assistantMessageIDs: task.native?.assistantMessageIDs ?? [],
@@ -9485,16 +10067,29 @@ export class EnsembleV2Service {
     for (const task of open) {
       const target = this.nativeIngestTarget(task.native!.sessionID, { requireMode: false })
       if (!target || target.channel !== task.conversationID) {
-        await this.markNativeInterrupted(task)
+        await this.markNativeInterrupted(task, "unbound-session")
         continue
       }
-      const answer = await this.nativeContextRead(task)
+      const messages = await this.nativeContextMessages(task)
+      if (!messages) continue
+      const answer = nativeContextAnswer(messages, {
+        ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+        assistantMessageIDs: task.native?.assistantMessageIDs ?? [],
+      })
+      this.logger?.event("debug", "native", "native.turn.reconciled", {
+        sessionID: task.native?.sessionID,
+        turnID: task.id,
+        found: answer !== undefined,
+        confirmed: answer === undefined ? nativeContextTurnSettled(messages, task.native?.inboxID) : undefined,
+      })
       if (answer !== undefined) {
         // The in-memory parts are gone after restart; rebuild only the final.
         this.seedNativeRecoveredAnswer(task, answer)
         await this.settleNativeTurn(task, target, "succeeded", now())
-      } else {
-        await this.markNativeInterrupted(task)
+      } else if (nativeContextTurnSettled(messages, task.native?.inboxID)) {
+        // Reconciliation confirmed the host settled this turn without an
+        // answer. Time alone never interrupts (ticket #218, ADR 0010 §7).
+        await this.markNativeInterrupted(task, "restart-no-answer")
       }
     }
   }

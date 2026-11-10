@@ -525,3 +525,36 @@ test("adoption is idempotent for the conversation's current session", async () =
     await harness.close()
   }
 })
+
+test("ticket218: adoption reconciles the adopted session once and recovers its missing turn", async () => {
+  const harness = await setup()
+  try {
+    await harness.invoke("settings.update", { nativeFirst: "on" })
+    harness.nativeSessions.set("s_adopted", sessionInfo("s_adopted", harness.workspace))
+    let contextCalls = 0
+    ;(harness.ctx.session as any).context = async (): Promise<{ data: any[] }> => {
+      contextCalls += 1
+      return {
+        data: [
+          { id: "m1", type: "user", content: [{ type: "text", text: "Adopted question" }], time: { created: Date.now() - 1_000 } },
+          { id: "m2", type: "assistant", content: [{ type: "text", text: "Adopted answer" }], time: { created: Date.now() - 900 } },
+          { type: "idle" },
+        ],
+      }
+    }
+    const adopted = await harness.invoke("session.adopt", {
+      agentID: "a", conversation: "direct", workspaceID: "w", sessionID: "s_adopted",
+    })
+    assert.equal(adopted.ok, true)
+    assert.equal(contextCalls, 1, "adoption reconciles the new binding once")
+    const snapshot = await harness.handlers.snapshot({ directory: harness.directory })
+    const turn = Object.values(snapshot.state.subtasks).find((task: any) => task.origin === "native") as any
+    assert.ok(turn, "adoption recovers the missing native turn")
+    assert.equal(turn.native.phase, "replied")
+    const rows = snapshot.state.messages["dm:a:w"] ?? []
+    assert.equal(rows.find((message: any) => message.author === "user")!.text, "Adopted question")
+    assert.equal(rows.find((message: any) => message.author === "agent")!.text, "Adopted answer")
+  } finally {
+    await harness.close()
+  }
+})

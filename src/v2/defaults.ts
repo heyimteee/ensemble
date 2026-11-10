@@ -28,7 +28,6 @@ export function createInitialState(): SnapshotState {
     memories: {},
     approvals: {},
     dmQueue: {},
-    dmTranscripts: {},
     settings: { ...DEFAULT_SETTINGS },
     ui: {},
     runs: {},
