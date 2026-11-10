@@ -656,6 +656,13 @@ export type Settings = {
    * User/operator-owned; agents cannot write settings.
    */
   nativeMentionRouting?: boolean
+  /**
+   * Tool-surface migration setting (ticket #225): `native` keeps only the
+   * decision tools, `legacy` restores the one-release explicit surface. Unset
+   * follows the native-first mode: `on` selects `native`, `off`/`shadow`
+   * select `legacy`.
+   */
+  toolSurface?: "native" | "legacy"
   /** Dispatch budget tiers (ticket #160); captured by each new root group. */
   dispatchGroupMaxHops: number
   dispatchCommandMaxHops: number

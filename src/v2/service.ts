@@ -5,7 +5,7 @@ import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, reconcileEnsembleInstructions, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
-import { ENSEMBLE_BLOCK_VERSION, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
+import { ENSEMBLE_BLOCK_VERSION, agentIdentity, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
@@ -82,6 +82,8 @@ import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingAct
 import { createLogRateLimiter, createLogger, defaultLogDirectory, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { createStoreObserver, dispatchGroupEvent, dispatchHopEvent } from "./log-events.ts"
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
+import { effectiveToolSurface, isToolSurface } from "./tool-surface.ts"
+import { ensembleTurnContext } from "./turn-context.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import { nativeFirstMode, isNativeFirstMode } from "./native-first.ts"
@@ -2146,21 +2148,7 @@ export class EnsembleV2Service {
   }
 
   private identityForAgent(agent: Agent): string {
-    return [
-      `<ensemble_persona name="${agent.name}">`,
-      agent.role || "You are a focused teammate.",
-      "</ensemble_persona>",
-      "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, and readable. Use Markdown.",
-      "For handoffs, write a Markdown file under .ensemble/handoffs with frontmatter (ensemble: handoff plus a task, a self-authored instruction for the recipient, and optional constraints, expected, and to) and call ensemble_handoff with its path, recipient, and required maxHops. The instruction is delegation: tell the recipient what to do, with what context, and what good looks like — in your own words, never a copy of the user's message; task stays the short display title. The hop is already queued — do not call ensemble_delegate after it (leader-only; would double-queue). Keep the chat reply short; your turn stays open until the answer arrives back in the group chat, so do not treat the ack as delivery.",
-      "Every ensemble_delegate and ensemble_handoff call requires maxHops: the number of direct dispatches the recipient may make. Use maxHops: 0 for a one-shot ask (the recipient may answer but cannot create new work). Your turn context shows task, group, command, and depth budgets; successful results show what remains. You cannot raise a ceiling. When a budget is exhausted, return your result to the leader; only the leader may open a linked continuation group with ensemble_delegate's continuationOf plus a required groupMaxHops tier. When the command or continuation cap is reached, ask the user to start a new command for a fresh budget.",
-      "Answer first: write your own answer in the group chat before handing off. A handoff forwards a completed result or clearly scoped work; it is never a substitute for answering your assignment.",
-      "A `/skill` token in a user message is a deliberate skill request. When it applies to your part, load that skill with the native skill tool rather than treating it as prose.",
-      "When a user message addresses multiple agents, handle only the part addressed to you. Do not delegate or duplicate another addressed agent's part; use ensemble_task_status and ensemble_workspace_info when you need coordination state.",
-      "End-of-turn handoff (mandatory): every non-leader turn must end with a handoff to another member — hand off explicitly with ensemble_handoff, or the server hands your finished turn to the workspace leader automatically and the group shows `Handed to $Name`. The leader may end turns normally or hand off voluntarily. A batch review turn lists every pending completion: decide each item with ensemble_review (delegate, start, end, or dismiss) — a delegate decision requires maxHops for the recipient — and the batch closes only when every item is decided; non-leaders hand it onward to the leader.",
-      "Use ensemble_workspace_info and ensemble_list_agents to see your teammates and workspace.",
-      "",
-      ensembleBlock(),
-    ].join("\n")
+    return agentIdentity(agent)
   }
 
   private async ensureHomeBinding(agent: Agent): Promise<{ sessionID: string; directory: string }> {
@@ -5524,6 +5512,14 @@ export class EnsembleV2Service {
       }
       patch.nativeMentionRouting = payload.nativeMentionRouting
     }
+    // Ticket #225: the tool-surface rollback is a closed setting. An unknown
+    // value is rejected so a typo cannot keep the old tools by accident.
+    if (payload.toolSurface !== undefined) {
+      if (!isToolSurface(payload.toolSurface)) {
+        throw Object.assign(new Error("toolSurface must be native or legacy."), { code: "invalid_settings" })
+      }
+      patch.toolSurface = payload.toolSurface
+    }
     // Ticket #160: the four dispatch limits are one validated set. A rejected
     // edit changes nothing; existing groups keep the caps they captured, so
     // only new commands observe the new values.
@@ -5548,7 +5544,22 @@ export class EnsembleV2Service {
       }
       Object.assign(patch, dispatchLimitSettings(validation.limits))
     }
-    return this.store.updateSettings(patch)
+    const settings = await this.store.updateSettings(patch)
+    // Ticket #225: registration is per host location, so a surface change must
+    // replace it in place; otherwise the rollback would wait for a restart.
+    if (patch.toolSurface !== undefined || patch.nativeFirst !== undefined) await this.refreshToolSurface()
+    return settings
+  }
+
+  /** Re-register every attached location after a tool-surface setting change. */
+  private async refreshToolSurface(): Promise<void> {
+    for (const ctx of [...this.toolRegistrations.keys()]) {
+      const handle = this.toolRegistrations.get(ctx)
+      this.toolRegistrations.delete(ctx)
+      try { await handle?.dispose?.() } catch {}
+      if (this.stopped) return
+      try { await this.installToolsFor(ctx) } catch {}
+    }
   }
 
   private toolSession(state: SnapshotState, sessionID: string): { workspace?: Workspace; agent?: Agent } {
@@ -5575,7 +5586,8 @@ export class EnsembleV2Service {
   async installToolsFor(ctx: any): Promise<HostRegistration> {
     const existing = this.toolRegistrations.get(ctx)
     if (existing) return existing
-    const registration = await ctx.tool.transform((editor: any) => registerEnsembleTools(editor, this.toolHandlers()))
+    const surface = effectiveToolSurface(this.store.settings())
+    const registration = await ctx.tool.transform((editor: any) => registerEnsembleTools(editor, this.toolHandlers(), surface))
     const handle = this.hostRegistration(registration, this.toolRegistrations, ctx)
     this.toolRegistrations.set(ctx, handle)
     return handle
@@ -9084,6 +9096,7 @@ export class EnsembleV2Service {
     if (this.nativeActiveTurn.get(sessionID) === task.id) {
       this.consumeNativeInbox(sessionID, task.native?.inboxID ?? "")
       if (task.native?.phase === "working") {
+        await this.injectNativeTurnContext(task, target)
         await this.ensureNativeAgentRow(task, target, at)
         return
       }
@@ -9091,7 +9104,51 @@ export class EnsembleV2Service {
     this.nativeActiveTurn.set(sessionID, task.id)
     this.consumeNativeInbox(sessionID, task.native?.inboxID ?? "")
     await this.ensureNativeTurnTask(task, at)
+    await this.injectNativeTurnContext(task, target)
     await this.ensureNativeAgentRow(task, target, at)
+  }
+
+  /**
+   * Ticket #225: replace the retired read-only roster tools with one compact
+   * per-turn block. The host applies instruction entries before the model
+   * turn; this is the same entry surface delegated runs already use.
+   */
+  private async injectNativeTurnContext(
+    task: Subtask,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+  ): Promise<void> {
+    const sessionID = task.native?.sessionID
+    if (!sessionID) return
+    const state = this.store.read()
+    const workspace = target.conversation.kind === "workspace"
+      ? state.workspaces[target.conversation.workspaceID]
+      : undefined
+    const group = task.dispatchGroupID ? state.dispatchGroups[task.dispatchGroupID] : undefined
+    const budget: DispatchBudgetState | undefined = workspace && group
+      ? dispatchBudgetState({
+          group,
+          groups: state.dispatchGroups,
+          task,
+          subtasks: state.subtasks,
+          nextDepth: dispatchDepthFor(task, state.subtasks),
+        })
+      : undefined
+    const value = ensembleTurnContext({
+      agent: target.agent,
+      conversation: {
+        kind: target.conversation.kind,
+        ...(workspace ? { workspaceID: workspace.id } : {}),
+      },
+      ...(workspace ? { workspace } : {}),
+      agents: state.agents,
+      routing: workspace !== undefined && state.settings.nativeMentionRouting !== false,
+      ...(budget ? { budget } : {}),
+    })
+    await this.ctx.session.instructions.entry.put({
+      sessionID,
+      key: "ensemble.v2.context",
+      value,
+    }).catch(() => undefined)
   }
 
   private async updateNativeTurn(task: Subtask, mutate: (next: Subtask) => void): Promise<Subtask> {

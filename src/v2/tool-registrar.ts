@@ -7,6 +7,7 @@
  * context without treating the first plugin context as the host authority.
  */
 import { DISPATCH_GROUP_TIERS } from "./dispatch-budget.ts"
+import type { ToolSurface } from "./tool-surface.ts"
 
 type Json = Record<string, any>
 
@@ -37,30 +38,45 @@ export type EnsembleToolEditor = {
   }): void
 }
 
-/** The one Ensemble toolset installed on each host location's context. */
-export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: EnsembleToolHandlers): void {
+/**
+ * The one Ensemble toolset installed on each host location's context.
+ *
+ * Ticket #225: the native surface is the default cutover. Read-only roster
+ * tools and `send_message` leave the list because the same facts arrive in
+ * `ensemble_turn` and the final native text routes `$Name` work. `delegate`
+ * and `handoff` stay on the legacy surface behind the migration setting until
+ * the native path has live loop and budget evidence. The legacy surface is the
+ * one-release rollback: it registers the pre-#225 list unchanged.
+ */
+export function registerEnsembleTools(
+  editor: EnsembleToolEditor,
+  handlers: EnsembleToolHandlers,
+  surface: ToolSurface = "native",
+): void {
   editor.namespace({ name: "ensemble", description: "Ensemble workspace collaboration." })
-  editor.add({
-    name: "workspace_info",
-    options: { namespace: "ensemble", codemode: false },
-    description: "Show the current Ensemble workspace, directory, leader, members, and paused state.",
-    input: { type: "object", properties: {}, additionalProperties: false },
-    execute: async (_input, context) => handlers.workspaceInfo(context),
-  })
-  editor.add({
-    name: "list_workspaces",
-    options: { namespace: "ensemble", codemode: false },
-    description: "List Ensemble workspaces and their directories, leaders, and members.",
-    input: { type: "object", properties: {}, additionalProperties: false },
-    execute: async () => handlers.listWorkspaces(),
-  })
-  editor.add({
-    name: "list_agents",
-    options: { namespace: "ensemble", codemode: false },
-    description: "List the Ensemble roster, workspace membership, and busy state.",
-    input: { type: "object", properties: {}, additionalProperties: false },
-    execute: async () => handlers.listAgents(),
-  })
+  if (surface === "legacy") {
+    editor.add({
+      name: "workspace_info",
+      options: { namespace: "ensemble", codemode: false },
+      description: "Show the current Ensemble workspace, directory, leader, members, and paused state.",
+      input: { type: "object", properties: {}, additionalProperties: false },
+      execute: async (_input, context) => handlers.workspaceInfo(context),
+    })
+    editor.add({
+      name: "list_workspaces",
+      options: { namespace: "ensemble", codemode: false },
+      description: "List Ensemble workspaces and their directories, leaders, and members.",
+      input: { type: "object", properties: {}, additionalProperties: false },
+      execute: async () => handlers.listWorkspaces(),
+    })
+    editor.add({
+      name: "list_agents",
+      options: { namespace: "ensemble", codemode: false },
+      description: "List the Ensemble roster, workspace membership, and busy state.",
+      input: { type: "object", properties: {}, additionalProperties: false },
+      execute: async () => handlers.listAgents(),
+    })
+  }
   editor.add({
     name: "task_status",
     options: { namespace: "ensemble", codemode: false },
@@ -68,52 +84,56 @@ export function registerEnsembleTools(editor: EnsembleToolEditor, handlers: Ense
     input: { type: "object", properties: { workspaceID: { type: "string" } }, additionalProperties: false },
     execute: async (input, context) => handlers.taskStatus(input, context),
   })
-  editor.add({
-    name: "send_message",
-    options: { namespace: "ensemble", codemode: false },
-    description: "Post a message to the group chat or queue a direct message to an agent.",
-    input: {
-      type: "object",
-      properties: { kind: { type: "string", enum: ["workspace", "agent"] }, id: { type: "string" }, text: { type: "string" } },
-      required: ["kind", "text"],
-      additionalProperties: false,
-    },
-    execute: async (input, context) => handlers.sendMessage(input, context),
-  })
-  editor.add({
-    name: "handoff",
-    options: { namespace: "ensemble", codemode: false },
-    description: "Queue a typed hop to a teammate with the required maxHops budget (0 = one-shot ask); the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate. Write a self-authored instruction for the recipient (what to do, context, expected output) — never paste the user's message verbatim; task stays the short display title.",
-    input: {
-      type: "object",
-      properties: { task: { type: "string" }, instruction: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" }, constraints: { type: "string" }, expected: { type: "string" }, maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." } },
-      required: ["task", "summary", "path", "maxHops"],
-      additionalProperties: false,
-    },
-    execute: async (input, context) => handlers.handoff(input, context),
-  })
-  editor.add({
-    name: "delegate",
-    options: { namespace: "ensemble", codemode: false },
-    description: "Delegate a typed subtask to another workspace member with the required maxHops budget (0 = one-shot ask) and record it on the board. The workspace leader may pass continuationOf (an exhausted dispatch group id) with a required groupMaxHops tier to open a continuation group; later delegations join it automatically. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
-    input: {
-      type: "object",
-      properties: {
-        assignee: { type: "string" },
-        title: { type: "string" },
-        instruction: { type: "string" },
-        constraints: { type: "string" },
-        expected: { type: "string" },
-        mode: { type: "string", enum: ["research", "edit"] },
-        maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
-        continuationOf: { type: "string", description: "Workspace leader only: id of the exhausted dispatch group to continue." },
-        groupMaxHops: { type: "integer", enum: [...DISPATCH_GROUP_TIERS], description: `Required with continuationOf: hops for the new group tier (${DISPATCH_GROUP_TIERS.join(", ")}), bounded by the command remaining.` },
+  if (surface === "legacy") {
+    editor.add({
+      name: "send_message",
+      options: { namespace: "ensemble", codemode: false },
+      // Compatibility shim: native-first agents post their final text and use
+      // `$Name`; this tool remains only while the legacy surface is enabled.
+      description: "Compatibility shim: post a message to the group chat or queue a direct message to an agent. Native-first sessions use their final text plus `$Name` instead.",
+      input: {
+        type: "object",
+        properties: { kind: { type: "string", enum: ["workspace", "agent"] }, id: { type: "string" }, text: { type: "string" } },
+        required: ["kind", "text"],
+        additionalProperties: false,
       },
-      required: ["assignee", "title", "instruction", "maxHops"],
-      additionalProperties: false,
-    },
-    execute: async (input, context) => handlers.delegate(input, context),
-  })
+      execute: async (input, context) => handlers.sendMessage(input, context),
+    })
+    editor.add({
+      name: "handoff",
+      options: { namespace: "ensemble", codemode: false },
+      description: "Queue a typed hop to a teammate with the required maxHops budget (0 = one-shot ask); the answer is relayed back here. The asking turn stays open until it lands — never follow a handoff with ensemble_delegate. Write a self-authored instruction for the recipient (what to do, context, expected output) — never paste the user's message verbatim; task stays the short display title.",
+      input: {
+        type: "object",
+        properties: { task: { type: "string" }, instruction: { type: "string" }, summary: { type: "string" }, path: { type: "string" }, to: { type: "string" }, constraints: { type: "string" }, expected: { type: "string" }, maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." } },
+        required: ["task", "summary", "path", "maxHops"],
+        additionalProperties: false,
+      },
+      execute: async (input, context) => handlers.handoff(input, context),
+    })
+    editor.add({
+      name: "delegate",
+      options: { namespace: "ensemble", codemode: false },
+      description: "Delegate a typed subtask to another workspace member with the required maxHops budget (0 = one-shot ask) and record it on the board. The workspace leader may pass continuationOf (an exhausted dispatch group id) with a required groupMaxHops tier to open a continuation group; later delegations join it automatically. Ensemble leader only — peers hand off with ensemble_handoff, which already queues the hop.",
+      input: {
+        type: "object",
+        properties: {
+          assignee: { type: "string" },
+          title: { type: "string" },
+          instruction: { type: "string" },
+          constraints: { type: "string" },
+          expected: { type: "string" },
+          mode: { type: "string", enum: ["research", "edit"] },
+          maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
+          continuationOf: { type: "string", description: "Workspace leader only: id of the exhausted dispatch group to continue." },
+          groupMaxHops: { type: "integer", enum: [...DISPATCH_GROUP_TIERS], description: `Required with continuationOf: hops for the new group tier (${DISPATCH_GROUP_TIERS.join(", ")}), bounded by the command remaining.` },
+        },
+        required: ["assignee", "title", "instruction", "maxHops"],
+        additionalProperties: false,
+      },
+      execute: async (input, context) => handlers.delegate(input, context),
+    })
+  }
   editor.add({
     name: "review",
     options: { namespace: "ensemble", codemode: false },

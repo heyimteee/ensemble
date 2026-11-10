@@ -18,6 +18,10 @@ const FAKE_BUBBLE_PROMPT = "fake-bubble-fixture"
 const FAKE_QUEUE_HOLD_PROMPT = "fake-queue-hold"
 const FAKE_QUEUE_HOLD_LONG_PROMPT = "fake-queue-hold-long"
 const FAKE_ASK_PROMPT = "fake-ask-person"
+// Ticket #225: deterministic tool-surface benchmark. The marker names the
+// peer so the same fake provider can drive a native final-text route or a
+// send_message tool call without knowing the workspace roster.
+const FAKE_BENCHMARK_RE = /fake-benchmark-(native|legacy):([A-Za-z][A-Za-z0-9_-]*)/
 // One-shot reduced-motion fixture: a normal 5 s stream so the Work card is
 // observable on frame 0 without making the trigger sticky in session history.
 const FAKE_MOTION_PROMPT = "fake-motion-static"
@@ -543,9 +547,19 @@ const server = createServer(async (request, response) => {
     const retryFixture = latestUserText.includes(FAKE_RETRY_PROMPT)
     const interruptHold = latestUserText.includes(FAKE_INTERRUPT_PROMPT)
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
+    const benchmark = latestUserText.match(FAKE_BENCHMARK_RE)
+    const benchmarkMode = benchmark?.[1]
+    const benchmarkPeer = benchmark?.[2]
     const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
     const answered = /User answer:/i.test(latestUserText)
     const toolResult = lastUser >= 0 && messages.slice(lastUser + 1).some((message) => message?.role === "tool")
+    // Ticket #225 benchmark metrics: shapes, sizes, and counts only. Never log
+    // message content, file bytes, or paths.
+    const toolSchemas = Array.isArray(body?.tools) ? body.tools : body?.tools ? Object.values(body.tools) : []
+    const ensembleSchemas = toolSchemas.filter((tool) => String(tool?.function?.name ?? tool?.name ?? "").startsWith("ensemble_"))
+    const messagesChars = JSON.stringify(messages).length
+    const toolSchemaChars = JSON.stringify(toolSchemas).length
+    const ensembleToolSchemaChars = JSON.stringify(ensembleSchemas).length
     const taskTitles = [...prompt.matchAll(/title="([^"]+)"/g)]
     const taskTitle = taskTitles.at(-1)?.[1] ?? ""
     // One ask per distinct user request. The native session accumulates
@@ -623,6 +637,15 @@ const server = createServer(async (request, response) => {
       budget: budget ? `${budget.chain}:${budget.consumed}/${budget.total}:${budget.mode}` : "",
       budgetGroup: budget ? latestDispatchGroup(prompt) ?? "" : "",
       reviewItems: reviewItems.length,
+      toolCount: toolSchemas.length,
+      toolSchemaChars,
+      ensembleToolCount: ensembleSchemas.length,
+      ensembleToolSchemaChars,
+      messagesChars,
+      promptChars: prompt.length,
+      hasTurnContext: JSON.stringify(body).includes("<ensemble_turn"),
+      hasBudgetContext: JSON.stringify(body).includes("<ensemble_dispatch_budget"),
+      estimatedPromptTokens: Math.ceil((messagesChars + toolSchemaChars) / 4),
       promptTail: prompt.slice(-120),
     })
     // Ticket #210: one retryable 429 per fixture text, counted only for
@@ -746,6 +769,28 @@ const server = createServer(async (request, response) => {
           return
         }
         log("review_skip", { request: requestID, reason: "duplicate_batch", batch: reviewBatch })
+        await streamCompletion(response, SHORT_REPLY, requestID)
+        return
+      }
+      // Ticket #225: the same coordination operation through the two surfaces.
+      // Native answers once with `$Peer`; legacy calls send_message and needs a
+      // second model turn after the tool result.
+      if (body?.stream !== false && benchmarkMode === "legacy" && !toolResult && benchmarkPeer) {
+        await streamToolCall(
+          response,
+          requestID,
+          "ensemble_send_message",
+          { kind: "workspace", text: `$${benchmarkPeer} please verify the benchmark route.` },
+          "benchmark_tool_call",
+          { surface: "legacy" },
+        )
+        return
+      }
+      if (body?.stream !== false && benchmarkMode === "native" && benchmarkPeer) {
+        await streamCompletion(response, `$${benchmarkPeer} please verify the benchmark route.`, requestID)
+        return
+      }
+      if (body?.stream !== false && benchmarkMode === "legacy" && toolResult) {
         await streamCompletion(response, SHORT_REPLY, requestID)
         return
       }

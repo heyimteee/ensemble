@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { ensureEnsembleDirectory, readEnsembleBlockVersion, readInitMetadata, readWorkspaceConfig, reconcileEnsembleInstructions, stripEnsembleBlock, writeAgentsBlock, writeHandoff, writeInitMetadata, writeWorkspaceConfig } from "./workspace-config.ts"
-import { ensembleBlock } from "./init-block.ts"
+import { ENSEMBLE_BLOCK_VERSION, ensembleBlock } from "./init-block.ts"
 import type { Agent, Workspace } from "./types.ts"
 
 const agent = (id: string, name: string): Agent => ({
@@ -57,26 +57,27 @@ test("ticket159: a stale Ensemble block and init metadata are refreshed in place
   writeInitMetadata(directory, 3)
   assert.equal(readEnsembleBlockVersion(readFileSync(join(directory, "AGENTS.md"), "utf8")), 3)
 
-  assert.equal(reconcileEnsembleInstructions(directory, 4, ensembleBlock()), true)
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, ensembleBlock()), true)
   const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
-  assert.equal(readEnsembleBlockVersion(content), 4)
+  assert.equal(readEnsembleBlockVersion(content), ENSEMBLE_BLOCK_VERSION)
   assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1)
   assert.equal(stripEnsembleBlock(content).trim(), "# Project\n\nKeep me.")
-  assert.equal(readInitMetadata(directory).version, 4)
-  assert.equal(reconcileEnsembleInstructions(directory, 4, ensembleBlock()), false, "a current block is stable")
+  assert.equal(readInitMetadata(directory).version, ENSEMBLE_BLOCK_VERSION)
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, ensembleBlock()), false, "a current block is stable")
 })
 
 test("ticket159: a stale block refreshes without metadata, and a newer block is never downgraded", () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-refresh-"))
   writeFileSync(join(directory, "AGENTS.md"), "<!-- ensemble:start v2 -->\nOLD\n<!-- ensemble:end -->\n")
-  assert.equal(reconcileEnsembleInstructions(directory, 4, ensembleBlock()), true)
-  assert.equal(readEnsembleBlockVersion(readFileSync(join(directory, "AGENTS.md"), "utf8")), 4)
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, ensembleBlock()), true)
+  assert.equal(readEnsembleBlockVersion(readFileSync(join(directory, "AGENTS.md"), "utf8")), ENSEMBLE_BLOCK_VERSION)
 
-  writeFileSync(join(directory, "AGENTS.md"), "<!-- ensemble:start v5 -->\nNEWER\n<!-- ensemble:end -->\n")
-  writeInitMetadata(directory, 5)
-  assert.equal(reconcileEnsembleInstructions(directory, 4, ensembleBlock()), false)
+  const newer = ENSEMBLE_BLOCK_VERSION + 1
+  writeFileSync(join(directory, "AGENTS.md"), `<!-- ensemble:start v${newer} -->\nNEWER\n<!-- ensemble:end -->\n`)
+  writeInitMetadata(directory, newer)
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, ensembleBlock()), false)
   assert.match(readFileSync(join(directory, "AGENTS.md"), "utf8"), /NEWER/)
-  assert.equal(readInitMetadata(directory).version, 5)
+  assert.equal(readInitMetadata(directory).version, newer)
 })
 
 
