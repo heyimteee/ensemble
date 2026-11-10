@@ -647,3 +647,28 @@ test("ticket182: disposing a location closes its active child records but keeps 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test("ticket215: each location subscribes to native inbox, text, and retry identity families", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-215-location-events-"))
+  const host = fakeHost("native", join(root, "native"))
+  const { registry } = serviceRegistry()
+  const attachment = await registry.attach(host.ctx)
+  try {
+    const types = [...host.events.subscriptions].flatMap((subscription) => subscription.types)
+    for (const type of [
+      "session.inbox.enqueued",
+      "session.inbox.delivered",
+      "session.inbox.delivery.changed",
+      "session.inbox.cancelled",
+      "session.text.started",
+      "session.text.delta",
+      "session.text.ended",
+      "session.retry.scheduled",
+    ]) {
+      assert.ok(types.includes(type), `${type} is subscribed per location`)
+    }
+  } finally {
+    await attachment.dispose()
+    rmSync(root, { recursive: true, force: true })
+  }
+})

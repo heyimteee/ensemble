@@ -240,6 +240,7 @@ import {
 } from "./workfocus.ts"
 import { approvalsColumnMode, approvalsForWorkspace, approvalsPaneLayout, closeFullApprovals, fullApprovalsHeader, fullApprovalsSection, openFullApprovals, workApprovalSection } from "./workapprovals.ts"
 import { nativeSubagentFocusChild, nativeSubagentFocusID, nativeSubagentWorkStatus } from "./nativecards.ts"
+import { directNativeWorkRow, nativeDirectChannel, nativeDirectChatLines } from "./native-direct.ts"
 import { isWorkActionID, nativeSubagentActions, pendingWorkSettled, workLifecycleSignature, workTaskActions, type WorkActionID, type WorkPendingAction } from "./workactions.ts"
 import {
   accumulateCompletions,
@@ -908,6 +909,21 @@ export function EnsembleV2App() {
     const workspace = activeWorkspace()
     return workspace ? Object.values(state()?.subtasks ?? {}).filter((task) => task.workspaceID === workspace.id) : []
   })
+  // Ticket #215: a native-first direct conversation reads the same durable
+  // channel and Work rows as the group surface. The channel is server-derived
+  // from the conversation binding, never from client guesswork.
+  const nativeDirect = createMemo(() => nativeDirectChannel(chatContext()?.conversation))
+  const nativeDirectWork = createMemo(() =>
+    directNativeWorkRow(Object.values(state()?.subtasks ?? {}), nativeDirect(), Date.now()),
+  )
+  /** True while this native session is a direct conversation under `on`. */
+  const sessionIsNativeDirect = (sessionID?: string) => {
+    if (!sessionID || state()?.settings.nativeFirst !== "on") return false
+    return Object.values(state()?.bindings ?? {}).some(
+      (binding) => binding.sessionID === sessionID
+        && (binding.kind === "direct" || binding.kind === "home" || binding.workspaceID === "home"),
+    )
+  }
   /**
    * Ticket #187: durable native child sessions for this workspace. A record
    * carries its workspace, with the parent task as fallback when the host
@@ -1515,19 +1531,24 @@ export function EnsembleV2App() {
   // so the UI renders exactly what the service reports.
   const chatLines = createMemo<ChatLine[]>(() => {
     if (surface()?.kind === "agent") {
-      const messages: ChatLine[] = (chatContext()?.messages ?? []).slice(-TRANSCRIPT_WINDOW).map((message: ChatMessage) => ({
-        id: message.id,
-        author: message.author,
-        role: transcriptRole(message.role),
-        text: message.role === "assistant" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
-        agentID: surfaceAgent()?.id,
-        queued: message.queued,
-        correlationID: message.correlationID,
-        attachments: message.attachments,
-        createdAt: message.createdAt,
-      }))
+      const channel = nativeDirect()
+      const messages: ChatLine[] = channel
+        ? nativeDirectChatLines(state()?.messages[channel] ?? [], surfaceAgent()?.name ?? "Agent", TRANSCRIPT_WINDOW).map((line) =>
+            line.role === "agent" ? { ...line, text: normalizeAgentMentions(line.text, activeAgents()).text } : line,
+          )
+        : (chatContext()?.messages ?? []).slice(-TRANSCRIPT_WINDOW).map((message: ChatMessage) => ({
+            id: message.id,
+            author: message.author,
+            role: transcriptRole(message.role),
+            text: message.role === "assistant" ? normalizeAgentMentions(message.text, activeAgents()).text : message.text,
+            agentID: surfaceAgent()?.id,
+            queued: message.queued,
+            correlationID: message.correlationID,
+            attachments: message.attachments,
+            createdAt: message.createdAt,
+          }))
       const live = liveDm()
-      if (live && chatContext()?.sessionID === live.sessionID) {
+      if (!channel && live && chatContext()?.sessionID === live.sessionID) {
         messages.push({ id: "live", author: surfaceAgent()?.name ?? "Agent", role: "agent" as const, text: live.text, agentID: surfaceAgent()?.id, createdAt: Date.now(), streaming: true })
       }
       // Slice C: the relevant direct surface carries one assignment line per
@@ -2511,7 +2532,7 @@ export function EnsembleV2App() {
       if (!currentWorkspace || !next.state.workspaces[currentWorkspace] || next.state.workspaces[currentWorkspace].archived) setWorkspaceID(null)
       if (!surface()) setSurface(null)
     }
-    if (surface()?.kind === "agent") chatRefresh.request()
+    if (surface()?.kind === "agent" && !nativeDirect()) chatRefresh.request()
     refreshGit()
     const current = surface()
     if (current?.kind === "workspace" && !next.state.workspaces[current.workspaceID]) setSurface(null)
@@ -3497,8 +3518,12 @@ export function EnsembleV2App() {
     const data = event?.data ?? event
     const session = String(data?.sessionID ?? "")
     const delta = String(data?.delta ?? "")
+    // Ticket #215: a native-first direct session streams through the durable
+    // message channel and patch feed. It never uses the native-text overlay,
+    // never re-reads chat.context, and never forces a full snapshot.
+    const durableDirect = sessionIsNativeDirect(session)
     if (event?.type === "session.text.delta" && session && delta) {
-      if (chatContext()?.sessionID === session && surface()?.kind === "agent") {
+      if (!durableDirect && chatContext()?.sessionID === session && surface()?.kind === "agent") {
         const current = liveDm()
         dmStream.push(session, (previous) => (previous ?? (current?.sessionID === session ? current.text : "")) + delta)
       }
@@ -3508,8 +3533,10 @@ export function EnsembleV2App() {
       // coalesced clear event is still in transit. A terminal/needs-you card
       // also ignores any entry that remains.
       setWorkActivities((current) => clearWorkActivitiesForSession(current, session))
-      if (chatContext()?.sessionID === session) { dmStream.clear(); setLiveDm(null); void refreshChat() }
-      void refresh()
+      if (!durableDirect) {
+        if (chatContext()?.sessionID === session) { dmStream.clear(); setLiveDm(null); void refreshChat() }
+        void refresh()
+      }
     }
   }
 
@@ -5002,7 +5029,9 @@ export function EnsembleV2App() {
         if (lastSnapshotMeta && (revision.catalogRevision !== lastSnapshotMeta.catalogRevision || revision.configRevision !== lastSnapshotMeta.configRevision)) {
           snapshotRefresh.request()
         }
-        if (surface()?.kind === "agent") chatRefresh.request()
+        // Ticket #215: a native-first direct transcript is durable and
+        // patch-driven, so the heartbeat never polls chat.context for it.
+        if (surface()?.kind === "agent" && !nativeDirect()) chatRefresh.request()
       } catch {
         // The revision RPC is an optimization; keep the snapshot path as the
         // fallback whenever it is unavailable.
@@ -7018,6 +7047,19 @@ export function EnsembleV2App() {
           </Show>
           <box id={MOUSE_PANE_IDS.chat} flexGrow={1} minWidth={0} minHeight={0} overflow="hidden" position="relative" border borderStyle="single" borderColor={chatOwnsFocus() ? colors.focus : colors.border} backgroundColor={colors.bg} flexDirection="column" padding={1}>
             <ChromeText colors={colors} fg={chatOwnsFocus() || composerActive() ? colors.focus : colors.muted} bg={colors.bg} width="100%" truncate flexShrink={0} text={surfaceTitle()} />
+            <Show when={nativeDirectWork()}>
+              {(row) => (
+                <ChromeText
+                  colors={colors}
+                  fg={row().needsYou ? colors.warn : row().status === "replied" ? colors.good : colors.muted}
+                  bg={colors.bg}
+                  width="100%"
+                  truncate
+                  flexShrink={0}
+                  text={`WORK · ${row().state} · ${row().title}`}
+                />
+              )}
+            </Show>
             <Show when={limitsOpen()} fallback={
               <Show when={settingsAgentID()} fallback={
               <Show when={helpOpen()} fallback={
