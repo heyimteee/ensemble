@@ -108,9 +108,11 @@ A native turn publishes patches and stream events, never a full snapshot.
 
 - **Retry.** A scheduled host retry keeps the same row, card, and turn in
   `retrying`. It is not an interruption and does not append a failure notice.
-- **Interruption.** Only `session.execution.interrupted` settles an interruption.
-  The partial text is preserved, and the turn asks the user what to do. A user
-  interrupt while idle emits no event and must not be invented.
+- **Interruption.** Only `session.execution.interrupted` settles an interrupted
+  execution. A `reason: "user"` settles `cancelled`: the user chose to stop it.
+  Shutdown, inactivity, superseded, or unknown reasons preserve the partial text
+  and settle `needs_you`, so the user can recover context. A user interrupt
+  while idle emits no event and must not be invented.
 - **Failure.** `session.execution.failed` records the structured host error and
   derives `failed`; per ADR 0005, `failed` means a native error, not a delivery
   or lease problem.
@@ -128,11 +130,17 @@ execution. That execution is a **new parent turn** with its own inbox id, turn
 id, and Work card. It is not the first turn's result and it is not correlated to
 the child by timestamp.
 
-The first parent turn settles when its own execution succeeds; the service does
-not hold it open waiting for the child. Child sessions remain read-only native
-subagent cards under the parent dispatch group per ADR 0008; they are not
-Subtask queue rows and consume no hop. ADR 0008's bounded hold for queued agent
-runs remains separate from this native-turn rule.
+A parent turn whose successful execution arrives while a known background child
+is still working stays `working` on the same card until every child mapped to
+that turn is terminal, or until ADR 0008's existing bounded barrier expires.
+The hold delays settlement only; it does not change identity, create a second
+row, or absorb the synthetic turn. If the parent execution settled before the
+child was known, no retroactive hold is invented.
+
+Child sessions remain read-only native subagent cards under the parent dispatch
+group per ADR 0008; they are not Subtask queue rows and consume no hop. ADR
+0008's bounded hold for queued agent runs remains separate from this native-turn
+rule.
 
 ### 7. Reconciliation is the backstop, not the path
 
@@ -189,8 +197,9 @@ turns.
   flicker and lost-row path.
 - **Treat a retry as interruption.** Rejected: it shows a false failure for work
   the host is still running.
-- **End the turn at the parent's first success.** Rejected: it drops the
-  background subagent's synthetic second turn.
+- **End the turn at the parent's first success while a known child still runs.**
+  Rejected: it hides live child work and races the synthetic completion. The
+  bounded child hold in section 6 is used instead.
 - **A separate native Work kind or card lifecycle.** Rejected: it teaches a
   second vocabulary and splits the Work pane, contradicting ADR 0005 and
   ADR 0008.
@@ -223,7 +232,8 @@ turns.
 - Do not derive a turn, recipient, or result from a timestamp.
 - Do not settle on idle, status, or a synthetic event.
 - Do not clear a live overlay before the durable row exists.
-- Do not hold a native parent turn open for a background child.
+- Do not hold a native parent turn open past the bounded child barrier, and do
+  not absorb the synthetic completion into the held turn.
 - Do not create a second native Work kind, card, or history store.
 - Keep logs free of conversation content, file bytes, and paths.
 
