@@ -42,6 +42,19 @@ import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } fr
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
+import {
+  DEFAULT_ATTACHMENT_LIMITS,
+  attachmentConversationKey,
+  attachmentError,
+  cleanupConversationAttachments,
+  cleanupWorkspaceAttachments,
+  formatAttachmentSize,
+  promptFilesForAttachments,
+  removeStoredAttachment,
+  resolveAttachments,
+  storeAttachment,
+  validateAttachmentSelection,
+} from "./attachments.ts"
 import { registerLiveSlot, type LiveSlot } from "./live-slot.ts"
 import { nextRetryAttempt, retryDelayMs } from "./retry.ts"
 import { RecentHostEvents, retryEventKey } from "./host-events.ts"
@@ -83,6 +96,7 @@ import type {
   Memory,
   MemoryScope,
   Message,
+  MessageAttachment,
   MessageStream,
   ModelRef,
   NativeSubagentRun,
@@ -333,6 +347,27 @@ function listData(value: any): any[] {
 
 function jsonSafe<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+/**
+ * Attachment references from a client payload. The client sends stored ids;
+ * the service re-reads durable metadata so a caller cannot spoof a name, size,
+ * or path (ticket #223).
+ */
+function attachmentIDs(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const ids: string[] = []
+  for (const item of value) {
+    const id = typeof item === "string" ? item : item && typeof item === "object" ? (item as { id?: unknown }).id : undefined
+    if (typeof id === "string" && id.trim()) ids.push(id.trim())
+  }
+  return [...new Set(ids)]
+}
+
+/** A work title for an attachment-only message; never a filesystem path. */
+function attachmentMessageTitle(attachments: readonly MessageAttachment[]): string {
+  if (attachments.length === 1) return `Attachment: ${attachments[0].name}`
+  return `${attachments.length} attachments`
 }
 
 function sameModel(a: ModelRef, b: ModelRef): boolean {
@@ -1768,8 +1803,10 @@ export class EnsembleV2Service {
       case "agent.delete": return this.deleteAgent(payload.id, payload.replacementLeaderID, Boolean(payload.deleteNativeSessions))
       case "agent.moveHome": return this.moveHomeSession(payload.agentID, payload.workspaceID)
       case "chat.context": return this.chatContext(payload.agentID, payload.workspaceID)
-      case "chat.send": return this.chatSend(payload.agentID, payload.workspaceID, payload.text)
+      case "chat.send": return this.chatSend(payload.agentID, payload.workspaceID, payload.text, undefined, attachmentIDs(payload.attachments))
       case "chat.removeQueued": return this.removeQueuedDm(payload.agentID, payload.workspaceID, payload.id)
+      case "attachment.add": return this.addAttachment(payload)
+      case "attachment.remove": return this.removeAttachment(payload)
       case "workspace.create": return this.createWorkspace(directory, payload)
       case "workspace.update": return this.updateWorkspace(payload)
       case "workspace.activate": return this.activateWorkspace(payload.id)
@@ -2051,16 +2088,90 @@ export class EnsembleV2Service {
     return { agentID: agent.id, workspaceID: target.workspace?.id, sessionID: target.sessionID, directory: target.directory, busy, messages, queued }
   }
 
-  private async chatSend(agentID: string, workspaceID: string | undefined, text: string, envelope?: { fromID?: string; correlationID?: string }): Promise<any> {
+  /**
+   * Ticket #223: attachments live under the conversation's own `.ensemble`
+   * area. Group rows use the workspace; a direct row uses the workspace when
+   * the agent is a member and the agent home otherwise. The key is derived
+   * from the same binding decision the send uses, never from client input.
+   */
+  private attachmentTarget(payload: Json): { directory: string; conversationKey: string; agentID?: Id; workspaceID?: Id } {
+    const workspaceID = typeof payload.workspaceID === "string" && payload.workspaceID ? payload.workspaceID : undefined
+    const agentID = typeof payload.agentID === "string" && payload.agentID ? payload.agentID : undefined
+    if (agentID) {
+      const agent = this.store.agent(agentID)
+      if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+      const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
+      if (workspaceID && !workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+      const target = this.chatSession(agent, workspace?.id)
+      const workspaceDirect = target.workspace?.id
+      return {
+        directory: target.directory,
+        conversationKey: attachmentConversationKey({
+          agentID: agent.id,
+          workspaceID: workspaceDirect,
+          bindingKey: workspaceDirect ? target.bindingKeyID : "home",
+        }),
+        agentID: agent.id,
+        workspaceID: workspaceDirect,
+      }
+    }
+    const workspace = workspaceID ? this.store.workspace(workspaceID) : undefined
+    if (!workspace || workspace.archived) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+    return {
+      directory: workspace.directory,
+      conversationKey: attachmentConversationKey({ workspaceID: workspace.id }),
+      workspaceID: workspace.id,
+    }
+  }
+
+  private decodeAttachmentData(value: unknown): Uint8Array {
+    if (typeof value !== "string" || !value) throw attachmentError("invalid", "The clipboard image had no bytes.")
+    const base64 = value.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "")
+    if (base64.length > Math.ceil((DEFAULT_ATTACHMENT_LIMITS.maxFileBytes * 4) / 3) + 8) {
+      throw attachmentError("too_large", `The clipboard image is larger than ${formatAttachmentSize(DEFAULT_ATTACHMENT_LIMITS.maxFileBytes)}.`)
+    }
+    let bytes: Buffer
+    try {
+      bytes = Buffer.from(base64, "base64")
+    } catch {
+      throw attachmentError("invalid", "The clipboard image could not be decoded.")
+    }
+    if (bytes.length === 0) throw attachmentError("invalid", "The clipboard image had no bytes.")
+    return new Uint8Array(bytes)
+  }
+
+  /** Copy a pasted path or clipboard image into the bounded conversation store. */
+  private async addAttachment(payload: Json): Promise<MessageAttachment> {
+    const target = this.attachmentTarget(payload)
+    const bytes = payload.data !== undefined ? this.decodeAttachmentData(payload.data) : undefined
+    const stored = storeAttachment({
+      directory: target.directory,
+      conversationKey: target.conversationKey,
+      ...(bytes ? { bytes } : {}),
+      ...(!bytes && typeof payload.path === "string" && payload.path ? { sourcePath: payload.path } : {}),
+      ...(typeof payload.name === "string" && payload.name ? { name: payload.name } : {}),
+      ...(typeof payload.mime === "string" && payload.mime ? { mime: payload.mime } : {}),
+    })
+    return stored.attachment
+  }
+
+  private removeAttachment(payload: Json): { removed: boolean } {
+    const target = this.attachmentTarget(payload)
+    const id = typeof payload.id === "string" ? payload.id : ""
+    if (!id) throw attachmentError("invalid", "Attachment id is required.")
+    return { removed: removeStoredAttachment(target.directory, target.conversationKey, id) }
+  }
+
+  private async chatSend(agentID: string, workspaceID: string | undefined, text: string, envelope?: { fromID?: string; correlationID?: string }, attachmentList: string[] = []): Promise<any> {
     const value = String(text ?? "").trim()
-    if (!value) throw Object.assign(new Error("Message is empty."), { code: "empty" })
+    if (!value && attachmentList.length === 0) throw Object.assign(new Error("Message is empty."), { code: "empty" })
     const state = this.store.read()
     const agent = state.agents[agentID]
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     // Ticket #103: direct conversations have no leader triage. General
     // skills are rejected before a DM line or prompt is created; the DM
     // agent's own assigned skills pass through unchanged.
-    if (!envelope?.fromID) {
+    if (!envelope?.fromID && value) {
       const issue = directSkillIssue({
         text: value,
         agent,
@@ -2072,9 +2183,25 @@ export class EnsembleV2Service {
     }
     const target = await this.ensureChatSession(agent, workspaceID)
     const workspaceKey = target.bindingKeyID
+    const conversationKey = attachmentConversationKey({
+      agentID: agent.id,
+      workspaceID: target.workspace?.id,
+      bindingKey: workspaceKey,
+    })
+    const attachments = resolveAttachments(target.directory, conversationKey, attachmentList)
+    const promptFiles = promptFilesForAttachments(target.directory, conversationKey, attachments)
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
     const correlationID = envelope?.correlationID ?? newCorrelationID()
-    const line = { id: id("dm"), role: "user" as const, author: "You", text: value, createdAt: this.dmNow(), queued: busy, correlationID }
+    const line = {
+      id: id("dm"),
+      role: "user" as const,
+      author: "You",
+      text: value,
+      createdAt: this.dmNow(),
+      queued: busy,
+      correlationID,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    }
     await this.store.saveDmMessage(workspaceKey, agent.id, line)
     if (busy) {
       const entry: DmQueueEntry = {
@@ -2083,6 +2210,7 @@ export class EnsembleV2Service {
         workspaceID: workspaceKey === "home" ? undefined : workspaceKey,
         directory: target.directory,
         text: value,
+        ...(attachments.length > 0 ? { attachments } : {}),
         status: "queued",
         createdAt: line.createdAt,
         fromID: envelope?.fromID,
@@ -2093,7 +2221,12 @@ export class EnsembleV2Service {
     }
     this.directBusy.add(target.sessionID)
     try {
-      await this.ctx.session.prompt({ sessionID: target.sessionID, text: value, delivery: "queue" })
+      await this.ctx.session.prompt({
+        sessionID: target.sessionID,
+        text: value || "See the attached file.",
+        delivery: "queue",
+        ...(promptFiles.length > 0 ? { files: promptFiles } : {}),
+      })
     } catch (error) {
       this.directBusy.delete(target.sessionID)
       throw error
@@ -2158,9 +2291,23 @@ export class EnsembleV2Service {
         const agent = this.store.agent(agentID)
         if (!agent) throw new Error("Agent not found.")
         const target = await this.ensureChatSession(agent, workspaceID)
+        const conversationKey = attachmentConversationKey({
+          agentID,
+          workspaceID: target.workspace?.id,
+          bindingKey: target.bindingKeyID,
+        })
+        const attachments = entry.attachments ?? []
+        const promptFiles = promptFilesForAttachments(target.directory, conversationKey, attachments)
+        const failure = validateAttachmentSelection(attachments)
+        if (failure) throw attachmentError(failure.code, failure.message)
         this.directBusy.add(target.sessionID)
         try {
-          await this.ctx.session.prompt({ sessionID: target.sessionID, text: entry.text, delivery: "queue" })
+          await this.ctx.session.prompt({
+            sessionID: target.sessionID,
+            text: entry.text || "See the attached file.",
+            delivery: "queue",
+            ...(promptFiles.length > 0 ? { files: promptFiles } : {}),
+          })
         } catch (error) {
           this.directBusy.delete(target.sessionID)
           throw error
@@ -2462,6 +2609,10 @@ export class EnsembleV2Service {
         await this.store.saveWorkspace(workspace)
         writeWorkspaceConfig(workspace, this.store.read().agents)
       }
+      cleanupConversationAttachments(
+        candidate.directory,
+        attachmentConversationKey({ agentID, workspaceID: candidate.id, bindingKey: candidate.id }),
+      )
       const binding = this.store.binding(candidate.id, agentID)
       if (binding) {
         if (deleteNativeSessions) {
@@ -2475,6 +2626,7 @@ export class EnsembleV2Service {
       if (deleteNativeSessions) await this.ctx.session.remove({ sessionID: home.sessionID }).catch(() => undefined)
       await this.store.removeBinding("home", agentID)
     }
+    if (agent.homeDirectory) cleanupWorkspaceAttachments(agent.homeDirectory)
     for (const memory of this.store.memories()) {
       if (memory.agentID === agentID) {
         const stored = this.store.cloneMemory(memory.id)
@@ -2993,9 +3145,14 @@ export class EnsembleV2Service {
       const workspace = entry.value as Workspace
       try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
       try { unlinkSync(join(workspace.directory, ".ensemble", "init.json")) } catch {}
+      cleanupWorkspaceAttachments(workspace.directory)
       if (deleteHandoffs) {
         try { rmSync(join(workspace.directory, ".ensemble", "handoffs"), { recursive: true, force: true }) } catch {}
       }
+    }
+    for (const entry of await this.scanStorage("v2/agent/")) {
+      const agent = entry.value as Agent
+      if (agent.homeDirectory) cleanupWorkspaceAttachments(agent.homeDirectory)
     }
     for (const entry of await this.scanStorage("v2/")) await this.ctx.storage.remove(entry.key).catch(() => undefined)
     await this.ctx.storage.remove("v2/meta").catch(() => undefined)
@@ -3052,6 +3209,7 @@ export class EnsembleV2Service {
       }
     }
     try { unlinkSync(workspaceConfigPath(workspace.directory)) } catch {}
+    cleanupWorkspaceAttachments(workspace.directory)
     const ui = this.store.ui()
     if (ui.activeWorkspaceID === workspaceID) await this.store.saveUi({ ...ui, activeWorkspaceID: undefined })
     await this.store.pruneWorkspace(workspaceID)
@@ -3143,7 +3301,11 @@ export class EnsembleV2Service {
     if (!workspace || workspace.archived) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
     if (workspace.paused) throw Object.assign(new Error("This workspace is paused. Resume it before sending work."), { code: "workspace_paused" })
     const text = String(payload.text ?? "").trim()
-    if (!text) throw Object.assign(new Error("Message is empty."), { code: "empty" })
+    const attachmentList = attachmentIDs(payload.attachments)
+    if (!text && attachmentList.length === 0) throw Object.assign(new Error("Message is empty."), { code: "empty" })
+    const conversationKey = attachmentConversationKey({ workspaceID: workspace.id })
+    const attachments = resolveAttachments(workspace.directory, conversationKey, attachmentList)
+    const promptText = text || "See the attached files."
     // Ticket #101: the server re-runs the shared planner against authoritative
     // workspace state before touching the transcript or the queue. Any invalid
     // skill/owner pair rejects the whole message atomically. Ticket #103 adds
@@ -3152,7 +3314,7 @@ export class EnsembleV2Service {
       ? Object.fromEntries(Object.entries(payload.ownerSelections as Record<string, unknown>).map(([key, value]) => [String(key), String(value)]))
       : undefined
     const plan = planSkillInvocation({
-      text,
+      text: promptText,
       workspace,
       agents: state.agents,
       skills: this.catalog.skillOptions,
@@ -3175,11 +3337,11 @@ export class EnsembleV2Service {
     const skillRecipients = plan.kind === "skills" ? plan.recipients : []
     const skillRecipient = new Map(skillRecipients.map((recipient) => [recipient.agentID, recipient]))
     const explicitIDs = Array.isArray(payload.recipientIDs) ? [...new Set(payload.recipientIDs.map(String))] : []
-    const references = workspaceFileReferences(text, workspace.directory)
+    const references = workspaceFileReferences(promptText, workspace.directory)
     // Deliberate skill delivery keeps the exact user text as the instruction;
     // the planner has already validated every addressed skill/owner pair.
     // File references are context for every prompt, including skill prompts.
-    const instruction = references.length === 0 ? text : `${text}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}`
+    const instruction = references.length === 0 ? promptText : `${promptText}\n\nReferenced files:\n${references.map((file) => `- ${file}`).join("\n")}`
     // One user command mints exactly one dispatch group; every recipient in
     // this fan-out (and every descendant hop) inherits it. A second command
     // mints a second group even while the first is still active.
@@ -3197,7 +3359,7 @@ export class EnsembleV2Service {
     }
     if (explicitIDs.length > 0) {
       const valid: string[] = []
-      await this.appendMessage(workspace, { author: "user", text, kind: "text" })
+      await this.appendMessage(workspace, { author: "user", text, kind: "text", ...(attachments.length > 0 ? { attachments } : {}) })
       for (const agentID of explicitIDs) {
         const agent = state.agents[agentID]
         if (agent && !agent.archived && workspace.memberIDs.includes(agentID)) {
@@ -3221,11 +3383,12 @@ export class EnsembleV2Service {
           workspace,
           assigneeID: agentID,
           creatorType: "user",
-          title: recipient ? skillWorkTitle(text, recipient) : text.slice(0, 80),
+          title: recipient ? skillWorkTitle(text || promptText, recipient) : text.slice(0, 80) || attachmentMessageTitle(attachments),
           instruction,
           mode: payload.mode === "edit" ? "edit" : "research",
           skillGrants: recipient?.generalSkills,
           dispatchGroupID,
+          ...(attachments.length > 0 ? { attachments } : {}),
         })
       }
       this.schedule()
@@ -3256,16 +3419,17 @@ export class EnsembleV2Service {
     if (mentioned.length === 0 && archivedRefs.length === 0 && unknown.length === 0 && outsideRefs.length === 0 && skillRecipients.length === 0) {
       // No addressee named: the leader takes the turn, exactly as before.
       const recipients = visibleRecipients(text, workspace, state.agents)
-      await this.appendMessage(workspace, { author: "user", text, kind: "text" })
+      await this.appendMessage(workspace, { author: "user", text, kind: "text", ...(attachments.length > 0 ? { attachments } : {}) })
       for (const agentID of recipients) {
         await this.createSubtask({
           workspace,
           assigneeID: agentID,
           creatorType: "user",
-          title: text.slice(0, 80),
+          title: text.slice(0, 80) || attachmentMessageTitle(attachments),
           instruction,
           mode: payload.mode === "edit" ? "edit" : "research",
           dispatchGroupID,
+          ...(attachments.length > 0 ? { attachments } : {}),
         })
       }
       this.schedule()
@@ -3276,7 +3440,7 @@ export class EnsembleV2Service {
       }
       return { recipients }
     }
-    await this.appendMessage(workspace, { author: "user", text, kind: "text" })
+    await this.appendMessage(workspace, { author: "user", text, kind: "text", ...(attachments.length > 0 ? { attachments } : {}) })
     for (const agent of archivedRefs) {
       await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, `${agent.name} is archived and cannot take turns.`), kind: "system" })
     }
@@ -3309,11 +3473,12 @@ export class EnsembleV2Service {
         workspace,
         assigneeID: agentID,
         askerKind: "user",
-        title: recipient ? skillWorkTitle(text, recipient) : text.slice(0, 80),
+        title: recipient ? skillWorkTitle(text || promptText, recipient) : text.slice(0, 80) || attachmentMessageTitle(attachments),
         instruction,
         mode: payload.mode === "edit" ? "edit" : "research",
         skillGrants: recipient?.generalSkills,
         dispatchGroupID,
+        ...(attachments.length > 0 ? { attachments } : {}),
       })
     }
     this.schedule()
@@ -3556,6 +3721,7 @@ export class EnsembleV2Service {
     creatorAgentID?: string
     title: string
     instruction: string
+    attachments?: MessageAttachment[]
     constraints?: string
     expected?: string
     mode?: "research" | "edit"
@@ -3603,6 +3769,7 @@ export class EnsembleV2Service {
       instruction: input.instruction,
       constraints: input.constraints,
       expected: input.expected,
+      attachmentIDs: input.attachments?.map((attachment) => attachment.id),
     })
     // Idempotency: resubmitting the same run-scoped work returns the existing
     // item instead of executing twice — while its row is retained, live or
@@ -3620,6 +3787,7 @@ export class EnsembleV2Service {
       assigneeID: input.assigneeID,
       title: input.title,
       instruction: input.instruction,
+      ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
       constraints: input.constraints,
       expected: input.expected,
       mode: input.mode ?? "research",
@@ -3680,6 +3848,7 @@ export class EnsembleV2Service {
     correlationID?: string
     title: string
     instruction: string
+    attachments?: MessageAttachment[]
     constraints?: string
     expected?: string
     mode?: "research" | "edit"
@@ -3694,6 +3863,7 @@ export class EnsembleV2Service {
       creatorAgentID: input.askerID,
       title: input.title,
       instruction: input.instruction,
+      attachments: input.attachments,
       constraints: input.constraints,
       expected: input.expected,
       mode: input.mode,
@@ -3712,6 +3882,7 @@ export class EnsembleV2Service {
     creatorAgentID?: string
     title: string
     instruction: string
+    attachments?: MessageAttachment[]
     constraints?: string
     expected?: string
     mode?: "research" | "edit"
@@ -3722,7 +3893,7 @@ export class EnsembleV2Service {
     return (await this.createWorkItem(input)).subtask
   }
 
-  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; notice?: Message["notice"]; correlationID?: string; updatedAt?: number }): Promise<Message> {
+  private async appendMessage(workspace: Workspace, input: { author: Message["author"]; agentID?: string; displayAuthor?: string; text: string; kind: Message["kind"]; taskID?: string; streaming?: boolean; interrupted?: boolean; notice?: Message["notice"]; correlationID?: string; updatedAt?: number; attachments?: MessageAttachment[] }): Promise<Message> {
     return this.store.appendMessage(workspace.id, {
       id: id("msg"),
       author: input.author,
@@ -3735,6 +3906,7 @@ export class EnsembleV2Service {
       interrupted: input.interrupted,
       notice: input.notice,
       correlationID: input.correlationID,
+      ...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
       createdAt: now(),
       ...(input.updatedAt !== undefined ? { updatedAt: input.updatedAt } : {}),
     })
@@ -7469,6 +7641,11 @@ export class EnsembleV2Service {
         })
         granted = true
       }
+      const attachmentFiles = promptFilesForAttachments(
+        workspace.directory,
+        attachmentConversationKey({ workspaceID: workspace.id }),
+        task.attachments,
+      )
       const models = [agent.mainModel, ...agent.backupModels]
       let result: { text: string; tools: string[]; toolOutcomes: ToolOutcome[]; failure?: any } | undefined
       for (let index = 0; index < models.length; index++) {
@@ -7494,7 +7671,12 @@ export class EnsembleV2Service {
         await this.ctx.session.switchModel({ sessionID: binding.sessionID, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } }).catch(() => undefined)
         attemptStartedAt = now()
         failureContext.startedAt = attemptStartedAt
-        await this.ctx.session.prompt({ sessionID: binding.sessionID, text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined), delivery: "steer" })
+        await this.ctx.session.prompt({
+          sessionID: binding.sessionID,
+          text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined),
+          delivery: "steer",
+          ...(attachmentFiles.length > 0 ? { files: attachmentFiles } : {}),
+        })
         await this.ctx.session.wait({ sessionID: binding.sessionID }).catch(() => undefined)
         let messages = listData(await this.ctx.session.context({ sessionID: binding.sessionID }))
         result = assistantResult(messages, attemptStartedAt)

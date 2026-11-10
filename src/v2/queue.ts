@@ -204,10 +204,19 @@ export function workKey(input: {
   instruction: string
   constraints?: string
   expected?: string
+  /**
+   * Stored attachment ids (ticket #223). Two otherwise-identical sends with
+   * different files are different work, so idempotent resubmission cannot
+   * silently drop the new attachment set.
+   */
+  attachmentIDs?: readonly string[]
 }): string {
   const run = runPrefixHash(input.parentID, input.dispatchGroupID)
+  const attachmentKey = input.attachmentIDs && input.attachmentIDs.length > 0
+    ? `\0${[...new Set(input.attachmentIDs)].sort().join(",")}`
+    : ""
   const body = stableHash(
-    [input.assigneeID, canonicalField(input.title), canonicalField(input.instruction), canonicalField(input.constraints), canonicalField(input.expected)].join("\0"),
+    [input.assigneeID, canonicalField(input.title), canonicalField(input.instruction), canonicalField(input.constraints), canonicalField(input.expected)].join("\0") + attachmentKey,
   )
   return `work:${input.workspaceID}:${input.kind}:${input.actor}:${run}:${input.assigneeID}:${body}`
 }

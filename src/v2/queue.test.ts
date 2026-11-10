@@ -269,3 +269,22 @@ test("the runtime status collection validates boundary values", () => {
   assert.equal(isDerivedWorkStatus("retry"), false)
   assert.equal(isDerivedWorkStatus(undefined), false)
 })
+
+test("attachment ids distinguish otherwise-identical sends without changing legacy keys", () => {
+  const input = {
+    actor: "user",
+    workspaceID: "w",
+    kind: "delegation" as const,
+    assigneeID: "agent_s",
+    title: "Review",
+    instruction: "Review",
+  }
+  const legacy = workKey(input)
+  assert.equal(workKey({ ...input, attachmentIDs: [] }), legacy)
+  const one = workKey({ ...input, attachmentIDs: ["att_a"] })
+  assert.notEqual(one, legacy)
+  assert.equal(workKey({ ...input, attachmentIDs: ["att_a"] }), one)
+  assert.equal(workKey({ ...input, attachmentIDs: ["att_a", "att_a"] }), one)
+  assert.notEqual(workKey({ ...input, attachmentIDs: ["att_b"] }), one)
+  assert.notEqual(workKey({ ...input, attachmentIDs: ["att_a", "att_b"] }), one)
+})

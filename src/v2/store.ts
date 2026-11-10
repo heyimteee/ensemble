@@ -322,6 +322,7 @@ export class V2Store {
           instruction: subtask.instruction,
           constraints: subtask.constraints,
           expected: subtask.expected,
+          attachmentIDs: subtask.attachments?.map((attachment) => attachment.id),
         })
       }
       // Ticket #148: working rows are left exactly as stored. Load must never

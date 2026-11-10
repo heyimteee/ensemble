@@ -75,6 +75,7 @@ export function chatLineFromMessage(message: Message, agentName: string): ChatMe
     author: message.author === "user" ? "You" : message.author === "system" ? "System" : message.displayAuthor ?? agentName,
     text: message.text,
     createdAt: message.createdAt,
+    ...(message.attachments && message.attachments.length > 0 ? { attachments: message.attachments } : {}),
     ...(message.correlationID ? { correlationID: message.correlationID } : {}),
   }
 }

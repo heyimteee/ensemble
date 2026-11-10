@@ -114,6 +114,20 @@ export type InitJob = {
 
 export type MessageKind = "text" | "task" | "approval" | "system"
 
+/**
+ * Metadata for one attachment (ticket #223). The durable row and the snapshot
+ * carry display facts only: no bytes, no store path, and no source path. The
+ * service resolves the stored file by conversation id at prompt time.
+ */
+export type MessageAttachment = {
+  id: Id
+  /** Original basename shown in the chip; never a filesystem path. */
+  name: string
+  mime: string
+  size: number
+  kind: "file" | "image"
+}
+
 export type Message = {
   id: Id
   workspaceID: Id
@@ -145,6 +159,12 @@ export type Message = {
    * Free-form copy is never inspected.
    */
   notice?: "retry" | "failure"
+  /**
+   * Attachment metadata for one row (ticket #223). Files live in the bounded
+   * conversation store; the transcript and snapshot never carry bytes or
+   * absolute paths.
+   */
+  attachments?: MessageAttachment[]
   createdAt: number
   /** Last wall-clock write (delta or finalize). Drives stream staleness so
     * long live streams stay visible while fresh and orphaned rows expire. */
@@ -279,6 +299,12 @@ export type Subtask = {
   assigneeID?: Id
   title: string
   instruction: string
+  /**
+   * Attachment metadata copied from the originating user message (ticket
+   * #223). The prompt payload resolves each id against the conversation
+   * store; the durable row never carries bytes or paths.
+   */
+  attachments?: MessageAttachment[]
   constraints?: string
   expected?: string
   mode: "research" | "edit"
@@ -462,6 +488,8 @@ export type DmQueueEntry = {
   workspaceID?: Id
   directory: string
   text: string
+  /** Attachment metadata carried with a queued direct send (ticket #223). */
+  attachments?: MessageAttachment[]
   status: "queued" | "sent" | "failed"
   createdAt: number
   /** Sender of a direct agent-to-agent message (envelope addressing). */
@@ -537,6 +565,8 @@ export type ChatMessage = {
   role: "user" | "assistant" | "system"
   author: string
   text: string
+  /** Attachment metadata for a durable direct row (ticket #223). */
+  attachments?: MessageAttachment[]
   createdAt: number
   queued?: boolean
   /** Correlation ID of a direct agent-to-agent envelope, when present. */
