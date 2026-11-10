@@ -617,7 +617,7 @@ export class EnsembleV2Service {
   private readonly nativeWatchdog = new Map<string, { lastActivityAt: number; passes: number }>()
   /** Ticket #217: parent turns held for a live background child, bounded. */
   private readonly nativeDeferredSettlements = new Map<string, {
-    target: { channel: string; agent: Agent }
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string }
     at: number
     deadline: number
     timer?: ReturnType<typeof setTimeout>
@@ -5600,7 +5600,20 @@ export class EnsembleV2Service {
       const workspace = input.id ? state.workspaces[String(input.id)] : found.workspace
       if (!workspace) return { content: "Workspace not found." }
       if (workspace.id !== found.workspace.id) return { content: "Cross-workspace posts require ensemble_share approval." }
-      await this.appendMessage(workspace, { author: "agent", agentID: found.agent.id, text, kind: "text" })
+      // Ticket #221: a post from a live native turn anchors to that turn and
+      // its dispatch group. A delegated run anchors to its own task. The
+      // anchor is also the delivery record a matching final text dedupes on.
+      const run = this.runForSession(state, context.sessionID)
+      const runTask = run ? state.subtasks[run.subtaskID] : undefined
+      const nativeTurn = runTask ? undefined : this.nativeActiveTurnTurn(context.sessionID)
+      const anchorTask = runTask ?? (nativeTurn && nativeTurn.conversationID === workspace.id ? nativeTurn : undefined)
+      const post = await this.appendMessage(workspace, {
+        author: "agent",
+        agentID: found.agent.id,
+        text,
+        kind: "text",
+        ...(anchorTask ? { taskID: anchorTask.id } : {}),
+      })
       // Agent-to-agent asks from the group chat: `$Name`/`!Name` mentions in
       // an agent post create peer turns through the same queue, caps, and
       // approvals as user mentions. Reply text alone never creates turns, so
@@ -5622,12 +5635,10 @@ export class EnsembleV2Service {
       for (const token of unknown) {
         await this.appendMessage(workspace, { author: "system", text: peerRefusalText(bareMentionToken(token), "no workspace member matches."), kind: "system" })
       }
-      const run = this.runForSession(state, context.sessionID)
-      const runTask = run ? state.subtasks[run.subtaskID] : undefined
       // One agent post is one dispatch: its mentions and approvals share one
       // group even when the post comes from outside a live run.
-      const dispatchGroupID = runTask ? resolveDispatchGroupID(runTask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
-      const askingDepth = runTask ? dispatchDepthFor(runTask, state.subtasks) : 0
+      const dispatchGroupID = anchorTask ? resolveDispatchGroupID(anchorTask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
+      const askingDepth = anchorTask ? dispatchDepthFor(anchorTask, state.subtasks) : 0
       const peerDepthMax = state.dispatchGroups[dispatchGroupID]?.depthMax ?? dispatchLimits(state.settings).depth
       // Outside-roster contact follows the existing approval model: the user
       // consents first, then the approved turn runs through the same queue.
@@ -5649,7 +5660,7 @@ export class EnsembleV2Service {
             instruction: text,
             mode: "research",
             correlationID,
-            parentID: run?.subtaskID,
+            parentID: anchorTask?.id,
             senderID: found.agent.id,
             depth: askingDepth + 1,
             dispatchGroupID,
@@ -5658,9 +5669,10 @@ export class EnsembleV2Service {
           createdAt: now(),
         }
         await this.store.saveApproval(approval)
-        await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${agent.name}`, kind: "approval", taskID: run?.subtaskID })
+        await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${agent.name}`, kind: "approval", taskID: anchorTask?.id })
       }
       const created: string[] = []
+      const createdAgentIDs: string[] = []
       const refused: string[] = []
       const refusalNotes: string[] = []
       const noteRefusal = (name: string, reason: string): void => {
@@ -5690,7 +5702,7 @@ export class EnsembleV2Service {
         }
         const { deduped } = await this.createPeerTurn({
           workspace,
-          parentID: run?.subtaskID,
+          parentID: anchorTask?.id,
           assigneeID: agentID,
           askerKind: "agent",
           askerID: found.agent.id,
@@ -5700,8 +5712,10 @@ export class EnsembleV2Service {
           dispatchGroupID,
         })
         created.push(agent.name)
+        createdAgentIDs.push(agentID)
         void deduped
       }
+      if (anchorTask) await this.recordAgentPost(anchorTask, post, text, createdAgentIDs)
       this.schedule()
       if (created.length === 0 && outsideRefs.length === 0) {
         const detail = refusalNotes.length > 0 ? ` ${refusalNotes[0]}` : ""
@@ -8145,6 +8159,19 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Ticket #221: record the latest workspace post from a turn so an identical
+   * final text can dedupe to its row and route set. The record carries a hash
+   * and recipient IDs only, never a second copy of the conversation text.
+   */
+  private async recordAgentPost(anchor: Subtask, post: Message, text: string, recipientIDs: Id[]): Promise<void> {
+    await this.store.saveAgentPost(anchor.id, {
+      messageID: post.id,
+      textHash: stableHash(text.trim()),
+      recipientIDs: [...new Set(recipientIDs)],
+    })
+  }
+
+  /**
    * Ticket #220: plan and apply `$Name` routing for one native user message.
    *
    * The #219 planner owns the grammar, sanitization, guards, and server-owned
@@ -8203,14 +8230,136 @@ export class EnsembleV2Service {
         this.logger?.event("info", "native", "native.route.created", {
           sessionID: task.native?.sessionID,
           turnID: task.id,
+          source: "native-user",
           agentID: route.agentID,
         })
       }
       if (plan.routes.length > 0) this.schedule()
     }
     for (const refusal of plan.refusals) {
-      await this.appendNativeMentionRefusal(target, task, refusal, state.settings.maxDelegations, at)
+      await this.appendNativeMentionRefusal(target, task, refusal, state.settings.maxDelegations, at, "native-user")
     }
+  }
+
+  /**
+   * Ticket #221: plan and apply `$Name` routing from an agent's exact final
+   * native text. The final text is the group message; `send_message` is not
+   * required for chat. The #219 planner supplies the sanitized-prose grammar,
+   * self/duplicate/reply-to-sender suppression, fan-out cap, cycle guard, and
+   * server-owned budget. This method supplies the turn anchor, sender, group
+   * trail, roster, and ledger, then creates normal peer turns under the turn.
+   *
+   * A tool post recorded on the same turn dedupes a byte-identical final text
+   * to one transcript row and one route set. Direct conversations never route.
+   */
+  private async routeAgentFinalMentions(
+    task: Subtask,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    text: string,
+    finalRowID: Id | undefined,
+    at: number,
+  ): Promise<boolean> {
+    if (nativeFirstMode(this.store.settings()) !== "on") return false
+    if (!text.trim()) return false
+    const state = this.store.read()
+    const post = task.agentPost
+    if (post && finalRowID && post.textHash === stableHash(text.trim())) {
+      // The tool post is already the visible message and already routed. Keep
+      // the finalized native row (the canonical turn result) and remove the
+      // duplicate row; never route the same text twice.
+      if (post.messageID !== finalRowID) await this.store.removeMessage(target.channel, post.messageID)
+      this.logger?.event("info", "native", "native.route.deduped", {
+        ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+        turnID: task.id,
+        messageID: finalRowID,
+        recipients: post.recipientIDs.length,
+      })
+      return false
+    }
+
+    const workspace = state.workspaces[task.workspaceID]
+    if (target.conversation.kind === "workspace" && !workspace) return false
+    const conversation: MentionConversation = target.conversation.kind === "workspace"
+      ? { kind: "group", workspaceID: target.conversation.workspaceID, sessionAgentID: target.agent.id }
+      : target.conversation.kind === "direct"
+        ? { kind: "direct", agentID: target.agent.id, workspaceID: target.conversation.workspaceID }
+        : { kind: "direct", agentID: target.agent.id }
+    const roster: MentionRosterEntry[] = Object.values(state.agents).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      member: workspace ? workspace.memberIDs.includes(agent.id) : false,
+      archived: agent.archived,
+    }))
+    const replyToSenderID = agentFinalReplyTo(task)
+    const groupTrail = agentFinalGroupTrail(task, state.subtasks)
+    const plan = planMentionRouting({
+      text,
+      conversation,
+      roster,
+      fanOutCap: state.settings.maxDelegations,
+      enabled: state.settings.nativeMentionRouting !== false,
+      senderID: target.agent.id,
+      ...(replyToSenderID ? { replyToSenderID } : {}),
+      ...(groupTrail.length > 0 ? { groupTrail } : {}),
+      ...(workspace ? { limits: dispatchLimits(state.settings), ledger: this.nativeMentionLedger(task) } : {}),
+    })
+
+    const excluded = plan.excluded.reduce<Record<string, number>>((counts, span) => {
+      counts[span.kind] = (counts[span.kind] ?? 0) + 1
+      return counts
+    }, {})
+    if (plan.routes.length + plan.suppressed.length + plan.refusals.length > 0 || plan.excluded.length > 0) {
+      this.logger?.event("info", "native", "native.route.planned", {
+        ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+        turnID: task.id,
+        source: "agent-final",
+        senderID: target.agent.id,
+        ...(replyToSenderID ? { replyToSenderID } : {}),
+        groupTrail: groupTrail.length,
+        routes: plan.routes.length,
+        suppressed: plan.suppressed.length,
+        refusals: plan.refusals.length,
+        excluded,
+      })
+    }
+    for (const suppression of plan.suppressed) {
+      this.logger?.event("info", "native", "native.route.suppressed", {
+        ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+        turnID: task.id,
+        source: "agent-final",
+        agentID: suppression.agentID,
+        reason: suppression.reason,
+      })
+    }
+
+    if (workspace && plan.routes.length > 0) {
+      await this.ensureDispatchGroupLedger(task.dispatchGroupID, workspace.id)
+      for (const route of plan.routes) {
+        const { subtask, deduped } = await this.createPeerTurn({
+          workspace,
+          parentID: task.id,
+          assigneeID: route.agentID,
+          askerKind: "agent",
+          askerID: target.agent.id,
+          title: text.slice(0, 80),
+          instruction: text,
+          mode: "research",
+          dispatchGroupID: task.dispatchGroupID,
+        })
+        this.logger?.event("info", "native", "native.route.created", {
+          ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+          turnID: task.id,
+          source: "agent-final",
+          recipientID: route.agentID,
+          taskID: subtask.id,
+          ...(deduped ? { deduped } : {}),
+        })
+      }
+    }
+    for (const refusal of plan.refusals) {
+      await this.appendNativeMentionRefusal(target, task, refusal, state.settings.maxDelegations, at, "agent-final")
+    }
+    return Boolean(workspace) && plan.routes.length > 0
   }
 
   /** Current ledger position for a route under the native turn's root group. */
@@ -8245,6 +8394,7 @@ export class EnsembleV2Service {
     refusal: MentionRefusal,
     fanOutCap: number,
     at: number,
+    source: "native-user" | "agent-final",
   ): Promise<void> {
     const text = peerRefusalText(refusal.agentName ?? refusal.token, nativeMentionRefusalReason(refusal, fanOutCap))
     if (target.conversation.kind === "workspace") {
@@ -8265,6 +8415,7 @@ export class EnsembleV2Service {
     this.logger?.event("info", "native", "native.route.refused", {
       sessionID: task.native?.sessionID,
       turnID: task.id,
+      source,
       agentID: refusal.agentID,
       reason: refusal.reason,
       ...(refusal.layer ? { layer: refusal.layer } : {}),
@@ -8973,7 +9124,7 @@ export class EnsembleV2Service {
    */
   private async settleOrDeferNativeTurn(
     task: Subtask,
-    target: { channel: string; agent: Agent },
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
     outcome: "succeeded" | "failed" | "interrupted" | "cancelled",
     at: number,
     error?: any,
@@ -8988,7 +9139,7 @@ export class EnsembleV2Service {
 
   private deferNativeTurnForChildren(
     task: Subtask,
-    target: { channel: string; agent: Agent },
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
     at: number,
   ): boolean {
     const sessionID = task.native?.sessionID
@@ -9047,7 +9198,7 @@ export class EnsembleV2Service {
    */
   private async settleNativeTurn(
     task: Subtask,
-    target: { channel: string; agent: Agent },
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
     outcome: "succeeded" | "failed" | "interrupted" | "cancelled",
     at: number,
     error?: any,
@@ -9150,6 +9301,12 @@ export class EnsembleV2Service {
       resultMessageID: next.native.resultMessageID,
       outcome,
     })
+    // Ticket #221: the exact final native text is the group message; `$Name`
+    // in it routes normal peer turns under this turn and its dispatch group.
+    if (outcome === "succeeded" && text) {
+      const routed = await this.routeAgentFinalMentions(next, target, text, row?.id, at)
+      if (routed) this.schedule()
+    }
     this.cleanupNativeTurnMemory(next)
   }
 
@@ -9854,6 +10011,16 @@ export class EnsembleV2Service {
         currentTask.error = undefined
         await this.store.saveSubtask(currentTask)
         await this.finalizeStream(live, reply, false, globalEpoch, workspaceEpoch, task.workspaceID)
+        // Ticket #221: route only after the reply is durable, so a quickly
+        // finishing peer cannot synthesize the parent mid-settlement.
+        const routed = await this.routeAgentFinalMentions(
+          currentTask,
+          { conversation: { kind: "workspace", workspaceID: workspace.id, agentID: agent.id }, channel: workspace.id, agent },
+          result?.text ?? "",
+          live?.id,
+          now(),
+        )
+        if (routed) this.schedule()
         await this.maybeSynthesize(currentTask.id)
         return
       }
@@ -9881,6 +10048,18 @@ export class EnsembleV2Service {
       await this.store.saveSubtask(currentTask)
       this.noteWorkChanged(currentTask)
       await this.clearSupersededNotices(currentTask)
+      // Ticket #221: the exact final text routes `$Name` peer work under this
+      // turn. It is agent prose, so the original final text — not the
+      // display-normalized reply — is the routing input. A matching tool post
+      // from this run dedupes to the live row and its existing route set.
+      const routed = await this.routeAgentFinalMentions(
+        currentTask,
+        { conversation: { kind: "workspace", workspaceID: workspace.id, agentID: agent.id }, channel: workspace.id, agent },
+        result?.text ?? "",
+        currentTask.resultMessageID ?? live?.id,
+        now(),
+      )
+      if (routed) this.schedule()
       // Ticket #169: a success that follows a retry/stall/terminal-failed
       // state is a recovery. The card ends replied and the repair is audited
       // with structured state only; the answer itself never enters the log.
@@ -10418,6 +10597,36 @@ export class EnsembleV2Service {
       await this.appendMessage(workspace, { author: "system", text: "Delegated subtasks completed.", kind: "system", taskID: parent.id })
     }
   }
+}
+
+/**
+ * Ticket #221: the agent a turn answers immediately. A peer turn or explicit
+ * handoff returns to its sender; a user command has no agent sender. This is
+ * the reply-to-sender loop guard input.
+ */
+function agentFinalReplyTo(task: Subtask): Id | undefined {
+  if (task.handoff?.senderID) return task.handoff.senderID
+  if (task.turn?.askerID) return task.turn.askerID
+  return task.creatorType === "agent" ? task.creatorAgentID : undefined
+}
+
+/**
+ * Ticket #221: agent ancestors in the same dispatch group. Routing back to one
+ * would close a cycle, so the #219 planner refuses it visibly.
+ */
+function agentFinalGroupTrail(task: Subtask, subtasks: Record<Id, Subtask>): Id[] {
+  const trail: Id[] = []
+  const seen = new Set<Id>([task.id])
+  let parentID = task.parentID
+  while (parentID) {
+    const parent = subtasks[parentID]
+    if (!parent || seen.has(parent.id)) break
+    seen.add(parent.id)
+    if (task.dispatchGroupID && parent.dispatchGroupID && parent.dispatchGroupID !== task.dispatchGroupID) break
+    if (parent.assigneeID) trail.push(parent.assigneeID)
+    parentID = parent.parentID
+  }
+  return trail
 }
 
 /** Visible reason for one refused native mention; names the rule or budget layer. */
