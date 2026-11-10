@@ -1,4 +1,5 @@
 import { dispatchBudgetContext, dispatchBudgetState, dispatchDepthFor } from "./dispatch-budget.ts"
+import { ensembleTurnContext } from "./turn-context.ts"
 import type { Agent, Memory, SnapshotState, Subtask, Workspace } from "./types.ts"
 
 export function skillPermissions(skillbox: string[]): Array<{ action: string; resource: string; effect: "allow" | "deny" }> {
@@ -119,7 +120,6 @@ export function promptForTask(task: Subtask, senderName?: string): string {
 
 export function contextForTask(state: SnapshotState, task: Subtask, workspace: Workspace, agent: Agent): string {
   const memories = visibleMemories(state, agent.id, workspace.id)
-  const recent = (state.messages[workspace.id] ?? []).slice(-20).map((message) => `${message.author === "user" ? "You" : state.agents[message.agentID ?? ""]?.name ?? "Agent"}: ${message.text}`).join("\n")
   const children = Object.values(state.subtasks).filter((item) => item.parentID === task.id)
   const childResults = task.stage === "synthesis"
     ? children.map((child) => `- ${state.agents[child.assigneeID ?? ""]?.name ?? "Agent"}: ${state.messages[workspace.id]?.find((message) => message.id === child.resultMessageID)?.text ?? child.error ?? "(no reply)"}`).join("\n")
@@ -138,7 +138,13 @@ export function contextForTask(state: SnapshotState, task: Subtask, workspace: W
       )
     : ""
   return [
-    `<ensemble_persona name="${agent.name}">\n${agent.role}\n</ensemble_persona>`,
+    ensembleTurnContext({
+      agent,
+      conversation: { kind: "workspace", workspaceID: workspace.id },
+      workspace,
+      agents: state.agents,
+      routing: true,
+    }),
     memoryContext(memories),
     dispatchBudget,
     task.workKind === "handoff" && task.handoff
@@ -147,12 +153,6 @@ export function contextForTask(state: SnapshotState, task: Subtask, workspace: W
     task.workKind === "turn" && task.turn
       ? `<ensemble_peer_turn ref="${task.turn.correlationID}">\nThis turn is a group-chat peer turn. Answer in this conversation as yourself; the reply lands in the asking transcript, attributed to you.\n</ensemble_peer_turn>`
       : "",
-    `<ensemble_workspace name="${workspace.name}" directory="${workspace.directory}">`,
-    `Leader: ${state.agents[workspace.leaderID]?.name ?? workspace.leaderID}`,
-    `Members: ${workspace.memberIDs.map((memberID) => state.agents[memberID]?.name ?? memberID).join(", ")}`,
-    "Recent group messages:",
-    recent || "(none)",
-    "</ensemble_workspace>",
     `<ensemble_subtask title="${task.title}">\n${task.instruction}\n</ensemble_subtask>`,
     childResults ? `<ensemble_child_results>\n${childResults}\n</ensemble_child_results>` : "",
   ].filter(Boolean).join("\n\n")
