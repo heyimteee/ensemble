@@ -51,9 +51,10 @@ export type DirectWorkRow = {
 }
 
 /**
- * The direct conversation's compact Work card. Active turns win over finished
- * ones; otherwise the newest retained terminal turn remains visible. Only
- * native turns belonging to this channel are eligible.
+ * The direct conversation's compact Work card. Working, retrying, or
+ * needs-you turn wins over a queued follow-up; among equal priorities the
+ * newest turn wins. Otherwise the newest retained terminal turn remains
+ * visible. Only native turns belonging to this channel are eligible.
  */
 export function directNativeWorkRow(
   tasks: readonly Subtask[],
@@ -63,9 +64,15 @@ export function directNativeWorkRow(
   if (!channel) return undefined
   const rows = tasks.filter((task) => isNativeTurn(task) && (task.conversationID ?? task.workspaceID) === channel)
   if (rows.length === 0) return undefined
+  const activeRank = (task: Subtask): number => {
+    const status = deriveWorkStatus(task, now)
+    if (status === "needs_you") return 0
+    if (status === "pending") return 2
+    return 1
+  }
   const active = rows
     .filter((task) => !isTerminalWorkStatus(deriveWorkStatus(task, now)))
-    .sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id))
+    .sort((a, b) => activeRank(a) - activeRank(b) || b.createdAt - a.createdAt || a.id.localeCompare(b.id))
   const terminal = rows
     .filter((task) => isTerminalWorkStatus(deriveWorkStatus(task, now)))
     .sort((a, b) => (b.finishedAt ?? b.repliedAt ?? 0) - (a.finishedAt ?? a.repliedAt ?? 0) || a.id.localeCompare(b.id))

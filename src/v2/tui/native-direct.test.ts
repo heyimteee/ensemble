@@ -90,3 +90,49 @@ test("ticket215: the direct Work row follows the canonical vocabulary for this c
   assert.equal(directNativeWorkRow([task()], undefined, 30), undefined)
   assert.equal(directNativeWorkRow([task()], "dm:other", 30), undefined)
 })
+
+test("ticket222: the direct active row keeps a working turn ahead of a newer queued follow-up", () => {
+  const working = task({
+    id: "task_working",
+    createdAt: 10,
+    state: "working",
+    native: { sessionID: "s1", inboxID: "m_working", assistantMessageIDs: [], phase: "working" },
+  })
+  const queued = task({
+    id: "task_queued",
+    createdAt: 20,
+    state: "pending",
+    native: { sessionID: "s1", inboxID: "m_queued", assistantMessageIDs: [], phase: "queued" },
+  })
+  const row = directNativeWorkRow([working, queued], "dm:a:w", 30)
+  assert.equal(row?.id, "task_working")
+  assert.equal(row?.state, "WORKING")
+
+  const retrying = task({
+    id: "task_retrying",
+    createdAt: 5,
+    state: "working",
+    native: { sessionID: "s1", inboxID: "m_retrying", assistantMessageIDs: [], phase: "retrying" },
+  })
+  assert.equal(directNativeWorkRow([queued, working, retrying], "dm:a:w", 30)?.id, "task_working", "newest priority turn wins")
+
+  const needsYou = task({
+    id: "task_needs_you",
+    createdAt: 1,
+    interrupted: true,
+    native: { sessionID: "s1", inboxID: "m_needs", assistantMessageIDs: [], phase: "interrupted" },
+  })
+  assert.equal(directNativeWorkRow([needsYou, working, queued], "dm:a:w", 30)?.id, "task_needs_you", "needs-you outranks a running turn")
+
+  const settled = task({
+    id: "task_settled",
+    createdAt: 1,
+    state: "replied",
+    outcome: "succeeded",
+    finishedAt: 9,
+    repliedAt: 9,
+    native: { sessionID: "s1", inboxID: "m_done", assistantMessageIDs: ["m2"], phase: "replied" },
+  })
+  assert.equal(directNativeWorkRow([settled, queued], "dm:a:w", 30)?.id, "task_queued", "active work still wins over a settled turn")
+  assert.equal(directNativeWorkRow([settled], "dm:a:w", 30)?.id, "task_settled", "the settled turn stays available to history")
+})
