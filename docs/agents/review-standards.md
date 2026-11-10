@@ -21,6 +21,33 @@ Source-text assertions are an exception for wiring that public behavior cannot r
 
 Do not use source-text tests to pin domain constants, copy, or whole implementations. If a public behavior test is practical, use it instead.
 
+For example, this guard is acceptable because it slices one named method and asserts the single call inside it; the behavioral test named below carries the outcome:
+
+```ts
+// turn-finalization.test.ts: the policy matrix and service behavior tests prove
+// every decision; this pins only that runTask is the single owner of the call.
+const start = source.indexOf("private async runTask(")
+const end = source.indexOf("\n  private ", start + 1)
+const runTask = source.slice(start, end)
+assert.match(runTask, /decideTurnFinalization\(/)
+```
+
+The outcome stays with `ticket194: the turn-finalization decision matrix covers every managed turn shape` and the service behavior tests. The existing `src/v2/turn-finalization.test.ts` guard also checks the complement: no other method contains the call.
+
+This guard is rejected:
+
+```ts
+// Rejected: fixed offsets over the whole file drift on unrelated edits, and an
+// identifier match passes on an import or comment even when no method calls it.
+const at = source.indexOf("private async runTask(")
+assert.ok(source.slice(at, at + 4000).includes("decideTurnFinalization("))
+assert.ok(source.includes("decideTurnFinalization"))
+```
+
+The first check guesses a byte window instead of slicing the method, so unrelated lines shift it and a call elsewhere in the window satisfies it. The second passes with no call at all. Neither proves that `runTask` owns the call.
+
+These examples illustrate the rule above; they do not replace the judgement call about whether a public behavior test can cover the wiring.
+
 ## One source of truth for derived state
 
 Before accepting a new flag or field, search for an existing source that already answers the question. Derive the value from the canonical record at the point of use, or store one value and compute the rest. Keep the derivation in one helper.
