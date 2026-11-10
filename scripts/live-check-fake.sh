@@ -1350,7 +1350,7 @@ live_assert_text "$LIVE_TUI_SESSION" "Memories (0)" "settings tab keeps the live
 live_key "$LIVE_TUI_SESSION" "j"
 live_require_text "$LIVE_TUI_SESSION" "› Title" 10 "j moves to the next row"
 live_key "$LIVE_TUI_SESSION" "G"
-live_require_text "$LIVE_TUI_SESSION" "› Model" 10 "G jumps to the last row"
+live_require_text "$LIVE_TUI_SESSION" "› Native mirror" 10 "G jumps to the last General row"
 live_key "$LIVE_TUI_SESSION" "g"
 live_key "$LIVE_TUI_SESSION" "g"
 live_require_text "$LIVE_TUI_SESSION" "› Name" 10 "gg jumps back to the first row"
