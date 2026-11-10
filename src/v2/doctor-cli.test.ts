@@ -117,6 +117,7 @@ function snapshotFor(directory: string, includeJessy: boolean) {
     agent_clark: { id: "agent_clark", name: "Clark", archived: false },
   }
   if (includeJessy) agents.agent_jessy = { id: "agent_jessy", name: "Jessy", archived: false }
+  const now = Date.now()
   return {
     output: {
       state: {
@@ -169,7 +170,53 @@ function snapshotFor(directory: string, includeJessy: boolean) {
             workKind: "delegation",
             title: "PRIVATE-TASK-TITLE",
           },
+          task_native_ok: {
+            id: "task_native_ok",
+            workspaceID: "workspace_site",
+            conversationID: "workspace_site",
+            creatorType: "user",
+            origin: "native",
+            adopted: true,
+            workKind: "turn",
+            state: "replied",
+            outcome: "succeeded",
+            interrupted: false,
+            createdAt: now - 1_000,
+            repliedAt: now - 500,
+            finishedAt: now - 500,
+            resultMessageID: "msg_native_result",
+            native: {
+              sessionID: "ses_clark",
+              inboxID: "m1",
+              assistantMessageIDs: ["m2"],
+              phase: "replied",
+              resultMessageID: "msg_native_result",
+              startedAt: now - 900,
+              settledAt: now - 500,
+            },
+          },
         },
+        messages: {
+          workspace_site: [
+            {
+              id: "msg_native_result",
+              workspaceID: "workspace_site",
+              channel: "workspace_site",
+              seq: 1,
+              author: "agent",
+              agentID: "agent_clark",
+              text: "PRIVATE-NATIVE-ANSWER",
+              kind: "text",
+              taskID: "task_native_ok",
+              createdAt: now - 500,
+              native: { sessionID: "ses_clark", inboxID: "m1", assistantMessageID: "m2", turnID: "task_native_ok" },
+            },
+          ],
+        },
+      },
+      native: {
+        sync: { state: "live" },
+        watchdog: { maxPasses: 3, turns: {} },
       },
       models: [],
       skills: [],
@@ -254,8 +301,17 @@ test("runDoctor returns 0 for agreement and 1 for divergence without printing cr
     assert.equal(report.locations[0].dispatch.groups, 1)
     assert.equal(report.locations[0].dispatch.usedHops, 1)
     assert.equal(report.locations[0].dispatch.commandUsedHops, 1)
+    assert.deepEqual(report.locations[0].native, {
+      sync: "live",
+      activeTurns: 0,
+      duplicates: 0,
+      missingResults: 0,
+      orphanRoutes: 0,
+      stuckTurns: 0,
+    })
     assert.equal(output.includes(PASSWORD), false)
     assert.equal(output.includes("PRIVATE-TASK-TITLE"), false)
+    assert.equal(output.includes("PRIVATE-NATIVE-ANSWER"), false)
 
     includeJessy = true
     writeConfig(directoryA, ["Clark", "Jessy"])
@@ -350,7 +406,7 @@ test("CLI uses the default descriptor, password override, snapshot-only wire con
     }
     const snap = snapshotFor(directory, mode === "divergent")
     response.end(JSON.stringify({ ...snap, output: { ...snap.output, state: {
-      ...snap.output.state, messages: { secret: content }, memories: { secret: content },
+      ...snap.output.state, messages: { ...snap.output.state.messages, secret: content }, memories: { secret: content },
     } } }))
   })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
