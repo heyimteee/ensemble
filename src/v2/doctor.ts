@@ -1,4 +1,5 @@
 import { dispatchGroupState, dispatchHopCount, dispatchLedgerSummary, isRootGroup, type DispatchLedgerSummary } from "./dispatch-budget.ts"
+import { bindingConversation, conversationStateKey } from "./conversation-binding.ts"
 import { DEADLINE_MS, FINISHED_RETENTION_MS, deriveWorkStatus, isDerivedWorkStatus, type DerivedWorkStatus } from "./queue.ts"
 import type { DispatchGroup, NativeSubagentSource, NativeSubagentState, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
 import type { WorkspaceConfig } from "./workspace-config.ts"
@@ -32,7 +33,7 @@ export type DoctorBinding = {
   workspaceID: string
   agentID: string
   sessionID: string
-  kind?: "workspace" | "home"
+  kind?: "workspace" | "direct" | "home"
   directory?: string
   agentVersion: number
 }
@@ -886,17 +887,61 @@ export function diagnoseLocations(inputs: DoctorLocationInput[]): DoctorReport {
     checkNativeSubagents(input, add, index)
 
     for (const item of Object.values(input.snapshot.bindings).sort((a, b) => a.key.localeCompare(b.key))) {
-      const expectedKey = `${item.workspaceID}:${item.agentID}`
+      const conversation = bindingConversation(item)
+      const expectedKey = conversation
+        ? conversationStateKey(conversation)
+        : `${item.workspaceID}:${item.agentID}`
       if (item.key !== expectedKey) {
         add(
           [index],
           "binding_key_mismatch",
-          { key: item.key, expectedKey, workspaceID: item.workspaceID, agentID: item.agentID },
-          `Binding key "${item.key}" does not match workspace/agent fields (expected "${expectedKey}").`,
+          { key: item.key, expectedKey, workspaceID: item.workspaceID, agentID: item.agentID, kind: item.kind },
+          `Binding key "${item.key}" does not match its conversation fields (expected "${expectedKey}").`,
           "storage",
         )
       }
       const agent = input.snapshot.agents[item.agentID]
+      if (item.kind === "direct" && !conversation) {
+        add(
+          [index],
+          "binding_field_mismatch",
+          { key: item.key, field: "workspaceID", expected: "a workspace", actual: item.workspaceID },
+          `Direct binding "${item.key}" does not name a workspace conversation.`,
+          "storage",
+        )
+        continue
+      }
+      if (item.kind === "direct") {
+        const owner = input.snapshot.workspaces[item.workspaceID]
+        if (!owner) {
+          add(
+            [index],
+            "binding_unknown_workspace",
+            { key: item.key, workspaceID: item.workspaceID, agentID: item.agentID },
+            `Binding "${item.key}" points at missing workspace ${item.workspaceID}.`,
+            "storage",
+          )
+        }
+        if (!agent) {
+          add(
+            [index],
+            "binding_unknown_agent",
+            { key: item.key, workspaceID: item.workspaceID, agentID: item.agentID },
+            `Binding "${item.key}" points at missing agent ${item.agentID}.`,
+            "storage",
+          )
+        }
+        if (owner && item.directory && item.directory !== owner.directory) {
+          add(
+            [index],
+            "binding_field_mismatch",
+            { key: item.key, field: "directory", expected: owner.directory, actual: item.directory },
+            `Binding "${item.key}" points at directory ${item.directory}, but workspace "${owner.name}" is ${owner.directory}.`,
+            "storage",
+          )
+        }
+        continue
+      }
       if (item.workspaceID === "home") {
         if (!agent) {
           add(

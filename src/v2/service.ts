@@ -68,9 +68,11 @@ import { createStoreObserver, dispatchGroupEvent, dispatchHopEvent } from "./log
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
+import { nativeFirstMode, isNativeFirstMode } from "./native-first.ts"
 import type {
   Agent,
   Approval,
+  BindingConversation,
   ChangesSince,
   DispatchGroup,
   DmQueueEntry,
@@ -1761,6 +1763,7 @@ export class EnsembleV2Service {
       case "agent.create": return this.createAgent(payload)
       case "agent.update": return this.updateAgent(payload)
       case "agent.rebindSession": return this.rebindAgentSession(payload)
+      case "agent.sessionBinding": return this.resolveAgentSessionBinding(payload)
       case "agent.archive": return this.archiveAgent(payload.id, payload.replacementLeaderID)
       case "agent.delete": return this.deleteAgent(payload.id, payload.replacementLeaderID, Boolean(payload.deleteNativeSessions))
       case "agent.moveHome": return this.moveHomeSession(payload.agentID, payload.workspaceID)
@@ -1899,15 +1902,26 @@ export class EnsembleV2Service {
    * conversation on an unavailable API.
    */
   private async nativeSessionMissing(sessionID: string): Promise<boolean> {
+    return !(await this.nativeSessionDetails(sessionID)).found
+  }
+
+  /**
+   * One host read for binding resolution: existence plus the host's archived
+   * marker. `session.get` is optional on older hosts; an unavailable API fails
+   * open, matching the rotation policy.
+   */
+  private async nativeSessionDetails(sessionID: string): Promise<{ found: boolean; archived: boolean }> {
     const get = this.ctx.session?.get
-    if (typeof get !== "function") return false
+    if (typeof get !== "function") return { found: true, archived: false }
     try {
       const info = unwrap<any>(await get.call(this.ctx.session, { sessionID }))
-      return !info || (typeof info === "object" && !info.id)
+      if (!info || (typeof info === "object" && !info.id)) return { found: false, archived: false }
+      return { found: true, archived: Boolean(info.archived) || Boolean(info.time?.archived) }
     } catch (error: any) {
       const reason = String(error?._tag ?? error?.code ?? error?.type ?? "")
       const status = Number(error?.status ?? error?.statusCode ?? 0)
-      return reason === "SessionNotFoundError" || reason === "session_not_found" || reason === "not_found" || status === 404
+      const missing = reason === "SessionNotFoundError" || reason === "session_not_found" || reason === "not_found" || status === 404
+      return { found: !missing, archived: false }
     }
   }
 
@@ -2267,6 +2281,53 @@ export class EnsembleV2Service {
   }
 
   /**
+   * Ticket #213: parse the requested binding conversation. Group and direct
+   * both need a workspace; a direct request without one resolves the agent's
+   * home conversation. Selection policy stays with #214; this only names the
+   * conversation to resolve.
+   */
+  private conversationFromRequest(payload: Json): BindingConversation {
+    const agentID = String(payload.agentID ?? "").trim()
+    if (!agentID) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    const workspace = payload.workspaceID === undefined || payload.workspaceID === null
+      ? ""
+      : String(payload.workspaceID).trim()
+    const requested = payload.conversation ?? "workspace"
+    if (requested === "workspace") {
+      if (!workspace || workspace === "home") {
+        throw Object.assign(new Error("A workspace group conversation requires a workspace."), { code: "invalid_conversation" })
+      }
+      return { kind: "workspace", workspaceID: workspace, agentID }
+    }
+    if (requested === "direct") {
+      if (!workspace || workspace === "home") return { kind: "home", agentID }
+      return { kind: "direct", workspaceID: workspace, agentID }
+    }
+    if (requested === "home") return { kind: "home", agentID }
+    throw Object.assign(new Error("Unknown conversation kind."), { code: "invalid_conversation" })
+  }
+
+  /**
+   * Ticket #213 read-only resolution: name the conversation, its current
+   * binding, and whether the bound native session still exists. It never
+   * creates, rotates, or rebinds a session, so it is safe to expose before the
+   * #214 direct-chat cutover.
+   */
+  private async resolveAgentSessionBinding(payload: Json): Promise<any> {
+    const agent = this.store.agent(String(payload.agentID ?? ""))
+    if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
+    const conversation = this.conversationFromRequest(payload)
+    const mode = nativeFirstMode(this.store.settings())
+    const binding = this.store.bindingForConversation(agent.id, conversation)
+    if (!binding) return { mode, agentID: agent.id, conversation, state: "unbound" }
+    if (agent.archived) return { mode, agentID: agent.id, conversation, state: "agent_archived", binding }
+    const details = await this.nativeSessionDetails(binding.sessionID)
+    if (!details.found) return { mode, agentID: agent.id, conversation, state: "missing", binding }
+    if (details.archived) return { mode, agentID: agent.id, conversation, state: "session_archived", binding }
+    return { mode, agentID: agent.id, conversation, state: "bound", binding }
+  }
+
+  /**
    * Ticket #189 maintenance action: point a binding at a session it already
    * owns. Only history/current sessions are selectable so a stale or foreign
    * id can never hijack an agent. IDs only reach the audit log.
@@ -2275,10 +2336,34 @@ export class EnsembleV2Service {
     const agent = this.store.agent(payload.agentID)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
     const rawWorkspaceID = payload.workspaceID
-    const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null || String(rawWorkspaceID).length === 0
-      ? "home"
-      : String(rawWorkspaceID)
-    const binding = this.store.binding(workspaceID, agent.id)
+    const rawConversation = payload.conversation
+    let conversation: BindingConversation
+    if (rawConversation === "direct") {
+      const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null || String(rawWorkspaceID).length === 0
+        ? ""
+        : String(rawWorkspaceID)
+      if (!workspaceID || workspaceID === "home") {
+        throw Object.assign(new Error("A workspace direct conversation requires a workspace."), { code: "invalid_conversation" })
+      }
+      conversation = { kind: "direct", workspaceID, agentID: agent.id }
+    } else if (rawConversation === "home") {
+      conversation = { kind: "home", agentID: agent.id }
+    } else if (rawConversation === "workspace") {
+      const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null ? "" : String(rawWorkspaceID)
+      if (!workspaceID || workspaceID === "home") {
+        throw Object.assign(new Error("A workspace group conversation requires a workspace."), { code: "invalid_conversation" })
+      }
+      conversation = { kind: "workspace", workspaceID, agentID: agent.id }
+    } else {
+      // Legacy payload: an omitted workspace means the home binding.
+      const workspaceID = rawWorkspaceID === undefined || rawWorkspaceID === null || String(rawWorkspaceID).length === 0
+        ? "home"
+        : String(rawWorkspaceID)
+      conversation = workspaceID === "home"
+        ? { kind: "home", agentID: agent.id }
+        : { kind: "workspace", workspaceID, agentID: agent.id }
+    }
+    const binding = this.store.bindingForConversation(agent.id, conversation)
     if (!binding) throw Object.assign(new Error("Session binding not found."), { code: "not_found" })
     const target = String(payload.sessionID ?? "").trim()
     const history = binding.history ?? []
@@ -2307,6 +2392,7 @@ export class EnsembleV2Service {
     this.logger?.event("info", "service", "agent.session.rebound", {
       agentID: agent.id,
       workspaceID: binding.workspaceID,
+      conversation: conversation.kind,
       fromSessionID,
       sessionID: target,
     })
@@ -4264,6 +4350,14 @@ export class EnsembleV2Service {
     if (payload.maxDelegations !== undefined) patch.maxDelegations = Math.max(1, Number(payload.maxDelegations))
     if (payload.maxDepth !== undefined) patch.maxDepth = Math.max(1, Number(payload.maxDepth))
     if (payload.synthesis !== undefined) patch.synthesis = Boolean(payload.synthesis)
+    // Ticket #213: the native-first migration mode is a closed set. An
+    // unknown value is rejected so a typo cannot silently change ingestion.
+    if (payload.nativeFirst !== undefined) {
+      if (!isNativeFirstMode(payload.nativeFirst)) {
+        throw Object.assign(new Error("nativeFirst must be off, shadow, or on."), { code: "invalid_settings" })
+      }
+      patch.nativeFirst = payload.nativeFirst
+    }
     // Ticket #160: the four dispatch limits are one validated set. A rejected
     // edit changes nothing; existing groups keep the caps they captured, so
     // only new commands observe the new values.
