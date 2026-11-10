@@ -256,6 +256,12 @@ reason codes rather than attaching content, per the
   assertion passed. It proves retention and upload, not the diagnosis quality
   of a natural product failure. The upload step is intentionally skipped on a
   successful live job.
+- The verify job's `git diff --check` runs on a clean checkout, so it guards
+  the working tree and fails on uncommitted whitespace/conflict residue; a
+  controlled local test showed exit 0 for whitespace already committed in a
+  clean tree and exit 2 for an uncommitted trailing-space line. Catching
+  whitespace that is already in a commit would need a commit-range diff, which
+  #203 did not add.
 - The hosted `verify` job runs on `ubuntu-latest`; GitHub's migration notice
   for that label was the only annotation. The live job is pinned to
   `ubuntu-24.04`.
