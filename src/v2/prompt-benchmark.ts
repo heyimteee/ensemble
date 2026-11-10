@@ -192,7 +192,6 @@ export function benchmarkFixture(directory = "/tmp/ensemble-benchmark-site"): {
     memories: {},
     approvals: {},
     dmQueue: {},
-    dmTranscripts: {},
     settings: {
       maxActiveRuns: 3,
       maxDelegations: 10,
