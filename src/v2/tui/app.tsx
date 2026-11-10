@@ -6919,7 +6919,11 @@ export function EnsembleV2App() {
                                       <Show when={message.role === "agent" && syntaxStyle} fallback={
                                         <text fg={message.role === "system" || message.queued ? colors.muted : colors.text} bg={colors.bg} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", Math.max(16, messageWidth())).join("\n")}</text>
                                       }>
-                                        {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={Math.max(16, messageWidth())} fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "full" }} />}
+                                        {(style) => (
+                                          <Show when={Math.max(16, messageWidth())} keyed>
+                                            {(width) => <markdown content={message.text || " "} syntaxStyle={style()} width={width} fg={colors.text} bg={colors.bg} conceal tableOptions={{ widthMode: "full" }} />}
+                                          </Show>
+                                        )}
                                       </Show>
                                     </box>
                                     )
@@ -6945,19 +6949,23 @@ export function EnsembleV2App() {
                                   // <For> row, so only colors change — never row
                                   // identity, geometry, or scroll state.
                                   const emphasis = () => transcriptEmphasis().get(message.id)
-                                  const wrapWidth = bubbleContentWidth(messageWidth(), BUBBLE_CHROME)
+                                  const wrapWidth = () => bubbleContentWidth(messageWidth(), BUBBLE_CHROME)
                                   return (
                                   <box id={chatRowID(message.id)} flexDirection="column" width="100%" marginTop={1}>
                                     <box alignSelf={side === "left" ? "flex-start" : "flex-end"} width="72%" border={true} borderStyle="rounded" borderColor={emphasis() === "error" ? colors.bad : emphasis() === "finalized" ? colors.focus : side === "left" ? accent : message.queued ? colors.warn : colors.good} backgroundColor={colors.panel} padding={1} flexDirection="column">
                                       <text fg={emphasis() === "error" ? colors.bad : message.queued && !hit ? colors.warn : accent} bg={colors.panel} width="100%" truncate>{headerForLine(message)}</text>
                                       <Show when={message.role === "user"} fallback={
                                         <Show when={syntaxStyle} fallback={
-                                          <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth).join("\n")}</text>
+                                          <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderMarkdownLines(message.text || "", wrapWidth()).join("\n")}</text>
                                         }>
-                                          {(style) => <markdown content={message.text || " "} syntaxStyle={style()} width={wrapWidth} fg={colors.text} bg={colors.panel} conceal tableOptions={{ widthMode: "full" }} />}
+                                          {(style) => (
+                                            <Show when={wrapWidth()} keyed>
+                                              {(width) => <markdown content={message.text || " "} syntaxStyle={style()} width={width} fg={colors.text} bg={colors.panel} conceal tableOptions={{ widthMode: "full" }} />}
+                                            </Show>
+                                          )}
                                         </Show>
                                       }>
-                                        <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth).join("\n")}</text>
+                                        <text fg={message.queued ? colors.muted : colors.text} bg={colors.panel} width="100%" wrapMode="word">{renderVerbatimLines(message.text || " ", wrapWidth()).join("\n")}</text>
                                       </Show>
                                     </box>
                                   </box>

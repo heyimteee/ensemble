@@ -227,12 +227,18 @@ test("the transcript width follows the Work pane state", () => {
 
 test("ticket190: the plain transcript markdown follows the reactive chat width", () => {
   assert.ok(
-    has(app(), 'syntaxStyle={style()} width={Math.max(16, messageWidth())}'),
-    "plain transcript markdown gets the reactive content width",
+    has(app(), '<Show when={Math.max(16, messageWidth())} keyed>'),
+    "plain transcript markdown remounts when the content width changes",
   )
+  assert.ok(has(app(), 'syntaxStyle={style()} width={width}'), "plain transcript markdown receives the keyed content width")
   assert.ok(!has(app(), 'syntaxStyle={style()} width="100%"'), "no transcript markdown keeps a static 100% width")
   assert.ok(has(app(), 'tableOptions={{ widthMode: "full" }}'), "transcript tables fill the message width")
   assert.ok(!has(app(), 'tableOptions={{ widthMode: "content" }}'), "no transcript table keeps content-only width")
+})
+
+test("ticket190: the bubble markdown follows the reactive bubble width", () => {
+  assert.ok(has(app(), '<Show when={wrapWidth()} keyed>'), "bubble markdown remounts when the bubble width changes")
+  assert.ok(has(app(), "const wrapWidth = () => bubbleContentWidth(messageWidth(), BUBBLE_CHROME)"), "bubble width is reactive")
 })
 
 test("the Work layout reads the pane content width", () => {
