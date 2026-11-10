@@ -20,6 +20,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [OpenCode/OpenTUI runtime guide](agents/opencode-tui-runtime.md): host contracts, source navigation, and verification
 - [Service subsystem map](agents/service-map.md): entry points and invariants for lifecycle, dispatch, handoffs, native subagents, and finalization
 - [Issue tracker](agents/issue-tracker.md)
+- [Integration workflow](agents/integration-workflow.md): branch, worktree, merge, review, and verification sequence
 - [Labels](agents/triage-labels.md)
 - [Review workflow](agents/review-workflow.md)
 - [Reviewer standards](agents/review-standards.md): judgement calls only; mechanical rules stay in automated checks

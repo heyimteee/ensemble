@@ -30,7 +30,9 @@
     "test:live:subagent": "bash scripts/live-subagent-probe.sh",
     "test:live:multilocation": "bash scripts/live-multilocation.sh",
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
-    "logs:summary": "node scripts/log-summary.mjs"
+    "logs:summary": "node scripts/log-summary.mjs",
+    "worktree:create": "bash scripts/worktree-create.sh",
+    "integration:merge": "bash scripts/integration-merge.sh"
   },
   "engines": {
     "node": ">=26.4.0"
