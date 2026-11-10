@@ -117,6 +117,13 @@ export type MessageKind = "text" | "task" | "approval" | "system"
 export type Message = {
   id: Id
   workspaceID: Id
+  /**
+   * Conversation channel (ticket #212). Group rows omit it and use
+   * `workspaceID`; direct rows carry `dm:<agentID>[:<workspaceID>]` so the
+   * same durable row, patch, window, retention, and client bound serve both
+   * conversation kinds without overloading the workspace id.
+   */
+  channel?: Id
   seq: number
   author: "user" | "agent" | "system"
   agentID?: Id
@@ -693,7 +700,7 @@ export type EntityChange =
   | { entity: "dispatchGroup"; op: "upsert"; group: DispatchGroup }
   | { entity: "dispatchGroup"; op: "remove"; id: Id }
   | { entity: "message"; op: "upsert"; message: Message }
-  | { entity: "message"; op: "remove"; workspaceID: Id; id: Id }
+  | { entity: "message"; op: "remove"; workspaceID: Id; channel?: Id; id: Id }
   | { entity: "agent"; op: "upsert"; agent: Agent }
   | { entity: "agent"; op: "remove"; id: Id }
   | { entity: "workspace"; op: "upsert"; workspace: Workspace }

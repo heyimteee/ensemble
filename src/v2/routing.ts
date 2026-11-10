@@ -1,5 +1,11 @@
 import type { Agent, Workspace } from "./types.ts"
 
+/**
+ * Legacy raw-text mention parsing. Composer and explicit-tool callers still
+ * use this path until #220/#221 move them. Native message routing must use
+ * `mention-routing.ts`, which applies the ADR 0011 sanitized-prose grammar.
+ */
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
