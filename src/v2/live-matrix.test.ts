@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -73,6 +73,43 @@ test("the harness skip is a structural marker, not log text", () => {
     assert.notEqual(required.status, 0)
     assert.doesNotMatch(required.stdout, /; skipping/)
     assert.ok(!existsSync(marker), "require mode fails before the marker is written")
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
+test("failure artifact retention cannot copy an ambient log directory", () => {
+  const box = sandbox()
+  try {
+    const state = join(box.root, "state")
+    const harnessLogs = join(box.root, "harness-logs")
+    const ambientLogs = join(box.root, "ambient-logs")
+    const artifacts = join(box.root, "artifacts")
+    mkdirSync(join(state, "ensemble", "logs"), { recursive: true })
+    mkdirSync(harnessLogs)
+    mkdirSync(ambientLogs)
+    writeFileSync(join(state, "ensemble", "logs", "service.jsonl"), '{"event":"isolated-state"}\n')
+    writeFileSync(join(ambientLogs, "service.jsonl"), '{"event":"ambient-host-log"}\n')
+    const command = [
+      'source "$1"',
+      "LIVE_KIND=privacy",
+      "LIVE_EXIT_STATUS=1",
+      'LIVE_STATE="$2"',
+      'LIVE_LOGS="$3"',
+      'LIVE_SERVER_URL=""',
+      'LIVE_NODE_BIN=""',
+      'LIVE_TMUX_BIN=""',
+      "LIVE_SESSION_NAMES=()",
+      'live_retain_failure_artifacts "$4/privacy"',
+    ].join("\n")
+    const result = spawnSync(bash, ["-c", command, "--", harness, state, harnessLogs, artifacts], {
+      encoding: "utf8",
+      env: environment(box, { ENSEMBLE_LOG_DIR: ambientLogs }),
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const copied = readFileSync(join(artifacts, "privacy", "service-logs", "service.jsonl"), "utf8")
+    assert.match(copied, /isolated-state/)
+    assert.doesNotMatch(copied, /ambient-host-log/)
   } finally {
     rmSync(box.root, { recursive: true, force: true })
   }

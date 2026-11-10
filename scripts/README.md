@@ -134,9 +134,12 @@ retries. A failing scenario stops the run and later scenarios are reported as
 
 ## CI
 
-CI keeps the `verify` job (`npm ci`, then `git diff --check`, then
-`npm run verify`) and a `live` job on every push and pull request. The live job
-pins the host toolset: Ubuntu 24.04, Node 26.12.1 through
+CI keeps the `verify` job (`npm ci`, then `scripts/ci-diff-check.sh`, then
+`npm run verify`) and a `live` job on every push and pull request. The diff
+check inspects the pushed range from `github.event.before`, or the pull-request
+base, and falls back to the full `HEAD` tree for an initial push or an
+unavailable base; it fails on whitespace errors and leftover conflict markers.
+The live job pins the host toolset: Ubuntu 24.04, Node 26.12.1 through
 `actions/setup-node`, OpenCode 2.2.6 through
 `npm install --global @opencode/cli@2.2.6`, the runner's `tmux`, and fd 10.2.0
 from its release archive. It then runs `npm run test:live:preflight` (fake
@@ -178,7 +181,7 @@ restating it.
 The equivalent local CI check is:
 
 ```sh
-git diff --check
+bash scripts/ci-diff-check.sh
 ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:preflight
 ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:fake:all
 ENSEMBLE_LIVE_REQUIRE=1 npm run test:live:multilocation
