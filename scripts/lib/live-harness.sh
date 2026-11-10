@@ -11,6 +11,7 @@
 #   - fake-provider, OpenCode server, and TUI tmux sessions
 #   - condition waits, keystrokes, pane capture, assertions
 #   - failure context and cleanup, with ENSEMBLE_LIVE_KEEP=1 preserve mode
+#   - failure-only artifact retention for CI uploads
 #
 # Scenarios must call live_require_runtime (and live_require_node when they
 # need Node) before live_setup, and live_setup before any live_start_* helper.
@@ -19,6 +20,10 @@
 # Set ENSEMBLE_LIVE_REQUIRE=1 to turn a missing prerequisite into a failure.
 # Local runs keep the historical skip-and-exit-zero behavior; CI uses require
 # mode so a skipped suite cannot look green.
+#
+# Set ENSEMBLE_LIVE_FAILURE_ARTIFACTS=<dir> to retain a redacted diagnostic set
+# under <dir>/<scenario> when a run fails. The temporary tree is still removed.
+# ENSEMBLE_LIVE_KEEP=1 remains the full local preserve mode.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   echo "live-harness: source this file; do not execute it" >&2
@@ -31,6 +36,8 @@ LIVE_TUI_TIMEOUT="${ENSEMBLE_LIVE_TUI_TIMEOUT:-60}"
 LIVE_STEP_TIMEOUT="${ENSEMBLE_LIVE_STEP_TIMEOUT:-20}"
 LIVE_BASE=""
 LIVE_ROOT=""
+LIVE_KIND=""
+LIVE_EXIT_STATUS=""
 LIVE_CONFIG=""
 LIVE_DATA=""
 LIVE_STATE=""
@@ -202,6 +209,7 @@ live_setup() {
   local tmp="${TMPDIR:-/tmp}/opencode"
   mkdir -p "$tmp"
   LIVE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+  LIVE_KIND="$kind"
   LIVE_BASE=$(mktemp -d "$tmp/ensemble-$kind-XXXXXX")
   LIVE_CONFIG="$LIVE_BASE/config"
   LIVE_DATA="$LIVE_BASE/data"
@@ -1530,10 +1538,16 @@ live_wait_for_subtask_status() {
 live_redact() {
   local secret="${LIVE_SERVER_PASSWORD:-}"
   if [[ -n "$secret" ]]; then
-    awk -v secret="$secret" '{ while (pos = index($0, secret)) $0 = substr($0, 1, pos - 1) "[redacted]" substr($0, pos + length(secret)); print }' | grep -v -i -E 'password|secret|token|key' || true
-    return 0
-  fi
-  grep -v -i -E 'password|secret|token|key' || true
+    awk -v secret="$secret" '{ while (pos = index($0, secret)) $0 = substr($0, 1, pos - 1) "[redacted]" substr($0, pos + length(secret)); print }'
+  else
+    cat
+  fi | sed -E \
+      -e 's#//[^/[:space:]:@]+:[^/[:space:]@]+@#//[redacted]@#g' \
+      -e 's/\bsk-[A-Za-z0-9._-]{8,}/[redacted]/g' \
+      -e 's/\bgh[pousr]_[A-Za-z0-9_]{12,}/[redacted]/g' \
+      -e 's/\b(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]+/\1 [redacted]/g' \
+    | grep -v -i -E 'password|secret|token|key' || true
+  return 0
 }
 
 live_dump_context() {
@@ -1570,6 +1584,60 @@ live_print_preserved() {
   done
 }
 
+# --- failure artifact retention (CI) --------------------------------------
+#
+# CI sets ENSEMBLE_LIVE_FAILURE_ARTIFACTS to a deterministic root and uploads
+# it only when the job fails. Retain only harness-written diagnostics, pass
+# every file through the same redaction as failure output, and never copy the
+# isolated HOME, config, project, dependency tree, fake URL, or host
+# descriptors. A successful run writes nothing.
+live_retain_failure_artifacts() {
+  local dest="$1" file name service_logs session
+  mkdir -p "$dest/logs" "$dest/service-logs" "$dest/captures" || return 1
+  printf 'scenario: %s\nexit_status: %s\n' \
+    "${LIVE_KIND:-unknown}" "${LIVE_EXIT_STATUS:-1}" >"$dest/meta.txt" || return 1
+  # A mid-run failure may happen before the scenario reaches its own doctor
+  # step. Take one fresh read-only snapshot when the isolated server was up;
+  # the doctor never writes files or reads task content.
+  if [[ -n "$LIVE_SERVER_URL" && -n "$LIVE_NODE_BIN" && -f "$LIVE_ROOT/src/v2/doctor-cli.ts" ]]; then
+    OPENCODE_PASSWORD="$LIVE_SERVER_PASSWORD" "$LIVE_NODE_BIN" --experimental-strip-types \
+      "$LIVE_ROOT/src/v2/doctor-cli.ts" --server "$LIVE_SERVER_URL" "$LIVE_PROJECT" 2>&1 \
+      | live_redact >"$dest/logs/doctor-failure.txt" || true
+  fi
+  if [[ -n "$LIVE_LOGS" && -d "$LIVE_LOGS" ]]; then
+    for file in "$LIVE_LOGS"/*; do
+      [[ -f "$file" ]] || continue
+      name=$(basename "$file")
+      # Proven harness outputs only. A future scenario file stays out until it
+      # is reviewed and added here.
+      case "$name" in
+        server.log|tui.log|fake.log|doctor.txt|doctor.json) ;;
+        multilocation.json|dispatch-budgets.json|log-summary.json|log-summary-*.json) ;;
+        *) continue ;;
+      esac
+      live_redact <"$file" >"$dest/logs/$name" || true
+    done
+  fi
+  service_logs="${ENSEMBLE_LOG_DIR:-}"
+  if [[ -z "$service_logs" && -n "$LIVE_STATE" ]]; then
+    service_logs="$LIVE_STATE/ensemble/logs"
+  fi
+  if [[ -n "$service_logs" && -d "$service_logs" ]]; then
+    for file in "$service_logs"/*.jsonl; do
+      [[ -f "$file" ]] || continue
+      name=$(basename "$file")
+      live_redact <"$file" >"$dest/service-logs/$name" || true
+    done
+  fi
+  if [[ -n "$LIVE_TMUX_BIN" ]]; then
+    for session in "${LIVE_SESSION_NAMES[@]}"; do
+      "$LIVE_TMUX_BIN" has-session -t "$session" 2>/dev/null || continue
+      live_capture "$session" | live_redact >"$dest/captures/$session.txt" || true
+    done
+  fi
+  printf 'live: retained failure artifacts at %s\n' "$dest" >&2
+}
+
 live_cleanup() {
   local session pid
   for session in "${LIVE_SESSION_NAMES[@]}"; do
@@ -1584,8 +1652,13 @@ live_on_exit() {
   local status=$?
   trap - EXIT INT TERM
   set +e
+  LIVE_EXIT_STATUS="$status"
   if (( status != 0 )); then
     live_dump_context
+    if [[ -n "${ENSEMBLE_LIVE_FAILURE_ARTIFACTS:-}" ]]; then
+      live_retain_failure_artifacts \
+        "${ENSEMBLE_LIVE_FAILURE_ARTIFACTS}/${LIVE_KIND:-live}" || true
+    fi
   fi
   if (( status != 0 )) && live_keep_enabled; then
     live_print_preserved
