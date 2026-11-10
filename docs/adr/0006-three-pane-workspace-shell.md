@@ -4,7 +4,7 @@
 - **Date:** 2026-11-09
 - **Tickets:** #166 (parent), #171, #172, #173, #174
 - **Supersedes:** none
-- **Related:** ADR 0005, ADR 0008, `src/v2/tui/workpane.ts`, `src/v2/tui/railmodel.ts`, `src/v2/tui/workfocus.ts`, `src/v2/tui/workapprovals.ts`, `src/v2/tui/picker.ts`
+- **Related:** ADR 0005, ADR 0008, ADR 0009, `src/v2/tui/workpane.ts`, `src/v2/tui/railmodel.ts`, `src/v2/tui/workfocus.ts`, `src/v2/tui/workapprovals.ts`, `src/v2/tui/picker.ts`
 
 ## Context
 
@@ -84,7 +84,9 @@ rendered `name | role` without one label column, so separators did not align.
    name, role, leader, and busy state; Enter routes to that member's native
    session and Esc closes. Work focus, `o`: open the focused card's assignee
    directly. DM, `o`: the current agent session. A missing binding raises a
-   clear message rather than a silent no-op.
+   clear message rather than a silent no-op. Under [ADR 0009](0009-conversation-identity-and-sessions.md),
+   these are the workspace group and direct sessions respectively; the picker
+   never substitutes one conversation's session for another.
 
 8. **One label column.**
    `alignedDetailRows` computes one label width for the visible rows and

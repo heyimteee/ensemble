@@ -4,6 +4,8 @@
 
 Status: **developer preview**, compatibility recorded against OpenCode 2.2.1. The v2 runtime is the default. The v1 preview was removed. The v5.8 live matrix ran on OpenCode 2.2.5.
 
+> **Native-first decisions (2026-11-10).** [ADR 0009](adr/0009-conversation-identity-and-sessions.md), [ADR 0010](adr/0010-native-turn-ingestion.md), and [ADR 0011](adr/0011-mention-routing-and-budgets.md) record the decided conversation/session, ingestion, and routing model. Where this document describes the current v2 path that differs (one workspace session per agent, a DM reusing it, TUI transcript reads, explicit `maxHops`), the ADR is authoritative for the target; implementation lands under tickets #212–#227.
+
 ## Architecture
 
 ```text
@@ -59,7 +61,7 @@ Workspace {
 
 - One canonical directory maps to one active workspace.
 - Switching workspace changes the chat, Work pane, and directory for new runs.
-- Sessions are bound to `workspace + agent`, so switching does not discard them.
+- Sessions are bound to `workspace + agent` in the current path; [ADR 0009](adr/0009-conversation-identity-and-sessions.md) replaces that key with a conversation binding.
 - `<workspace>/.ensemble/config.json` is authoritative for workspace name, leader, members, synthesis, and paused state. OpenCode storage remains authoritative for agents, messages, subtasks, approvals, memories, bindings, and history.
 - Valid config files discovered in a directory register a workspace automatically; invalid config is rejected and the last good state is kept.
 - `.ensemble/` is created when a workspace is created, is added to `.gitignore`, and contains only config, handoffs, and init metadata. Conversation history stays in OpenCode storage.
@@ -109,6 +111,8 @@ Agent {
 - See [ADR 0007](adr/0007-apply-agent-behavior-in-place.md).
 
 ## Group chat
+
+Native-first target: `$Name` in sanitized native prose is the routing operator; the current tool path below remains during migration. See [ADR 0011](adr/0011-mention-routing-and-budgets.md).
 
 The transcript is shared and attributed:
 
@@ -168,6 +172,8 @@ The authoritative boundary and its trade-offs are recorded in [ADR 0001: Native-
 - Creating an agent starts a visible onboarding prompt in its home session. The prompt includes the agent's name/title/role, colleague behavior, handoff rules, and the full versioned AGENTS.md Ensemble block. It runs in the background; hidden identity instructions also carry the block into every session.
 
 ## Direct chats and sessions
+
+Native-first target: each direct conversation has its own native session and Work history; the current path below reuses the workspace session until #214. See [ADR 0009](adr/0009-conversation-identity-and-sessions.md).
 
 - Every agent has a direct chat. If the agent belongs to the active workspace, the DM uses that workspace’s native session; otherwise it uses a no-workspace session in `~/.ensemble/agents/<id>/`.
 - Direct chat messages are queued while the agent is running and flushed when the native session becomes idle.
