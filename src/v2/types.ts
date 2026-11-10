@@ -125,6 +125,19 @@ export type NativeTurnPhase =
   | "interrupted"
 
 /**
+ * One observed native host event, identity-only. Ticket #222 uses this
+ * timeline for the "Why this card?" detail. It never carries conversation
+ * content or file paths.
+ */
+export type NativeTurnEvent = {
+  type: string
+  at: number
+  phase?: NativeTurnPhase
+  delivery?: string
+  messageID?: Id
+}
+
+/**
  * Host identity and phase for one native turn (ticket #215). `inboxID` is the
  * user message id; `assistantMessageIDs` are the host text message ids. A
  * retry reuses the same assistant id, so these arrays are append-only.
@@ -138,6 +151,8 @@ export type NativeTurnInfo = {
   settledAt?: number
   resultMessageID?: Id
   errorCode?: string
+  /** Ticket #222: bounded, identity-only host event timeline. */
+  events?: NativeTurnEvent[]
 }
 
 /**
@@ -707,6 +722,20 @@ export type ScopedResync = {
   gate?: Tier3Gate
   /** Catalog/config metadata that travels beside the scoped payload. */
   meta?: FeedMeta
+}
+
+/**
+ * Ticket #222: one server-paged Work history read for one conversation.
+ * Terminal rows only, inside the durable 24 h retention. `next` is an opaque
+ * cursor from the last row on this page; absent when the page is the end.
+ */
+export type WorkHistoryPage = {
+  conversationID: Id
+  tasks: Record<Id, Subtask>
+  groups: Record<Id, DispatchGroup>
+  hasMore: boolean
+  next?: string
+  limit: number
 }
 
 export type Snapshot = {

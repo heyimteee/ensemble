@@ -74,6 +74,7 @@ import {
 } from "./native-subagents.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
+import { selectWorkHistory, workHistoryGroups } from "./work-history.ts"
 import { chatLineFromMessage, directMessageChannelForBinding, dmChannelReadMode, projectDirectLines, type DmChannelReadMode } from "./message-channel.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type StoreObserver } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
@@ -114,6 +115,7 @@ import {
   NATIVE_SKIP_TURN_METADATA,
   isNativeIngestEvent,
   isNativeTurn,
+  appendNativeTurnEvent,
   nativeAssistantMessageID,
   nativeContextAnswer,
   nativeContextTurnAnswer,
@@ -236,6 +238,8 @@ type RpcInput = {
   version?: number
   workspaceID?: string
   beforeSeq?: number
+  before?: string
+  conversationID?: string
   limit?: number
   messageID?: string
   scopes?: string[]
@@ -259,6 +263,8 @@ function rpcInput(value: unknown): RpcInput {
   if (input.workspaceID !== undefined && typeof input.workspaceID !== "string") throw invalidInput("workspaceID must be a string.")
   if (input.messageID !== undefined && typeof input.messageID !== "string") throw invalidInput("messageID must be a string.")
   if (input.beforeSeq !== undefined && typeof input.beforeSeq !== "number") throw invalidInput("beforeSeq must be a number.")
+  if (input.before !== undefined && typeof input.before !== "string") throw invalidInput("before must be a string.")
+  if (input.conversationID !== undefined && typeof input.conversationID !== "string") throw invalidInput("conversationID must be a string.")
   if (input.limit !== undefined && typeof input.limit !== "number") throw invalidInput("limit must be a number.")
   if (input.scopes !== undefined && !Array.isArray(input.scopes)) throw invalidInput("scopes must be a list.")
   for (const field of ["level", "cat", "event", "taskID", "instanceID"] as const) {
@@ -272,6 +278,8 @@ function rpcInput(value: unknown): RpcInput {
     version: input.version as number | undefined,
     workspaceID: input.workspaceID as string | undefined,
     beforeSeq: input.beforeSeq as number | undefined,
+    before: input.before as string | undefined,
+    conversationID: input.conversationID as string | undefined,
     limit: input.limit as number | undefined,
     messageID: input.messageID as string | undefined,
     scopes: input.scopes as string[] | undefined,
@@ -812,6 +820,7 @@ export class EnsembleV2Service {
     revision: (input: unknown) => Promise<Revision>
     "changes.since": (input: unknown) => Promise<ChangesSince>
     "work.project": (input: unknown) => Promise<any>
+    "work.history": (input: unknown) => Promise<any>
     "transcript.window": (input: unknown) => Promise<any>
     "message.get": (input: unknown) => Promise<any>
     "logs.recent": (input: unknown) => Promise<any>
@@ -828,6 +837,15 @@ export class EnsembleV2Service {
       revision: async (input) => this.revision(rpcInput(input).directory),
       "changes.since": async (input) => this.changesSince(rpcInput(input)),
       "work.project": async (input) => this.workProject(rpcInput(input).directory),
+      "work.history": async (input) => {
+        const request = rpcInput(input)
+        return this.workHistoryPage(request.directory, {
+          ...(request.workspaceID ? { workspaceID: request.workspaceID } : {}),
+          ...(request.conversationID ? { conversationID: request.conversationID } : {}),
+          ...(request.before ? { before: request.before } : {}),
+          ...(request.limit !== undefined ? { limit: request.limit } : {}),
+        })
+      },
       "transcript.window": async (input) => {
         const request = rpcInput(input)
         return this.transcriptWindow(request.directory, request.workspaceID, request.beforeSeq, request.limit)
@@ -1722,6 +1740,45 @@ export class EnsembleV2Service {
       counts: workspaceCounts(state),
       tasks,
       groups: this.dispatchGroupsFor(tasks, state.dispatchGroups),
+    })
+  }
+
+  /**
+   * Ticket #222: one bounded, conversation-scoped page of terminal Work from
+   * the durable store. A large history never rides on the bootstrap or a Work
+   * resync; a fresh client asks for this page instead of depending on an
+   * earlier client's retained rows.
+   */
+  private async workHistoryPage(
+    directory: string,
+    request: { workspaceID?: string; conversationID?: string; before?: string; limit?: number },
+  ): Promise<any> {
+    await this.beginRead(directory, { dmClock: false })
+    const state = this.store.read()
+    const direct = request.conversationID?.startsWith("dm:")
+    const conversationID = direct
+      ? request.conversationID!
+      : this.readWorkspaceID(state, directory, request.workspaceID ?? request.conversationID)
+    if (!conversationID) throw Object.assign(new Error("Conversation not found."), { code: "not_found" })
+    const at = Date.now()
+    const page = selectWorkHistory(Object.values(state.subtasks), {
+      conversationID,
+      now: at,
+      ...(request.before ? { before: request.before } : {}),
+      ...(request.limit !== undefined ? { limit: request.limit } : {}),
+    })
+    const tasks: Record<string, Subtask> = {}
+    for (const task of page.tasks) tasks[task.id] = { ...task, status: deriveWorkStatus(task, at) } as Subtask
+    const groups = workHistoryGroups(page.tasks, state.dispatchGroups)
+    return jsonSafe({
+      version: state.version,
+      epoch: this.epochValue,
+      conversationID,
+      tasks,
+      groups,
+      hasMore: page.hasMore,
+      ...(page.next ? { next: page.next } : {}),
+      limit: page.limit,
     })
   }
 
@@ -8463,6 +8520,7 @@ export class EnsembleV2Service {
             inboxID,
             assistantMessageIDs: [],
             phase: "queued",
+            events: [{ type: "session.inbox.enqueued", at, phase: "queued" }],
           },
         }
         await this.store.saveSubtask(task)
@@ -8549,7 +8607,21 @@ export class EnsembleV2Service {
 
     if (type === "session.inbox.delivered" || type === "session.inbox.delivery.changed") {
       const inboxID = String(data?.inboxID ?? "").trim()
-      if (inboxID) this.nativeDelivery.set(inboxID, String(data?.delivery ?? data?.item?.delivery ?? "delivered"))
+      if (inboxID) {
+        const delivery = String(data?.delivery ?? data?.item?.delivery ?? "delivered")
+        this.nativeDelivery.set(inboxID, delivery)
+        const task = this.nativeTurnByInbox(inboxID)
+        if (task && isNativeTurn(task) && nativePhaseOpen(task.native?.phase)) {
+          await this.updateNativeTurn(task, (next) => {
+            appendNativeTurnEvent(next.native!, {
+              type,
+              at,
+              ...(next.native?.phase ? { phase: next.native.phase } : {}),
+              delivery,
+            })
+          })
+        }
+      }
       return
     }
 
@@ -8580,6 +8652,7 @@ export class EnsembleV2Service {
       this.touchNativeWatchdog(task.id)
       await this.updateNativeTurn(task, (next) => {
         next.native = { ...next.native!, phase: "retrying" }
+        appendNativeTurnEvent(next.native, { type: "session.retry.scheduled", at, phase: "retrying" })
         next.state = "working"
         next.outcome = "pending"
       })
@@ -8648,6 +8721,7 @@ export class EnsembleV2Service {
           next.native!.assistantMessageIDs = [...(next.native!.assistantMessageIDs ?? []), assistantID]
           if (next.native!.phase === "queued") next.native!.phase = "working"
           next.native!.startedAt ??= at
+          appendNativeTurnEvent(next.native!, { type: "session.text.started", at, phase: "working", messageID: assistantID })
           next.state = "working"
           next.outcome = "pending"
         })
@@ -8732,6 +8806,7 @@ export class EnsembleV2Service {
         phase: "working",
         startedAt: next.native!.startedAt ?? at,
       }
+      appendNativeTurnEvent(next.native, { type: "session.execution.started", at, phase: "working" })
       next.state = "working"
       next.outcome = "pending"
       next.interrupted = false
@@ -9117,6 +9192,11 @@ export class EnsembleV2Service {
       settledAt: at,
       ...(row ? { resultMessageID: row.id } : {}),
     }
+    appendNativeTurnEvent(next.native, {
+      type: outcome === "cancelled" ? "session.inbox.cancelled" : `session.execution.${outcome}`,
+      at,
+      phase: next.native.phase,
+    })
     if (outcome === "succeeded" || outcome === "failed" || outcome === "cancelled") {
       next.state = "replied"
       next.outcome = outcome === "succeeded" ? "succeeded" : "failed"
@@ -9216,6 +9296,7 @@ export class EnsembleV2Service {
     }
     const next = this.store.cloneSubtask(task.id) ?? { ...task }
     next.native = { ...next.native!, phase: "interrupted", settledAt: at }
+    appendNativeTurnEvent(next.native, { type: "native.turn.recovered", at, phase: "interrupted" })
     next.state = "working"
     next.outcome = "pending"
     next.interrupted = true

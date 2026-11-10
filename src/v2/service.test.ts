@@ -9439,6 +9439,7 @@ test("ticket215: a native direct turn becomes one durable user row, one exact ag
     assert.equal(turn.workspaceID, "dm:a:w")
     assert.equal(turn.native.phase, "queued")
     assert.equal(turn.native.inboxID, "m1")
+    assert.deepEqual(turn.native.events?.map((event: any) => event.type), ["session.inbox.enqueued"], "the queued turn carries its identity timeline")
     assert.equal(deriveWorkStatus(turn, Date.now()), "pending")
     assert.ok(projectVisibleWork(queued, Date.now())[turn.id], "the queued turn is a visible Work card")
 
@@ -9478,6 +9479,12 @@ test("ticket215: a native direct turn becomes one durable user row, one exact ag
     assert.equal(settledTurn.outcome, "succeeded")
     assert.equal(settledTurn.resultMessageID, answer.id)
     assert.equal(deriveWorkStatus(settledTurn, Date.now()), "replied")
+    const eventTypes = settledTurn.native.events?.map((event: any) => event.type) ?? []
+    assert.deepEqual(
+      eventTypes,
+      ["session.inbox.enqueued", "session.execution.started", "session.inbox.delivered", "session.text.started", "session.execution.succeeded"],
+      "the turn keeps an identity-only host event timeline",
+    )
     assert.ok(
       projectVisibleWork(settled, (settledTurn.finishedAt ?? Date.now()) + 500)[settledTurn.id],
       "the Work card persists through the completion hold",
