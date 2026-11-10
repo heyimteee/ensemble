@@ -120,6 +120,7 @@ import {
   appendNativeTurnEvent,
   nativeAssistantMessageID,
   nativeContextAnswer,
+  nativeContextAnswerExact,
   nativeContextTurnAnswer,
   nativeContextTurnGroups,
   nativeContextTurnSettled,
@@ -140,6 +141,13 @@ import {
   type NativeContextTurn,
   type NativeTextState,
 } from "./native-turn.ts"
+import {
+  SHADOW_COMPARISON_LIMIT,
+  buildShadowComparison,
+  type ShadowComparison,
+  type ShadowSession,
+  type ShadowTurn,
+} from "./native-shadow.ts"
 import type {
   Agent,
   Approval,
@@ -643,6 +651,16 @@ export class EnsembleV2Service {
   private readonly nativeActiveTurn = new Map<string, string>()
   private readonly nativePendingExecutions = new Map<string, number>()
   private readonly nativeAssistantTurns = new Map<string, string>()
+  /**
+   * Ticket #230: shadow ingestion is in-memory only. It reuses native turn
+   * identities and the pure text/router helpers, writes no durable row,
+   * publishes no patch, and routes no work. State is cleared on settle, mode
+   * change, and service stop.
+   */
+  private readonly shadowSessions = new Map<string, ShadowSession>()
+  private readonly shadowTurns = new Map<string, ShadowTurn>()
+  private readonly shadowComparisons: ShadowComparison[] = []
+  private shadowComparisonTotal = 0
   /** In-memory authoritative text parts per turn; durable only at settle. */
   private readonly nativeText = new Map<string, NativeTextState>()
   /** Durable streaming row per turn, so deltas never open a second row. */
@@ -840,6 +858,7 @@ export class EnsembleV2Service {
       this.nativeRunSettled.clear()
       this.nativeWatchdog.clear()
       this.nativeReconcileRuns.clear()
+      this.clearShadowState()
       this.nativeLocationAttached = false
       this.nativeReconcilePending = 0
       this.nativeReconcileFailures = 0
@@ -885,7 +904,7 @@ export class EnsembleV2Service {
     "message.get": (input: unknown) => Promise<any>
     "logs.recent": (input: unknown) => Promise<any>
     resync: (input: unknown) => Promise<ScopedResync>
-    diagnostic: (input: unknown) => Promise<{ state: SnapshotState; directory: string; recoveries?: unknown[]; logs?: unknown; service?: unknown }>
+    diagnostic: (input: unknown) => Promise<any>
     invoke: (input: unknown) => Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>
   } {
     return {
@@ -1999,7 +2018,7 @@ export class EnsembleV2Service {
     return jsonSafe(payload)
   }
 
-  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; recoveries: Array<{ taskID: string; from?: string; to?: string; reason?: string; at?: number }>; native: { sync: NativeSyncStatus; watchdog: { maxPasses: number; turns: Record<string, { passes: number; lastActivityAt?: number; held?: boolean }> } }; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
+  private async diagnostic(directory: string): Promise<{ state: SnapshotState; directory: string; dispatch: { summary: ReturnType<typeof dispatchLedgerSummary>; groups: DispatchGroup[] }; recoveries: Array<{ taskID: string; from?: string; to?: string; reason?: string; at?: number }>; native: { sync: NativeSyncStatus; watchdog: { maxPasses: number; turns: Record<string, { passes: number; lastActivityAt?: number; held?: boolean }> }; shadow: { activeTurns: number; activeSessions: number; comparisons: number; last: ShadowComparison[] } }; clones?: ReturnType<typeof cloneStats>; logs?: unknown; service?: unknown }> {
     await this.store.sync()
     this.refreshDmClock()
     this.noteViewDirectory(directory)
@@ -2049,6 +2068,14 @@ export class EnsembleV2Service {
               ...(this.nativeDeferredSettlements.has(turnID) ? { held: true } : {}),
             },
           ])),
+        },
+        // Ticket #230: bounded, content-free shadow comparison rows. IDs,
+        // phases, lengths, digests, and route counts only.
+        shadow: {
+          activeTurns: this.shadowTurns.size,
+          activeSessions: this.shadowSessions.size,
+          comparisons: this.shadowComparisonTotal,
+          last: this.shadowComparisons.slice(-8),
         },
       },
       ...(cloneDebugEnabled() ? { clones: cloneStats() } : {}),
@@ -5551,6 +5578,9 @@ export class EnsembleV2Service {
       Object.assign(patch, dispatchLimitSettings(validation.limits))
     }
     const settings = await this.store.updateSettings(patch)
+    // Ticket #230: an in-flight shadow turn belongs to the previous mode. Drop
+    // it rather than comparing it under a different visible path.
+    if (patch.nativeFirst !== undefined) this.clearShadowIngestion()
     // Ticket #225: registration is per host location, so a surface change must
     // replace it in place; otherwise the rollback would wait for a restart.
     if (patch.toolSurface !== undefined || patch.nativeFirst !== undefined) await this.refreshToolSurface()
@@ -8594,6 +8624,356 @@ export class EnsembleV2Service {
     })
   }
 
+  // ---- Ticket #230: invisible shadow ingestion ---------------------------
+
+  private shadowSession(sessionID: string): ShadowSession {
+    let session = this.shadowSessions.get(sessionID)
+    if (!session) {
+      session = {
+        pending: [],
+        executionTurns: [],
+        executionSkip: false,
+        assistantTurns: {},
+        steered: [],
+        pendingExecutions: 0,
+      }
+      this.shadowSessions.set(sessionID, session)
+    }
+    return session
+  }
+
+  /** Drop in-flight shadow turns but keep the bounded comparison rows. */
+  private clearShadowIngestion(): void {
+    this.shadowSessions.clear()
+    this.shadowTurns.clear()
+  }
+
+  /** Full stop/restart cleanup: no shadow state or comparisons survive. */
+  private clearShadowState(): void {
+    this.clearShadowIngestion()
+    this.shadowComparisons.length = 0
+    this.shadowComparisonTotal = 0
+  }
+
+  private maybeClearShadowSession(sessionID: string): void {
+    const session = this.shadowSessions.get(sessionID)
+    if (!session) return
+    if (
+      session.pending.length === 0
+      && session.executionTurns.length === 0
+      && session.steered.length === 0
+      && !session.executionSkip
+      && Object.keys(session.assistantTurns).length === 0
+    ) {
+      this.shadowSessions.delete(sessionID)
+    }
+  }
+
+  private shadowTurnByInbox(sessionID: string, inboxID: string): ShadowTurn | undefined {
+    const turnID = nativeTurnID(sessionID, inboxID)
+    return this.shadowTurns.get(turnID)
+  }
+
+  /**
+   * Count what the #219 planner would route without admitting anything. This
+   * is the shadow routing comparison: the visible path routes nothing.
+   */
+  private planShadowRoutes(
+    target: { conversation: BindingConversation; channel: string; agent: Agent },
+    text: string,
+    source: "native-user" | "agent-final",
+  ): number {
+    if (!String(text ?? "").trim()) return 0
+    const state = this.store.read()
+    const workspace = target.conversation.kind === "workspace"
+      ? state.workspaces[target.conversation.workspaceID]
+      : undefined
+    if (target.conversation.kind === "workspace" && !workspace) return 0
+    const conversation: MentionConversation = workspace
+      ? { kind: "group", workspaceID: workspace.id, sessionAgentID: target.agent.id }
+      : {
+          kind: "direct",
+          agentID: target.agent.id,
+          ...(target.conversation.kind === "direct" ? { workspaceID: target.conversation.workspaceID } : {}),
+        }
+    const roster: MentionRosterEntry[] = Object.values(state.agents).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      member: workspace ? workspace.memberIDs.includes(agent.id) : false,
+      archived: agent.archived,
+    }))
+    const limits = dispatchLimits(state.settings)
+    const ledger = {
+      groupUsed: 0,
+      groupMax: limits.groupMaxHops,
+      depth: 0,
+      depthMax: limits.depth,
+    }
+    const plan = planMentionRouting({
+      text: String(text),
+      conversation,
+      roster,
+      fanOutCap: state.settings.maxDelegations,
+      enabled: state.settings.nativeMentionRouting !== false,
+      ...(workspace ? { limits, ledger } : {}),
+      ...(source === "agent-final" ? { senderID: target.agent.id } : {}),
+    })
+    return plan.routes.length
+  }
+
+  /**
+   * Read the native transcript once at shadow settle for the visible-path
+   * comparison. This is never called per delta or on a heartbeat.
+   */
+  private async shadowVisibleText(turn: ShadowTurn): Promise<string | undefined> {
+    try {
+      const messages = listData(await this.ctx.session.context({ sessionID: turn.sessionID }))
+      return nativeContextAnswerExact(messages, {
+        inboxID: turn.inboxID,
+        assistantMessageIDs: turn.assistantMessageIDs,
+      })
+    } catch {
+      return undefined
+    }
+  }
+
+  private recordShadowComparison(row: ShadowComparison): void {
+    this.shadowComparisonTotal++
+    this.shadowComparisons.push(row)
+    while (this.shadowComparisons.length > SHADOW_COMPARISON_LIMIT) this.shadowComparisons.shift()
+    this.logger?.event("info", "native", "native.shadow.compare", { ...row })
+    this.logger?.event("info", "native", "native.shadow.turn.cleared", {
+      sessionID: row.sessionID,
+      turnID: row.turnID,
+      inboxID: row.inboxID,
+      phase: row.phase,
+    })
+  }
+
+  private async settleShadowTurn(
+    turn: ShadowTurn,
+    target: { conversation: BindingConversation; channel: string; agent: Agent },
+    outcome: "succeeded" | "failed" | "interrupted" | "cancelled",
+    at: number,
+  ): Promise<void> {
+    const expectedPhase = outcome === "succeeded"
+      ? "replied"
+      : outcome
+    const final = nativeFinalText(turn.text)
+    const visibleText = await this.shadowVisibleText(turn)
+    let text = final.complete ? final.text : final.text || nativeTextForParts(turn.text)
+    if (!final.complete && visibleText !== undefined) text = visibleText
+    turn.phase = expectedPhase
+    turn.finalRoutes = this.planShadowRoutes(target, text, "agent-final")
+    this.recordShadowComparison(buildShadowComparison({
+      turn,
+      text,
+      ...(visibleText !== undefined ? { visibleText } : {}),
+      expectedPhase,
+      at,
+    }))
+    this.shadowTurns.delete(turn.turnID)
+  }
+
+  /**
+   * Process one host event into the invisible shadow sink. This mirrors the
+   * #215/#216 turn/part semantics with the shared pure helpers and never calls
+   * a durable writer, scheduler, or router.
+   */
+  private async handleNativeShadowEvent(
+    event: any,
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+  ): Promise<void> {
+    const type = nativeEventType(event)
+    const data = nativeEventData(event)
+    const sessionID = nativeEventSessionID(event)
+    if (!sessionID) return
+    const at = nativeEventAt(event, now())
+    const session = this.shadowSession(sessionID)
+
+    if (type === "session.inbox.enqueued") {
+      const inboxID = String(data?.inboxID ?? "").trim()
+      if (!inboxID) return
+      const item = data?.item ?? {}
+      const payload = item?.payload ?? {}
+      if (nativePromptSkipsTurn(payload) || nativePromptIsInternal(payload) || item?.type !== "user") {
+        session.pending.push({ inboxID, turn: false })
+        return
+      }
+      const turnID = nativeTurnID(sessionID, inboxID)
+      if (this.shadowTurns.has(turnID)) return
+      const turn: ShadowTurn = {
+        turnID,
+        sessionID,
+        inboxID,
+        conversation: target.conversation,
+        channel: target.channel,
+        agentID: target.agent.id,
+        phase: "queued",
+        text: {},
+        assistantMessageIDs: [],
+        startedAt: at,
+        userRoutes: 0,
+        finalRoutes: 0,
+      }
+      const text = String(payload.text ?? "")
+      turn.userRoutes = this.planShadowRoutes(target, text, "native-user")
+      this.shadowTurns.set(turnID, turn)
+      session.pending.push({ inboxID, turn: true })
+      this.logger?.event("info", "native", "native.shadow.ingested", {
+        sessionID,
+        turnID,
+        inboxID,
+        conversationID: target.channel,
+        channelKind: target.conversation.kind,
+        phase: "queued",
+      })
+      if (session.pendingExecutions > 0 && session.executionTurns.length === 0) {
+        session.pendingExecutions--
+        session.executionTurns = [turnID]
+        turn.phase = "working"
+      }
+      return
+    }
+
+    if (type === "session.execution.started") {
+      if (session.executionTurns.length > 0) return
+      const next = session.pending.shift()
+      if (!next) {
+        session.pendingExecutions++
+        return
+      }
+      if (!next.turn) {
+        session.executionSkip = true
+        return
+      }
+      const turn = this.shadowTurnByInbox(sessionID, next.inboxID)
+      if (!turn) {
+        session.executionSkip = true
+        return
+      }
+      session.executionSkip = false
+      session.executionTurns = [turn.turnID]
+      turn.phase = "working"
+      turn.startedAt = at
+      return
+    }
+
+    if (type === "session.inbox.delivered" || type === "session.inbox.delivery.changed") {
+      if (type !== "session.inbox.delivered") return
+      const inboxID = String(data?.inboxID ?? "").trim()
+      if (!inboxID || session.executionTurns.length === 0) return
+      const turn = this.shadowTurnByInbox(sessionID, inboxID)
+      if (turn && !session.executionTurns.includes(turn.turnID) && !session.steered.includes(inboxID)) {
+        session.steered.push(inboxID)
+      }
+      return
+    }
+
+    if (type === "session.inbox.cancelled") {
+      const inboxID = String(data?.inboxID ?? "").trim()
+      const turn = inboxID
+        ? this.shadowTurnByInbox(sessionID, inboxID)
+        : (session.executionTurns.length > 0 ? this.shadowTurns.get(session.executionTurns.at(-1)!) : undefined)
+      if (!turn) return
+      await this.settleShadowTurn(turn, target, "cancelled", at)
+      session.executionTurns = session.executionTurns.filter((turnID) => turnID !== turn.turnID)
+      session.steered = session.steered.filter((candidate) => candidate !== inboxID)
+      session.pending = session.pending.filter((entry) => entry.inboxID !== inboxID)
+      for (const assistantID of Object.keys(session.assistantTurns)) {
+        if (!this.shadowTurns.has(session.assistantTurns[assistantID]!)) delete session.assistantTurns[assistantID]
+      }
+      this.maybeClearShadowSession(sessionID)
+      return
+    }
+
+    if (type === "session.retry.scheduled") {
+      if (session.executionSkip) return
+      const turn = session.executionTurns.length > 0
+        ? this.shadowTurns.get(session.executionTurns.at(-1)!)
+        : undefined
+      if (turn) turn.phase = "retrying"
+      return
+    }
+
+    if (type === "session.text.started" || type === "session.text.delta" || type === "session.text.ended") {
+      if (session.executionSkip) return
+      const assistantID = String(data?.assistantMessageID ?? "").trim()
+      if (!assistantID) return
+      let turnID: string | undefined = session.assistantTurns[assistantID]
+      if (!turnID && type === "session.text.started" && session.steered.length > 0) {
+        const inboxID = session.steered.shift()!
+        const steered = this.shadowTurnByInbox(sessionID, inboxID)
+        if (steered) {
+          turnID = steered.turnID
+          session.executionTurns.push(steered.turnID)
+        }
+      }
+      turnID ??= session.executionTurns.at(-1)
+      if (!turnID) {
+        const next = session.pending.shift()
+        if (next?.turn) {
+          const pending = this.shadowTurnByInbox(sessionID, next.inboxID)
+          if (pending) {
+            turnID = pending.turnID
+            session.executionTurns = [pending.turnID]
+          }
+        }
+      }
+      const turn = turnID ? this.shadowTurns.get(turnID) : undefined
+      if (!turn) return
+      const ordinal = Math.max(0, Math.floor(Number(data?.ordinal ?? 0) || 0))
+      const part = (turn.text[assistantID] ??= { started: [], deltas: {}, ended: {} })
+      if (!part.started.includes(ordinal)) part.started.push(ordinal)
+      if (type === "session.text.delta") {
+        part.deltas[ordinal] = (part.deltas[ordinal] ?? "") + String(data?.delta ?? "")
+      } else if (type === "session.text.ended") {
+        part.ended[ordinal] = String(data?.text ?? "")
+      }
+      if (!turn.assistantMessageIDs.includes(assistantID)) turn.assistantMessageIDs.push(assistantID)
+      session.assistantTurns[assistantID] = turn.turnID
+      if (turn.phase === "queued") turn.phase = "working"
+      return
+    }
+
+    if (
+      type === "session.execution.succeeded" ||
+      type === "session.execution.failed" ||
+      type === "session.execution.interrupted"
+    ) {
+      if (session.executionSkip) {
+        session.executionSkip = false
+        session.executionTurns = []
+        session.steered = []
+        this.maybeClearShadowSession(sessionID)
+        return
+      }
+      const outcome = type === "session.execution.succeeded"
+        ? "succeeded"
+        : type === "session.execution.failed"
+          ? "failed"
+          : "interrupted"
+      const turns = session.executionTurns
+        .map((turnID) => this.shadowTurns.get(turnID))
+        .filter((turn): turn is ShadowTurn => Boolean(turn))
+      if (turns.length === 0) {
+        const next = session.pending.shift()
+        if (next?.turn) {
+          const turn = this.shadowTurnByInbox(sessionID, next.inboxID)
+          if (turn) turns.push(turn)
+        }
+      }
+      for (const turn of turns) await this.settleShadowTurn(turn, target, outcome, at)
+      session.executionTurns = []
+      session.steered = []
+      for (const assistantID of Object.keys(session.assistantTurns)) {
+        if (!this.shadowTurns.has(session.assistantTurns[assistantID]!)) delete session.assistantTurns[assistantID]
+      }
+      this.maybeClearShadowSession(sessionID)
+      return
+    }
+  }
+
   private nativeTurnByInbox(inboxID: string): Subtask | undefined {
     return Object.values(this.store.read().subtasks).find((task) => isNativeTurn(task) && task.native?.inboxID === inboxID)
   }
@@ -8763,6 +9143,15 @@ export class EnsembleV2Service {
     if (type === "session.execution.started" || type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") {
       await this.handleNativeSubagentExecution(event)
       this.handleExecutionActivityEvent(event)
+    }
+    // Ticket #230: `shadow` ingests into the invisible sink and returns before
+    // any durable write, patch, Work row, or route. The visible path below is
+    // reached only by `on`; `off` simply stops here.
+    const mode = nativeFirstMode(this.store.settings())
+    if (mode === "shadow") {
+      const shadowTarget = this.nativeIngestTarget(sessionID, { requireMode: false })
+      if (shadowTarget) await this.handleNativeShadowEvent(event, shadowTarget)
+      return
     }
     const target = this.nativeIngestTarget(sessionID)
     if (!target) return
