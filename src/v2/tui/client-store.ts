@@ -3,6 +3,7 @@ import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
 import { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
 import { CLIENT_MESSAGE_LIMIT, mergeRetainedWork, projectRetainedWork, trimMessages } from "../scoped-read.ts"
+import { messageChannel } from "../message-channel.ts"
 import { configMetadataApplies } from "./refresh-coordinator.ts"
 import type { DispatchGroup, EntityChange, FeedMeta, Id, Message, MessageStream, ModelOption, SkillOption, Snapshot, SnapshotState, Subtask, TranscriptWindow, WorkspaceCounts } from "../types.ts"
 
@@ -42,7 +43,7 @@ function entityChangeKey(change: EntityChange): string | undefined {
     case "dispatchGroup":
       return `dispatchGroup\u0000${change.op === "upsert" ? change.group.id : change.id}`
     case "message":
-      return `message\u0000${change.op === "upsert" ? change.message.workspaceID : change.workspaceID}\u0000${change.op === "upsert" ? change.message.id : change.id}`
+      return `message\u0000${change.op === "upsert" ? messageChannel(change.message) : change.channel ?? change.workspaceID}\u0000${change.op === "upsert" ? change.message.id : change.id}`
     case "agent":
       return `agent\u0000${change.op === "upsert" ? change.agent.id : change.id}`
     case "workspace":
@@ -107,22 +108,22 @@ function reduceEntityChanges(state: SnapshotState, changes: EntityChange[]): Sna
         break
       }
       case "message": {
-        const workspaceID = change.op === "upsert" ? change.message.workspaceID : change.workspaceID
+        const channel = change.op === "upsert" ? messageChannel(change.message) : change.channel ?? change.workspaceID
         const messageID = change.op === "upsert" ? change.message.id : change.id
-        const list = next.messages[workspaceID] ?? []
+        const list = next.messages[channel] ?? []
         const index = list.findIndex((message) => message.id === messageID)
         if (change.op === "upsert") {
           if (index >= 0 && list[index] === change.message) break
           const messages = index >= 0 ? list.slice() : [...list, change.message]
           if (index >= 0) messages[index] = change.message
           messages.sort((a, b) => a.seq - b.seq)
-          copy().messages = { ...next.messages, [workspaceID]: messages }
+          copy().messages = { ...next.messages, [channel]: messages }
         } else {
           if (index < 0) break
           const messages = list.filter((message) => message.id !== messageID)
           const map = { ...next.messages }
-          if (messages.length === 0) delete map[workspaceID]
-          else map[workspaceID] = messages
+          if (messages.length === 0) delete map[channel]
+          else map[channel] = messages
           copy().messages = map
         }
         break

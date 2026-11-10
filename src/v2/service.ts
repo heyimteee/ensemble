@@ -59,6 +59,7 @@ import {
 } from "./native-subagents.ts"
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
+import { chatLineFromMessage, directMessageChannelForBinding, dmChannelReadMode, projectDirectLines, type DmChannelReadMode } from "./message-channel.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type StoreObserver } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
@@ -541,11 +542,14 @@ export class EnsembleV2Service {
   private readonly heartbeatMs: number
   /** Ticket #188: how long a parent run may hold for missing child terminal events. */
   private readonly nativeSubagentBarrierMs: number
+  /** Ticket #212: `off`/`shadow` read the legacy DM store; `on` reads durable rows. */
+  private readonly dmChannelReadsOption: DmChannelReadMode | undefined
 
-  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number } = {}) {
+  constructor(ctx: Ctx, options: { heartbeatMs?: number; nativeSubagentBarrierMs?: number; dmChannelReads?: DmChannelReadMode } = {}) {
     this.ctx = ctx
     this.heartbeatMs = Math.max(10, Math.floor(options.heartbeatMs ?? HEARTBEAT_MS))
     this.nativeSubagentBarrierMs = Math.max(1, Math.floor(options.nativeSubagentBarrierMs ?? NATIVE_SUBAGENT_BARRIER_MS))
+    this.dmChannelReadsOption = options.dmChannelReads
     this.catalog = new Catalog(ctx, () => {
       this.publishFeedMetaIfChanged()
     })
@@ -1996,6 +2000,10 @@ export class EnsembleV2Service {
     return { workspace: undefined, sessionID: home.sessionID, directory: home.directory, bindingKeyID: "home", bindingVersion: binding?.agentVersion }
   }
 
+  private dmChannelReads(): DmChannelReadMode {
+    return this.dmChannelReadsOption ?? dmChannelReadMode()
+  }
+
   private async chatContext(agentID: string, workspaceID?: string): Promise<any> {
     const agent = this.store.agent(agentID)
     if (!agent) throw Object.assign(new Error("Agent not found."), { code: "not_found" })
@@ -2010,7 +2018,18 @@ export class EnsembleV2Service {
     // made that stale bit outrank the queue's own truth. The queue entry is
     // authoritative: a line is queued exactly while its entry is still
     // `queued`; sent/failed/removed entries mean the line renders as sent.
-    const stored = this.store.dmTranscript(target.bindingKeyID, agent.id).map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
+    // Ticket #212: flag-on reads the same durable channel rows as group
+    // messages, projecting any pre-migration legacy lines behind them.
+    const legacy = this.store.dmTranscript(target.bindingKeyID, agent.id)
+    const storedBase = this.dmChannelReads() === "on"
+      ? projectDirectLines(
+          this.store
+            .messages(directMessageChannelForBinding(target.bindingKeyID, agent.id))
+            .map((message) => chatLineFromMessage(message, agent.name)),
+          legacy,
+        )
+      : legacy
+    const stored = storedBase.map((message) => ({ ...message, queued: queuedIDs.has(message.id) }))
     const native = mapNativeChat(listData(await this.ctx.session.context({ sessionID: target.sessionID })), agent.name)
     const messages = mergeDmTranscript(stored, native)
     const busy = [...this.activeRuns.values()].some((run) => run.sessionID === target.sessionID) || this.directBusy.has(target.sessionID)
