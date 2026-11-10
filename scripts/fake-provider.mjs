@@ -42,6 +42,13 @@ const FAKE_RETRY_PROMPT = "fake-retry-fixture"
 // enough that a missed interrupt still settles in a few seconds.
 const FAKE_INTERRUPT_PROMPT = "fake-interrupt-hold-fixture"
 const INTERRUPT_HOLD_CHUNKS = 90
+// Ticket #227: deterministic agent final-text mention routing. The trigger names
+// the peer; the reply body is the final native text the service routes from.
+const FAKE_MENTION_FINAL_RE = /fake-mention-final:([A-Za-z][A-Za-z0-9_-]*)/
+const FAKE_MENTION_FINAL_MARKER = "AGENT_FINAL_MENTION_MARKER"
+// Ticket #227 keeps the retry state visible long enough to assert `retrying`.
+// #210's probe leaves the default zero-delay behavior unchanged.
+const RETRY_AFTER_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_RETRY_DELAY_MS ?? "0"))
 const retryFixtureAttempts = new Map()
 const SUBAGENT_CHILD_DELAY_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_SUBAGENT_CHILD_DELAY_MS ?? "120"))
 const SUBAGENT_CHILD_MARKDOWN = [
@@ -546,6 +553,7 @@ const server = createServer(async (request, response) => {
     const subagentParent = latestUserText.includes(FAKE_SUBAGENT_PROMPT)
     const retryFixture = latestUserText.includes(FAKE_RETRY_PROMPT)
     const interruptHold = latestUserText.includes(FAKE_INTERRUPT_PROMPT)
+    const finalMention = latestUserText.match(FAKE_MENTION_FINAL_RE)
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
     const benchmark = latestUserText.match(FAKE_BENCHMARK_RE)
     const benchmarkMode = benchmark?.[1]
@@ -592,6 +600,8 @@ const server = createServer(async (request, response) => {
       ? SUBAGENT_CHILD_MARKDOWN
       : interruptHold
       ? INTERRUPT_HOLD_MARKDOWN
+      : finalMention
+      ? `${FAKE_MENTION_FINAL_MARKER} — $${finalMention[1]} please pick up the follow-up.\n`
       : leaseHold
       ? LEASE_HOLD_MARKDOWN
       : motion
@@ -658,7 +668,7 @@ const server = createServer(async (request, response) => {
       if (attempt === 1) {
         response.writeHead(429, {
           "Content-Type": "application/json",
-          "Retry-After": "0",
+          "Retry-After": String(Math.ceil(RETRY_AFTER_MS / 1000)),
         })
         response.end(JSON.stringify({ error: { message: "fake retry fixture", type: "rate_limit_exceeded" } }))
         return
