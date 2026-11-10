@@ -156,6 +156,20 @@ export type NativeTurnInfo = {
 }
 
 /**
+ * Ticket #221: the delivery record for one workspace `send_message` post made
+ * during a turn. It lets an identical final native text dedupe to the same
+ * transcript row and route set instead of posting and routing twice. The text
+ * itself stays in its message row; this record carries only a hash and IDs.
+ */
+export type AgentPostInfo = {
+  messageID: Id
+  /** Hash of the trimmed post text, never the conversation text. */
+  textHash: string
+  /** Agents the post routed to, in prose order after suppressions. */
+  recipientIDs: Id[]
+}
+
+/**
  * Metadata for one attachment (ticket #223). The durable row and the snapshot
  * carry display facts only: no bytes, no store path, and no source path. The
  * service resolves the stored file by conversation id at prompt time.
@@ -444,6 +458,11 @@ export type Subtask = {
   adopted?: boolean
   conversationID?: Id
   native?: NativeTurnInfo
+  /**
+   * Ticket #221: the latest workspace tool post made during this turn. A final
+   * native text identical to it reuses its message row and route set.
+   */
+  agentPost?: AgentPostInfo
   /**
    * General-skill leader triage (ticket #103): the turn must read and either
    * use or delegate the listed skills. This is the single triage source of
