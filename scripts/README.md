@@ -42,6 +42,18 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   aggregate activity summary with Work open, and the small/full approvals modes
   with the left footer, chat modal, and `V` retired. The long-run lifecycle case
   lives in `test:live:lifecycle`.
+- `npm run test:live:probe`: ticket #210's native host event-contract probe. It
+  starts an isolated OpenCode 2.2.6 host and fake provider, loads a recording
+  plugin through the same `ctx.event.subscribe` surface the service uses, and
+  drives the native turns native-first ingestion depends on: direct, workspace,
+  retry, interruption, attachment, synthetic, background subagent, delivery
+  change/cancel, move, session-list scopes, and a ten-second idle observation.
+  It writes a normalized JSONL fixture (text lengths/digests only; no content or
+  absolute paths) and runs `src/v2/native-host-fixture.test.ts` against the fresh
+  record. `ENSEMBLE_PROBE_OUT` selects the output path,
+  `ENSEMBLE_PROBE_ARTIFACTS` copies the host logs, and
+  `ENSEMBLE_PROBE_WRITE=1` refreshes the committed fixture at
+  `src/v2/fixtures/native-host-contract.jsonl`.
 - `npm run test:live:subagent`: ticket #188's real native-subagent probe. The
   isolated OpenCode 2.2.6 host runs the worktree plugin against the fake
   provider, then an Ensemble agent's fake turn calls the host's built-in

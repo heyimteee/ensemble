@@ -29,6 +29,16 @@ const FAKE_NATIVE_ERROR_PROMPT = "fake-native-error"
 // which is exactly the early-finalization condition the barrier must cover.
 const FAKE_SUBAGENT_PROMPT = "fake-subagent-parent-fixture"
 const FAKE_SUBAGENT_CHILD_PROMPT = "fake-subagent-child-hold-fixture"
+// Ticket #210: real host retry fixture. The first streaming request returns a
+// retryable 429 with a zero delay; the host schedules `session.retry.scheduled`
+// and the next request answers normally. Non-streaming title/aux requests are
+// not counted, so the probe's single turn retries exactly once.
+const FAKE_RETRY_PROMPT = "fake-retry-fixture"
+// Ticket #210: a bounded stream long enough to interrupt mid-text and short
+// enough that a missed interrupt still settles in a few seconds.
+const FAKE_INTERRUPT_PROMPT = "fake-interrupt-hold-fixture"
+const INTERRUPT_HOLD_CHUNKS = 90
+const retryFixtureAttempts = new Map()
 const SUBAGENT_CHILD_DELAY_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_SUBAGENT_CHILD_DELAY_MS ?? "120"))
 const SUBAGENT_CHILD_MARKDOWN = [
   "# Subagent child fixture",
@@ -168,6 +178,16 @@ const QUEUE_HOLD_LONG_MARKDOWN = [
     { length: 400 },
     (_, index) => `long hold line ${index + 1} keeps this second dispatch group live while the first group is cancelled.`,
   ),
+  "",
+].join("\n")
+
+// Ticket #210: a bounded stream long enough to interrupt mid-text and short
+// enough that a missed interrupt still settles in a few seconds.
+const INTERRUPT_HOLD_MARKDOWN = [
+  "# Interrupt Hold Fixture",
+  "",
+  "INTERRUPT_HOLD_MARKER",
+  ...Array.from({ length: INTERRUPT_HOLD_CHUNKS }, (_, index) => `interrupt line ${index + 1} keeps this native turn streaming until the probe interrupts it.`),
   "",
 ].join("\n")
 
@@ -520,6 +540,8 @@ const server = createServer(async (request, response) => {
     const latestUserText = lastUser >= 0 ? textOf(messages[lastUser]?.content) : ""
     const subagentChild = latestUserText.includes(FAKE_SUBAGENT_CHILD_PROMPT)
     const subagentParent = latestUserText.includes(FAKE_SUBAGENT_PROMPT)
+    const retryFixture = latestUserText.includes(FAKE_RETRY_PROMPT)
+    const interruptHold = latestUserText.includes(FAKE_INTERRUPT_PROMPT)
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
     const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
     const answered = /User answer:/i.test(latestUserText)
@@ -554,6 +576,8 @@ const server = createServer(async (request, response) => {
       ? COMPACTION_SUMMARY
       : subagentChild
       ? SUBAGENT_CHILD_MARKDOWN
+      : interruptHold
+      ? INTERRUPT_HOLD_MARKDOWN
       : leaseHold
       ? LEASE_HOLD_MARKDOWN
       : motion
@@ -601,6 +625,22 @@ const server = createServer(async (request, response) => {
       reviewItems: reviewItems.length,
       promptTail: prompt.slice(-120),
     })
+    // Ticket #210: one retryable 429 per fixture text, counted only for
+    // streaming model requests. The host schedules a retry and then succeeds.
+    if (body?.stream !== false && retryFixture) {
+      const key = latestUserText
+      const attempt = (retryFixtureAttempts.get(key) ?? 0) + 1
+      retryFixtureAttempts.set(key, attempt)
+      log("retry_fixture", { request: requestID, attempt })
+      if (attempt === 1) {
+        response.writeHead(429, {
+          "Content-Type": "application/json",
+          "Retry-After": "0",
+        })
+        response.end(JSON.stringify({ error: { message: "fake retry fixture", type: "rate_limit_exceeded" } }))
+        return
+      }
+    }
     // A real native error fixture: the host turn fails before any text stream.
     if (body?.stream !== false && latestUserText.includes(FAKE_NATIVE_ERROR_PROMPT)) {
       log("native_error", { request: requestID })
