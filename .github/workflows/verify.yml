@@ -29,6 +29,8 @@ jobs:
   live:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      ENSEMBLE_LIVE_FAILURE_ARTIFACTS: ${{ github.workspace }}/live-artifacts
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -67,3 +69,11 @@ jobs:
         env:
           ENSEMBLE_LIVE_REQUIRE: "1"
         run: npm run test:live:subagent
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-failure-artifacts-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/live-artifacts
+          if-no-files-found: warn
+          retention-days: 7

@@ -151,6 +151,14 @@ use fd; the job still installs it so the same pinned toolset can validate the
 full local matrix with `npm run test:live:preflight -- all`. Real-model checks
 stay local and are never required in CI.
 
+On failure, the live job uploads the harness's retained diagnostics as the
+`live-failure-artifacts-<attempt>` artifact with seven-day retention; the
+upload step is skipped on success. The harness writes them under
+`live-artifacts/<scenario>/` whenever `ENSEMBLE_LIVE_FAILURE_ARTIFACTS` is set:
+redacted harness logs (`server.log`, `tui.log`, `fake.log`, doctor text/JSON,
+and log summaries), redacted service JSONL, and redacted pane captures. See
+[CI failure artifacts](#ci-failure-artifacts).
+
 ## Skip versus fail
 
 This is the authoritative contract; other documents point here instead of
@@ -205,6 +213,39 @@ and tmux session names. Attach using the printed `tmux attach -t <session>`.
 When finished, kill each listed session and remove only the printed temporary
 directory. Logs and configuration are local diagnostic artifacts; inspect for
 sensitive content before sharing. Successful runs always clean up.
+
+### CI failure artifacts
+
+Set `ENSEMBLE_LIVE_FAILURE_ARTIFACTS=/path` to retain a bounded diagnostic set
+when a scenario fails. CI sets it to `<workspace>/live-artifacts` and the
+`live` job uploads that directory only on failure. The harness writes
+`/path/<scenario>/` (for example `live-artifacts/fake-empty/`) before removing
+its temporary tree; a successful run writes nothing.
+
+The set is limited to:
+
+- `meta.txt`: scenario name and exit status.
+- `logs/`: the harness's proven outputs: `server.log`, `tui.log`, `fake.log`,
+  `doctor.txt`, `doctor.json`, `multilocation.json`, `dispatch-budgets.json`,
+  and `log-summary*.json`, plus a fresh read-only `doctor-failure.txt` snapshot
+  when the isolated server was still up. Other files in the temporary log
+  directory are excluded until reviewed.
+- `service-logs/`: the isolated service and TUI JSONL logs.
+- `captures/`: pane captures for harness sessions that were still running.
+
+Every copied file passes through the same `live_redact` filter used for failure
+output. Retention never copies the isolated HOME, config, project, dependency
+directory, fake-provider URL file, or host descriptors. Credentials are removed
+with credential-bearing lines. CI runs against a disposable HOME/config/project
+and the deterministic fake provider with `ENSEMBLE_LOG_CONTENT` off, so the set
+contains fixture text plus service identifiers, states, counts, and reason
+codes, never a user's credentials or conversations. Treat the artifact as
+private diagnostic evidence: cite event names, IDs, states, counts, and reason
+codes rather than attaching content, per the
+[service-log rule](../docs/agents/opencode-tui-runtime.md#service-logs).
+
+`ENSEMBLE_LIVE_KEEP=1` remains the full local preserve mode and keeps the whole
+temporary tree; the two settings are independent.
 
 The fake checks are the primary regression net for the v5.7 and v5.8 behavior; run
 `test:live:fake` more than once when changing focus, caret, or native
