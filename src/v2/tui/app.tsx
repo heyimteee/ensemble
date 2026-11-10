@@ -14,7 +14,7 @@ import { COMPOSER_COMMANDS, COMPOSER_VALIDATION_MS, composerHeight as computeCom
 import { directSkillIssue, planSkillInvocation, replaceSkillToken, skillPaletteAt } from "../skill-invocation.ts"
 import { initComposerIssue, isInitAlias } from "../system-agent.ts"
 import { activeInitJobs, initMessageIDs as initJobMessageIDs, initRowForJob } from "./initrow.ts"
-import { agentName, alignedDetailRows, busyCount, fuzzyMatch, headerQueuedSuffix, isWorkingTask, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
+import { agentName, alignedDetailRows, busyCount, directConversationParts, fuzzyMatch, headerQueuedSuffix, isWorkingTask, missingSkills, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, transcriptRole, unreadCount, workspaceLabel } from "./format.ts"
 import { filterMemories } from "./memories.ts"
 import {
   RAIL_PULSE_STEP_MS,
@@ -6629,7 +6629,10 @@ export function EnsembleV2App() {
     if (!current) return "No chat open"
     if (current.kind === "agent") {
       const workspace = current.workspaceID ? state()?.workspaces[current.workspaceID] : undefined
-      return chromeJoin([surfaceAgent()?.name ?? "Agent", "direct", workspace ? `#${workspace.name}` : "no workspace"])
+      // Ticket #214: the label comes from the service's resolved conversation,
+      // not the surface's remembered workspace, so a membership change cannot
+      // leave the header claiming the wrong native context.
+      return chromeJoin([surfaceAgent()?.name ?? "Agent", ...directConversationParts(chatContext()?.conversation, workspace?.name)])
     }
     const workspace = state()?.workspaces[current.workspaceID]
     if (!workspace) return "Workspace"

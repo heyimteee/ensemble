@@ -784,3 +784,7 @@ test("rail and approvals share the Braille motion tick", () => {
 test("the init row reads durable jobs on the shared motion tick", () => {
   assert.ok(has(app(), "initRowForJob(job, motionFrame(), process.env)"))
 })
+
+test("the direct surface labels its workspace or home native context", () => {
+  assert.ok(has(app(), "directConversationParts(chatContext()?.conversation"))
+})

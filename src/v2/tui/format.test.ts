@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { ageLabel, agentColor, alignedDetailRows, answerHeader, askingLine, assignmentLine, fuzzyMatch, headerQueuedSuffix, isAssignmentEvent, markdownText, missingSkills, queuedRemovable, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, short, systemLine, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
+import { ageLabel, agentColor, alignedDetailRows, answerHeader, askingLine, assignmentLine, directConversationParts, fuzzyMatch, headerQueuedSuffix, isAssignmentEvent, markdownText, missingSkills, queuedRemovable, queuedSuffix, relayTaskForMessage, renderMarkdownLines, renderVerbatimLines, resultForTask, short, systemLine, transcriptRole, unreadCount, wrapText, workspaceGroupLabel } from "./format.ts"
 import type { Agent, Message, SnapshotState, Subtask, Workspace } from "../types.ts"
 
 const agent = (patch: Partial<Agent> = {}): Agent => ({
@@ -209,4 +209,22 @@ test("short keeps the ellipsis glued to the last kept letter", () => {
   assert.equal(short("Technical Architect/Code Reviewer", 26), "Technical Architect/Code…")
   assert.equal(short("Smith   ", 20), "Smith   ")
   assert.equal(short("ab cd ef", 5), "ab c…")
+})
+
+test("ticket214: the direct surface title names the workspace or home context", () => {
+  assert.deepEqual(
+    directConversationParts({ kind: "direct", workspaceName: "site", context: "workspace", sessionID: "s", sharedSession: false }),
+    ["direct", "workspace #site"],
+  )
+  assert.deepEqual(
+    directConversationParts({ kind: "home", context: "home", sessionID: "s", sharedSession: false }),
+    ["direct", "home"],
+  )
+  assert.deepEqual(
+    directConversationParts({ kind: "workspace", workspaceName: "site", context: "workspace", sessionID: "s", sharedSession: true }),
+    ["direct", "workspace #site", "shared session"],
+    "the rollback path says the group session is shared",
+  )
+  assert.deepEqual(directConversationParts(undefined, "site"), ["direct", "workspace #site"], "the surface workspace labels the loading context")
+  assert.deepEqual(directConversationParts(undefined), ["direct", "home"])
 })
