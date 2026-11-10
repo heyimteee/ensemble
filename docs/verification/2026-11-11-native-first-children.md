@@ -3,7 +3,7 @@
 - **Date:** 2026-11-11
 - **Parent:** [#209](https://github.com/heyimteee/ensemble/issues/209)
 - **Cutover:** [#227](https://github.com/heyimteee/ensemble/issues/227)
-- **Integration tip:** `d2659ab` (`Merge ticket #225`)
+- **Integration tip:** `588351c` (`Merge ticket #230`)
 
 This index records where each native-first child ticket's verification lives.
 Tickets with a committed record under `docs/verification/` are linked directly.
@@ -26,11 +26,13 @@ Tickets that closed with a merge/verification comment on the issue are marked
 | [#220](https://github.com/heyimteee/ensemble/issues/220) | Native user-message mentions | Closed | Issue comment; `1728/1728` at `9e7254c` |
 | [#221](https://github.com/heyimteee/ensemble/issues/221) | Native agent final-text mentions | Closed | Issue comment; `1764/1764` at `8923d99` |
 | [#222](https://github.com/heyimteee/ensemble/issues/222) | Work history and persistent cards | Closed | Issue comment; `1756/1756` at `324e180` |
-| [#223](https://github.com/heyimteee/ensemble/issues/223) | Composer attachments | Closed | [2026-11-10-ticket-223.md](2026-11-10-ticket-223.md); #227 found the native-prompt size path is incomplete (**#228**) |
+| [#223](https://github.com/heyimteee/ensemble/issues/223) | Composer attachments | Closed | [2026-11-10-ticket-223.md](2026-11-10-ticket-223.md); native-prompt size fixed in #228 |
 | [#224](https://github.com/heyimteee/ensemble/issues/224) | Session picker and adoption | Closed | Issue comment; merge `ddbf0d5`, `1702/1702` |
 | [#225](https://github.com/heyimteee/ensemble/issues/225) | Tool retirement and contract shrink | Closed | [2026-11-11-ticket-225.md](2026-11-11-ticket-225.md); `1798/1798` |
 | [#226](https://github.com/heyimteee/ensemble/issues/226) | Legacy DM transcript contract | Closed | [2026-11-11-ticket-226.md](2026-11-11-ticket-226.md); `1770/1770` |
-| [#228](https://github.com/heyimteee/ensemble/issues/228) | Native prompt attachment size (follow-up) | Fixed | [2026-11-11-ticket-228.md](2026-11-11-ticket-228.md); `1801/1801`; live main 65/65 |
+| [#228](https://github.com/heyimteee/ensemble/issues/228) | Native prompt attachment size (follow-up) | Closed | [2026-11-11-ticket-228.md](2026-11-11-ticket-228.md); `1801/1801`; live attachment check passes |
+| [#229](https://github.com/heyimteee/ensemble/issues/229) | Immediate prompt after adoption (follow-up) | Closed | [2026-11-11-ticket-229.md](2026-11-11-ticket-229.md); `1799/1799`; live adoption prompt passes |
+| [#230](https://github.com/heyimteee/ensemble/issues/230) | Native shadow mode (follow-up) | Closed | [2026-11-11-ticket-230.md](2026-11-11-ticket-230.md); `1810/1810`; live shadow comparison passes |
 
 **Gap:** #211, #212, #213, #214, #219, #220, #221, #222, and #224 do not have a
 dedicated committed file. Their evidence is the closing issue comment plus the

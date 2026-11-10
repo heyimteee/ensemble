@@ -1,21 +1,18 @@
 # Native-first cutover verification (#227)
 
-Status: **Matrix executed.**
-Update 2026-11-11: #228 (attachment size) and #230 (shadow mode) are fixed;
-a rerun on `ticket/230-shadow-mode` passes main **65/65** and restart
-**16/16** with **0 gaps**. See [ticket #230 verification](2026-11-11-ticket-230.md).
-The original blocked-run record is preserved below; #229 remains a follow-up.
+Status: **Pass — the native-first cutover matrix is green; #227 is ready to
+close.**
 Date: 2026-11-11
 Issue: [#227](https://github.com/heyimteee/ensemble/issues/227)
 Spec: [#209](https://github.com/heyimteee/ensemble/issues/209)
 Branch: `ticket/227-verification`
-Base: `integration/native-first` at `d2659ab` (`Merge ticket #225`)
+Base: `integration/native-first` at `588351c` (`Merge ticket #230`)
 Child evidence index: [2026-11-11-native-first-children.md](2026-11-11-native-first-children.md)
 
-This record is the closing evidence for the native-first program. It does not
-claim a pass where a check failed. The live matrix is deterministic, isolated,
-and fake-provider only; no real model, user credential, conversation content,
-file bytes, or private path is part of the record.
+This record is the closing evidence for the native-first program. The live
+matrix is deterministic, isolated, and fake-provider only; no real model, user
+credential, conversation content, file bytes, or private path is part of the
+record.
 
 ## Environment
 
@@ -39,10 +36,10 @@ The user's live host was never restarted or reconfigured.
 
 | Command | Result |
 |---|---|
-| `npm run verify` | **Pass** — strict typecheck; **1798 tests passed, 0 failed, 0 skipped**. |
+| `npm run verify` | **Pass** — strict typecheck; **1810 tests passed, 0 failed, 0 skipped**. |
 | `npm run test:live:probe` | **Pass** — isolated OpenCode 2.2.6 host; 11 recorded scenarios, 304 fixture rows, **14/14 contract tests pass**. |
-| `npm run test:live:fake:all` | **Pass** — fake 476 s, fake-empty 9 s; **2 passed, 0 failed, 0 skipped** in 485 s |
-| `npm run test:live:native-first` | **Fail by design while blockers are open** — main **64/65** checks, restart **16/16** checks plus 1 recorded gap; exit 1 because #228 is a failed check; #230 is a recorded gap. |
+| `npm run test:live:fake:all` | **Pass** — fake 472 s, fake-empty 9 s; **2 passed, 0 failed, 0 skipped** in 481 s |
+| `npm run test:live:native-first` | **Pass** — main **65/65** checks, restart **16/16** checks, **0 gaps**; exit 0. |
 | `git diff --check` | **Pass** — no whitespace errors. |
 
 The new scenario is wired as `npm run test:live:native-first`. It reuses the
@@ -53,18 +50,18 @@ surface; it does not start a second host client or a second fake host.
 
 | Scenario | Result | Evidence |
 |---|---|---|
-| Native direct turn | **Pass** | User row exact on `dm:<agent>:<workspace>`; one exact agent row; native adopted turn; `replied`; 166 ms prompt-to-settled |
-| Native workspace turn | **Pass** | User and agent rows on the workspace channel; native turn; `replied`; 93 ms |
-| User `$Name` mention | **Pass** | Exactly one peer turn under the native turn; same dispatch group; server-owned group budget `maxHops=8`; no agent-authored `taskMaxHops`; 145 ms |
-| Agent final-text `$Name` mention | **Pass** | Final native text is the exact group message; exactly one routed peer turn; same dispatch group; `askerKind=agent`; 221 ms |
-| Attachment prompt | **Fail (partial)** | Prompt reaches the agent and one chip is durable with name/MIME/kind, but `size` is `0` — **#228**. No bytes or paths in the row or snapshot. |
-| Session adoption | **Pass** | Preview adoptable; binding moves to the new session; previous session kept in history; heads-up emitted; adopted session ingests into the workspace channel |
+| Native direct turn | **Pass** | User row exact on `dm:<agent>:<workspace>`; one exact agent row; native adopted turn; `replied`; 169 ms prompt-to-settled |
+| Native workspace turn | **Pass** | User and agent rows on the workspace channel; native turn; `replied`; 91 ms |
+| User `$Name` mention | **Pass** | Exactly one peer turn under the native turn; same dispatch group; server-owned group budget `maxHops=8`; no agent-authored `taskMaxHops`; 153 ms |
+| Agent final-text `$Name` mention | **Pass** | Final native text is the exact group message; exactly one routed peer turn; same dispatch group; `askerKind=agent`; 215 ms |
+| Attachment prompt | **Pass** | Prompt reaches the agent; one chip with name, `text/plain` MIME, `kind:"file"`, and **31-byte** size; no bytes, source path, or store path in the row or snapshot |
+| Session adoption | **Pass** | Preview adoptable; binding moves to the new session; previous session kept in history; heads-up emitted; a prompt sent immediately after adoption settles as its own turn while the heads-up settles separately |
 | Retry | **Pass** | `retrying` observed; one turn, one assistant row, one assistant message id; `session.retry.scheduled` in the durable event timeline; no interrupted row |
 | User interruption | **Pass** | `session.interrupt` acknowledged; phase `cancelled`; partial text preserved; not an interrupted row |
 | Restart / reconnect | **Pass** | Service restarted with the same state root; bindings, 9 native turns, and terminal phases survived; 0 stuck turns; `native:live`; Work history identical; a post-restart native prompt ingested and settled; service logs recorded both `native.reconcile.done reason=start` and location `reason=reconnect` passes |
 | Work history reload | **Pass** | Workspace 11 terminal tasks over 5 pages; direct 4 tasks over 2 pages; no duplicate rows; fresh bootstrap returns the same ids |
 | Rollback to explicit tools | **Pass** | `nativeFirst:off` + `toolSurface:legacy`; legacy `message.send` task replied; 11 Ensemble tools in the provider request; durable native turns preserved; `on` + `native` restored |
-| Shadow mode | **Fail (gap)** | `nativeFirst:shadow` accepts the setting but creates no durable native turn and emits no comparison — **#230** |
+| Shadow mode | **Pass** | Shadow ingested the fixture turn and recorded a comparison row (`phase:"replied"`, text length 33, planned routes 0) while creating no durable turn, message, patch, or Work card; one `native.shadow.compare` row was logged |
 | Latency / tokens | **Pass (measurement only)** | See the table below; no spec numeric budget exists, so the raw values and the before/after schema comparison are the evidence |
 
 ### Matrix notes
@@ -82,12 +79,15 @@ surface; it does not start a second host client or a second fake host.
 - **Interruption identity.** The partial row stayed visible after the user
   interrupt and the turn settled `cancelled`. `session.idle` was not used as a
   settlement signal.
+- **Adoption ordering.** The driver prompts immediately after adoption, while
+  the synthetic heads-up may still be active. The prompt turn and the heads-up
+  turn each settle with their own exact row; neither is left `pending`.
 - **Restart honesty.** The restart pass did not synthesize an interruption for
   any completed turn and did not leave a queued/working/retrying turn behind.
   The post-restart prompt proved the reattached location still ingests.
-- **Attachment partial failure.** The scenario deliberately keeps the chip
-  checks separate so the rest of the matrix runs. The failed size check is
-  #228, not a harness sequencing issue.
+- **Shadow safety.** The comparison row carries ids, lengths, digests, phases,
+  and route counts only. Shadow mode never writes a durable row, opens a
+  ledger, routes a peer, or publishes a patch.
 
 ## Latency and token metrics
 
@@ -97,12 +97,12 @@ is a comparative measurement, not a real-model SLA.
 
 | Path | Samples | Wall clock |
 |---|---:|---:|
-| Native direct turn | 1 | 166 ms |
-| Native workspace turn | 1 | 93 ms |
-| User mention route to peer reply | 1 | 145 ms |
-| Agent final-text route to peer reply | 1 | 221 ms |
-| Retry (includes 2 s fixture backoff) | 1 | 2156 ms |
-| Rollback legacy task | 1 | 84 ms |
+| Native direct turn | 1 | 169 ms |
+| Native workspace turn | 1 | 91 ms |
+| User mention route to peer reply | 1 | 153 ms |
+| Agent final-text route to peer reply | 1 | 215 ms |
+| Retry (includes 2 s fixture backoff) | 1 | 2237 ms |
+| Rollback legacy task | 1 | 85 ms |
 
 Token and tool-schema evidence (provider request, chars/4 estimate; schema
 characters are exact JSON):
@@ -141,42 +141,44 @@ store) remains the storage rollback path in
 
 ## Shadow mode
 
-`nativeFirst: "shadow"` is accepted by settings validation, and
-`agent.sessionBinding` returns `mode: "shadow"`. The live probe then prompted a
-bound native session and waited for the host turn to settle:
+`nativeFirst: "shadow"` now runs the #215/#216 turn semantics into an invisible,
+in-memory sink:
 
-- no durable native turn or message was created (`ingested: false`);
-- no comparison row or log was emitted (`comparisonRows: false`);
-- the visible path stayed pre-cutover (`visiblePathUnchanged: true`).
+- inbox/text/execution events create shadow turns using the same deterministic
+  identities as the visible path;
+- the pure #219 planner counts the routes that would be admitted, but no ledger
+  is opened and no peer turn or refusal is created;
+- no durable message, turn, patch, stream frame, or Work card is written;
+- at settlement the sink reads the native transcript once and records a bounded,
+  content-free comparison row (ids, channel kind, text length and digest,
+  shadow/expected phase, route counts, match booleans).
 
-That matches the current source: the ingestion/reconciliation gates test for
-`"on"`, so `shadow` falls through to `off`. The spec requires shadow ingestion
-without visible changes plus a structured comparison of final text, turn state,
-and routing outcomes. **#230** tracks the gap. #227 therefore cannot claim the
-shadow acceptance criterion.
+The live probe observed `ingested: true`, `visiblePathUnchanged: true`, and
+`comparisonRows: true`; the row settled `phase:"replied"` with text length 33
+and 0 planned routes. The service logged one `native.shadow.compare` row, and
+the scenario fails if prompt content appears in the service logs. #230 is
+closed with [2026-11-11-ticket-230.md](2026-11-11-ticket-230.md).
 
-## Follow-ups found during verification
+## Follow-ups resolved
 
-| Issue | Severity | What the live run showed |
-|---|---|---|
-| [#228](https://github.com/heyimteee/ensemble/issues/228) | Bug / blocker | Native prompt attachment chips are durable but report `size: 0`; the host payload carries `data`, while `nativePromptAttachments()` reads only `dataLength`/`bytes`/`size`. |
-| [#229](https://github.com/heyimteee/ensemble/issues/229) | Bug / follow-up | A native prompt sent immediately after adoption, before the synthetic heads-up settles, was accepted and streamed by the host but its durable turn stayed `pending` with no execution attribution. The final matrix waits for the heads-up and passes; the race is still a real stuck-turn path. |
-| [#230](https://github.com/heyimteee/ensemble/issues/230) | Bug / blocker | `nativeFirst: "shadow"` does not ingest or compare; it is operationally identical to `off`. |
+| Issue | Resolution |
+|---|---|
+| [#228](https://github.com/heyimteee/ensemble/issues/228) | Native prompt chips derive a bounded size from explicit fields or the host `data` payload; live chip size is 31 bytes. Closed with [2026-11-11-ticket-228.md](2026-11-11-ticket-228.md). |
+| [#229](https://github.com/heyimteee/ensemble/issues/229) | A prompt steered into an in-flight adoption heads-up execution is claimed by its own turn and both participants settle separately. Closed with [2026-11-11-ticket-229.md](2026-11-11-ticket-229.md). |
+| [#230](https://github.com/heyimteee/ensemble/issues/230) | Shadow mode ingests into an invisible sink, records a content-free comparison row, and leaves the visible path untouched. Closed with [2026-11-11-ticket-230.md](2026-11-11-ticket-230.md). |
 
-Small harness changes are in this branch: the fake provider gained a
-deterministic agent-final mention fixture, a configurable retry delay, and the
-new driver/scenario. Product fixes are follow-ups, per the ticket constraints.
+The final `npm run verify` on the merged branch is **1810/1810**; the
+native-first live matrix is **65/65 + 16/16 with 0 gaps**.
 
 ## Child tickets
 
 All native-first child tickets are closed. The evidence map is in
 [2026-11-11-native-first-children.md](2026-11-11-native-first-children.md).
-#210, #215, #216, #217, #218, #223, #225, and #226 have dedicated committed
-records. #211, #212, #213, #214, #219, #220, #221, #222, and #224 closed with a
-merge/verification comment naming the commit and full-suite count; the index
-links those comments and does not upgrade them into live evidence. #227 found
-two implementation gaps inside the closed #223/#224 surface (#228, #229) and
-the missing shadow mode (#230).
+#210, #215, #216, #217, #218, #223, #225, #226, #228, #229, and #230 have
+dedicated committed records. #211, #212, #213, #214, #219, #220, #221, #222,
+and #224 closed with a merge/verification comment naming the commit and
+full-suite count; the index links those comments and does not upgrade them into
+live evidence.
 
 ## Suites not rerun
 
@@ -184,10 +186,12 @@ the missing shadow mode (#230).
   and the #225 record already reports the unchanged-baseline workspace-wizard
   stop. Not rerun here; recorded as **not run**, not a pass.
 - `test:live:sizes`, `test:live:lifecycle`, `test:live:subagent`,
-  `test:live:multilocation`, and `test:live:latency`: unchanged by #227 and
-  cited from their committed records (#177, #165/#177, #188, #146/#157/#164,
-  #143/#177). No new claim is made for them.
-- `npm run verify` is the authoritative unit gate and was rerun on this branch.
+  `test:live:multilocation`, and `test:live:latency`: unchanged by #227 and the
+  native-first fixes, and cited from their committed records (#177,
+  #165/#177, #188, #146/#157/#164, #143/#177). No new claim is made for them.
+- `npm run verify`, `npm run test:live:probe`, `npm run test:live:fake:all`,
+  and `npm run test:live:native-first` were all rerun on the merged branch and
+  passed. The real-host/optional suites above remain not rerun.
 
 ## Privacy
 
@@ -196,10 +200,10 @@ names, ids (randomly generated), booleans, counts, character lengths, MIME
 names, and estimated token counts only. The attachment check asserts the
 durable chip carries no bytes, source path, or store path. The scenario's
 privacy gate rejects the isolated harness roots, the server password, `/home/`,
-inline `data:` payloads, and the attachment content marker in the recorded
-output; the isolated service logs are checked for attachment bytes and home
-paths. Service logs still carry the host project directory by design; they are
-local run artifacts and are not committed.
+inline `data:` payloads, the attachment content marker, and shadow prompt
+content in the recorded output or service logs. Service logs still carry the
+host project directory by design; they are local run artifacts and are not
+committed.
 
 ## Reproduce
 
@@ -209,6 +213,6 @@ source ~/.nvm/nvm.sh && nvm use 26.12.1
 OPENCODE_BIN=/path/to/opencode-2.2.6 npm run test:live:native-first
 ```
 
-The run exits non-zero while #228 (failed check) is open; #230 appears as a
-recorded gap. A clean run means the whole matrix, including shadow mode,
-passed.
+A clean run passes all 65 main checks and all 16 restart checks with 0 gaps,
+including attachment size, immediate post-adoption prompt, and shadow
+ingestion/comparison.
