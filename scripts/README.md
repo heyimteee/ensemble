@@ -54,6 +54,16 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   `ENSEMBLE_PROBE_ARTIFACTS` copies the host logs, and
   `ENSEMBLE_PROBE_WRITE=1` refreshes the committed fixture at
   `src/v2/fixtures/native-host-contract.jsonl`.
+- `npm run test:live:native-first`: ticket #227's cutover matrix. It starts
+  the isolated fake host, loads the worktree Ensemble plugin, and drives real
+  native prompts through the same `@opencode/client` surface as the #210 probe:
+  a direct turn, a workspace turn, user and agent final-text `$Name` routing,
+  an attachment prompt, session adoption, retry, user interruption, Work
+  history paging and a fresh reload, rollback to `toolSurface: "legacy"`, a
+  full host restart with post-restart ingestion, and latency/token metrics.
+  The restart phase records the `nativeFirst: "shadow"` contract; while #230 is
+  open it reports a gap instead of a pass. The scenario exits non-zero while
+  the attachment size check (#228) or shadow gap is open.
 - `npm run test:live:subagent`: ticket #188's real native-subagent probe. The
   isolated OpenCode 2.2.6 host runs the worktree plugin against the fake
   provider, then an Ensemble agent's fake turn calls the host's built-in
