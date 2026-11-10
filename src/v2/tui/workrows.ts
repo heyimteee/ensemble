@@ -1,5 +1,5 @@
 import { dispatchBudgetLabel, type DispatchBudgetSummary } from "../dispatch-budget.ts"
-import { MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
+import { MAX_ATTEMPTS, deriveWorkStatus, isTerminalWorkStatus, workStatusWord, type DerivedWorkStatus } from "../queue.ts"
 import { nextRetryAttempt } from "../retry.ts"
 import { isNeedsYouTask, orderedGroupTasks, taskNeedsYou } from "../work-groups.ts"
 import { TRANSCRIPT_WINDOW } from "../scoped-read.ts"
@@ -560,27 +560,7 @@ export function workCardTones(status: DerivedWorkStatus, needsYou: boolean): Wor
 
 /** The uppercase status word in a card header; QUEUED never reads as pending. */
 export function workCardStateWord(status: DerivedWorkStatus, needsYou: boolean): string {
-  if (needsYou) return "NEEDS YOU"
-  switch (status) {
-    case "pending":
-      return "QUEUED"
-    case "working":
-      return "WORKING"
-    case "waiting":
-      return "WAITING"
-    case "retrying":
-      return "RETRYING"
-    case "needs_you":
-      return "NEEDS YOU"
-    case "replied":
-      return "REPLIED"
-    case "failed":
-      return "FAILED"
-    case "stalled":
-      return "STALLED"
-    case "cancelled":
-      return "CANCELLED"
-  }
+  return workStatusWord(status, needsYou)
 }
 
 /**

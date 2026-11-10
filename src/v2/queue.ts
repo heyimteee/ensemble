@@ -154,7 +154,7 @@ function nativeWorkStatus(task: Pick<WorkLifecycle, "native" | "interrupted">): 
  * pending; otherwise a durable approval link alone reads needs-you.
  */
 export function deriveWorkStatus(task: WorkLifecycle, now: number, context?: WorkNeedsYouContext): DerivedWorkStatus {
-  if (task.origin === "native" || task.native !== undefined) return nativeWorkStatus(task)
+  if (isNativeTurn(task)) return nativeWorkStatus(task)
   if (task.state === "replied") {
     if (task.stoppedAt !== undefined) return "cancelled"
     if (task.outcome === "succeeded") return "replied"
@@ -181,6 +181,36 @@ export function deriveWorkStatus(task: WorkLifecycle, now: number, context?: Wor
 /** Stable short hash for idempotency-key segments. Never interpolate raw ids. */
 export function stableHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32)
+}
+
+/** True when a stored task is a native turn (never claimed or pumped). */
+export function isNativeTurn(task: { origin?: string; native?: unknown }): boolean {
+  return task.origin === "native" || task.native !== undefined
+}
+
+/** The uppercase status word shared by Work cards and Work history. */
+export function workStatusWord(status: DerivedWorkStatus, needsYou = false): string {
+  if (needsYou) return "NEEDS YOU"
+  switch (status) {
+    case "pending":
+      return "QUEUED"
+    case "working":
+      return "WORKING"
+    case "waiting":
+      return "WAITING"
+    case "retrying":
+      return "RETRYING"
+    case "needs_you":
+      return "NEEDS YOU"
+    case "replied":
+      return "REPLIED"
+    case "failed":
+      return "FAILED"
+    case "stalled":
+      return "STALLED"
+    case "cancelled":
+      return "CANCELLED"
+  }
 }
 
 /** Boundary validation for the domain union. Unknown values are rejected. */

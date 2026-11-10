@@ -1,7 +1,7 @@
 import { dispatchGroupState, dispatchHopCount, dispatchLedgerSummary, isRootGroup, type DispatchLedgerSummary } from "./dispatch-budget.ts"
 import { bindingConversation, conversationStateKey } from "./conversation-binding.ts"
 import { nativePhaseOpen } from "./native-turn.ts"
-import { DEADLINE_MS, FINISHED_RETENTION_MS, deriveWorkStatus, isDerivedWorkStatus, type DerivedWorkStatus } from "./queue.ts"
+import { DEADLINE_MS, FINISHED_RETENTION_MS, deriveWorkStatus, isDerivedWorkStatus, isNativeTurn, type DerivedWorkStatus } from "./queue.ts"
 import type { DispatchGroup, NativeSubagentSource, NativeSubagentState, NativeSyncState, NativeSyncStatus, NativeTurnPhase, SubtaskOutcome, SubtaskState, WorkFailureKind, WorkKind } from "./types.ts"
 import type { WorkspaceConfig } from "./workspace-config.ts"
 
@@ -689,7 +689,7 @@ function checkNativeTurns(input: DoctorLocationInput, add: (
     stuckTurns: 0,
   }
   const nativeTurns = Object.values(tasks)
-    .filter((task) => task.origin === "native" || task.native !== undefined)
+    .filter((task) => isNativeTurn(task))
     .sort((a, b) => a.id.localeCompare(b.id))
   const nativeTaskIDs = new Set(nativeTurns.map((task) => task.id))
   // ADR 0010 §9: one session must serve exactly one conversation binding.
@@ -842,7 +842,7 @@ function checkNativeTurns(input: DoctorLocationInput, add: (
 
   for (const task of Object.values(tasks).sort((a, b) => a.id.localeCompare(b.id))) {
     if (!task.parentID || task.parentID === task.id) continue
-    if (task.origin === "native" || task.native !== undefined) continue
+    if (isNativeTurn(task)) continue
     if (tasks[task.parentID]) continue
     const nativeParent = task.parentID.startsWith("task_native_")
     const nativeGroup = (task.dispatchGroupID ?? "").startsWith("group_native_")

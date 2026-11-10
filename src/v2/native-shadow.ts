@@ -51,7 +51,7 @@ export type ShadowComparison = {
   turnID: Id
   inboxID: Id
   conversationID: Id
-  channelKind: "workspace" | "direct" | "home"
+  channelKind: BindingConversation["kind"]
   phase: NativeTurnPhase
   /** Phase the terminal host event implies; a state-machine check. */
   expectedPhase: NativeTurnPhase
@@ -66,8 +66,14 @@ export type ShadowComparison = {
   plannedUserRoutes: number
   plannedFinalRoutes: number
   plannedRoutes: number
-  /** The visible path routes nothing under shadow. */
-  visibleRoutes: 0
+  /** Routes the visible pre-cutover path would create for this native turn. */
+  visibleRoutes: number
+  /** plannedRoutes - visibleRoutes, reported as data rather than a failure. */
+  routingDelta: number
+  /**
+   * True when the routing difference is explained: the visible path cannot
+   * route a native turn under shadow, so a planned delta is expected.
+   */
   routingMatch: boolean
   at: number
 }
@@ -75,10 +81,6 @@ export type ShadowComparison = {
 /** Digest-only text identity. The caller must never pass this content on. */
 export function shadowTextDigest(text: string): string {
   return stableHash(String(text ?? ""))
-}
-
-export function shadowChannelKind(conversation: BindingConversation): "workspace" | "direct" | "home" {
-  return conversation.kind
 }
 
 /**
@@ -95,13 +97,16 @@ export function buildShadowComparison(input: {
   const text = String(input.text ?? "")
   const visible = input.visibleText === undefined ? undefined : String(input.visibleText)
   const plannedRoutes = input.turn.userRoutes + input.turn.finalRoutes
-  const visibleRoutes = 0 as const
+  // The pre-cutover path never routes a native turn: `$Name` there is prose.
+  // A planned delta is therefore expected data, not a mismatch.
+  const visibleRoutes = 0
+  const routingDelta = plannedRoutes - visibleRoutes
   return {
     sessionID: input.turn.sessionID,
     turnID: input.turn.turnID,
     inboxID: input.turn.inboxID,
     conversationID: input.turn.channel,
-    channelKind: shadowChannelKind(input.turn.conversation),
+    channelKind: input.turn.conversation.kind,
     phase: input.turn.phase,
     expectedPhase: input.expectedPhase,
     phaseMatch: input.turn.phase === input.expectedPhase,
@@ -118,7 +123,10 @@ export function buildShadowComparison(input: {
     plannedFinalRoutes: input.turn.finalRoutes,
     plannedRoutes,
     visibleRoutes,
-    routingMatch: plannedRoutes === visibleRoutes,
+    routingDelta,
+    // A delta is expected whenever the visible path cannot route this turn.
+    // Only a visible route that differs from the planned set is unexplained.
+    routingMatch: visibleRoutes === 0 || plannedRoutes === visibleRoutes,
     at: input.at,
   }
 }

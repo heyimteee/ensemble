@@ -76,15 +76,6 @@ export function registerEnsembleTools(
       input: { type: "object", properties: {}, additionalProperties: false },
       execute: async () => handlers.listAgents(),
     })
-  }
-  editor.add({
-    name: "task_status",
-    options: { namespace: "ensemble", codemode: false },
-    description: "List pending, working, and replied Ensemble subtasks.",
-    input: { type: "object", properties: { workspaceID: { type: "string" } }, additionalProperties: false },
-    execute: async (input, context) => handlers.taskStatus(input, context),
-  })
-  if (surface === "legacy") {
     editor.add({
       name: "send_message",
       options: { namespace: "ensemble", codemode: false },
@@ -134,6 +125,13 @@ export function registerEnsembleTools(
       execute: async (input, context) => handlers.delegate(input, context),
     })
   }
+  editor.add({
+    name: "task_status",
+    options: { namespace: "ensemble", codemode: false },
+    description: "List pending, working, and replied Ensemble subtasks.",
+    input: { type: "object", properties: { workspaceID: { type: "string" } }, additionalProperties: false },
+    execute: async (input, context) => handlers.taskStatus(input, context),
+  })
   editor.add({
     name: "review",
     options: { namespace: "ensemble", codemode: false },

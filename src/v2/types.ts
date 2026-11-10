@@ -54,6 +54,12 @@ export type Agent = {
   color: string
   archived: boolean
   pendingSettings: boolean
+  /**
+   * Per-agent native mirror (privacy toggle). Unset means on: native user and
+   * final rows mirror into the agent's conversation. `false` keeps the native
+   * session private while service-originated work still mirrors.
+   */
+  nativeMirror?: boolean
   homeSessionID?: Id
   homeDirectory?: string
   version: number
@@ -448,13 +454,14 @@ export type Subtask = {
   turn?: TurnInfo
   /**
    * Native-first turn provenance (ADR 0010, tickets #215/#216). Native turns
-   * are adopted `workKind: "turn"` rows: they have no lease, claim, or
-   * attempts, and the queue pump/reaper skip them. `conversationID` is the
-   * durable conversation channel (the workspace id for a group, or
+   * are `workKind: "turn"` rows: they have no lease, claim, or attempts, and
+   * the queue pump/reaper skip them. `conversationID` is the durable
+   * conversation channel (the workspace id for a group, or
    * `dm:<agentID>[:<workspaceID>]` for a direct conversation) and doubles as
    * the task's `workspaceID` so one Work projection serves group and direct.
    */
   origin?: "native"
+  /** Legacy marker; writing it does not make a turn native. Use `origin`. */
   adopted?: boolean
   conversationID?: Id
   native?: NativeTurnInfo

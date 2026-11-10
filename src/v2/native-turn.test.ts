@@ -189,6 +189,7 @@ test("ticket218: context grouping is identity-based and stops at the next opener
     inboxID: "m1",
     itemType: "user",
     text: "first",
+    attachments: [],
     createdAt: 10,
     assistantMessageIDs: ["m2", "m3"],
     assistantText: "part one\npart two",
@@ -200,6 +201,22 @@ test("ticket218: context grouping is identity-based and stops at the next opener
   assert.deepEqual(turns[1]?.metadata, { childID: "c1" })
   assert.equal(turns[1]?.settled, false)
   assert.equal(turns[1]?.text, "child finished")
+})
+
+test("ticket223: context grouping maps prompt files to content-free attachment chips", () => {
+  const turns = nativeContextTurnGroups([
+    {
+      id: "m1",
+      type: "user",
+      content: [{ type: "text", text: "review" }],
+      files: [{ name: "diagram.png", mime: "image/png", dataLength: 128, data: "ignored" }],
+    },
+    { id: "m2", type: "assistant", content: [{ type: "text", text: "looked" }] },
+  ])
+  assert.deepEqual(turns[0]?.attachments.map((chip) => ({ name: chip.name, mime: chip.mime, size: chip.size, kind: chip.kind })), [
+    { name: "diagram.png", mime: "image/png", size: 128, kind: "image" },
+  ])
+  assert.equal(JSON.stringify(turns).includes("ignored"), false, "raw file data never reaches the group or its chips")
 })
 
 test("ticket218: toolkit-only and duplicate context entries stay bounded to one turn", () => {

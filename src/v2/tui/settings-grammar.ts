@@ -11,12 +11,12 @@ import type { SettingsTabID } from "./skills.ts"
 
 export const SETTINGS_TABS: readonly SettingsTabID[] = ["general", "models", "memories", "skillbox"]
 
-/** General-tab text fields in row order; the fifth row is the model picker. */
+/** General-tab text fields in row order; model and mirror rows follow. */
 export const SETTINGS_FIELDS = ["name", "title", "role", "color"] as const
 
 export type SettingsFieldID = (typeof SETTINGS_FIELDS)[number]
 
-export type SettingsRowKind = "field" | "model" | "backup" | "memory" | "skill" | "none"
+export type SettingsRowKind = "field" | "model" | "toggle" | "backup" | "memory" | "skill" | "none"
 
 export type SettingsCounts = {
   backups: number
@@ -24,11 +24,11 @@ export type SettingsCounts = {
   skills: number
 }
 
-/** Rows in a tab: identity + model, main + backups, live memories, catalog skills. */
+/** Rows in a tab: identity + model + mirror, main + backups, memories, skills. */
 export function settingsRowCount(tab: SettingsTabID, counts: SettingsCounts): number {
   switch (tab) {
     case "general":
-      return SETTINGS_FIELDS.length + 1
+      return SETTINGS_FIELDS.length + 2
     case "models":
       return 1 + counts.backups
     case "memories":
@@ -67,7 +67,8 @@ export function settingsRowKind(tab: SettingsTabID, cursor: number, counts: Sett
   if (cursor < 0 || cursor >= settingsRowCount(tab, counts)) return "none"
   switch (tab) {
     case "general":
-      return cursor < SETTINGS_FIELDS.length ? "field" : "model"
+      if (cursor < SETTINGS_FIELDS.length) return "field"
+      return cursor === SETTINGS_FIELDS.length ? "model" : "toggle"
     case "models":
       return cursor === 0 ? "model" : "backup"
     case "memories":

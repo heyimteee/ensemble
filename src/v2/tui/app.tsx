@@ -6,6 +6,8 @@ import { execFileSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
 import type { Agent, Approval, ChangesSince, ChatContext, ChatMessage, InitJobState, Message, MessageAttachment, MessageStream, ModelOption, NativeSubagentRun, NativeSyncState, PatchBatch, ScopeName, ScopedResync, Snapshot, Subtask, TranscriptWindow, WorkHistoryPage, Workspace, WorkspaceCounts } from "../types.ts"
+import { nativeFirstMode } from "../native-first.ts"
+import { isDirectMessageChannel } from "../message-channel.ts"
 import { dispatchBudgetSummary } from "../dispatch-budget.ts"
 import { ChromeText, FullApprovalsView, HelpView, InitRowView, LimitsView, PickerOverlay, Rail, SettingsView, StatuslineMessage, StatuslineRow, ToastOverlay, WorkApprovalsView, WorkCardView, WorkCompactRowView, WorkHistoryRowView, type ChatLine, type PickerItem, type SettingsTab } from "./components.tsx"
 import { LIMITS_ROW_IDS, cycleLimitsValue, limitsSave, limitsSavedMessage } from "./limits.ts"
@@ -956,14 +958,13 @@ export function EnsembleV2App() {
       (task) => (task.conversationID ?? task.workspaceID) === conversation,
     )
   })
-  /** True while this native session is a direct conversation under `on`. */
-  const sessionIsNativeDirect = (sessionID?: string) => {
-    if (!sessionID || state()?.settings.nativeFirst !== "on") return false
-    return Object.values(state()?.bindings ?? {}).some(
-      (binding) => binding.sessionID === sessionID
-        && (binding.kind === "direct" || binding.kind === "home" || binding.workspaceID === "home"),
-    )
-  }
+  /**
+   * True while the open chat context is the server-derived durable direct
+   * conversation. `conversation.channel` is set only under native-first `on`,
+   * so the client never re-derives the answer from bindings or a raw setting.
+   */
+  const sessionIsDurableDirect = (sessionID?: string) =>
+    Boolean(sessionID) && chatContext()?.sessionID === sessionID && nativeDirect() !== undefined
   /**
    * Ticket #187: durable native child sessions for this workspace. A record
    * carries its workspace, with the parent task as fallback when the host
@@ -2703,7 +2704,7 @@ export function EnsembleV2App() {
     const task = (async () => {
       const page = await callRpc<WorkHistoryPage & { version: number; epoch?: number }>(context, "work.history", {
         directory: directoryOf(context),
-        ...(conversationID.startsWith("dm:") ? { conversationID } : { workspaceID: conversationID }),
+        ...(isDirectMessageChannel(conversationID) ? { conversationID } : { workspaceID: conversationID }),
         ...(before ? { before } : {}),
       })
       // A stale epoch's cursor and rows belong to another store generation.
@@ -3624,7 +3625,7 @@ export function EnsembleV2App() {
     // Ticket #215: a native-first direct session streams through the durable
     // message channel and patch feed. It never uses the native-text overlay,
     // never re-reads chat.context, and never forces a full snapshot.
-    const durableDirect = sessionIsNativeDirect(session)
+    const durableDirect = sessionIsDurableDirect(session)
     if (event?.type === "session.text.delta" && session && delta) {
       if (!durableDirect && chatContext()?.sessionID === session && surface()?.kind === "agent") {
         const current = liveDm()
@@ -4458,21 +4459,38 @@ export function EnsembleV2App() {
   }
 
   /**
-   * Ticket #224: refresh the open picker on a claimed host session event. The
-   * generation guard drops a response that arrives after a newer reload.
+   * Ticket #224: one reload path for the open session picker. Every trigger
+   * bumps the generation, applies the requested scope/query, and drops a
+   * response that arrives after a newer reload.
    */
-  const refreshSessionPicker = (): void => {
-    const current = picker()
-    if (!current?.native || current.mode !== "sessions") return
+  const reloadSessionPicker = (
+    current: PickerState,
+    options: {
+      scope: SessionPickerScope
+      query?: string
+      native?: Partial<NonNullable<PickerState["native"]>>
+      picker?: Partial<PickerState>
+    },
+  ): void => {
+    if (!current.native || current.mode !== "sessions") return
     const generation = current.native.generation + 1
-    setPicker({ ...current, native: { ...current.native, generation }, cursor: 0 })
-    void loadSessionPicker(current.native, current.native.scope, current.native.query ?? "")
+    const query = options.query ?? current.native.query ?? ""
+    const native = { ...current.native, ...(options.native ?? {}), scope: options.scope, query, generation }
+    setPicker({ ...current, ...(options.picker ?? {}), native, cursor: 0 })
+    void loadSessionPicker(native, options.scope, query)
       .then((loaded) => {
         const live = picker()
         if (!live?.native || live.native.generation !== generation) return
         setPicker({ ...live, candidates: sessionCandidateRows(loaded.sessions), cursor: 0 })
       })
       .catch((error) => showError(error))
+  }
+
+  /** Ticket #224: refresh the open picker on a claimed host session event. */
+  const refreshSessionPicker = (): void => {
+    const current = picker()
+    if (!current?.native) return
+    reloadSessionPicker(current, { scope: current.native.scope })
   }
 
   /**
@@ -4482,39 +4500,21 @@ export function EnsembleV2App() {
    */
   const searchSessionPicker = (query: string): void => {
     const current = picker()
-    if (!current?.native || current.mode !== "sessions") return
-    const generation = current.native.generation + 1
-    setPicker({ ...current, native: { ...current.native, query, generation }, cursor: 0 })
-    void loadSessionPicker(current.native, current.native.scope, query)
-      .then((loaded) => {
-        const live = picker()
-        if (!live?.native || live.native.generation !== generation) return
-        setPicker({ ...live, candidates: sessionCandidateRows(loaded.sessions), cursor: 0 })
-      })
-      .catch((error) => showError(error))
+    if (!current?.native) return
+    reloadSessionPicker(current, { scope: current.native.scope, query })
   }
 
   /** Ticket #224: one-key scope switch; search applies to the new scope. */
   const pickerCycleScope = (): void => {
     const current = picker()
-    if (!current?.native || current.mode !== "sessions") return
+    if (!current?.native) return
     const scope = nextSessionPickerScope(current.native.scope)
-    const generation = current.native.generation + 1
-    setPicker({
-      ...current,
-      title: sessionScopeTitle(scope),
-      native: { ...current.native, scope, query: "", generation },
+    reloadSessionPicker(current, {
+      scope,
       query: "",
-      filtering: false,
-      cursor: 0,
+      native: { scope, query: "" },
+      picker: { title: sessionScopeTitle(scope), query: "", filtering: false },
     })
-    void loadSessionPicker(current.native, scope)
-      .then((loaded) => {
-        const live = picker()
-        if (!live?.native || live.native.generation !== generation) return
-        setPicker({ ...live, candidates: sessionCandidateRows(loaded.sessions), cursor: 0 })
-      })
-      .catch((error) => showError(error))
   }
 
   const restoreSettingsFocus = () => {
@@ -4569,6 +4569,14 @@ export function EnsembleV2App() {
     if (settingsFeedback()?.kind === "saved") clearSettingsFeedback()
   }
 
+  /** General-tab privacy control: one durable per-agent native mirror toggle. */
+  const toggleNativeMirror = () => {
+    const agent = draft()
+    if (!agent) return
+    setDraft({ ...agent, nativeMirror: agent.nativeMirror === false })
+    markSettingsDirty()
+  }
+
   const closeSettings = async () => {
     if (dirty()) {
       const discard = await openConfirm("Discard changes?", "This agent has unsaved settings.")
@@ -4582,7 +4590,7 @@ export function EnsembleV2App() {
     if (!agent.name.trim()) throw new Error("Agent name is required.")
     clearSettingsFeedback()
     const ok = await run("Save settings", async () => {
-      await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color })
+      await invoke(context, "agent.update", { id: agent.id, name: agent.name, title: agent.title, role: agent.role, mainModel: agent.mainModel, backupModels: agent.backupModels, skillbox: agent.skillbox, color: agent.color, nativeMirror: agent.nativeMirror !== false })
       // Restore the pre-#124 save-then-close flow. The confirmation is one
       // one-shot toast after the surface closes; the statusline remains the
       // modal fallback, so save never has two competing feedback channels.
@@ -4878,6 +4886,7 @@ export function EnsembleV2App() {
       return
     }
     if (kind === "model") { await editModelRow(0); return }
+    if (kind === "toggle") { toggleNativeMirror(); return }
     if (kind === "backup") { await editModelRow(cursor); return }
     if (kind === "memory") {
       const memory = filteredMemories()[cursor]
@@ -7279,7 +7288,7 @@ export function EnsembleV2App() {
     leader: leaderMode(),
     context: statusContext(),
     // Ticket #218: native sync is relevant only when native-first is on.
-    ...(state()?.settings.nativeFirst === "on" ? { nativeSync: nativeSyncState() } : {}),
+    ...(nativeFirstMode(state()?.settings) === "on" ? { nativeSync: nativeSyncState() } : {}),
     // Insert without a target only replaces the typing hints with a notice;
     // git, position, selection size, and the pending chord stay visible.
     notice: insertWithoutTarget(interaction()) ? "no text target" : undefined,

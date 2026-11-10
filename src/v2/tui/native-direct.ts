@@ -1,8 +1,8 @@
-import { deriveWorkStatus, isTerminalWorkStatus, type DerivedWorkStatus } from "../queue.ts"
+import { deriveWorkStatus, isTerminalWorkStatus, workStatusWord, type DerivedWorkStatus } from "../queue.ts"
 import { isNativeTurn } from "../native-turn.ts"
+import { chatLineFromMessage } from "../message-channel.ts"
 import type { ChatConversationContext, Id, Message, Subtask } from "../types.ts"
 import type { ChatLine } from "./components.tsx"
-import { workCardStateWord } from "./workrows.ts"
 
 /**
  * Ticket #215: the direct surface reads the same durable message channel and
@@ -25,20 +25,20 @@ export function nativeDirectChatLines(
   return messages
     .filter((message) => Boolean(message?.text?.trim()) || (message?.attachments?.length ?? 0) > 0)
     .slice(-Math.max(1, Math.floor(limit)))
-    .map((message) => ({
-      id: message.id,
-      author: message.author === "user" ? "You" : message.author === "system" ? "System" : message.displayAuthor ?? agentName,
-      role: message.author === "user" ? "user" as const : message.author === "system" ? "system" as const : "agent" as const,
-      agentID: message.agentID,
-      text: message.text,
-      kind: message.kind,
-      ...(message.attachments && message.attachments.length > 0 ? { attachments: message.attachments } : {}),
-      ...(message.streaming ? { streaming: true } : {}),
-      ...(message.interrupted ? { interrupted: true } : {}),
-      ...(message.correlationID ? { correlationID: message.correlationID } : {}),
-      ...(message.taskID ? { taskID: message.taskID } : {}),
-      createdAt: message.createdAt,
-    }))
+    .map((message) => {
+      // One author/role/attachment projection serves the direct chat-context
+      // reader and the durable transcript; only durable-only fields are added.
+      const line = chatLineFromMessage(message, agentName)
+      return {
+        ...line,
+        role: line.role === "assistant" ? "agent" as const : line.role,
+        agentID: message.agentID,
+        kind: message.kind,
+        ...(message.streaming ? { streaming: true } : {}),
+        ...(message.interrupted ? { interrupted: true } : {}),
+        ...(message.taskID ? { taskID: message.taskID } : {}),
+      }
+    })
 }
 
 export type DirectWorkRow = {
@@ -83,7 +83,7 @@ export function directNativeWorkRow(
   return {
     id: task.id,
     status,
-    state: workCardStateWord(status, needsYou),
+    state: workStatusWord(status, needsYou),
     title: task.title || "Native turn",
     needsYou,
   }

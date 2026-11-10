@@ -1,5 +1,8 @@
-import { stableHash } from "./queue.ts"
-import type { Id, NativeTurnEvent, NativeTurnInfo, NativeTurnPhase, Subtask } from "./types.ts"
+import { nativeInboxAttachments } from "./attachments.ts"
+import { isNativeTurn, stableHash } from "./queue.ts"
+import type { Id, MessageAttachment, NativeTurnEvent, NativeTurnInfo, NativeTurnPhase } from "./types.ts"
+
+export { isNativeTurn }
 
 /**
  * Ticket #215: pure identity and text helpers for native turn ingestion.
@@ -256,6 +259,8 @@ export type NativeContextTurn = {
   itemType: "user" | "synthetic"
   /** Prompt text joined from text parts; empty for an attachment-only prompt. */
   text: string
+  /** Host prompt files mapped to content-free transcript chips. */
+  attachments: MessageAttachment[]
   metadata?: Record<string, unknown>
   createdAt?: number
   assistantMessageIDs: Id[]
@@ -287,6 +292,7 @@ export function nativeContextTurnGroups(messages: readonly any[]): NativeContext
         inboxID,
         itemType: type,
         text: nativeContextMessageText(message),
+        attachments: nativeInboxAttachments(message?.files, inboxID),
         ...(metadata ? { metadata } : {}),
         ...(Number.isFinite(createdAt) && createdAt > 0 ? { createdAt } : {}),
         assistantMessageIDs: [],
@@ -345,11 +351,6 @@ export function nativeContextAnswer(
     if (text) return text
   }
   return undefined
-}
-
-/** True when a stored task is a native turn (never claimed or pumped). */
-export function isNativeTurn(task: Pick<Subtask, "origin" | "native">): boolean {
-  return task.origin === "native" || task.native !== undefined
 }
 
 /** Ticket #222: keep the identity-only timeline bounded. */
