@@ -114,6 +114,32 @@ export type InitJob = {
 
 export type MessageKind = "text" | "task" | "approval" | "system"
 
+/** Native turn lifecycle (ADR 0010). Retry/interruption nuance is ticket #217. */
+export type NativeTurnPhase =
+  | "queued"
+  | "working"
+  | "retrying"
+  | "replied"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+
+/**
+ * Host identity and phase for one native turn (ticket #215). `inboxID` is the
+ * user message id; `assistantMessageIDs` are the host text message ids. A
+ * retry reuses the same assistant id, so these arrays are append-only.
+ */
+export type NativeTurnInfo = {
+  sessionID: Id
+  inboxID?: Id
+  assistantMessageIDs: Id[]
+  phase: NativeTurnPhase
+  startedAt?: number
+  settledAt?: number
+  resultMessageID?: Id
+  errorCode?: string
+}
+
 /**
  * Metadata for one attachment (ticket #223). The durable row and the snapshot
  * carry display facts only: no bytes, no store path, and no source path. The
@@ -171,6 +197,17 @@ export type Message = {
   updatedAt?: number
   /** Correlation ID linking handoff ask/ack/relay/notice legs. */
   correlationID?: string
+  /**
+   * Native host identity for an ingested row (ticket #215). The turn link is
+   * also carried by `taskID`; these ids make duplicate and reconciliation
+   * checks exact without reading text.
+   */
+  native?: {
+    sessionID?: Id
+    inboxID?: Id
+    assistantMessageID?: Id
+    turnID?: Id
+  }
 }
 
 /**
@@ -381,6 +418,17 @@ export type Subtask = {
   /** Peer-turn record (ticket #57). Present only on workKind "turn". */
   turn?: TurnInfo
   /**
+   * Native-first turn provenance (ADR 0010, ticket #215). Native turns are
+   * adopted `workKind: "turn"` rows: they have no lease, claim, or attempts,
+   * and the queue pump/reaper skip them. `conversationID` is the durable
+   * conversation channel (`dm:<agentID>[:<workspaceID>]`) and doubles as the
+   * task's `workspaceID` so one Work projection serves group and direct.
+   */
+  origin?: "native"
+  adopted?: boolean
+  conversationID?: Id
+  native?: NativeTurnInfo
+  /**
    * General-skill leader triage (ticket #103): the turn must read and either
    * use or delegate the listed skills. This is the single triage source of
    * truth: a non-empty grant identifies a leader triage task. The host session
@@ -586,6 +634,13 @@ export type ChatConversationContext = {
   context: "workspace" | "home"
   sessionID: Id
   sharedSession: boolean
+  /**
+   * Ticket #215: when set, the direct transcript is durable and lives on this
+   * channel. The TUI reads the same message rows and patches as a group chat;
+   * there is no native-text poll or live overlay on this path.
+   */
+  channel?: Id
+  durable?: boolean
 }
 
 export type ChatContext = {

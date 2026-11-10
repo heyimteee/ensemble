@@ -850,3 +850,21 @@ test("group and direct sends carry stored attachment ids", () => {
 test("transcript rows render attachment metadata chips", () => {
   assert.ok(has(app(), 'composerAttachmentLabel(attachment)'))
 })
+
+// ---- Ticket #215: native-first direct transcript and Work row ----
+
+test("a native-first direct transcript reads the durable message channel", () => {
+  assert.ok(has(app(), "nativeDirectChatLines(state()?.messages[channel]"))
+  assert.ok(has(app(), "nativeDirectChannel(chatContext()?.conversation)"))
+})
+
+test("a native direct surface renders one compact Work row with canonical vocabulary", () => {
+  assert.ok(has(app(), "directNativeWorkRow(Object.values(state()?.subtasks"))
+  assert.ok(has(app(), "WORK · ${row().state} · ${row().title}"))
+})
+
+test("a native direct session never uses the native text overlay or full refresh", () => {
+  assert.ok(has(app(), "const durableDirect = sessionIsNativeDirect(session)"))
+  assert.ok(has(app(), "if (!durableDirect)"))
+  assert.ok(has(app(), 'surface()?.kind === "agent" && !nativeDirect()'))
+})

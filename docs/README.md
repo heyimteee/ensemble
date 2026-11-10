@@ -34,6 +34,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 - [Native host event contract](verification/2026-11-10-native-host-contract.md): measured OpenCode 2.2.6 order, identities, retry, interruption, background subagent, and move behavior
 - [Composer attachments](verification/2026-11-10-ticket-223.md): path and clipboard-image paste, bounded store, prompt files, transcript chips, cleanup, and terminal limits
+- [Direct native turn ingestion](verification/2026-11-10-ticket-215.md): direct durable messages, exact settlement, Work card, restart recovery, and the nativeFirst rollback
 - [macOS/Herdr manual checklist](verification/macos-herdr-checklist.md): repeatable, manual, and unexecuted until a run is recorded
 - [v6 verification](verification/2026-11-07-v6.md): nine-scene motion parity, Work-card size matrix, load probe, reduced motion, and `NO_COLOR`
 - [v5.9 verification](verification/2026-11-06-v59.md): live-matrix guardrails, CI, reviewer standards, unused checks, and tracker hygiene
