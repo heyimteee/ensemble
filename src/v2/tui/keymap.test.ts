@@ -218,6 +218,11 @@ test("the chat new-workspace key yields to active transcript search", () => {
   assert.equal(entry?.availability, "no-transcript-search")
 })
 
+test("ticket232: chat create keys are not pane-selection keys", () => {
+  assert.equal(entryId("pane", "n"), undefined, "pane selection does not open the workspace wizard")
+  assert.equal(entryId("chat", "n"), "chat.new.workspace", "chat interaction owns n after Enter")
+})
+
 test("the leader catalog covers the documented Normal actions with unique keys", () => {
   const ids = leaderEntries().map((entry) => entry.id)
   for (const id of [

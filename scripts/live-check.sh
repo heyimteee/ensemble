@@ -13,7 +13,10 @@ live_require_runtime
 live_require_node
 command -v fd >/dev/null 2>&1 || live_skip "fd is unavailable (required for real file-completion coverage)"
 live_setup "real"
-ENSEMBLE_LIVE_TUI_WIDTH=120
+# Ticket #232: the real host runs the same 160-column shell as the fake matrix.
+# At 120 the right Work column leaves the chat cell too narrow for the palette
+# flag assertions, which tests the truncation layout rather than the real host.
+ENSEMBLE_LIVE_TUI_WIDTH=160
 ENSEMBLE_LIVE_TUI_HEIGHT=40
 
 live_write_plugin_config
@@ -43,6 +46,15 @@ clear_composer_text() {
   live_key "$LIVE_TUI_SESSION" End
   live_key_repeat "$LIVE_TUI_SESSION" BSpace 160
   sleep 0.4
+}
+
+# Ticket #232: opening an agent or workspace focuses its chat column in pane
+# selection; chat keys such as `n` exist only after Enter enters interaction.
+# Enter is the documented way in and is a no-op when chat already owns focus.
+live_enter_chat_interaction() {
+  local description="${1:-chat interaction}"
+  live_key "$LIVE_TUI_SESSION" Enter
+  live_require_text "$LIVE_TUI_SESSION" "j/k scroll" 10 "$description"
 }
 MODELS=$(live_snapshot_value '.models.length')
 if [[ "$MODELS" -gt 0 ]]; then
@@ -79,6 +91,7 @@ if [[ "$MODELS" -gt 0 ]]; then
   # chord while the onboarding run is streaming (the host may swallow Esc).
   live_key "$LIVE_TUI_SESSION" C-g
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Direct conversation" 10 "leaving the wizard leaves Normal behind"
+  live_enter_chat_interaction "agent direct chat interaction before the workspace key"
 
   live_key "$LIVE_TUI_SESSION" "n"
   live_require_text "$LIVE_TUI_SESSION" "Workspace directory" 10 "workspace wizard"
@@ -107,6 +120,7 @@ if [[ "$MODELS" -gt 0 ]]; then
   # Normal before the composer and Normal-surface probes below.
   live_key "$LIVE_TUI_SESSION" C-g
   live_require_text "$LIVE_TUI_SESSION" "NORMAL  │ Group chat" 10 "leaving the workspace wizard leaves Normal behind"
+  live_enter_chat_interaction "workspace group chat interaction before the composer"
 
   # v5.8: the message-start palette distinguishes commands from skills, the
   # built-in init entry is General, and flags never use a middle dot.
@@ -143,7 +157,13 @@ if [[ "$MODELS" -gt 0 ]]; then
     sleep 0.5
   done
   [[ "$init_state" != "" && "$init_state" != *"running"* ]] || live_fail "real init did not reach a terminal state (got $init_state)"
-  live_require_any_text "$LIVE_TUI_SESSION" 30 "System Agent final init report" "Ensemble init complete" "Ensemble init failed"
+  # The full report is longer than this TUI viewport. Assert the durable report
+  # head and the visible report tail; a viewport-only head assertion would test
+  # transcript height, not the real host.
+  init_report=$(live_snapshot_value '(function () { var jobs = Object.values(output.state.initJobs).filter(function (job) { return job.report }); return jobs.length ? jobs[jobs.length - 1].report : "" })()')
+  [[ "$init_report" == *"Ensemble init complete"* ]] || live_fail "System Agent report is missing its completion head"
+  live_key "$LIVE_TUI_SESSION" G
+  live_require_text "$LIVE_TUI_SESSION" "Wrote .ensemble/init.json" 30 "System Agent report tail is visible"
   init_audit=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces).find(function (w) { return w.name === "live" }); return (output.state.messages[ws.id] || []).filter(function (m) { return m.author === "user" && m.text === "/init" }).length })()')
   [[ "$init_audit" == "1" ]] || live_fail "expected one visible /init audit line, found $init_audit"
   live_log "v5.8 palette, prose guard, and visible System Agent init verified"
@@ -214,7 +234,15 @@ if [[ "$MODELS" -gt 0 ]]; then
   live_key "$LIVE_TUI_SESSION" Enter
   live_type "$LIVE_TUI_SESSION" " review ping"
   live_key "$LIVE_TUI_SESSION" Enter
-  live_require_joined_text "$LIVE_TUI_SESSION" "→ Assigned to \$LiveAgent: \$LiveAgent review ping" 20 "group message with agent mention sent"
+  # The assigned row scrolls above the viewport once the answer streams. Prove
+  # the durable user row and assignment instead of a viewport-dependent line.
+  mention_assigned=""
+  for _ in $(seq 1 40); do
+    mention_assigned=$(live_snapshot_value '(function () { var ws = Object.values(output.state.workspaces).find(function (w) { return w.name === "live" }); var rows = output.state.messages[ws.id] || []; var user = rows.filter(function (m) { return m.author === "user" && m.text.indexOf("$LiveAgent") === 0 && m.text.indexOf("review ping") >= 0 }); var assigned = rows.filter(function (m) { return m.author === "system" && m.text.indexOf("→ Assigned to $LiveAgent:") === 0 && m.text.indexOf("review ping") >= 0 }); return user.length > 0 && assigned.length > 0 })()')
+    [[ "$mention_assigned" == "true" ]] && break
+    sleep 0.5
+  done
+  [[ "$mention_assigned" == "true" ]] || live_fail "group message with agent mention was not assigned"
   live_key "$LIVE_TUI_SESSION" C-g
   live_require_absence "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer left after send"
 
