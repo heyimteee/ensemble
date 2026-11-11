@@ -13311,6 +13311,187 @@ test("ticket221: the kill switch alone restores the explicit send_message path",
   }
 })
 
+// ---- Ticket #248: terminal-turn routing ----
+
+/** One pending task for the normal queue runner; terminal or non-terminal. */
+async function seedQueuedTask(
+  ctx: any,
+  input: {
+    id: string
+    assigneeID?: string
+    stage?: "initial" | "synthesis"
+    handoff?: any
+    parentID?: string
+    title?: string
+    instruction?: string
+  },
+): Promise<void> {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveSubtask({
+    id: input.id,
+    workspaceID: "w",
+    ...(input.parentID ? { parentID: input.parentID } : {}),
+    creatorType: input.handoff ? "agent" : "user",
+    ...(input.handoff ? { creatorAgentID: input.handoff.senderID } : {}),
+    assigneeID: input.assigneeID ?? "a",
+    title: input.title ?? input.id,
+    instruction: input.instruction ?? "Do the work",
+    mode: "research",
+    state: "pending",
+    stage: input.stage ?? "initial",
+    outcome: "pending",
+    interrupted: false,
+    awaitingChildren: false,
+    attempts: 0,
+    createdAt: 1,
+    ...(input.handoff ? { workKind: "handoff" as const, handoff: input.handoff } : {}),
+  })
+}
+
+function replyTextBySession(ctx: any, replies: Record<string, string>): void {
+  ;(ctx.session as any).context = async ({ sessionID }: any) => ({
+    data: [{ type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: replies[sessionID] ?? "OK" }] }],
+  })
+}
+
+test("ticket248: a synthesis turn posts its final text but creates no work from three mentions", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-248-synthesis-"))
+  const { ctx, nativeSessions } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c", "s_group_d"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+    { id: "d", name: "Bolt", sessionID: "s_group_d" },
+  ])
+  const finalText = "Thanks $Sage, $Echo, and $Bolt. The release is ready."
+  replyTextBySession(ctx, { s_group_a: finalText })
+  await seedQueuedTask(ctx, { id: "synthesis", assigneeID: "a", stage: "synthesis", instruction: "Summarize the release." })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    await waitFor(async () => (await snapshotFor(handlers, directory)).subtasks.synthesis?.state === "replied")
+
+    const state = await snapshotFor(handlers, directory)
+    assert.equal(routeChildren(state, "synthesis").length, 0, "a synthesis turn creates zero peer turns")
+    assert.equal(agentTextMessages(state, "synthesis").length, 1, "the final text is the one group message")
+    assert.equal(agentTextMessages(state, "synthesis")[0].text, finalText)
+    assert.ok(
+      nativeSystemMessages(state).some((text) => text.includes("No work was created from mentions in a terminal turn")),
+      "the stopped chain is visible and names the continuation",
+    )
+    const suppressed = await (handlers as any)["logs.recent"]({ directory, event: "native.route.suppressed", limit: 20 })
+    assert.equal(suppressed.entries.length, 3)
+    assert.ok(suppressed.entries.every((entry: any) => entry.turnID === "synthesis" && entry.reason === "terminal-turn" && entry.count === 3))
+    assert.deepEqual(suppressed.entries.map((entry: any) => entry.agentID).sort(), ["b", "c", "d"])
+    const terminal = await (handlers as any)["logs.recent"]({ directory, event: "native.route.terminal", limit: 20 })
+    assert.equal(terminal.entries.length, 1)
+    assert.equal(terminal.entries[0].turnID, "synthesis")
+    assert.equal(terminal.entries[0].count, 3)
+    assert.deepEqual([...terminal.entries[0].recipients].sort(), ["b", "c", "d"])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket248: completion and batch reviews treat mentions as references", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-248-reviews-"))
+  const { ctx, nativeSessions } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+  ])
+  const completionText = "Thanks $Sage and $Echo."
+  const batchText = "Reviewed: $Sage and $Echo."
+  replyTextBySession(ctx, { s_group_a: completionText, s_group_b: batchText })
+  await seedQueuedTask(ctx, {
+    id: "completion",
+    handoff: { correlationID: "completion_248", senderID: "b", recipientID: "a", depth: 1, completion: true },
+  })
+  await seedQueuedTask(ctx, {
+    id: "batch",
+    assigneeID: "b",
+    handoff: {
+      correlationID: "batch_248",
+      senderID: "a",
+      recipientID: "b",
+      depth: 1,
+      completion: true,
+      batch: true,
+      itemIDs: ["i1", "i2"],
+    },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      return state.subtasks.completion?.state === "replied" && state.subtasks.batch?.state === "replied"
+    })
+    const state = await snapshotFor(handlers, directory)
+    assert.equal(routeChildren(state, "completion").length, 0, "a completion review creates zero peer turns")
+    assert.equal(agentTextMessages(state, "completion")[0].text, completionText)
+    assert.equal(routeChildren(state, "batch").length, 0, "a batch review creates zero peer turns")
+    assert.equal(agentTextMessages(state, "batch")[0].text, batchText)
+
+    const suppressed = await (handlers as any)["logs.recent"]({ directory, event: "native.route.suppressed", limit: 20 })
+    assert.equal(suppressed.entries.length, 4, "both reviews suppress each mention")
+    assert.ok(suppressed.entries.every((entry: any) => entry.reason === "terminal-turn"))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket248: a worker handoff still routes a sibling and keeps the reply-to-sender guard", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-248-worker-"))
+  const { ctx, nativeSessions } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c", "s_group_d"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+    { id: "d", name: "Bolt", sessionID: "s_group_d" },
+  ])
+  const finalText = "$Nova thanks. $Echo please take it, and $Bolt too."
+  replyTextBySession(ctx, { s_group_b: finalText })
+  await seedQueuedTask(ctx, {
+    id: "worker",
+    assigneeID: "b",
+    handoff: { correlationID: "worker_248", senderID: "a", recipientID: "b", depth: 1 },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      return state.subtasks.worker?.state === "replied" && routeChildren(state, "worker").length === 2
+    })
+    const state = await snapshotFor(handlers, directory)
+    assert.deepEqual(routeChildren(state, "worker").map((task) => task.assigneeID).sort(), ["c", "d"], "the worker routes siblings normally")
+    assert.ok(
+      !nativeSystemMessages(state).some((text) => text.includes("No work was created from mentions in a terminal turn")),
+      "a non-terminal turn never posts the terminal notice",
+    )
+    const suppressed = await (handlers as any)["logs.recent"]({ directory, event: "native.route.suppressed", limit: 20 })
+    assert.deepEqual(suppressed.entries.map((entry: any) => [entry.agentID, entry.reason]), [["a", "reply-to-sender"]])
+    assert.ok(suppressed.entries.every((entry: any) => entry.reason !== "terminal-turn"))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket225: native final text routes the same peer work as the send_message shim", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-225-equivalence-"))
   const { ctx, nativeSessions, emitEvent, tools } = fakeContext()
