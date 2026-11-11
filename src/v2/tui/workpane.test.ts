@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { NativeSubagentRun, Subtask } from "../types.ts"
-import { WORK_CARD_GAP_COLS, WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
+import { WORK_CARD_HORIZONTAL_CHROME, WORK_CARD_MIN_WIDTH, WORK_CARD_ROWS } from "./workrows.ts"
 import {
   emptyHistoryViewState,
   historyGroupFocusID,
@@ -11,7 +11,7 @@ import {
   settleWorkFocus,
   toggleHistoryView,
   workPaneBodyHeight,
-  workPaneColumns,
+  workPaneCardsFit,
   workPaneHeader,
   workTaskPage,
   workViewGroups,
@@ -95,10 +95,13 @@ test("ticket172: the drawer overlays the chat and leaves its right edge exact", 
   assert.ok(panes.workWidth < panes.chatWidth, "the drawer never claims the whole chat")
 })
 
-test("ticket172: work content width adapts from compact rows to three card columns", () => {
-  assert.equal(workPaneColumns(workspacePaneWidths(120).workContentWidth), 1)
-  assert.equal(workPaneColumns(workspacePaneWidths(140).workContentWidth), 2)
-  assert.equal(workPaneColumns(workspacePaneWidths(200).workContentWidth), 3)
+test("ticket239: card mode is a width decision that keeps the compact matrix sizes", () => {
+  assert.equal(workPaneCardsFit(workspacePaneWidths(80).workContentWidth), false, "the 80x24 drawer stays compact")
+  assert.equal(workPaneCardsFit(workspacePaneWidths(100).workContentWidth), false, "100x30 stays compact")
+  assert.equal(workPaneCardsFit(workspacePaneWidths(120).workContentWidth), false, "120x40 stays compact")
+  assert.equal(workPaneCardsFit(workspacePaneWidths(140).workContentWidth), true)
+  assert.equal(workPaneCardsFit(workspacePaneWidths(160).workContentWidth), true)
+  assert.equal(workPaneCardsFit(WORK_CARD_MIN_WIDTH - WORK_CARD_HORIZONTAL_CHROME), false, "one minimum card is not card mode")
   for (const terminalWidth of [80, 96, 100, 120, 140, 160, 200]) {
     const panes = workspacePaneWidths(terminalWidth)
     assert.equal(panes.workContentWidth, panes.workWidth - panes.workChrome)
@@ -106,16 +109,22 @@ test("ticket172: work content width adapts from compact rows to three card colum
   }
 })
 
-test("ticket172: the card grid keeps an exact right edge at every pane width", () => {
-  for (const terminalWidth of [96, 100, 117, 118, 120, 140, 160, 200]) {
+test("ticket239: one full-width card keeps an exact right edge at every card width", () => {
+  const items = [
+    working({ id: "a1", dispatchGroupID: "dispatch_1", createdAt: 1 }),
+    working({ id: "b1", dispatchGroupID: "dispatch_2", createdAt: 2 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 5_000 })
+  for (const terminalWidth of [140, 160, 200]) {
     const panes = workspacePaneWidths(terminalWidth)
-    const columns = workPaneColumns(panes.workContentWidth)
-    const cardWidths = columns > 1
-      ? Math.floor((panes.workContentWidth - WORK_CARD_GAP_COLS * (columns - 1)) / columns)
-      : panes.workContentWidth
-    const used = cardWidths * columns + WORK_CARD_GAP_COLS * Math.max(0, columns - 1)
-    assert.ok(used <= panes.workContentWidth, `${terminalWidth}: the grid never exceeds the pane`)
-    assert.ok(panes.workContentWidth - used < (columns > 1 ? WORK_CARD_GAP_COLS + columns : 1), `${terminalWidth}: the grid ends at the right edge`)
+    const layout = paginateWorkGroups(views.active, panes.workContentWidth, workPaneBodyHeight(50), 5_000)
+    assert.equal(layout.mode, "cards")
+    assert.equal(layout.cardWidth, panes.workContentWidth, `${terminalWidth}: the card spans the exact content width`)
+    assert.equal(layout.cardContentWidth, layout.cardWidth - WORK_CARD_HORIZONTAL_CHROME)
+    for (const section of layout.pages.flatMap((page) => page.sections)) {
+      if (section.mode !== "cards") continue
+      assert.equal(section.items?.length, 1, `${terminalWidth}: one card per section`)
+    }
   }
 })
 
@@ -436,8 +445,8 @@ test("ticket184: a completed group leaves ACTIVE immediately and stays in HISTOR
   assert.deepEqual(afterHold.history.map((group) => group.id), ["dispatch_1"], "the pane retains finished groups")
 })
 
-/** Ticket #172: the pane pages by body height, not by the whole terminal. */
-test("ticket172: card mode fits whole group rows and pages the next group", () => {
+/** Ticket #172/#239: the pane pages by body height, one whole card per row. */
+test("ticket239: one card per page keeps headers, cont., and fresh groups exact", () => {
   const items = [
     working({ id: "a1", dispatchGroupID: "dispatch_1", createdAt: 1 }),
     working({ id: "a2", dispatchGroupID: "dispatch_1", createdAt: 2 }),
@@ -447,15 +456,39 @@ test("ticket172: card mode fits whole group rows and pages the next group", () =
   const views = workViewGroups(items, record(...items), { now: 5_000 })
   const layout = paginateWorkGroups(views.active, 59, WORK_CARD_ROWS + 2, 5_000)
   assert.equal(layout.mode, "cards")
-  assert.equal(layout.columns, 2)
-  assert.equal(layout.pages.length, 2)
-  assert.equal(layout.pages[0]?.sections.length, 1)
+  assert.equal(layout.pages.length, 4, "a card row plus label no longer shares a page")
+  for (const page of layout.pages) {
+    assert.equal(page.sections.length, 1)
+    assert.equal(page.sections[0]?.items?.length, 1, "one full-width card per section")
+  }
   assert.equal(layout.pages[0]?.sections[0]?.groupID, "dispatch_1")
   assert.equal(layout.pages[0]?.sections[0]?.label, "GROUP 1 · 2 active · 0 done")
   assert.equal(layout.pages[0]?.sections[0]?.gapBefore, false)
-  assert.equal(layout.pages[1]?.sections[0]?.groupID, "dispatch_2")
-  assert.equal(layout.pages[1]?.sections[0]?.label, "GROUP 2 · 2 active · 0 done", "a new page never calls a fresh group continued")
-  assert.equal(layout.pages[1]?.sections[0]?.continued, false)
+  assert.equal(layout.pages[1]?.sections[0]?.groupID, "dispatch_1")
+  assert.match(layout.pages[1]?.sections[0]?.label ?? "", /cont\./)
+  assert.equal(layout.pages[2]?.sections[0]?.groupID, "dispatch_2")
+  assert.equal(layout.pages[2]?.sections[0]?.label, "GROUP 2 · 2 active · 0 done", "a new page never calls a fresh group continued")
+  assert.equal(layout.pages[2]?.sections[0]?.continued, false)
+  assert.match(layout.pages[3]?.sections[0]?.label ?? "", /cont\./)
+})
+
+test("ticket239: card mode renders exactly one full-width card per section", () => {
+  const items = [
+    working({ id: "a1", dispatchGroupID: "dispatch_1", createdAt: 1 }),
+    working({ id: "a2", dispatchGroupID: "dispatch_1", createdAt: 2 }),
+    working({ id: "b1", dispatchGroupID: "dispatch_2", createdAt: 3 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 5_000 })
+  const panes = workspacePaneWidths(160)
+  const layout = paginateWorkGroups(views.active, panes.workContentWidth, workPaneBodyHeight(50), 5_000)
+  assert.equal(layout.mode, "cards")
+  assert.equal(layout.cardWidth, panes.workContentWidth, "the card spans the Work content width")
+  assert.equal(layout.cardContentWidth, panes.workContentWidth - WORK_CARD_HORIZONTAL_CHROME)
+  const cardSections = layout.pages.flatMap((page) => page.sections).filter((section) => section.mode === "cards")
+  assert.deepEqual(cardSections.map((section) => section.items?.length), [1, 1, 1], "one card per row")
+  for (const section of cardSections) {
+    assert.equal(section.height, section.label === null ? WORK_CARD_ROWS : WORK_CARD_ROWS + 1)
+  }
 })
 
 test("ticket172: a group split across pages repeats its header with cont.", () => {
@@ -467,15 +500,16 @@ test("ticket172: a group split across pages repeats its header with cont.", () =
     working({ id: "a5", dispatchGroupID: "dispatch_1", createdAt: 5 }),
   ]
   const views = workViewGroups(items, record(...items), { now: 5_000 })
-  const layout = paginateWorkGroups(views.active, 59, WORK_CARD_ROWS * 2 + 2, 5_000)
+  const layout = paginateWorkGroups(views.active, 59, WORK_CARD_ROWS * 3 + 2, 5_000)
   assert.equal(layout.mode, "cards")
   assert.equal(layout.pages.length, 2)
+  assert.deepEqual(layout.pages[0]?.sections.flatMap((section) => section.tasks.map((item) => item.id)), ["a1", "a2", "a3"])
   const continued = layout.pages[1]?.sections[0]
   assert.equal(continued?.groupID, "dispatch_1")
   assert.equal(continued?.continued, true)
   assert.match(continued?.label ?? "", /cont\./)
   assert.match(continued?.label ?? "", /GROUP 1/, "the continued header keeps the group identity")
-  assert.deepEqual(layout.pages[1]?.sections[0]?.tasks.map((item) => item.id), ["a5"])
+  assert.deepEqual(layout.pages[1]?.sections.flatMap((section) => section.tasks.map((item) => item.id)), ["a4", "a5"])
   assert.deepEqual(layout.tasks.map((item) => item.id), ["a1", "a2", "a3", "a4", "a5"], "every task is reachable across pages")
 })
 
@@ -490,7 +524,7 @@ test("ticket172: compact pages split a long group and repeat cont.", () => {
   const views = workViewGroups(items, record(...items), { now: 5_000 })
   const layout = paginateWorkGroups(views.active, 36, 4, 5_000)
   assert.equal(layout.mode, "compact")
-  assert.equal(layout.columns, 0)
+  assert.equal(layout.cardWidth, 0)
   assert.equal(layout.pages.length, 2)
   assert.equal(layout.pages[0]?.sections[0]?.label, "GROUP 1 · 5 active · 0 done")
   assert.deepEqual(layout.pages[0]?.sections.flatMap((section) => section.tasks.map((item) => item.id)), ["a1", "a2", "a3"])
@@ -516,24 +550,6 @@ test("ticket172: pages never exceed the body and empty work is one empty page", 
   assert.equal(empty.pages.length, 1)
   assert.equal(empty.pages[0]?.sections.length, 0)
   assert.equal(empty.tasks.length, 0)
-})
-
-test("ticket172: card pages keep the exact right edge at pane widths", () => {
-  const items = [
-    working({ id: "a1", dispatchGroupID: "dispatch_1", createdAt: 1 }),
-    working({ id: "b1", dispatchGroupID: "dispatch_2", createdAt: 2 }),
-  ]
-  const views = workViewGroups(items, record(...items), { now: 5_000 })
-  for (const terminalWidth of [140, 160, 200]) {
-    const panes = workspacePaneWidths(terminalWidth)
-    const layout = paginateWorkGroups(views.active, panes.workContentWidth, workPaneBodyHeight(50), 5_000)
-    assert.equal(layout.mode, "cards")
-    assert.ok(layout.cardWidth > 0)
-    const used = layout.cardWidth * layout.columns + WORK_CARD_GAP_COLS * (layout.columns - 1)
-    assert.ok(used <= panes.workContentWidth)
-    assert.ok(panes.workContentWidth - used < layout.columns + WORK_CARD_GAP_COLS)
-    assert.equal(layout.cardContentWidth, layout.cardWidth - WORK_CARD_HORIZONTAL_CHROME)
-  }
 })
 
 /** Ticket #172: focus follows task identity, then falls back predictably. */
@@ -595,6 +611,14 @@ test("ticket172: the 80x24/100x30/120x40/160x50 matrix picks a valid pane and la
     assert.equal(panes.mode, paneMode, `${width}x${height} pane mode`)
     assert.equal(layout.mode, layoutMode, `${width}x${height} work layout`)
     assert.ok(layout.pages.length >= 1)
+    if (layoutMode === "cards") {
+      assert.equal(layout.cardWidth, panes.workContentWidth, `${width}x${height} card spans the content width`)
+      for (const section of layout.pages.flatMap((page) => page.sections)) {
+        if (section.mode === "cards") assert.equal(section.items?.length, 1, `${width}x${height} renders one card per row`)
+      }
+    } else {
+      assert.equal(layout.cardWidth, 0, `${width}x${height} keeps compact rows`)
+    }
     for (const page of layout.pages) {
       assert.ok(page.height <= body, `${width}x${height} page ${page.number} fits ${body} rows`)
     }
@@ -663,8 +687,10 @@ test("ticket187: native cards join pagination without changing task reachability
   assert.deepEqual(layout.tasks.map((item) => item.id), ["parent"])
   assert.deepEqual(layout.native.map((item) => item.childSessionID), ["child_live"])
   assert.deepEqual(layout.items.map((item) => item.kind === "task" ? item.task.id : item.run.childSessionID), ["parent", "child_live"])
-  assert.equal(layout.pages[0]?.sections[0]?.tasks.length, 1)
-  assert.equal(layout.pages[0]?.sections[0]?.native?.length, 1)
+  assert.equal(layout.pages[0]?.sections[0]?.tasks.length, 1, "the task card owns its own full-width row")
+  assert.equal(layout.pages[0]?.sections[0]?.native?.length, 0)
+  assert.equal(layout.pages[0]?.sections[1]?.tasks.length, 0)
+  assert.equal(layout.pages[0]?.sections[1]?.native?.length, 1, "the native card owns the next full-width row")
 })
 
 test("ticket187: native cards page like task cards without duplicating", () => {

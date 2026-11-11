@@ -2938,8 +2938,11 @@ export class EnsembleV2Service {
       changed,
     })
     const synced = this.store.read()
+    const identityChanged = changed.some((field) => field === "name" || field === "title" || field === "role")
     for (const workspace of Object.values(synced.workspaces)) {
-      if (workspace.memberIDs.includes(agent.id)) writeWorkspaceConfig(workspace, synced.agents)
+      if (!workspace.memberIDs.includes(agent.id)) continue
+      writeWorkspaceConfig(workspace, synced.agents)
+      if (identityChanged && !workspace.archived) this.reconcileWorkspaceInstructions(workspace)
     }
     return agent
   }
@@ -3602,6 +3605,7 @@ export class EnsembleV2Service {
         workspace.memberIDs = workspace.memberIDs.filter((member) => member !== agentID)
         await this.store.saveWorkspace(workspace)
         writeWorkspaceConfig(workspace, this.store.read().agents)
+        if (!workspace.archived) this.reconcileWorkspaceInstructions(workspace)
       }
     }
     await this.cancelAgentSubtasks(agentID, "Agent archived.")
@@ -3648,6 +3652,7 @@ export class EnsembleV2Service {
         workspace.memberIDs = workspace.memberIDs.filter((member) => member !== agentID)
         await this.store.saveWorkspace(workspace)
         writeWorkspaceConfig(workspace, this.store.read().agents)
+        if (!workspace.archived) this.reconcileWorkspaceInstructions(workspace)
       }
       cleanupConversationAttachments(
         candidate.directory,
@@ -3700,6 +3705,7 @@ export class EnsembleV2Service {
         workspace.configVersion = config.version
         workspace.lastActiveAt = now()
         await this.store.saveWorkspace(workspace)
+        this.reconcileWorkspaceInstructions(workspace)
       } catch {
         // Keep the last good state for workspaces whose config names cannot be resolved.
       }
@@ -3714,7 +3720,9 @@ export class EnsembleV2Service {
    */
   private reconcileWorkspaceInstructions(workspace: Workspace): void {
     try {
-      if (reconcileEnsembleInstructions(workspace.directory, ENSEMBLE_BLOCK_VERSION, ensembleBlock())) {
+      const agents = this.store.read().agents
+      const block = ensembleBlock({ leaderID: workspace.leaderID, memberIDs: workspace.memberIDs, agents })
+      if (reconcileEnsembleInstructions(workspace.directory, ENSEMBLE_BLOCK_VERSION, block)) {
         this.logger?.event("info", "service", "workspace.instructions.refreshed", {
           workspaceID: workspace.id,
           version: ENSEMBLE_BLOCK_VERSION,
@@ -3754,6 +3762,7 @@ export class EnsembleV2Service {
       await this.store.saveWorkspace(workspace)
       ensureEnsembleDirectory(canonical)
       writeWorkspaceConfig(workspace, state.agents)
+      this.reconcileWorkspaceInstructions(workspace)
       return workspace
     }
     const members = this.resolveAgentNames(config.members, state.agents)
@@ -3771,6 +3780,7 @@ export class EnsembleV2Service {
       workspace.configVersion = config.version
       workspace.lastActiveAt = now()
       await this.store.saveWorkspace(workspace)
+      this.reconcileWorkspaceInstructions(workspace)
       return workspace
     }
     return found
@@ -3808,6 +3818,7 @@ export class EnsembleV2Service {
     await this.store.saveWorkspace(workspace)
     ensureEnsembleDirectory(workspace.directory)
     writeWorkspaceConfig(workspace, state.agents)
+    this.reconcileWorkspaceInstructions(workspace)
     return workspace
   }
 
@@ -3826,6 +3837,7 @@ export class EnsembleV2Service {
     workspace.lastActiveAt = now()
     await this.store.saveWorkspace(workspace)
     writeWorkspaceConfig(workspace, this.store.read().agents)
+    this.reconcileWorkspaceInstructions(workspace)
     return workspace
   }
 
@@ -4025,7 +4037,11 @@ export class EnsembleV2Service {
         this.restoreAgentsFile(currentWorkspace.directory, writing)
         return
       }
-      writeAgentsBlock(currentWorkspace.directory, ensembleBlock())
+      writeAgentsBlock(currentWorkspace.directory, ensembleBlock({
+        leaderID: currentWorkspace.leaderID,
+        memberIDs: currentWorkspace.memberIDs,
+        agents: current.agents,
+      }))
       writeInitMetadata(currentWorkspace.directory, ENSEMBLE_BLOCK_VERSION)
       if (run.cancelled) {
         this.restoreAgentsFile(currentWorkspace.directory, writing)

@@ -99,12 +99,18 @@ export function readEnsembleBlockVersion(value: string): number | undefined {
   return Number.isFinite(version) ? version : undefined
 }
 
+/** Full Ensemble block text between the canonical markers, if present. */
+export function readEnsembleBlock(value: string): string | undefined {
+  return /<!-- ensemble:start[^>]*-->[\s\S]*?<!-- ensemble:end -->/.exec(value)?.[0]
+}
+
 /**
- * Refresh a stale Ensemble instruction block in place (US37). The block marker
- * and `.ensemble/init.json` are two views of one contract version; either can
- * prove staleness. Project-owned content outside the block is preserved. A
- * newer recorded version is never downgraded, and a directory that never ran
- * init is left alone.
+ * Refresh a stale Ensemble instruction block in place (US37, #238). The block
+ * marker and `.ensemble/init.json` are two views of one contract version, and
+ * the generated roster means equal versions can still carry different text:
+ * the desired content is compared too. Project-owned content outside the block
+ * is preserved. A newer recorded version is never downgraded, and a directory
+ * that never ran init is left alone.
  */
 export function reconcileEnsembleInstructions(directory: string, currentVersion: number, block: string): boolean {
   const metadata = readInitMetadata(directory)
@@ -116,10 +122,12 @@ export function reconcileEnsembleInstructions(directory: string, currentVersion:
   const staleMetadata = typeof metadata.version === "number" && metadata.version < currentVersion
   const staleBlock = blockVersion !== undefined && blockVersion < currentVersion
   const missingOrStaleBlock = typeof metadata.version === "number" && blockVersion !== currentVersion
+  const existingBlock = readEnsembleBlock(content)
+  const contentDiffers = existingBlock !== undefined && existingBlock.trim() !== block.trim()
   const newer = (typeof metadata.version === "number" && metadata.version > currentVersion)
     || (blockVersion !== undefined && blockVersion > currentVersion)
   if (newer) return false
-  if (!staleMetadata && !staleBlock && !missingOrStaleBlock) return false
+  if (!staleMetadata && !staleBlock && !missingOrStaleBlock && !contentDiffers) return false
   writeAgentsBlock(directory, block)
   writeInitMetadata(directory, currentVersion)
   return true

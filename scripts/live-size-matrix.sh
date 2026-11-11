@@ -10,8 +10,9 @@ fi
 # `test:live:fake` scenario is calibrated for its 160x80 default and contains
 # viewport-sensitive transcript assertions; this script restarts the TUI at the
 # four approved sizes and proves the shell breakpoints, the right Work pane and
-# the 80x24 drawer, card/compact layouts, spatial `hjkl`, page edges, ACTIVE
-# pagination, the exact right edge, and the white/grey Work-card focus border.
+# the 80x24 drawer, one full-width card per row at 160x50, compact rows at the
+# narrower sizes, spatial `hjkl`, page edges, ACTIVE pagination, the exact right
+# edge, and the white/grey Work-card focus border.
 #
 #   npm run test:live:sizes
 #   ENSEMBLE_V6_SIZES="80x24 160x50" npm run test:live:sizes
@@ -217,8 +218,9 @@ assert_right_edge() {
     || live_fail "root right padding is missing at ${width}"
 }
 
-# Read the SGR colour of each Work-card top border on the first row with two
-# or more rounded corners. Focused cards are white; unfocused cards are grey.
+# Read the SGR colour of the first two Work-card top borders in reading order.
+# Ticket #239 renders one full-width card per row, so the focused card and its
+# neighbour never share a row. Focused cards are white; unfocused cards grey.
 card_border_colors() {
   "$LIVE_TMUX_BIN" capture-pane -e -p -J -t "$LIVE_TUI_SESSION" | "$LIVE_NODE_BIN" -e '
     let value = "";
@@ -228,8 +230,8 @@ card_border_colors() {
       const start = Number(process.argv[1]);
       const end = Number(process.argv[2]);
       const sgr = /\x1b\[([0-9;]*)m/g;
+      const colors = [];
       for (const line of value.split("\n")) {
-        const colors = [];
         let column = 1;
         let fg = "";
         let index = 0;
@@ -249,7 +251,7 @@ card_border_colors() {
           index += 1;
         }
         if (colors.length >= 2) {
-          process.stdout.write(colors.join(","));
+          process.stdout.write(colors.slice(0, 2).join(","));
           return;
         }
       }
@@ -273,17 +275,17 @@ is_grey_color() {
 }
 
 assert_focus_borders() {
-  local left_white="$1" colors left right
+  local first_white="$1" colors first second
   colors=$(card_border_colors)
   [[ -n "$colors" ]] || live_fail "could not read Work-card border colours"
-  left=$(cut -d, -f1 <<<"$colors")
-  right=$(cut -d, -f2 <<<"$colors")
-  if [[ "$left_white" == "1" ]]; then
-    is_white_color "$left" || live_fail "focused left card border is not white (got $left)"
-    is_grey_color "$right" || live_fail "unfocused right card border is not grey (got $right)"
+  first=$(cut -d, -f1 <<<"$colors")
+  second=$(cut -d, -f2 <<<"$colors")
+  if [[ "$first_white" == "1" ]]; then
+    is_white_color "$first" || live_fail "focused first card border is not white (got $first)"
+    is_grey_color "$second" || live_fail "unfocused next card border is not grey (got $second)"
   else
-    is_grey_color "$left" || live_fail "unfocused left card border is not grey (got $left)"
-    is_white_color "$right" || live_fail "focused right card border is not white (got $right)"
+    is_grey_color "$first" || live_fail "unfocused first card border is not grey (got $first)"
+    is_white_color "$second" || live_fail "focused second card border is not white (got $second)"
   fi
 }
 
@@ -368,44 +370,46 @@ run_load_probe_160x50() {
 }
 
 check_spatial_focus() {
-  local position
   ensure_active_view
-  live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "first Work card owns the cursor"
-  live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "first page has four groups"
+  live_require_text "$LIVE_TUI_SESSION" "1/4" 10 "first Work card owns the cursor"
+  live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "first page holds four one-card rows"
+  # Ticket #239: one full-width card per row. h/l have no same-row neighbour;
+  # they use the ticket #184 page-edge rule and land on the nearest card.
   live_key "$LIVE_TUI_SESSION" "l"
-  live_require_text "$LIVE_TUI_SESSION" "2/5" 10 "l moves to the next card in the row"
+  live_require_text "$LIVE_TUI_SESSION" "1/2" 10 "l pages forward from the only column"
+  live_require_text "$LIVE_TUI_SESSION" "page 2/2" 10 "l advanced the page"
   live_key "$LIVE_TUI_SESSION" "h"
-  live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "h moves back within the row"
+  live_require_text "$LIVE_TUI_SESSION" "1/4" 10 "h pages back to the first card"
+  live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "h returned to page one"
   live_key "$LIVE_TUI_SESSION" "j"
-  live_require_text "$LIVE_TUI_SESSION" "3/5" 10 "j moves to the next group row"
+  live_require_text "$LIVE_TUI_SESSION" "2/4" 10 "j moves to the next full-width card"
   live_key "$LIVE_TUI_SESSION" "k"
-  live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "k returns to the first card"
+  live_require_text "$LIVE_TUI_SESSION" "1/4" 10 "k returns to the first card"
   live_key "$LIVE_TUI_SESSION" "g"
   live_key "$LIVE_TUI_SESSION" "g"
-  live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "gg returns to the first card"
+  live_require_text "$LIVE_TUI_SESSION" "1/4" 10 "gg returns to the first card"
   live_key "$LIVE_TUI_SESSION" "G"
-  live_require_text "$LIVE_TUI_SESSION" "1/1" 10 "G selects the last card on page two"
+  live_require_text "$LIVE_TUI_SESSION" "2/2" 10 "G selects the last of two cards on page two"
   live_require_text "$LIVE_TUI_SESSION" "page 2/2" 10 "the last card lives on page two"
   live_key "$LIVE_TUI_SESSION" "g"
   live_key "$LIVE_TUI_SESSION" "g"
-  for _ in $(seq 1 5); do live_key "$LIVE_TUI_SESSION" "j"; done
-  live_require_text "$LIVE_TUI_SESSION" "1/1" 10 "j at the page edge moves to the next page"
+  for _ in $(seq 1 4); do live_key "$LIVE_TUI_SESSION" "j"; done
+  live_require_text "$LIVE_TUI_SESSION" "1/2" 10 "j at the page edge moves to the next page"
   live_require_text "$LIVE_TUI_SESSION" "page 2/2" 10 "page edge advanced to page two"
   live_key "$LIVE_TUI_SESSION" "k"
-  live_require_text "$LIVE_TUI_SESSION" "5/5" 10 "k at the page edge returns to the previous page"
+  live_require_text "$LIVE_TUI_SESSION" "4/4" 10 "k at the page edge returns to the previous page"
   live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "page edge returned to page one"
-  # Ticket #184: h/l also cross a page edge at the row's edge. The last card on
-  # page one is alone in its row; l lands on the nearest card of page two and h
-  # returns to the same card instead of a dead key.
+  live_key "$LIVE_TUI_SESSION" "g"
+  live_key "$LIVE_TUI_SESSION" "g"
   live_key "$LIVE_TUI_SESSION" "l"
-  live_require_text "$LIVE_TUI_SESSION" "1/1" 10 "l at the right page edge moves to the next page"
+  live_require_text "$LIVE_TUI_SESSION" "1/2" 10 "l at the right page edge moves to the next page"
   live_require_text "$LIVE_TUI_SESSION" "page 2/2" 10 "l advanced the page indicator"
   live_key "$LIVE_TUI_SESSION" "h"
   live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "h at the left page edge returns to the previous page"
-  live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "h lands on the nearest card in the previous page"
+  live_require_text "$LIVE_TUI_SESSION" "1/4" 10 "h lands on the nearest card in the previous page"
   live_key "$LIVE_TUI_SESSION" "g"
   live_key "$LIVE_TUI_SESSION" "g"
-  live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "gg returns to the first card before the border probe"
+  live_require_text "$LIVE_TUI_SESSION" "1/4" 10 "gg returns to the first card before the border probe"
   sleep 0.3
 }
 
@@ -446,22 +450,24 @@ check_pane_chrome() {
 check_size_160x50() {
   ensure_active_view
   live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 5 groups · 6 active · 0 done │ page 1/2" 20 "five-group Work header at 160x50"
-  live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 2 active · 0 done" 10 "two-task group label"
-  live_require_text "$LIVE_TUI_SESSION" "GROUP 4 · 1 active · 0 done" 20 "fourth group label on the first page"
-  [[ "$(work_card_border_count)" == "5" ]] || live_fail "expected five rounded Work cards on page one at 160x50, got $(work_card_border_count)"
+  live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 2 active · 0 done" 10 "two-card group label"
+  live_require_text "$LIVE_TUI_SESSION" "GROUP 3 · 1 active · 0 done" 20 "third group label on the first page"
+  # Two cards in group one plus one each in groups two and three fit page one;
+  # groups four and five open page two.
+  [[ "$(work_card_border_count)" == "4" ]] || live_fail "expected four one-card rows on page one at 160x50, got $(work_card_border_count)"
   assert_budget_label "160x50" 1
   assert_right_edge 160
   check_spatial_focus
-  # The leftmost card is focused after gg: white border, grey neighbour.
+  # The first card is focused after gg: white border, grey next card.
   sleep 0.3
   assert_focus_borders 1
-  live_key "$LIVE_TUI_SESSION" "l"
-  live_require_text "$LIVE_TUI_SESSION" "2/5" 10 "second card owns focus for the border check"
+  live_key "$LIVE_TUI_SESSION" "j"
+  live_require_text "$LIVE_TUI_SESSION" "2/4" 10 "second card owns focus for the border check"
   sleep 0.3
   assert_focus_borders 0
-  live_key "$LIVE_TUI_SESSION" "h"
+  live_key "$LIVE_TUI_SESSION" "k"
   live_assert_absence "$LIVE_TUI_SESSION" "+1 more" "the Work pane pages instead of an overflow line"
-  live_log "size matrix: 160x50 three panes, cards, spatial focus, page edges, right edge, and white/grey borders passed"
+  live_log "size matrix: 160x50 three panes, one card per row, spatial focus, page edges, right edge, and white/grey borders passed"
 }
 
 check_size_compact() {

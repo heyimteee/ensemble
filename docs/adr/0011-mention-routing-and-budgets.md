@@ -2,7 +2,8 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-10
-- **Tickets:** spec #209, ticket #211 in `heyimteee/ensemble`
+- **Updated:** 2026-11-11 (contract v6 and roster, #238)
+- **Tickets:** spec #209, tickets #211, #238 in `heyimteee/ensemble`
 - **Supersedes:** none
 - **Related:** [ADR 0001](0001-native-skill-boundary.md), [ADR 0003](0003-single-service-and-safe-recovery.md), [ADR 0004](0004-dispatch-budgets-and-continuation.md), [ADR 0009](0009-conversation-identity-and-sessions.md), [ADR 0010](0010-native-turn-ingestion.md)
 
@@ -145,6 +146,32 @@ behind a flag until native routing has live loop and budget evidence, then
 retire under the migration plan. ADR 0001's skill grammar and exact-text rule
 are unchanged.
 
+### 8. The workspace contract states the grammar and the roster
+
+The versioned `AGENTS.md` block is the durable statement of this ADR. Contract
+v6 says the final native text is the group message; `$Name` routes work while a
+bare name is only a reference; `@path` is file-only; code, URLs, and paths never
+route; direct conversations are one-to-one; and the server owns routing,
+budgets, and completion. It requires an agent not to claim a teammate replied
+until that member's turn is visible, and not to open a second completion loop
+for a teammate it asked. The old rule that every non-leader turn must end with
+a handoff is removed; explicit `delegate` and `handoff` are migration and
+rollback tools, not the normal chat path.
+
+The block also carries one generated `Team roster` table. Active members only:
+the leader first and marked, then the remaining members in `memberIDs` order,
+with columns `Member`, `Title`, and `Role`. Title and role are the stored
+strings exactly as authored; only `|` and newlines are escaped for table
+syntax. Archived members are excluded. The table lives once in the workspace
+`AGENTS.md`; the per-turn `ensemble_turn` block keeps compact names and budget,
+so the table is not duplicated into every prompt.
+
+Reconciliation compares the desired block content as well as the version, so a
+roster change rewrites the block even at the same version. Workspace membership
+and leader changes, and agent name, title, role, archive, and delete changes,
+refresh the block immediately; project-owned content outside the Ensemble
+markers is preserved, and a newer recorded version is never downgraded.
+
 ## Rejected alternatives
 
 - **Use `@Name` for agents.** Rejected: ADR 0001 reserves `@` for workspace
@@ -180,6 +207,10 @@ are unchanged.
   group; this is intentional.
 - **The kill switch changes behavior by workspace.** Operators can compare and
   disable routing without removing the explicit tools.
+- **The roster table costs prompt bytes.** The workspace block grows with the
+  roster (about +125 chars for an empty 12-member table and +1.4k chars for a
+  representative filled one); the table is written once per workspace file, not
+  per turn.
 - **One service and the dispatch ledger are unchanged.** ADR 0003 and ADR 0004
   remain in force.
 
@@ -197,7 +228,10 @@ are unchanged.
 
 - Ticket #219 covers the sanitizer and router as pure functions; #220 and #221
   cover user and agent mentions at the service seam; #225 covers tool
-  retirement.
+  retirement. #238 covers contract v6, roster rendering and escaping,
+  content-aware reconciliation, and the refresh triggers
+  (`src/v2/init-block.test.ts`, `src/v2/workspace-config.test.ts`,
+  `src/v2/service.test.ts`).
 - The [native host contract](../verification/2026-11-10-native-host-contract.md)
   supplies the turn and delivery identities routing depends on.
 - `npm run verify` passes for this documentation ticket. No product behavior

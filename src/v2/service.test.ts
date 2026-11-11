@@ -14,9 +14,10 @@ import { chatLineFromMessage, directMessageChannel, isDirectMessageChannel, proj
 import { nativeAssistantMessageID, nativeTurnGroupID, nativeTurnID, nativeUserMessageID } from "./native-turn.ts"
 import type { Agent, Workspace } from "./types.ts"
 import { INIT_PROGRESS_TEXT, INIT_START_TEXT, SYSTEM_AGENT_NAME, initJobPhase } from "./system-agent.ts"
-import { ENSEMBLE_BLOCK_VERSION } from "./init-block.ts"
+import { ENSEMBLE_BLOCK_VERSION, ensembleBlock } from "./init-block.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import { FALLBACK_REPLIES } from "./execution.ts"
+import { stripEnsembleBlock } from "./workspace-config.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -2205,6 +2206,118 @@ test("ticket159: stale workspace instructions refresh on config reconciliation",
     assert.equal((content.match(/<!-- ensemble:start/g) ?? []).length, 1, "one canonical block")
     assert.ok(content.includes("# Project"), "project-owned guidance is preserved")
     assert.ok(!content.includes("STALE CONTRACT"))
+  } finally {
+    await stop()
+  }
+})
+
+test("ticket238: the AGENTS roster refreshes on membership and leader changes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-roster-workspace-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova", title: "Lead" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
+    const workspace = await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    const seeded = await handlers.snapshot({ directory })
+    const block = ensembleBlock({ leaderID: nova.result.id, memberIDs: [nova.result.id, sage.result.id], agents: seeded.state.agents })
+    writeFileSync(join(directory, "AGENTS.md"), `${block}\n\n# Project\n\nKeep me.\n`)
+    writeFileSync(join(directory, ".ensemble", "init.json"), `${JSON.stringify({ version: ENSEMBLE_BLOCK_VERSION }, null, 2)}\n`)
+
+    await handlers.invoke({
+      directory,
+      action: "workspace.update",
+      payload: { id: workspace.result.id, memberIDs: [nova.result.id, sage.result.id, echo.result.id] },
+    })
+    let content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+    assert.match(content, /^\| \*\*Nova\*\* \(leader\) \| Lead \|/m)
+    assert.match(content, /^\| Sage \|/m)
+    assert.match(content, /^\| Echo \|/m)
+    assert.ok(content.indexOf("Nova") < content.indexOf("Sage") && content.indexOf("Sage") < content.indexOf("Echo"))
+
+    await handlers.invoke({ directory, action: "workspace.update", payload: { id: workspace.result.id, leaderID: echo.result.id } })
+    content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+    assert.match(content, /^\| \*\*Echo\*\* \(leader\) \|/m)
+    assert.ok(content.indexOf("**Echo**") < content.indexOf("Nova"))
+    assert.equal(stripEnsembleBlock(content).trim(), "# Project\n\nKeep me.", "project-owned content survives refresh")
+  } finally {
+    await stop()
+  }
+})
+
+test("ticket238: the AGENTS roster refreshes on agent name, title, and role changes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-roster-agent-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage", title: "Researcher", role: "Own research." } })
+    await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id], leaderID: nova.result.id },
+    })
+    const seeded = await handlers.snapshot({ directory })
+    writeFileSync(
+      join(directory, "AGENTS.md"),
+      `${ensembleBlock({ leaderID: nova.result.id, memberIDs: [nova.result.id, sage.result.id], agents: seeded.state.agents })}\n`,
+    )
+    writeFileSync(join(directory, ".ensemble", "init.json"), `${JSON.stringify({ version: ENSEMBLE_BLOCK_VERSION }, null, 2)}\n`)
+
+    await handlers.invoke({
+      directory,
+      action: "agent.update",
+      payload: { id: sage.result.id, name: "Sage Prime", title: "Research | Lead", role: "Line one.\nLine two." },
+    })
+    const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+    assert.match(content, /^\| Sage Prime \| Research \\\| Lead \| Line one\.<br>Line two\. \|$/m)
+    assert.doesNotMatch(content, /^\| Sage \|/m)
+  } finally {
+    await stop()
+  }
+})
+
+test("ticket238: archived and deleted agents leave the AGENTS roster", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-roster-lifecycle-"))
+  const { ctx } = fakeContext()
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const nova = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Nova" } })
+    const sage = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Sage" } })
+    const echo = await handlers.invoke({ directory, action: "agent.create", payload: { name: "Echo" } })
+    await handlers.invoke({
+      directory,
+      action: "workspace.create",
+      payload: { name: "site", directory, memberIDs: [nova.result.id, sage.result.id, echo.result.id], leaderID: nova.result.id },
+    })
+    const seeded = await handlers.snapshot({ directory })
+    writeFileSync(
+      join(directory, "AGENTS.md"),
+      `# Project\n\nKeep me.\n\n${ensembleBlock({ leaderID: nova.result.id, memberIDs: [nova.result.id, sage.result.id, echo.result.id], agents: seeded.state.agents })}\n`,
+    )
+    writeFileSync(join(directory, ".ensemble", "init.json"), `${JSON.stringify({ version: ENSEMBLE_BLOCK_VERSION }, null, 2)}\n`)
+
+    await handlers.invoke({ directory, action: "agent.archive", payload: { id: echo.result.id } })
+    let content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+    assert.doesNotMatch(content, /^\| Echo \|/m)
+    assert.match(content, /^\| Sage \|/m)
+
+    await handlers.invoke({ directory, action: "agent.delete", payload: { id: sage.result.id } })
+    content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+    assert.doesNotMatch(content, /^\| Sage \|/m)
+    assert.match(content, /^\| \*\*Nova\*\* \(leader\) \|/m)
+    assert.equal(stripEnsembleBlock(content).trim(), "# Project\n\nKeep me.", "project-owned content survives refresh")
   } finally {
     await stop()
   }
