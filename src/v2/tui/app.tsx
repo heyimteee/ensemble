@@ -7699,7 +7699,7 @@ export function EnsembleV2App() {
                         <Show when={section.label}>
                           <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                         </Show>
-                        <box flexDirection="row" width="100%" gap={1}>
+                        <box flexDirection="row" width="100%">
                           <For each={section.cards}>{(card) => (
                             <WorkCardView
                               colors={colors}

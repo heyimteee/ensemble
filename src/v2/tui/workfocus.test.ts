@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { NativeSubagentRun, Subtask } from "../types.ts"
-import { WORK_CARD_GAP_COLS, WORK_CARD_ROWS } from "./workrows.ts"
+import { WORK_CARD_ROWS } from "./workrows.ts"
 import { nativeSubagentFocusID } from "./nativecards.ts"
 import { emptyHistoryViewState, historyGroupFocusID, historyPaneGroups, paginateWorkGroups, reconcileHistoryView, workPaneBodyHeight, workspacePaneWidths, type WorkPanePage, type WorkPaneSection } from "./workpane.ts"
 import { workViewGroups } from "./workpane.ts"
@@ -77,21 +77,22 @@ const pageRects = (page: number, rects: WorkCardRect[]): WorkPageRects => ({
   rects: rects.map((item) => ({ ...item, page })),
 })
 
-test("ticket173: card rectangles mirror the rendered sections, labels, gaps, and rows", () => {
+test("ticket239: card rectangles mirror one full-width card per section", () => {
   const sections: WorkPaneSection[] = [
-    { groupID: "g1", label: "GROUP 1", tone: "faint", mode: "cards", tasks: [task({ id: "a" }), task({ id: "b" })], height: 1 + WORK_CARD_ROWS, continued: false, gapBefore: false },
+    { groupID: "g1", label: "GROUP 1", tone: "faint", mode: "cards", tasks: [task({ id: "a" })], height: 1 + WORK_CARD_ROWS, continued: false, gapBefore: false },
+    { groupID: "g1", label: null, tone: "faint", mode: "cards", tasks: [task({ id: "b" })], height: WORK_CARD_ROWS, continued: false, gapBefore: false },
     { groupID: "g2", label: "GROUP 2", tone: "faint", mode: "cards", tasks: [task({ id: "c" })], height: 1 + WORK_CARD_ROWS, continued: false, gapBefore: true },
   ]
-  const page: WorkPanePage = { number: 1, sections, tasks: [], height: 2 * (1 + WORK_CARD_ROWS) + 1 }
-  const layout = { mode: "cards" as const, columns: 2, cardWidth: 20, cardContentWidth: 15, pages: [page] }
+  const page: WorkPanePage = { number: 1, sections, tasks: [], height: 3 * WORK_CARD_ROWS + 3 }
+  const layout = { mode: "cards" as const, cardWidth: 59, cardContentWidth: 54, pages: [page] }
   const rects = workPageRects(page, layout)
   assert.deepEqual(
     rects.map((item) => [item.id, item.x, item.y, item.width, item.height]),
     [
-      ["a", 0, 1, 20, WORK_CARD_ROWS],
-      ["b", 20 + WORK_CARD_GAP_COLS, 1, 20, WORK_CARD_ROWS],
+      ["a", 0, 1, 59, WORK_CARD_ROWS],
+      ["b", 0, 1 + WORK_CARD_ROWS, 59, WORK_CARD_ROWS],
       // The second group adds one blank separation row before its label.
-      ["c", 0, 1 + WORK_CARD_ROWS + 1 + 1, 20, WORK_CARD_ROWS],
+      ["c", 0, 2 * WORK_CARD_ROWS + 3, 59, WORK_CARD_ROWS],
     ],
   )
   assert.deepEqual(workLayoutRects(layout), [{ page: 1, rects }])
@@ -103,7 +104,7 @@ test("ticket173: compact pages emit one full-width rectangle per row", () => {
     { groupID: "g2", label: null, tone: "faint", mode: "rows", tasks: [task({ id: "c" })], height: 1, continued: false, gapBefore: false },
   ]
   const page: WorkPanePage = { number: 2, sections, tasks: [], height: 4 }
-  const layout = { mode: "compact" as const, columns: 0, cardWidth: 0, cardContentWidth: 36, pages: [page] }
+  const layout = { mode: "compact" as const, cardWidth: 0, cardContentWidth: 36, pages: [page] }
   assert.deepEqual(
     workPageRects(page, layout).map((item) => [item.id, item.x, item.y, item.width, item.height, item.page]),
     [
@@ -137,20 +138,44 @@ test("ticket173: hjkl picks the nearest card in the direction with perpendicular
   assert.equal(next("e", "right"), undefined)
 })
 
-test("ticket173: spatial navigation crosses group sections instead of column arithmetic", () => {
+test("ticket239: one card per row navigates vertically across group sections", () => {
   const items = [
     working({ id: "a1", dispatchGroupID: "dispatch_1", createdAt: 1 }),
     working({ id: "a2", dispatchGroupID: "dispatch_1", createdAt: 2 }),
     working({ id: "b1", dispatchGroupID: "dispatch_2", createdAt: 3 }),
   ]
   const views = workViewGroups(items, record(...items), { now: 5_000 })
-  const layout = paginateWorkGroups(views.active, 59, 20, 5_000)
-  assert.equal(layout.columns, 2)
+  const layout = paginateWorkGroups(views.active, 59, 24, 5_000)
+  assert.equal(layout.mode, "cards")
+  assert.equal(layout.cardWidth, 59)
   const pages = workLayoutRects(layout)
-  assert.equal(navigateWorkFocus(pages, "a1", "down")?.id, "b1", "the next group's only card is directly below")
-  assert.equal(navigateWorkFocus(pages, "a2", "down")?.id, "b1")
-  assert.equal(navigateWorkFocus(pages, "b1", "up")?.id, "a1")
-  assert.equal(navigateWorkFocus(pages, "a1", "right")?.id, "a2")
+  const rects = pages.flatMap((page) => page.rects)
+  assert.deepEqual(rects.map((item) => [item.id, item.x, item.width]), [
+    ["a1", 0, 59],
+    ["a2", 0, 59],
+    ["b1", 0, 59],
+  ], "every card starts at the left edge and spans the content width")
+  assert.equal(navigateWorkFocus(pages, "a1", "down")?.id, "a2")
+  assert.equal(navigateWorkFocus(pages, "a2", "down")?.id, "b1", "the next group's card is directly below")
+  assert.equal(navigateWorkFocus(pages, "b1", "up")?.id, "a2")
+  assert.equal(navigateWorkFocus(pages, "a1", "right"), undefined, "no card sits to the right in a one-column layout")
+  assert.equal(navigateWorkFocus(pages, "a1", "left"), undefined)
+})
+
+test("ticket239: one-column page edges keep j/k and h/l navigation continuous", () => {
+  const items = ["a1", "a2", "a3"].map((id, index) =>
+    working({ id, dispatchGroupID: "dispatch_1", createdAt: index + 1 }),
+  )
+  const views = workViewGroups(items, record(...items), { now: 5_000 })
+  const layout = paginateWorkGroups(views.active, 59, WORK_CARD_ROWS + 2, 5_000)
+  assert.equal(layout.mode, "cards")
+  assert.equal(layout.pages.length, 3, "each full-width card owns a page at this body height")
+  const pages = workLayoutRects(layout)
+  assert.deepEqual(navigateWorkFocus(pages, "a1", "down"), { id: "a2", page: 2, rect: pages[1]!.rects[0] })
+  assert.equal(navigateWorkFocus(pages, "a2", "down")?.id, "a3")
+  assert.equal(navigateWorkFocus(pages, "a3", "up")?.id, "a2", "up at the page edge returns to the previous card")
+  assert.equal(navigateWorkFocus(pages, "a1", "right")?.id, "a2", "right at the only column pages forward")
+  assert.equal(navigateWorkFocus(pages, "a2", "left")?.id, "a1", "left at the only column pages back")
 })
 
 test("ticket173: compact rows navigate sequentially and never jump columns", () => {
@@ -368,8 +393,8 @@ test("ticket187: native subagent cards participate in Work focus geometry", () =
   const ids = pages.flatMap((page) => page.rects.map((item) => item.id))
   assert.deepEqual(ids, ["parent", nativeSubagentFocusID("child_live")], "the child card owns a namespaced focus target")
   assert.equal(firstWorkFocus(pages)?.id, "parent")
-  assert.equal(navigateWorkFocus(pages, "parent", "right")?.id, nativeSubagentFocusID("child_live"))
-  assert.equal(navigateWorkFocus(pages, nativeSubagentFocusID("child_live"), "left")?.id, "parent")
+  assert.equal(navigateWorkFocus(pages, "parent", "down")?.id, nativeSubagentFocusID("child_live"))
+  assert.equal(navigateWorkFocus(pages, nativeSubagentFocusID("child_live"), "up")?.id, "parent")
 })
 
 test("ticket187: a compact native card still owns one focus row at drawer width", () => {
