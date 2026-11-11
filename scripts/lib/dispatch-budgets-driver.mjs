@@ -103,6 +103,7 @@ async function waitForSettings(expected, failures) {
   while (Date.now() < deadline) {
     const current = (await snapshot()).settings ?? {}
     if (
+      current.nativeFirst === expected.nativeFirst &&
       current.dispatchGroupMaxHops === expected.dispatchGroupMaxHops &&
       current.dispatchCommandMaxHops === expected.dispatchCommandMaxHops &&
       current.dispatchDepth === expected.dispatchDepth &&
@@ -172,7 +173,12 @@ let workspaceID = ""
 
 async function runScenario(input) {
   const failures = []
+  // Ticket #240: this probe predates native-first and drives the explicit
+  // `ensemble_handoff`/`ensemble_delegate` tools, which the native surface
+  // deliberately does not register. Pin the legacy mode before each scenario
+  // so the default-on cutover cannot silently remove the tools under test.
   const settings = {
+    nativeFirst: "off",
     maxActiveRuns: 8,
     maxDelegations: 10,
     dispatchGroupMaxHops: input.groupMaxHops,
