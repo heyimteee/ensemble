@@ -42,6 +42,7 @@ import {
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
 import { resolveActiveTurnAnchor, type ActiveTurnAnchor } from "./turn-anchor.ts"
 import { completionDecision } from "./completion-decision.ts"
+import { resolveCommandRoot } from "./command-root.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
@@ -6695,7 +6696,7 @@ export class EnsembleV2Service {
         kind: "system",
         taskID: batch.id,
       })
-      if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+      if (batch.parentID) await this.maybeSynthesize(batch.parentID, batch.id)
       return "Batch closed: every item decided."
     }
     let candidateID = workspace.leaderID
@@ -6721,7 +6722,7 @@ export class EnsembleV2Service {
         kind: "system",
         taskID: batch.id,
       })
-      if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+      if (batch.parentID) await this.maybeSynthesize(batch.parentID, batch.id)
       return "Batch closed: the onward chain reached its depth cap, so the batch ends here."
     }
     const target = this.store.agent(route.to)
@@ -6784,7 +6785,7 @@ export class EnsembleV2Service {
       })
       this.schedule()
     }
-    if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+    if (batch.parentID) await this.maybeSynthesize(batch.parentID, batch.id)
     return `Batch handed to $${target?.name ?? route.to}: every item decided.`
   }
 
@@ -11255,7 +11256,7 @@ export class EnsembleV2Service {
     await this.clearSupersededNotices(task)
     this.logTaskRecovered(task, previousStatus, "late-success", resultMessageID, previousFailure)
     await this.settleLinkedApprovals(task.id, "Superseded: the linked work finished.", new Set(["native"]))
-    if (task.parentID) await this.maybeSynthesize(task.parentID)
+    if (task.parentID) await this.maybeSynthesize(task.parentID, task.id)
     return true
   }
 
@@ -11673,7 +11674,7 @@ export class EnsembleV2Service {
       // mirrors are excluded: only the host or an explicit resolve settles
       // them, since the host request may still be live after our run ends.
       await this.settleLinkedApprovals(currentTask.id, "Superseded: the linked work finished.", new Set(["native"]))
-      if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID)
+      if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID, currentTask.id)
     } catch (error: any) {
       const currentTask = this.store.cloneSubtask(task.id)
       const failureText = error?.message ?? String(error)
@@ -12154,16 +12155,19 @@ export class EnsembleV2Service {
     // announced from the terminal task row like success; a generic duplicate
     // system line made failure feel secondary. Correlation-specific notices
     // above remain.
-    if (task.parentID) await this.maybeSynthesize(task.parentID)
+    if (task.parentID) await this.maybeSynthesize(task.parentID, task.id)
   }
 
-  private async maybeSynthesize(parentID: string): Promise<void> {
-    const stored = this.store.subtask(parentID)
-    if (!stored || stored.stage === "synthesis" || stored.state === "replied") return
-    // A native turn is answered by its own host execution, never by child
-    // synthesis. Routed child work must not reassign the session agent or
-    // settle the turn (ticket #220).
-    if (isNativeTurn(stored)) return
+  private async maybeSynthesize(parentID: string, childID?: string): Promise<void> {
+    // Ticket #246: only the command root may synthesize. Walk the parent chain
+    // to the topmost Subtask; an intermediate handoff/delegation parent relays
+    // its child result and settles without a leader turn. A native turn is
+    // host-answered, so a child completion never converts it (or its root)
+    // into synthesis work.
+    const resolution = resolveCommandRoot(parentID, this.store.read().subtasks)
+    if (!resolution || resolution.hostAnswered) return
+    const stored = resolution.root
+    if (stored.stage === "synthesis" || stored.state === "replied") return
     // Ticket #71: batch reviews close only via the review tool once every
     // item is acted on or dismissed — never by child completion.
     if (stored.handoff?.batch === true) return
@@ -12179,6 +12183,33 @@ export class EnsembleV2Service {
     if (!workspace) return
     const parent = this.store.cloneSubtask(parentID)
     if (!parent) return
+    if (resolution.root.id !== parentID) {
+      // Intermediate relay: settle with the child result and propagate upward.
+      // The parent's own worker answer already owns its resultMessageID; never
+      // overwrite it with a child's message (ticket #246 clarification).
+      if (parent.stage === "synthesis" || parent.state === "replied") return
+      if (parent.handoff?.batch === true) return
+      const triggering = childID ? this.store.subtask(childID) : undefined
+      const childResultID = triggering?.resultMessageID ?? children.find((child) => child.resultMessageID)?.resultMessageID
+      parent.state = "replied"
+      parent.outcome = "succeeded"
+      parent.awaitingChildren = false
+      parent.repliedAt = at
+      parent.finishedAt = at
+      parent.failure = undefined
+      parent.error = undefined
+      if (!parent.resultMessageID && childResultID) parent.resultMessageID = childResultID
+      await this.store.saveSubtask(parent)
+      this.noteWorkChanged(parent)
+      this.logger?.event("info", "task", "task.relay.settled", {
+        taskID: parent.id,
+        parentID: parent.parentID,
+        childID: triggering?.id ?? children[0]?.id,
+        reason: "children-terminal",
+      })
+      if (parent.parentID) await this.maybeSynthesize(parent.parentID, parent.id)
+      return
+    }
     if (workspace.synthesis) {
       parent.state = "pending"
       parent.stage = "synthesis"
@@ -12189,7 +12220,6 @@ export class EnsembleV2Service {
       parent.deadlineAt = now() + DEADLINE_MS
       await this.store.saveSubtask(parent)
     } else {
-      const at = now()
       parent.state = "replied"
       parent.outcome = "succeeded"
       parent.repliedAt = at

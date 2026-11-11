@@ -1,3 +1,4 @@
+import { collectBranchResults, formatBranchDigest } from "./branch-digest.ts"
 import { dispatchBudgetContext, dispatchBudgetState, dispatchDepthFor } from "./dispatch-budget.ts"
 import { ensembleTurnContext } from "./turn-context.ts"
 import type { Agent, Memory, SnapshotState, Subtask, Workspace } from "./types.ts"
@@ -129,9 +130,19 @@ export function recentGroupMessages(state: SnapshotState, workspace: Workspace, 
 export function contextForTask(state: SnapshotState, task: Subtask, workspace: Workspace, agent: Agent): string {
   const memories = visibleMemories(state, agent.id, workspace.id)
   const recent = recentGroupMessages(state, workspace)
-  const children = Object.values(state.subtasks).filter((item) => item.parentID === task.id)
-  const childResults = task.stage === "synthesis"
-    ? children.map((child) => `- ${state.agents[child.assigneeID ?? ""]?.name ?? "Agent"}: ${state.messages[workspace.id]?.find((message) => message.id === child.resultMessageID)?.text ?? child.error ?? "(no reply)"}`).join("\n")
+  // Ticket #246: only the command root synthesizes, so its context carries a
+  // bounded digest of terminal leaves (worker path + final result), never an
+  // intermediate parent's own reply. Ticket #249 will remove the recent
+  // transcript from this synthesis context.
+  const branchResults = task.stage === "synthesis"
+    ? formatBranchDigest(
+        collectBranchResults({
+          rootID: task.id,
+          subtasks: state.subtasks,
+          messages: state.messages[workspace.id] ?? [],
+        }),
+        state.agents,
+      )
     : ""
   const dispatchGroup = task.dispatchGroupID ? state.dispatchGroups[task.dispatchGroupID] : undefined
   const dispatchBudget = dispatchGroup
@@ -167,6 +178,6 @@ export function contextForTask(state: SnapshotState, task: Subtask, workspace: W
     // delegated worker still knows what the chat just said.
     `<ensemble_recent_messages>\n${recent || "(none)"}\n</ensemble_recent_messages>`,
     `<ensemble_subtask title="${task.title}">\n${task.instruction}\n</ensemble_subtask>`,
-    childResults ? `<ensemble_child_results>\n${childResults}\n</ensemble_child_results>` : "",
+    branchResults ? `<ensemble_branch_results>\n${branchResults}\n</ensemble_branch_results>` : "",
   ].filter(Boolean).join("\n\n")
 }
