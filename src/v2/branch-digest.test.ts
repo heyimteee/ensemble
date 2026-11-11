@@ -143,6 +143,53 @@ test("ticket251: a completion hop never keeps a subtree open", () => {
   )
 })
 
+test("ticket251: the digest follows the canonical work status for stalled and native branches", () => {
+  const tasks = {
+    root: task({ id: "root", assigneeID: "a" }),
+    stalled: task({
+      id: "stalled",
+      parentID: "root",
+      assigneeID: "b",
+      state: "replied",
+      outcome: "failed",
+      error: "lease expired",
+      failure: { kind: "lease", reason: "lease-expired" },
+      createdAt: 1,
+    }),
+    nativePending: task({
+      id: "nativePending",
+      parentID: "root",
+      assigneeID: "c",
+      state: "pending",
+      outcome: "pending",
+      origin: "native",
+      native: { sessionID: "s", assistantMessageIDs: [], phase: "queued" },
+      createdAt: 2,
+    }),
+    nativeFailed: task({
+      id: "nativeFailed",
+      parentID: "root",
+      assigneeID: "d",
+      state: "replied",
+      outcome: "failed",
+      error: "provider failed",
+      origin: "native",
+      native: { sessionID: "s", assistantMessageIDs: [], phase: "failed" },
+      createdAt: 3,
+    }),
+  }
+  const branches = collectBranchResults({ rootID: "root", subtasks: tasks, messages: [] })
+  assert.deepEqual(branches.map((branch) => [branch.taskID, branch.outcome]), [
+    ["stalled", "stalled"],
+    ["nativePending", "pending"],
+    ["nativeFailed", "failed"],
+  ])
+  const digest = formatBranchDigest(branches, agents)
+  assert.match(digest, /^- \$Nova → \$Sage: \(stalled\) lease expired$/m)
+  assert.match(digest, /^- \$Nova → \$Iris: \(pending\)$/m)
+  assert.match(digest, /^- \$Nova → \$Fern: \(failed\) provider failed$/m)
+})
+
 test("the digest is bounded by branch count and result length", () => {
   const tasks: Record<string, Subtask> = { root: task({ id: "root", assigneeID: "a" }) }
   const messages: Message[] = []

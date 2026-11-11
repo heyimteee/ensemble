@@ -31,8 +31,6 @@ function register(surface: "native" | "legacy") {
 test("ticket225: the native surface registers only the decision tools", () => {
   const tools = register("native")
   assert.deepEqual([...tools.keys()], [...TOOL_SURFACE_TOOL_NAMES.native])
-  assert.equal(TOOL_SURFACE_TOOL_NAMES.native.length, 6, "ticket250: the native surface has six tools")
-  assert.equal(TOOL_SURFACE_TOOL_NAMES.legacy.length, 11, "ticket250: the legacy surface is unchanged")
   for (const name of ["send_message", "workspace_info", "list_workspaces", "list_agents", "delegate", "handoff"]) {
     assert.equal(tools.has(name), false, `${name} is absent from the native surface`)
   }

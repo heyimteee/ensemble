@@ -318,15 +318,6 @@ async function waitForCommandRoot(workspaceID, title, timeoutMs = 120_000) {
   return settled.state
 }
 
-async function sendFlowKickoff(sessionID, marker) {
-  const inbox = await promptNative(sessionID, marker)
-  const settled = await waitFor("the flow kickoff native turn", async (next) => {
-    const task = nativeTask(next, sessionID, inbox.id)
-    return task?.native?.phase === "replied"
-  }, 120_000)
-  return settled.state
-}
-
 function commandRoot(snapshot, workspaceID, title) {
   return Object.values(snapshot.subtasks ?? {}).find(
     (task) => task.workspaceID === workspaceID && task.title === title && !task.parentID,
@@ -813,9 +804,24 @@ async function flows() {
   const channel = saved.flowsChannel
   const leaderID = saved.leaderID
   const agentIDs = saved.agentIDs
+  let reviewSeeds = 0
+  // Ticket #251 review: a normal native kickoff is not a terminal turn, so it
+  // cannot call `ensemble_dispatch`. Seed one worker task whose final answer is
+  // the next ticket marker; its completion review is terminal and dispatches
+  // the ticket. This is the real continuation path, not a test bypass.
+  const dispatchFromReview = async (marker) => {
+    reviewSeeds += 1
+    await invoke("task.delegate", {
+      workspaceID,
+      assigneeID: agentIDs.phoenix,
+      title: `Review seed ${reviewSeeds}`,
+      instruction: `fake-vera-seed:target=${marker}`,
+      mode: "research",
+    })
+  }
 
   // --- ticket one: five-hop relay + terminal continuation dispatch ---------
-  await sendFlowKickoff(saved.flowsGroupSessionID, FLOW_TICKET_ONE)
+  await dispatchFromReview(FLOW_TICKET_ONE)
   let snapshot = await waitForCommandRoot(workspaceID, "Ticket one")
   let root = commandRoot(snapshot, workspaceID, "Ticket one")
   assert("ticket one is a parentless leader command root", Boolean(root) && root.parentID === undefined && root.assigneeID === leaderID)
@@ -880,14 +886,14 @@ async function flows() {
     twoSynthesis?.hasRootRequest === true && twoSynthesis?.hasBranchResults === true,
   )
 
-  // --- ticket three: refused dispatch at the command cap --------------------
+  // --- ticket three: refused dispatch above the new command ceiling ----------
   await invoke("settings.update", {
     dispatchGroupMaxHops: 8,
     dispatchCommandMaxHops: 8,
     dispatchDepth: 8,
     dispatchContinuations: 0,
   })
-  await sendFlowKickoff(saved.flowsGroupSessionID, FLOW_TICKET_THREE)
+  await dispatchFromReview(FLOW_TICKET_THREE)
   snapshot = await waitForCommandRoot(workspaceID, "Ticket three")
   root = commandRoot(snapshot, workspaceID, "Ticket three")
   assert("ticket three is a parentless leader command root", Boolean(root) && root.parentID === undefined && root.assigneeID === leaderID)
@@ -902,10 +908,11 @@ async function flows() {
     (message) =>
       message.author === "system" &&
       String(message.text ?? "").startsWith("Dispatch refused:") &&
-      String(message.text ?? "").includes("the command budget is exhausted (9/8 hops)") &&
-      String(message.text ?? "").includes("Ask the user to start a new command"),
+      String(message.text ?? "").includes("the new command is limited to 8 hops") &&
+      String(message.text ?? "").includes("reduce the batch or split it across commands"),
   )
-  assert("the command-cap refusal is visible in the group chat", Boolean(refusalCopy))
+  assert("the command-cap refusal is visible as batch-too-large", Boolean(refusalCopy))
+  assert("the refusal does not ask for a fresh user command", !String(refusalCopy?.text ?? "").includes("Ask the user"))
   const refusalLog = (await logEntries("dispatch.command.refused", 100)).find((entry) => entry.originTaskID === root.id)
   assert(
     "the command-cap refusal names the command layer",
@@ -930,7 +937,7 @@ async function flows() {
   })
 
   // --- ticket four: worker handoff with $Name to a sibling -------------------
-  await sendFlowKickoff(saved.flowsGroupSessionID, FLOW_TICKET_FOUR)
+  await dispatchFromReview(FLOW_TICKET_FOUR)
   snapshot = await waitForCommandRoot(workspaceID, "Ticket four")
   root = commandRoot(snapshot, workspaceID, "Ticket four")
   assert("ticket four is a parentless leader command root", Boolean(root) && root.parentID === undefined && root.assigneeID === leaderID)
@@ -958,14 +965,19 @@ async function flows() {
   )
   assert("ticket four terminal mentions are references", fourSuppressed.length === 1, String(fourSuppressed.length))
 
-  const kickoffs = Object.values(snapshot.subtasks ?? {}).filter(
-    (task) =>
-      task.workspaceID === workspaceID &&
-      task.origin === "native" &&
-      String(task.instruction ?? "").startsWith("fake-vera-flows:"),
+  // Every ticket root was started by a terminal turn: ticket one, three, and
+  // four from a completion review, and ticket two from ticket one's synthesis.
+  const commandLogs = await logEntries("dispatch.command.created", 200)
+  const ticketOrigins = [one, two, three, four].map((ticket) => {
+    const entry = commandLogs.find((item) => item.rootTaskID === ticket.rootTaskID)
+    return entry ? snapshot.subtasks[entry.originTaskID] : undefined
+  })
+  assert("four terminal turns start the flow tickets", ticketOrigins.every(Boolean), String(ticketOrigins.length))
+  assert(
+    "every ticket dispatch originates in a terminal turn",
+    ticketOrigins.every((task) => task && (task.stage === "synthesis" || task.handoff?.completion === true || task.handoff?.batch === true)),
+    JSON.stringify(ticketOrigins.map((task) => ({ stage: task?.stage, completion: task?.handoff?.completion, batch: task?.handoff?.batch }))),
   )
-  assert("three native kickoff turns start the flow tickets", kickoffs.length === 3, String(kickoffs.length))
-  assert("every kickoff turn settled", kickoffs.every((task) => task.native?.phase === "replied"))
 
   const tickets = { one, two, three, four }
   for (const [ticket, values] of Object.entries(tickets)) {
@@ -988,7 +1000,7 @@ async function flows() {
   const beforeFanoutChars = 5761
   metrics.flows = {
     tickets,
-    kickoffTurns: kickoffs.length,
+    kickoffTurns: ticketOrigins.length,
     terminalSuppressed: { one: oneSuppressed.length, two: twoSuppressed.length, three: threeSuppressed.length, four: fourSuppressed.length },
     terminalNotices: {
       one: terminalNoticeFor(snapshot, channel, one.rootTaskID),
@@ -1048,7 +1060,7 @@ async function flows() {
     nativeCount: workspaceTasks.filter((task) => task.origin === "native").length,
     roots: { one: one.rootTaskID, two: two.rootTaskID, three: three.rootTaskID, four: four.rootTaskID },
     groups: { one: one.dispatchGroupID, two: two.dispatchGroupID, three: three.dispatchGroupID, four: four.dispatchGroupID },
-    kickoffTurns: kickoffs.length,
+    kickoffTurns: ticketOrigins.length,
     peerRouteTaskID: peerRoute?.id,
     ticketMetrics: tickets,
     terminalNotices: metrics.flows.terminalNotices,
@@ -1097,8 +1109,10 @@ async function restart() {
     ).length === saved.phoenixTaskCount,
   )
   assert(
-    "restart creates no completion turn for the leader",
-    Object.values(snapshot.subtasks ?? {}).filter((task) => task.handoff?.completion === true).length === 0,
+    "restart creates no completion turn for the leader in the probe workspace",
+    Object.values(snapshot.subtasks ?? {}).filter(
+      (task) => task.workspaceID === saved.workspaceID && task.handoff?.completion === true,
+    ).length === 0,
   )
   const stuck = Object.values(snapshot.subtasks ?? {}).filter(
     (task) => task.origin === "native" && ["queued", "working", "retrying"].includes(task.native?.phase),
@@ -1138,7 +1152,11 @@ async function restart() {
     "restart preserves every flow native turn",
     flowTasks.filter((task) => task.origin === "native").length === flows.nativeCount,
   )
-  assert("restart creates no flow completion turn", flowTasks.every((task) => task.handoff?.completion !== true))
+  const flowCommandGroups = new Set(Object.values(flows.groups ?? {}))
+  assert(
+    "restart keeps every ticket command group free of completion turns",
+    flowTasks.every((task) => !flowCommandGroups.has(task.dispatchGroupID) || task.handoff?.completion !== true),
+  )
   for (const [ticket, rootID] of Object.entries(flows.roots)) {
     const flowRoot = snapshot.subtasks[rootID]
     assert(`restart keeps the ${ticket} command root`, Boolean(flowRoot) && flowRoot.parentID === undefined && flowRoot.assigneeID === saved.leaderID)

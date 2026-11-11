@@ -121,6 +121,16 @@ export function promptForTask(task: Subtask, senderName?: string): string {
   return `${body}${triage}`
 }
 
+/**
+ * Ticket #251: the prompt text actually sent. A reused native session may keep
+ * its first instruction snapshot, so a synthesis turn also carries the bounded
+ * context in the prompt as a fallback. This is the one place the append is
+ * assembled; the prompt benchmark measures the same string.
+ */
+export function promptTextForTask(task: Subtask, prompt: string, context: string): string {
+  return task.stage === "synthesis" ? `${prompt}\n\n${context}` : prompt
+}
+
 /** The bounded recent group transcript injected into a delegated prompt. */
 export function recentGroupMessages(state: SnapshotState, workspace: Workspace, limit = 20): string {
   return (state.messages[workspace.id] ?? [])

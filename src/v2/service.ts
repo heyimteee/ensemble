@@ -8,7 +8,7 @@ import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, reconci
 import { ENSEMBLE_BLOCK_VERSION, agentIdentity, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
-import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
+import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, promptTextForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
 import { isSubstantiveReply, planLateSuccessRepair, settlementText, shouldInterruptSettledReply } from "./stream-settlement.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { planMentionRouting, type MentionConversation, type MentionLedgerSnapshot, type MentionRefusal, type MentionRosterEntry } from "./mention-routing.ts"
@@ -4636,9 +4636,10 @@ export class EnsembleV2Service {
     options: { maxPerRun?: number; perRunKind?: WorkKind } = {},
   ): Promise<{ admitted: boolean; consumed: boolean; deduped?: boolean; refusal?: DispatchRefusal; group?: DispatchGroup; task?: Subtask }> {
     await this.ensureDispatchGroupLedger(task.dispatchGroupID, task.workspaceID)
-    // Ticket #250: a new command root is a container, not a dispatch hop. It
-    // carries `hopExempt` and is saved through the same queue-key/idempotency
-    // path without spending group or command budget; its assignments spend.
+    // Ticket #250: a new command root is a container, not a dispatch hop. Its
+    // durable dispatch root key is the one root identity, so it is saved
+    // through the same queue-key/idempotency path without spending group or
+    // command budget; its assignments spend.
     if (!dispatchesHop(task)) {
       await this.store.saveSubtask(task)
       return { admitted: true, consumed: false }
@@ -4807,8 +4808,6 @@ export class EnsembleV2Service {
     queueKey?: string
     /** Ticket #250: a command root waits for its batch and is never claimed. */
     awaitingChildren?: boolean
-    /** Ticket #250: a command root container spends no hop. */
-    hopExempt?: boolean
   }): Promise<{ subtask: Subtask; deduped: boolean; admitted: boolean; refusal?: DispatchRefusal }> {
     const kind: WorkKind = parseWorkKind(input.kind ?? "delegation") ?? (() => { throw invalidInput(`Unknown work kind: ${String(input.kind)}.`) })()
     // Central propagation: explicit group (a user command fan-out or an
@@ -4871,7 +4870,6 @@ export class EnsembleV2Service {
       createdAt: at,
       workKind: kind,
       queueKey: key,
-      ...(input.hopExempt === true ? { hopExempt: true } : {}),
       dispatchGroupID,
       ...(taskMaxHops !== undefined ? { taskMaxHops } : {}),
       dispatchDepth: depth,
@@ -6286,6 +6284,7 @@ export class EnsembleV2Service {
         taskID: decision.taskID,
         parentID: decision.parentID,
         rootID: decision.rootID,
+        ancestorID: decision.ancestorID,
         leaderID: decision.leaderID,
         reason: decision.reason,
       })
@@ -6846,6 +6845,19 @@ export class EnsembleV2Service {
       return { content: "ensemble_dispatch requires an active leader turn." }
     }
     const origin = anchor.task
+    // Ticket #251 review: a continuation starts only from a terminal turn.
+    // A normal worker or native turn must route with the mention grammar, so
+    // the explicit next-command tool cannot bypass the terminal boundary.
+    if (!isTerminalTurn(origin)) {
+      return this.refuseDispatchCommand(
+        workspace,
+        "ensemble_dispatch is only available from a terminal turn (synthesis, completion review, or batch review).",
+        origin.id,
+        0,
+        undefined,
+        "not-terminal",
+      )
+    }
     const title = typeof input.title === "string" ? input.title.trim() : ""
     const instruction = typeof input.instruction === "string" ? input.instruction.trim() : ""
     if (!title || !instruction) {
@@ -6935,10 +6947,8 @@ export class EnsembleV2Service {
     }
     // Continuation cap: one terminal turn starts at most one new command.
     // A corrected batch after a refusal has no root, so it is still allowed.
-    const started = Object.values(state.subtasks).find(
-      (task) => typeof task.queueKey === "string" && task.queueKey.startsWith(key.prefix) && task.queueKey.endsWith(":root"),
-    )
-    if (started) {
+    // The durable dispatch-key lookup is the one source; no prefix rescan here.
+    if (dispatchCommandStartedForTurn(state.subtasks, workspace.id, origin.id)) {
       return this.refuseDispatchCommand(
         workspace,
         "this terminal turn already started a command; start the next command from the next review.",
@@ -6978,7 +6988,6 @@ export class EnsembleV2Service {
       dispatchGroupID,
       queueKey: key.rootKey,
       awaitingChildren: true,
-      hopExempt: true,
     })
     if (!createdRoot.admitted) {
       return this.refuseDispatch(workspace, "delegation", createdRoot.refusal!, undefined, this.store.dispatchGroup(dispatchGroupID), { log: false })
@@ -6992,6 +7001,7 @@ export class EnsembleV2Service {
       root,
       assignments,
       dispatchGroupID,
+      rollbackRoot: true,
     })
     if (created.refused) return created
     this.logger?.event("info", "dispatch", "dispatch.command.created", {
@@ -7025,6 +7035,8 @@ export class EnsembleV2Service {
     root: Subtask
     assignments: readonly DispatchAssignmentInput[]
     dispatchGroupID?: Id
+    /** True when this attempt created the root; a retry must keep existing work. */
+    rollbackRoot?: boolean
   }): Promise<{ content: string; refused?: true }> {
     const state = this.store.read()
     const dispatchGroupID = input.dispatchGroupID ?? input.root.dispatchGroupID
@@ -7058,13 +7070,21 @@ export class EnsembleV2Service {
         queueKey: assignmentKey,
       })
       if (!result.admitted) {
-        return this.refuseDispatch(
+        // Ticket #251 review: admission is per assignment, so a failure after
+        // the root (or an earlier assignment) exists must not leave open work.
+        // Close everything this attempt created, then return the one visible
+        // batch refusal. Existing rows from an earlier attempt stay untouched.
+        const reason = dispatchCommandRefusalText(result.refusal!)
+        await this.rollbackDispatchCommand(
+          input.rollbackRoot ? [input.root, ...created] : created,
+          reason,
+        )
+        return this.refuseDispatchCommand(
           input.workspace,
-          "delegation",
+          reason,
+          input.origin.id,
+          input.assignments.length,
           result.refusal!,
-          input.root,
-          this.store.dispatchGroup(dispatchGroupID),
-          { log: false },
         )
       }
       created.push(result.subtask)
@@ -7076,6 +7096,36 @@ export class EnsembleV2Service {
     }
   }
 
+  /**
+   * Ticket #251 review: close the rows a partially admitted command created.
+   * Cancellation is structural (`stoppedAt`), so the rows render as cancelled
+   * and never enter synthesis or a completion hop. Residual race: rows are
+   * written sequentially, so a host could claim an earlier assignment before
+   * the later refusal lands; the cancellation stops further work, but a run
+   * that already started may still append its own answer.
+   */
+  private async rollbackDispatchCommand(rows: readonly Subtask[], reason: string): Promise<void> {
+    const at = now()
+    for (const candidate of rows) {
+      const task = this.store.cloneSubtask(candidate.id)
+      if (!task || (task.state !== "pending" && task.state !== "working")) continue
+      task.state = "replied"
+      task.outcome = "failed"
+      task.error = reason
+      task.stoppedAt = at
+      task.repliedAt = at
+      task.finishedAt = at
+      task.awaitingChildren = false
+      task.activeRunID = undefined
+      task.approvalID = undefined
+      task.claimedBy = undefined
+      task.leaseUntil = undefined
+      task.retryAfter = undefined
+      await this.store.saveSubtask(task)
+      this.noteWorkChanged(task)
+    }
+  }
+
   /** Visible refusal for a whole continuation command; no work is created. */
   private async refuseDispatchCommand(
     workspace: Workspace,
@@ -7083,13 +7133,14 @@ export class EnsembleV2Service {
     originTaskID: Id,
     assignmentCount: number,
     refusal?: DispatchRefusal,
+    reasonCode = "invalid-command",
   ): Promise<{ content: string; refused?: true }> {
     await this.appendMessage(workspace, { author: "system", text: `Dispatch refused: ${reason}`, kind: "system" })
     this.logger?.event("warn", "dispatch", "dispatch.command.refused", {
       workspaceID: workspace.id,
       originTaskID,
       assignmentCount,
-      ...(refusal ? { layer: refusal.layer, used: refusal.used, max: refusal.max } : { reason: "invalid-command" }),
+      ...(refusal ? { layer: refusal.layer, used: refusal.used, max: refusal.max } : { reason: reasonCode }),
     })
     return { content: `Dispatch refused: ${reason}`, refused: true }
   }
@@ -9050,7 +9101,7 @@ export class EnsembleV2Service {
         ...(suppression.reason === "terminal-turn" ? { count: terminalSuppressions.length } : {}),
       })
     }
-    if (terminalSuppressions.length > 0) {
+    if (isTerminalTurn(task) && terminalSuppressions.length > 0) {
       // Ticket #248: the chain stops visibly, never silently. Ticket #250: a
       // terminal turn that started the next command with `ensemble_dispatch`
       // has already created work, so the "no work was created" notice would
@@ -11722,9 +11773,11 @@ export class EnsembleV2Service {
       const taskPrompt = promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined)
       // Ticket #251: a session that already ran a native turn can keep its
       // first instruction snapshot for later prompts. Carry the bounded
-      // synthesis context in the prompt text too, so the digest is guaranteed
-      // to reach the model even when the host reuses that snapshot.
-      const promptText = task.stage === "synthesis" ? `${taskPrompt}\n\n${taskContext}` : taskPrompt
+      // synthesis context in the prompt text too (the reused-session
+      // fallback), so the digest is guaranteed to reach the model even when
+      // the host reuses that snapshot. `promptTextForTask` is the one source;
+      // the synthesis benchmark measures the same string.
+      const promptText = promptTextForTask(task, taskPrompt, taskContext)
       // Ticket #103: General skills are a one-run leader grant. Apply the
       // extra allow rules before the prompt; the finally block restores the
       // Skillbox-permission baseline after the turn.

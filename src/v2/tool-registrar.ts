@@ -11,6 +11,23 @@ import type { ToolSurface } from "./tool-surface.ts"
 
 type Json = Record<string, any>
 
+/**
+ * Shared assignment fields for `ensemble_delegate` and one
+ * `ensemble_dispatch` batch item. The continuation fields stay on delegate;
+ * the dispatch item is the same assignment shape without them.
+ */
+const ASSIGNMENT_PROPERTIES = {
+  assignee: { type: "string" },
+  title: { type: "string" },
+  instruction: { type: "string" },
+  constraints: { type: "string" },
+  expected: { type: "string" },
+  mode: { type: "string", enum: ["research", "edit"] },
+  maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
+} as const
+
+const ASSIGNMENT_REQUIRED = ["assignee", "title", "instruction", "maxHops"] as const
+
 export type ToolResult = { content: string }
 
 export interface EnsembleToolHandlers {
@@ -110,17 +127,11 @@ export function registerEnsembleTools(
       input: {
         type: "object",
         properties: {
-          assignee: { type: "string" },
-          title: { type: "string" },
-          instruction: { type: "string" },
-          constraints: { type: "string" },
-          expected: { type: "string" },
-          mode: { type: "string", enum: ["research", "edit"] },
-          maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
+          ...ASSIGNMENT_PROPERTIES,
           continuationOf: { type: "string", description: "Workspace leader only: id of the exhausted dispatch group to continue." },
           groupMaxHops: { type: "integer", enum: [...DISPATCH_GROUP_TIERS], description: `Required with continuationOf: hops for the new group tier (${DISPATCH_GROUP_TIERS.join(", ")}), bounded by the command remaining.` },
         },
-        required: ["assignee", "title", "instruction", "maxHops"],
+        required: [...ASSIGNMENT_REQUIRED],
         additionalProperties: false,
       },
       execute: async (input, context) => handlers.delegate(input, context),
@@ -171,16 +182,8 @@ export function registerEnsembleTools(
             type: "array",
             items: {
               type: "object",
-              properties: {
-                assignee: { type: "string" },
-                title: { type: "string" },
-                instruction: { type: "string" },
-                constraints: { type: "string" },
-                expected: { type: "string" },
-                mode: { type: "string", enum: ["research", "edit"] },
-                maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
-              },
-              required: ["assignee", "title", "instruction", "maxHops"],
+              properties: { ...ASSIGNMENT_PROPERTIES },
+              required: [...ASSIGNMENT_REQUIRED],
               additionalProperties: false,
             },
           },

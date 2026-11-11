@@ -1,4 +1,4 @@
-import { contextForTask, promptForTask, recentGroupMessages } from "./execution.ts"
+import { contextForTask, promptForTask, promptTextForTask, recentGroupMessages } from "./execution.ts"
 import { agentIdentity } from "./init-block.ts"
 import { registerEnsembleTools } from "./tool-registrar.ts"
 import { TOOL_SURFACE_TOOL_NAMES, type ToolSurface } from "./tool-surface.ts"
@@ -221,6 +221,11 @@ export type SynthesisBenchmarkReport = {
   fixture: { branches: number; recentMessages: number }
   context: PromptSize
   prompt: PromptSize
+  /** Context appended to the prompt for a reused session (the fallback). */
+  appendedContext: PromptSize
+  /** Exact prompt text sent: prompt plus the appended context. */
+  sentPrompt: PromptSize
+  /** Kept as the headline prompt total; equals `sentPrompt`. */
   totalPrompt: PromptSize
   removedRecentTranscript: PromptSize
   representativeOutput: PromptSize
@@ -300,12 +305,15 @@ export function synthesisBenchmark(): SynthesisBenchmarkReport {
   const { state, task, workspace, agent } = synthesisBenchmarkFixture()
   const context = contextForTask(state, task, workspace, agent)
   const prompt = promptForTask(task)
+  const sentPrompt = promptTextForTask(task, prompt, context)
   const removedRecentTranscript = `<ensemble_recent_messages>\n${recentGroupMessages(state, workspace)}\n</ensemble_recent_messages>`
   return {
     fixture: { branches: BRANCH_NOTES.length, recentMessages: 20 },
     context: size(context),
     prompt: size(prompt),
-    totalPrompt: addSize(size(context), size(prompt)),
+    appendedContext: size(context),
+    sentPrompt: size(sentPrompt),
+    totalPrompt: size(sentPrompt),
     removedRecentTranscript: size(removedRecentTranscript),
     representativeOutput: size(REPRESENTATIVE_SYNTHESIS_OUTPUT),
   }
@@ -315,6 +323,8 @@ export function synthesisBenchmarkSummary(report: SynthesisBenchmarkReport = syn
   return [
     `synthesis context ${report.context.chars} chars`,
     `synthesis prompt ${report.prompt.chars} chars`,
+    `appended synthesis context ${report.appendedContext.chars} chars`,
+    `synthesis prompt sent ${report.sentPrompt.chars} chars`,
     `synthesis prompt total ${report.totalPrompt.chars} chars`,
     `removed recent transcript ${report.removedRecentTranscript.chars} chars`,
     `representative summary ${report.representativeOutput.chars} chars`,

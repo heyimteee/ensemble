@@ -96,9 +96,12 @@ test("ticket250: the batch preflight checks command, group, depth, and fan-out",
   )
 })
 
-test("ticket250: a command refusal tells the leader to ask the user for a new command", () => {
-  assert.match(dispatchCommandRefusalText({ layer: "command", used: 9, max: 8 }), /Ask the user to start a new command/)
-  assert.match(dispatchCommandRefusalText({ layer: "group", used: 9, max: 8 }), /reduce the batch/)
+test("ticket251: a command-cap refusal is batch-too-large, not a request for a new command", () => {
+  const command = dispatchCommandRefusalText({ layer: "command", used: 25, max: 24 })
+  assert.match(command, /new command is limited to 24 hops/)
+  assert.match(command, /reduce the batch or split it across commands/)
+  assert.doesNotMatch(command, /Ask the user/)
+  assert.match(dispatchCommandRefusalText({ layer: "group", used: 9, max: 8 }), /reduce the batch or split it/)
   assert.match(dispatchCommandRefusalText({ layer: "depth", used: 2, max: 1 }), /depth limit is 1/)
   assert.match(dispatchCommandRefusalText({ layer: "fanout", used: 3, max: 2 }), /assignment limit is 2/)
 })
