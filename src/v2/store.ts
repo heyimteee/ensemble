@@ -3,6 +3,7 @@ import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
 import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchFanOutCount, dispatchGroupExhausted, dispatchRefusalReasonCode, reconcileLegacyDispatchGroup, reconcileLegacyTaskBudgets, validateContinuation, type ContinuationRefusal, type DispatchRefusal, type DispatchRefusalReason } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import { directMessageChannelForBinding, isDirectMessageChannel, messageChannel, parseDirectMessageChannel } from "./message-channel.ts"
+import { withNativeContact } from "./native-turn.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
   Agent,
@@ -1131,6 +1132,28 @@ export class V2Store {
       await this.ctx.storage.set(`v2/subtask/${subtaskID}`, next)
       await this.commit([{ entity: "subtask", op: "upsert", task: structuredClone(next) }])
       this.notify(() => this.observer?.subtask?.(next, previous))
+    })
+  }
+
+  /**
+   * Ticket #236: write only a native turn's contact ledger. Like
+   * `saveAgentPost`, this touches one field under the serialized write queue so
+   * a contact recorded by a tool call cannot revert a concurrent host identity
+   * or phase update. Non-native rows and unknown ids are no-ops.
+   */
+  async recordNativeContact(subtaskID: string, recipientID: string): Promise<boolean> {
+    return this.write(async () => {
+      const previous = this.state.subtasks[subtaskID]
+      if (!previous || !previous.native) return false
+      const next = structuredClone(previous)
+      const contact = withNativeContact(next.native!, recipientID)
+      if (!contact.added) return false
+      next.native = contact.native
+      this.state.subtasks[subtaskID] = next
+      await this.ctx.storage.set(`v2/subtask/${subtaskID}`, next)
+      await this.commit([{ entity: "subtask", op: "upsert", task: structuredClone(next) }])
+      this.notify(() => this.observer?.subtask?.(next, previous))
+      return true
     })
   }
 

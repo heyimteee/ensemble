@@ -353,6 +353,35 @@ export function nativeContextAnswer(
   return undefined
 }
 
+/**
+ * Ticket #236: recipients this native turn already contacted. A turn created
+ * before the ledger existed has no field and reads as empty, so replay and
+ * restart never invent contacts.
+ */
+export function nativeContacted(native: NativeTurnInfo | undefined): readonly Id[] {
+  const contacts = native?.contacted
+  if (!Array.isArray(contacts)) return []
+  return contacts.filter((recipientID): recipientID is Id => typeof recipientID === "string" && recipientID.length > 0)
+}
+
+/** True when the turn already contacted the recipient. */
+export function nativeContactedRecipient(native: NativeTurnInfo | undefined, recipientID: Id): boolean {
+  return nativeContacted(native).includes(recipientID)
+}
+
+/**
+ * Add one recipient to a turn's durable contact ledger. Returns the same value
+ * when already present so the caller can skip the write.
+ */
+export function withNativeContact(
+  native: NativeTurnInfo,
+  recipientID: Id,
+): { native: NativeTurnInfo; added: boolean } {
+  const contacted = nativeContacted(native)
+  if (contacted.includes(recipientID)) return { native, added: false }
+  return { native: { ...native, contacted: [...contacted, recipientID] }, added: true }
+}
+
 /** Ticket #222: keep the identity-only timeline bounded. */
 export const NATIVE_TURN_EVENT_LIMIT = 32
 

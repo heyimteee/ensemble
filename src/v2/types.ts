@@ -157,6 +157,11 @@ export type NativeTurnInfo = {
   settledAt?: number
   resultMessageID?: Id
   errorCode?: string
+  /**
+   * Ticket #236: durable recipients already contacted during this turn. A
+   * missing field is an empty ledger for turns created before it existed.
+   */
+  contacted?: Id[]
   /** Ticket #222: bounded, identity-only host event timeline. */
   events?: NativeTurnEvent[]
 }
