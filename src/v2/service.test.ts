@@ -4728,6 +4728,168 @@ test("ticket168: a completion handoff is not failed by the delivery window", asy
   }
 })
 
+test("ticket237: a leader's delegation reply skips the completion hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-237-delegation-"))
+  const { ctx, prompts } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Sage" }))
+  await seedWorkspace(seed, directory, { memberIDs: ["a", "b"] })
+  // The leader's parent turn already synthesized: its reply stands as the
+  // delivery, so the child must not bounce the same result back as a second
+  // leader turn.
+  await seed.saveSubtask({
+    id: "parent", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Parent", instruction: "Do parent",
+    mode: "research", state: "replied", stage: "initial", outcome: "succeeded", interrupted: false, awaitingChildren: false,
+    attempts: 1, createdAt: 1, repliedAt: Date.now(), finishedAt: Date.now(),
+  })
+  await seed.saveSubtask({
+    id: "child", workspaceID: "w", parentID: "parent", creatorType: "agent", creatorAgentID: "a", assigneeID: "b",
+    title: "Child", instruction: "Do child", mode: "research", state: "pending", stage: "initial", outcome: "pending",
+    interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.child as any)?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const subtasks = Object.values(after.state.subtasks) as any[]
+    assert.equal(subtasks.some((task) => task.id !== "child" && task.parentID === "child" && task.handoff?.completion === true), false, "no completion hop")
+    assert.equal(subtasks.filter((task) => task.assigneeID === "a").length, 1, "no leader review card or model turn")
+    const messages = (after.state.messages.w ?? []) as any[]
+    assert.equal(messages.some((message) => message.text.startsWith("Handed to $Nova")), false, "no leader completion message")
+    assert.equal(prompts.length, 1, "only the delegated worker ran")
+    const logs = await handlers["logs.recent"]({ directory, event: "completion.skipped", limit: 20 })
+    assert.equal(logs.entries.length, 1)
+    const entry = logs.entries[0]
+    assert.equal(entry.taskID, "child")
+    assert.equal(entry.parentID, "parent")
+    assert.equal(entry.leaderID, "a")
+    assert.equal(entry.reason, "parent-is-leader")
+    assert.equal(entry.title, undefined, "no conversation content in the log")
+    assert.equal(entry.instruction, undefined)
+    assert.equal(entry.text, undefined)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket237: a peer turn the leader asked skips the completion hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-237-peer-turn-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Sage" }))
+  await seedWorkspace(seed, directory, { memberIDs: ["a", "b"] })
+  await seed.saveSubtask({
+    id: "turn", workspaceID: "w", creatorType: "agent", creatorAgentID: "a", assigneeID: "b",
+    title: "Answer the leader", instruction: "Answer the leader", mode: "research", state: "pending",
+    stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 2,
+    workKind: "turn", turn: { correlationID: "peer_237", askerKind: "agent", askerID: "a" },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.turn as any)?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const subtasks = Object.values(after.state.subtasks) as any[]
+    assert.equal(subtasks.some((task) => task.parentID === "turn" && task.handoff?.completion === true), false)
+    assert.equal(subtasks.filter((task) => task.assigneeID === "a").length, 0)
+    const logs = await handlers["logs.recent"]({ directory, event: "completion.skipped", limit: 20 })
+    assert.equal(logs.entries.length, 1)
+    assert.equal(logs.entries[0].taskID, "turn")
+    assert.equal(logs.entries[0].leaderID, "a")
+    assert.equal(logs.entries[0].reason, "asker-is-leader")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket237: a handoff the leader sent skips the completion hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-237-handoff-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Sage" }))
+  await seedWorkspace(seed, directory, { memberIDs: ["a", "b"] })
+  await seed.saveSubtask({
+    id: "hop", workspaceID: "w", creatorType: "agent", creatorAgentID: "a", assigneeID: "b",
+    title: "Leader handoff", instruction: "Do the handoff", mode: "research", state: "pending",
+    stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 2,
+    workKind: "handoff", handoff: { correlationID: "handoff_237", senderID: "a", recipientID: "b", depth: 1 },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.hop as any)?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const subtasks = Object.values(after.state.subtasks) as any[]
+    assert.equal(subtasks.some((task) => task.parentID === "hop" && task.handoff?.completion === true), false)
+    assert.equal(subtasks.filter((task) => task.assigneeID === "a").length, 0)
+    const logs = await handlers["logs.recent"]({ directory, event: "completion.skipped", limit: 20 })
+    assert.equal(logs.entries.length, 1)
+    assert.equal(logs.entries[0].taskID, "hop")
+    assert.equal(logs.entries[0].leaderID, "a")
+    assert.equal(logs.entries[0].reason, "sender-is-leader")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket237: a worker the leader did not ask still reaches the leader for review", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-237-review-"))
+  const { ctx, prompts } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Sage" }))
+  await seedWorkspace(seed, directory, { memberIDs: ["a", "b"] })
+  await seed.saveSubtask({
+    id: "turn", workspaceID: "w", creatorType: "user", assigneeID: "b",
+    title: "User asks Sage", instruction: "User asks Sage", mode: "research", state: "pending",
+    stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 2,
+    workKind: "turn", turn: { correlationID: "peer_237_user", askerKind: "user" },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.parentID === "turn" && task.handoff?.completion === true && task.state === "replied")
+    }, 5000)
+    const after = await handlers.snapshot({ directory })
+    const completion = Object.values(after.state.subtasks).find((task: any) => task.parentID === "turn" && task.handoff?.completion === true) as any
+    assert.ok(completion, "the leader reviews work they did not ask for")
+    assert.equal(completion.assigneeID, "a")
+    assert.match(completion.instruction, /finished/)
+    assert.ok(prompts.some((prompt) => prompt.text?.includes("finished")), "the leader received a model turn")
+    const logs = await handlers["logs.recent"]({ directory, event: "completion.skipped", taskID: "turn", limit: 20 })
+    assert.equal(logs.entries.length, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket168: a parent awaiting children reads waiting, not retrying", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-168-waiting-"))
   const { ctx } = fakeContext()

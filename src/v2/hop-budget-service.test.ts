@@ -200,14 +200,21 @@ test("ticket161: zero task budget answers and completes but cannot create new wo
     const after = await handlers.snapshot({ directory })
     assert.equal(after.state.dispatchGroups[groupID].usedHops, 1, "the refused dispatch spends nothing")
     assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true).length, 0)
-    // The zero-budget recipient still finishes its turn; the automatic
-    // completion handoff is exempt from the hop budget.
+    // The zero-budget recipient still finishes its turn. The leader asked for
+    // it, so the parent turn's synthesis is the delivery: ticket #237 skips
+    // the redundant completion hop and the task budget is untouched.
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      return Object.values(next.state.subtasks).some((task: any) => task.handoff?.completion === true && task.handoff?.senderID === sage.id)
+      const child = Object.values(next.state.subtasks).find((task: any) => task.title === "Answer only") as any
+      return child?.state === "replied"
     }, 15_000)
     const completed = await handlers.snapshot({ directory })
-    assert.equal(completed.state.dispatchGroups[groupID].usedHops, 1, "completion did not consume")
+    assert.equal(completed.state.dispatchGroups[groupID].usedHops, 1, "the finished turn spends no completion hop")
+    assert.equal(
+      Object.values(completed.state.subtasks).filter((task: any) => task.handoff?.completion === true && task.handoff?.senderID === sage.id).length,
+      0,
+      "leader-asked work skips the completion hop",
+    )
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

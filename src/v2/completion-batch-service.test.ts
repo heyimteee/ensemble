@@ -100,25 +100,23 @@ async function bindingSessionID(handlers: Handlers, directory: string, agentID: 
 
 // Ticket #71: a non-leader turn that ends without an explicit handoff cannot
 // finish silently — the server hands the finished content to the leader and
-// the group shows `Handed to $Leader`. No second delegate is queued.
+// the group shows `Handed to $Leader`. Ticket #237 keeps that path for work
+// the leader did not ask for, modelled here by a user `$Sage` mention.
 test("non-leader completion auto-handoffs to the leader with finished content", async () => {
   const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
-  const { ctx, tools } = fakeContext()
+  const { ctx } = fakeContext()
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
     const { nova, sage, workspace } = await setupPair(directory, handlers)
-    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
-    const novaSession = await bindingSessionID(handlers, directory, nova.id)
-    const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee: "Sage", title: "Do research", instruction: "Check" }, { sessionID: novaSession })
-    assert.match(delegated.content, /Delegated to Sage/)
+    // The user asks Sage directly; the leader was neither parent nor asker, so
+    // the finished turn still reaches Nova for review.
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage Do research" } })
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       return Object.values(next.state.subtasks).some(
-        // Synthesis reassigns the finished turn to the leader, so match the
-        // turn by title/kind instead of the original assignee.
-        (task: any) => task.title === "Do research" && task.workKind === "delegation" && task.state === "replied",
+        (task: any) => task.workKind === "turn" && task.assigneeID === sage.id && task.state === "replied",
       )
     })
     const after = await handlers.snapshot({ directory })
@@ -134,24 +132,26 @@ test("non-leader completion auto-handoffs to the leader with finished content", 
     assert.ok(hop.instruction.includes("Finished the work."))
     // Ticket #73: the leader receives review work — sender, title, outcome —
     // not a verbatim forward of the finished title and reply.
-    assert.equal(hop.title, "Do research")
+    assert.equal(hop.title, "$Sage Do research")
     assert.match(hop.instruction, /Review/)
     assert.ok(hop.instruction.includes("$Sage"))
-    assert.ok(!hop.instruction.startsWith("Do research\n\nFinished"))
+    assert.ok(!hop.instruction.startsWith("$Sage Do research\n\nFinished"))
     const texts = ((after.state.messages[workspace.id] ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
     // Ticket #73: concise system ack — no policy text, no ref, no agent bubble.
     const ack = ((after.state.messages[workspace.id] ?? []) as any[]).find((message: any) => message.text.includes("Handed to $Nova"))
     assert.ok(ack)
     assert.equal(ack.author, "system")
-    assert.equal(ack.text, "Handed to $Nova · Do research")
+    assert.equal(ack.text, "Handed to $Nova · $Sage Do research")
     for (const message of (after.state.messages[workspace.id] ?? []) as any[]) {
       assert.ok(!message.text.includes("do not call ensemble_delegate"))
     }
     for (const text of texts) assert.ok(!text.includes("@Nova") && !text.includes("@Sage"))
-    // Mandatory handoff never double-queues: no delegate child, one hop only.
-    const delegations = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "delegation")
-    assert.equal(delegations.length, 2)
+    // Mandatory handoff never double-queues: one turn, one completion hop, no
+    // delegate child.
+    const turns = Object.values(after.state.subtasks).filter((task: any) => task.workKind === "turn")
+    assert.equal(turns.length, 1)
+    assert.equal(Object.values(after.state.subtasks).filter((task: any) => task.workKind === "delegation").length, 0)
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -250,16 +250,14 @@ test("leader turns terminate without a forced handoff", async () => {
 // Ticket #71: multiple pending completions for one recipient coalesce into a
 // single consolidated review turn listing sender, title, outcome, and path
 // per item; the leader decides each item and the batch closes only when all
-// are decided.
+// are decided. Ticket #237: the retained non-asker path is one user command
+// addressed to non-leader members, so their completions batch in that group.
 test("two completions produce one batch review with per-item decisions", async () => {
   const directory = mkdtempSync(tmpdir() + "/ensemble-completion-")
   const { ctx, tools } = fakeContext()
-  // Keep the leader's run live while the test issues its three direct tool
-  // calls so every delegation inherits the command's dispatch group. Child
-  // runs finish quickly; only the leader needs a long turn.
-  ;(ctx.session as any).wait = async ({ sessionID }: any) => {
-    await new Promise((resolve) => setTimeout(resolve, String(sessionID).includes("Nova") ? 2_000 : 5))
-  }
+  // Keep the three recipient runs close together so their completions land in
+  // one quiet window instead of forming a partial batch first.
+  ;(ctx.session as any).wait = async () => { await new Promise((resolve) => setTimeout(resolve, 400)) }
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
@@ -273,41 +271,44 @@ test("two completions produce one batch review with per-item decisions", async (
       payload: { name: "second", directory: `${directory}/second`, memberIDs: [nova.id, sage.id, kim.id], leaderID: nova.id },
     })
     const workspaceID = created.result.id
+    // An ordinary unmentioned command opens the leader's session for the
+    // review tool; it is not an asker of the work below.
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID, text: "Coordinate" } })
     let novaSession = ""
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       const binding = Object.values(next.state.bindings).find(
-        (item: any) => item.agentID === nova.id && (item.workspaceID === workspaceID || item.workspaceID === workspaceID),
+        (item: any) => item.agentID === nova.id && item.workspaceID === workspaceID,
       ) as any
       if (!binding) return false
       novaSession = binding.sessionID
-      // The binding lands before the run registers; all three delegations
-      // must join the command group, so wait for the leader's run itself.
-      const root = Object.values(next.state.subtasks).find((task: any) => task.title === "Coordinate") as any
-      return Boolean(root) && Object.values(next.state.runs ?? {}).some((run: any) => run.subtaskID === root.id && run.status === "running")
+      return true
     })
-    for (const [assignee, title] of [["Sage", "First work"], ["Kim", "Second work"], ["Sage", "Third work"]] as const) {
-      const delegated = await tools.get("delegate").execute({ maxHops: 1, assignee, title, instruction: "Check" }, { sessionID: novaSession })
-      assert.match(delegated.content, new RegExp(`Delegated to ${assignee}`))
-    }
+    // One user command addressed to two non-leader members: every recipient
+    // inherits one dispatch group, and none of them was asked by the leader.
+    const asked = await handlers.invoke({
+      directory,
+      action: "message.send",
+      payload: { workspaceID, text: "Do the work", recipientIDs: [sage.id, kim.id] },
+    })
+    assert.equal(asked.ok, true)
     let batch: any
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
       batch = Object.values(next.state.subtasks).find((task: any) => task.workKind === "handoff" && task.handoff?.batch === true)
-      return batch?.handoff?.itemIDs?.length === 3
+      return batch?.handoff?.itemIDs?.length === 2
     }, 15000)
     assert.equal(batch.assigneeID, nova.id)
-    assert.equal(batch.title, "Review 3 completions")
+    assert.equal(batch.title, "Review 2 completions")
     assert.ok(batch.dispatchGroupID, "a completion batch carries its dispatch group")
     assert.ok(batch.instruction.includes("$Sage"))
     assert.ok(batch.instruction.includes("$Kim"))
-    assert.ok(batch.instruction.includes("First work"))
+    assert.ok(batch.instruction.includes("Do the work"))
     assert.ok(batch.instruction.includes("ensemble_review"))
     for (const text of [batch.instruction]) assert.ok(!text.includes("@Sage") && !text.includes("@Kim"))
     const grouped = await handlers.snapshot({ directory })
     const items = batch.handoff.itemIDs.map((itemID: string) => (grouped.state.subtasks as any)[itemID])
-    assert.equal(items.length, 3)
+    assert.equal(items.length, 2)
     for (const item of items) {
       assert.equal(item.parentID, batch.id)
       assert.equal(item.handoff?.batchedIn, batch.id)
@@ -324,36 +325,32 @@ test("two completions produce one batch review with per-item decisions", async (
       assert.equal((parked.state.subtasks as any)[item].state, "pending")
     }
     // Partial disposition keeps the batch open; full disposition closes it.
-    const [first, secondItem, third] = batch.handoff.itemIDs
+    const [first, secondItem] = batch.handoff.itemIDs
     const partial = await tools.get("review").execute(
       { batch: batch.id, decisions: [{ item: first, action: "end" }] },
       { sessionID: novaSession },
     )
     assert.match(partial.content, /ended/)
-    assert.match(partial.content, /Batch stays open: 1 of 3 decided/)
+    assert.match(partial.content, /Batch stays open: 1 of 2 decided/)
     let open = await handlers.snapshot({ directory })
     assert.notEqual((open.state.subtasks as any)[batch.id].state, "replied")
     const full = await tools.get("review").execute(
       {
         batch: batch.id,
         decisions: [
-          { item: secondItem, action: "dismiss" },
-          { item: third, action: "delegate", assignee: "Kim", note: "Take it from here", maxHops: 1 },
+          { item: secondItem, action: "delegate", assignee: "Kim", note: "Take it from here", maxHops: 1 },
         ],
       },
       { sessionID: novaSession },
     )
-    assert.match(full.content, /dismissed/)
     assert.match(full.content, /delegated to \$Kim/)
     assert.match(full.content, /Batch closed: every item decided/)
     const after = await handlers.snapshot({ directory })
     const rows = after.state.subtasks as any
     assert.equal(rows[first].state, "replied")
-    assert.equal(rows[secondItem].handoff?.decided, "dismissed")
-    assert.ok(rows[secondItem].stoppedAt !== undefined)
-    assert.equal(rows[third].handoff?.decided, "delegated")
+    assert.equal(rows[secondItem].handoff?.decided, "delegated")
     assert.equal(rows[batch.id].state, "replied")
-    const delegation = Object.values(rows).find((task: any) => task.workKind === "delegation" && task.title === rows[third].title && task.assigneeID === kim.id)
+    const delegation = Object.values(rows).find((task: any) => task.workKind === "delegation" && task.title === rows[secondItem].title && task.assigneeID === kim.id && task.parentID === batch.id)
     assert.ok(delegation)
     // A review follow-up is part of the same dispatch: the delegated task
     // inherits the batch's group instead of starting a phantom dispatch.
@@ -361,7 +358,7 @@ test("two completions produce one batch review with per-item decisions", async (
     assert.equal((delegation as any).taskMaxHops, 1, "review delegation carries its explicit task budget")
     const texts = ((after.state.messages[workspaceID] ?? []) as any[]).map((message) => message.text)
     assert.ok(texts.some((text) => text.includes("Handed to $Nova")))
-    assert.ok(texts.some((text) => text.includes("Review closed: Review 3 completions")))
+    assert.ok(texts.some((text) => text.includes("Review closed: Review 2 completions")))
     for (const text of texts) assert.ok(!text.includes("@Sage") && !text.includes("@Kim") && !text.includes("@Nova"))
     // Ticket #73: every handoff ack in the transcript is a concise system
     // line — no policy text, no correlation ref, no agent bubble.
