@@ -32,6 +32,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Verification
 
+- [Vera regression and cutover verification](verification/2026-11-11-ticket-241.md): unset-store default-on restart, one leader turn with explicit delegation plus multi-mention routing without duplicates, no completion bounce, exact generated roster table, one-card-per-row size matrix, rollback/restore durability, and the measured AGENTS block delta
 - [Native-first default on and rollback](verification/2026-11-11-ticket-240.md): persisted default, explicit off/shadow, tool-surface rollback, global commands, restart requirement, and the passing live matrix
 - [Contract v6 and team roster](verification/2026-11-11-ticket-238.md): native-first rules, generated roster table, content-aware reconciliation, refresh triggers, and the measured prompt delta
 - [Native-first full E2E](verification/2026-11-12-e2e.md): all 12 unit/live suites passing on OpenCode 2.2.7, including the real TUI acceptance
