@@ -3,6 +3,7 @@ import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
 import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchFanOutCount, dispatchGroupExhausted, dispatchRefusalReasonCode, reconcileLegacyDispatchGroup, reconcileLegacyTaskBudgets, validateContinuation, type ContinuationRefusal, type DispatchRefusal, type DispatchRefusalReason } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import { directMessageChannelForBinding, isDirectMessageChannel, messageChannel, parseDirectMessageChannel } from "./message-channel.ts"
+import { isNativeFirstMode, nativeFirstMode } from "./native-first.ts"
 import { withNativeContact } from "./native-turn.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
@@ -1002,6 +1003,20 @@ export class V2Store {
       await this.commit([{ entity: "settings", op: "upsert", settings: structuredClone(this.state.settings) }])
       return this.settings()
     })
+  }
+
+  /**
+   * Ticket #240: persist native-first `on` once when the store has no explicit
+   * mode. A later default change can then never flip a user's explicit
+   * `off`/`shadow`, and a first start makes the effective default durable.
+   * A persisted mode is never rewritten.
+   */
+  async ensureNativeFirstDefault(): Promise<{ mode: ReturnType<typeof nativeFirstMode>; migrated: boolean }> {
+    const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
+    const persisted = (meta as any)?.settings?.nativeFirst
+    if (isNativeFirstMode(persisted)) return { mode: persisted, migrated: false }
+    const settings = await this.updateSettings({ nativeFirst: "on" })
+    return { mode: nativeFirstMode(settings), migrated: true }
   }
 
   async saveAgent(agent: Agent): Promise<void> {

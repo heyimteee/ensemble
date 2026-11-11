@@ -801,6 +801,15 @@ export class EnsembleV2Service {
       observer: this.createStoreObserver(),
     })
     await this.store.load()
+    // Ticket #240: persist native-first `on` once when the store has no
+    // explicit mode. A restart then preserves the user's choice, and a later
+    // default change cannot flip an explicit `off`/`shadow`.
+    const nativeDefault = await this.store.ensureNativeFirstDefault()
+    this.logger.event("info", "native", "native.mode", {
+      mode: nativeDefault.mode,
+      toolSurface: effectiveToolSurface(this.store.settings()),
+      migrated: nativeDefault.migrated,
+    })
     // Ticket #226: backfill pre-channel direct lines before any reader serves
     // them. Migration is idempotent; an empty legacy store is a cheap no-op.
     const directMigration = await this.store.migrateLegacyDirectTranscripts()

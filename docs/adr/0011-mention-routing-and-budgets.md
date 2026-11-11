@@ -119,8 +119,14 @@ trust model until it retires.
   not agent-writable.
 
 The migration feature flag (`off`, `shadow`, `on`) is separate from the kill
-switch. `off` restores the explicit-tool path; `shadow` ingests and compares
-without changing the visible path.
+switch. `nativeFirst` defaults to `on` for new and existing stores; the first
+service start persists that default once, so an explicit `off` or `shadow` is
+never overwritten by a later default change. `off` restores the explicit-tool
+path; `shadow` ingests and compares without changing the visible path.
+Operators change the mode with `:native-first on|off|shadow` and the tool
+surface with `:tools native|legacy`; the service logs the effective mode and
+migration outcome without content. A host restart is required once after
+upgrading so the new plugin code and the `AGENTS.md` contract load.
 
 ### 6. Refusals and deduplication
 

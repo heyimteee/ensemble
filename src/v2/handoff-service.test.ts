@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
-import { startServiceForTest } from "./test-service.ts"
+import { seedLegacySettings, startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 import { directMessageChannel } from "./message-channel.ts"
 
@@ -15,6 +15,7 @@ type Handlers = {
 
 function fakeContext() {
   const values = new Map<string, unknown>()
+  seedLegacySettings(values)
   const tools = new Map<string, any>()
   const ctx = {
     onboarding: false,

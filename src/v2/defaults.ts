@@ -6,6 +6,8 @@ export const DEFAULT_SETTINGS: Settings = {
   maxDelegations: 10,
   maxDepth: 5,
   synthesis: true,
+  // Ticket #240: native-first is the default for new and existing stores.
+  nativeFirst: "on",
   nativeMentionRouting: true,
   dispatchGroupMaxHops: DISPATCH_LIMIT_DEFAULTS.groupMaxHops,
   dispatchCommandMaxHops: DISPATCH_LIMIT_DEFAULTS.commandMaxHops,

@@ -7,11 +7,12 @@ export function isNativeFirstMode(value: unknown): value is NativeFirstMode {
 }
 
 /**
- * Read the native-first migration mode. A pre-flag or unset store is `off`,
- * which preserves the explicit-tool path (ADR 0011).
+ * Read the native-first migration mode (ticket #240). A pre-flag, unset, or
+ * invalid store resolves to `on`: native-first is the default after the
+ * cutover. Explicit `off` and `shadow` are always respected.
  */
 export function nativeFirstMode(settings: Pick<Settings, "nativeFirst"> | undefined): NativeFirstMode {
-  return settings?.nativeFirst && isNativeFirstMode(settings.nativeFirst) ? settings.nativeFirst : "off"
+  return settings?.nativeFirst && isNativeFirstMode(settings.nativeFirst) ? settings.nativeFirst : "on"
 }
 
 /**

@@ -119,7 +119,7 @@ const task = (patch: Partial<Subtask> = {}): Subtask => ({
 
 function seed(values: Map<string, unknown>, options: { messages: number; oldTasks?: number; version?: number; live?: boolean }) {
   const version = options.version ?? 100
-  values.set("v2/meta", { version, updatedAt: 1, settings: {}, ui: {} })
+  values.set("v2/meta", { version, updatedAt: 1, settings: { nativeFirst: "off" }, ui: {} })
   values.set("v2/agent/a", agent())
   values.set("v2/workspace/w", workspace())
   for (let seq = 1; seq <= options.messages; seq++) {

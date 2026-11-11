@@ -230,13 +230,28 @@ handoff requires `maxHops`; the group depth ceiling and per-run fan-out cap stil
 apply. Relay and failure-notice legs are messages, not work rows, so they never
 consume a hop or the fan-out budget. See [Dispatch budgets](#dispatch-budgets).
 
-The surface follows the migration setting. `nativeFirst: "on"` selects the
-native list; `off` and `shadow` keep the legacy list. An explicit
-`settings.toolSurface` of `native` or `legacy` overrides the mode for one
-release, which is the rollback path. `nativeMentionRouting: false` forces the
-legacy surface so the explicit `ensemble_send_message` path returns with the
-kill switch. Both lists are registered per host location and are replaced in
-place when the setting changes.
+The surface follows the migration setting. `nativeFirst` defaults to `on` for
+new and existing stores; an absent persisted value resolves to `on`, and the
+first service start persists that default once. A later default change cannot
+flip an explicit `off` or `shadow`. `on` selects the native list; `off` and
+`shadow` select the legacy list, even when a stale `toolSurface: "native"` is
+still stored. An explicit `settings.toolSurface: "legacy"` keeps native
+ingestion while restoring the legacy tool list for one release, which is the
+tool rollback path. `nativeMentionRouting: false` also forces the legacy
+surface so the explicit `ensemble_send_message` path returns with the kill
+switch. Both lists are registered per host location and are replaced in place
+when the setting changes.
+
+Operators change the mode with `:native-first on|off|shadow` and the tool
+surface with `:tools native|legacy`. `:native-first on` also clears a legacy
+tool-surface override so the native list returns. Both commands update settings
+through the normal validated path and refresh the location registrations
+immediately. The service logs one `native.mode` event at start with the
+effective mode, tool surface, and whether the default was migrated; it carries
+no content or paths. The host must still be restarted once after upgrading so
+the new plugin code and the rewritten `AGENTS.md` contract load. Rollback never
+requires editing storage, and the legacy path stays available for the release
+window.
 
 ### Native mirror privacy
 

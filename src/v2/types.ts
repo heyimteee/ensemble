@@ -656,9 +656,10 @@ export type Settings = {
   maxDepth: number
   synthesis: boolean
   /**
-   * Native-first migration mode (ADR 0011): `off` keeps today's explicit
-   * path, `shadow` compares without changing the visible path, and `on`
-   * enables native-first behavior as each surface cuts over.
+   * Native-first migration mode (ADR 0011, ticket #240): defaults to `on` for
+   * new and existing stores. `off` keeps today's explicit path, `shadow`
+   * compares without changing the visible path, and `on` enables native-first
+   * behavior as each surface cuts over.
    */
   nativeFirst?: NativeFirstMode
   /**
@@ -669,10 +670,10 @@ export type Settings = {
    */
   nativeMentionRouting?: boolean
   /**
-   * Tool-surface migration setting (ticket #225): `native` keeps only the
-   * decision tools, `legacy` restores the one-release explicit surface. Unset
-   * follows the native-first mode: `on` selects `native`, `off`/`shadow`
-   * select `legacy`.
+   * Tool-surface migration setting (ticket #225, revised by #240): `legacy`
+   * restores the one-release explicit surface while native ingestion stays
+   * on. `native` only follows the mode when `nativeFirst` is `on`; `off` and
+   * `shadow` always select `legacy`.
    */
   toolSurface?: "native" | "legacy"
   /** Dispatch budget tiers (ticket #160); captured by each new root group. */

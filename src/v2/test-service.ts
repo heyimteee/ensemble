@@ -2,6 +2,22 @@ import { LocationAttachment } from "./location-adapter.ts"
 import type { EnsembleV2Service } from "./service.ts"
 
 /**
+ * Ticket #240: most service suites exercise the explicit legacy path with
+ * `send_message`, `delegate`, and `handoff`. They opt into `nativeFirst: off`
+ * explicitly; default-on behavior is covered by the ticket240 suites. The
+ * helper merges into an existing meta row so a test may still seed limits.
+ */
+export function seedLegacySettings(values: Map<string, unknown>): void {
+  const meta = (values.get("v2/meta") ?? {}) as any
+  values.set("v2/meta", {
+    ...meta,
+    version: Number(meta.version ?? 0),
+    settings: { ...(meta.settings ?? {}), nativeFirst: "off" },
+    ui: meta.ui ?? {},
+  })
+}
+
+/**
  * Test seam for the service-only suites (ticket #153/#154).
  *
  * Production setup goes through `SharedEnsemble.attach(ctx)`, which starts the
