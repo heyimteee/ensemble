@@ -206,6 +206,43 @@ work_card_border_count() {
   work_pane | { grep -oF '╭' || true; } | wc -l | tr -d ' '
 }
 
+# Ticket #241: card mode must render exactly one full-width card per row.
+# Read the Work content slice and require every top border to start at the
+# content edge, end at the content right edge, and stand alone on its row.
+assert_full_width_card_rows() {
+  local size="$1" expected="$2"
+  local width=$((WORK_END - WORK_START + 1)) result cards bad
+  result=$(work_pane | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const width = Number(process.argv[1]);
+      let cards = 0;
+      let bad = 0;
+      for (const row of value.split("\n")) {
+        const tops = (row.match(/╭/g) ?? []).length;
+        if (tops === 0) continue;
+        cards += 1;
+        if (tops !== 1) { bad += 1; continue; }
+        if (!row.startsWith("╭") || !row.endsWith("╮")) { bad += 1; continue; }
+        if (row.length !== width) { bad += 1; continue; }
+      }
+      process.stdout.write(`${cards} ${bad}`);
+    });
+  ' "$width")
+  cards=${result%% *}
+  bad=${result##* }
+  [[ -n "$result" ]] || live_fail "could not read Work card rows at $size"
+  [[ "$cards" == "$expected" ]] || live_fail "expected $expected full-width card rows at $size, got $cards"
+  [[ "$bad" == "0" ]] || live_fail "found $bad card rows that are not one full-width card at $size"
+  if [[ "$expected" != "0" ]]; then
+    live_log "size matrix: $size rendered $cards full-width one-card rows"
+  else
+    live_log "size matrix: $size rendered compact rows with no card borders"
+  fi
+}
+
 assert_right_edge() {
   local width="$1"
   local row
@@ -455,6 +492,7 @@ check_size_160x50() {
   # Two cards in group one plus one each in groups two and three fit page one;
   # groups four and five open page two.
   [[ "$(work_card_border_count)" == "4" ]] || live_fail "expected four one-card rows on page one at 160x50, got $(work_card_border_count)"
+  assert_full_width_card_rows "160x50" 4
   assert_budget_label "160x50" 1
   assert_right_edge 160
   check_spatial_focus
@@ -477,6 +515,7 @@ check_size_compact() {
   live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 5 groups · 6 active" 20 "five-group compact header at $size"
   [[ "$(work_card_border_count)" == "0" ]] || live_fail "compact Work at $size rendered $([ "$(work_card_border_count)" -gt 0 ] && echo card borders || echo no borders)"
   [[ "$(work_row_count)" == "6" ]] || live_fail "expected six compact Work rows at $size, got $(work_row_count)"
+  assert_full_width_card_rows "$size" 0
   live_require_text "$LIVE_TUI_SESSION" "GROUP 1 · 2 active · 0 done" 10 "compact group label at $size"
   live_require_text "$LIVE_TUI_SESSION" "page 1/1" 10 "compact page indicator at $size"
   assert_budget_label "$size"
@@ -520,6 +559,7 @@ check_size_drawer() {
   live_require_text "$LIVE_TUI_SESSION" "page 1/2" 10 "drawer pages its compact body"
   [[ "$(work_card_border_count)" == "0" ]] || live_fail "drawer rendered card borders at 80x24"
   [[ "$(work_row_count)" == "5" ]] || live_fail "expected five drawer rows on page one at 80x24, got $(work_row_count)"
+  assert_full_width_card_rows "80x24" 0
   live_assert_text "$LIVE_TUI_SESSION" "SizeAgent1" "drawer rows keep the agent name"
   live_require_text "$LIVE_TUI_SESSION" "1/5" 10 "first drawer row owns the cursor"
   live_key "$LIVE_TUI_SESSION" "j"

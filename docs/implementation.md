@@ -253,6 +253,20 @@ the new plugin code and the rewritten `AGENTS.md` contract load. Rollback never
 requires editing storage, and the legacy path stays available for the release
 window.
 
+The Vera regression (`npm run test:live:vera`) proves the cutover on one
+isolated fake host across three starts. It begins with a real workspace whose
+persisted `nativeFirst` key was removed (a pre-#240 upgrade shape), proves the
+restarted service resolves and persists `on`, checks the generated v6 roster
+table in the real workspace `AGENTS.md`, drives one leader native turn that
+explicitly delegates one member and then `$Name`-mentions several, and asserts
+one work item per member, an `already-routed` suppression for the explicit
+recipient, no completion hop back to the leader who asked, and one settlement.
+It then rolls back with off/legacy, restores on/native, restarts again, and
+proves the native turns and contact ledger are durable. The explicit
+delegation runs with `toolSurface: "legacy"` while the mode stays `on`, because
+the native tool list deliberately omits the migration tools. See [the #241
+verification record](verification/2026-11-11-ticket-241.md).
+
 ### Native mirror privacy
 
 Each agent has a durable `nativeMirror` setting, default on. The agent's
