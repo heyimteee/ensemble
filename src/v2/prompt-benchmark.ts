@@ -1,8 +1,8 @@
-import { contextForTask } from "./execution.ts"
+import { contextForTask, promptForTask, recentGroupMessages } from "./execution.ts"
 import { agentIdentity } from "./init-block.ts"
 import { registerEnsembleTools } from "./tool-registrar.ts"
 import { TOOL_SURFACE_TOOL_NAMES, type ToolSurface } from "./tool-surface.ts"
-import type { Agent, SnapshotState, Subtask, Workspace } from "./types.ts"
+import type { Agent, Message, SnapshotState, Subtask, Workspace } from "./types.ts"
 
 /**
  * Ticket #225 benchmark fixture. It is deliberately fixed and content-free:
@@ -206,6 +206,118 @@ export function benchmarkFixture(directory = "/tmp/ensemble-benchmark-site"): {
     runs: {},
   }
   return { state, task, workspace, agent: agents.a1! }
+}
+
+/**
+ * Ticket #249 measurement fixture: one root synthesis over a five-branch
+ * fan-out. It reuses the #225 roster and 20-message transcript, appends five
+ * synthetic branch results, and measures the prompt the leader actually
+ * receives. `removedRecentTranscript` is the exact old block the synthesis
+ * context no longer carries; `representativeOutput` is a fixed concise summary
+ * sample, not a live model measurement.
+ */
+export type SynthesisBenchmarkReport = {
+  fixture: { branches: number; recentMessages: number }
+  context: PromptSize
+  prompt: PromptSize
+  totalPrompt: PromptSize
+  removedRecentTranscript: PromptSize
+  representativeOutput: PromptSize
+}
+
+const BRANCH_NOTES = [
+  "Install steps are correct on a clean machine; the only change needed is a note about the Node version.",
+  "Migration notes match the schema; no data backfill is required for this release.",
+  "Rollback path was exercised against staging and completed in under two minutes.",
+  "Accessibility section is clear; contrast and keyboard notes are covered.",
+  "Changelog links resolve and the version header matches the release candidate.",
+] as const
+
+const REPRESENTATIVE_SYNTHESIS_OUTPUT = [
+  "Release notes review complete: no blockers. Sage checked the install steps, Echo verified the migration notes, Iris reviewed the rollback path, Milo cleared the accessibility section, and Juno confirmed the changelog links.",
+  "One open item: the CDN cache header needs a staging run after the next deploy.",
+].join("\n\n")
+
+function synthesisBenchmarkFixture(): {
+  state: SnapshotState
+  task: Subtask
+  workspace: Workspace
+  agent: Agent
+} {
+  const base = benchmarkFixture()
+  const root: Subtask = {
+    ...base.task,
+    id: "task_synthesis",
+    assigneeID: base.workspace.leaderID,
+    stage: "synthesis",
+    state: "pending",
+    outcome: "pending",
+    workKind: "delegation",
+  }
+  const subtasks: Record<string, Subtask> = { task_synthesis: root }
+  const results: Message[] = BRANCH_NOTES.map((text, index) => ({
+    id: `msg_result_${index}`,
+    workspaceID: "w",
+    author: "agent",
+    agentID: `a${index + 1}`,
+    text,
+    kind: "text",
+    seq: 21 + index,
+    createdAt: 21 + index,
+  }))
+  BRANCH_NOTES.forEach((_, index) => {
+    subtasks[`branch_${index}`] = {
+      id: `branch_${index}`,
+      workspaceID: "w",
+      creatorType: "agent",
+      creatorAgentID: base.workspace.leaderID,
+      parentID: "task_synthesis",
+      assigneeID: `a${index + 1}`,
+      title: "Review the release notes",
+      instruction: "Review the release notes and report blockers.",
+      mode: "research",
+      state: "replied",
+      stage: "initial",
+      outcome: "succeeded",
+      interrupted: false,
+      awaitingChildren: false,
+      attempts: 0,
+      createdAt: index + 1,
+      resultMessageID: `msg_result_${index}`,
+      workKind: "handoff",
+    }
+  })
+  const state: SnapshotState = {
+    ...base.state,
+    messages: { w: [...(base.state.messages.w ?? []), ...results] },
+    subtasks,
+  }
+  return { state, task: root, workspace: base.workspace, agent: base.state.agents[base.workspace.leaderID]! }
+}
+
+export function synthesisBenchmark(): SynthesisBenchmarkReport {
+  const { state, task, workspace, agent } = synthesisBenchmarkFixture()
+  const context = contextForTask(state, task, workspace, agent)
+  const prompt = promptForTask(task)
+  const removedRecentTranscript = `<ensemble_recent_messages>\n${recentGroupMessages(state, workspace)}\n</ensemble_recent_messages>`
+  return {
+    fixture: { branches: BRANCH_NOTES.length, recentMessages: 20 },
+    context: size(context),
+    prompt: size(prompt),
+    totalPrompt: addSize(size(context), size(prompt)),
+    removedRecentTranscript: size(removedRecentTranscript),
+    representativeOutput: size(REPRESENTATIVE_SYNTHESIS_OUTPUT),
+  }
+}
+
+export function synthesisBenchmarkSummary(report: SynthesisBenchmarkReport = synthesisBenchmark()): string {
+  return [
+    `synthesis context ${report.context.chars} chars`,
+    `synthesis prompt ${report.prompt.chars} chars`,
+    `synthesis prompt total ${report.totalPrompt.chars} chars`,
+    `removed recent transcript ${report.removedRecentTranscript.chars} chars`,
+    `representative summary ${report.representativeOutput.chars} chars`,
+  ].join("; ")
 }
 
 /**
