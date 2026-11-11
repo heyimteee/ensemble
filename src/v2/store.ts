@@ -3,7 +3,7 @@ import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
 import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchFanOutCount, dispatchGroupExhausted, dispatchRefusalReasonCode, reconcileLegacyDispatchGroup, reconcileLegacyTaskBudgets, validateContinuation, type ContinuationRefusal, type DispatchRefusal, type DispatchRefusalReason } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import { directMessageChannelForBinding, isDirectMessageChannel, messageChannel, parseDirectMessageChannel } from "./message-channel.ts"
-import { isNativeFirstMode, nativeFirstMode } from "./native-first.ts"
+import { isNativeFirstMode, DEFAULT_NATIVE_FIRST_MODE, nativeFirstMode } from "./native-first.ts"
 import { withNativeContact } from "./native-turn.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
 import type {
@@ -1006,16 +1006,18 @@ export class V2Store {
   }
 
   /**
-   * Ticket #240: persist native-first `on` once when the store has no explicit
-   * mode. A later default change can then never flip a user's explicit
-   * `off`/`shadow`, and a first start makes the effective default durable.
-   * A persisted mode is never rewritten.
+   * Ticket #240: persist the canonical native-first default once when the
+   * store has no explicit persisted mode. An explicit `off`/`shadow` is never
+   * rewritten; an absent or invalid value migrates to the default so a first
+   * start makes the effective mode durable. Reading the raw persisted settings
+   * (rather than the loaded state) is deliberate: load merges defaults, so the
+   * loaded value cannot distinguish an absent mode from a persisted one.
    */
   async ensureNativeFirstDefault(): Promise<{ mode: ReturnType<typeof nativeFirstMode>; migrated: boolean }> {
     const meta = await this.ctx.storage.get("v2/meta").catch(() => undefined)
     const persisted = (meta as any)?.settings?.nativeFirst
     if (isNativeFirstMode(persisted)) return { mode: persisted, migrated: false }
-    const settings = await this.updateSettings({ nativeFirst: "on" })
+    const settings = await this.updateSettings({ nativeFirst: DEFAULT_NATIVE_FIRST_MODE })
     return { mode: nativeFirstMode(settings), migrated: true }
   }
 
@@ -1154,7 +1156,9 @@ export class V2Store {
    * Ticket #236: write only a native turn's contact ledger. Like
    * `saveAgentPost`, this touches one field under the serialized write queue so
    * a contact recorded by a tool call cannot revert a concurrent host identity
-   * or phase update. Non-native rows and unknown ids are no-ops.
+   * or phase update. The ledger stores recipient IDs only; the contact source
+   * code is carried by the service log event, never by the row. Non-native
+   * rows and unknown ids are no-ops.
    */
   async recordNativeContact(subtaskID: string, recipientID: string): Promise<boolean> {
     return this.write(async () => {

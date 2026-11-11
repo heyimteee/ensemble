@@ -1,4 +1,5 @@
 import { DISPATCH_LIMIT_DEFAULTS } from "./dispatch-budget.ts"
+import { DEFAULT_NATIVE_FIRST_MODE } from "./native-first.ts"
 import type { Settings, SnapshotState } from "./types.ts"
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -7,7 +8,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxDepth: 5,
   synthesis: true,
   // Ticket #240: native-first is the default for new and existing stores.
-  nativeFirst: "on",
+  nativeFirst: DEFAULT_NATIVE_FIRST_MODE,
   nativeMentionRouting: true,
   dispatchGroupMaxHops: DISPATCH_LIMIT_DEFAULTS.groupMaxHops,
   dispatchCommandMaxHops: DISPATCH_LIMIT_DEFAULTS.commandMaxHops,

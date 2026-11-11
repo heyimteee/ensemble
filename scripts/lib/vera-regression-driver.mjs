@@ -11,7 +11,10 @@
  *   run      assert the host migrated an absent persisted nativeFirst to `on`,
  *            assert the generated v6 roster table, drive one leader native turn
  *            that explicitly delegates one member and then `$Name`-mentions
- *            several, and prove the legacy rollback/restore path.
+ *            several, and prove the legacy rollback/restore path with the real
+ *            `nativeFirstCommand` / `toolsCommand` patches. The TUI key handler
+ *            is a thin wrapper over those pure functions and is covered by
+ *            `src/v2/tui/commands.test.ts`.
  *   restart  assert durable native turns, the contact ledger, the roster table,
  *            and the no-completion-bounce result survive a host restart.
  *
@@ -24,6 +27,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { OpenCode } from "@opencode/client"
+import { teamRosterTable } from "../../src/v2/init-block.ts"
+import { nativeFirstCommand, toolsCommand } from "../../src/v2/tui/commands.ts"
 
 function arg(name, fallback = "") {
   const index = process.argv.indexOf(name)
@@ -241,13 +246,32 @@ function rosterTableFrom(content) {
 }
 
 function expectedRosterTable(saved) {
-  const ordered = [saved.leaderID, ...saved.memberIDs.filter((id) => id !== saved.leaderID)]
-  const rows = ordered.map((id) => {
-    const name = saved.agentNames[id]
-    const display = id === saved.leaderID ? `**${name}** (leader)` : name
-    return `| ${display} | ${saved.agentTitles[id]} | ${saved.agentRoles[id]} |`
+  // Ticket #238/#241: the expected table is the product renderer's exact
+  // output, so escaping cannot drift between the harness and the contract.
+  // The separate ordering assertion below still catches a product ordering
+  // bug that this comparison would otherwise mirror.
+  const agents = Object.fromEntries(saved.memberIDs.map((id) => [id, {
+    name: saved.agentNames[id],
+    title: saved.agentTitles[id],
+    role: saved.agentRoles[id],
+  }]))
+  return teamRosterTable({
+    leaderID: saved.leaderID,
+    memberIDs: saved.memberIDs,
+    agents,
+  }).split("\n")
+}
+
+/** Member names in rendered row order, parsed independently of the renderer. */
+function rosterMemberNames(table) {
+  return (table ?? []).slice(2).map((line) => {
+    const cell = line.replace(/^\| /, "").split(" | ")[0]
+    return cell.replace(/^\*\*/, "").replace(/\*\* \(leader\)$/, "")
   })
-  return ["| Member | Title | Role |", "|---|---|---|", ...rows]
+}
+
+function expectedRosterNames(saved) {
+  return [saved.leaderID, ...saved.memberIDs.filter((id) => id !== saved.leaderID)].map((id) => saved.agentNames[id])
 }
 
 function withoutRosterSection(block) {
@@ -380,6 +404,10 @@ async function run() {
   const expected = expectedRosterTable(saved)
   assert("the workspace AGENTS.md carries one v6 block", Boolean(block) && (content.match(/<!-- ensemble:start/g) ?? []).length === 1)
   assert("the generated roster table is exact", JSON.stringify(table) === JSON.stringify(expected))
+  assert(
+    "the roster table lists active members leader-first in memberIDs order",
+    JSON.stringify(rosterMemberNames(table)) === JSON.stringify(expectedRosterNames(saved)),
+  )
   assert("the project-owned content outside the block is preserved", content.includes(PROJECT_LINE) && !content.includes("STALE V5 CONTRACT"))
   const genericBlock = block ? withoutRosterSection(block) : undefined
   const tableText = (table ?? []).join("\n")
@@ -397,7 +425,9 @@ async function run() {
   // the documented `:tools legacy` override while keeping native-first on so
   // one real native turn can call `ensemble_delegate`; the service still owns
   // ingestion, routing, the contact ledger, and completion.
-  await invoke("settings.update", { toolSurface: "legacy" })
+  const explicitOverride = toolsCommand(["legacy"])
+  assert("the :tools legacy command validates", explicitOverride.ok)
+  await invoke("settings.update", explicitOverride.patch)
   let snapshot = await state()
   assert("the explicit-tool override keeps the mode on", snapshot.settings.nativeFirst === "on" && snapshot.settings.toolSurface === "legacy")
 
@@ -519,10 +549,18 @@ async function run() {
   }
 
   // --- rollback: :native-first off plus :tools legacy -----------------------
+  // The driver applies the exact validated patches the TUI commands produce.
+  // The TUI key handler is a thin wrapper over these pure functions and is
+  // covered by src/v2/tui/commands.test.ts.
   const nativeBefore = Object.values(snapshot.subtasks ?? {}).filter((task) => task.origin === "native").length
   const ledgerBefore = [...(own.native?.contacted ?? [])]
   const phoenixBefore = Object.values(snapshot.subtasks ?? {}).filter((task) => task.assigneeID === saved.agentIDs.phoenix).length
-  await invoke("settings.update", { nativeFirst: "off", toolSurface: "legacy" })
+  const offPatch = nativeFirstCommand(["off"])
+  const legacyPatch = toolsCommand(["legacy"])
+  assert("the :native-first off command validates", offPatch.ok)
+  assert("the :tools legacy command validates", legacyPatch.ok)
+  await invoke("settings.update", offPatch.patch)
+  await invoke("settings.update", legacyPatch.patch)
   snapshot = await state()
   assert("rollback stores nativeFirst off and the legacy tool surface", snapshot.settings.nativeFirst === "off" && snapshot.settings.toolSurface === "legacy")
   const offBinding = await invoke("agent.sessionBinding", {
@@ -541,7 +579,12 @@ async function run() {
   const legacyRequests = streamingRequestsBetween(rollbackStarted, Date.now() + 500)
   assert("the legacy path registered the full 11-tool surface", legacyRequests.some((entry) => Number(entry.ensembleToolCount ?? 0) === 11))
 
-  await invoke("settings.update", { nativeFirst: "on", toolSurface: "native" })
+  const onPatch = nativeFirstCommand(["on"])
+  const nativePatch = toolsCommand(["native"])
+  assert("the :native-first on command validates", onPatch.ok)
+  assert("the :tools native command validates", nativePatch.ok)
+  await invoke("settings.update", onPatch.patch)
+  await invoke("settings.update", nativePatch.patch)
   snapshot = await state()
   assert("restoring on/native keeps the mode on", snapshot.settings.nativeFirst === "on" && snapshot.settings.toolSurface === "native")
   const restoredBinding = await invoke("agent.sessionBinding", {
@@ -564,6 +607,12 @@ async function run() {
     legacyEnsembleToolCount: Number(legacyRequests.find((entry) => Number(entry.ensembleToolCount ?? 0) === 11)?.ensembleToolCount ?? 0),
     nativeTurnsPreserved: nativeAfter === nativeBefore,
     ledgerPreserved: JSON.stringify(restoredParent.native?.contacted ?? []) === JSON.stringify(ledgerBefore),
+    commands: {
+      off: offPatch.ok,
+      legacy: legacyPatch.ok,
+      on: onPatch.ok,
+      native: nativePatch.ok,
+    },
   }
 
   stateFileData.phase = "run"
@@ -623,6 +672,10 @@ async function restart() {
   const content = readAgents(saved.workspaceDir)
   const table = rosterTableFrom(content)
   assert("restart keeps the exact generated roster table", JSON.stringify(table) === JSON.stringify(expectedRosterTable(saved)))
+  assert(
+    "restart keeps the roster order and names",
+    JSON.stringify(rosterMemberNames(table)) === JSON.stringify(expectedRosterNames(saved)),
+  )
   assert("restart keeps exactly one v6 block", (content.match(/<!-- ensemble:start/g) ?? []).length === 1 && content.includes(V6_START))
   const messages = channelMessages(snapshot, saved.workspaceChannel)
   const parentRows = messages.filter((message) => message.taskID === saved.parentTaskID && message.author === "agent")

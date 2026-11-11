@@ -12,7 +12,9 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   portion is explicitly skipped.
 - `npm run test:live:fake`: no API key or external model request. A local Node
   HTTP server binds an ephemeral loopback port and streams fixed rich Markdown.
-  Checks observe streaming, finalized content, single occurrences of reply
+  The walkthrough runs the explicit legacy surface (`nativeFirst: off`) because
+  its direct, DM-queue, and statusline assertions predate default-on; the Vera
+  regression covers the default-on cutover. Checks observe streaming, finalized content, single occurrences of reply
   markers, no remaining streaming label, no stale lines after navigation,
   searchable help, the v5.7 persistent mode (roster/chat `Enter` keeps the
   mode; wizard steps keep their arrival mode), block/line caret transitions,
@@ -280,12 +282,12 @@ then restarts the TUI at 80×24, 100×30, 120×40, and 160×50. At each size it
 starts a fresh five-group fixture (one two-task group and four single-task
 groups), then checks:
 
-- 160×50: three panes, six tasks in two-column cards across two pages, the
-  Work header and group labels, spatial `hjkl`, `gg`/`G`, page-edge `j`/`k`
-  and `h`/`l`, the exact right edge, and the focused white / unfocused grey
-  card borders read from `tmux capture-pane -e`. It also reads pane headings
-  and borders from ANSI capture: the selected Agents/Workspaces section, chat,
-  and Work are white while the rest stay grey.
+- 160×50: three panes, six tasks in one full-width card per row across two
+  pages, the Work header and group labels, spatial `hjkl`, `gg`/`G`,
+  page-edge `j`/`k` and `h`/`l`, the exact right edge, and the focused white /
+  unfocused grey card borders read from `tmux capture-pane -e`. It also reads
+  pane headings and borders from ANSI capture: the selected Agents/Workspaces
+  section, chat, and Work are white while the rest stay grey.
 - 120×40 and 100×30: three panes with compact Work rows, group labels, the
   dispatch budget label, focus movement, the page indicator, the exact right
   edge, and the same per-pane white/grey heading and border contract.

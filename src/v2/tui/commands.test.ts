@@ -40,6 +40,15 @@ test("command parsing accepts the leading colon and surrounding whitespace", () 
   assert.deepEqual(parseCommandLine(":logs task t_123"), { name: "logs", args: ["task", "t_123"] })
 })
 
+test("ticket241: command arity lives on the one catalog", () => {
+  const withArgs = Object.fromEntries(COMMANDS.filter((command) => command.args).map((command) => [command.name, command.args]))
+  assert.deepEqual(withArgs, { "native-first": true, tools: true, logs: true })
+  assert.deepEqual(parseCommandLine(":logs"), { name: "logs", args: [] })
+  assert.deepEqual(parseCommandLine(":native-first off"), { name: "native-first", args: ["off"] })
+  assert.deepEqual(parseCommandLine(":tools legacy"), { name: "tools", args: ["legacy"] })
+  assert.deepEqual(parseCommandLine(":settings extra"), { name: "settings" }, "no-argument commands still ignore words")
+})
+
 test("ticket240: native-first and tools commands parse their required argument", () => {
   assert.deepEqual(parseCommandLine(":native-first on"), { name: "native-first", args: ["on"] })
   assert.deepEqual(parseCommandLine(":native-first off"), { name: "native-first", args: ["off"] })
@@ -54,16 +63,15 @@ test("ticket240: native-first command validates on, off, and shadow", () => {
   const on = nativeFirstCommand(["on"])
   assert.equal(on.ok, true)
   if (on.ok) {
-    assert.equal(on.patch.nativeFirst, "on")
-    assert.equal(on.patch.toolSurface, "native", "restoring the mode restores the native surface")
-    assert.ok(on.message.length > 0)
+    assert.deepEqual(on.patch, { nativeFirst: "on" }, "the mode command never rewrites an explicit tool-surface choice")
+    assert.match(on.message, /:tools native/)
   }
   const off = nativeFirstCommand(["off"])
   assert.equal(off.ok, true)
-  if (off.ok) assert.equal(off.patch.nativeFirst, "off")
+  if (off.ok) assert.deepEqual(off.patch, { nativeFirst: "off" })
   const shadow = nativeFirstCommand(["shadow"])
   assert.equal(shadow.ok, true)
-  if (shadow.ok) assert.equal(shadow.patch.nativeFirst, "shadow")
+  if (shadow.ok) assert.deepEqual(shadow.patch, { nativeFirst: "shadow" })
 
   for (const invalid of [nativeFirstCommand([]), nativeFirstCommand(["sometimes"]), nativeFirstCommand(["on", "extra"])]) {
     assert.equal(invalid.ok, false)

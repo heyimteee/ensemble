@@ -167,6 +167,19 @@ export type NativeTurnInfo = {
 }
 
 /**
+ * Ticket #236: why a native turn recorded a recipient on its contact ledger.
+ * The code is logged with the turn and recipient; the durable ledger stores
+ * recipient IDs only.
+ */
+export type NativeContactSource =
+  | "delegation"
+  | "handoff"
+  | "group-post"
+  | "outside-roster-approval"
+  | "user-route"
+  | "agent-final-route"
+
+/**
  * Ticket #221: the delivery record for one workspace `send_message` post made
  * during a turn. It lets an identical final native text dedupe to the same
  * transcript row and route set instead of posting and routing twice. The text
