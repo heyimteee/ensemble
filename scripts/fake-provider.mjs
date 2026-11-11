@@ -56,6 +56,10 @@ const FAKE_VERA_REGRESSION_RE = /fake-vera-regression:delegate=([A-Za-z][A-Za-z0
 // command's instruction; names come from the driver, so the provider never
 // hard-codes the isolated roster. Counts and roles only are logged.
 const FAKE_VERA_FLOWS_RE = /fake-vera-flows:ticket=([a-z0-9-]+);mode=(relay|fanout|refuse|route);dispatch=(start|two|refused|none);workers=([A-Za-z,]*);mentions=([A-Za-z,]*)/
+// Ticket #251 review: a normal worker turn cannot call `ensemble_dispatch`.
+// The seed turn returns a flow marker as its final text; the completion review
+// that follows is a terminal turn and can dispatch the next ticket.
+const FAKE_VERA_SEED_RE = /fake-vera-seed:target=(fake-vera-flows:ticket=[a-z0-9-]+;mode=(?:relay|fanout|refuse|route);dispatch=(?:start|two|refused|none);workers=[A-Za-z,]*;mentions=[A-Za-z,]*)/
 const FAKE_VERA_RELAY_RE = /fake-vera-relay:chain=([A-Za-z,]+);at=(\d+)/
 const FAKE_VERA_FANOUT_RE = /fake-vera-fanout:ticket=([a-z0-9-]+);worker=([A-Za-z][A-Za-z0-9_-]*)/
 const FAKE_VERA_ROUTE_RE = /fake-vera-route:peer=([A-Za-z][A-Za-z0-9_-]*)/
@@ -652,6 +656,7 @@ const server = createServer(async (request, response) => {
     // after the fixed "Synthesize the completed branches" sentence, so the
     // role is derivable from the latest user message without content logging.
     const flowMarker = latestUserText.match(FAKE_VERA_FLOWS_RE)
+    const seedMarker = latestUserText.match(FAKE_VERA_SEED_RE)
     const relayMarker = latestUserText.match(FAKE_VERA_RELAY_RE)
     const fanoutMarker = latestUserText.match(FAKE_VERA_FANOUT_RE)
     const routeMarker = latestUserText.match(FAKE_VERA_ROUTE_RE)
@@ -813,6 +818,12 @@ const server = createServer(async (request, response) => {
       return
     }
     try {
+      if (body?.stream !== false && seedMarker && !toolResult) {
+        // A worker turn cannot dispatch. Emit the next ticket's marker as the
+        // final answer; the completion review is the terminal dispatch turn.
+        await streamCompletion(response, `${seedMarker[1]}\n`, requestID)
+        return
+      }
       if (body?.stream !== false && flowMarker) {
         const ticket = flowMarker[1]
         const mode = flowMarker[2]

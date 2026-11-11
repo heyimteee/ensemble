@@ -20,7 +20,7 @@ fi
 #           several, and prove `:native-first off` + `:tools legacy` rollback
 #           and on/native restore.
 #   flows   drive a five-hop relay, its terminal `ensemble_dispatch` into a
-#           five-way fan-out, the next ticket's synthesis, a command-cap
+#           five-way fan-out, the next ticket's synthesis, a batch-too-large
 #           refusal, and a worker `$Name` route. Every command root is
 #           leader-owned, so each ticket gets exactly one synthesis.
 #   restart restart again and prove durable native turns, the contact ledger,
@@ -160,8 +160,8 @@ fi
 # the multi-ticket flows on the native surface.
 FLOWS_STATUS=0
 run_driver flows --out "$FLOWS_OUT" || FLOWS_STATUS=$?
-if [[ ! -s "$STATE_FILE" ]]; then
-  live_fail "the Vera flows phase did not record scenario state (status $FLOWS_STATUS)"
+if [[ ! -s "$FLOWS_OUT" ]]; then
+  live_fail "the Vera flows phase did not record its result (status $FLOWS_STATUS)"
 fi
 
 restart_host

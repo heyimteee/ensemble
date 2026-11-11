@@ -211,6 +211,56 @@ test("ticket246: a five-hop relay promotes only the command root and relays ever
   }
 })
 
+test("ticket251: a relay parent keeps its own result while the root digest reports the leaf", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-251-relay-result-"))
+  const { ctx, instructions } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  for (const [id, name] of [["a", "Nova"], ["b", "Sage"], ["c", "Iris"]] as const) await seed.saveAgent(agent(id, name))
+  await seed.saveWorkspace(workspace(directory, ["a", "b", "c"]))
+  await seed.saveChannelMessage("w", { id: "m_parent", author: "agent", agentID: "b", text: "Parent worker answer", kind: "text", createdAt: 1 })
+  await seed.saveChannelMessage("w", { id: "m_leaf", author: "agent", agentID: "c", text: "Leaf final answer", kind: "text", createdAt: 2 })
+  await seed.saveSubtask(task({ id: "root", assigneeID: "a", state: "working", awaitingChildren: true, workKind: "delegation" }))
+  await seed.saveSubtask(task({
+    id: "relay",
+    parentID: "root",
+    assigneeID: "b",
+    state: "working",
+    awaitingChildren: true,
+    workKind: "handoff",
+    handoff: handoff("a", "b"),
+    resultMessageID: "m_parent",
+  }))
+  await seed.saveSubtask(task({
+    id: "leaf",
+    parentID: "relay",
+    assigneeID: "c",
+    state: "replied",
+    outcome: "succeeded",
+    workKind: "handoff",
+    handoff: handoff("b", "c"),
+    resultMessageID: "m_leaf",
+    taskMaxHops: 0,
+  }))
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    await waitFor(async () => {
+      const next = await service.handlers().snapshot({ directory })
+      return next.state.subtasks.root?.stage === "synthesis" && next.state.subtasks.root?.state === "replied"
+    })
+    const state = (await service.handlers().snapshot({ directory })).state
+    assert.equal(state.subtasks.relay.resultMessageID, "m_parent", "the relay parent keeps its own worker result")
+    const synthesisContext = instructions.map((entry) => entry.value).find((value) => value.includes("<ensemble_branch_results>")) ?? ""
+    const digest = branchBlock(synthesisContext)
+    assert.match(digest, /Leaf final answer/)
+    assert.doesNotMatch(digest, /Parent worker answer/, "the root digest reports the terminal leaf, not the relay parent")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket246: a five-way fan-out synthesizes once after every branch is terminal", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-246-fanout-"))
   const { ctx, instructions } = fakeContext()

@@ -7,6 +7,7 @@ import { EnsembleV2Service, streamFinalization } from "./service.ts"
 import { seedLegacySettings, startServiceForTest } from "./test-service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { deriveWorkStatus, workKey } from "./queue.ts"
+import { dispatchContinuationCapacity } from "./dispatch-budget.ts"
 import { projectVisibleWork } from "./scoped-read.ts"
 import { allWorkGroupsForTasks } from "./work-groups.ts"
 import { V2Store } from "./store.ts"
@@ -13661,6 +13662,52 @@ const dispatchBatch = {
   ],
 }
 
+test("ticket251: ensemble_dispatch is refused outside a terminal turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-251-dispatch-terminal-only-"))
+  const { ctx, nativeSessions, tools } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+  ])
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.updateSettings({ nativeFirst: "on" })
+  // A normal leader turn is not a synthesis, completion review, or batch review.
+  await seedQueuedTask(ctx, { id: "work", assigneeID: "a", instruction: "Do the normal work." })
+  replyTextBySession(ctx, { s_group_a: "Normal answer." })
+  let result = ""
+  let releasePrompt!: () => void
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
+  const service = new EnsembleV2Service(ctx)
+  ;(ctx.session as any).prompt = async ({ sessionID }: any) => {
+    await promptGate
+    if (sessionID !== "s_group_a" || result) return
+    result = (await tools.get("dispatch").execute(dispatchBatch, { sessionID })).content
+  }
+  const stop = await startServiceForTest(service, service.ctx)
+  releasePrompt()
+  try {
+    await waitFor(async () => (await snapshotFor(service.handlers(), directory)).subtasks.work?.state === "replied")
+    assert.match(result, /terminal turn/i)
+    assert.match(result, /synthesis, completion review, or batch review/)
+    const state = await snapshotFor(service.handlers(), directory)
+    assert.ok(
+      nativeSystemMessages(state).some((text) => text.startsWith("Dispatch refused:") && /terminal turn/i.test(text)),
+      "the refusal is visible in the group chat",
+    )
+    assert.ok(!Object.values(state.subtasks).some((task: any) => task.title === "Ticket two"))
+    assert.ok(
+      !Object.values(state.subtasks).some((task: any) => String(task.queueKey ?? "").startsWith("ensemble-dispatch:")),
+      "a normal turn creates no command work",
+    )
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket250: ensemble_dispatch starts a parentless command root and its assignment batch", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-250-dispatch-"))
   const { ctx, nativeSessions, tools } = fakeContext()
@@ -13817,6 +13864,72 @@ test("ticket250: a dispatch retry returns the existing root and assignments", as
   }
 })
 
+test("ticket251: continuationOf is provenance only; the next command keeps a fresh budget", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-251-dispatch-fresh-command-"))
+  const { ctx, nativeSessions, tools } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+  ])
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.updateSettings({ nativeFirst: "on", dispatchContinuations: 1 })
+  // The previous ticket is fully spent: no command hops and no continuations.
+  await seed.saveDispatchGroup({
+    id: "dispatch_old",
+    workspaceID: "w",
+    rootID: "dispatch_old",
+    continuationIndex: 0,
+    maxHops: 8,
+    usedHops: 8,
+    depthMax: 8,
+    commandMaxHops: 24,
+    commandUsedHops: 24,
+    maxContinuations: 1,
+    continuationsUsed: 1,
+    createdAt: 1,
+  })
+  await seedQueuedTask(ctx, { id: "review", assigneeID: "a", stage: "synthesis", instruction: "Summarize ticket one." })
+  replyTextBySession(ctx, { s_group_a: "Ticket one is complete." })
+  let result = ""
+  let newGroup: any
+  let releasePrompt!: () => void
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
+  const service = new EnsembleV2Service(ctx)
+  ;(ctx.session as any).prompt = async ({ sessionID }: any) => {
+    await promptGate
+    if (sessionID !== "s_group_a" || result) return
+    result = (await tools.get("dispatch").execute({ ...dispatchBatch, continuationOf: "dispatch_old" }, { sessionID })).content
+    const snapshot = await service.handlers().snapshot({ directory })
+    const root = Object.values(snapshot.state.subtasks).find((task: any) => task.title === "Ticket two") as any
+    newGroup = snapshot.state.dispatchGroups[root.dispatchGroupID]
+  }
+  const stop = await startServiceForTest(service, service.ctx)
+  releasePrompt()
+  try {
+    await waitFor(async () => (await snapshotFor(service.handlers(), directory)).subtasks.review?.state === "replied")
+    assert.match(result, /Started command "Ticket two"/)
+    assert.ok(newGroup, "the next command has its own group")
+    assert.notEqual(newGroup.id, "dispatch_old", "the next ticket is a new command, not a continuation segment")
+    assert.equal(newGroup.rootID, newGroup.id, "the new group is a command root")
+    assert.equal(newGroup.maxHops, 8, "the new command captures the group ceiling")
+    assert.equal(newGroup.usedHops, 2, "the new command spends only its own assignments")
+    assert.equal(newGroup.commandMaxHops, 24, "the new command has a fresh command ceiling")
+    assert.equal(newGroup.commandUsedHops, 2, "the previous command's spend is not inherited")
+    assert.equal(newGroup.maxContinuations, 1, "the new command captures its own continuation cap")
+    assert.equal(newGroup.continuationsUsed, 0, "the previous command's continuations are not inherited")
+    assert.equal(dispatchContinuationCapacity(newGroup).canContinue, true, "the new command can still continue inside its own budget")
+    const state = await snapshotFor(service.handlers(), directory)
+    assert.equal(state.dispatchGroups.dispatch_old.commandUsedHops, 24, "the previous command's ledger is unchanged")
+    assert.equal(state.dispatchGroups.dispatch_old.continuationsUsed, 1, "the previous command's continuation count is unchanged")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 /**
  * Run one dispatch from a terminal review turn and return what the service
  * wrote. The helper owns its temp directory and stops the service, so each
@@ -13897,7 +14010,7 @@ test("ticket250: a group refusal creates no command work and is visible", async 
   )
 })
 
-test("ticket250: a command-cap refusal tells the leader to ask for a new command", async () => {
+test("ticket251: a batch above the new command ceiling asks to reduce or split it", async () => {
   const outcome = await runDispatchRefusal({
     name: "command-refusal",
     settings: { dispatchGroupMaxHops: 24, dispatchCommandMaxHops: 24, dispatchContinuations: 0 },
@@ -13907,9 +14020,10 @@ test("ticket250: a command-cap refusal tells the leader to ask for a new command
       instruction: "Do the command task.",
       maxHops: 0,
     })),
-    expected: /Ask the user to start a new command/,
+    expected: /reduce the batch or split it across commands/,
   })
   assert.match(outcome.result, outcome.expected)
+  assert.doesNotMatch(outcome.result, /Ask the user/, "the new command ceiling is the batch limit, not an exhausted user budget")
   assert.equal(outcome.after, outcome.before, "the refused batch creates no task")
   assert.ok(!Object.values(outcome.state.subtasks).some((task: any) => String(task.queueKey ?? "").startsWith("ensemble-dispatch:")))
 })
@@ -13928,6 +14042,71 @@ test("ticket250: a fan-out refusal creates no command work", async () => {
   assert.match(outcome.result, outcome.expected)
   assert.equal(outcome.after, outcome.before, "the refused batch creates no task")
   assert.ok(!Object.values(outcome.state.subtasks).some((task: any) => String(task.queueKey ?? "").startsWith("ensemble-dispatch:")))
+})
+
+test("ticket251: a mid-batch admission refusal closes the root and earlier assignments", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-251-dispatch-partial-"))
+  const { ctx, nativeSessions, tools } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+  ])
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.updateSettings({ nativeFirst: "on" })
+  await seedQueuedTask(ctx, { id: "review", assigneeID: "a", stage: "synthesis", instruction: "Summarize ticket one." })
+  replyTextBySession(ctx, { s_group_a: "Ticket one is complete." })
+  let result = ""
+  let state: any
+  let releasePrompt!: () => void
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
+  const service = new EnsembleV2Service(ctx)
+  let assignmentAdmissions = 0
+  ;(ctx.session as any).prompt = async ({ sessionID }: any) => {
+    await promptGate
+    if (sessionID !== "s_group_a" || result) return
+    result = (await tools.get("dispatch").execute(dispatchBatch, { sessionID })).content
+    state = (await service.handlers().snapshot({ directory })).state
+  }
+  const stop = await startServiceForTest(service, service.ctx)
+  const store = (service as any).store
+  const admit = store.admitDispatchedSubtask.bind(store)
+  store.admitDispatchedSubtask = async (task: any, options: any) => {
+    if (String(task.queueKey ?? "").includes(":assign:")) {
+      assignmentAdmissions++
+      // Simulate a refusal that appears after the root and one assignment
+      // already exist, for example a concurrent ledger mutation.
+      if (assignmentAdmissions === 2) {
+        return { admitted: false, task, consumed: false, refusal: { layer: "group", used: 9, max: 8 } }
+      }
+    }
+    return admit(task, options)
+  }
+  releasePrompt()
+  try {
+    await waitFor(async () => (await snapshotFor(service.handlers(), directory)).subtasks.review?.state === "replied")
+    assert.match(result, /^Dispatch refused:/)
+    assert.match(result, /reduce the batch or split it/)
+    const commandRows = Object.values(state.subtasks).filter((task: any) =>
+      String(task.queueKey ?? "").startsWith("ensemble-dispatch:"),
+    ) as any[]
+    assert.equal(commandRows.length, 2, "the root and the first admitted assignment exist as closed evidence")
+    for (const row of commandRows) {
+      assert.equal(row.stoppedAt !== undefined, true, `${row.id} is cancelled, not left open`)
+      assert.equal(deriveWorkStatus(row, Date.now()), "cancelled")
+    }
+    assert.equal(
+      Object.values(state.subtasks).some((task: any) => task.state === "pending" && task.workspaceID === "w"),
+      false,
+      "no open command work remains",
+    )
+    assert.ok(nativeSystemMessages(state).some((text) => text.startsWith("Dispatch refused:")))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test("ticket250: a terminal turn that dispatches work does not post the no-work notice", async () => {

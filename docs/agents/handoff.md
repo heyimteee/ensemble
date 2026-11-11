@@ -52,9 +52,14 @@ routing-operator mentions are references, not work; the final text still posts
 as the group message. To start the next ticket explicitly, the leader calls
 `ensemble_dispatch` with a title, an instruction, and an assignment batch. It
 creates a new parentless command root with a fresh command group and budget and
-creates the assignments under it. It is leader-only and idempotent: a retry
-returns the existing root and assignments. A terminal turn with suppressed
-mentions and no dispatch posts a visible no-work notice.
+creates the assignments under it. It is leader-only, terminal-turn-only, and
+idempotent: a retry returns the existing root and assignments. Each ticket is a
+new command with its own caps; `continuationOf` is provenance, not a shared
+budget, and one terminal turn starts at most one command. A batch above the new
+command's own ceiling is refused as batch-too-large (reduce or split it), not
+as an exhausted user command. A terminal turn with suppressed mentions and no
+dispatch posts a visible no-work notice. See
+[ADR 0012](../adr/0012-terminal-turns-and-root-synthesis.md).
 
 ## Review obligations
 

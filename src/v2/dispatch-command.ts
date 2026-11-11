@@ -42,7 +42,40 @@ export type DispatchCommandKey = {
   assignmentKeys: string[]
 }
 
-function canonical(value: string | undefined): string {
+/** The one durable queue-key namespace for a terminal continuation command. */
+export const DISPATCH_COMMAND_QUEUE_PREFIX = "ensemble-dispatch"
+
+/** Scope prefix shared by a command root and its assignment batch. */
+export function dispatchCommandPrefix(workspaceID: Id, originTaskID: Id): string {
+  return `${DISPATCH_COMMAND_QUEUE_PREFIX}:${workspaceID}:${originTaskID}:`
+}
+
+/** Root queue key for one terminal turn and assignment set. */
+export function dispatchCommandRootKey(prefix: string, setHash: string): string {
+  return `${prefix}${setHash}:root`
+}
+
+/** Assignment queue key for one position in the batch. */
+export function dispatchCommandAssignmentKey(prefix: string, setHash: string, index: number): string {
+  return `${prefix}${setHash}:assign:${index}`
+}
+
+/** True when the key belongs to the continuation-command namespace. */
+export function isDispatchCommandQueueKey(queueKey: string | undefined): boolean {
+  return typeof queueKey === "string" && queueKey.startsWith(`${DISPATCH_COMMAND_QUEUE_PREFIX}:`)
+}
+
+/** True when the key is a command root, derived from the durable queue key. */
+export function isDispatchCommandRootKey(queueKey: string | undefined): boolean {
+  return typeof queueKey === "string" && isDispatchCommandQueueKey(queueKey) && queueKey.endsWith(":root")
+}
+
+/** True when the row is a continuation command root container. */
+export function isDispatchCommandRoot(task: Pick<Subtask, "queueKey">): boolean {
+  return isDispatchCommandRootKey(task.queueKey)
+}
+
+function normalizeText(value: string | undefined): string {
   return (value ?? "").trim()
 }
 
@@ -54,25 +87,25 @@ function canonical(value: string | undefined): string {
  */
 export function dispatchCommandKey(input: DispatchCommandKeyInput): DispatchCommandKey {
   const assignments = input.assignments.map((assignment) => ({
-    assignee: canonical(assignment.assignee),
-    title: canonical(assignment.title),
-    instruction: canonical(assignment.instruction),
-    constraints: canonical(assignment.constraints),
-    expected: canonical(assignment.expected),
+    assignee: normalizeText(assignment.assignee),
+    title: normalizeText(assignment.title),
+    instruction: normalizeText(assignment.instruction),
+    constraints: normalizeText(assignment.constraints),
+    expected: normalizeText(assignment.expected),
     mode: assignment.mode ?? "research",
     maxHops: assignment.maxHops,
   }))
   const setHash = stableHash(JSON.stringify({
-    title: canonical(input.title),
-    instruction: canonical(input.instruction),
+    title: normalizeText(input.title),
+    instruction: normalizeText(input.instruction),
     assignments,
   }))
-  const prefix = `ensemble-dispatch:${input.workspaceID}:${input.originTaskID}:`
+  const prefix = dispatchCommandPrefix(input.workspaceID, input.originTaskID)
   return {
     prefix,
     setHash,
-    rootKey: `${prefix}${setHash}:root`,
-    assignmentKeys: assignments.map((_, index) => `${prefix}${setHash}:assign:${index}`),
+    rootKey: dispatchCommandRootKey(prefix, setHash),
+    assignmentKeys: assignments.map((_, index) => dispatchCommandAssignmentKey(prefix, setHash, index)),
   }
 }
 
@@ -88,9 +121,9 @@ export function dispatchCommandStartedForTurn(
   workspaceID: Id,
   originTaskID: Id,
 ): boolean {
-  const prefix = `ensemble-dispatch:${workspaceID}:${originTaskID}:`
+  const prefix = dispatchCommandPrefix(workspaceID, originTaskID)
   return Object.values(subtasks).some(
-    (task) => typeof task?.queueKey === "string" && task.queueKey.startsWith(prefix) && task.queueKey.endsWith(":root"),
+    (task) => typeof task?.queueKey === "string" && task.queueKey.startsWith(prefix) && isDispatchCommandRootKey(task.queueKey),
   )
 }
 
@@ -106,9 +139,7 @@ export function pendingDispatchCommandRoot(
   at: number,
   graceMs: number,
 ): boolean {
-  return typeof task.queueKey === "string" &&
-    task.queueKey.startsWith("ensemble-dispatch:") &&
-    task.queueKey.endsWith(":root") &&
+  return isDispatchCommandRootKey(task.queueKey) &&
     at - task.createdAt < graceMs
 }
 
@@ -139,19 +170,25 @@ export function preflightDispatchCommand(input: DispatchCommandPreflightInput): 
   return undefined
 }
 
+/** One suffix for every batch-too-large refusal; the layer supplies the numbers. */
+const REDUCE_OR_SPLIT = "reduce the batch or split it across commands"
+
 /** Refusal copy for a whole command batch, never for a single hop. */
 export function dispatchCommandRefusalText(refusal: DispatchRefusal): string {
   switch (refusal.layer) {
     case "command":
-      return `the command budget is exhausted (${refusal.used}/${refusal.max} hops). Ask the user to start a new command for a fresh budget.`
+      // The command ceiling here is the prospective new command's own cap, so
+      // asking the user for a fresh command would not help: the batch itself
+      // is too large for any command at this setting.
+      return `the new command is limited to ${refusal.max} hops and the batch has ${refusal.used} assignments; ${REDUCE_OR_SPLIT}.`
     case "group":
-      return `the new command group is limited to ${refusal.max} hops and the batch has ${refusal.used} assignments; reduce the batch.`
+      return `the new command group is limited to ${refusal.max} hops and the batch has ${refusal.used} assignments; ${REDUCE_OR_SPLIT}.`
     case "depth":
-      return `the dispatch depth limit is ${refusal.max} (next depth ${refusal.used}); reduce the batch.`
+      return `the dispatch depth limit is ${refusal.max} (next depth ${refusal.used}); ${REDUCE_OR_SPLIT}.`
     case "fanout":
-      return `the assignment limit is ${refusal.max} per command and the batch has ${refusal.used}; reduce the batch.`
+      return `the assignment limit is ${refusal.max} per command and the batch has ${refusal.used}; ${REDUCE_OR_SPLIT}.`
     case "task":
-      return `the task budget is exhausted (${refusal.used}/${refusal.max}); reduce the batch.`
+      return `the task budget is exhausted (${refusal.used}/${refusal.max}); ${REDUCE_OR_SPLIT}.`
     case "closed":
       return "the command is closed; ask the user to start a new command."
   }

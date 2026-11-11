@@ -1,3 +1,4 @@
+import { isDispatchCommandRoot } from "./dispatch-command.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import type { DispatchGroup, Id, Settings, Subtask, WorkKind } from "./types.ts"
 
@@ -599,8 +600,8 @@ export type DispatchHopWorkItem = {
   creatorType: "user" | "agent"
   workKind?: WorkKind
   handoff?: { completion?: boolean; batch?: boolean }
-  /** Ticket #250: a command-root container never spends a hop. */
-  hopExempt?: boolean
+  /** Ticket #250: the durable command-root key is the one root identity. */
+  queueKey?: string
 }
 
 /**
@@ -611,7 +612,7 @@ export type DispatchHopWorkItem = {
  */
 export function dispatchesHop(task: DispatchHopWorkItem): boolean {
   if (task.creatorType !== "agent") return false
-  if (task.hopExempt === true) return false
+  if (isDispatchCommandRoot(task)) return false
   if (task.workKind !== "delegation" && task.workKind !== "handoff") return false
   if (task.handoff?.completion === true) return false
   if (task.handoff?.batch === true) return false

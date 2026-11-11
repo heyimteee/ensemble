@@ -18,6 +18,7 @@ replacement.
 | [0009](0009-conversation-identity-and-sessions.md) | Conversation identity and per-conversation native sessions | Accepted | #209, #211 |
 | [0010](0010-native-turn-ingestion.md) | Native turn ingestion is service-owned and identity-based | Accepted | #209, #211 |
 | [0011](0011-mention-routing-and-budgets.md) | `$Name` routing grammar and server-owned budgets | Accepted | #209, #211 |
+| [0012](0012-terminal-turns-and-root-synthesis.md) | Terminal turns, root-only synthesis, and explicit continuation | Accepted | spec #245, #246–#251 |
 
 ## Related evidence
 

@@ -1,3 +1,4 @@
+import { deriveWorkStatus, isTerminalWorkStatus } from "./queue.ts"
 import type { Agent, Id, Message, Subtask } from "./types.ts"
 
 /**
@@ -9,7 +10,7 @@ import type { Agent, Id, Message, Subtask } from "./types.ts"
  * Completion hops are review deliveries, not work branches. They never appear
  * in the digest.
  */
-export type BranchOutcome = "succeeded" | "failed" | "cancelled" | "pending"
+export type BranchOutcome = "succeeded" | "failed" | "cancelled" | "stalled" | "pending"
 
 export type BranchResult = {
   /** Terminal leaf task id. */
@@ -29,20 +30,29 @@ export type BranchDigestOptions = {
 const DEFAULT_MAX_BRANCHES = 20
 const DEFAULT_MAX_RESULT_CHARS = 600
 
-function branchOutcome(task: Subtask): BranchOutcome {
-  if (task.stoppedAt !== undefined) return "cancelled"
-  if (task.state === "replied" && task.outcome === "succeeded") return "succeeded"
-  if (task.state === "replied" && task.outcome === "failed") return "failed"
-  return "pending"
+/**
+ * Ticket #251 review: the digest uses the canonical lifecycle, not a local
+ * state/outcome/stoppedAt guess. `stalled` stays distinct from `failed`; the
+ * queue owns that boundary (a native error is failed, an exhausted delivery is
+ * stalled). Non-terminal statuses collapse to pending in the digest.
+ */
+function branchOutcome(task: Subtask, at: number): BranchOutcome {
+  const status = deriveWorkStatus(task, at)
+  if (status === "stalled") return "stalled"
+  if (!isTerminalWorkStatus(status)) return "pending"
+  if (status === "replied") return "succeeded"
+  if (status === "failed") return "failed"
+  return "cancelled"
 }
 
-function branchResult(task: Subtask, messages: ReadonlyMap<Id, Message>): string {
-  const outcome = branchOutcome(task)
+function branchResult(task: Subtask, messages: ReadonlyMap<Id, Message>, at: number): string {
+  const outcome = branchOutcome(task, at)
   if (outcome === "succeeded") {
     const text = task.resultMessageID ? messages.get(task.resultMessageID)?.text?.trim() : undefined
     return text || "(no reply)"
   }
   if (outcome === "failed") return task.error ? `(failed) ${task.error}` : "(failed)"
+  if (outcome === "stalled") return task.error ? `(stalled) ${task.error}` : "(stalled)"
   if (outcome === "cancelled") return task.error ? `(cancelled) ${task.error}` : "(cancelled)"
   return "(pending)"
 }
@@ -103,7 +113,14 @@ export function collectBranchResults(input: {
   rootID: Id
   subtasks: Readonly<Record<Id, Subtask>>
   messages: readonly Message[]
+  /**
+   * Canonical lifecycle clock. Defaults to 0 because only terminal rows shape
+   * the digest; a live lease still collapses to pending either way. Callers
+   * that already have a clock pass it for exactness.
+   */
+  now?: number
 }): BranchResult[] {
+  const at = input.now ?? 0
   const byID = new Map<Id, Subtask>(Object.entries(input.subtasks))
   const messages = new Map(input.messages.map((message) => [message.id, message]))
   const childrenByParent = new Map<Id, Subtask[]>()
@@ -131,8 +148,8 @@ export function collectBranchResults(input: {
       branches.push({
         taskID: child.id,
         path: nextPath,
-        outcome: branchOutcome(child),
-        result: branchResult(child, messages),
+        outcome: branchOutcome(child, at),
+        result: branchResult(child, messages, at),
       })
     }
   }
