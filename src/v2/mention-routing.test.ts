@@ -347,6 +347,62 @@ test("routing policy suppresses an immediate reply-to-sender and refuses a group
   assert.deepEqual(allowed.routes.map((route) => route.agentID), ["e"])
 })
 
+test("ticket248: a terminal turn suppresses every mention before roster, cycle, and budget guards", () => {
+  const text = "Thanks $Sage, $Echo, and $Bolt."
+  const terminal = planMentionRouting({
+    text,
+    conversation: groupConversation,
+    roster: policyRoster,
+    fanOutCap: 8,
+    terminal: true,
+  })
+  assert.deepEqual(terminal.routes, [], "a terminal turn creates no peer turns")
+  assert.deepEqual(
+    terminal.suppressed.map((item) => [item.agentID, item.reason]),
+    [
+      ["s", "terminal-turn"],
+      ["e", "terminal-turn"],
+      ["b", "terminal-turn"],
+    ],
+    "every mention is a terminal reference, not a route",
+  )
+  assert.deepEqual(terminal.refusals, [], "terminal references are not refusals")
+
+  const guarded = planMentionRouting({
+    text: "$Archived $Outside $Nova $Sage $Echo",
+    conversation: groupConversation,
+    roster: policyRoster,
+    fanOutCap: 0,
+    terminal: true,
+    replyToSenderID: "s",
+    groupTrail: ["e"],
+    ledger: { groupUsed: 8, groupMax: 8, depth: 9, depthMax: 8, closed: true },
+  })
+  assert.deepEqual(guarded.routes, [], "the ledger never admits a terminal route")
+  assert.deepEqual(
+    guarded.suppressed.map((item) => [item.agentID, item.reason]),
+    [
+      ["a", "terminal-turn"],
+      ["o", "terminal-turn"],
+      ["n", "terminal-turn"],
+      ["s", "terminal-turn"],
+      ["e", "terminal-turn"],
+    ],
+    "terminal suppression precedes roster, self, reply, cycle, fan-out, and budget checks",
+  )
+  assert.deepEqual(guarded.refusals, [])
+
+  const normal = planMentionRouting({
+    text,
+    conversation: groupConversation,
+    roster: policyRoster,
+    fanOutCap: 8,
+    terminal: false,
+  })
+  assert.deepEqual(normal.routes.map((route) => route.agentID), ["s", "e", "b"], "non-terminal turns still route")
+  assert.deepEqual(normal.suppressed, [])
+})
+
 test("routing policy preflights the ledger before any route is admitted", () => {
   const cases: Array<{
     name: string
