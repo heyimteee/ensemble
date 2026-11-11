@@ -1,11 +1,18 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { DEFAULT_SETTINGS } from "./defaults.ts"
-import { isNativeFirstMode, NATIVE_FIRST_MODES, nativeFirstMode } from "./native-first.ts"
+import { DEFAULT_NATIVE_FIRST_MODE, isNativeFirstMode, NATIVE_FIRST_MODES, nativeFirstMode } from "./native-first.ts"
 
 test("ticket240: native-first defaults on for new settings", () => {
   assert.equal(DEFAULT_SETTINGS.nativeFirst, "on")
   assert.deepEqual(NATIVE_FIRST_MODES, ["off", "shadow", "on"])
+})
+
+test("ticket240: one canonical default constant wires the setting and the resolver", () => {
+  assert.equal(DEFAULT_NATIVE_FIRST_MODE, "on")
+  assert.equal(DEFAULT_SETTINGS.nativeFirst, DEFAULT_NATIVE_FIRST_MODE)
+  assert.equal(nativeFirstMode(undefined), DEFAULT_NATIVE_FIRST_MODE)
+  assert.equal(nativeFirstMode({ nativeFirst: "sometimes" as any }), DEFAULT_NATIVE_FIRST_MODE)
 })
 
 test("ticket240: an absent persisted mode resolves to on", () => {

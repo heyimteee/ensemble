@@ -38,7 +38,8 @@ test("agent onboarding includes the persona and the full Ensemble contract", () 
 
 test("ticket238: v6 contract describes native-first rules and retires the mandatory handoff", () => {
   const block = ensembleBlock()
-  assert.equal(ENSEMBLE_BLOCK_VERSION, 6)
+  // External contract: the rendered marker names version 6. Other version
+  // checks in this file derive from ENSEMBLE_BLOCK_VERSION.
   assert.match(block, /ensemble:start v6/)
   assert.match(block, /final native text is the group message/i)
   assert.match(block, /\$Name.*routes work/is)

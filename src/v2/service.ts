@@ -169,6 +169,7 @@ import type {
   MessageAttachment,
   MessageStream,
   ModelRef,
+  NativeContactSource,
   NativeSubagentRun,
   NativeSubagentSource,
   NativeSubagentState,
@@ -5841,8 +5842,9 @@ export class EnsembleV2Service {
       if (workspace.id !== found.workspace.id) return { content: "Cross-workspace posts require ensemble_share approval." }
       // Ticket #221/#236: a post from a live native turn anchors to that turn
       // and its dispatch group; a managed run anchors to its own task. The one
-      // active-turn anchor owns the decision, and a cross-conversation post
-      // still never borrows another channel's turn.
+      // active-turn anchor owns workspace/agent validation. This separate
+      // condition keeps the group-channel rule: a workspace post must not
+      // borrow a DM turn, even though that DM turn belongs to the workspace.
       const anchor = this.activeTurnAnchor(context.sessionID, workspace, found.agent)
       const anchorTask = anchor && (anchor.task.conversationID ?? anchor.task.workspaceID) === workspace.id ? anchor.task : undefined
       const post = await this.appendMessage(workspace, {
@@ -5862,6 +5864,19 @@ export class EnsembleV2Service {
       })
       const archivedRefs = archivedMentionRefs(text, state.agents).filter((agent) => agent.id !== found.agent.id)
       const outsideRefs = outsideMentionRefs(text, state.agents, workspace.memberIDs, found.agent.id)
+      // Ticket #236: the anchor's contact ledger owns cross-tool dedupe. A
+      // recipient already contacted by a delegation, handoff, earlier post, or
+      // approval gets no second route or approval from this post. The post
+      // itself is still the visible message.
+      const alreadyContacted = (agentID: Id): boolean => this.anchorAlreadyContacted(anchor, agentID)
+      const mentionIDsToRoute = mentionIDs.filter((agentID) => !alreadyContacted(agentID))
+      const contactedMentionNames = mentionIDs
+        .filter((agentID) => alreadyContacted(agentID))
+        .map((agentID) => state.agents[agentID]?.name ?? agentID)
+      const outsideRefsToAsk = outsideRefs.filter((agent) => !alreadyContacted(agent.id))
+      const contactedOutsideNames = outsideRefs
+        .filter((agent) => alreadyContacted(agent.id))
+        .map((agent) => agent.name)
       const excludedTokens = new Set([
         ...archivedRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]),
         ...outsideRefs.flatMap((agent) => [`$${agent.name}`.toLowerCase(), `!${agent.name}`.toLowerCase(), `$${agent.id}`.toLowerCase(), `!${agent.id}`.toLowerCase()]),
@@ -5880,7 +5895,7 @@ export class EnsembleV2Service {
       const peerDepthMax = state.dispatchGroups[dispatchGroupID]?.depthMax ?? dispatchLimits(state.settings).depth
       // Outside-roster contact follows the existing approval model: the user
       // consents first, then the approved turn runs through the same queue.
-      for (const agent of outsideRefs) {
+      for (const agent of outsideRefsToAsk) {
         const correlationID = newCorrelationID()
         const approval: Approval = {
           id: id("approval"),
@@ -5921,7 +5936,7 @@ export class EnsembleV2Service {
       for (const agent of archivedRefs) noteRefusal(agent.name, `${agent.name} is archived and cannot take turns.`)
       for (const token of unknown) noteRefusal(bareMentionToken(token), "no workspace member matches.")
       for (const agent of outsideRefs) refused.push(agent.name)
-      for (const agentID of mentionIDs) {
+      for (const agentID of mentionIDsToRoute) {
         const agent = state.agents[agentID]
         if (!agent) continue
         if (askingDepth + 1 > peerDepthMax) {
@@ -5957,13 +5972,21 @@ export class EnsembleV2Service {
       }
       if (anchorTask) await this.recordAgentPost(anchorTask, post, text, createdAgentIDs)
       this.schedule()
-      if (created.length === 0 && outsideRefs.length === 0) {
+      const contactedNames = [...contactedMentionNames, ...contactedOutsideNames]
+      const alreadyNote = contactedNames.length > 0
+        ? ` Already contacted $${contactedNames.join(", $")} during this turn; no duplicate work was created.`
+        : ""
+      if (created.length === 0 && outsideRefsToAsk.length === 0) {
         const detail = refusalNotes.length > 0 ? ` ${refusalNotes[0]}` : ""
-        return { content: refused.length > 0 ? `Posted to #${workspace.name}. No peer turns created (${refused.length} refused).${detail}` : `Posted to #${workspace.name}.` }
+        return {
+          content: refused.length > 0
+            ? `Posted to #${workspace.name}. No peer turns created (${refused.length} refused).${detail}${alreadyNote}`
+            : `Posted to #${workspace.name}.${alreadyNote}`,
+        }
       }
       const asked = created.length > 0 ? ` Asked $${created.join(", $")}; the answer will arrive here.` : ""
-      const pendingNote = outsideRefs.length > 0 ? ` Approval required before contacting $${outsideRefs.map((agent) => agent.name).join(", $")}.` : ""
-      return { content: `Posted to #${workspace.name}.${asked}${pendingNote}` }
+      const pendingNote = outsideRefsToAsk.length > 0 ? ` Approval required before contacting $${outsideRefsToAsk.map((agent) => agent.name).join(", $")}.` : ""
+      return { content: `Posted to #${workspace.name}.${asked}${pendingNote}${alreadyNote}` }
     }
     if (input.kind === "agent") {
       const rawID = String(input.id ?? "").trim()
@@ -5979,6 +6002,11 @@ export class EnsembleV2Service {
         // asking turn, and its recipient is recorded so a later `$Name` cannot
         // queue the same approval twice.
         const anchor = this.activeTurnAnchor(context.sessionID, found.workspace, found.agent)
+        // Ticket #236: an earlier tool or route already contacted this
+        // recipient in the turn, so the approval queue must not grow twice.
+        if (this.anchorAlreadyContacted(anchor, target.id)) {
+          return { content: `Already contacted ${target.name} during this turn; no new approval was created.` }
+        }
         const approval: Approval = {
           id: id("approval"),
           workspaceID: found.workspace.id,
@@ -6077,6 +6105,12 @@ export class EnsembleV2Service {
     if (duplicate) {
       await this.recordNativeContact(anchor?.task, recipient.id, "handoff")
       return { content: handoffDuplicateText(recipient.name, task) }
+    }
+    // Ticket #236: an explicit tool already contacted this recipient during
+    // the turn. The retry above kept its existing hop; this is a different
+    // handoff and must not create a second one.
+    if (this.anchorAlreadyContacted(anchor, recipient.id)) {
+      return { content: `Already contacted ${recipient.name} during this turn; no new handoff was created.` }
     }
     // Required task budget: the sender must say how many direct dispatches
     // the recipient may make. Zero is a deliberate one-shot ask.
@@ -6852,6 +6886,12 @@ export class EnsembleV2Service {
       await this.recordNativeContact(anchor?.task, target.id, "delegation")
       return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.` }
     }
+    // Ticket #236: one native turn contacts a recipient at most once. A retry
+    // returned its existing work above; a different delegation to the same
+    // recipient in the same turn creates nothing.
+    if (this.anchorAlreadyContacted(anchor, target.id)) {
+      return { content: `Already contacted ${target.name} during this turn; no new delegation was created.` }
+    }
     // Required task budget: the sender must say how many direct dispatches
     // the recipient may make. Zero is a deliberate one-shot ask.
     const taskBudget = validateTaskMaxHops("ensemble_delegate", input.maxHops)
@@ -7054,8 +7094,8 @@ export class EnsembleV2Service {
    * A live managed run wins. Otherwise the session's open native turn owns the
    * call. Only when neither exists does the legacy newest-open-sender-task
    * fallback apply, so a parentless hop still holds the sender's turn open.
-   * The resolver is pure; this method only supplies the candidates for the
-   * session and workspace.
+   * The pure resolver validates every candidate against this workspace and
+   * agent, so a stale or foreign turn can never own the call.
    */
   private activeTurnAnchor(sessionID: string, workspace: Workspace, agent: Agent): ActiveTurnAnchor | undefined {
     const state = this.store.read()
@@ -7068,16 +7108,24 @@ export class EnsembleV2Service {
           const fallbackID = newestOpenSenderTaskID(state, workspace.id, agent.id)
           return fallbackID ? state.subtasks[fallbackID] : undefined
         })()
-    return resolveActiveTurnAnchor({ runTask, nativeTurn, fallbackTask, subtasks: state.subtasks })
+    return resolveActiveTurnAnchor({
+      workspaceID: workspace.id,
+      agentID: agent.id,
+      runTask,
+      nativeTurn,
+      fallbackTask,
+      subtasks: state.subtasks,
+    })
   }
 
   /**
    * Ticket #236: record one recipient on a native turn's durable contact
    * ledger. Non-native anchors (managed runs, the legacy fallback) have no
-   * ledger and are silently skipped. The ledger carries IDs and a source code
-   * only; the recipient's conversation text never enters it.
+   * ledger and are silently skipped. The ledger stores recipient IDs only; the
+   * source code travels in this log event and the recipient's conversation
+   * text never enters either.
    */
-  private async recordNativeContact(task: Subtask | undefined, recipientID: Id | undefined, source: string): Promise<void> {
+  private async recordNativeContact(task: Subtask | undefined, recipientID: Id | undefined, source: NativeContactSource): Promise<void> {
     if (!task || !recipientID || !isNativeTurn(task)) return
     const recorded = await this.store.recordNativeContact(task.id, recipientID)
     const latest = this.store.subtask(task.id)
@@ -7089,6 +7137,16 @@ export class EnsembleV2Service {
       recorded,
       contacted: latest ? nativeContacted(latest.native).length : undefined,
     })
+  }
+
+  /**
+   * Ticket #236: the native turn already contacted this recipient through an
+   * explicit tool, a user route, a group post, or an approval. The turn's
+   * durable ledger is the single source; managed runs and the legacy fallback
+   * carry no ledger and therefore never dedupe.
+   */
+  private anchorAlreadyContacted(anchor: ActiveTurnAnchor | undefined, recipientID: Id): boolean {
+    return anchor?.contacted.includes(recipientID) === true
   }
 
   private profileForSession(sessionID: string): string | undefined {

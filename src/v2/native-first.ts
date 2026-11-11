@@ -2,6 +2,13 @@ import type { Agent, NativeFirstMode, Settings } from "./types.ts"
 
 export const NATIVE_FIRST_MODES: readonly NativeFirstMode[] = ["off", "shadow", "on"]
 
+/**
+ * Ticket #240: the one canonical native-first default. The setting, the
+ * resolver, and the one-time store migration all read this constant so a
+ * future default change cannot drift between them.
+ */
+export const DEFAULT_NATIVE_FIRST_MODE: NativeFirstMode = "on"
+
 export function isNativeFirstMode(value: unknown): value is NativeFirstMode {
   return typeof value === "string" && (NATIVE_FIRST_MODES as readonly string[]).includes(value)
 }
@@ -12,7 +19,7 @@ export function isNativeFirstMode(value: unknown): value is NativeFirstMode {
  * cutover. Explicit `off` and `shadow` are always respected.
  */
 export function nativeFirstMode(settings: Pick<Settings, "nativeFirst"> | undefined): NativeFirstMode {
-  return settings?.nativeFirst && isNativeFirstMode(settings.nativeFirst) ? settings.nativeFirst : "on"
+  return isNativeFirstMode(settings?.nativeFirst) ? settings.nativeFirst : DEFAULT_NATIVE_FIRST_MODE
 }
 
 /**

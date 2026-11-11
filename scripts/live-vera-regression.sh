@@ -87,7 +87,7 @@ STORE_DB="$LIVE_DATA/opencode/opencode.db"
 run_driver() {
   local phase="$1"
   shift
-  "$LIVE_NODE_BIN" "$SCRIPT_DIR/lib/vera-regression-driver.mjs" \
+  "$LIVE_NODE_BIN" --experimental-strip-types "$SCRIPT_DIR/lib/vera-regression-driver.mjs" \
     --url "$LIVE_SERVER_URL" \
     --password "$LIVE_SERVER_PASSWORD" \
     --project "$LIVE_PROJECT" \

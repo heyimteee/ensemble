@@ -68,20 +68,21 @@ export function workPageRects(page: WorkPanePage, layout: WorkPageGeometry): Wor
     const items: WorkPaneItem[] = section.items
       ?? section.tasks.map((task): WorkPaneItem => ({ kind: "task", task }))
     if (section.mode === "cards") {
-      // Ticket #239: every card section is one full-width card, so its
-      // rectangle starts at the content's left edge and spans its width.
-      const item = items[0]
-      if (item) {
+      // Ticket #239/#241: every card in a card section is one full-width card
+      // stacked at successive WORK_CARD_ROWS. Pagination emits one card per
+      // section today, but the focus geometry follows the renderer's card list
+      // rather than assuming a single item.
+      for (const [index, item] of items.entries()) {
         rects.push({
           id: workItemFocusID(item),
           page: page.number,
           x: 0,
-          y,
+          y: y + index * WORK_CARD_ROWS,
           width: Math.max(1, layout.cardWidth),
           height: WORK_CARD_ROWS,
         })
       }
-      y += WORK_CARD_ROWS
+      y += Math.max(1, items.length) * WORK_CARD_ROWS
       continue
     }
     for (const item of items) {

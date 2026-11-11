@@ -29,8 +29,10 @@ type Handlers = {
 
 function fakeContext(sharedValues?: Map<string, unknown>) {
   const values = sharedValues ?? new Map<string, unknown>()
-  // Ticket #240: the broad service suite exercises the explicit legacy tools.
-  // It opts into `off`; the default-on path has dedicated tests below.
+  // Ticket #240: this branch keys on whether the caller supplied a store map,
+  // not on a mode. Suites that exercise the explicit legacy tools omit the map
+  // and get an `off` seed; a caller that passes a map owns its settings,
+  // including the empty map that represents a genuinely fresh store.
   if (!sharedValues) seedLegacySettings(values)
   const removedSessions: string[] = []
   const interruptedSessions: string[] = []
@@ -1402,6 +1404,28 @@ test("ticket240: service start persists native-first on and logs the effective m
   }
 })
 
+test("ticket240: a store with no seeded settings starts on and persists the default", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-240-fresh-"))
+  // Passing an empty map is a genuinely fresh store: fakeContext does not seed
+  // the explicit-legacy settings. The service must resolve and persist `on`.
+  const values = new Map<string, unknown>()
+  const { ctx, tools } = fakeContext(values)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    const snap = await service.handlers().snapshot({ directory })
+    assert.equal(snap.state.settings.nativeFirst, "on", "the effective mode is on")
+    assert.equal((values.get("v2/meta") as any).settings.nativeFirst, "on", "the first start persists the default")
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+    const entry = getGlobalLogger()?.recent({ event: "native.mode" }).at(-1)
+    assert.equal(entry?.mode, "on")
+    assert.equal(entry?.migrated, true)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket240: service start respects an explicit off mode and logs no migration", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-240-explicit-off-"))
   const values = new Map<string, unknown>([["v2/meta", { version: 4, updatedAt: 1, settings: { nativeFirst: "off" }, ui: {} }]])
@@ -1435,18 +1459,23 @@ test("ticket240: the default native surface rolls back to legacy tools and resto
   try {
     assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
 
+    // `:tools legacy` keeps native ingestion but restores the old tools.
+    await handlers.invoke({ directory, action: "settings.update", payload: { toolSurface: "legacy" } })
+    assert.ok(tools.has("workspace_info") && tools.has("delegate"))
+
     // `:native-first off`: explicit off always selects the legacy surface.
     await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "off" } })
     assert.ok(tools.has("send_message"))
     assert.ok(tools.has("delegate") && tools.has("handoff"))
 
-    // `:native-first on`: the command also clears the legacy surface override.
-    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on", toolSurface: "native" } })
-    assert.equal(tools.has("send_message"), false)
+    // `:native-first on` changes the mode only: an explicit legacy surface
+    // stays in force (#240 treats on + legacy as a valid state).
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    assert.ok(tools.has("send_message"), "the mode command never clears an explicit legacy surface")
 
-    // `:tools legacy` keeps native ingestion but restores the old tools.
-    await handlers.invoke({ directory, action: "settings.update", payload: { toolSurface: "legacy" } })
-    assert.ok(tools.has("workspace_info") && tools.has("delegate"))
+    // `:tools native` is the separate restore.
+    await handlers.invoke({ directory, action: "settings.update", payload: { toolSurface: "native" } })
+    assert.equal(tools.has("send_message"), false)
 
     // `shadow` keeps the legacy surface even with a stale native tool setting.
     await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow", toolSurface: "native" } })
@@ -12573,6 +12602,139 @@ test("ticket236: a group post from a native turn keeps its row and route under t
     assert.equal(children[0].assigneeID, "b")
     assert.equal(children[0].dispatchGroupID, turn.dispatchGroupID, "the route stays in the turn's group")
     assert.deepEqual(after.subtasks[turn.id].native.contacted, ["b"], "the post records the contacted recipient")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket236: explicit tools never contact the same recipient twice in one turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-236-tool-dedupe-"))
+  const { ctx, nativeSessions, emitEvent, tools } = fakeContext()
+  nativeSessions.set("s_group_a", { id: "s_group_a" })
+  nativeSessions.set("s_group_b", { id: "s_group_b" })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "e", name: "Echo", member: false },
+  ])
+  mkdirSync(join(directory, ".ensemble", "handoffs"), { recursive: true })
+  writeFileSync(join(directory, ".ensemble", "handoffs", "task-nova-sage-236.md"), "---\nensemble: handoff\ntask: Review the release notes\n---\n# Handoff\n")
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on", toolSurface: "legacy" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_group_a",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "Coordinate the release" } },
+    }, { id: "evt_236_tool_dedupe_enqueue", created: Date.now() }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_group_a" }, { id: "evt_236_tool_dedupe_start", created: Date.now() + 1 }))
+    await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory), "working")))
+    const turn = nativeTurnIn(await snapshotFor(handlers, directory), "working")
+
+    const delegated = await tools.get("delegate").execute(
+      { maxHops: 0, assignee: "Sage", title: "Release notes", instruction: "Draft the release notes." },
+      { sessionID: "s_group_a" },
+    )
+    assert.match(delegated.content, /Delegated to Sage/)
+
+    const handed = await tools.get("handoff").execute(
+      { task: "Review the release notes", summary: "Review", path: ".ensemble/handoffs/task-nova-sage-236.md", to: "Sage", maxHops: 0 },
+      { sessionID: "s_group_a" },
+    )
+    assert.match(handed.content, /Already contacted Sage during this turn/)
+
+    const posted = await tools.get("send_message").execute(
+      { kind: "workspace", text: "Please sync the notes, $Sage." },
+      { sessionID: "s_group_a" },
+    )
+    assert.match(posted.content, /Already contacted \$Sage/)
+
+    const outside = await tools.get("delegate").execute(
+      { maxHops: 0, assignee: "Echo", title: "Audit", instruction: "Audit the release." },
+      { sessionID: "s_group_a" },
+    )
+    assert.match(outside.content, /Approval required/)
+    const outsidePost = await tools.get("send_message").execute(
+      { kind: "workspace", text: "Please audit too, $Echo." },
+      { sessionID: "s_group_a" },
+    )
+    assert.match(outsidePost.content, /Already contacted \$Echo/)
+
+    const after = await snapshotFor(handlers, directory)
+    assert.equal(
+      Object.values(after.subtasks).filter((task: any) => task.assigneeID === "b").length,
+      1,
+      "the explicit delegation is the only work for Sage",
+    )
+    assert.equal(
+      Object.values(after.subtasks).filter((task: any) => task.assigneeID === "b" && task.workKind === "handoff").length,
+      0,
+      "the second explicit tool creates no handoff",
+    )
+    assert.equal(
+      Object.values(after.subtasks).filter((task: any) => task.assigneeID === "b" && task.workKind === "turn").length,
+      0,
+      "the group post creates no peer turn for the delegated recipient",
+    )
+    assert.equal(
+      Object.values(after.subtasks).filter((task: any) => task.assigneeID === "e").length,
+      0,
+      "an approval is not work yet",
+    )
+    assert.equal(
+      Object.values(after.approvals).filter((approval: any) => approval.kind === "outside_roster" && approval.payload?.assigneeID === "e").length,
+      1,
+      "one outside-roster approval per recipient",
+    )
+    assert.deepEqual(after.subtasks[turn.id].native.contacted, ["b", "e"], "the ledger keeps one entry per recipient")
+    const posts = agentTextMessages(after, turn.id).filter((post: any) => post.text.length > 0)
+    assert.equal(posts.length, 2, "both posts remain visible messages")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket236: a workspace post never borrows a DM turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-236-dm-anchor-"))
+  const { ctx, nativeSessions, emitEvent, tools } = fakeContext()
+  nativeSessions.set("s_direct_a", { id: "s_direct_a" })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", directSessionID: "s_direct_a" },
+  ])
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on", toolSurface: "legacy" } })
+    emitEvent(nativeEvent("session.inbox.enqueued", {
+      sessionID: "s_direct_a",
+      inboxID: "m1",
+      item: { type: "user", delivery: "steer", payload: { text: "Direct hello" } },
+    }, { id: "evt_236_dm_enqueue", created: Date.now() }))
+    emitEvent(nativeEvent("session.execution.started", { sessionID: "s_direct_a" }, { id: "evt_236_dm_start", created: Date.now() + 1 }))
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      return Object.values(state.subtasks).some((task: any) => task.origin === "native" && task.conversationID === "dm:a:w")
+    })
+    const before = await snapshotFor(handlers, directory)
+    const dmTurn = Object.values(before.subtasks).find((task: any) => task.origin === "native" && task.conversationID === "dm:a:w") as any
+    assert.equal(dmTurn.workspaceID, "dm:a:w")
+
+    const posted = await tools.get("send_message").execute(
+      { kind: "workspace", text: "Hello team." },
+      { sessionID: "s_direct_a" },
+    )
+    assert.match(posted.content, /Posted/)
+
+    const after = await snapshotFor(handlers, directory)
+    const post = (after.messages.w ?? []).find((message: any) => message.author === "agent" && message.text === "Hello team.") as any
+    assert.ok(post, "the group post is visible in the workspace channel")
+    assert.equal(post.taskID, undefined, "the DM turn does not own the workspace post")
+    assert.equal(after.subtasks[dmTurn.id].agentPost, undefined, "the DM turn records no workspace post")
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

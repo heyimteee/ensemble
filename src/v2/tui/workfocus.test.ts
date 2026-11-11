@@ -98,6 +98,31 @@ test("ticket239: card rectangles mirror one full-width card per section", () => 
   assert.deepEqual(workLayoutRects(layout), [{ page: 1, rects }])
 })
 
+test("ticket241: a card section registers every rendered card at successive rows", () => {
+  // The renderer iterates `section.cards`; focus must register the same list.
+  // Pagination emits one card per section, so this is defensive agreement for
+  // any future multi-card section and proves the two models match.
+  const section: WorkPaneSection = {
+    groupID: "g1",
+    label: "GROUP 1",
+    tone: "faint",
+    mode: "cards",
+    tasks: [task({ id: "a" }), task({ id: "b" })],
+    height: 1 + 2 * WORK_CARD_ROWS,
+    continued: false,
+    gapBefore: false,
+  }
+  const page: WorkPanePage = { number: 1, sections: [section], tasks: [], height: 1 + 2 * WORK_CARD_ROWS }
+  const layout = { mode: "cards" as const, cardWidth: 59, cardContentWidth: 54, pages: [page] }
+  assert.deepEqual(
+    workPageRects(page, layout).map((item) => [item.id, item.x, item.y, item.width, item.height]),
+    [
+      ["a", 0, 1, 59, WORK_CARD_ROWS],
+      ["b", 0, 1 + WORK_CARD_ROWS, 59, WORK_CARD_ROWS],
+    ],
+  )
+})
+
 test("ticket173: compact pages emit one full-width rectangle per row", () => {
   const sections: WorkPaneSection[] = [
     { groupID: "g1", label: "GROUP 1", tone: "faint", mode: "rows", tasks: [task({ id: "a" }), task({ id: "b" })], height: 3, continued: false, gapBefore: false },
