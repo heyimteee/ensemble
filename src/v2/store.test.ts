@@ -40,6 +40,82 @@ const subtask = (patch: Partial<Subtask> = {}): Subtask => ({
 const message = (patch: Partial<Message> = {}): Message => ({
   id: "m", workspaceID: "w", seq: 1, author: "agent", text: "reply", kind: "text", createdAt: 1, ...patch,
 })
+
+test("ticket240: an existing store without nativeFirst persists the default once", async () => {
+  const ctx = fakeContext()
+  ctx.values.set("v2/meta", { version: 3, updatedAt: 1, settings: { maxActiveRuns: 2 }, ui: {} })
+  const store = new V2Store(ctx as any)
+  await store.load()
+  assert.equal(store.settings().nativeFirst, "on", "the absent persisted value reads as on")
+  assert.deepEqual(await store.ensureNativeFirstDefault(), { mode: "on", migrated: true })
+  const persisted = ctx.values.get("v2/meta") as any
+  assert.equal(persisted.settings.nativeFirst, "on", "the first start persists the default")
+  const version = persisted.version
+
+  const restarted = new V2Store(ctx as any)
+  await restarted.load()
+  assert.deepEqual(await restarted.ensureNativeFirstDefault(), { mode: "on", migrated: false })
+  assert.equal((ctx.values.get("v2/meta") as any).version, version, "a persisted choice is never rewritten")
+})
+
+test("ticket240: a new store persists nativeFirst on at first start", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx as any)
+  await store.load()
+  assert.equal(store.settings().nativeFirst, "on")
+  assert.deepEqual(await store.ensureNativeFirstDefault(), { mode: "on", migrated: true })
+  assert.equal((ctx.values.get("v2/meta") as any).settings.nativeFirst, "on")
+})
+
+test("ticket240: explicit off and shadow survive the default migration", async () => {
+  for (const mode of ["off", "shadow"] as const) {
+    const ctx = fakeContext()
+    ctx.values.set("v2/meta", { version: 2, updatedAt: 1, settings: { nativeFirst: mode }, ui: {} })
+    const store = new V2Store(ctx as any)
+    await store.load()
+    assert.equal(store.settings().nativeFirst, mode)
+    assert.deepEqual(await store.ensureNativeFirstDefault(), { mode, migrated: false })
+    assert.equal((ctx.values.get("v2/meta") as any).settings.nativeFirst, mode)
+  }
+})
+
+test("ticket236: native contacts are durable, idempotent, and restart-safe", async () => {
+  const ctx = fakeContext()
+  const store = new V2Store(ctx as any)
+  await store.load()
+  await store.saveAgent(agent())
+  await store.saveWorkspace(workspace())
+  await store.saveSubtask(subtask({
+    id: "t_native",
+    origin: "native",
+    workKind: "turn",
+    native: { sessionID: "s", assistantMessageIDs: [], phase: "working" },
+  }))
+
+  assert.equal(await store.recordNativeContact("t_native", "b"), true, "the first contact records")
+  assert.equal(await store.recordNativeContact("t_native", "b"), false, "a repeat contact is idempotent")
+  assert.equal(await store.recordNativeContact("t_native", "c"), true)
+  assert.deepEqual(store.subtask("t_native")?.native?.contacted, ["b", "c"])
+
+  const loaded = new V2Store(ctx as any)
+  await loaded.load()
+  assert.deepEqual(loaded.subtask("t_native")?.native?.contacted, ["b", "c"], "the ledger survives restart")
+
+  // A turn created before the field existed reads as an empty ledger.
+  await loaded.saveSubtask(subtask({
+    id: "t_legacy",
+    origin: "native",
+    workKind: "turn",
+    native: { sessionID: "s", assistantMessageIDs: [], phase: "working" },
+  }))
+  assert.deepEqual(loaded.subtask("t_legacy")?.native?.contacted, undefined)
+  assert.equal(await loaded.recordNativeContact("t_legacy", "b"), true, "a legacy turn accepts its first contact")
+  assert.deepEqual(loaded.subtask("t_legacy")?.native?.contacted, ["b"])
+
+  assert.equal(await loaded.recordNativeContact("t_missing", "b"), false, "an unknown turn never creates a row")
+  assert.equal(await loaded.recordNativeContact("t", "b"), false, "a non-native row has no native ledger")
+})
+
 const nativeSubagent = (patch: Partial<NativeSubagentRun> = {}): NativeSubagentRun => ({
   childSessionID: "child_1",
   parentSessionID: "parent_1",

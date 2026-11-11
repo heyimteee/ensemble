@@ -169,7 +169,7 @@ import { clearToasts, createToastState, expireToasts, feedbackChannel, initToast
 import { editLine } from "./line-editor.ts"
 import { commandStatusHints, layerEntries, globalEntries, leaderHints, leaderLayerEntries, leaderMenuEntries, normalizeKeyToken, resolveLeaderKey, resolveNormalKey, singleKeyEntry, statuslineHints, whichKeyLines, type KeyContext, type KeyEntry } from "./keymap.ts"
 import { filterHelpSections, helpEntryKey, helpMatchAfter, helpSections } from "./help.ts"
-import { commandCompletions, completeCommand, parseCommandLine, type ParsedCommand } from "./commands.ts"
+import { commandCompletions, completeCommand, nativeFirstCommand, parseCommandLine, toolsCommand, type ParsedCommand } from "./commands.ts"
 import { createLogger, type EnsembleLogger, type LogEntry } from "../logging.ts"
 import { formatLogEntry, formatLogStats, logEntryTone, logsRpcInput, logsTitle, parseLogsCommand, sortLogEntries, type LogsViewFilter } from "./logs.ts"
 import { createPageActivation } from "./page-activation.ts"
@@ -2302,6 +2302,29 @@ export function EnsembleV2App() {
     dispatchInteraction({ type: "command.close" })
   }
 
+  /**
+   * Ticket #240: mode and surface commands share one path: validate, send a
+   * single settings patch, refresh, then acknowledge. A validation miss stays
+   * in the statusline without a toast or a settings write.
+   */
+  const applySettingsCommand = async (
+    label: string,
+    result: ReturnType<typeof nativeFirstCommand> | ReturnType<typeof toolsCommand>,
+  ): Promise<void> => {
+    if (!result.ok) { notify(result.error, "error"); return }
+    if (busy()) return
+    setBusy(true)
+    try {
+      await invoke(context, "settings.update", result.patch)
+      await refresh()
+      notify(result.message, "success")
+    } catch (error: any) {
+      notify(`${label}: ${error?.message ?? String(error)}`, "error")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const runNamedCommand = async (command: ParsedCommand): Promise<void> => {
     switch (command.name) {
       case "settings": openSettings(); return
@@ -2316,6 +2339,8 @@ export function EnsembleV2App() {
       case "resume": await togglePause(false); return
       case "init": await initEnsemble(); return
       case "native": openNative(); return
+      case "native-first": await applySettingsCommand("Native-first", nativeFirstCommand(command.args ?? [])); return
+      case "tools": await applySettingsCommand("Tools", toolsCommand(command.args ?? [])); return
       case "logs": openLogs(command.args ?? []); return
       case "help": openHelp(); return
       case "q": leaveEnsemble(); return
@@ -7699,7 +7724,7 @@ export function EnsembleV2App() {
                         <Show when={section.label}>
                           <ChromeText colors={colors} fg={section.tone === "warn" ? colors.warn : colors.faint} bg={colors.bg} width="100%" truncate text={section.label ?? ""} />
                         </Show>
-                        <box flexDirection="row" width="100%" gap={1}>
+                        <box flexDirection="row" width="100%">
                           <For each={section.cards}>{(card) => (
                             <WorkCardView
                               colors={colors}

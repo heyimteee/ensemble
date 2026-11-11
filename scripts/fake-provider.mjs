@@ -46,6 +46,11 @@ const INTERRUPT_HOLD_CHUNKS = 90
 // the peer; the reply body is the final native text the service routes from.
 const FAKE_MENTION_FINAL_RE = /fake-mention-final:([A-Za-z][A-Za-z0-9_-]*)/
 const FAKE_MENTION_FINAL_MARKER = "AGENT_FINAL_MENTION_MARKER"
+// Ticket #241 Vera regression: one deterministic leader turn first calls the
+// explicit migration delegation, then its final text mentions the delegated
+// recipient plus several other roster members. The recipient names come from
+// the driver so the same provider works for any isolated fixture roster.
+const FAKE_VERA_REGRESSION_RE = /fake-vera-regression:delegate=([A-Za-z][A-Za-z0-9_-]*);mentions=([A-Za-z][A-Za-z0-9_,-]*)/
 // Ticket #227 keeps the retry state visible long enough to assert `retrying`.
 // #210's probe leaves the default zero-delay behavior unchanged.
 const RETRY_AFTER_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_RETRY_DELAY_MS ?? "0"))
@@ -409,6 +414,13 @@ function parseBudgetMarker(text) {
   }
 }
 
+// Ticket #241: the final text must name the explicit delegation recipient too,
+// so the native contact ledger has a real duplicate to suppress.
+function veraRegressionFinalText(mentions) {
+  const names = String(mentions ?? "").split(",").map((name) => name.trim()).filter(Boolean)
+  return `Vera regression complete. ${names.map((name) => `$${name}`).join(" ")} please confirm your part.\n`
+}
+
 function latestDispatchGroup(prompt) {
   let last
   for (const match of prompt.matchAll(/group="(dispatch_[^"]+)"/g)) last = match[1]
@@ -554,6 +566,20 @@ const server = createServer(async (request, response) => {
     const retryFixture = latestUserText.includes(FAKE_RETRY_PROMPT)
     const interruptHold = latestUserText.includes(FAKE_INTERRUPT_PROMPT)
     const finalMention = latestUserText.match(FAKE_MENTION_FINAL_RE)
+    // A native turn injects its compact context as a user-role message after
+    // the original prompt and the tool result, so neither `latestUserText` nor
+    // the generic `toolResult` (after the latest user) identifies this turn.
+    // The group transcript is also embedded in the system prompt, so a marker
+    // from an earlier turn must not count: only a user-role message can start
+    // this fixture turn. Any tool-role result after that message belongs to it.
+    const veraMarkerIndex = messages.findIndex((message) =>
+      (message?.role ?? message?.type) === "user" && FAKE_VERA_REGRESSION_RE.test(textOf(message?.content)))
+    const veraRegression = veraMarkerIndex >= 0 ? FAKE_VERA_REGRESSION_RE.exec(textOf(messages[veraMarkerIndex]?.content)) : null
+    const veraToolResult = veraMarkerIndex >= 0 && messages.slice(veraMarkerIndex + 1).some((message) => (message?.role ?? message?.type) === "tool")
+    // Only a streaming request is the fixture's model turn. Title, summary,
+    // and compaction requests in the same session must keep their normal
+    // deterministic replies even though the marker remains in history.
+    const veraFinal = Boolean(veraRegression && veraToolResult && body?.stream !== false)
     const askedThisTurn = latestUserText.includes(FAKE_ASK_PROMPT)
     const benchmark = latestUserText.match(FAKE_BENCHMARK_RE)
     const benchmarkMode = benchmark?.[1]
@@ -602,6 +628,8 @@ const server = createServer(async (request, response) => {
       ? INTERRUPT_HOLD_MARKDOWN
       : finalMention
       ? `${FAKE_MENTION_FINAL_MARKER} — $${finalMention[1]} please pick up the follow-up.\n`
+      : veraFinal
+      ? veraRegressionFinalText(veraRegression[2])
       : leaseHold
       ? LEASE_HOLD_MARKDOWN
       : motion
@@ -630,6 +658,7 @@ const server = createServer(async (request, response) => {
       model: body?.model,
       stream: body?.stream !== false,
       messages: messages.length,
+      veraToolResult,
       rich,
       bubble,
       hold,
@@ -685,6 +714,28 @@ const server = createServer(async (request, response) => {
       return
     }
     try {
+      if (body?.stream !== false && veraRegression && !veraToolResult) {
+        // Ticket #241: the explicit migration delegation is a real tool call
+        // from the leader's native turn. maxHops: 0 keeps it a one-shot ask.
+        await streamToolCall(
+          response,
+          requestID,
+          "ensemble_delegate",
+          {
+            assignee: veraRegression[1],
+            title: "Vera regression delegation",
+            instruction: "Vera regression delegated work for the explicit recipient.",
+            maxHops: 0,
+          },
+          "vera_regression_tool_call",
+          { recipient: veraRegression[1] },
+        )
+        return
+      }
+      if (body?.stream !== false && veraRegression && veraToolResult) {
+        await streamCompletion(response, veraRegressionFinalText(veraRegression[2]), requestID)
+        return
+      }
       if (body?.stream !== false && subagentChild) {
         // The real child session streams long enough that the parent's first
         // turn has already reached idle before this reply completes.

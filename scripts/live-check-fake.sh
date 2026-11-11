@@ -207,6 +207,11 @@ live_start_server
 live_check_plugin
 live_wait_for_model "ensemble-fake" "ensemble-fake-model"
 live_assert_single_model "ensemble-fake" "ensemble-fake-model"
+# Ticket #240: this broad walkthrough predates native-first default-on and
+# asserts the legacy direct, DM-queue, and statusline surfaces. Run it on the
+# explicit legacy path; the Vera regression (#241) covers the default-on
+# cutover, and the unit/service suites cover the default itself.
+live_invoke settings.update '{"nativeFirst":"off"}' >/dev/null
 live_start_tui
 live_wait_for_native_tui
 live_open_ensemble

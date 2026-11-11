@@ -157,9 +157,27 @@ export type NativeTurnInfo = {
   settledAt?: number
   resultMessageID?: Id
   errorCode?: string
+  /**
+   * Ticket #236: durable recipients already contacted during this turn. A
+   * missing field is an empty ledger for turns created before it existed.
+   */
+  contacted?: Id[]
   /** Ticket #222: bounded, identity-only host event timeline. */
   events?: NativeTurnEvent[]
 }
+
+/**
+ * Ticket #236: why a native turn recorded a recipient on its contact ledger.
+ * The code is logged with the turn and recipient; the durable ledger stores
+ * recipient IDs only.
+ */
+export type NativeContactSource =
+  | "delegation"
+  | "handoff"
+  | "group-post"
+  | "outside-roster-approval"
+  | "user-route"
+  | "agent-final-route"
 
 /**
  * Ticket #221: the delivery record for one workspace `send_message` post made
@@ -651,9 +669,10 @@ export type Settings = {
   maxDepth: number
   synthesis: boolean
   /**
-   * Native-first migration mode (ADR 0011): `off` keeps today's explicit
-   * path, `shadow` compares without changing the visible path, and `on`
-   * enables native-first behavior as each surface cuts over.
+   * Native-first migration mode (ADR 0011, ticket #240): defaults to `on` for
+   * new and existing stores. `off` keeps today's explicit path, `shadow`
+   * compares without changing the visible path, and `on` enables native-first
+   * behavior as each surface cuts over.
    */
   nativeFirst?: NativeFirstMode
   /**
@@ -664,10 +683,10 @@ export type Settings = {
    */
   nativeMentionRouting?: boolean
   /**
-   * Tool-surface migration setting (ticket #225): `native` keeps only the
-   * decision tools, `legacy` restores the one-release explicit surface. Unset
-   * follows the native-first mode: `on` selects `native`, `off`/`shadow`
-   * select `legacy`.
+   * Tool-surface migration setting (ticket #225, revised by #240): `legacy`
+   * restores the one-release explicit surface while native ingestion stays
+   * on. `native` only follows the mode when `nativeFirst` is `on`; `off` and
+   * `shadow` always select `legacy`.
    */
   toolSurface?: "native" | "legacy"
   /** Dispatch budget tiers (ticket #160); captured by each new root group. */

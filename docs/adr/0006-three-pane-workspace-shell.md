@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-09
-- **Tickets:** #166 (parent), #171, #172, #173, #174
+- **Tickets:** #166 (parent), #171, #172, #173, #174, #239
 - **Supersedes:** none
 - **Related:** ADR 0005, ADR 0008, ADR 0009, `src/v2/tui/workpane.ts`, `src/v2/tui/railmodel.ts`, `src/v2/tui/workfocus.ts`, `src/v2/tui/workapprovals.ts`, `src/v2/tui/picker.ts`
 
@@ -38,24 +38,34 @@ rendered `name | role` without one label column, so separators did not align.
    unread/busy counts, paused marker, and active selection. One cursor walks
    the visible rows.
 
-3. **Work is a filtered, paginated grid.**
+3. **Work is a filtered, paginated one-column card list.**
    ACTIVE is the default and keeps only non-terminal tasks. HISTORY keeps
    terminal tasks, even while their group still has live work, so a group may
    appear in both views with disjoint cards. HISTORY groups order by latest
    finish descending and cards inside a group order by finish, newest first.
-   The newest history group expands, older groups roll up, and a seen group
-   keeps its row when later finishes reorder it. Pagination is pure and sized
-   by the Work pane body; a group that spans pages repeats its header with
-   `cont.`. Completed cards leave ACTIVE immediately and remain in HISTORY
-   under the existing retention; the pane does not add a second retention
-   policy. See [ADR 0008](0008-task-level-history-and-rollup.md); ticket #184
-   replaced this ADR's original all-terminal-group contract.
+   Ticket #239: card mode renders exactly one full-width card per row; the
+   card's outer width is the Work content width and its content width follows
+   the existing card chrome. There is no horizontal card gap and no rendered
+   2–3 column grid. Card mode is a width/height decision, not a column count:
+   the pane needs the width that formerly fit a second minimum card, so
+   160×50 (and wider) render one card per row while 100×30, 120×40, and the
+   80×24 drawer keep the compact-row fallback. The newest history group
+   expands, older groups roll up, and a seen group keeps its row when later
+   finishes reorder it. Pagination is pure and sized by the Work pane body;
+   each section carries one card, and a group that spans pages repeats its
+   header with `cont.`. Completed cards leave ACTIVE immediately and remain in
+   HISTORY under the existing retention; the pane does not add a second
+   retention policy. See [ADR 0008](0008-task-level-history-and-rollup.md);
+   ticket #184 replaced this ADR's original all-terminal-group contract.
 
 4. **Spatial focus and honest actions.**
-   The layout emits card rectangles; `nextWorkCard` selects the nearest card
-   in a direction with perpendicular tie-breaking. `h`/`l` move within a row,
-   `j`/`k` move rows, and `j`/`k` at a page edge auto-page while preserving
-   the horizontal position. `gg`/`G` and `Ctrl+d`/`u` use the same geometry.
+   The layout emits one full-width card rectangle per row; `nextWorkCard`
+   selects the nearest card in a direction with perpendicular tie-breaking.
+   `j`/`k` move rows and auto-page at a page edge while preserving the
+   horizontal position. In the one-column card layout `h`/`l` have no
+   same-row neighbour, so they use the ticket #184 page-edge rule and land on
+   the nearest card of the adjacent page. `gg`/`G` and `Ctrl+d`/`u` use the
+   same geometry.
    Focus is stored by task id; updates, pagination, and filter changes keep it
    until the card disappears, then settle to the nearest prior position.
    `Enter` opens the result. `d`/`t`/`r`/`R`/`x`/`o` act on the focused card
@@ -99,6 +109,10 @@ rendered `name | role` without one label column, so separators did not align.
 
 - **Below 96 columns Work is a drawer.** The chat keeps a usable width rather
   than squeezing all three panes; one pane is temporarily covered.
+- **One card per row trades density for readability.** A wide Work pane shows
+  fewer cards per page than the retired 2–3 column grid, but each card keeps a
+  readable full-width header, title, detail, and tide. Panes too narrow for a
+  comfortable full-width card keep compact rows.
 - **HISTORY is not a second retention policy.** It reads the same task graph
   and the existing finished-work retention; the pane does not keep rows alive
   beyond the service's retention.
@@ -123,8 +137,9 @@ rendered `name | role` without one label column, so separators did not align.
 | Behavior | Test |
 |---|---|
 | Pane breakpoints, exact tiling, drawer right edge, Work content width, size matrix | `src/v2/tui/workpane.test.ts` |
-| ACTIVE/HISTORY partitioning, ordering, page-split `cont.`, empty work | `src/v2/tui/workpane.test.ts` |
-| Spatial navigation, page edges, half pages, focus settlement, card rectangles | `src/v2/tui/workfocus.test.ts` |
+| One full-width card per row, exact card width, compact fallback, page-split `cont.` | `src/v2/tui/workpane.test.ts` |
+| ACTIVE/HISTORY partitioning, ordering, history rollups, empty work | `src/v2/tui/workpane.test.ts` |
+| Spatial navigation, one-column page edges, half pages, focus settlement, card rectangles | `src/v2/tui/workfocus.test.ts` |
 | Rail grouping, primary workspace, Homeless, collapse, visible rows | `src/v2/tui/railmodel.test.ts` |
 | Focused white / unfocused grey, pane focus separation | `src/v2/tui/theme.test.ts`, `src/v2/tui/app-wiring.test.ts` |
 | Inline approvals window, overflow, header grammar | `src/v2/tui/workapprovals.test.ts` |

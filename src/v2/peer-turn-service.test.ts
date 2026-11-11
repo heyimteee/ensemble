@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
-import { startServiceForTest } from "./test-service.ts"
+import { seedLegacySettings, startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 
 type Handlers = {
@@ -14,6 +14,7 @@ type Handlers = {
 
 function fakeContext(sharedValues?: Map<string, unknown>) {
   const values = sharedValues ?? new Map<string, unknown>()
+  if (!sharedValues) seedLegacySettings(values)
   const tools = new Map<string, any>()
   const ctx = {
     onboarding: false,

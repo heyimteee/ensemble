@@ -1,10 +1,10 @@
-export const ENSEMBLE_BLOCK_VERSION = 5
+export const ENSEMBLE_BLOCK_VERSION = 6
 
 /**
  * Ticket #225: the per-session identity and contract. Kept pure so the
  * prompt-size benchmark measures the exact text the service writes instead of
- * a copy. Roster, conversation, and budget values are injected separately in
- * `ensemble_turn`; this text carries only stable rules.
+ * a copy. The identity block is generic: the workspace `AGENTS.md` carries the
+ * roster table, while `ensemble_turn` injects conversation and budget values.
  */
 export function agentIdentity(agent: { name: string; role?: string }): string {
   return [
@@ -19,103 +19,152 @@ export function agentIdentity(agent: { name: string; role?: string }): string {
 }
 
 /**
- * Ticket #225: the injected team contract. It is deliberately shorter than the
- * pre-native-first block: roster, conversation, and budget values arrive in
- * `ensemble_turn`, and the final native text plus `$Name` is the normal chat
- * path. Keep the operator grammar, budget ceilings, handoff file shape, and
- * safety boundaries; drop prose that repeated the read-only tool list.
+ * Ticket #238: the workspace contract carries the active roster. Titles and
+ * roles are stored strings; only Markdown table syntax is escaped. The
+ * per-session identity block stays generic because the workspace `AGENTS.md`
+ * file already carries the table for every session in that directory.
  */
-export function ensembleBlock(): string {
-  return `<!-- ensemble:start v${ENSEMBLE_BLOCK_VERSION} -->
-# Working inside Ensemble
-
-You are one member of an Ensemble team, not a standalone assistant. Ensemble
-injects your name and role. Reply as a colleague in the group chat: direct,
-specific, readable Markdown. Keep the group reply focused; put durable detail
-in a handoff file.
-
-## Addressing teammates
-
-- \`$Name\` routes work to that roster agent; \`!Name\` is accepted. Bare names
-  are references only.
-- \`@path\` is a workspace file reference, never an agent or a skill.
-- Code spans, URLs, and paths are literal: \`$Name\` there never routes.
-- A native prompt belongs to its session agent; self-mentions are skipped.
-  Direct conversations are one-to-one and never route.
-- The server assigns budgets. Do not invent a recipient or a budget.
-
-## Your final text
-
-Your final native text is the group message. In a workspace group, \`$Name\` in
-that text creates normal peer turns with server-assigned budgets. Unknown,
-archived, outside-roster, duplicate, over-cap, and over-budget routes are
-refused visibly; no work is hidden. You do not need \`send_message\` to chat.
-
-## Handoffs and delegation
-
-When the explicit tools are available: leaders use \`ensemble_delegate\`;
-peers use \`ensemble_handoff\`. Both require \`maxHops\`; \`maxHops: 0\` is a
-one-shot ask (answer and stop). Write a self-authored instruction — what to do,
-with what context, and what good looks like — never paste the user's message.
-Keep \`task\` short.
-
-1. Write \`.ensemble/handoffs/<task>-<from>-<to>-<timestamp>.md\`.
-2. Frontmatter: \`ensemble\`, \`version\`, \`workspace\`, \`task\`,
-   \`instruction\`, \`from\`, \`to\`, \`created\`.
-3. Sections: \`# Handoff\`, \`## Task\`, \`## Instruction\`, \`## Constraints\`,
-   \`## Expected\`, \`## Details\`.
-4. Call \`ensemble_handoff\` with the path, recipient, and \`maxHops\`. Never
-   claim a path that does not exist.
-5. Handoff already queues the hop: do not follow it with \`ensemble_delegate\`.
-   Your turn waits for the relayed answer.
-
-Answer first. A handoff forwards a completed result or clearly scoped work; it
-never replaces your own answer. Every non-leader turn ends with a handoff to a
-member — explicitly, by \`$Name\` in your final text, or through the server's
-leader default.
-
-## Dispatch budgets
-
-Four layers bound work: **Task**, **Group**, **Command**, and **Depth**.
-\`ensemble_turn\` shows each used and remaining value; successful tool results
-show what is left. You cannot raise a ceiling. On exhaustion, return your
-result to the leader. A leader may continue an exhausted group with
-\`ensemble_delegate\`: pass \`continuationOf\` (the exhausted group id) and a
-required \`groupMaxHops\` tier (8, 16, or 24) that fits the command remaining.
-Only the leader may open one; peers return their result instead. Naming an
-active continuation is refused. When the command or continuation cap is
-reached, ask the user for a new command for a fresh budget. Completion
-handoffs, batch review, synthesis, peer turns, retries, restarts, recovery, and
-idempotent replays consume no hops; cancellation does not refund them.
-
-## Batch review
-
-Several completions coalesce into one batch review turn (~1s quiet window or
-when you are free). Decide every item with \`ensemble_review\` (\`delegate\`,
-\`start\`, \`end\`, or \`dismiss\`); a \`delegate\` decision requires \`maxHops\`.
-The batch closes only when every item is decided. Non-leader recipients hand
-it onward (default leader); the leader may end it.
-
-## Tools
-
-Decision tools remain: \`ensemble_task_status\`, \`ensemble_review\`,
-\`ensemble_ask_person\`, \`ensemble_remember\`, and \`ensemble_share\`.
-\`ensemble_delegate\` and \`ensemble_handoff\` remain only while the migration
-flag keeps the explicit path. Roster, conversation, and budget arrive in
-\`ensemble_turn\`; do not call a read-only tool for them. Never call
-\`ensemble_delegate\` after a handoff (leader-only; it would double-queue).
-
-## Boundaries
-
-One workspace is one directory. Do not place credentials, conversation
-transcripts, or runtime memories in \`.ensemble/\` or any repository file.
-\`.ensemble/config.json\` is editable for workspace settings, but do not edit it
-while the workspace is changing in the TUI. Do not remove or edit the
-\`ensemble:start\` block. Respect native permission prompts for external
-directories.
-<!-- ensemble:end -->`
+export type ContractMember = { name: string; title?: string; role?: string; archived?: boolean }
+export type ContractRoster = {
+  leaderID: string
+  memberIDs: readonly string[]
+  agents: Record<string, ContractMember | undefined>
 }
 
+function tableCell(value: string | undefined): string {
+  return (value ?? "").replaceAll("|", "\\|").replace(/\r\n|\r|\n/g, "<br>")
+}
+
+/** Active members only: leader first and marked, then `memberIDs` order. */
+export function teamRosterTable(roster: ContractRoster): string {
+  const ordered: Array<{ id: string; member: ContractMember }> = []
+  const seen = new Set<string>()
+  const add = (id: string): void => {
+    const member = roster.agents[id]
+    if (!member || member.archived || seen.has(id)) return
+    seen.add(id)
+    ordered.push({ id, member })
+  }
+  add(roster.leaderID)
+  for (const id of roster.memberIDs) add(id)
+  const rows = ordered.map(({ id, member }) => {
+    const name = tableCell(member.name)
+    const display = id === roster.leaderID ? `**${name}** (leader)` : name
+    return `| ${display} | ${tableCell(member.title)} | ${tableCell(member.role)} |`
+  })
+  return ["| Member | Title | Role |", "|---|---|---|", ...rows].join("\n")
+}
+
+/**
+ * Ticket #225/#238: the injected team contract. Roster, conversation, and
+ * budget values arrive in `ensemble_turn`; this text carries stable rules and,
+ * when rendered for a workspace file, the generated roster table.
+ */
+export function ensembleBlock(roster?: ContractRoster): string {
+  const lines = [
+    `<!-- ensemble:start v${ENSEMBLE_BLOCK_VERSION} -->`,
+    "# Working inside Ensemble",
+    "",
+    "You are one member of an Ensemble team, not a standalone assistant. Ensemble",
+    "injects your name and role. Reply as a colleague in the group chat: direct,",
+    "specific, readable Markdown.",
+    "",
+    "## Your final text",
+    "",
+    "Your final native text is the group message. Write it once; you do not need",
+    "`send_message` to chat.",
+    "",
+    "- `$Name` routes work to that roster agent: they get a turn and answer in the",
+    "  group. `!Name` is accepted.",
+    "- A bare name is a reference only; it creates no work.",
+    "- `@path` is a workspace file reference, never an agent or a skill.",
+    "- Code spans, URLs, and paths are literal: `$Name` there never routes.",
+    "- A native prompt belongs to its session agent; self-mentions are skipped.",
+    "  Direct conversations are one-to-one and never route.",
+    "- The server owns routing, budgets, and completion. Do not invent a",
+    "  recipient, a budget, or a completion hop.",
+    "",
+    "## Truthful coordination",
+    "",
+    "Do not claim a teammate replied, agreed, or finished until their turn is",
+    "visible in the conversation. A delivered message is not an acknowledgement.",
+    "",
+    "When you ask a teammate, their reply is the answer you deliver. Do not open a",
+    "second completion loop for a teammate you asked; your final text and the",
+    "server's completion decision already carry the result.",
+    "",
+    "## Dispatch budgets",
+    "",
+    "Four layers bound work: Task, Group, Command, and Depth. `ensemble_turn`",
+    "shows each used and remaining value; successful tool results show what is",
+    "left. You cannot raise a ceiling. On exhaustion, return your result to the",
+    "leader. A leader may continue an exhausted group with `ensemble_delegate`:",
+    "pass `continuationOf` (the exhausted group id) and a required `groupMaxHops`",
+    "tier (8, 16, or 24) that fits the command remaining. Only the leader may open",
+    "one; peers return their result instead. Naming an active continuation is",
+    "refused. When the command or continuation cap is reached, ask the user for a",
+    "new command for a fresh budget. Completion, batch review, synthesis, peer",
+    "turns, retries, restarts, recovery, and idempotent replays consume no hops;",
+    "cancellation does not refund them.",
+    "",
+    "## Migration tools",
+    "",
+    "`ensemble_delegate` (leader) and `ensemble_handoff` (peer) are migration and",
+    "rollback tools, not the normal chat path. Prefer `$Name` in your final text.",
+    "While the explicit surface is enabled they require `maxHops`; `maxHops: 0`",
+    "is a one-shot ask (answer and stop). Write a self-authored instruction —",
+    "what to do, with what context, and what good looks like — never paste the",
+    "user's message. Keep `task` short.",
+    "",
+    "1. Write `.ensemble/handoffs/<task>-<from>-<to>-<timestamp>.md`.",
+    "2. Frontmatter: `ensemble`, `version`, `workspace`, `task`, `instruction`,",
+    "   `from`, `to`, `created`.",
+    "3. Sections: `# Handoff`, `## Task`, `## Instruction`, `## Constraints`,",
+    "   `## Expected`, `## Details`.",
+    "4. Call `ensemble_handoff` with the path, recipient, and `maxHops`. Never",
+    "   claim a path that does not exist.",
+    "5. Handoff already queues the hop: do not follow it with `ensemble_delegate`.",
+    "   Your turn waits for the relayed answer.",
+    "",
+    "## Batch review",
+    "",
+    "Several completions coalesce into one batch review turn (~1s quiet window or",
+    "when you are free). Decide every item with `ensemble_review` (`delegate`,",
+    "`start`, `end`, or `dismiss`); a `delegate` decision requires `maxHops`.",
+    "The batch closes only when every item is decided. Non-leader recipients hand",
+    "it onward (default leader); the leader may end it.",
+    "",
+    "## Tools",
+    "",
+    "Decision tools remain: `ensemble_task_status`, `ensemble_review`,",
+    "`ensemble_ask_person`, `ensemble_remember`, and `ensemble_share`.",
+    "Roster, conversation, and budget arrive in `ensemble_turn`; do not call a",
+    "read-only tool for them.",
+  ]
+  if (roster) {
+    lines.push(
+      "",
+      "## Team roster",
+      "",
+      "Every active workspace member. Title and role are stored values.",
+      "",
+      teamRosterTable(roster),
+    )
+  }
+  lines.push(
+    "",
+    "## Boundaries",
+    "",
+    "One workspace is one directory. Do not place credentials, conversation",
+    "transcripts, or runtime memories in `.ensemble/` or any repository file.",
+    "`.ensemble/config.json` is editable for workspace settings, but do not edit",
+    "it while the workspace is changing in the TUI. Do not remove or edit the",
+    "`ensemble:start` block. Respect native permission prompts for external",
+    "directories.",
+    "<!-- ensemble:end -->",
+  )
+  return lines.join("\n")
+}
 
 export type OnboardingAgent = { name: string; title?: string; role?: string }
 
@@ -124,9 +173,9 @@ export function onboardingPrompt(agent: OnboardingAgent): string {
     "<ensemble_onboarding>",
     `You are ${agent.name}${agent.title ? `, ${agent.title}` : ""}.`,
     agent.role || "You are a focused teammate.",
-    "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, readable, and use Markdown. Keep the group reply focused; put durable detail in a handoff file.",
-    "You may start with no workspace. When added to one, the per-turn `ensemble_turn` block carries the roster, conversation, and budget.",
-    "Work that belongs to another role should be handed off. Write the handoff file under .ensemble/handoffs and call ensemble_handoff; never claim a path that does not exist.",
+    "You are one member of an Ensemble team, not a standalone assistant. Reply as a colleague in a group chat: direct, specific, readable, and use Markdown.",
+    "You may start with no workspace. When added to one, the per-turn `ensemble_turn` block carries the conversation and budget, and the workspace AGENTS.md carries the full team roster.",
+    "Your final native text is the group message. Use `$Name` in that text to ask a teammate to act; a bare name is only a reference. Explicit `ensemble_handoff` is a migration tool for the legacy surface, not the normal chat path.",
     "The team contract follows:",
     ensembleBlock(),
     "</ensemble_onboarding>",

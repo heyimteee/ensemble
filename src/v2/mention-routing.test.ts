@@ -242,7 +242,29 @@ test("routing policy suppresses self and duplicate recipients", () => {
   }
 })
 
-test("routing policy refuses unknown, archived, outside, and over-cap recipients visibly", () => {
+test("ticket236: routing suppresses recipients the turn already contacted", () => {
+  const plan = planMentionRouting({
+    text: "$Sage $Echo please review",
+    conversation: groupConversation,
+    roster: policyRoster,
+    fanOutCap: 8,
+    alreadyRouted: ["s"],
+  })
+  assert.deepEqual(plan.routes.map((route) => route.agentID), ["e"], "an already contacted recipient creates no second route")
+  assert.deepEqual(plan.suppressed.map((item) => [item.agentID, item.reason]), [["s", "already-routed"]])
+  assert.deepEqual(plan.refusals, [], "the suppression is not a refusal")
+
+  const empty = planMentionRouting({
+    text: "$Sage take this",
+    conversation: groupConversation,
+    roster: policyRoster,
+    fanOutCap: 8,
+    alreadyRouted: [],
+  })
+  assert.deepEqual(empty.routes.map((route) => route.agentID), ["s"], "an empty ledger routes normally")
+})
+
+test("ticket236: routing policy refuses unknown, archived, outside, and over-cap recipients visibly", () => {
   const cases: Array<{
     name: string
     text: string

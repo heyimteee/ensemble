@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
-import { startServiceForTest } from "./test-service.ts"
+import { seedLegacySettings, startServiceForTest } from "./test-service.ts"
 import { V2Store, cloneStats, resetCloneStats } from "./store.ts"
 import type { Agent, Workspace } from "./types.ts"
 
@@ -15,6 +15,7 @@ type Handlers = {
 }
 
 function fakeContext(values: Map<string, unknown>) {
+  seedLegacySettings(values)
   const tools = new Map<string, any>()
   const handlers: Partial<Handlers> = {}
   const ctx = {

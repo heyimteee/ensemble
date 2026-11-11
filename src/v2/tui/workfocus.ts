@@ -1,4 +1,4 @@
-import { WORK_CARD_GAP_COLS, WORK_CARD_ROWS } from "./workrows.ts"
+import { WORK_CARD_ROWS } from "./workrows.ts"
 import { historyGroupFocusID, type WorkPaneItem, type WorkPaneLayout, type WorkPanePage } from "./workpane.ts"
 import { nativeSubagentFocusID } from "./nativecards.ts"
 
@@ -40,7 +40,7 @@ export type WorkFocusPosition = {
   height: number
 }
 
-type WorkPageGeometry = Pick<WorkPaneLayout, "mode" | "columns" | "cardWidth" | "cardContentWidth">
+type WorkPageGeometry = Pick<WorkPaneLayout, "mode" | "cardWidth" | "cardContentWidth">
 
 /**
  * Lay one paginated page into rectangles. The walk mirrors the renderer:
@@ -68,17 +68,21 @@ export function workPageRects(page: WorkPanePage, layout: WorkPageGeometry): Wor
     const items: WorkPaneItem[] = section.items
       ?? section.tasks.map((task): WorkPaneItem => ({ kind: "task", task }))
     if (section.mode === "cards") {
-      items.forEach((item, index) => {
+      // Ticket #239/#241: every card in a card section is one full-width card
+      // stacked at successive WORK_CARD_ROWS. Pagination emits one card per
+      // section today, but the focus geometry follows the renderer's card list
+      // rather than assuming a single item.
+      for (const [index, item] of items.entries()) {
         rects.push({
           id: workItemFocusID(item),
           page: page.number,
-          x: index * (layout.cardWidth + WORK_CARD_GAP_COLS),
-          y,
-          width: layout.cardWidth,
+          x: 0,
+          y: y + index * WORK_CARD_ROWS,
+          width: Math.max(1, layout.cardWidth),
           height: WORK_CARD_ROWS,
         })
-      })
-      y += WORK_CARD_ROWS
+      }
+      y += Math.max(1, items.length) * WORK_CARD_ROWS
       continue
     }
     for (const item of items) {
@@ -102,7 +106,7 @@ function workItemFocusID(item: WorkPaneItem): string {
 }
 
 /** Every page's rectangles in page order. */
-export function workLayoutRects(layout: Pick<WorkPaneLayout, "mode" | "columns" | "cardWidth" | "cardContentWidth" | "pages">): WorkPageRects[] {
+export function workLayoutRects(layout: Pick<WorkPaneLayout, "mode" | "cardWidth" | "cardContentWidth" | "pages">): WorkPageRects[] {
   return layout.pages.map((page) => ({ page: page.number, rects: workPageRects(page, layout) }))
 }
 
