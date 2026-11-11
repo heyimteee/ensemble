@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service, streamFinalization } from "./service.ts"
-import { startServiceForTest } from "./test-service.ts"
+import { seedLegacySettings, startServiceForTest } from "./test-service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
 import { deriveWorkStatus, workKey } from "./queue.ts"
 import { projectVisibleWork } from "./scoped-read.ts"
@@ -18,6 +18,7 @@ import { ENSEMBLE_BLOCK_VERSION, ensembleBlock } from "./init-block.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
 import { FALLBACK_REPLIES } from "./execution.ts"
 import { stripEnsembleBlock } from "./workspace-config.ts"
+import { getGlobalLogger } from "./logging.ts"
 
 type Handlers = {
   snapshot: (input: unknown) => Promise<any>
@@ -28,6 +29,9 @@ type Handlers = {
 
 function fakeContext(sharedValues?: Map<string, unknown>) {
   const values = sharedValues ?? new Map<string, unknown>()
+  // Ticket #240: the broad service suite exercises the explicit legacy tools.
+  // It opts into `off`; the default-on path has dedicated tests below.
+  if (!sharedValues) seedLegacySettings(values)
   const removedSessions: string[] = []
   const interruptedSessions: string[] = []
   const movedSessions: Array<{ sessionID: string; directory: string }> = []
@@ -1366,6 +1370,91 @@ test("ticket225: native-first registers the decision toolset and the setting rol
     const cutover = await handlers.invoke({ directory, action: "settings.update", payload: { toolSurface: "native" } })
     assert.equal(cutover.ok, true)
     assert.equal(tools.has("send_message"), false)
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket240: service start persists native-first on and logs the effective mode", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-240-default-"))
+  const values = new Map<string, unknown>([["v2/meta", { version: 4, updatedAt: 1, settings: { maxActiveRuns: 2 }, ui: {} }]])
+  const { ctx, tools } = fakeContext(values)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    const snap = await service.handlers().snapshot({ directory })
+    assert.equal(snap.state.settings.nativeFirst, "on", "the absent persisted mode resolves to on")
+    const stored = values.get("v2/meta") as any
+    assert.equal(stored.settings.nativeFirst, "on", "the first start persists the default")
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+
+    const entry = getGlobalLogger()?.recent({ event: "native.mode" }).at(-1)
+    assert.ok(entry, "the service logs the effective native mode")
+    assert.equal(entry.mode, "on")
+    assert.equal(entry.toolSurface, "native")
+    assert.equal(entry.migrated, true)
+    assert.equal("directory" in entry, false, "the migration log carries no paths")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket240: service start respects an explicit off mode and logs no migration", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-240-explicit-off-"))
+  const values = new Map<string, unknown>([["v2/meta", { version: 4, updatedAt: 1, settings: { nativeFirst: "off" }, ui: {} }]])
+  const { ctx, tools } = fakeContext(values)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    const snap = await service.handlers().snapshot({ directory })
+    assert.equal(snap.state.settings.nativeFirst, "off")
+    assert.equal((values.get("v2/meta") as any).settings.nativeFirst, "off", "an explicit choice is never rewritten")
+    assert.ok(tools.has("send_message"), "off keeps the legacy surface")
+
+    const entry = getGlobalLogger()?.recent({ event: "native.mode" }).at(-1)
+    assert.ok(entry)
+    assert.equal(entry.mode, "off")
+    assert.equal(entry.toolSurface, "legacy")
+    assert.equal(entry.migrated, false)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket240: the default native surface rolls back to legacy tools and restores", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-240-rollback-"))
+  const values = new Map<string, unknown>()
+  const { ctx, tools } = fakeContext(values)
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+
+    // `:native-first off`: explicit off always selects the legacy surface.
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "off" } })
+    assert.ok(tools.has("send_message"))
+    assert.ok(tools.has("delegate") && tools.has("handoff"))
+
+    // `:native-first on`: the command also clears the legacy surface override.
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on", toolSurface: "native" } })
+    assert.equal(tools.has("send_message"), false)
+
+    // `:tools legacy` keeps native ingestion but restores the old tools.
+    await handlers.invoke({ directory, action: "settings.update", payload: { toolSurface: "legacy" } })
+    assert.ok(tools.has("workspace_info") && tools.has("delegate"))
+
+    // `shadow` keeps the legacy surface even with a stale native tool setting.
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "shadow", toolSurface: "native" } })
+    assert.ok(tools.has("send_message"))
+    const snap = await handlers.snapshot({ directory })
+    assert.equal(snap.state.settings.nativeFirst, "shadow")
+
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on", toolSurface: "native" } })
     assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
   } finally {
     await stop()
@@ -3658,6 +3747,7 @@ test("a direct message is stored durably and renders exactly once", async () => 
 test("a direct message survives restart via the load path and never duplicates", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-dm-"))
   const values = new Map<string, unknown>()
+  seedLegacySettings(values)
   const first = fakeContext(values)
   const service = new EnsembleV2Service(first.ctx)
   const stop = await startServiceForTest(service, service.ctx)

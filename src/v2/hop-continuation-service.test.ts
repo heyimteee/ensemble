@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
-import { startServiceForTest } from "./test-service.ts"
+import { seedLegacySettings, startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 import type { LogEntry } from "./logging.ts"
 
@@ -17,6 +17,7 @@ type Handlers = {
 
 function fakeContext() {
   const values = new Map<string, unknown>()
+  seedLegacySettings(values)
   const tools = new Map<string, any>()
   const instructions: Array<{ sessionID: string; key: string; value: string }> = []
   const handlers: Partial<Handlers> = {}

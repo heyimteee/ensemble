@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { EnsembleV2Service } from "./service.ts"
-import { startServiceForTest } from "./test-service.ts"
+import { seedLegacySettings, startServiceForTest } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 
 type Handlers = {
@@ -13,6 +13,7 @@ type Handlers = {
 
 function fakeContext() {
   const values = new Map<string, unknown>()
+  seedLegacySettings(values)
   const tools = new Map<string, any>()
   const ctx = {
     onboarding: false,

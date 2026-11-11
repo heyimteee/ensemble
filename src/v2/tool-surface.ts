@@ -16,19 +16,22 @@ export function isToolSurface(value: unknown): value is ToolSurface {
 
 /**
  * The native surface is the native-first cutover. `off` and `shadow` keep the
- * explicit path and therefore the full legacy toolset. An explicit
- * `toolSurface` wins so a rollback can keep native ingestion while restoring
- * the old tools, and a test can select either surface without changing modes.
- * The mention-routing kill switch takes precedence over both: it restores the
- * explicit path it turns off.
+ * explicit path and therefore the full legacy toolset, even if an old
+ * `toolSurface: "native"` value is still stored. An explicit
+ * `toolSurface: "legacy"` wins while the mode is on, so a rollback can keep
+ * native ingestion while restoring the old tools. The mention-routing kill
+ * switch also restores the explicit path it turns off.
  */
 export function effectiveToolSurface(settings: Pick<Settings, "nativeFirst" | "toolSurface" | "nativeMentionRouting"> | undefined): ToolSurface {
+  // Ticket #240: the mode is the outer gate. A stored native override from a
+  // previous cutover must not resurrect the native surface while rolled back.
+  if (nativeFirstMode(settings) !== "on") return "legacy"
   // Ticket #221: the mention-routing kill switch must restore the explicit
   // path, not just refuse `$Name`. The legacy surface carries `send_message`,
   // `handoff`, and `delegate`; the native surface deliberately does not.
-  if (nativeFirstMode(settings) === "on" && settings?.nativeMentionRouting === false) return "legacy"
-  if (settings?.toolSurface && isToolSurface(settings.toolSurface)) return settings.toolSurface
-  return nativeFirstMode(settings) === "on" ? "native" : "legacy"
+  if (settings?.nativeMentionRouting === false) return "legacy"
+  if (settings?.toolSurface === "legacy") return "legacy"
+  return "native"
 }
 
 /** Exact registered names per surface, in stable registration order. */

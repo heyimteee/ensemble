@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { EnsembleV2Service } from "./service.ts"
 import { SharedEnsemble } from "./shared-service.ts"
+import { seedLegacySettings } from "./test-service.ts"
 import { V2Store } from "./store.ts"
 import type { Agent, SessionBinding, Workspace } from "./types.ts"
 
@@ -85,6 +86,7 @@ function eventSource() {
  * cleanup.
  */
 function fakeHost(name: string, directory: string, values = new Map<string, unknown>()) {
+  seedLegacySettings(values)
   const tools = new Map<string, any>()
   const rpcRegistrations: Array<Registration & { disposed: boolean; handlers: any }> = []
   const toolRegistrations: Array<Registration & { disposed: boolean }> = []

@@ -204,6 +204,10 @@ async function promptNative(sessionID, text, extra = {}) {
 async function main() {
   const workspaceDir = join(project, "cutover-workspace")
   mkdirSync(workspaceDir, { recursive: true })
+  // Ticket #240: a fresh isolated state root must resolve and persist the
+  // native-first default before any scenario setting is written.
+  const initial = await state()
+  assert("fresh store defaults native-first on", initial.settings.nativeFirst === "on")
   await invoke("settings.update", { nativeFirst: "on", nativeMentionRouting: true, toolSurface: "native" })
 
   const lead = await invoke("agent.create", {

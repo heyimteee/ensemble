@@ -32,6 +32,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Verification
 
+- [Native-first default on and rollback](verification/2026-11-11-ticket-240.md): persisted default, explicit off/shadow, tool-surface rollback, global commands, restart requirement, and the passing live matrix
 - [Contract v6 and team roster](verification/2026-11-11-ticket-238.md): native-first rules, generated roster table, content-aware reconciliation, refresh triggers, and the measured prompt delta
 - [Native-first full E2E](verification/2026-11-12-e2e.md): all 12 unit/live suites passing on OpenCode 2.2.7, including the real TUI acceptance
 - [Native probe version set and stale live harness](verification/2026-11-11-ticket-233-234.md): 2.2.6/2.2.7 contract set, Native mirror settings row, and Work interaction before HISTORY
