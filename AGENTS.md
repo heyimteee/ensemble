@@ -17,9 +17,9 @@ Ensemble extends OpenCode's TUI with persistent agent teams. Keep changes within
 - Use patch/direct file edits; for necessary multi-site scripted edits, inspect a temporary script and run it once. See the guide's editing discipline.
 - Run `npm run verify` after source changes and before handoff; report live checks separately, including skips.
 
-## End-of-turn handoff (mandatory, ticket #71)
+## End-of-turn completion (server-owned, ticket #238)
 
-This section governs Ensemble runtime agents, not coding agents working in this repository. Every non-leader Ensemble agent turn must end with a handoff to another workspace member before the turn closes. Read the [handoff contract](docs/agents/handoff.md) for delegation content, batched review, loop guards, and mention syntax.
+This section governs Ensemble runtime agents, not coding agents working in this repository. A non-leader Ensemble agent turn ends by posting its answer as the group message; the server owns completion and decides whether the finished result returns to the leader. Do not claim a teammate replied until their turn is visible, and do not open a second completion loop for a teammate you asked. Explicit `delegate`/`handoff` are migration tools, not the normal chat path. Read the [handoff contract](docs/agents/handoff.md) for delegation content, batched review, loop guards, and mention syntax.
 
 ## Agent skills
 
