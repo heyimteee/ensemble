@@ -5009,6 +5009,164 @@ test("ticket237: a worker the leader did not ask still reaches the leader for re
   }
 })
 
+test("ticket247: a leaf in a chain under a leader-owned root skips the completion hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-247-chain-"))
+  const { ctx, prompts } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Sage" }))
+  await seed.saveAgent(novaAgent({ id: "c", name: "Iris" }))
+  await seedWorkspace(seed, directory, { memberIDs: ["a", "b", "c"] })
+  await seed.saveSubtask({
+    id: "root", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Root", instruction: "Do root",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true,
+    attempts: 1, createdAt: 1, workKind: "delegation",
+  })
+  await seed.saveSubtask({
+    id: "mid", workspaceID: "w", parentID: "root", creatorType: "agent", creatorAgentID: "a", assigneeID: "b",
+    title: "Mid", instruction: "Do mid", mode: "research", state: "working", stage: "initial", outcome: "pending",
+    interrupted: false, awaitingChildren: true, attempts: 1, createdAt: 2, workKind: "handoff",
+    handoff: { correlationID: "handoff_247_a_b", senderID: "a", recipientID: "b", depth: 1 },
+  })
+  await seed.saveSubtask({
+    id: "leaf", workspaceID: "w", parentID: "mid", creatorType: "agent", creatorAgentID: "b", assigneeID: "c",
+    title: "Leaf", instruction: "Do leaf", mode: "research", state: "pending", stage: "initial", outcome: "pending",
+    interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 3, workKind: "handoff",
+    handoff: { correlationID: "handoff_247_b_c", senderID: "b", recipientID: "c", depth: 1 },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.root as any)?.stage === "synthesis" && (next.state.subtasks.root as any)?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const subtasks = Object.values(after.state.subtasks) as any[]
+    assert.equal(subtasks.some((task) => task.parentID === "leaf" && task.handoff?.completion === true), false, "no completion hop")
+    assert.equal(subtasks.filter((task) => task.assigneeID === "a").length, 1, "the root synthesis is the only leader card")
+    const messages = (after.state.messages.w ?? []) as any[]
+    assert.equal(messages.some((message) => String(message.text).startsWith("Handed to $Nova")), false, "no completion message")
+    assert.equal(prompts.length, 2, "the leaf worker and the root synthesis ran, with no completion review")
+    const logs = await handlers["logs.recent"]({ directory, event: "completion.skipped", limit: 20 })
+    assert.equal(logs.entries.length, 1)
+    const entry = logs.entries[0]
+    assert.equal(entry.taskID, "leaf")
+    assert.equal(entry.parentID, "mid")
+    assert.equal(entry.rootID, "root")
+    assert.equal(entry.leaderID, "a")
+    assert.equal(entry.reason, "ancestor-is-leader")
+    assert.equal(entry.title, undefined, "no conversation content in the log")
+    assert.equal(entry.instruction, undefined)
+    assert.equal(entry.text, undefined)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket247: a nested delegation under a leader-owned root skips the completion hop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-247-nested-"))
+  const { ctx, prompts } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Sage" }))
+  await seed.saveAgent(novaAgent({ id: "c", name: "Iris" }))
+  await seed.saveAgent(novaAgent({ id: "d", name: "Fern" }))
+  await seedWorkspace(seed, directory, { memberIDs: ["a", "b", "c", "d"] })
+  await seed.saveSubtask({
+    id: "root", workspaceID: "w", creatorType: "user", assigneeID: "a", title: "Root", instruction: "Do root",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true,
+    attempts: 1, createdAt: 1, workKind: "delegation",
+  })
+  await seed.saveSubtask({
+    id: "first", workspaceID: "w", parentID: "root", creatorType: "agent", creatorAgentID: "a", assigneeID: "b",
+    title: "First", instruction: "Do first", mode: "research", state: "working", stage: "initial", outcome: "pending",
+    interrupted: false, awaitingChildren: true, attempts: 1, createdAt: 2, workKind: "delegation",
+    handoff: { correlationID: "handoff_247_delegate_a_b", senderID: "a", recipientID: "b", depth: 1 },
+  })
+  await seed.saveSubtask({
+    id: "second", workspaceID: "w", parentID: "first", creatorType: "agent", creatorAgentID: "b", assigneeID: "c",
+    title: "Second", instruction: "Do second", mode: "research", state: "working", stage: "initial", outcome: "pending",
+    interrupted: false, awaitingChildren: true, attempts: 1, createdAt: 3, workKind: "delegation",
+    handoff: { correlationID: "handoff_247_delegate_b_c", senderID: "b", recipientID: "c", depth: 1 },
+  })
+  await seed.saveSubtask({
+    id: "leaf", workspaceID: "w", parentID: "second", creatorType: "agent", creatorAgentID: "c", assigneeID: "d",
+    title: "Leaf", instruction: "Do leaf", mode: "research", state: "pending", stage: "initial", outcome: "pending",
+    interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 4, workKind: "handoff",
+    handoff: { correlationID: "handoff_247_c_d", senderID: "c", recipientID: "d", depth: 1 },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return (next.state.subtasks.root as any)?.stage === "synthesis" && (next.state.subtasks.root as any)?.state === "replied"
+    })
+    const after = await handlers.snapshot({ directory })
+    const subtasks = Object.values(after.state.subtasks) as any[]
+    assert.equal(subtasks.some((task) => task.parentID === "leaf" && task.handoff?.completion === true), false, "no completion hop")
+    assert.equal(prompts.length, 2, "only the leaf worker and the root synthesis ran")
+    const logs = await handlers["logs.recent"]({ directory, event: "completion.skipped", limit: 20 })
+    assert.equal(logs.entries.length, 1)
+    assert.equal(logs.entries[0].taskID, "leaf")
+    assert.equal(logs.entries[0].parentID, "second")
+    assert.equal(logs.entries[0].rootID, "root")
+    assert.equal(logs.entries[0].leaderID, "a")
+    assert.equal(logs.entries[0].reason, "ancestor-is-leader")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket247: work rooted under another member still reaches the leader for review", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-247-other-root-"))
+  const { ctx, prompts } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seed.saveAgent(novaAgent({ id: "b", name: "Sage" }))
+  await seed.saveAgent(novaAgent({ id: "c", name: "Iris" }))
+  await seedWorkspace(seed, directory, { memberIDs: ["a", "b", "c"] })
+  await seed.saveSubtask({
+    id: "root", workspaceID: "w", creatorType: "user", assigneeID: "b", title: "Root", instruction: "Do root",
+    mode: "research", state: "working", stage: "initial", outcome: "pending", interrupted: false, awaitingChildren: true,
+    attempts: 1, createdAt: 1, workKind: "delegation",
+  })
+  await seed.saveSubtask({
+    id: "leaf", workspaceID: "w", parentID: "root", creatorType: "agent", creatorAgentID: "b", assigneeID: "c",
+    title: "Leaf", instruction: "Do leaf", mode: "research", state: "pending", stage: "initial", outcome: "pending",
+    interrupted: false, awaitingChildren: false, attempts: 0, createdAt: 2, workKind: "handoff",
+    handoff: { correlationID: "handoff_247_b_c", senderID: "b", recipientID: "c", depth: 1 },
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      return Object.values(next.state.subtasks).some((task: any) => task.parentID === "leaf" && task.handoff?.completion === true && task.state === "replied")
+    }, 5000)
+    const after = await handlers.snapshot({ directory })
+    const completion = Object.values(after.state.subtasks).find((task: any) => task.parentID === "leaf" && task.handoff?.completion === true) as any
+    assert.ok(completion, "the leader reviews work whose root they do not own")
+    assert.equal(completion.assigneeID, "a")
+    assert.match(completion.instruction, /finished/)
+    assert.ok(prompts.some((prompt) => prompt.text?.includes("finished")), "the leader received a model turn")
+    const logs = await handlers["logs.recent"]({ directory, event: "completion.skipped", taskID: "leaf", limit: 20 })
+    assert.equal(logs.entries.length, 0)
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("ticket168: a parent awaiting children reads waiting, not retrying", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-168-waiting-"))
   const { ctx } = fakeContext()
