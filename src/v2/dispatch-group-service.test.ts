@@ -187,7 +187,32 @@ test("ticket160: agent delegation and handoff consume hops; completion and batch
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
+    const kim = (await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kim" } })).result
+    await handlers.invoke({ directory, action: "workspace.update", payload: { id: workspace.id, memberIDs: [nova.id, sage.id, kim.id] } })
+    // One user command addressed to two non-leader members: their completion
+    // hops and the consolidated batch review arrive in that command's group
+    // and never spend a hop.
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage and $Kim take this" } })
+    let exemptGroupID = ""
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const turns = Object.values(next.state.subtasks).filter((task: any) => task.workKind === "turn") as any[]
+      if (turns.length < 2 || !turns[0].dispatchGroupID) return false
+      exemptGroupID = turns[0].dispatchGroupID
+      return true
+    })
+    await waitFor(async () => {
+      const next = await handlers.snapshot({ directory })
+      const batch = Object.values(next.state.subtasks).find(
+        (task: any) => task.handoff?.batch === true && task.dispatchGroupID === exemptGroupID,
+      ) as any
+      return batch?.handoff?.itemIDs?.length === 2
+    }, 15000)
+    const exempt = await handlers.snapshot({ directory })
+    assert.equal(exempt.state.dispatchGroups[exemptGroupID].usedHops, 0, "completion and batch review spend no hop")
+    assert.equal(exempt.state.dispatchGroups[exemptGroupID].commandUsedHops, 0)
+    // The leader's own command still spends a hop per agent dispatch.
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
     let groupID = ""
@@ -206,14 +231,21 @@ test("ticket160: agent delegation and handoff consume hops; completion and batch
     let mid = await handlers.snapshot({ directory })
     assert.equal(mid.state.dispatchGroups[groupID].usedHops, 2, "two agent dispatches consumed two hops")
     assert.equal(mid.state.dispatchGroups[groupID].commandUsedHops, 2)
-    // Completion handoffs and the consolidated batch review arrive later in
-    // the same group but never spend another hop.
+    // Ticket #237: the leader asked for both dispatches, so their finished
+    // turns hand back to the parent/sender instead of queueing a completion.
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      return Object.values(next.state.subtasks).some((task: any) => task.handoff?.batch === true)
+      const child = Object.values(next.state.subtasks).find((task: any) => task.title === "Child work") as any
+      return child?.state === "replied"
     }, 15000)
     mid = await handlers.snapshot({ directory })
     assert.equal(mid.state.dispatchGroups[groupID].usedHops, 2)
+    const finishedChild = Object.values(mid.state.subtasks).find((task: any) => task.title === "Child work") as any
+    assert.equal(
+      Object.values(mid.state.subtasks).some((task: any) => task.parentID === finishedChild?.id && task.handoff?.completion === true),
+      false,
+      "no redundant completion hop for leader-asked work",
+    )
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -292,7 +324,9 @@ test("delegation, handoff, completion batch, and synthesis inherit the command g
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
-    const { nova, workspace } = await setupPair(directory, handlers)
+    const { nova, sage, workspace } = await setupPair(directory, handlers)
+    const kim = (await handlers.invoke({ directory, action: "agent.create", payload: { name: "Kim" } })).result
+    await handlers.invoke({ directory, action: "workspace.update", payload: { id: workspace.id, memberIDs: [nova.id, sage.id, kim.id] } })
     await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "Coordinate" } })
     const novaSession = await bindingSessionID(handlers, directory, nova.id)
     await waitFor(async () => {
@@ -315,17 +349,23 @@ test("delegation, handoff, completion batch, and synthesis inherit the command g
     const hop = Object.values(created.state.subtasks).find((task: any) => task.workKind === "handoff" && task.handoff?.completion !== true) as any
     assert.equal(child.dispatchGroupID, groupID)
     assert.equal(hop.dispatchGroupID, groupID)
-    // Both non-leader completions land in one group-scoped batch review.
+    // Ticket #237: the leader-asked child and handoff finish without a
+    // completion hop, so the batch that proves group inheritance comes from a
+    // separate user command addressed to non-leader members.
+    await handlers.invoke({ directory, action: "message.send", payload: { workspaceID: workspace.id, text: "$Sage and $Kim carry on" } })
     let batch: any
     await waitFor(async () => {
       const next = await handlers.snapshot({ directory })
-      batch = Object.values(next.state.subtasks).find((task: any) => task.handoff?.batch === true) as any
+      batch = Object.values(next.state.subtasks).find(
+        (task: any) => task.handoff?.batch === true && task.dispatchGroupID !== groupID,
+      ) as any
       return batch?.handoff?.itemIDs?.length === 2
     }, 15000)
-    assert.equal(batch.dispatchGroupID, groupID)
+    assert.ok(batch.dispatchGroupID, "a completion batch inherits its own command group")
+    assert.notEqual(batch.dispatchGroupID, groupID)
     const batched = await handlers.snapshot({ directory })
     for (const itemID of batch.handoff.itemIDs) {
-      assert.equal((batched.state.subtasks as any)[itemID].dispatchGroupID, groupID)
+      assert.equal((batched.state.subtasks as any)[itemID].dispatchGroupID, batch.dispatchGroupID)
     }
     // Synthesis reuses the root row, so the group survives the leader's
     // synthesis turn unchanged.

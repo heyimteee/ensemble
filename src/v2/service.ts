@@ -41,6 +41,7 @@ import {
 } from "./dispatch-budget.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
 import { resolveActiveTurnAnchor, type ActiveTurnAnchor } from "./turn-anchor.ts"
+import { completionDecision } from "./completion-decision.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
@@ -6209,6 +6210,21 @@ export class EnsembleV2Service {
     const leader = state.agents[workspace.leaderID]
     if (!leader || leader.archived || !workspace.memberIDs.includes(leader.id)) return undefined
     const finisher = state.agents[finisherID]
+    // Ticket #237: the parent turn's synthesis is the delivery when the leader
+    // was the parent, the asker, or the sender. Queueing the completion hop
+    // would only run a second leader turn to answer the same result.
+    const parent = finished.parentID ? state.subtasks[finished.parentID] : undefined
+    const decision = completionDecision({ task: finished, parent, leaderID: leader.id })
+    if (decision.decision === "skip") {
+      this.logger?.event("info", "dispatch", "completion.skipped", {
+        workspaceID: workspace.id,
+        taskID: decision.taskID,
+        parentID: decision.parentID,
+        leaderID: decision.leaderID,
+        reason: decision.reason,
+      })
+      return undefined
+    }
     const prior = finished.handoff?.chain ?? (finished.handoff ? [finished.handoff.senderID] : [])
     const route = checkCompletionRoute({ chain: prior, senderID: finisherID, candidateID: leader.id, leaderID: leader.id })
     if (route.decision === "terminate") {
