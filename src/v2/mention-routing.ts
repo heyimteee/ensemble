@@ -13,7 +13,8 @@ import { DISPATCH_LIMIT_DEFAULTS, type DispatchLimits } from "./dispatch-budget.
  * file paths never produce a route. Names and IDs match a roster entry
  * case-insensitively and exactly; the longest candidate wins. Self, duplicate,
  * immediate reply-to-sender, fan-out, cycle, and ledger guards are applied by
- * `planMentionRouting`.
+ * `planMentionRouting`. A terminal turn (synthesis or review) treats every
+ * mention as a reference and suppresses it before those guards run.
  *
  * This module is pure: it reads no store, clock, host, or environment. Callers
  * supply the message text, roster, conversation scope, settings, and ledger
@@ -222,7 +223,7 @@ export const PEER_TURN_BUDGET: PeerTurnBudget = Object.freeze({ kind: "peer-turn
 
 export type MentionRoute = MentionMatch & { budget: PeerTurnBudget }
 
-export type MentionSuppressionReason = "self" | "reply-to-sender" | "duplicate" | "already-routed"
+export type MentionSuppressionReason = "self" | "reply-to-sender" | "duplicate" | "already-routed" | "terminal-turn"
 
 export type MentionSuppression = {
   agentID: string
@@ -303,6 +304,13 @@ export type MentionRoutingInput = {
    * reason so one turn contacts each recipient at most once.
    */
   alreadyRouted?: readonly string[]
+  /**
+   * Ticket #248: a synthesis, completion-review, or batch-review turn. Its
+   * mentions are references, not work. Every roster mention is suppressed with
+   * `terminal-turn` before the self, reply, roster, cycle, fan-out, and budget
+   * guards; the final text still posts as the group message.
+   */
+  terminal?: boolean
 }
 
 export type MentionRoutingPlan = {
@@ -311,7 +319,10 @@ export type MentionRoutingPlan = {
   routes: MentionRoute[]
   suppressed: MentionSuppression[]
   refusals: MentionRefusal[]
-  /** Unknown operator references, also represented in `refusals` with reason `unknown`. */
+  /**
+   * Unknown operator references. Non-terminal plans also represent them in
+   * `refusals` with reason `unknown`; a terminal turn leaves them as references.
+   */
   unknown: UnknownMention[]
   excluded: MentionExclusion[]
   budget: MentionTurnBudget
@@ -343,6 +354,24 @@ export function planMentionRouting(input: MentionRoutingInput): MentionRoutingPl
       addressee,
       routes,
       suppressed,
+      refusals: byPosition(refusals),
+      unknown: parse.unknown,
+      excluded: parse.excluded,
+      budget,
+    }
+  }
+
+  // Ticket #248: a terminal turn references recipients; it never routes them.
+  // Suppress every occurrence before roster, cycle, fan-out, and budget checks
+  // so a review cannot fan out into acknowledgments or visible refusals.
+  if (input.terminal === true) {
+    for (const mention of parse.mentions) {
+      suppressed.push(suppressionFor(mention, "terminal-turn"))
+    }
+    return {
+      addressee,
+      routes,
+      suppressed: byPosition(suppressed),
       refusals: byPosition(refusals),
       unknown: parse.unknown,
       excluded: parse.excluded,

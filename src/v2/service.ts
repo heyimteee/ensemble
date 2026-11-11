@@ -8682,6 +8682,9 @@ export class EnsembleV2Service {
     // contacted a recipient after the caller took its turn snapshot.
     const liveTurn = state.subtasks[task.id] ?? task
     const alreadyRouted = nativeContacted(liveTurn.native)
+    // Ticket #248: a synthesis, completion-review, or batch-review turn is
+    // terminal. Its mentions are references and never create peer work.
+    const terminal = isTerminalTurn(task)
     const plan = planMentionRouting({
       text,
       conversation,
@@ -8689,11 +8692,13 @@ export class EnsembleV2Service {
       fanOutCap: state.settings.maxDelegations,
       enabled: state.settings.nativeMentionRouting !== false,
       senderID: target.agent.id,
+      terminal,
       ...(replyToSenderID ? { replyToSenderID } : {}),
       ...(groupTrail.length > 0 ? { groupTrail } : {}),
       ...(alreadyRouted.length > 0 ? { alreadyRouted } : {}),
       ...(workspace ? { limits: dispatchLimits(state.settings), ledger: this.nativeMentionLedger(task) } : {}),
     })
+    const terminalSuppressions = plan.suppressed.filter((item) => item.reason === "terminal-turn")
 
     const excluded = plan.excluded.reduce<Record<string, number>>((counts, span) => {
       counts[span.kind] = (counts[span.kind] ?? 0) + 1
@@ -8726,7 +8731,21 @@ export class EnsembleV2Service {
         source: "agent-final",
         agentID: suppression.agentID,
         reason: suppression.reason,
+        ...(suppression.reason === "terminal-turn" ? { count: terminalSuppressions.length } : {}),
       })
+    }
+    if (terminalSuppressions.length > 0) {
+      // Ticket #248: the chain stops visibly, never silently. #250 adds the
+      // explicit `ensemble_dispatch` continuation; naming it here is the
+      // forward-compatible instruction until then.
+      this.logger?.event("info", "native", "native.route.terminal", {
+        ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+        turnID: task.id,
+        reason: "terminal-turn",
+        recipients: [...new Set(terminalSuppressions.map((item) => item.agentID))],
+        count: terminalSuppressions.length,
+      })
+      await this.appendTerminalTurnNotice(target, task, at)
     }
 
     if (workspace && plan.routes.length > 0) {
@@ -8820,6 +8839,34 @@ export class EnsembleV2Service {
       ...(refusal.used !== undefined ? { used: refusal.used } : {}),
       ...(refusal.max !== undefined ? { max: refusal.max } : {}),
     })
+  }
+
+  /**
+   * Ticket #248: a terminal turn's suppressed mentions stop the chain
+   * visibly. The notice names the explicit continuation path that #250 adds;
+   * it never starts work itself.
+   */
+  private async appendTerminalTurnNotice(
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    task: Subtask,
+    at: number,
+  ): Promise<void> {
+    const text = "No work was created from mentions in a terminal turn. Start the next batch explicitly with ensemble_dispatch."
+    if (target.conversation.kind === "workspace") {
+      const workspace = this.store.workspace(target.conversation.workspaceID)
+      if (!workspace) return
+      await this.appendMessage(workspace, { author: "system", text, kind: "system", taskID: task.id })
+    } else {
+      // Direct channels have no workspace row to append through. The
+      // deterministic id keeps a replayed terminal notice from duplicating.
+      await this.store.saveChannelMessage(target.channel, {
+        id: `msg_native_terminal_${stableHash(`native-terminal-notice:${task.id}`)}`,
+        author: "system",
+        text,
+        kind: "system",
+        createdAt: at,
+      })
+    }
   }
 
   // ---- Ticket #230: invisible shadow ingestion ---------------------------
@@ -12182,6 +12229,14 @@ export class EnsembleV2Service {
       await this.appendMessage(workspace, { author: "system", text: "Delegated subtasks completed.", kind: "system", taskID: parent.id })
     }
   }
+}
+
+/**
+ * Ticket #248: synthesis, completion-review, and batch-review turns are
+ * terminal. Their mentions are references; explicit tools remain available.
+ */
+function isTerminalTurn(task: Subtask): boolean {
+  return task.stage === "synthesis" || task.handoff?.completion === true || task.handoff?.batch === true
 }
 
 /**
