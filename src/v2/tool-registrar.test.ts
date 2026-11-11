@@ -18,6 +18,7 @@ function register(surface: "native" | "legacy") {
       handoff: fail,
       delegate: fail,
       review: fail,
+      dispatch: fail,
       askPerson: fail,
       remember: fail,
       share: fail,
@@ -30,12 +31,33 @@ function register(surface: "native" | "legacy") {
 test("ticket225: the native surface registers only the decision tools", () => {
   const tools = register("native")
   assert.deepEqual([...tools.keys()], [...TOOL_SURFACE_TOOL_NAMES.native])
+  assert.equal(TOOL_SURFACE_TOOL_NAMES.native.length, 6, "ticket250: the native surface has six tools")
+  assert.equal(TOOL_SURFACE_TOOL_NAMES.legacy.length, 11, "ticket250: the legacy surface is unchanged")
   for (const name of ["send_message", "workspace_info", "list_workspaces", "list_agents", "delegate", "handoff"]) {
     assert.equal(tools.has(name), false, `${name} is absent from the native surface`)
   }
-  for (const name of ["task_status", "review", "ask_person", "remember", "share"]) {
+  for (const name of ["task_status", "review", "dispatch", "ask_person", "remember", "share"]) {
     assert.ok(tools.get(name), `${name} remains available`)
   }
+})
+
+test("ticket250: ensemble_dispatch takes a next command and its assignment batch", () => {
+  const tools = register("native")
+  const dispatch = tools.get("dispatch")
+  assert.ok(dispatch, "dispatch is registered on the native surface")
+  assert.equal(dispatch.input.properties.title.type, "string")
+  assert.equal(dispatch.input.properties.instruction.type, "string")
+  assert.equal(dispatch.input.properties.continuationOf.type, "string")
+  const assignment = dispatch.input.properties.assignments.items
+  assert.deepEqual([...assignment.required].sort(), ["assignee", "instruction", "maxHops", "title"])
+  assert.equal(assignment.properties.maxHops.type, "integer")
+  assert.equal(assignment.properties.maxHops.minimum, 0)
+  assert.deepEqual(assignment.properties.mode.enum, ["research", "edit"])
+  assert.match(dispatch.description, /leader/i)
+  assert.match(dispatch.description, /new command root/i)
+  assert.match(dispatch.description, /routing operator/i)
+  assert.equal(tools.has("dispatch"), true)
+  assert.equal(register("legacy").has("dispatch"), false, "the legacy surface stays unchanged")
 })
 
 test("ticket225: the legacy surface keeps send_message as a compatibility shim", () => {
@@ -61,6 +83,7 @@ test("ticket161: delegate and handoff require a non-negative integer maxHops", (
       handoff: fail,
       delegate: fail,
       review: fail,
+      dispatch: fail,
       askPerson: fail,
       remember: fail,
       share: fail,

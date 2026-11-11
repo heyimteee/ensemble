@@ -45,6 +45,17 @@ Related: [handoff terminology](../../GLOSSARY.md), tickets
 - Use `$Name` (or the `!Name` alias) for agents throughout.
 - `@` is file-only and never addresses an agent.
 
+## Terminal turns
+
+A synthesis, completion-review, or batch-review turn is terminal. Its
+routing-operator mentions are references, not work; the final text still posts
+as the group message. To start the next ticket explicitly, the leader calls
+`ensemble_dispatch` with a title, an instruction, and an assignment batch. It
+creates a new parentless command root with a fresh command group and budget and
+creates the assignments under it. It is leader-only and idempotent: a retry
+returns the existing root and assignments. A terminal turn with suppressed
+mentions and no dispatch posts a visible no-work notice.
+
 ## Review obligations
 
 A recipient of a batch review owns the disposition, not just acknowledgement:

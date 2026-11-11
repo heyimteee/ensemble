@@ -440,6 +440,12 @@ export type Subtask = {
    * readers; `deriveWorkStatus` in queue.ts is the canonical lifecycle
    * derivation and never trusts `state` alone.
    */
+  /**
+   * Ticket #250: this row is a command-root container, not a dispatch hop.
+   * The root waits for its assignment batch and spends no group or command
+   * hop; the assignments spend them. Absent on every other row.
+   */
+  hopExempt?: boolean
   /** Unit of work: "delegation" (default), "handoff", or "turn". */
   workKind?: WorkKind
   /** Idempotency key: resubmitting the same work executes once, not twice. */

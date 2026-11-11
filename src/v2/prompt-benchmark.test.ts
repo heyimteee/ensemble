@@ -5,8 +5,8 @@ import { benchmarkReport, benchmarkSummary, schemaText, toolSurfaceSize } from "
 test("ticket225: prompt-size regression gate records tool schema, identity, context, calls, and round-trips", () => {
   const report = benchmarkReport()
   assert.equal(report.before.toolSurface.count, 11)
-  assert.equal(report.after.toolSurface.count, 5)
-  assert.ok(report.after.toolSurface.estimatedTokens < report.before.toolSurface.estimatedTokens * 0.5, benchmarkSummary(report))
+  assert.equal(report.after.toolSurface.count, 6, "ticket250: the native surface grew from five to six tools")
+  assert.ok(report.after.toolSurface.estimatedTokens < report.before.toolSurface.estimatedTokens * 0.6, benchmarkSummary(report))
   assert.ok(report.after.identity.chars < 6200, `identity stayed compact: ${report.after.identity.chars}`)
   // The bounded last-20 transcript is part of the delegated context; the
   // roster/budget block around it stays compact.
@@ -21,11 +21,12 @@ test("ticket225: prompt-size regression gate records tool schema, identity, cont
 
 test("ticket225: north-star schema bytes are the native decision set", () => {
   const native = schemaText("native")
-  assert.equal(toolSurfaceSize("native").count, 5)
+  assert.equal(toolSurfaceSize("native").count, 6)
   assert.doesNotMatch(native, /workspace_info|list_agents|list_workspaces|send_message/)
   assert.match(native, /task_status/)
   assert.match(native, /ask_person/)
   assert.match(native, /review/)
+  assert.match(native, /dispatch/)
   assert.match(native, /remember/)
   assert.match(native, /share/)
 })

@@ -421,6 +421,20 @@ continuation automatically; naming an active continuation as
 new hop; completion, batch, synthesis, peer-turn, retry, restart, and recovery
 rows may still save directly.
 
+**Terminal continuation.** `ensemble_dispatch` is the explicit next-ticket path
+from a terminal turn (synthesis, completion review, or batch review). It is
+leader-only and creates a parentless command root assigned to the leader with
+`awaitingChildren: true`, then creates the assignment batch under it with the
+ordinary delegation admission path. The root itself spends no hop; each
+assignment spends one from a fresh command group and budget. The batch is
+preflighted before the root exists: a command, group, depth, or fan-out refusal
+creates nothing and is visible in the group; a command refusal tells the leader
+to ask the user for a new command. The durable dispatch key is the terminal
+task id plus the assignment set, so a retry returns the existing root and
+assignments, and one terminal turn starts at most one command. When the batch
+completes, the root enters the same root-only synthesis path. Normal chat keeps
+the routing operator; terminal mentions are references.
+
 **Ledger.** `SnapshotState.dispatchGroups` is a full durable map. Each
 `DispatchGroup` records identity, workspace, root, parent, continuation index,
 group maximum/used hops, depth maximum, root-only command maximum/used,
@@ -781,8 +795,10 @@ or trace-only data.
 
 The `dispatch` category records `dispatch.group.created`, `dispatch.group.continued`,
 `dispatch.group.exhausted`, `dispatch.group.closed`, `dispatch.group.reconciled`,
-`dispatch.group.refused`, `dispatch.hop.consumed`, `dispatch.hop.refused`, and
-`dispatch.settings.invalid`. Rows carry workspace, group, root, parent,
+`dispatch.group.refused`, `dispatch.hop.consumed`, `dispatch.hop.refused`,
+`dispatch.command.created`, `dispatch.command.deduped`,
+`dispatch.command.refused`, and `dispatch.settings.invalid`. Rows carry
+workspace, group, root, parent,
 continuation index, actor/recipient IDs, work kind, caps, used and remaining
 counts, depth, reason code, and duration. They never carry task titles,
 instructions, handoff paths, file content, or conversation text. Exhaustion and
