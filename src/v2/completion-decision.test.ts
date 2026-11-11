@@ -1,6 +1,8 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { completionDecision } from "./completion-decision.ts"
+import { resolveCommandRoot } from "./command-root.ts"
+import type { Subtask } from "./types.ts"
 
 /**
  * Ticket #237: the completion hop exists for work the leader did not ask for.
@@ -81,4 +83,91 @@ test("ticket237: the sender and asker forms win over the generic parent form", (
 
 test("ticket237: no leader means no skip", () => {
   assert.deepEqual(completionDecision({ task: { id: "child", parentID: "parent" }, leaderID: "" }), { decision: "deliver" })
+})
+
+const task = (patch: Partial<Subtask> & { id: string }): Subtask => ({
+  workspaceID: "w",
+  creatorType: "agent",
+  assigneeID: "a",
+  title: "Task",
+  instruction: "Do",
+  mode: "research",
+  state: "pending",
+  stage: "initial",
+  outcome: "pending",
+  interrupted: false,
+  awaitingChildren: false,
+  attempts: 0,
+  createdAt: 1,
+  ...patch,
+})
+
+test("ticket247: a chain under a leader-owned command root skips the completion hop", () => {
+  const tasks = {
+    root: task({ id: "root", assigneeID: "leo" }),
+    relay: task({ id: "relay", parentID: "root", assigneeID: "kim" }),
+    leaf: task({ id: "leaf", parentID: "relay", assigneeID: "sage" }),
+  }
+  const commandRoot = resolveCommandRoot("leaf", tasks)
+  assert.ok(commandRoot)
+  assert.deepEqual(completionDecision({ task: tasks.leaf, parent: tasks.relay, commandRoot, leaderID: "leo" }), {
+    decision: "skip",
+    reason: "ancestor-is-leader",
+    taskID: "leaf",
+    parentID: "relay",
+    rootID: "root",
+    ancestorID: "root",
+    leaderID: "leo",
+  })
+})
+
+test("ticket247: a nested delegation under a leader-owned root skips the completion hop", () => {
+  const tasks = {
+    root: task({ id: "root", assigneeID: "leo", workKind: "delegation" }),
+    first: task({ id: "first", parentID: "root", assigneeID: "kim", workKind: "delegation" }),
+    second: task({ id: "second", parentID: "first", assigneeID: "sage", workKind: "handoff" }),
+    leaf: task({ id: "leaf", parentID: "second", assigneeID: "fern", workKind: "handoff" }),
+  }
+  const commandRoot = resolveCommandRoot("leaf", tasks)
+  assert.ok(commandRoot)
+  assert.deepEqual(completionDecision({ task: tasks.leaf, parent: tasks.second, commandRoot, leaderID: "leo" }), {
+    decision: "skip",
+    reason: "ancestor-is-leader",
+    taskID: "leaf",
+    parentID: "second",
+    rootID: "root",
+    ancestorID: "root",
+    leaderID: "leo",
+  })
+})
+
+test("ticket247: work rooted under another member still reaches the leader", () => {
+  const tasks = {
+    root: task({ id: "root", assigneeID: "kim" }),
+    relay: task({ id: "relay", parentID: "root", assigneeID: "sage" }),
+    leaf: task({ id: "leaf", parentID: "relay", assigneeID: "fern" }),
+  }
+  const commandRoot = resolveCommandRoot("leaf", tasks)
+  assert.ok(commandRoot)
+  assert.deepEqual(completionDecision({ task: tasks.leaf, parent: tasks.relay, commandRoot, leaderID: "leo" }), { decision: "deliver" })
+})
+
+test("ticket247: a leader-owned ancestor is enough even when the root belongs to another member", () => {
+  const tasks = {
+    root: task({ id: "root", assigneeID: "kim" }),
+    middle: task({ id: "middle", parentID: "root", assigneeID: "leo" }),
+    relay: task({ id: "relay", parentID: "middle", assigneeID: "sage" }),
+    leaf: task({ id: "leaf", parentID: "relay", assigneeID: "fern" }),
+  }
+  const commandRoot = resolveCommandRoot("leaf", tasks)
+  assert.ok(commandRoot)
+  assert.deepEqual(completionDecision({ task: tasks.leaf, parent: tasks.relay, commandRoot, leaderID: "leo" }), {
+    decision: "skip",
+    reason: "ancestor-is-leader",
+    taskID: "leaf",
+    parentID: "relay",
+    rootID: "root",
+    ancestorID: "middle",
+    leaderID: "leo",
+  })
 })
