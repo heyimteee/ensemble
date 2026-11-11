@@ -66,18 +66,25 @@ Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available
   The restart phase asserts the `nativeFirst: "shadow"` contract: shadow
   ingestion, a content-free comparison row, and an unchanged visible path. The
   scenario fails on any recorded shadow gap or prompt content in service logs.
-- `npm run test:live:vera`: ticket #241's Vera regression. One isolated fake
-  host, three starts, and a real temp workspace. The scenario seeds a v5
-  contract, removes the persisted `nativeFirst` key from the isolated plugin
-  store, restarts, and requires the effective mode to be `on` and the default
-  to be persisted. It then checks the generated v6 roster table, drives one
-  leader native turn that explicitly delegates one member and `$Name`-mentions
-  several more, and asserts one work item per member, one `already-routed`
-  suppression for the explicit recipient, no completion hop back to the leader,
-  and one settlement. Finally it exercises `nativeFirst: "off"` plus
-  `toolSurface: "legacy"`, restores `on`/`native`, restarts, and proves the
-  durable native turns and contact ledger. The fake provider is the only model;
-  the store fixture removes one settings key and reports counts only.
+- `npm run test:live:vera`: ticket #241's Vera regression plus ticket #251's
+  multi-ticket and token verification. One isolated fake host, three starts,
+  and a real temp workspace. The scenario seeds a v5 contract, removes the
+  persisted `nativeFirst` key from the isolated plugin store, restarts, and
+  requires the effective mode to be `on` and the default to be persisted. It
+  then checks the generated v6 roster table, drives one leader native turn that
+  explicitly delegates one member and `$Name`-mentions several more, and
+  asserts one work item per member, one `already-routed` suppression for the
+  explicit recipient, no completion hop back to the leader, and one settlement.
+  It exercises `nativeFirst: "off"` plus `toolSurface: "legacy"`, restores
+  `on`/`native`, and then runs a second `VeraFlows` workspace: a six-turn
+  five-hop `$Name` relay, the relay root's terminal `ensemble_dispatch` into a
+  five-way fan-out, the next ticket's one-synthesis root, a visible
+  command-cap dispatch refusal with no work created, and a worker `$Name` route
+  to a sibling. Every command root is leader-owned, so the completion guard
+  skips per-child reviews; the driver records leader turns, leader output,
+  synthesis prompt/context characters, and the native six-tool vs legacy
+  eleven-tool schemas. The fake provider is the only model; the store fixture
+  removes one settings key and reports counts only.
 - `npm run test:live:subagent`: ticket #188's real native-subagent probe. The
   isolated OpenCode 2.2.6 host runs the worktree plugin against the fake
   provider, then an Ensemble agent's fake turn calls the host's built-in
