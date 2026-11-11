@@ -13,6 +13,7 @@ import {
   workPaneBodyHeight,
   workPaneCardsFit,
   workPaneHeader,
+  WORK_PANE_MAX_WIDTH,
   workTaskPage,
   workViewGroups,
   workspacePaneWidths,
@@ -85,6 +86,23 @@ test("ticket172: three-pane widths tile the view exactly and keep a usable chat"
     assert.ok(panes.chatOnlyContentWidth >= panes.chatContentWidth, "a narrower three-pane row never widens a DM")
     assert.equal(panes.railWidth, Math.max(26, Math.min(34, Math.floor(panes.viewWidth * 0.26))))
   }
+})
+
+test("ticket243: a wide terminal caps the Work pane and gives the width to chat", () => {
+  for (const terminalWidth of [196, 200, 240]) {
+    const panes = workspacePaneWidths(terminalWidth)
+    assert.equal(panes.workWidth, WORK_PANE_MAX_WIDTH, `${terminalWidth}: Work is capped`)
+    assert.equal(
+      panes.railWidth + panes.chatWidth + panes.workWidth + panes.gap * 2,
+      panes.viewWidth,
+      `${terminalWidth}: the capped row still tiles exactly`,
+    )
+    assert.equal(workPaneCardsFit(panes.workContentWidth), true, `${terminalWidth}: the capped pane keeps one-card mode`)
+  }
+  const wide = workspacePaneWidths(196)
+  const uncapped = Math.floor(wide.viewWidth * 0.4)
+  assert.ok(wide.workWidth < uncapped, "the cap actually narrows a 196-column Work pane")
+  assert.ok(wide.chatWidth > workspacePaneWidths(160).chatWidth, "the reclaimed width goes to the chat")
 })
 
 test("ticket172: the drawer overlays the chat and leaves its right edge exact", () => {

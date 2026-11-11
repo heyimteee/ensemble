@@ -11,10 +11,11 @@ import { workGroupLabel, workHistoryFinishedAt, workHistoryRollupLabel } from ".
  * Ticket #172: one responsive shell model for the three-pane workspace.
  *
  * The rail keeps its ticket #171 width; the chat takes the remainder; the
- * Work pane gets a readable share on the right. Below 96 terminal columns the
- * Work pane becomes a right drawer that overlays the chat, so the chat never
- * becomes unusably narrow. Every consumer (transcript width, Work layout,
- * hit-testing, and the size tests) reads these numbers from one pure function.
+ * Work pane gets a bounded, readable share on the right. Below 96 terminal
+ * columns the Work pane becomes a right drawer that overlays the chat, so the
+ * chat never becomes unusably narrow. Every consumer (transcript width, Work
+ * layout, hit-testing, and the size tests) reads these numbers from one pure
+ * function.
  */
 
 export type ShellPaneMode = "three" | "compact" | "drawer"
@@ -27,6 +28,14 @@ export const SHELL_VIEW_INSET = 2
 
 /** Work outer border (2) plus its left/right padding (2). */
 export const WORK_PANE_HORIZONTAL_CHROME = 4
+
+/**
+ * Ticket #243: the Work pane's widest share. The chat is the primary surface;
+ * on a very wide terminal the Work pane should stay a task board, not become a
+ * second transcript. Sixty columns keeps the full Work header and a readable
+ * one-card row, and leaves the reclaimed width to the chat.
+ */
+export const WORK_PANE_MAX_WIDTH = 60
 
 /**
  * Chat outer chrome: border (2), pane padding (2), transcript right padding
@@ -121,7 +130,7 @@ export function workspacePaneWidths(
     }
   }
   const ratio = terminal >= 140 ? 0.4 : 0.38
-  let workWidth = clamp(30, 78, Math.floor(viewWidth * ratio))
+  let workWidth = clamp(30, WORK_PANE_MAX_WIDTH, Math.floor(viewWidth * ratio))
   let chatWidth = viewWidth - railWidth - workWidth - SHELL_PANE_GAP - (left ? SHELL_PANE_GAP : 0)
   // The chat is the shell's primary surface: shrink the Work pane before the
   // transcript drops below a readable 30-cell column.
