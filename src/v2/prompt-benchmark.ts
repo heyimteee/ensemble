@@ -81,6 +81,7 @@ export function schemaText(surface: ToolSurface): string {
       handoff: fail,
       delegate: fail,
       review: fail,
+      dispatch: fail,
       askPerson: fail,
       remember: fail,
       share: fail,

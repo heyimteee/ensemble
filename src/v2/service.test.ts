@@ -1360,7 +1360,7 @@ test("ticket225: native-first registers the decision toolset and the setting rol
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
-    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "dispatch", "ask_person", "remember", "share"])
     const invalid = await handlers.invoke({ directory, action: "settings.update", payload: { toolSurface: "sometimes" } })
     assert.equal(invalid.ok, false)
     assert.equal(invalid.error?.code, "invalid_settings")
@@ -1372,7 +1372,7 @@ test("ticket225: native-first registers the decision toolset and the setting rol
     const cutover = await handlers.invoke({ directory, action: "settings.update", payload: { toolSurface: "native" } })
     assert.equal(cutover.ok, true)
     assert.equal(tools.has("send_message"), false)
-    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "dispatch", "ask_person", "remember", "share"])
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -1390,7 +1390,7 @@ test("ticket240: service start persists native-first on and logs the effective m
     assert.equal(snap.state.settings.nativeFirst, "on", "the absent persisted mode resolves to on")
     const stored = values.get("v2/meta") as any
     assert.equal(stored.settings.nativeFirst, "on", "the first start persists the default")
-    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "dispatch", "ask_person", "remember", "share"])
 
     const entry = getGlobalLogger()?.recent({ event: "native.mode" }).at(-1)
     assert.ok(entry, "the service logs the effective native mode")
@@ -1416,7 +1416,7 @@ test("ticket240: a store with no seeded settings starts on and persists the defa
     const snap = await service.handlers().snapshot({ directory })
     assert.equal(snap.state.settings.nativeFirst, "on", "the effective mode is on")
     assert.equal((values.get("v2/meta") as any).settings.nativeFirst, "on", "the first start persists the default")
-    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "dispatch", "ask_person", "remember", "share"])
     const entry = getGlobalLogger()?.recent({ event: "native.mode" }).at(-1)
     assert.equal(entry?.mode, "on")
     assert.equal(entry?.migrated, true)
@@ -1457,7 +1457,7 @@ test("ticket240: the default native surface rolls back to legacy tools and resto
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
   try {
-    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "dispatch", "ask_person", "remember", "share"])
 
     // `:tools legacy` keeps native ingestion but restores the old tools.
     await handlers.invoke({ directory, action: "settings.update", payload: { toolSurface: "legacy" } })
@@ -1484,7 +1484,7 @@ test("ticket240: the default native surface rolls back to legacy tools and resto
     assert.equal(snap.state.settings.nativeFirst, "shadow")
 
     await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on", toolSurface: "native" } })
-    assert.deepEqual([...tools.keys()], ["task_status", "review", "ask_person", "remember", "share"])
+    assert.deepEqual([...tools.keys()], ["task_status", "review", "dispatch", "ask_person", "remember", "share"])
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })
@@ -13644,6 +13644,332 @@ test("ticket248: a worker handoff still routes a sibling and keeps the reply-to-
     const suppressed = await (handlers as any)["logs.recent"]({ directory, event: "native.route.suppressed", limit: 20 })
     assert.deepEqual(suppressed.entries.map((entry: any) => [entry.agentID, entry.reason]), [["a", "reply-to-sender"]])
     assert.ok(suppressed.entries.every((entry: any) => entry.reason !== "terminal-turn"))
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+// ---- Ticket #250: terminal continuation dispatch ----
+
+const dispatchBatch = {
+  title: "Ticket two",
+  instruction: "Ship ticket two.",
+  assignments: [
+    { assignee: "Sage", title: "Write the notes", instruction: "Write the release notes.", maxHops: 1 },
+    { assignee: "Echo", title: "Run the tests", instruction: "Run the test suite.", maxHops: 0 },
+  ],
+}
+
+test("ticket250: ensemble_dispatch starts a parentless command root and its assignment batch", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-250-dispatch-"))
+  const { ctx, nativeSessions, tools } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+  ])
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.updateSettings({ nativeFirst: "on" })
+  await seedQueuedTask(ctx, { id: "review", assigneeID: "a", stage: "synthesis", instruction: "Summarize ticket one." })
+  replyTextBySession(ctx, { s_group_a: "Ticket one is complete." })
+  let dispatched = false
+  let createdRoot: any
+  let createdAssignments: any[] = []
+  let createdGroup: any
+  let dispatchResult = ""
+  let releasePrompt!: () => void
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
+  const service = new EnsembleV2Service(ctx)
+  let handlers: any
+  ;(ctx.session as any).prompt = async ({ sessionID }: any) => {
+    await promptGate
+    if (sessionID !== "s_group_a" || dispatched) return
+    dispatched = true
+    const tool = tools.get("dispatch")
+    assert.ok(tool, "ticket250: dispatch is on the native surface")
+    const result = await tool.execute(dispatchBatch, { sessionID })
+    dispatchResult = result.content
+    const snap = await service.handlers().snapshot({ directory })
+    createdRoot = Object.values(snap.state.subtasks).find((task: any) => task.title === "Ticket two")
+    createdAssignments = Object.values(snap.state.subtasks).filter((task: any) => task.parentID === createdRoot?.id) as any[]
+    createdGroup = snap.state.dispatchGroups[createdRoot?.dispatchGroupID]
+  }
+  const stop = await startServiceForTest(service, service.ctx)
+  handlers = service.handlers()
+  releasePrompt()
+  try {
+    await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+    await waitFor(async () => (await snapshotFor(handlers, directory)).subtasks.review?.state === "replied")
+    await waitFor(async () => {
+      const state = await snapshotFor(handlers, directory)
+      return createdRoot ? state.subtasks[createdRoot.id]?.stage === "synthesis" && state.subtasks[createdRoot.id]?.state === "replied" : false
+    }, 5000)
+
+    assert.match(dispatchResult, /Started command "Ticket two"/)
+    assert.ok(createdRoot, "the new command root exists")
+    assert.equal(createdRoot.parentID, undefined, "the command root has no parent")
+    assert.equal(createdRoot.assigneeID, "a", "the command root belongs to the leader")
+    assert.equal(createdRoot.creatorType, "agent")
+    assert.equal(createdRoot.creatorAgentID, "a")
+    assert.equal(createdRoot.stage, "initial", "the root starts as an initial row")
+    assert.equal(createdRoot.workKind, "delegation")
+    assert.equal(createdRoot.awaitingChildren, true, "the root waits for its batch instead of being claimed")
+    assert.equal(createdRoot.state, "pending")
+    assert.ok(createdRoot.dispatchGroupID, "the root owns a dispatch group")
+    assert.notEqual(createdRoot.dispatchGroupID, "dispatch_review", "the next ticket is a new command")
+    assert.equal(createdGroup.rootID, createdRoot.dispatchGroupID, "the new group is a command root")
+    assert.equal(createdGroup.usedHops, 2, "the root consumes no hop; each assignment consumes one")
+    assert.equal(createdGroup.commandUsedHops, 2, "the fresh command budget starts at the assignment count")
+    assert.equal(createdGroup.maxHops, 8)
+    assert.equal(createdGroup.commandMaxHops, 24)
+    assert.deepEqual(createdAssignments.map((task) => task.assigneeID).sort(), ["b", "c"])
+    for (const assignment of createdAssignments) {
+      assert.equal(assignment.parentID, createdRoot.id)
+      assert.equal(assignment.dispatchGroupID, createdRoot.dispatchGroupID)
+      assert.equal(assignment.workKind, "delegation")
+      assert.equal(assignment.creatorType, "agent")
+      assert.equal(assignment.creatorAgentID, "a")
+      assert.ok(assignment.taskMaxHops === 0 || assignment.taskMaxHops === 1)
+    }
+
+    const state = await snapshotFor(handlers, directory)
+    const root = state.subtasks[createdRoot.id]
+    assert.equal(root.stage, "synthesis", "the next batch enters the root synthesis")
+    assert.equal(root.state, "replied")
+    assert.equal(agentTextMessages(state, root.id).length, 1, "the next command gets exactly one synthesis message")
+    const completionHops = Object.values(state.subtasks).filter(
+      (task: any) => task.workKind === "handoff" && task.handoff?.completion === true,
+    )
+    assert.equal(completionHops.length, 0, "a leader-owned root skips per-child completion reviews")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("ticket250: a dispatch retry returns the existing root and assignments", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-250-dispatch-retry-"))
+  const { ctx, nativeSessions, tools } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+  ])
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.updateSettings({ nativeFirst: "on" })
+  await seedQueuedTask(ctx, { id: "review", assigneeID: "a", stage: "synthesis", instruction: "Summarize ticket one." })
+  replyTextBySession(ctx, { s_group_a: "Ticket one is complete." })
+  const results: string[] = []
+  let firstRootID = ""
+  let firstAssignmentIDs: string[] = []
+  let secondRootID = ""
+  let secondAssignmentIDs: string[] = []
+  let calls = 0
+  let releasePrompt!: () => void
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
+  const service = new EnsembleV2Service(ctx)
+  ;(ctx.session as any).prompt = async ({ sessionID }: any) => {
+    await promptGate
+    if (sessionID !== "s_group_a" || calls > 0) return
+    calls++
+    const tool = tools.get("dispatch")
+    const first = await tool.execute(dispatchBatch, { sessionID })
+    results.push(first.content)
+    const afterFirst = await service.handlers().snapshot({ directory })
+    firstRootID = (Object.values(afterFirst.state.subtasks).find((task: any) => task.title === "Ticket two") as any)?.id ?? ""
+    firstAssignmentIDs = Object.values(afterFirst.state.subtasks)
+      .filter((task: any) => task.parentID === firstRootID)
+      .map((task: any) => task.id)
+      .sort()
+    const second = await tool.execute(dispatchBatch, { sessionID })
+    results.push(second.content)
+    const afterSecond = await service.handlers().snapshot({ directory })
+    secondRootID = (Object.values(afterSecond.state.subtasks).find((task: any) => task.title === "Ticket two") as any)?.id ?? ""
+    secondAssignmentIDs = Object.values(afterSecond.state.subtasks)
+      .filter((task: any) => task.parentID === secondRootID)
+      .map((task: any) => task.id)
+      .sort()
+  }
+  const stop = await startServiceForTest(service, service.ctx)
+  releasePrompt()
+  try {
+    await waitFor(async () => (await snapshotFor(service.handlers(), directory)).subtasks.review?.state === "replied")
+    assert.match(results[0]!, /Started command "Ticket two"/)
+    assert.match(results[1]!, /Already started command "Ticket two"/)
+    assert.equal(secondRootID, firstRootID, "the retry returns the same command root")
+    assert.deepEqual(secondAssignmentIDs, firstAssignmentIDs, "the retry returns the same assignments")
+    const state = await snapshotFor(service.handlers(), directory)
+    assert.equal(
+      Object.values(state.subtasks).filter((task: any) => task.title === "Ticket two" && !task.parentID).length,
+      1,
+      "no duplicate root",
+    )
+    assert.equal(Object.values(state.subtasks).filter((task: any) => firstAssignmentIDs.includes(task.id)).length, 2, "no duplicate assignments")
+    assert.equal(state.dispatchGroups[state.subtasks[firstRootID].dispatchGroupID].usedHops, 2, "the retry spends no hop")
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Run one dispatch from a terminal review turn and return what the service
+ * wrote. The helper owns its temp directory and stops the service, so each
+ * refusal case is one isolated command.
+ */
+async function runDispatchRefusal(input: {
+  name: string
+  settings?: Record<string, unknown>
+  assignments: Array<Record<string, unknown>>
+  expected: RegExp
+  finalText?: string
+}): Promise<{ result: string; before: number; after: number; state: any; expected: RegExp }> {
+  const directory = mkdtempSync(join(tmpdir(), `ensemble-250-${input.name}-`))
+  const { ctx, nativeSessions, tools } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+  ])
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.updateSettings({ nativeFirst: "on", ...input.settings })
+  await seedQueuedTask(ctx, { id: "review", assigneeID: "a", stage: "synthesis", instruction: "Summarize ticket one." })
+  replyTextBySession(ctx, { s_group_a: input.finalText ?? "Ticket one is complete." })
+  let result = ""
+  let before = 0
+  let after = 0
+  let state: any
+  let releasePrompt!: () => void
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
+  const service = new EnsembleV2Service(ctx)
+  ;(ctx.session as any).prompt = async ({ sessionID }: any) => {
+    await promptGate
+    if (sessionID !== "s_group_a" || result) return
+    const handlers = service.handlers()
+    before = Object.keys((await handlers.snapshot({ directory })).state.subtasks).length
+    const tool = tools.get("dispatch")
+    result = (await tool.execute(
+      { title: "Ticket two", instruction: "Ship ticket two.", assignments: input.assignments },
+      { sessionID },
+    )).content
+    state = (await handlers.snapshot({ directory })).state
+    after = Object.keys(state.subtasks).length
+  }
+  const stop = await startServiceForTest(service, service.ctx)
+  releasePrompt()
+  try {
+    await waitFor(async () => (await snapshotFor(service.handlers(), directory)).subtasks.review?.state === "replied")
+    const finalState = await snapshotFor(service.handlers(), directory)
+    return { result, before, after, state: finalState, expected: input.expected }
+  } finally {
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
+test("ticket250: a group refusal creates no command work and is visible", async () => {
+  const outcome = await runDispatchRefusal({
+    name: "group-refusal",
+    assignments: Array.from({ length: 9 }, (_, index) => ({
+      assignee: "Sage",
+      title: `Group task ${index}`,
+      instruction: "Do the group task.",
+      maxHops: 0,
+    })),
+    expected: /new command group is limited to 8 hops/,
+    finalText: "Ticket one is complete. Thanks $Sage.",
+  })
+  assert.match(outcome.result, outcome.expected)
+  assert.equal(outcome.after, outcome.before, "the refused batch creates no task")
+  assert.ok(!Object.values(outcome.state.subtasks).some((task: any) => task.title === "Ticket two"))
+  assert.ok(!Object.values(outcome.state.subtasks).some((task: any) => String(task.queueKey ?? "").startsWith("ensemble-dispatch:")))
+  assert.ok(nativeSystemMessages(outcome.state).some((text) => text.startsWith("Dispatch refused:")))
+  assert.ok(
+    nativeSystemMessages(outcome.state).some((text) => text.includes("No work was created from mentions in a terminal turn")),
+    "a refused dispatch did not start work, so the terminal notice stays honest",
+  )
+})
+
+test("ticket250: a command-cap refusal tells the leader to ask for a new command", async () => {
+  const outcome = await runDispatchRefusal({
+    name: "command-refusal",
+    settings: { dispatchGroupMaxHops: 24, dispatchCommandMaxHops: 24, dispatchContinuations: 0 },
+    assignments: Array.from({ length: 25 }, (_, index) => ({
+      assignee: index % 2 === 0 ? "Sage" : "Echo",
+      title: `Command task ${index}`,
+      instruction: "Do the command task.",
+      maxHops: 0,
+    })),
+    expected: /Ask the user to start a new command/,
+  })
+  assert.match(outcome.result, outcome.expected)
+  assert.equal(outcome.after, outcome.before, "the refused batch creates no task")
+  assert.ok(!Object.values(outcome.state.subtasks).some((task: any) => String(task.queueKey ?? "").startsWith("ensemble-dispatch:")))
+})
+
+test("ticket250: a fan-out refusal creates no command work", async () => {
+  const outcome = await runDispatchRefusal({
+    name: "fanout-refusal",
+    settings: { maxDelegations: 2 },
+    assignments: [
+      { assignee: "Sage", title: "Fan one", instruction: "Do fan one.", maxHops: 0 },
+      { assignee: "Echo", title: "Fan two", instruction: "Do fan two.", maxHops: 0 },
+      { assignee: "Sage", title: "Fan three", instruction: "Do fan three.", maxHops: 0 },
+    ],
+    expected: /assignment limit is 2 per command/,
+  })
+  assert.match(outcome.result, outcome.expected)
+  assert.equal(outcome.after, outcome.before, "the refused batch creates no task")
+  assert.ok(!Object.values(outcome.state.subtasks).some((task: any) => String(task.queueKey ?? "").startsWith("ensemble-dispatch:")))
+})
+
+test("ticket250: a terminal turn that dispatches work does not post the no-work notice", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-250-dispatch-notice-"))
+  const { ctx, nativeSessions, tools } = fakeContext()
+  for (const sessionID of ["s_group_a", "s_group_b", "s_group_c"]) nativeSessions.set(sessionID, { id: sessionID })
+  await seedNativeMentionTeam(ctx, directory, [
+    { id: "a", name: "Nova", sessionID: "s_group_a" },
+    { id: "b", name: "Sage", sessionID: "s_group_b" },
+    { id: "c", name: "Echo", sessionID: "s_group_c" },
+  ])
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.updateSettings({ nativeFirst: "on" })
+  await seedQueuedTask(ctx, { id: "review", assigneeID: "a", stage: "synthesis", instruction: "Summarize ticket one." })
+  replyTextBySession(ctx, { s_group_a: "Ticket one is complete. Thanks $Sage and $Echo." })
+  let dispatched = false
+  let releasePrompt!: () => void
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve })
+  const service = new EnsembleV2Service(ctx)
+  ;(ctx.session as any).prompt = async ({ sessionID }: any) => {
+    await promptGate
+    if (sessionID !== "s_group_a" || dispatched) return
+    dispatched = true
+    await tools.get("dispatch").execute(dispatchBatch, { sessionID })
+  }
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  releasePrompt()
+  try {
+    await waitFor(async () => (await snapshotFor(handlers, directory)).subtasks.review?.state === "replied")
+    const state = await snapshotFor(handlers, directory)
+    assert.ok(
+      !nativeSystemMessages(state).some((text) => text.includes("No work was created from mentions in a terminal turn")),
+      "the dispatch created work, so the no-work notice is suppressed",
+    )
+    const terminal = await (handlers as any)["logs.recent"]({ directory, event: "native.route.terminal", limit: 20 })
+    assert.equal(terminal.entries.length, 1)
+    assert.equal(terminal.entries[0].dispatched, true)
+    const suppressed = await (handlers as any)["logs.recent"]({ directory, event: "native.route.suppressed", limit: 20 })
+    assert.equal(suppressed.entries.length, 2)
+    assert.ok(suppressed.entries.every((entry: any) => entry.reason === "terminal-turn"))
   } finally {
     await stop()
     rmSync(directory, { recursive: true, force: true })

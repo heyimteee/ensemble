@@ -599,16 +599,19 @@ export type DispatchHopWorkItem = {
   creatorType: "user" | "agent"
   workKind?: WorkKind
   handoff?: { completion?: boolean; batch?: boolean }
+  /** Ticket #250: a command-root container never spends a hop. */
+  hopExempt?: boolean
 }
 
 /**
  * True when creating this work item spends one hop: an agent-created
  * delegation or explicit handoff. User command recipients, peer turns,
- * completion handoffs, batch review, synthesis, retries, restarts, and
- * recovery never consume.
+ * completion handoffs, batch review, synthesis, retries, restarts, recovery,
+ * and a continuation command root never consume.
  */
 export function dispatchesHop(task: DispatchHopWorkItem): boolean {
   if (task.creatorType !== "agent") return false
+  if (task.hopExempt === true) return false
   if (task.workKind !== "delegation" && task.workKind !== "handoff") return false
   if (task.handoff?.completion === true) return false
   if (task.handoff?.batch === true) return false

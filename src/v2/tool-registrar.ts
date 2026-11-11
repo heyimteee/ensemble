@@ -22,6 +22,7 @@ export interface EnsembleToolHandlers {
   handoff(input: Json, context: any): Promise<ToolResult>
   delegate(input: Json, context: any): Promise<ToolResult>
   review(input: Json, context: any): Promise<ToolResult>
+  dispatch(input: Json, context: any): Promise<ToolResult>
   askPerson(input: Json, context: any): Promise<ToolResult>
   remember(input: Json, context: any): Promise<ToolResult>
   share(input: Json, context: any): Promise<ToolResult>
@@ -156,6 +157,41 @@ export function registerEnsembleTools(
     },
     execute: async (input, context) => handlers.review(input, context),
   })
+  if (surface === "native") {
+    editor.add({
+      name: "dispatch",
+      options: { namespace: "ensemble", codemode: false },
+      description: "Leader-only terminal continuation: start the next ticket as a new command root with a fresh budget and this assignment batch. Normal chat uses the routing operator; a retry returns the existing command.",
+      input: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          instruction: { type: "string" },
+          assignments: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                assignee: { type: "string" },
+                title: { type: "string" },
+                instruction: { type: "string" },
+                constraints: { type: "string" },
+                expected: { type: "string" },
+                mode: { type: "string", enum: ["research", "edit"] },
+                maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
+              },
+              required: ["assignee", "title", "instruction", "maxHops"],
+              additionalProperties: false,
+            },
+          },
+          continuationOf: { type: "string" },
+        },
+        required: ["title", "instruction", "assignments"],
+        additionalProperties: false,
+      },
+      execute: async (input, context) => handlers.dispatch(input, context),
+    })
+  }
   editor.add({
     name: "ask_person",
     options: { namespace: "ensemble", codemode: false },

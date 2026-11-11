@@ -40,6 +40,7 @@ import {
   type DispatchRefusal,
 } from "./dispatch-budget.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
+import { dispatchCommandKey, dispatchCommandRefusalText, dispatchCommandStartedForTurn, pendingDispatchCommandRoot, preflightDispatchCommand, type DispatchAssignmentInput } from "./dispatch-command.ts"
 import { resolveActiveTurnAnchor, type ActiveTurnAnchor } from "./turn-anchor.ts"
 import { completionDecision } from "./completion-decision.ts"
 import { resolveCommandRoot } from "./command-root.ts"
@@ -4634,6 +4635,9 @@ export class EnsembleV2Service {
     options: { maxPerRun?: number; perRunKind?: WorkKind } = {},
   ): Promise<{ admitted: boolean; consumed: boolean; deduped?: boolean; refusal?: DispatchRefusal; group?: DispatchGroup; task?: Subtask }> {
     await this.ensureDispatchGroupLedger(task.dispatchGroupID, task.workspaceID)
+    // Ticket #250: a new command root is a container, not a dispatch hop. It
+    // carries `hopExempt` and is saved through the same queue-key/idempotency
+    // path without spending group or command budget; its assignments spend.
     if (!dispatchesHop(task)) {
       await this.store.saveSubtask(task)
       return { admitted: true, consumed: false }
@@ -4794,6 +4798,16 @@ export class EnsembleV2Service {
     taskMaxHops?: number
     maxPerRun?: number
     perRunKind?: WorkKind
+    /**
+     * Ticket #250: explicit durable idempotency key. The continuation
+     * dispatch scopes the next command to its terminal turn and assignment
+     * set; every other caller keeps the derived `workKey`.
+     */
+    queueKey?: string
+    /** Ticket #250: a command root waits for its batch and is never claimed. */
+    awaitingChildren?: boolean
+    /** Ticket #250: a command root container spends no hop. */
+    hopExempt?: boolean
   }): Promise<{ subtask: Subtask; deduped: boolean; admitted: boolean; refusal?: DispatchRefusal }> {
     const kind: WorkKind = parseWorkKind(input.kind ?? "delegation") ?? (() => { throw invalidInput(`Unknown work kind: ${String(input.kind)}.`) })()
     // Central propagation: explicit group (a user command fan-out or an
@@ -4814,7 +4828,7 @@ export class EnsembleV2Service {
     // none, so they cannot be mistaken for a granted local bound. Legacy live
     // rows are filled once by reconciliation instead.
     const taskMaxHops = input.taskMaxHops
-    const key = workKey({
+    const key = input.queueKey ?? workKey({
       actor: input.creatorAgentID ?? input.creatorType,
       workspaceID: input.workspace.id,
       kind,
@@ -4851,11 +4865,12 @@ export class EnsembleV2Service {
       stage: input.stage ?? "initial",
       outcome: "pending",
       interrupted: false,
-      awaitingChildren: false,
+      awaitingChildren: input.awaitingChildren === true,
       attempts: 0,
       createdAt: at,
       workKind: kind,
       queueKey: key,
+      ...(input.hopExempt === true ? { hopExempt: true } : {}),
       dispatchGroupID,
       ...(taskMaxHops !== undefined ? { taskMaxHops } : {}),
       dispatchDepth: depth,
@@ -5737,6 +5752,7 @@ export class EnsembleV2Service {
       handoff: (input, context) => this.toolHandoff(input, context),
       delegate: (input, context) => this.toolDelegate(input, context),
       review: (input, context) => this.toolReview(input, context),
+      dispatch: (input, context) => this.toolDispatch(input, context),
       askPerson: (input, context) => this.toolAsk(input, context),
       remember: (input, context) => this.toolRemember(input, context),
       share: (input, context) => this.toolShare(input, context),
@@ -6794,6 +6810,289 @@ export class EnsembleV2Service {
     return `Batch handed to $${target?.name ?? route.to}: every item decided.`
   }
 
+  /**
+   * Ticket #250: the explicit terminal continuation. A synthesis or review
+   * turn can start the next ticket as a new command root with a fresh command
+   * group and budget. The root is a leader-owned container that spends no hop
+   * and waits for its assignment batch; the assignments use the ordinary
+   * delegation admission path. Normal chat keeps the routing operator.
+   */
+  private async toolDispatch(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
+    const state = this.store.read()
+    const found = this.requireToolSession(state, context.sessionID)
+    if (!found) return { content: "This session is not bound to an Ensemble workspace." }
+    const { workspace, agent } = found
+    if (workspace.paused) {
+      await this.appendMessage(workspace, { author: "system", text: `Dispatch refused: workspace ${workspace.name} is paused.`, kind: "system" })
+      return { content: "This workspace is paused." }
+    }
+    if (workspace.leaderID !== agent.id) {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: `Dispatch refused: only the workspace leader (${this.agentName(workspace.leaderID)}) can start a new command.`,
+        kind: "system",
+      })
+      return { content: "Only the workspace leader can start a new command with ensemble_dispatch." }
+    }
+    const anchor = this.activeTurnAnchor(context.sessionID, workspace, agent)
+    if (!anchor?.task) {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: "Dispatch refused: no active leader turn. Call ensemble_dispatch from the turn that must continue.",
+        kind: "system",
+      })
+      return { content: "ensemble_dispatch requires an active leader turn." }
+    }
+    const origin = anchor.task
+    const title = typeof input.title === "string" ? input.title.trim() : ""
+    const instruction = typeof input.instruction === "string" ? input.instruction.trim() : ""
+    if (!title || !instruction) {
+      return this.refuseDispatchCommand(workspace, "a command title and instruction are required.", origin.id, 0)
+    }
+    const rawAssignments = Array.isArray(input.assignments) ? input.assignments : []
+    if (rawAssignments.length === 0) {
+      return this.refuseDispatchCommand(workspace, "at least one assignment is required.", origin.id, 0)
+    }
+    // The optional continuation reference is provenance for the ticket
+    // sequence. The next command still gets its own fresh group and budget.
+    const continuationRef = typeof input.continuationOf === "string" ? input.continuationOf.trim() : ""
+    let continuationGroup: DispatchGroup | undefined
+    if (continuationRef) {
+      const namedGroup = state.dispatchGroups[continuationRef]
+      const namedTask = state.subtasks[continuationRef]
+      const resolved = namedGroup ?? (namedTask?.dispatchGroupID ? state.dispatchGroups[namedTask.dispatchGroupID] : undefined)
+      if (!resolved || resolved.workspaceID !== workspace.id) {
+        return this.refuseDispatchCommand(workspace, "continuationOf is not a command in this workspace.", origin.id, rawAssignments.length)
+      }
+      continuationGroup = resolved
+    }
+    const assignments: DispatchAssignmentInput[] = []
+    for (const raw of rawAssignments) {
+      if (!raw || typeof raw !== "object") {
+        return this.refuseDispatchCommand(workspace, "every assignment needs an assignee, title, and instruction.", origin.id, rawAssignments.length)
+      }
+      const assignee = typeof raw.assignee === "string" ? raw.assignee.trim() : ""
+      const assignmentTitle = typeof raw.title === "string" ? raw.title.trim() : ""
+      const assignmentInstruction = typeof raw.instruction === "string" ? raw.instruction.trim() : ""
+      if (!assignee || !assignmentTitle || !assignmentInstruction) {
+        return this.refuseDispatchCommand(workspace, "every assignment needs an assignee, title, and instruction.", origin.id, rawAssignments.length)
+      }
+      const budget = validateTaskMaxHops("ensemble_dispatch", raw.maxHops)
+      if (!budget.ok) return this.refuseDispatchCommand(workspace, budget.reason, origin.id, rawAssignments.length)
+      const target = Object.values(state.agents).find(
+        (item) => item.name.toLowerCase() === assignee.toLowerCase() || item.id === assignee,
+      )
+      if (!target || target.archived) {
+        return this.refuseDispatchCommand(workspace, `${assignee} is not available.`, origin.id, rawAssignments.length)
+      }
+      if (!workspace.memberIDs.includes(target.id)) {
+        return this.refuseDispatchCommand(workspace, `${target.name} is not a workspace member.`, origin.id, rawAssignments.length)
+      }
+      assignments.push({
+        assignee: target.id,
+        title: assignmentTitle,
+        instruction: assignmentInstruction,
+        ...(typeof raw.constraints === "string" && raw.constraints.trim() ? { constraints: raw.constraints } : {}),
+        ...(typeof raw.expected === "string" && raw.expected.trim() ? { expected: raw.expected } : {}),
+        mode: raw.mode === "edit" ? "edit" : "research",
+        maxHops: budget.maxHops,
+      })
+    }
+    const key = dispatchCommandKey({
+      workspaceID: workspace.id,
+      originTaskID: origin.id,
+      title,
+      instruction,
+      assignments,
+    })
+    const existingRoot = this.findWorkByKey(workspace.id, key.rootKey)
+    if (existingRoot) {
+      const existingAssignments = key.assignmentKeys
+        .map((assignmentKey) => this.findWorkByKey(workspace.id, assignmentKey))
+        .filter((task): task is Subtask => Boolean(task))
+      if (existingAssignments.length === assignments.length) {
+        this.logger?.event("info", "dispatch", "dispatch.command.deduped", {
+          workspaceID: workspace.id,
+          originTaskID: origin.id,
+          rootTaskID: existingRoot.id,
+          dispatchGroupID: existingRoot.dispatchGroupID,
+          assignmentCount: assignments.length,
+        })
+        return {
+          content: `Already started command "${title}" with ${assignments.length} assignment${assignments.length === 1 ? "" : "s"}; returning the existing root ${existingRoot.id}.`,
+        }
+      }
+      return this.createDispatchAssignments({
+        workspace,
+        agent,
+        origin,
+        key,
+        root: existingRoot,
+        assignments,
+      })
+    }
+    // Continuation cap: one terminal turn starts at most one new command.
+    // A corrected batch after a refusal has no root, so it is still allowed.
+    const started = Object.values(state.subtasks).find(
+      (task) => typeof task.queueKey === "string" && task.queueKey.startsWith(key.prefix) && task.queueKey.endsWith(":root"),
+    )
+    if (started) {
+      return this.refuseDispatchCommand(
+        workspace,
+        "this terminal turn already started a command; start the next command from the next review.",
+        origin.id,
+        assignments.length,
+      )
+    }
+    // Preflight the whole batch before any row exists. The command ceiling is
+    // the outer bound; group, depth, and fan-out follow. A refusal creates no
+    // work and is visible in the group chat.
+    const prospectiveGroup = newRootDispatchGroup({
+      id: newDispatchGroupID(),
+      workspaceID: workspace.id,
+      settings: state.settings,
+    })
+    const refusal = preflightDispatchCommand({
+      assignmentCount: assignments.length,
+      group: prospectiveGroup,
+      maxDelegations: state.settings.maxDelegations,
+      nextDepth: 1,
+    })
+    if (refusal) {
+      return this.refuseDispatchCommand(workspace, dispatchCommandRefusalText(refusal), origin.id, assignments.length, refusal)
+    }
+    const dispatchGroupID = prospectiveGroup.id
+    await this.ensureDispatchGroupLedger(dispatchGroupID, workspace.id)
+    const createdRoot = await this.createWorkItem({
+      workspace,
+      assigneeID: workspace.leaderID,
+      creatorType: "agent",
+      creatorAgentID: agent.id,
+      title,
+      instruction,
+      mode: "research",
+      stage: "initial",
+      kind: "delegation",
+      dispatchGroupID,
+      queueKey: key.rootKey,
+      awaitingChildren: true,
+      hopExempt: true,
+    })
+    if (!createdRoot.admitted) {
+      return this.refuseDispatch(workspace, "delegation", createdRoot.refusal!, undefined, this.store.dispatchGroup(dispatchGroupID), { log: false })
+    }
+    const root = createdRoot.subtask
+    const created = await this.createDispatchAssignments({
+      workspace,
+      agent,
+      origin,
+      key,
+      root,
+      assignments,
+      dispatchGroupID,
+    })
+    if (created.refused) return created
+    this.logger?.event("info", "dispatch", "dispatch.command.created", {
+      workspaceID: workspace.id,
+      originTaskID: origin.id,
+      rootTaskID: root.id,
+      dispatchGroupID,
+      ...(continuationGroup ? { parentGroupID: continuationGroup.id } : {}),
+      assignmentCount: assignments.length,
+      groupMaxHops: prospectiveGroup.maxHops,
+      groupUsedHops: assignments.length,
+      commandMaxHops: prospectiveGroup.commandMaxHops,
+      commandUsedHops: assignments.length,
+    })
+    const budget = this.dispatchResultLine({ groupID: dispatchGroupID, nextDepth: 0 })
+    return {
+      content: `Started command "${title}" as a new command root with ${assignments.length} assignment${assignments.length === 1 ? "" : "s"}. Root ${root.id}.${budget ? ` ${budget}` : ""}`,
+    }
+  }
+
+  /**
+   * Create the assignment batch under a command root. Existing rows (a retry
+   * or a partial first attempt) are reused by their durable dispatch key; the
+   * store admission remains the one hop authority.
+   */
+  private async createDispatchAssignments(input: {
+    workspace: Workspace
+    agent: Agent
+    origin: Subtask
+    key: ReturnType<typeof dispatchCommandKey>
+    root: Subtask
+    assignments: readonly DispatchAssignmentInput[]
+    dispatchGroupID?: Id
+  }): Promise<{ content: string; refused?: true }> {
+    const state = this.store.read()
+    const dispatchGroupID = input.dispatchGroupID ?? input.root.dispatchGroupID
+    if (!dispatchGroupID) {
+      return this.refuseDispatchCommand(input.workspace, "the new command has no dispatch group.", input.origin.id, input.assignments.length)
+    }
+    const created: Subtask[] = []
+    for (let index = 0; index < input.assignments.length; index++) {
+      const assignment = input.assignments[index]
+      const assignmentKey = input.key.assignmentKeys[index]
+      const existing = this.findWorkByKey(input.workspace.id, assignmentKey)
+      if (existing) {
+        created.push(existing)
+        continue
+      }
+      const result = await this.createWorkItem({
+        workspace: input.workspace,
+        parentID: input.root.id,
+        assigneeID: assignment.assignee,
+        creatorType: "agent",
+        creatorAgentID: input.agent.id,
+        title: assignment.title,
+        instruction: assignment.instruction,
+        constraints: assignment.constraints,
+        expected: assignment.expected,
+        mode: assignment.mode,
+        kind: "delegation",
+        dispatchGroupID,
+        taskMaxHops: assignment.maxHops,
+        maxPerRun: state.settings.maxDelegations,
+        queueKey: assignmentKey,
+      })
+      if (!result.admitted) {
+        return this.refuseDispatch(
+          input.workspace,
+          "delegation",
+          result.refusal!,
+          input.root,
+          this.store.dispatchGroup(dispatchGroupID),
+          { log: false },
+        )
+      }
+      created.push(result.subtask)
+    }
+    this.schedule()
+    const budget = this.dispatchResultLine({ groupID: dispatchGroupID, nextDepth: 0 })
+    return {
+      content: `Started command "${input.root.title}" with ${created.length} assignment${created.length === 1 ? "" : "s"}. Root ${input.root.id}.${budget ? ` ${budget}` : ""}`,
+    }
+  }
+
+  /** Visible refusal for a whole continuation command; no work is created. */
+  private async refuseDispatchCommand(
+    workspace: Workspace,
+    reason: string,
+    originTaskID: Id,
+    assignmentCount: number,
+    refusal?: DispatchRefusal,
+  ): Promise<{ content: string; refused?: true }> {
+    await this.appendMessage(workspace, { author: "system", text: `Dispatch refused: ${reason}`, kind: "system" })
+    this.logger?.event("warn", "dispatch", "dispatch.command.refused", {
+      workspaceID: workspace.id,
+      originTaskID,
+      assignmentCount,
+      ...(refusal ? { layer: refusal.layer, used: refusal.used, max: refusal.max } : { reason: "invalid-command" }),
+    })
+    return { content: `Dispatch refused: ${reason}`, refused: true }
+  }
+
   private async toolDelegate(input: Json, context: any): Promise<{ content: string }> {
     await this.store.refreshBindings()
     const state = this.store.read()
@@ -7532,6 +7831,10 @@ export class EnsembleV2Service {
       // Batch reviews close only through ensemble_review.
       if (candidate.handoff?.batch === true) continue
       const children = childrenByParent.get(candidate.id) ?? []
+      // Ticket #250: a command root is saved just before its assignment batch.
+      // Keep it waiting through that write window instead of closing a
+      // zero-child parent; the grace bound releases a crashed batch.
+      if (candidate.awaitingChildren && children.length === 0 && pendingDispatchCommandRoot(candidate, at, DEADLINE_MS)) continue
       // Ticket #170: a stalled child still persists `state: "replied"` but is
       // non-terminal. Only the canonical derived lifecycle may release a
       // parent; otherwise a lease problem would close the parent's turn.
@@ -7625,7 +7928,7 @@ export class EnsembleV2Service {
           if (directory) busyEditDirs.add(directory)
         }
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !isNativeTurn(task) && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
+          .filter((task) => task.state === "pending" && task.assigneeID && !isNativeTurn(task) && !task.approvalID && !task.interrupted && !task.activeRunID && !task.awaitingChildren && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)
         const skipped = (task: Subtask, reason: string, extra: Record<string, unknown> = {}) => {
           if (task.retryAfter === undefined) return
@@ -8740,17 +9043,20 @@ export class EnsembleV2Service {
       })
     }
     if (terminalSuppressions.length > 0) {
-      // Ticket #248: the chain stops visibly, never silently. #250 adds the
-      // explicit `ensemble_dispatch` continuation; naming it here is the
-      // forward-compatible instruction until then.
+      // Ticket #248: the chain stops visibly, never silently. Ticket #250: a
+      // terminal turn that started the next command with `ensemble_dispatch`
+      // has already created work, so the "no work was created" notice would
+      // be false. The durable dispatch key scopes the lookup to this turn.
+      const dispatched = dispatchCommandStartedForTurn(this.store.read().subtasks, task.workspaceID, task.id)
       this.logger?.event("info", "native", "native.route.terminal", {
         ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
         turnID: task.id,
         reason: "terminal-turn",
         recipients: [...new Set(terminalSuppressions.map((item) => item.agentID))],
         count: terminalSuppressions.length,
+        ...(dispatched ? { dispatched: true } : {}),
       })
-      await this.appendTerminalTurnNotice(target, task, at)
+      if (!dispatched) await this.appendTerminalTurnNotice(target, task, at)
     }
 
     if (workspace && plan.routes.length > 0) {
@@ -11267,7 +11573,7 @@ export class EnsembleV2Service {
 
   private async runTask(taskID: string): Promise<void> {
     const task = this.store.cloneSubtask(taskID)
-    if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
+    if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID || task.awaitingChildren) return
     // Do not run work the queue has retired/stalled: the next reapAndRetire
     // pass (or the current one) records the terminal state with its reason.
     // Ticket #168: an old delivery timestamp never blocks a claim; only the
