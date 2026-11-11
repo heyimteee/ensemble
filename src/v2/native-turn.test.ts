@@ -1,10 +1,12 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { deriveWorkStatus } from "./queue.ts"
-import type { Subtask } from "./types.ts"
+import type { NativeTurnInfo, Subtask } from "./types.ts"
 import {
   NATIVE_INTERNAL_PROMPT_METADATA,
   nativeAssistantMessageID,
+  nativeContacted,
+  nativeContactedRecipient,
   nativeContextAnswer,
   nativeContextAnswerExact,
   nativeContextTurnAnswer,
@@ -20,6 +22,7 @@ import {
   nativeTurnID,
   nativeTurnTitle,
   nativeUserMessageID,
+  withNativeContact,
   type NativeTextState,
 } from "./native-turn.ts"
 
@@ -54,6 +57,24 @@ test("ticket215: a live stream joins ended parts and falls back to deltas", () =
   }
   assert.equal(nativeTextForParts(state), "Match the final\nlive ")
   assert.deepEqual(nativeFinalText(state), { text: "Match the final", complete: false })
+})
+
+test("ticket236: the contact ledger reads empty when absent and dedupes on write", () => {
+  const base: NativeTurnInfo = { sessionID: "s", assistantMessageIDs: [], phase: "working" }
+  assert.deepEqual(nativeContacted(undefined), [])
+  assert.deepEqual(nativeContacted(base), [], "a turn created before the field existed has no contacts")
+  assert.deepEqual(nativeContacted({ ...base, contacted: [] }), [])
+  assert.deepEqual(nativeContacted({ ...base, contacted: ["b", "", "c"] }), ["b", "c"], "malformed ids are ignored")
+
+  const first = withNativeContact(base, "b")
+  assert.equal(first.added, true)
+  assert.deepEqual(first.native.contacted, ["b"])
+  assert.equal(base.contacted, undefined, "the input turn is never mutated")
+  const second = withNativeContact(first.native, "b")
+  assert.equal(second.added, false)
+  assert.equal(second.native, first.native, "an existing contact returns the same record")
+  assert.equal(nativeContactedRecipient(first.native, "b"), true)
+  assert.equal(nativeContactedRecipient(first.native, "c"), false)
 })
 
 test("ticket215: the final text is exact only when every started part ended", () => {

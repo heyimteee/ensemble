@@ -222,7 +222,7 @@ export const PEER_TURN_BUDGET: PeerTurnBudget = Object.freeze({ kind: "peer-turn
 
 export type MentionRoute = MentionMatch & { budget: PeerTurnBudget }
 
-export type MentionSuppressionReason = "self" | "reply-to-sender" | "duplicate"
+export type MentionSuppressionReason = "self" | "reply-to-sender" | "duplicate" | "already-routed"
 
 export type MentionSuppression = {
   agentID: string
@@ -296,6 +296,13 @@ export type MentionRoutingInput = {
   replyToSenderID?: string
   /** Ancestor agents in the same dispatch group; routing back closes a cycle. */
   groupTrail?: readonly string[]
+  /**
+   * Ticket #236: recipients this native turn already contacted through a user
+   * `$Name` route, an explicit delegation/handoff, a group post, or an
+   * outside-roster approval. Suppressed with the distinct `already-routed`
+   * reason so one turn contacts each recipient at most once.
+   */
+  alreadyRouted?: readonly string[]
 }
 
 export type MentionRoutingPlan = {
@@ -360,6 +367,7 @@ export function planMentionRouting(input: MentionRoutingInput): MentionRoutingPl
   }
 
   const rosterByID = new Map(input.roster.map((entry) => [entry.id, entry]))
+  const alreadyRouted = new Set(input.alreadyRouted ?? [])
   const budgetRefusal = ledgerRefusal(budget)
   const cap = normalizeFanOutCap(input.fanOutCap)
 
@@ -376,6 +384,13 @@ export function planMentionRouting(input: MentionRoutingInput): MentionRoutingPl
     }
     if (input.replyToSenderID === mention.agentID) {
       suppressed.push(suppressionFor(mention, "reply-to-sender"))
+      continue
+    }
+    // Contact already happened through an explicit tool, an earlier user
+    // route, a group post, or an approval. Suppress before roster checks: the
+    // work exists, so a later archive/membership change must not refuse it.
+    if (alreadyRouted.has(mention.agentID)) {
+      suppressed.push(suppressionFor(mention, "already-routed"))
       continue
     }
 

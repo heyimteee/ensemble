@@ -40,6 +40,7 @@ import {
   type DispatchRefusal,
 } from "./dispatch-budget.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
+import { resolveActiveTurnAnchor, type ActiveTurnAnchor } from "./turn-anchor.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
@@ -124,6 +125,7 @@ import {
   nativeContextTurnAnswer,
   nativeContextTurnGroups,
   nativeContextTurnSettled,
+  nativeContacted,
   nativeEventAt,
   nativeEventData,
   nativeEventSessionID,
@@ -5811,13 +5813,12 @@ export class EnsembleV2Service {
       const workspace = input.id ? state.workspaces[String(input.id)] : found.workspace
       if (!workspace) return { content: "Workspace not found." }
       if (workspace.id !== found.workspace.id) return { content: "Cross-workspace posts require ensemble_share approval." }
-      // Ticket #221: a post from a live native turn anchors to that turn and
-      // its dispatch group. A delegated run anchors to its own task. The
-      // anchor is also the delivery record a matching final text dedupes on.
-      const run = this.runForSession(state, context.sessionID)
-      const runTask = run ? state.subtasks[run.subtaskID] : undefined
-      const nativeTurn = runTask ? undefined : this.nativeActiveTurnTurn(context.sessionID)
-      const anchorTask = runTask ?? (nativeTurn && nativeTurn.conversationID === workspace.id ? nativeTurn : undefined)
+      // Ticket #221/#236: a post from a live native turn anchors to that turn
+      // and its dispatch group; a managed run anchors to its own task. The one
+      // active-turn anchor owns the decision, and a cross-conversation post
+      // still never borrows another channel's turn.
+      const anchor = this.activeTurnAnchor(context.sessionID, workspace, found.agent)
+      const anchorTask = anchor && (anchor.task.conversationID ?? anchor.task.workspaceID) === workspace.id ? anchor.task : undefined
       const post = await this.appendMessage(workspace, {
         author: "agent",
         agentID: found.agent.id,
@@ -5849,7 +5850,7 @@ export class EnsembleV2Service {
       // One agent post is one dispatch: its mentions and approvals share one
       // group even when the post comes from outside a live run.
       const dispatchGroupID = anchorTask ? resolveDispatchGroupID(anchorTask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
-      const askingDepth = anchorTask ? dispatchDepthFor(anchorTask, state.subtasks) : 0
+      const askingDepth = anchorTask && anchor ? anchor.depth : 0
       const peerDepthMax = state.dispatchGroups[dispatchGroupID]?.depthMax ?? dispatchLimits(state.settings).depth
       // Outside-roster contact follows the existing approval model: the user
       // consents first, then the approved turn runs through the same queue.
@@ -5858,7 +5859,7 @@ export class EnsembleV2Service {
         const approval: Approval = {
           id: id("approval"),
           workspaceID: workspace.id,
-          subtaskID: run?.subtaskID,
+          subtaskID: anchorTask?.id,
           agentID: found.agent.id,
           kind: "outside_roster",
           source: "workspace",
@@ -5881,6 +5882,7 @@ export class EnsembleV2Service {
         }
         await this.store.saveApproval(approval)
         await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${agent.name}`, kind: "approval", taskID: anchorTask?.id })
+        await this.recordNativeContact(anchorTask, agent.id, "outside-roster-approval")
       }
       const created: string[] = []
       const createdAgentIDs: string[] = []
@@ -5902,8 +5904,8 @@ export class EnsembleV2Service {
           noteRefusal(agent.name, reason)
           continue
         }
-        if (run) {
-          const siblings = this.store.subtasks().filter((item) => item.parentID === run.subtaskID)
+        if (anchor?.source === "run" && anchorTask) {
+          const siblings = this.store.subtasks().filter((item) => item.parentID === anchorTask.id)
           if (siblings.length >= state.settings.maxDelegations) {
             const reason = `the delegation limit is ${state.settings.maxDelegations}.`
             await this.appendMessage(workspace, { author: "system", text: peerRefusalText(agent.name, reason), kind: "system" })
@@ -5924,6 +5926,7 @@ export class EnsembleV2Service {
         })
         created.push(agent.name)
         createdAgentIDs.push(agentID)
+        await this.recordNativeContact(anchorTask, agentID, "group-post")
         void deduped
       }
       if (anchorTask) await this.recordAgentPost(anchorTask, post, text, createdAgentIDs)
@@ -5946,11 +5949,14 @@ export class EnsembleV2Service {
       // an agent outside the workspace roster needs user consent, exactly
       // like delegate's outside_roster path. Member DMs stay direct.
       if (target.id !== found.agent.id && !found.workspace.memberIDs.includes(target.id)) {
-        const run = this.runForSession(state, context.sessionID)
+        // Ticket #236: a cross-roster contact approval still belongs to the
+        // asking turn, and its recipient is recorded so a later `$Name` cannot
+        // queue the same approval twice.
+        const anchor = this.activeTurnAnchor(context.sessionID, found.workspace, found.agent)
         const approval: Approval = {
           id: id("approval"),
           workspaceID: found.workspace.id,
-          subtaskID: run?.subtaskID,
+          subtaskID: anchor?.parentID,
           agentID: found.agent.id,
           kind: "outside_roster",
           source: "workspace",
@@ -5961,7 +5967,8 @@ export class EnsembleV2Service {
           createdAt: now(),
         }
         await this.store.saveApproval(approval)
-        await this.appendMessage(found.workspace, { author: "system", text: `Approval needed: contact $${target.name}`, kind: "approval", taskID: run?.subtaskID })
+        await this.appendMessage(found.workspace, { author: "system", text: `Approval needed: contact $${target.name}`, kind: "approval", taskID: anchor?.parentID })
+        await this.recordNativeContact(anchor?.task, target.id, "outside-roster-approval")
         return { content: `Approval required before contacting ${target.name}.` }
       }
       const workspaceID = found.workspace.memberIDs.includes(target.id) ? found.workspace.id : undefined
@@ -6014,18 +6021,13 @@ export class EnsembleV2Service {
     const recipient = resolved.agent
     const path = relative(workspace.directory, absolute)
     const hopInstruction = `${brief} (${path})`
-    const run = this.runForSession(state, context.sessionID)
-    // Parentless-hop hole (ticket #70): a handoff called from a session
-    // with no live run would orphan the hop (parentID undefined), so the
-    // sender's turn could finalize before the answer arrives. Anchor the
-    // hop to the sender's newest open task in the workspace instead — the
-    // runTask children check then holds the sender in `awaitingChildren`
-    // with a visible `Waiting for $Name…` line until the hop is
-    // delivered/answered. No second delegate is needed (leader-only;
-    // would double-queue under a separate key).
-    const askingSubtaskID = run?.subtaskID ?? newestOpenSenderTaskID(state, workspace.id, sender.id)
-    const askingTask = askingSubtaskID ? state.subtasks[askingSubtaskID] : undefined
-    const dispatchGroupID = askingTask ? resolveDispatchGroupID(askingTask, state.subtasks) ?? newDispatchGroupID() : newDispatchGroupID()
+    // Ticket #236: the live native turn (or managed run) owns this hop. The
+    // newest-open-sender heuristic is now only the resolver's last resort, so
+    // an unrelated newer task can never steal the parent or its group.
+    const anchor = this.activeTurnAnchor(context.sessionID, workspace, sender)
+    const askingSubtaskID = anchor?.parentID
+    const askingTask = anchor?.task
+    const dispatchGroupID = anchor?.dispatchGroupID ?? newDispatchGroupID()
     await this.ensureDispatchGroupLedger(dispatchGroupID, workspace.id)
     // Idempotency spans terminal rows for the row's lifetime: the handoff hop
     // is the effect, so a retried or resubmitted handoff from the same run
@@ -6035,7 +6037,7 @@ export class EnsembleV2Service {
     // open row (for example an inbound completion hop); fall back to the same
     // logical ask so anchor drift cannot duplicate the hop either.
     const key = handoffWorkKey({ actor: sender.id, workspaceID: workspace.id, parentID: askingSubtaskID, recipientID: recipient.id, task, instruction: brief, constraints, expected })
-    const duplicate = this.findWorkByKey(workspace.id, key) ?? (!run ? Object.values(state.subtasks).find((item) =>
+    const duplicate = this.findWorkByKey(workspace.id, key) ?? (anchor?.source !== "run" ? Object.values(state.subtasks).find((item) =>
       item.workspaceID === workspace.id &&
       item.workKind === "handoff" &&
       item.handoff?.completion !== true &&
@@ -6046,7 +6048,10 @@ export class EnsembleV2Service {
       (item.constraints ?? "") === (constraints ?? "") &&
       (item.expected ?? "") === (expected ?? "")
     ) : undefined)
-    if (duplicate) return { content: handoffDuplicateText(recipient.name, task) }
+    if (duplicate) {
+      await this.recordNativeContact(anchor?.task, recipient.id, "handoff")
+      return { content: handoffDuplicateText(recipient.name, task) }
+    }
     // Required task budget: the sender must say how many direct dispatches
     // the recipient may make. Zero is a deliberate one-shot ask.
     const taskBudget = validateTaskMaxHops("ensemble_handoff", input.maxHops)
@@ -6072,7 +6077,7 @@ export class EnsembleV2Service {
       const approval: Approval = {
         id: id("approval"),
         workspaceID: workspace.id,
-        subtaskID: run?.subtaskID,
+        subtaskID: askingSubtaskID,
         agentID: sender.id,
         kind: "outside_roster",
         source: "workspace",
@@ -6098,7 +6103,8 @@ export class EnsembleV2Service {
         createdAt: at,
       }
       await this.store.saveApproval(approval)
-      await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${recipient.name}`, kind: "approval", taskID: run?.subtaskID })
+      await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact $${recipient.name}`, kind: "approval", taskID: askingSubtaskID })
+      await this.recordNativeContact(anchor?.task, recipient.id, "outside-roster-approval")
       return { content: `Approval required before contacting ${recipient.name}.` }
     }
     const hop: Subtask = {
@@ -6141,7 +6147,11 @@ export class EnsembleV2Service {
     }
     // Two concurrent identical handoffs: the serialized admission returns the
     // winner, which already queued the hop and posted its ack.
-    if (admission.deduped) return { content: handoffDuplicateText(recipient.name, task) }
+    if (admission.deduped) {
+      await this.recordNativeContact(anchor?.task, recipient.id, "handoff")
+      return { content: handoffDuplicateText(recipient.name, task) }
+    }
+    await this.recordNativeContact(anchor?.task, recipient.id, "handoff")
     this.noteWorkChanged(hop)
     // Ticket #73: the group sees only a concise system line. The policy
     // sentence and correlation ref stay in the tool result below, which is
@@ -6709,8 +6719,11 @@ export class EnsembleV2Service {
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
     const { workspace, agent } = found
-    const run = this.runForSession(state, context.sessionID)
-    const subtask = run ? state.subtasks[run.subtaskID] : undefined
+    // Ticket #236: one anchor for every tool call. A managed run wins; a live
+    // native turn owns the delegation; the newest open sender task is only a
+    // fallback. Children are parented to the anchor, never to nothing.
+    const anchor = this.activeTurnAnchor(context.sessionID, workspace, agent)
+    const subtask = anchor?.task
     // Every refusal below is posted to the group chat as well as returned to
     // the caller: a tool-result string alone is invisible from the board's
     // perspective, which read as silently missing delegation state.
@@ -6773,7 +6786,7 @@ export class EnsembleV2Service {
         return this.refuseContinuation(workspace, validation.refusal)
       }
     } else {
-      const currentGroupID = subtask ? resolveDispatchGroupID(subtask, state.subtasks) : undefined
+      const currentGroupID = anchor?.dispatchGroupID
       const current = currentGroupID ? state.dispatchGroups[currentGroupID] : undefined
       // The ledger is the routing truth: an active group keeps its work; an
       // exhausted or continued group routes to the newest active continuation.
@@ -6794,7 +6807,10 @@ export class EnsembleV2Service {
       constraints,
       expected,
     })
-    if (this.findWorkByKey(workspace.id, key)) return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.` }
+    if (this.findWorkByKey(workspace.id, key)) {
+      await this.recordNativeContact(anchor?.task, target.id, "delegation")
+      return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.` }
+    }
     // Required task budget: the sender must say how many direct dispatches
     // the recipient may make. Zero is a deliberate one-shot ask.
     const taskBudget = validateTaskMaxHops("ensemble_delegate", input.maxHops)
@@ -6851,6 +6867,7 @@ export class EnsembleV2Service {
       }
       await this.store.saveApproval(approval)
       await this.appendMessage(workspace, { author: "system", text: `Approval needed: contact ${target.name}`, kind: "approval", taskID: subtask?.id })
+      await this.recordNativeContact(anchor?.task, target.id, "outside-roster-approval")
       return { content: `Approval required before contacting ${target.name}.` }
     }
     const created = await this.createWorkItem({
@@ -6871,6 +6888,7 @@ export class EnsembleV2Service {
     if (!created.admitted) {
       return this.refuseDispatch(workspace, "delegation", created.refusal!, subtask, this.store.dispatchGroup(dispatchGroupID), { log: false })
     }
+    await this.recordNativeContact(anchor?.task, target.id, "delegation")
     this.schedule()
     const remaining = this.dispatchResultLine({ groupID: dispatchGroupID, task: subtask, nextDepth: preflight.depth })
     if (created.deduped) return { content: `Already delegated to ${target.name}; the reply will arrive in the group chat.${remaining ? ` ${remaining}` : ""}` }
@@ -6885,8 +6903,10 @@ export class EnsembleV2Service {
     const state = this.store.read()
     const found = this.requireToolSession(state, context.sessionID)
     if (!found) return { content: "This session is not bound to an Ensemble workspace." }
-    const run = this.runForSession(state, context.sessionID)
-    const subtask = run ? state.subtasks[run.subtaskID] : undefined
+    // Ticket #236: the question is part of the asking turn, so the Work card
+    // shows that this turn needs the user and the approval survives with it.
+    const anchor = this.activeTurnAnchor(context.sessionID, found.workspace, found.agent)
+    const subtask = anchor?.task
     const approval: Approval = {
       id: id("approval"),
       workspaceID: found.workspace.id,
@@ -6985,6 +7005,49 @@ export class EnsembleV2Service {
     if (!runID) return undefined
     const run = this.activeRuns.get(runID)
     return run ? { subtaskID: run.subtaskID, agentID: run.agentID, workspaceID: run.workspaceID } : undefined
+  }
+
+  /**
+   * Ticket #236: the one anchor every tool call from this session joins.
+   *
+   * A live managed run wins. Otherwise the session's open native turn owns the
+   * call. Only when neither exists does the legacy newest-open-sender-task
+   * fallback apply, so a parentless hop still holds the sender's turn open.
+   * The resolver is pure; this method only supplies the candidates for the
+   * session and workspace.
+   */
+  private activeTurnAnchor(sessionID: string, workspace: Workspace, agent: Agent): ActiveTurnAnchor | undefined {
+    const state = this.store.read()
+    const run = this.runForSession(state, sessionID)
+    const runTask = run ? state.subtasks[run.subtaskID] : undefined
+    const nativeTurn = runTask ? undefined : this.nativeActiveTurnTurn(sessionID)
+    const fallbackTask = runTask || nativeTurn
+      ? undefined
+      : (() => {
+          const fallbackID = newestOpenSenderTaskID(state, workspace.id, agent.id)
+          return fallbackID ? state.subtasks[fallbackID] : undefined
+        })()
+    return resolveActiveTurnAnchor({ runTask, nativeTurn, fallbackTask, subtasks: state.subtasks })
+  }
+
+  /**
+   * Ticket #236: record one recipient on a native turn's durable contact
+   * ledger. Non-native anchors (managed runs, the legacy fallback) have no
+   * ledger and are silently skipped. The ledger carries IDs and a source code
+   * only; the recipient's conversation text never enters it.
+   */
+  private async recordNativeContact(task: Subtask | undefined, recipientID: Id | undefined, source: string): Promise<void> {
+    if (!task || !recipientID || !isNativeTurn(task)) return
+    const recorded = await this.store.recordNativeContact(task.id, recipientID)
+    const latest = this.store.subtask(task.id)
+    this.logger?.event("info", "native", "native.contact.recorded", {
+      ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+      turnID: task.id,
+      recipientID,
+      source,
+      recorded,
+      contacted: latest ? nativeContacted(latest.native).length : undefined,
+    })
   }
 
   private profileForSession(sessionID: string): string | undefined {
@@ -8455,6 +8518,7 @@ export class EnsembleV2Service {
           source: "native-user",
           agentID: route.agentID,
         })
+        await this.recordNativeContact(task, route.agentID, "user-route")
       }
       if (plan.routes.length > 0) this.schedule()
     }
@@ -8514,6 +8578,10 @@ export class EnsembleV2Service {
     }))
     const replyToSenderID = agentFinalReplyTo(task)
     const groupTrail = agentFinalGroupTrail(task, state.subtasks)
+    // Ticket #236: read the ledger fresh. A tool call or user route may have
+    // contacted a recipient after the caller took its turn snapshot.
+    const liveTurn = state.subtasks[task.id] ?? task
+    const alreadyRouted = nativeContacted(liveTurn.native)
     const plan = planMentionRouting({
       text,
       conversation,
@@ -8523,6 +8591,7 @@ export class EnsembleV2Service {
       senderID: target.agent.id,
       ...(replyToSenderID ? { replyToSenderID } : {}),
       ...(groupTrail.length > 0 ? { groupTrail } : {}),
+      ...(alreadyRouted.length > 0 ? { alreadyRouted } : {}),
       ...(workspace ? { limits: dispatchLimits(state.settings), ledger: this.nativeMentionLedger(task) } : {}),
     })
 
@@ -8582,6 +8651,7 @@ export class EnsembleV2Service {
           taskID: subtask.id,
           ...(deduped ? { deduped } : {}),
         })
+        await this.recordNativeContact(task, route.agentID, "agent-final-route")
       }
     }
     for (const refusal of plan.refusals) {
