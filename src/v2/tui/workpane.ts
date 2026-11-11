@@ -150,12 +150,16 @@ export function workPaneBodyHeight(terminalHeight: number): number {
 }
 
 /**
- * Card columns for a Work content width. One column falls back to compact
- * rows; the cap matches the existing Work grid.
+ * Ticket #239: card mode renders one full-width card per row, so the pane
+ * asks a yes/no question instead of counting columns. The threshold is the
+ * width that previously fit the second minimum card: a pane that fit two or
+ * three columns becomes one wide card, while a pane that only ever fit one
+ * minimum card keeps the compact-row fallback (100x30, 120x40, and the 80x24
+ * drawer).
  */
-export function workPaneColumns(contentWidth: number): number {
+export function workPaneCardsFit(contentWidth: number): boolean {
   const width = Math.max(0, Math.floor(contentWidth))
-  return Math.max(1, Math.min(3, Math.floor((width + WORK_CARD_GAP_COLS) / (WORK_CARD_MIN_WIDTH + WORK_CARD_GAP_COLS))))
+  return width >= WORK_CARD_MIN_WIDTH * 2 + WORK_CARD_GAP_COLS
 }
 
 /**
@@ -510,9 +514,7 @@ export type WorkPanePage = {
 
 export type WorkPaneLayout = {
   mode: "cards" | "compact"
-  /** Card columns; zero in compact mode. */
-  columns: number
-  /** Outer card width including border and padding; zero in compact mode. */
+  /** Outer card width including border and padding; the full content width in card mode, zero in compact mode. */
   cardWidth: number
   /** Card content width after border, accent, and padding. */
   cardContentWidth: number
@@ -547,7 +549,6 @@ type SectionAtom = {
 function emptyLayout(): WorkPaneLayout {
   return {
     mode: "compact",
-    columns: 0,
     cardWidth: 0,
     cardContentWidth: Math.max(12, 0),
     pages: [{ number: 1, sections: [], tasks: [], native: [], items: [], height: 0 }],
@@ -572,10 +573,10 @@ export function paginateWorkGroups(
   const width = Math.max(0, Math.floor(contentWidth))
   const body = Math.max(2, Math.floor(bodyHeight))
   if (groups.length === 0) return emptyLayout()
-  const fitColumns = workPaneColumns(width)
-  const cards = fitColumns >= 2 && body >= WORK_CARD_ROWS + 2
-  const columns = cards ? fitColumns : 0
-  const cardWidth = cards ? Math.floor((width - WORK_CARD_GAP_COLS * (columns - 1)) / columns) : 0
+  const cards = workPaneCardsFit(width) && body >= WORK_CARD_ROWS + 2
+  // Ticket #239: the card owns the full Work content width; no column gap and
+  // no per-column division.
+  const cardWidth = cards ? width : 0
   const cardContentWidth = cards ? workCardContentWidth(cardWidth) : Math.max(12, width)
   const atoms: SectionAtom[] = []
   groups.forEach((group, index) => {
@@ -607,13 +608,15 @@ export function paginateWorkGroups(
     }
     const items = group.history ? newestHistoryItems(groupItems(group)) : groupItems(group)
     if (cards) {
-      for (let offset = 0; offset < items.length; offset += columns) {
+      // Ticket #239: one full-width card per section. Pagination still repeats
+      // the group header with `cont.` when the group crosses a page.
+      for (const [offset, item] of items.entries()) {
         atoms.push({
           groupID: group.id,
           fullLabel,
           tone,
           mode: "cards",
-          items: items.slice(offset, offset + columns),
+          items: [item],
           bodyHeight: WORK_CARD_ROWS,
           // A history group's focusable header already owns the separation row.
           gapBefore: !group.history && index > 0 && offset === 0,
@@ -699,7 +702,6 @@ export function paginateWorkGroups(
   flush()
   return {
     mode: cards ? "cards" : "compact",
-    columns,
     cardWidth,
     cardContentWidth,
     pages,
