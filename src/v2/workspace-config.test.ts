@@ -66,6 +66,30 @@ test("ticket159: a stale Ensemble block and init metadata are refreshed in place
   assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, ensembleBlock()), false, "a current block is stable")
 })
 
+test("ticket238: a roster change at the same version rewrites only the block", () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-roster-"))
+  const agents = {
+    a: { name: "Nova", title: "Lead", role: "Own architecture." },
+    b: { name: "Sage", title: "Researcher | Analyst", role: "Own research.\nSign off findings." },
+  }
+  const block = ensembleBlock({ leaderID: "a", memberIDs: ["a", "b"], agents })
+  writeFileSync(join(directory, "AGENTS.md"), `${block}\n\n# Project\n\nKeep me.\n`)
+  writeInitMetadata(directory, ENSEMBLE_BLOCK_VERSION)
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, block), false, "matching content is stable")
+
+  const changed = ensembleBlock({
+    leaderID: "b",
+    memberIDs: ["a", "b"],
+    agents: { ...agents, b: { ...agents.b, title: "Principal Researcher" } },
+  })
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, changed), true, "content, not only the version, decides staleness")
+  const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+  assert.ok(content.includes("| **Sage** (leader) | Principal Researcher | Own research.<br>Sign off findings. |"))
+  assert.doesNotMatch(content, /Researcher \| Analyst[^<]/)
+  assert.equal(stripEnsembleBlock(content).trim(), "# Project\n\nKeep me.")
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, changed), false)
+})
+
 test("ticket159: a stale block refreshes without metadata, and a newer block is never downgraded", () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-refresh-"))
   writeFileSync(join(directory, "AGENTS.md"), "<!-- ensemble:start v2 -->\nOLD\n<!-- ensemble:end -->\n")

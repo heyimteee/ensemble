@@ -42,7 +42,7 @@ OpenCode engine
 - **`src/v2/routing.ts`** — `$`/`!` mention routing and leader fallback.
 - **`src/v2/paths.ts`** — canonical workspace directories and file references.
 - **`src/v2/workspace-config.ts`** — `.ensemble/config.json`, handoff paths, `.gitignore`, AGENTS.md insertion.
-- **`src/v2/init-block.ts`** — the versioned AGENTS.md team contract.
+- **`src/v2/init-block.ts`** — the versioned AGENTS.md team contract and the generated active-member roster table.
 
 Every execution is a native OpenCode session. Ensemble does not replace tools, providers, permissions, or skills.
 
@@ -191,7 +191,7 @@ handoffs/            typed Markdown handoffs
 init.json            AGENTS.md block version
 ```
 
-`I`, `:init`, or a message-start `/init` appends a visible `/init` audit line and starts a System Agent init job. An init alias attached to an agent anchor is rejected as a mixed solo request; a prose `/init` is ordinary text. The job creates a temporary native session in the workspace, calls native `/init` with the full `initInstructions()` text (inspect the project, preserve project guidance, replace one Ensemble block), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the current `<!-- ensemble:start v5 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
+`I`, `:init`, or a message-start `/init` appends a visible `/init` audit line and starts a System Agent init job. An init alias attached to an agent anchor is rejected as a mixed solo request; a prose `/init` is ordinary text. The job creates a temporary native session in the workspace, calls native `/init` with the full `initInstructions()` text (inspect the project, preserve project guidance, replace one Ensemble block), streams progress into the System Agent message, and finalizes a report. The internal native call is deliberate: the user-facing composer path never forwards text to native OpenCode, and native `/init` in a native prompt is not shadowed. On success it places the current `<!-- ensemble:start v6 -->` block at the top and writes `.ensemble/init.json`; existing content outside the markers is preserved. The block ends with a generated `Team roster` table of active members (leader first and marked, then `memberIDs` order) carrying each stored title and role. Reconciliation compares the desired block text as well as the version, so a roster change rewrites the block at the same contract version, and membership, leadership, name, title, role, archive, and delete changes refresh it immediately. On failure, cancellation, reset/archive/delete, or service restart, the previous `AGENTS.md` is restored (or removed when it did not exist) and the report says so. Init is solo-only and workspace-only; a duplicate active init is rejected.
 
 Reset is available through the `/reset-ensemble` composer command, requires typing `RESET`, and deletes Ensemble state, bound native sessions, config, and legacy v1 state. Handoffs are preserved unless explicitly deleted.
 
@@ -202,7 +202,9 @@ normal path is prose: an agent's final native text is the group message, and
 `$Name` in a workspace group routes peer turns with server-assigned budgets.
 The service injects a compact `ensemble_turn` block with the roster,
 conversation, and dispatch budget each turn, so no read-only roster tool call
-is required.
+is required. The full `Team roster` table lives once in the workspace
+`AGENTS.md` block; per-turn blocks keep compact names and budget only, so the
+table is not repeated into every prompt.
 
 The native tool surface keeps only decisions the server cannot infer safely:
 
@@ -410,10 +412,9 @@ non-completion delegation/handoff count, caps are raised to at least observed
 usage and depth, and live rows that still lack a budget receive the group's
 remaining budget. A stored budget, including zero, is never overwritten. No
 in-flight work is retroactively refused. Reconciliation logs
-`dispatch.group.reconciled`; the team contract is bumped and config
-reconciliation rewrites a stale `AGENTS.md` block and `.ensemble/init.json`
-from either version marker, preserving project-owned content and never
-downgrading a newer version. `settings.maxDepth` is deprecated: it remains
+`dispatch.group.reconciled`; config reconciliation rewrites a stale `AGENTS.md`
+block and `.ensemble/init.json` from either version marker or a changed desired
+block, preserving project-owned content and never downgrading a newer version. `settings.maxDepth` is deprecated: it remains
 readable but is ignored for enforcement, and removal is a future settings
 cleanup.
 
@@ -491,7 +492,7 @@ Approvals live only in the right column: a small summary under Work in split mod
 - The interaction layer is modal: Normal, Insert, Visual, and Command share one binding catalog and one Esc ladder. `Space` is the leader, `Esc` never leaves, and the old Ctrl app shortcuts are gone.
 - `Space ?` opens a searchable shortcut reference with fuzzy filtering and a scrollable list generated from the binding catalog.
 - The Leader key is `Space`; `Space q` and `:q` leave Ensemble deliberately, and `Esc` never leaves.
-- The versioned team contract is v4 (`ENSEMBLE_BLOCK_VERSION = 4`); stale workspace blocks are rewritten on reconciliation. It defines `$Name` chat mentions, `@path` file references, Ensemble tools as the work-dispatch mechanism, the required `maxHops` task budget, and the layered command/group/task/depth budgets with leader-only continuation groups.
+- The versioned team contract is v6 (`ENSEMBLE_BLOCK_VERSION = 6`); stale or changed workspace blocks are rewritten on reconciliation. It defines the native-first rules — final text is the group message, `$Name` routes work, bare names reference, `@path` is file-only, direct is one-to-one, the server owns budgets and completion — and the generated active-member `Team roster` table. The old mandatory non-leader handoff rule is retired; explicit `delegate`/`handoff` remain migration tools.
 - Agent replies that write `@KnownAgent` are display-normalized to `$KnownAgent`; a system note clarifies that a mention does not dispatch work.
 - The shared service is the root fix for the stale-location lost update: Jessy's profile and binding remained in storage, but one location held a workspace row without her. Both locations now reconcile to three members.
 
@@ -517,6 +518,15 @@ Approvals live only in the right column: a small summary under Work in split mod
 - **General-skill leader triage.** Assigned skills stay with their owner. General skills route to the leader, who reads them under a one-run native permission grant and either uses them or delegates with a self-authored instruction. The grant is restored after the turn; a delegatee receives guidance, not a host grant.
 - **No attachment bypass.** General skills are never delivered through prompt `skills` attachments or the experimental skill-activation endpoint. Native per-agent skill permissions remain authoritative, and the identity contract tells agents to load deliberate `/skill` tokens with the native skill tool.
 - **Atomic validation.** A bad skill, owner, agent, workspace, or cap rejects the whole message before any transcript line or work row, names the specific problem, and leaves the draft in place.
+
+## v6 native-first team contract and roster (ticket #238)
+
+- **Contract v6.** `ENSEMBLE_BLOCK_VERSION = 6` rewrites the workspace block around native-first: the final native text is the group message; `$Name` routes work and a bare name is only a reference; `@path` is file-only; code spans, URLs, and paths never route; direct conversations are one-to-one; and the server owns routing, budgets, and completion. Agents must not claim a teammate replied until that member's turn is visible, and must not open a second completion loop for a teammate they asked. The old “every non-leader turn ends with a handoff” rule is removed.
+- **Migration tools only.** `ensemble_delegate` and `ensemble_handoff` are described as migration and rollback tools, not the normal chat path; `$Name` in the final text is the normal request. Their `maxHops` contract is unchanged while the explicit surface is enabled.
+- **Generated roster.** The workspace block carries one `Team roster` table with columns `Member`, `Title`, and `Role`. Active members only: the leader is first and marked `(leader)`, then the remaining members in `memberIDs` order. Title and role are the stored strings exactly as authored; only `|` (escaped as `\|`) and newlines (rendered as `<br>`) are transformed. No table row carries credentials, conversation content, or private paths.
+- **Single copy.** The hidden identity block and every `ensemble_turn` block stay generic/compact; the full table is written once to the workspace `AGENTS.md`, which the host already loads for each session in that directory.
+- **Refresh and reconciliation.** Reconciliation compares the desired block content, not only the version, so a roster change rewrites the block at the same contract version. The service refreshes after workspace membership/leader changes, after agent name/title/role changes, and after archive/delete. A newer recorded version is never downgraded, and project-owned content outside the Ensemble markers is preserved.
+- **Prompt delta.** On a fixed 12-member fixture (chars/4 estimate), the generic contract text is 4,058 chars / 1,015 tokens versus 4,248 / 1,062 for v5 (−190 chars, −47 tokens). The empty-roster v6 block is 4,373 / 1,094 (+125 chars, +31 tokens versus v5); a representative filled roster of one title and one role line per member is 5,667 / 1,417 (+1,419 chars, +355 tokens, with 1,525 chars of table). The per-turn context is unchanged and carries no table.
 
 ## v7 durable feed and message streaming
 

@@ -1,26 +1,31 @@
 # Handoff contract
 
-This is the detailed contract behind the mandatory handoff line in
+This is the detailed contract behind the end-of-turn rule in
 [AGENTS.md](../../AGENTS.md). It applies to every Ensemble workspace turn. The
 short rule remains in the repository agent instructions so solo sessions still
 see it; this document holds the mechanics that only matter once a turn is
 running inside a workspace.
 
-Related: [handoff terminology](../../GLOSSARY.md), ticket
-[#71](https://github.com/heyimteee/ensemble/issues/71), and the
+Related: [handoff terminology](../../GLOSSARY.md), tickets
+[#71](https://github.com/heyimteee/ensemble/issues/71) and
+[#238](https://github.com/heyimteee/ensemble/issues/238), and the
 [issue tracker workflow](issue-tracker.md).
 
-## Mandatory completion handoff
+## Completion is server-owned
 
-- Every non-leader agent turn must end with a handoff to another workspace
-  member: explicit via `ensemble_handoff`, or the automatic server default to
-  the workspace leader carrying the finished task content. The group shows
-  `Handed to $Recipient`. Leader turns may end normally or hand off
-  voluntarily.
-- A handoff is delegation: write the recipient a clear, self-authored
-  instruction in your own words — never a copy of the user's message. `task`
-  stays the short display title; the recipient's work item uses your
-  instruction.
+- A non-leader turn ends by posting its answer as the group message. The server
+  decides whether the finished work returns to the leader; an agent does not add
+  a handoff just to close a turn.
+- Do not claim a teammate replied, agreed, or finished until that member's turn
+  is visible in the conversation. A delivered message is not an acknowledgement.
+- When you asked a teammate, their reply is the answer you deliver. Do not open a
+  second completion loop for a teammate you asked.
+- Explicit `ensemble_handoff` and `ensemble_delegate` are migration and rollback
+  tools, not the normal chat path. Normal work is a `$Name` in your final text.
+  While the explicit surface is enabled, a handoff is still delegation: write
+  the recipient a clear, self-authored instruction in your own words — never a
+  copy of the user's message. `task` stays the short display title; the
+  recipient's work item uses your instruction.
 - Answer first: write your own answer in the group chat before handing off. A
   handoff forwards a completed result or clearly scoped work; it is never a
   substitute for answering your assignment.
@@ -32,9 +37,8 @@ Related: [handoff terminology](../../GLOSSARY.md), ticket
   leader); the leader may end it.
 - Loop guards apply: maximum handoff chain depth, no immediate back-and-forth
   to the previous sender, repeated-recipient detection, forced leader or
-  termination fallback at the cap. Mandatory handoff never calls
-  `ensemble_delegate` after a handoff (leader-only; would double-queue) and
-  never queues duplicate work.
+  termination fallback at the cap. Never call `ensemble_delegate` after a
+  handoff (leader-only; would double-queue) and never queue duplicate work.
 
 ## Mention syntax
 
