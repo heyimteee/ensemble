@@ -6273,13 +6273,18 @@ export class EnsembleV2Service {
     // Ticket #237: the parent turn's synthesis is the delivery when the leader
     // was the parent, the asker, or the sender. Queueing the completion hop
     // would only run a second leader turn to answer the same result.
+    // Ticket #247: the command root or any leader-owned ancestor owns the
+    // synthesis for a chain, so a leaf under that root must not wake the leader
+    // again either.
     const parent = finished.parentID ? state.subtasks[finished.parentID] : undefined
-    const decision = completionDecision({ task: finished, parent, leaderID: leader.id })
+    const commandRoot = resolveCommandRoot(finished.id, state.subtasks)
+    const decision = completionDecision({ task: finished, parent, commandRoot, leaderID: leader.id })
     if (decision.decision === "skip") {
       this.logger?.event("info", "dispatch", "completion.skipped", {
         workspaceID: workspace.id,
         taskID: decision.taskID,
         parentID: decision.parentID,
+        rootID: decision.rootID,
         leaderID: decision.leaderID,
         reason: decision.reason,
       })

@@ -246,6 +246,8 @@ test("ticket246: a five-way fan-out synthesizes once after every branch is termi
     const leaderMessages = ((state.messages.w ?? []) as any[]).filter((message) => message.taskID === "root" && message.author === "agent" && !message.streaming)
     assert.equal(leaderMessages.length, 1, "exactly one leader synthesis message")
     const synthesisContext = instructions.map((entry) => entry.value).find((value) => value.includes("<ensemble_branch_results>")) ?? ""
+    assert.doesNotMatch(synthesisContext, /<ensemble_recent_messages>/, "ticket249: synthesis carries no recent transcript")
+    assert.match(synthesisContext, /<ensemble_root_request>\nDo the work\n<\/ensemble_root_request>/, "ticket249: synthesis carries the original request")
     const digest = branchBlock(synthesisContext)
     assert.match(digest, /^- \$Nova → \$Sage: Result B$/m)
     assert.match(digest, /^- \$Nova → \$Iris: \(failed\) branch failed$/m)
