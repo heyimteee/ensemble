@@ -32,6 +32,7 @@
     "test:live:native-first": "bash scripts/live-native-first.sh",
     "test:live:vera": "bash scripts/live-vera-regression.sh",
     "benchmark:tools": "node --experimental-strip-types scripts/tool-surface-benchmark.mjs",
+    "benchmark:synthesis": "node --experimental-strip-types scripts/synthesis-benchmark.mjs",
     "test:live:tool-surface": "bash scripts/live-tool-surface-benchmark.sh",
     "test:live:multilocation": "bash scripts/live-multilocation.sh",
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
