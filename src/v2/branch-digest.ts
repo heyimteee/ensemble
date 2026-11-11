@@ -48,6 +48,53 @@ function branchResult(task: Subtask, messages: ReadonlyMap<Id, Message>): string
 }
 
 /**
+ * Ticket #251: a parent settles only when its whole non-completion subtree is
+ * terminal. A direct child can be replied while a peer turn it just routed is
+ * still pending, so checking direct children alone starts the root synthesis
+ * early. Pure; completion hops are review deliveries, never branches.
+ */
+export function pendingDescendantResolver(input: {
+  subtasks: Readonly<Record<Id, Subtask>>
+  isTerminal: (task: Subtask) => boolean
+}): (parentID: Id) => boolean {
+  const childrenByParent = new Map<Id, Subtask[]>()
+  for (const task of Object.values(input.subtasks)) {
+    if (!task.parentID || task.handoff?.completion === true) continue
+    const list = childrenByParent.get(task.parentID) ?? []
+    list.push(task)
+    childrenByParent.set(task.parentID, list)
+  }
+  const memo = new Map<Id, boolean>()
+  const visiting = new Set<Id>()
+  const pending = (parentID: Id): boolean => {
+    const cached = memo.get(parentID)
+    if (cached !== undefined) return cached
+    if (visiting.has(parentID)) return false
+    visiting.add(parentID)
+    let result = false
+    for (const child of childrenByParent.get(parentID) ?? []) {
+      if (!input.isTerminal(child) || pending(child.id)) {
+        result = true
+        break
+      }
+    }
+    visiting.delete(parentID)
+    memo.set(parentID, result)
+    return result
+  }
+  return pending
+}
+
+/** Convenience wrapper for one parent; the resolver is memoized per call. */
+export function hasPendingDescendant(input: {
+  parentID: Id
+  subtasks: Readonly<Record<Id, Subtask>>
+  isTerminal: (task: Subtask) => boolean
+}): boolean {
+  return pendingDescendantResolver(input)(input.parentID)
+}
+
+/**
  * Walk every non-completion branch from the command root to its terminal
  * leaves. Children are ordered by creation time and id so the digest is
  * deterministic. Pure.

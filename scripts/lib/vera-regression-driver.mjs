@@ -64,6 +64,11 @@ const SHORT_REPLY = "Onboarding complete. I am ready."
 const WARMUP = "vera-warmup-fixture"
 const ROLLBACK = "vera-rollback-fixture"
 const WORKSPACE_NAME = "VeraProbe"
+const FLOWS_WORKSPACE_NAME = "VeraFlows"
+const FLOWS_WARMUP = "vera-flows-warmup-fixture"
+const FLOW_TICKET_ONE = "fake-vera-flows:ticket=one;mode=relay;dispatch=start;workers=Phoenix,Kakiko,Clark,Juno,Mira,Wren;mentions=Kakiko,Clark"
+const FLOW_TICKET_THREE = "fake-vera-flows:ticket=three;mode=refuse;dispatch=start;workers=Phoenix,Kakiko;mentions=Kakiko,Clark"
+const FLOW_TICKET_FOUR = "fake-vera-flows:ticket=four;mode=route;dispatch=start;workers=Phoenix;mentions=Clark"
 const PROJECT_LINE = "Keep this project-owned line."
 const STALE_BLOCK = `<!-- ensemble:start v5 -->\nSTALE V5 CONTRACT\n<!-- ensemble:end -->\n\n# Project-owned\n\n${PROJECT_LINE}\n`
 const V6_START = "<!-- ensemble:start v6 -->"
@@ -79,8 +84,14 @@ const FIXTURE = [
   { key: "vera", name: "Vera", title: "Vera Lead", role: "Owns the Vera regression and release sign-off." },
   { key: "kakiko", name: "Kakiko", title: "Completion Guard", role: "Checks that no second completion turn reaches the leader." },
   { key: "clark", name: "Clark", title: "Route Checker", role: "Confirms each mentioned member receives exactly one turn." },
+  { key: "juno", name: "Juno", title: "Relay Runner", role: "Carries one relay hop without waking the leader." },
+  { key: "mira", name: "Mira", title: "Branch Minder", role: "Keeps every fan-out branch terminal before synthesis." },
+  { key: "wren", name: "Wren", title: "Terminal Checker", role: "Confirms a terminal turn creates no new work." },
 ]
+// The VeraProbe workspace keeps the original four-member roster so the #241
+// assertions stay stable; VeraFlows adds the three relay/fan-out workers.
 const MEMBER_ORDER = ["clark", "vera", "kakiko", "phoenix"]
+const FLOW_ORDER = ["vera", "phoenix", "kakiko", "clark", "juno", "mira", "wren"]
 const LEADER_KEY = "vera"
 const DELEGATE_KEY = "phoenix"
 const MENTION_KEYS = ["phoenix", "clark", "kakiko"]
@@ -214,6 +225,114 @@ function streamingRequestsBetween(started, ended) {
   })
 }
 
+/** Ticket #251: one structured fake-provider row per flow turn, counts only. */
+function flowMetrics(ticket, role) {
+  const row = providerRows().find(
+    (entry) => entry.event === "vera_flow" && entry.ticket === ticket && entry.role === role && entry.hasToolResult !== true,
+  )
+  if (!row) return undefined
+  return {
+    latestUserChars: row.latestUserChars,
+    synthesisContextChars: row.synthesisContextChars,
+    promptChars: row.promptChars,
+    messagesChars: row.messagesChars,
+    estimatedPromptTokens: row.estimatedPromptTokens,
+    toolCount: row.toolCount,
+    ensembleToolCount: row.ensembleToolCount,
+    ensembleToolSchemaChars: row.ensembleToolSchemaChars,
+    ensembleToolSchemaTokens: Math.ceil(Number(row.ensembleToolSchemaChars ?? 0) / 4),
+    hasRootRequest: row.hasRootRequest,
+    hasBranchResults: row.hasBranchResults,
+  }
+}
+
+function toolSurfaceMetrics(count) {
+  const row = providerRows().find(
+    (entry) => entry.event === "request" && Number(entry.ensembleToolCount) === count && Number(entry.ensembleToolSchemaChars) > 0,
+  )
+  if (!row) return { count }
+  return {
+    count,
+    chars: row.ensembleToolSchemaChars,
+    tokens: Math.ceil(Number(row.ensembleToolSchemaChars) / 4),
+  }
+}
+
+function tasksInGroup(snapshot, groupID) {
+  return Object.values(snapshot.subtasks ?? {}).filter((task) => task.dispatchGroupID === groupID)
+}
+
+function leaderMessagesFor(snapshot, channel, leaderID, taskID) {
+  return channelMessages(snapshot, channel).filter(
+    (message) => message.author === "agent" && message.agentID === leaderID && message.taskID === taskID,
+  )
+}
+
+function terminalNoticeFor(snapshot, channel, taskID) {
+  return channelMessages(snapshot, channel).some(
+    (message) =>
+      message.author === "system" &&
+      message.taskID === taskID &&
+      String(message.text ?? "").includes("No work was created from mentions in a terminal turn"),
+  )
+}
+
+function ticketMetrics(snapshot, root, leaderID, channel) {
+  const tasks = tasksInGroup(snapshot, root.dispatchGroupID)
+  const result = root.resultMessageID ? messageByID(snapshot, channel, root.resultMessageID) : undefined
+  const leaderMessages = leaderMessagesFor(snapshot, channel, leaderID, root.id)
+  return {
+    rootTaskID: root.id,
+    dispatchGroupID: root.dispatchGroupID,
+    tasks: tasks.length,
+    leaderTasks: tasks.filter((task) => task.assigneeID === leaderID).length,
+    workerTurns: tasks.filter((task) => task.assigneeID !== leaderID && task.handoff?.completion !== true).length,
+    completionTasks: tasks.filter((task) => task.handoff?.completion === true).length,
+    leaderMessages: leaderMessages.length,
+    leaderOutputChars: String(result?.text ?? "").length,
+    leaderOutputTokens: Math.ceil(String(result?.text ?? "").length / 4),
+  }
+}
+
+function relayChain(snapshot, root) {
+  const chain = [root]
+  let current = root
+  for (;;) {
+    const child = Object.values(snapshot.subtasks ?? {}).find(
+      (task) => task.parentID === current.id && String(task.instruction ?? "").includes("fake-vera-relay:chain="),
+    )
+    if (!child) break
+    chain.push(child)
+    current = child
+  }
+  return chain.slice(1)
+}
+
+async function waitForCommandRoot(workspaceID, title, timeoutMs = 120_000) {
+  const settled = await waitFor(`the ${title} command root synthesis`, async (next) => {
+    const root = Object.values(next.subtasks ?? {}).find(
+      (task) => task.workspaceID === workspaceID && task.title === title && !task.parentID,
+    )
+    return root?.stage === "synthesis" && root.state === "replied"
+  }, timeoutMs)
+  return settled.state
+}
+
+async function sendFlowKickoff(sessionID, marker) {
+  const inbox = await promptNative(sessionID, marker)
+  const settled = await waitFor("the flow kickoff native turn", async (next) => {
+    const task = nativeTask(next, sessionID, inbox.id)
+    return task?.native?.phase === "replied"
+  }, 120_000)
+  return settled.state
+}
+
+function commandRoot(snapshot, workspaceID, title) {
+  return Object.values(snapshot.subtasks ?? {}).find(
+    (task) => task.workspaceID === workspaceID && task.title === title && !task.parentID,
+  )
+}
+
 async function promptNative(sessionID, text, extra = {}) {
   const inbox = await client.session.prompt({ sessionID, text, ...extra })
   if (!inbox?.id) throw new Error("native prompt did not return an inbox id")
@@ -333,6 +452,37 @@ async function seed() {
   }
   assert("seed creates the group binding", Boolean(groupBinding?.sessionID))
 
+  // Ticket #251: a second workspace runs the relay, fan-out, terminal-turn,
+  // multi-ticket, refused-dispatch, and worker-route flows. It shares the
+  // roster but keeps its own channel and group session so the #241 assertions
+  // stay scoped to VeraProbe.
+  const flowsWorkspaceDir = join(project, "vera-flows")
+  mkdirSync(flowsWorkspaceDir, { recursive: true })
+  const flowMemberIDs = FLOW_ORDER.map((key) => created[key].id)
+  const flowsWorkspace = await invoke("workspace.create", {
+    name: FLOWS_WORKSPACE_NAME,
+    directory: flowsWorkspaceDir,
+    memberIDs: flowMemberIDs,
+    leaderID,
+  })
+  let flowsGroupBinding = bindingFor(snapshot, leaderID, flowsWorkspace.id, "workspace")
+  if (!flowsGroupBinding?.sessionID) {
+    await invoke("message.send", {
+      workspaceID: flowsWorkspace.id,
+      text: FLOWS_WARMUP,
+      recipientIDs: [leaderID],
+    })
+    const warmed = await waitFor("the VeraFlows group binding after warm-up", async (next) => {
+      const task = Object.values(next.subtasks ?? {}).find(
+        (item) => item.instruction === FLOWS_WARMUP && item.state === "replied",
+      )
+      return Boolean(task && bindingFor(next, leaderID, flowsWorkspace.id, "workspace")?.sessionID)
+    }, 60_000)
+    snapshot = warmed.state
+    flowsGroupBinding = bindingFor(snapshot, leaderID, flowsWorkspace.id, "workspace")
+  }
+  assert("seed creates the flows group binding", Boolean(flowsGroupBinding?.sessionID))
+
   // A pre-v6 initialized workspace: the next service reconciliation must
   // rewrite exactly this stale block to v6 with the generated roster.
   mkdirSync(join(workspaceDir, ".ensemble"), { recursive: true })
@@ -354,6 +504,11 @@ async function seed() {
     workspaceChannel: workspace.id,
     groupSessionID: groupBinding.sessionID,
     memberIDs,
+    flowsWorkspaceID: flowsWorkspace.id,
+    flowsWorkspaceDir,
+    flowsChannel: flowsWorkspace.id,
+    flowsGroupSessionID: flowsGroupBinding.sessionID,
+    flowsMemberIDs: flowMemberIDs,
     leaderID,
   }
   metrics.seed = {
@@ -361,6 +516,8 @@ async function seed() {
     memberIDs: memberIDs.length,
     groupBinding: true,
     warmupSettled: true,
+    flowsGroupBinding: true,
+    flowsWarmupSettled: true,
   }
   saveState()
 }
@@ -619,12 +776,287 @@ async function run() {
   stateFileData.parentTaskID = own.id
   stateFileData.parentResultMessageID = own.resultMessageID
   stateFileData.contacted = [...(restoredParent.native?.contacted ?? [])]
-  stateFileData.nativeCount = nativeAfter
+  // Scope the #241 durability counts to VeraProbe: the VeraFlows warm-up and
+  // ticket #251 scenarios live in a second workspace.
+  stateFileData.nativeCount = Object.values(snapshot.subtasks ?? {}).filter(
+    (task) => task.workspaceID === saved.workspaceID && task.origin === "native",
+  ).length
   stateFileData.ledgerBefore = ledgerBefore
   stateFileData.phoenixTaskCount = phoenixBefore
   stateFileData.legacyTaskID = legacyTask.id
-  stateFileData.taskCount = Object.keys(snapshot.subtasks ?? {}).length
+  stateFileData.taskCount = Object.values(snapshot.subtasks ?? {}).filter(
+    (task) => task.workspaceID === saved.workspaceID,
+  ).length
   stateFileData.agentsBlock = metrics.agentsBlock
+  saveState()
+}
+
+/**
+ * Ticket #251: the live relay, fan-out, terminal-turn, multi-ticket,
+ * refused-dispatch, and worker-route flows. Every command root is leader-owned
+ * through `ensemble_dispatch`, so the completion guard skips every worker
+ * completion and the root is the only synthesis turn.
+ */
+async function flows() {
+  const saved = JSON.parse(readFileSync(stateFile, "utf8"))
+  stateFileData = saved
+  assert(
+    "flows has the seed scenario state",
+    Boolean(saved.flowsWorkspaceID && saved.flowsGroupSessionID && saved.flowsChannel && saved.leaderID),
+  )
+  const diag = await diagnostic()
+  assert(
+    "flows starts on the native surface",
+    diag.state.settings.nativeFirst === "on" && diag.state.settings.toolSurface === "native",
+  )
+  const workspaceID = saved.flowsWorkspaceID
+  const channel = saved.flowsChannel
+  const leaderID = saved.leaderID
+  const agentIDs = saved.agentIDs
+
+  // --- ticket one: five-hop relay + terminal continuation dispatch ---------
+  await sendFlowKickoff(saved.flowsGroupSessionID, FLOW_TICKET_ONE)
+  let snapshot = await waitForCommandRoot(workspaceID, "Ticket one")
+  let root = commandRoot(snapshot, workspaceID, "Ticket one")
+  assert("ticket one is a parentless leader command root", Boolean(root) && root.parentID === undefined && root.assigneeID === leaderID)
+  const relay = relayChain(snapshot, root)
+  assert("ticket one relay has six worker turns", relay.length === 6, String(relay.length))
+  assert(
+    "ticket one relay runs the five named hops",
+    JSON.stringify(relay.map((task) => saved.agentNames[task.assigneeID])) ===
+      JSON.stringify(["Phoenix", "Kakiko", "Clark", "Juno", "Mira", "Wren"]),
+    JSON.stringify(relay.map((task) => saved.agentNames[task.assigneeID])),
+  )
+  assert(
+    "ticket one has no completion work",
+    tasksInGroup(snapshot, root.dispatchGroupID).every((task) => task.handoff?.completion !== true),
+  )
+  assert(
+    "ticket one has exactly one synthesis task",
+    tasksInGroup(snapshot, root.dispatchGroupID).filter((task) => task.stage === "synthesis").length === 1,
+  )
+  const one = ticketMetrics(snapshot, root, leaderID, channel)
+  assert("ticket one has one leader synthesis turn", one.leaderTasks === 1 && one.leaderMessages === 1, JSON.stringify(one))
+  const oneSynthesis = flowMetrics("one", "synthesis")
+  assert(
+    "ticket one synthesis carries the root request and branch digest",
+    oneSynthesis?.hasRootRequest === true && oneSynthesis?.hasBranchResults === true,
+  )
+  const oneSuppressed = (await logEntries("native.route.suppressed", 500)).filter(
+    (entry) => entry.turnID === root.id && entry.reason === "terminal-turn",
+  )
+  assert("ticket one terminal mentions create no peer turns", oneSuppressed.length === 2, String(oneSuppressed.length))
+  assert("ticket one dispatched, so it posts no terminal notice", !terminalNoticeFor(snapshot, channel, root.id))
+  const dispatchLogs = await logEntries("dispatch.command.created", 100)
+  const ticketTwoDispatch = dispatchLogs.find((entry) => entry.originTaskID === root.id)
+  assert("ticket one's terminal turn dispatches ticket two", Boolean(ticketTwoDispatch) && ticketTwoDispatch.assignmentCount === 5)
+
+  // --- ticket two: five-way fan-out, fresh command root, one synthesis ------
+  snapshot = await waitForCommandRoot(workspaceID, "Ticket two")
+  root = commandRoot(snapshot, workspaceID, "Ticket two")
+  assert("ticket two is a parentless leader command root", Boolean(root) && root.parentID === undefined && root.assigneeID === leaderID)
+  assert("ticket two is a new command, not a child of ticket one", root.dispatchGroupID !== one.dispatchGroupID)
+  assert("ticket two is the dispatched root", root.id === ticketTwoDispatch?.rootTaskID)
+  const twoGroup = snapshot.dispatchGroups[root.dispatchGroupID]
+  assert("ticket two has a fresh command budget", Boolean(twoGroup) && twoGroup.rootID === root.dispatchGroupID && twoGroup.usedHops === 5 && twoGroup.commandUsedHops === 5 && twoGroup.maxHops === 8 && twoGroup.commandMaxHops === 24, JSON.stringify(twoGroup))
+  const two = ticketMetrics(snapshot, root, leaderID, channel)
+  assert("ticket two has five fan-out worker turns", two.workerTurns === 5, String(two.workerTurns))
+  assert("ticket two has one leader synthesis turn", two.leaderTasks === 1 && two.leaderMessages === 1, JSON.stringify(two))
+  assert("ticket two has no per-child completion review", two.completionTasks === 0)
+  assert(
+    "ticket two creates no peer turns from the synthesis",
+    tasksInGroup(snapshot, root.dispatchGroupID).every((task) => task.workKind !== "turn"),
+  )
+  assert("ticket two posts the visible terminal notice", terminalNoticeFor(snapshot, channel, root.id))
+  const twoSuppressed = (await logEntries("native.route.suppressed", 500)).filter(
+    (entry) => entry.turnID === root.id && entry.reason === "terminal-turn",
+  )
+  assert("ticket two terminal mentions are references", twoSuppressed.length === 5, String(twoSuppressed.length))
+  const twoTerminal = (await logEntries("native.route.terminal", 100)).find((entry) => entry.turnID === root.id)
+  assert("ticket two terminal turn reports no dispatch", Boolean(twoTerminal) && twoTerminal.count === 5 && twoTerminal.dispatched !== true)
+  const twoSynthesis = flowMetrics("two", "synthesis")
+  assert(
+    "ticket two synthesis carries the root request and branch digest",
+    twoSynthesis?.hasRootRequest === true && twoSynthesis?.hasBranchResults === true,
+  )
+
+  // --- ticket three: refused dispatch at the command cap --------------------
+  await invoke("settings.update", {
+    dispatchGroupMaxHops: 8,
+    dispatchCommandMaxHops: 8,
+    dispatchDepth: 8,
+    dispatchContinuations: 0,
+  })
+  await sendFlowKickoff(saved.flowsGroupSessionID, FLOW_TICKET_THREE)
+  snapshot = await waitForCommandRoot(workspaceID, "Ticket three")
+  root = commandRoot(snapshot, workspaceID, "Ticket three")
+  assert("ticket three is a parentless leader command root", Boolean(root) && root.parentID === undefined && root.assigneeID === leaderID)
+  const three = ticketMetrics(snapshot, root, leaderID, channel)
+  assert("ticket three has one leader synthesis turn", three.leaderTasks === 1 && three.leaderMessages === 1, JSON.stringify(three))
+  assert("ticket three has no completion work", three.completionTasks === 0)
+  const refusedBatch = Object.values(snapshot.subtasks ?? {}).filter((task) =>
+    String(task.instruction ?? "").includes("fake-vera-fanout:ticket=three;worker="),
+  )
+  assert("the refused dispatch creates no work", refusedBatch.length === 0, String(refusedBatch.length))
+  const refusalCopy = channelMessages(snapshot, channel).find(
+    (message) =>
+      message.author === "system" &&
+      String(message.text ?? "").startsWith("Dispatch refused:") &&
+      String(message.text ?? "").includes("the command budget is exhausted (9/8 hops)") &&
+      String(message.text ?? "").includes("Ask the user to start a new command"),
+  )
+  assert("the command-cap refusal is visible in the group chat", Boolean(refusalCopy))
+  const refusalLog = (await logEntries("dispatch.command.refused", 100)).find((entry) => entry.originTaskID === root.id)
+  assert(
+    "the command-cap refusal names the command layer",
+    Boolean(refusalLog) && refusalLog.layer === "command" && refusalLog.used === 9 && refusalLog.max === 8,
+    JSON.stringify(refusalLog ?? {}),
+  )
+  assert("ticket three posts the visible terminal notice", terminalNoticeFor(snapshot, channel, root.id))
+  const threeSynthesis = flowMetrics("three", "synthesis")
+  assert(
+    "ticket three synthesis carries the root request and branch digest",
+    threeSynthesis?.hasRootRequest === true && threeSynthesis?.hasBranchResults === true,
+  )
+  const threeSuppressed = (await logEntries("native.route.suppressed", 500)).filter(
+    (entry) => entry.turnID === root.id && entry.reason === "terminal-turn",
+  )
+  assert("ticket three terminal mentions are references", threeSuppressed.length === 2, String(threeSuppressed.length))
+  await invoke("settings.update", {
+    dispatchGroupMaxHops: 8,
+    dispatchCommandMaxHops: 24,
+    dispatchDepth: 8,
+    dispatchContinuations: 2,
+  })
+
+  // --- ticket four: worker handoff with $Name to a sibling -------------------
+  await sendFlowKickoff(saved.flowsGroupSessionID, FLOW_TICKET_FOUR)
+  snapshot = await waitForCommandRoot(workspaceID, "Ticket four")
+  root = commandRoot(snapshot, workspaceID, "Ticket four")
+  assert("ticket four is a parentless leader command root", Boolean(root) && root.parentID === undefined && root.assigneeID === leaderID)
+  const four = ticketMetrics(snapshot, root, leaderID, channel)
+  assert("ticket four has one leader synthesis turn", four.leaderTasks === 1 && four.leaderMessages === 1, JSON.stringify(four))
+  assert("ticket four has no completion work", four.completionTasks === 0)
+  const phoenixTask = tasksInGroup(snapshot, root.dispatchGroupID).find((task) => task.assigneeID === agentIDs.phoenix)
+  assert("ticket four assigns the worker", Boolean(phoenixTask))
+  const peerRoute = Object.values(snapshot.subtasks ?? {}).find(
+    (task) => task.parentID === phoenixTask?.id && task.assigneeID === agentIDs.clark,
+  )
+  assert("a worker turn still routes a sibling with $Name", Boolean(peerRoute) && peerRoute.workKind === "turn" && peerRoute.state === "replied")
+  const routeLog = (await logEntries("native.route.created", 100)).find(
+    (entry) => entry.turnID === phoenixTask?.id && entry.recipientID === agentIDs.clark,
+  )
+  assert("the worker route is logged as a real peer turn", Boolean(routeLog))
+  assert("ticket four posts the visible terminal notice", terminalNoticeFor(snapshot, channel, root.id))
+  const fourSynthesis = flowMetrics("four", "synthesis")
+  assert(
+    "ticket four synthesis carries the root request and branch digest",
+    fourSynthesis?.hasRootRequest === true && fourSynthesis?.hasBranchResults === true,
+  )
+  const fourSuppressed = (await logEntries("native.route.suppressed", 500)).filter(
+    (entry) => entry.turnID === root.id && entry.reason === "terminal-turn",
+  )
+  assert("ticket four terminal mentions are references", fourSuppressed.length === 1, String(fourSuppressed.length))
+
+  const kickoffs = Object.values(snapshot.subtasks ?? {}).filter(
+    (task) =>
+      task.workspaceID === workspaceID &&
+      task.origin === "native" &&
+      String(task.instruction ?? "").startsWith("fake-vera-flows:"),
+  )
+  assert("three native kickoff turns start the flow tickets", kickoffs.length === 3, String(kickoffs.length))
+  assert("every kickoff turn settled", kickoffs.every((task) => task.native?.phase === "replied"))
+
+  const tickets = { one, two, three, four }
+  for (const [ticket, values] of Object.entries(tickets)) {
+    const synthesis = flowMetrics(ticket, "synthesis")
+    values.synthesisPromptChars = synthesis?.latestUserChars
+    values.synthesisPromptTokens = Math.ceil(Number(synthesis?.latestUserChars ?? 0) / 4)
+    values.synthesisContextChars = synthesis?.synthesisContextChars
+    values.synthesisContextTokens = Math.ceil(Number(synthesis?.synthesisContextChars ?? 0) / 4)
+  }
+  const synthesisPromptChars = ["one", "two", "three", "four"].reduce(
+    (total, ticket) => total + Number(flowMetrics(ticket, "synthesis")?.latestUserChars ?? 0),
+    0,
+  )
+  const synthesisContextChars = ["one", "two", "three", "four"].reduce(
+    (total, ticket) => total + Number(flowMetrics(ticket, "synthesis")?.synthesisContextChars ?? 0),
+    0,
+  )
+  const leaderOutputChars = Object.values(tickets).reduce((total, ticket) => total + ticket.leaderOutputChars, 0)
+  const beforeRelayChars = 8333
+  const beforeFanoutChars = 5761
+  metrics.flows = {
+    tickets,
+    kickoffTurns: kickoffs.length,
+    terminalSuppressed: { one: oneSuppressed.length, two: twoSuppressed.length, three: threeSuppressed.length, four: fourSuppressed.length },
+    terminalNotices: {
+      one: terminalNoticeFor(snapshot, channel, one.rootTaskID),
+      two: terminalNoticeFor(snapshot, channel, two.rootTaskID),
+      three: terminalNoticeFor(snapshot, channel, three.rootTaskID),
+      four: terminalNoticeFor(snapshot, channel, four.rootTaskID),
+    },
+    refusal: { visible: Boolean(refusalCopy), layer: refusalLog?.layer, used: refusalLog?.used, max: refusalLog?.max, createdWork: refusedBatch.length },
+    workerRoute: { peerTurns: peerRoute ? 1 : 0, routed: Boolean(routeLog) },
+    toolSurface: { native: toolSurfaceMetrics(6), legacy: toolSurfaceMetrics(11) },
+    synthesis: {
+      promptChars: synthesisPromptChars,
+      promptTokens: Math.ceil(synthesisPromptChars / 4),
+      contextChars: synthesisContextChars,
+      contextTokens: Math.ceil(synthesisContextChars / 4),
+    },
+    totals: {
+      leaderTurns: Object.values(tickets).reduce((total, ticket) => total + ticket.leaderTasks, 0),
+      leaderOutputChars,
+      leaderOutputTokens: Math.ceil(leaderOutputChars / 4),
+    },
+    beforeAfter: {
+      relay: {
+        beforeChars: beforeRelayChars,
+        beforeTokens: Math.ceil(beforeRelayChars / 4),
+        afterChars: one.leaderOutputChars,
+        afterTokens: one.leaderOutputTokens,
+        deltaChars: beforeRelayChars - one.leaderOutputChars,
+        deltaTokens: Math.ceil(beforeRelayChars / 4) - one.leaderOutputTokens,
+      },
+      fanout: {
+        beforeChars: beforeFanoutChars,
+        beforeTokens: Math.ceil(beforeFanoutChars / 4),
+        beforeBranches: 3,
+        afterChars: two.leaderOutputChars,
+        afterTokens: two.leaderOutputTokens,
+        afterBranches: two.workerTurns,
+        deltaChars: beforeFanoutChars - two.leaderOutputChars,
+        deltaTokens: Math.ceil(beforeFanoutChars / 4) - two.leaderOutputTokens,
+      },
+      leaderTurns: {
+        beforeRelay: 5,
+        beforeFanout: 4,
+        afterPerTicket: 1,
+        relayDelta: 4,
+        fanoutDelta: 3,
+      },
+    },
+  }
+
+  const workspaceTasks = Object.values(snapshot.subtasks ?? {}).filter((task) => task.workspaceID === workspaceID)
+  stateFileData.flows = {
+    workspaceID,
+    channel,
+    groupSessionID: saved.flowsGroupSessionID,
+    taskCount: workspaceTasks.length,
+    nativeCount: workspaceTasks.filter((task) => task.origin === "native").length,
+    roots: { one: one.rootTaskID, two: two.rootTaskID, three: three.rootTaskID, four: four.rootTaskID },
+    groups: { one: one.dispatchGroupID, two: two.dispatchGroupID, three: three.dispatchGroupID, four: four.dispatchGroupID },
+    kickoffTurns: kickoffs.length,
+    peerRouteTaskID: peerRoute?.id,
+    ticketMetrics: tickets,
+    terminalNotices: metrics.flows.terminalNotices,
+    toolSurface: metrics.flows.toolSurface,
+    beforeAfter: metrics.flows.beforeAfter,
+    totals: metrics.flows.totals,
+  }
+  stateFileData.phase = "flows"
   saveState()
 }
 
@@ -654,11 +1086,15 @@ async function restart() {
   )
   assert(
     "restart preserves every durable native turn",
-    Object.values(snapshot.subtasks ?? {}).filter((task) => task.origin === "native").length === saved.nativeCount,
+    Object.values(snapshot.subtasks ?? {}).filter(
+      (task) => task.workspaceID === saved.workspaceID && task.origin === "native",
+    ).length === saved.nativeCount,
   )
   assert(
     "restart keeps exactly one work item for the explicit recipient",
-    Object.values(snapshot.subtasks ?? {}).filter((task) => task.assigneeID === saved.agentIDs.phoenix).length === saved.phoenixTaskCount,
+    Object.values(snapshot.subtasks ?? {}).filter(
+      (task) => task.workspaceID === saved.workspaceID && task.assigneeID === saved.agentIDs.phoenix,
+    ).length === saved.phoenixTaskCount,
   )
   assert(
     "restart creates no completion turn for the leader",
@@ -689,8 +1125,38 @@ async function restart() {
   assert("restart keeps the leader's single turn row", leaderRows.length === 1 && leaderRows[0].id === saved.parentResultMessageID)
   assert(
     "restart keeps the same total work rows",
-    Object.keys(snapshot.subtasks ?? {}).length === saved.taskCount,
+    Object.values(snapshot.subtasks ?? {}).filter((task) => task.workspaceID === saved.workspaceID).length === saved.taskCount,
   )
+
+  // Ticket #251: the multi-ticket flow survives the host restart with its
+  // roots, one synthesis per ticket, and the visible terminal notices.
+  const flows = saved.flows
+  assert("restart has the ticket #251 flow state", Boolean(flows?.workspaceID && flows?.roots?.two))
+  const flowTasks = Object.values(snapshot.subtasks ?? {}).filter((task) => task.workspaceID === flows.workspaceID)
+  assert("restart preserves every flow task", flowTasks.length === flows.taskCount)
+  assert(
+    "restart preserves every flow native turn",
+    flowTasks.filter((task) => task.origin === "native").length === flows.nativeCount,
+  )
+  assert("restart creates no flow completion turn", flowTasks.every((task) => task.handoff?.completion !== true))
+  for (const [ticket, rootID] of Object.entries(flows.roots)) {
+    const flowRoot = snapshot.subtasks[rootID]
+    assert(`restart keeps the ${ticket} command root`, Boolean(flowRoot) && flowRoot.parentID === undefined && flowRoot.assigneeID === saved.leaderID)
+    assert(`restart keeps the ${ticket} synthesis`, flowRoot?.stage === "synthesis" && flowRoot.state === "replied")
+    assert(
+      `restart keeps one ${ticket} leader message`,
+      leaderMessagesFor(snapshot, flows.channel, saved.leaderID, rootID).length === 1,
+    )
+    if (ticket === "two" || ticket === "three" || ticket === "four") {
+      assert(`restart keeps the ${ticket} terminal notice`, terminalNoticeFor(snapshot, flows.channel, rootID))
+    }
+  }
+  const flowTwoGroup = snapshot.dispatchGroups[flows.groups.two]
+  assert(
+    "restart keeps ticket two's fresh command budget",
+    Boolean(flowTwoGroup) && flowTwoGroup.usedHops === 5 && flowTwoGroup.commandUsedHops === 5 && flowTwoGroup.commandMaxHops === 24,
+  )
+  assert("restart keeps the worker route peer turn", Boolean(snapshot.subtasks[flows.peerRouteTaskID]))
 
   metrics.restart = {
     mode: snapshot.settings.nativeFirst,
@@ -701,6 +1167,13 @@ async function restart() {
     leaderRows: leaderRows.length,
     stuckTurns: stuck.length,
     rosterExact: JSON.stringify(table) === JSON.stringify(expectedRosterTable(saved)),
+    flows: {
+      tasks: flowTasks.length,
+      nativeTurns: flowTasks.filter((task) => task.origin === "native").length,
+      roots: Object.keys(flows.roots).length,
+      ticketTwoCommandMaxHops: flowTwoGroup?.commandMaxHops,
+      peerRoute: Boolean(snapshot.subtasks[flows.peerRouteTaskID]),
+    },
   }
   stateFileData.phase = "restart"
   saveState()
@@ -709,6 +1182,7 @@ async function restart() {
 try {
   if (phase === "seed") await seed()
   else if (phase === "run") await run()
+  else if (phase === "flows") await flows()
   else if (phase === "restart") await restart()
   else throw new Error(`unknown phase: ${phase}`)
 } catch (error) {

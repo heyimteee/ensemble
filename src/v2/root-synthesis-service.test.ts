@@ -260,3 +260,53 @@ test("ticket246: a five-way fan-out synthesizes once after every branch is termi
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("ticket251: the root synthesis waits for a pending descendant routed by a replied child", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-251-subtree-"))
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  const ids = ["a", "b", "c", "d", "e"]
+  const names = ["Nova", "Sage", "Iris", "Fern", "Ash"]
+  for (const [index, id] of ids.entries()) await seed.saveAgent(agent(id, names[index]))
+  await seed.saveWorkspace(workspace(directory, ids))
+  await seed.saveChannelMessage("w", { id: "m_b", author: "agent", agentID: "c", text: "Intermediate answer", kind: "text", createdAt: 1 })
+  await seed.saveSubtask(task({ id: "root", assigneeID: "a", state: "working", awaitingChildren: true, workKind: "delegation" }))
+  await seed.saveSubtask(task({ id: "a1", parentID: "root", assigneeID: "b", state: "working", awaitingChildren: true, workKind: "delegation" }))
+  await seed.saveSubtask(task({ id: "b1", parentID: "a1", assigneeID: "c", state: "replied", outcome: "succeeded", resultMessageID: "m_b", workKind: "delegation" }))
+  await seed.saveSubtask(task({ id: "c1", parentID: "b1", assigneeID: "d", instruction: "Leaf pending work", workKind: "delegation" }))
+  await seed.saveSubtask(task({ id: "d1", parentID: "a1", assigneeID: "e", instruction: "Sibling work", workKind: "delegation" }))
+  let releaseLeaf!: () => void
+  const leafGate = new Promise<void>((resolve) => { releaseLeaf = resolve })
+  const realPrompt = (ctx.session as any).prompt
+  ;(ctx.session as any).prompt = async (input: any) => {
+    if (String(input.text ?? "").includes("Leaf pending work")) await leafGate
+    return realPrompt(input)
+  }
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    await waitFor(async () => {
+      const next = await service.handlers().snapshot({ directory })
+      return next.state.subtasks.d1?.state === "replied"
+    })
+    const waiting = (await service.handlers().snapshot({ directory })).state
+    assert.equal(waiting.subtasks.a1.state, "working", "the intermediate parent stays open")
+    assert.notEqual(waiting.subtasks.root.stage, "synthesis", "the root does not synthesize over a pending descendant")
+    assert.notEqual(waiting.subtasks.c1.state, "replied", "the routed descendant is still active")
+    releaseLeaf()
+    await waitFor(async () => {
+      const next = await service.handlers().snapshot({ directory })
+      return next.state.subtasks.root?.stage === "synthesis" && next.state.subtasks.root?.state === "replied"
+    })
+    const after = (await service.handlers().snapshot({ directory })).state
+    assert.equal(after.subtasks.c1.state, "replied", "the routed descendant finished before synthesis")
+    const synthesis = Object.values(after.subtasks).filter((item: any) => item.stage === "synthesis")
+    assert.equal(synthesis.length, 1, "exactly one root synthesis")
+    assert.equal((synthesis[0] as any).id, "root")
+  } finally {
+    releaseLeaf()
+    await stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

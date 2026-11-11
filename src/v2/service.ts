@@ -44,6 +44,7 @@ import { dispatchCommandKey, dispatchCommandRefusalText, dispatchCommandStartedF
 import { resolveActiveTurnAnchor, type ActiveTurnAnchor } from "./turn-anchor.ts"
 import { completionDecision } from "./completion-decision.ts"
 import { resolveCommandRoot } from "./command-root.ts"
+import { hasPendingDescendant, pendingDescendantResolver } from "./branch-digest.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
@@ -7817,6 +7818,11 @@ export class EnsembleV2Service {
   private async reconcileWaitingWork(): Promise<void> {
     const tasks = this.store.subtasks()
     const at = now()
+    const subtasksByID = Object.fromEntries(tasks.map((task) => [task.id, task]))
+    const pendingDescendant = pendingDescendantResolver({
+      subtasks: subtasksByID,
+      isTerminal: (child) => isTerminalWorkStatus(deriveWorkStatus(child, at)),
+    })
     const childrenByParent = new Map<string, Subtask[]>()
     for (const task of tasks) {
       if (!task.parentID || task.handoff?.completion === true) continue
@@ -7838,7 +7844,9 @@ export class EnsembleV2Service {
       // Ticket #170: a stalled child still persists `state: "replied"` but is
       // non-terminal. Only the canonical derived lifecycle may release a
       // parent; otherwise a lease problem would close the parent's turn.
-      if (candidate.awaitingChildren && !children.some((child) => !isTerminalWorkStatus(deriveWorkStatus(child, at)))) {
+      // Ticket #251: a replied child can route a pending peer turn, so release
+      // only when the whole non-completion subtree is terminal.
+      if (candidate.awaitingChildren && !pendingDescendant(candidate.id)) {
         const task = this.store.cloneSubtask(candidate.id)
         if (!task) continue
         task.awaitingChildren = false
@@ -11705,11 +11713,18 @@ export class EnsembleV2Service {
       } else {
         this.liveBySession.set(binding.sessionID, { message: live, lastSave: 0, buffer: "" })
       }
+      const taskContext = contextForTask(this.store.read(), task, workspace, agent)
       await this.ctx.session.instructions.entry.put({
         sessionID: binding.sessionID,
         key: "ensemble.v2.context",
-        value: contextForTask(this.store.read(), task, workspace, agent),
+        value: taskContext,
       }).catch(() => undefined)
+      const taskPrompt = promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined)
+      // Ticket #251: a session that already ran a native turn can keep its
+      // first instruction snapshot for later prompts. Carry the bounded
+      // synthesis context in the prompt text too, so the digest is guaranteed
+      // to reach the model even when the host reuses that snapshot.
+      const promptText = task.stage === "synthesis" ? `${taskPrompt}\n\n${taskContext}` : taskPrompt
       // Ticket #103: General skills are a one-run leader grant. Apply the
       // extra allow rules before the prompt; the finally block restores the
       // Skillbox-permission baseline after the turn.
@@ -11752,7 +11767,7 @@ export class EnsembleV2Service {
         failureContext.startedAt = attemptStartedAt
         await this.ctx.session.prompt({
           sessionID: binding.sessionID,
-          text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined),
+          text: promptText,
           delivery: "steer",
           metadata: { [NATIVE_INTERNAL_PROMPT_METADATA]: true, [NATIVE_SKIP_TURN_METADATA]: false },
           ...(attachmentFiles.length > 0 ? { files: attachmentFiles } : {}),
@@ -12489,7 +12504,15 @@ export class EnsembleV2Service {
     // active until retry/cancel/dismissal. Parent completion follows the
     // canonical derived status, never the storage cache.
     const at = now()
-    if (children.length === 0 || children.some((child) => !isTerminalWorkStatus(deriveWorkStatus(child, at)))) return
+    // Ticket #251: a replied child can route a new peer turn after it settles.
+    // Wait for the whole non-completion subtree, not just the direct children,
+    // so the command root never synthesizes over a pending descendant.
+    const pendingDescendant = hasPendingDescendant({
+      parentID,
+      subtasks: this.store.read().subtasks,
+      isTerminal: (child) => isTerminalWorkStatus(deriveWorkStatus(child, at)),
+    })
+    if (children.length === 0 || pendingDescendant) return
     const workspace = this.store.workspace(stored.workspaceID)
     if (!workspace) return
     const parent = this.store.cloneSubtask(parentID)
@@ -12498,7 +12521,13 @@ export class EnsembleV2Service {
       // Intermediate relay: settle with the child result and propagate upward.
       // The parent's own worker answer already owns its resultMessageID; never
       // overwrite it with a child's message (ticket #246 clarification).
-      if (parent.stage === "synthesis" || parent.state === "replied") return
+      if (parent.stage === "synthesis" || parent.state === "replied") {
+        // Ticket #251: a replied parent can route a new peer turn after it
+        // settles. That child's completion must still wake the ancestor, where
+        // the subtree check decides whether the whole command is terminal.
+        if (parent.parentID) await this.maybeSynthesize(parent.parentID, parent.id)
+        return
+      }
       if (parent.handoff?.batch === true) return
       const triggering = childID ? this.store.subtask(childID) : undefined
       const childResultID = triggering?.resultMessageID ?? children.find((child) => child.resultMessageID)?.resultMessageID

@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { collectBranchResults, formatBranchDigest } from "./branch-digest.ts"
+import { collectBranchResults, formatBranchDigest, hasPendingDescendant } from "./branch-digest.ts"
 import type { Agent, Message, Subtask } from "./types.ts"
 
 const agent = (id: string, name: string): Agent => ({
@@ -107,6 +107,40 @@ test("completion hops are review deliveries, not work branches", () => {
   assert.equal(branches.length, 1)
   assert.equal(branches[0].taskID, "b")
   assert.equal(branches[0].result, "Worker answer")
+})
+
+test("ticket251: a terminal child with a pending descendant keeps the subtree open", () => {
+  const tasks = {
+    root: task({ id: "root", assigneeID: "a", state: "working", outcome: "pending", awaitingChildren: true }),
+    b: task({ id: "b", parentID: "root", assigneeID: "b", state: "replied", outcome: "succeeded" }),
+    c: task({ id: "c", parentID: "b", assigneeID: "c", state: "pending", outcome: "pending" }),
+  }
+  const terminal = (item: Subtask) => item.state === "replied"
+  assert.equal(hasPendingDescendant({ parentID: "root", subtasks: tasks, isTerminal: terminal }), true, "a pending grandchild keeps the root open")
+  assert.equal(hasPendingDescendant({ parentID: "b", subtasks: tasks, isTerminal: terminal }), true, "a pending child keeps the intermediate parent open")
+  tasks.c.state = "replied"
+  tasks.c.outcome = "succeeded"
+  assert.equal(hasPendingDescendant({ parentID: "root", subtasks: tasks, isTerminal: terminal }), false, "the whole subtree is terminal")
+})
+
+test("ticket251: a completion hop never keeps a subtree open", () => {
+  const tasks = {
+    root: task({ id: "root", assigneeID: "a", state: "working", outcome: "pending", awaitingChildren: true }),
+    b: task({ id: "b", parentID: "root", assigneeID: "b", state: "replied", outcome: "succeeded" }),
+    review: task({
+      id: "review",
+      parentID: "b",
+      assigneeID: "a",
+      state: "pending",
+      outcome: "pending",
+      handoff: { correlationID: "c", senderID: "b", recipientID: "a", depth: 1, completion: true },
+    }),
+  }
+  assert.equal(
+    hasPendingDescendant({ parentID: "root", subtasks: tasks, isTerminal: (item) => item.state === "replied" }),
+    false,
+    "completion deliveries are not work branches",
+  )
 })
 
 test("the digest is bounded by branch count and result length", () => {
