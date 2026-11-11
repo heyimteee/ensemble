@@ -4,12 +4,14 @@ if [[ "${ENSEMBLE_LIVE_TRACE_ERR:-0}" == "1" ]]; then
   trap 'printf "live: command failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 fi
 
-# Ticket #241: Vera regression and cutover verification.
+# Ticket #241/#251: Vera regression, cutover verification, and multi-ticket
+# token verification.
 #
 # One isolated fake host, three host starts, and a fresh-store upgrade shape:
 #
 #   seed    create the Vera roster in a real temp workspace, warm the group
-#           binding, and seed a pre-v6 AGENTS.md contract.
+#           binding, and seed a pre-v6 AGENTS.md contract. A second VeraFlows
+#           workspace runs the ticket #251 relay/fan-out/multi-ticket flows.
 #   unset   stop the host and remove the persisted nativeFirst key from the
 #           isolated plugin store, exactly as a pre-#240 store looked.
 #   run     restart, prove the effective mode is `on` and the default was
@@ -17,8 +19,13 @@ fi
 #           native turn that delegates one member and then `$Name`-mentions
 #           several, and prove `:native-first off` + `:tools legacy` rollback
 #           and on/native restore.
+#   flows   drive a five-hop relay, its terminal `ensemble_dispatch` into a
+#           five-way fan-out, the next ticket's synthesis, a batch-too-large
+#           refusal, and a worker `$Name` route. Every command root is
+#           leader-owned, so each ticket gets exactly one synthesis.
 #   restart restart again and prove durable native turns, the contact ledger,
-#           the exact roster table, and no completion bounce.
+#           the exact roster table, the ticket #251 roots and notices, and no
+#           completion bounce.
 #
 #   npm run test:live:vera
 #   ENSEMBLE_LIVE_KEEP=1 npm run test:live:vera
@@ -79,6 +86,7 @@ live_wait_for_model "ensemble-fake" "ensemble-fake-model"
 STATE_FILE="$LIVE_LOGS/vera-state.json"
 SEED_OUT="$LIVE_LOGS/vera-seed.json"
 RUN_OUT="$LIVE_LOGS/vera-run.json"
+FLOWS_OUT="$LIVE_LOGS/vera-flows.json"
 RESTART_OUT="$LIVE_LOGS/vera-restart.json"
 PRESTART_STORE="$LIVE_LOGS/vera-prestart-store.json"
 POSTSTART_STORE="$LIVE_LOGS/vera-poststart-store.json"
@@ -148,6 +156,14 @@ if [[ ! -s "$STATE_FILE" ]]; then
   live_fail "the Vera run phase did not record scenario state (status $RUN_STATUS)"
 fi
 
+# Ticket #251: the same isolated host, after the rollback/restore pass, runs
+# the multi-ticket flows on the native surface.
+FLOWS_STATUS=0
+run_driver flows --out "$FLOWS_OUT" || FLOWS_STATUS=$?
+if [[ ! -s "$FLOWS_OUT" ]]; then
+  live_fail "the Vera flows phase did not record its result (status $FLOWS_STATUS)"
+fi
+
 restart_host
 
 RESTART_STATUS=0
@@ -155,22 +171,25 @@ run_driver restart --out "$RESTART_OUT" || RESTART_STATUS=$?
 
 # Privacy gate: the driver outputs and isolated service logs never carry the
 # harness directories, credentials, prompt markers, or answer text.
-for private_value in "$LIVE_BASE" "$LIVE_PROJECT" "$LIVE_PROJECT/vera-workspace" "$LIVE_SERVER_PASSWORD"; do
-  if grep -qF -- "$private_value" "$SEED_OUT" "$RUN_OUT" "$RESTART_OUT" 2>/dev/null; then
+for private_value in "$LIVE_BASE" "$LIVE_PROJECT" "$LIVE_PROJECT/vera-workspace" "$LIVE_PROJECT/vera-flows" "$LIVE_SERVER_PASSWORD"; do
+  if grep -qF -- "$private_value" "$SEED_OUT" "$RUN_OUT" "$FLOWS_OUT" "$RESTART_OUT" 2>/dev/null; then
     live_fail "the Vera record carried a private path or credential"
   fi
 done
-for marker in "fake-vera-regression" "Vera regression complete" "vera-warmup-fixture" "vera-rollback-fixture"; do
-  if grep -qF -- "$marker" "$SEED_OUT" "$RUN_OUT" "$RESTART_OUT" 2>/dev/null; then
+for marker in "fake-vera-regression" "fake-vera-flows" "fake-vera-relay" "fake-vera-fanout" "fake-vera-route" "Vera regression complete" "vera-warmup-fixture" "vera-flows-warmup-fixture" "vera-rollback-fixture"; do
+  if grep -qF -- "$marker" "$SEED_OUT" "$RUN_OUT" "$FLOWS_OUT" "$RESTART_OUT" 2>/dev/null; then
     live_fail "the Vera record carried fixture prompt or answer text"
   fi
 done
-if grep -qF "/home/" "$SEED_OUT" "$RUN_OUT" "$RESTART_OUT" 2>/dev/null; then
+if grep -qF "/home/" "$SEED_OUT" "$RUN_OUT" "$FLOWS_OUT" "$RESTART_OUT" 2>/dev/null; then
   live_fail "the Vera record carried an absolute home path"
 fi
 if compgen -G "$LIVE_STATE/ensemble/logs/*" >/dev/null; then
   if grep -R -qF -- "fake-vera-regression" "$LIVE_STATE/ensemble/logs"; then
     live_fail "the service logs carried the Vera prompt marker"
+  fi
+  if grep -R -qE 'fake-vera-flows|fake-vera-relay|fake-vera-fanout|fake-vera-route' "$LIVE_STATE/ensemble/logs"; then
+    live_fail "the service logs carried a ticket #251 prompt marker"
   fi
   if grep -R -qE '/home/|/Users/' "$LIVE_STATE/ensemble/logs"; then
     live_fail "the service logs carried an absolute home path"
@@ -187,7 +206,7 @@ live_log "Vera evidence: already-routed suppressions=$SUPPRESS_COUNT completion 
 
 if [[ -n "${ENSEMBLE_LIVE_ARTIFACTS:-}" ]]; then
   mkdir -p "$ENSEMBLE_LIVE_ARTIFACTS"
-  cp "$SEED_OUT" "$RUN_OUT" "$RESTART_OUT" "$PRESTART_STORE" "$POSTSTART_STORE" "$ENSEMBLE_LIVE_ARTIFACTS/"
+  cp "$SEED_OUT" "$RUN_OUT" "$FLOWS_OUT" "$RESTART_OUT" "$PRESTART_STORE" "$POSTSTART_STORE" "$ENSEMBLE_LIVE_ARTIFACTS/"
   if compgen -G "$LIVE_STATE/ensemble/logs/*" >/dev/null; then
     mkdir -p "$ENSEMBLE_LIVE_ARTIFACTS/service-logs"
     cp -R "$LIVE_STATE/ensemble/logs/." "$ENSEMBLE_LIVE_ARTIFACTS/service-logs/"
@@ -195,8 +214,8 @@ if [[ -n "${ENSEMBLE_LIVE_ARTIFACTS:-}" ]]; then
   live_log "artifacts copied to $ENSEMBLE_LIVE_ARTIFACTS"
 fi
 
-if [[ "$SEED_STATUS" != "0" || "$RUN_STATUS" != "0" || "$RESTART_STATUS" != "0" ]]; then
-  live_fail "the Vera regression recorded failures (seed=$SEED_STATUS run=$RUN_STATUS restart=$RESTART_STATUS); see $SEED_OUT, $RUN_OUT, and $RESTART_OUT"
+if [[ "$SEED_STATUS" != "0" || "$RUN_STATUS" != "0" || "$FLOWS_STATUS" != "0" || "$RESTART_STATUS" != "0" ]]; then
+  live_fail "the Vera regression recorded failures (seed=$SEED_STATUS run=$RUN_STATUS flows=$FLOWS_STATUS restart=$RESTART_STATUS); see $SEED_OUT, $RUN_OUT, $FLOWS_OUT, and $RESTART_OUT"
 fi
 
-live_log "Vera regression passed: $SEED_OUT $RUN_OUT $RESTART_OUT"
+live_log "Vera regression passed: $SEED_OUT $RUN_OUT $FLOWS_OUT $RESTART_OUT"

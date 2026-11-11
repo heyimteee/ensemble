@@ -11,6 +11,23 @@ import type { ToolSurface } from "./tool-surface.ts"
 
 type Json = Record<string, any>
 
+/**
+ * Shared assignment fields for `ensemble_delegate` and one
+ * `ensemble_dispatch` batch item. The continuation fields stay on delegate;
+ * the dispatch item is the same assignment shape without them.
+ */
+const ASSIGNMENT_PROPERTIES = {
+  assignee: { type: "string" },
+  title: { type: "string" },
+  instruction: { type: "string" },
+  constraints: { type: "string" },
+  expected: { type: "string" },
+  mode: { type: "string", enum: ["research", "edit"] },
+  maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
+} as const
+
+const ASSIGNMENT_REQUIRED = ["assignee", "title", "instruction", "maxHops"] as const
+
 export type ToolResult = { content: string }
 
 export interface EnsembleToolHandlers {
@@ -22,6 +39,7 @@ export interface EnsembleToolHandlers {
   handoff(input: Json, context: any): Promise<ToolResult>
   delegate(input: Json, context: any): Promise<ToolResult>
   review(input: Json, context: any): Promise<ToolResult>
+  dispatch(input: Json, context: any): Promise<ToolResult>
   askPerson(input: Json, context: any): Promise<ToolResult>
   remember(input: Json, context: any): Promise<ToolResult>
   share(input: Json, context: any): Promise<ToolResult>
@@ -109,17 +127,11 @@ export function registerEnsembleTools(
       input: {
         type: "object",
         properties: {
-          assignee: { type: "string" },
-          title: { type: "string" },
-          instruction: { type: "string" },
-          constraints: { type: "string" },
-          expected: { type: "string" },
-          mode: { type: "string", enum: ["research", "edit"] },
-          maxHops: { type: "integer", minimum: 0, description: "Direct dispatches the recipient may make; 0 is a one-shot ask." },
+          ...ASSIGNMENT_PROPERTIES,
           continuationOf: { type: "string", description: "Workspace leader only: id of the exhausted dispatch group to continue." },
           groupMaxHops: { type: "integer", enum: [...DISPATCH_GROUP_TIERS], description: `Required with continuationOf: hops for the new group tier (${DISPATCH_GROUP_TIERS.join(", ")}), bounded by the command remaining.` },
         },
-        required: ["assignee", "title", "instruction", "maxHops"],
+        required: [...ASSIGNMENT_REQUIRED],
         additionalProperties: false,
       },
       execute: async (input, context) => handlers.delegate(input, context),
@@ -156,6 +168,33 @@ export function registerEnsembleTools(
     },
     execute: async (input, context) => handlers.review(input, context),
   })
+  if (surface === "native") {
+    editor.add({
+      name: "dispatch",
+      options: { namespace: "ensemble", codemode: false },
+      description: "Leader-only terminal continuation: start the next ticket as a new command root with a fresh budget and this assignment batch. Normal chat uses the routing operator; a retry returns the existing command.",
+      input: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          instruction: { type: "string" },
+          assignments: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { ...ASSIGNMENT_PROPERTIES },
+              required: [...ASSIGNMENT_REQUIRED],
+              additionalProperties: false,
+            },
+          },
+          continuationOf: { type: "string" },
+        },
+        required: ["title", "instruction", "assignments"],
+        additionalProperties: false,
+      },
+      execute: async (input, context) => handlers.dispatch(input, context),
+    })
+  }
   editor.add({
     name: "ask_person",
     options: { namespace: "ensemble", codemode: false },

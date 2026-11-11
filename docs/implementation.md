@@ -421,6 +421,35 @@ continuation automatically; naming an active continuation as
 new hop; completion, batch, synthesis, peer-turn, retry, restart, and recovery
 rows may still save directly.
 
+**Terminal continuation.** `ensemble_dispatch` is the explicit next-ticket path
+from a terminal turn (synthesis, completion review, or batch review); a normal
+worker or native turn is refused visibly. It is leader-only and creates a
+parentless command root assigned to the leader with `awaitingChildren: true`,
+then creates the assignment batch under it with the ordinary delegation
+admission path. The root itself spends no hop; each assignment spends one.
+
+Each ticket is a new command. The new root captures a fresh group, command,
+depth, and continuation budget, so the next ticket's own continuation cap
+applies inside it. `continuationOf` is provenance for the ticket sequence only:
+it does not link budgets or inherit the previous command's remaining hops. The
+anti-laundering boundary is one terminal turn starts at most one new command;
+each ticket is a new command with its own caps. The durable dispatch key is the
+terminal task id plus the assignment set, so a retry returns the existing root
+and assignments.
+
+The batch is preflighted before the root exists. A group, depth, or fan-out
+refusal creates nothing and is visible in the group. A batch above the new
+command's command ceiling is a batch-too-large refusal: reduce the batch or
+split it across commands; it is not a request for the user to start a new
+command, because a new command at the same setting has the same ceiling. If an
+assignment admission still fails after the root exists, every row this attempt
+created is cancelled before the refusal is returned; existing rows from an
+earlier retry are left alone. A host that already claimed an earlier assignment
+may still append its answer (residual race). When the batch completes, the root
+enters the same root-only synthesis path. Normal chat keeps the routing
+operator; terminal mentions are references. See
+[ADR 0012](adr/0012-terminal-turns-and-root-synthesis.md).
+
 **Ledger.** `SnapshotState.dispatchGroups` is a full durable map. Each
 `DispatchGroup` records identity, workspace, root, parent, continuation index,
 group maximum/used hops, depth maximum, root-only command maximum/used,
@@ -781,8 +810,10 @@ or trace-only data.
 
 The `dispatch` category records `dispatch.group.created`, `dispatch.group.continued`,
 `dispatch.group.exhausted`, `dispatch.group.closed`, `dispatch.group.reconciled`,
-`dispatch.group.refused`, `dispatch.hop.consumed`, `dispatch.hop.refused`, and
-`dispatch.settings.invalid`. Rows carry workspace, group, root, parent,
+`dispatch.group.refused`, `dispatch.hop.consumed`, `dispatch.hop.refused`,
+`dispatch.command.created`, `dispatch.command.deduped`,
+`dispatch.command.refused`, and `dispatch.settings.invalid`. Rows carry
+workspace, group, root, parent,
 continuation index, actor/recipient IDs, work kind, caps, used and remaining
 counts, depth, reason code, and duration. They never carry task titles,
 instructions, handoff paths, file content, or conversation text. Exhaustion and

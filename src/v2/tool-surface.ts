@@ -36,7 +36,7 @@ export function effectiveToolSurface(settings: Pick<Settings, "nativeFirst" | "t
 
 /** Exact registered names per surface, in stable registration order. */
 export const TOOL_SURFACE_TOOL_NAMES: Record<ToolSurface, readonly string[]> = {
-  native: ["task_status", "review", "ask_person", "remember", "share"],
+  native: ["task_status", "review", "dispatch", "ask_person", "remember", "share"],
   legacy: [
     "workspace_info",
     "list_workspaces",

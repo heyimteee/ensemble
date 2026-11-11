@@ -1,6 +1,13 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { effectiveToolSurface, isToolSurface } from "./tool-surface.ts"
+import { TOOL_SURFACE_TOOL_NAMES, effectiveToolSurface, isToolSurface } from "./tool-surface.ts"
+
+test("ticket250: the native surface has six tools and the legacy surface keeps eleven", () => {
+  assert.equal(TOOL_SURFACE_TOOL_NAMES.native.length, 6)
+  assert.equal(TOOL_SURFACE_TOOL_NAMES.legacy.length, 11)
+  assert.ok(TOOL_SURFACE_TOOL_NAMES.native.includes("dispatch"))
+  assert.ok(!TOOL_SURFACE_TOOL_NAMES.legacy.includes("dispatch"))
+})
 
 test("ticket240: the default native-first mode selects the native surface", () => {
   assert.equal(effectiveToolSurface(undefined), "native")

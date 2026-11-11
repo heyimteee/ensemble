@@ -1,3 +1,4 @@
+import { collectBranchResults, formatBranchDigest } from "./branch-digest.ts"
 import { dispatchBudgetContext, dispatchBudgetState, dispatchDepthFor } from "./dispatch-budget.ts"
 import { ensembleTurnContext } from "./turn-context.ts"
 import type { Agent, Memory, SnapshotState, Subtask, Workspace } from "./types.ts"
@@ -97,7 +98,9 @@ export function memoryContext(memories: Memory[]): string {
 
 export function promptForTask(task: Subtask, senderName?: string): string {
   if (task.stage === "synthesis") {
-    return `Synthesize the completed subtasks into one clear answer for the user.\n\nOriginal request: ${task.instruction}`
+    // Ticket #249: the root synthesis is terminal, so it answers the original
+    // request in one group message instead of retelling the branch history.
+    return `Synthesize the completed branches into one concise group summary for the user. Answer the original request, name the workers who contributed, and note anything still open; do not retell each hop. Mentions are references here: $Name names a worker and starts no new work.\n\nOriginal request: ${task.instruction}`
   }
   const body = [task.instruction, task.constraints ? `Constraints: ${task.constraints}` : "", task.expected ? `Expected: ${task.expected}` : ""].filter(Boolean).join("\n\n")
   const triageSkills = task.skillGrants ?? []
@@ -118,6 +121,16 @@ export function promptForTask(task: Subtask, senderName?: string): string {
   return `${body}${triage}`
 }
 
+/**
+ * Ticket #251: the prompt text actually sent. A reused native session may keep
+ * its first instruction snapshot, so a synthesis turn also carries the bounded
+ * context in the prompt as a fallback. This is the one place the append is
+ * assembled; the prompt benchmark measures the same string.
+ */
+export function promptTextForTask(task: Subtask, prompt: string, context: string): string {
+  return task.stage === "synthesis" ? `${prompt}\n\n${context}` : prompt
+}
+
 /** The bounded recent group transcript injected into a delegated prompt. */
 export function recentGroupMessages(state: SnapshotState, workspace: Workspace, limit = 20): string {
   return (state.messages[workspace.id] ?? [])
@@ -128,10 +141,23 @@ export function recentGroupMessages(state: SnapshotState, workspace: Workspace, 
 
 export function contextForTask(state: SnapshotState, task: Subtask, workspace: Workspace, agent: Agent): string {
   const memories = visibleMemories(state, agent.id, workspace.id)
-  const recent = recentGroupMessages(state, workspace)
-  const children = Object.values(state.subtasks).filter((item) => item.parentID === task.id)
-  const childResults = task.stage === "synthesis"
-    ? children.map((child) => `- ${state.agents[child.assigneeID ?? ""]?.name ?? "Agent"}: ${state.messages[workspace.id]?.find((message) => message.id === child.resultMessageID)?.text ?? child.error ?? "(no reply)"}`).join("\n")
+  const synthesis = task.stage === "synthesis"
+  // Ticket #249: a synthesis turn is terminal and summarizes the whole command.
+  // It gets the original request plus the bounded branch digest, never the
+  // last-20 transcript that grows with every hop. Worker turns keep it.
+  const recent = synthesis ? "" : recentGroupMessages(state, workspace)
+  // Ticket #246: only the command root synthesizes, so its context carries a
+  // bounded digest of terminal leaves (worker path + final result), never an
+  // intermediate parent's own reply.
+  const branchResults = synthesis
+    ? formatBranchDigest(
+        collectBranchResults({
+          rootID: task.id,
+          subtasks: state.subtasks,
+          messages: state.messages[workspace.id] ?? [],
+        }),
+        state.agents,
+      )
     : ""
   const dispatchGroup = task.dispatchGroupID ? state.dispatchGroups[task.dispatchGroupID] : undefined
   const dispatchBudget = dispatchGroup
@@ -152,7 +178,9 @@ export function contextForTask(state: SnapshotState, task: Subtask, workspace: W
       conversation: { kind: "workspace", workspaceID: workspace.id },
       workspace,
       agents: state.agents,
-      routing: true,
+      // Ticket #248 makes a synthesis turn terminal; its mentions are
+      // references, so the turn block says so instead of advertising routes.
+      routing: !synthesis,
     }),
     memoryContext(memories),
     dispatchBudget,
@@ -164,9 +192,12 @@ export function contextForTask(state: SnapshotState, task: Subtask, workspace: W
       : "",
     // Ticket #225 removed the read-only roster tools, not the group context.
     // Keep the bounded last-20 transcript alongside the compact roster so a
-    // delegated worker still knows what the chat just said.
-    `<ensemble_recent_messages>\n${recent || "(none)"}\n</ensemble_recent_messages>`,
-    `<ensemble_subtask title="${task.title}">\n${task.instruction}\n</ensemble_subtask>`,
-    childResults ? `<ensemble_child_results>\n${childResults}\n</ensemble_child_results>` : "",
+    // delegated worker still knows what the chat just said. Ticket #249 gives
+    // synthesis the root request instead; it never needs the hop history.
+    synthesis
+      ? `<ensemble_root_request>\n${task.instruction}\n</ensemble_root_request>`
+      : `<ensemble_recent_messages>\n${recent || "(none)"}\n</ensemble_recent_messages>`,
+    synthesis ? "" : `<ensemble_subtask title="${task.title}">\n${task.instruction}\n</ensemble_subtask>`,
+    branchResults ? `<ensemble_branch_results>\n${branchResults}\n</ensemble_branch_results>` : "",
   ].filter(Boolean).join("\n\n")
 }

@@ -239,6 +239,12 @@ copy_artifacts() {
 
 start_fixture_host
 
+# Ticket #251 review: this probe's one-task/barrier assertions predate
+# native-first default-on. Native-first mints a synthetic native turn for the
+# subagent completion, so pin the explicit legacy path here; native ingestion
+# has its own suites.
+live_invoke settings.update '{"nativeFirst":"off"}' >/dev/null
+
 live_invoke agent.create "{\"name\":\"$PARENT_AGENT\",\"title\":\"Subagent probe\",\"role\":\"Native subagent fixture.\",\"mainModel\":{\"providerID\":\"ensemble-fake\",\"modelID\":\"ensemble-fake-model\"}}" >/dev/null
 live_wait_for "$LIVE_STEP_TIMEOUT" "$PARENT_AGENT in the snapshot" live_snapshot_has_agent_named "$PARENT_AGENT" \
   || live_fail "subagent probe agent was not created"

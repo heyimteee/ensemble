@@ -51,6 +51,18 @@ const FAKE_MENTION_FINAL_MARKER = "AGENT_FINAL_MENTION_MARKER"
 // recipient plus several other roster members. The recipient names come from
 // the driver so the same provider works for any isolated fixture roster.
 const FAKE_VERA_REGRESSION_RE = /fake-vera-regression:delegate=([A-Za-z][A-Za-z0-9_-]*);mentions=([A-Za-z][A-Za-z0-9_,-]*)/
+// Ticket #251: deterministic relay, fan-out, terminal-turn, multi-ticket, and
+// worker-route fixtures. The marker rides in the user request or in the next
+// command's instruction; names come from the driver, so the provider never
+// hard-codes the isolated roster. Counts and roles only are logged.
+const FAKE_VERA_FLOWS_RE = /fake-vera-flows:ticket=([a-z0-9-]+);mode=(relay|fanout|refuse|route);dispatch=(start|two|refused|none);workers=([A-Za-z,]*);mentions=([A-Za-z,]*)/
+// Ticket #251 review: a normal worker turn cannot call `ensemble_dispatch`.
+// The seed turn returns a flow marker as its final text; the completion review
+// that follows is a terminal turn and can dispatch the next ticket.
+const FAKE_VERA_SEED_RE = /fake-vera-seed:target=(fake-vera-flows:ticket=[a-z0-9-]+;mode=(?:relay|fanout|refuse|route);dispatch=(?:start|two|refused|none);workers=[A-Za-z,]*;mentions=[A-Za-z,]*)/
+const FAKE_VERA_RELAY_RE = /fake-vera-relay:chain=([A-Za-z,]+);at=(\d+)/
+const FAKE_VERA_FANOUT_RE = /fake-vera-fanout:ticket=([a-z0-9-]+);worker=([A-Za-z][A-Za-z0-9_-]*)/
+const FAKE_VERA_ROUTE_RE = /fake-vera-route:peer=([A-Za-z][A-Za-z0-9_-]*)/
 // Ticket #227 keeps the retry state visible long enough to assert `retrying`.
 // #210's probe leaves the default zero-delay behavior unchanged.
 const RETRY_AFTER_MS = Math.max(0, Number(process.env.ENSEMBLE_FAKE_RETRY_DELAY_MS ?? "0"))
@@ -421,6 +433,59 @@ function veraRegressionFinalText(mentions) {
   return `Vera regression complete. ${names.map((name) => `$${name}`).join(" ")} please confirm your part.\n`
 }
 
+function flowNames(value) {
+  return String(value ?? "").split(",").map((name) => name.trim()).filter(Boolean)
+}
+
+/** One deterministic leader summary; mentions are references in a terminal turn. */
+function veraFlowSummary(ticket, mentions) {
+  const names = flowNames(mentions)
+  const who = names.length > 0 ? `${names.map((name) => `$${name}`).join(" ")} finished` : "the team finished"
+  return `Ticket ${ticket} complete. ${who} the requested work; no blockers were reported. The command stayed within its dispatch budget, the terminal turn created no extra peer work, and the next review can continue from this summary.\n`
+}
+
+/** The kickoff starts one worker (or a fan-out) under the new command root. */
+function veraKickoffBatch(ticket, mode, workers, mentions) {
+  if (mode === "fanout") return veraDispatchBatch("fanout", workers)
+  const [assignee = "Phoenix", ...chain] = workers
+  if (mode === "route") {
+    return [{
+      assignee,
+      title: `Ticket ${ticket} worker`,
+      instruction: `fake-vera-route:peer=${mentions[0] ?? "Clark"}`,
+      maxHops: 0,
+    }]
+  }
+  return [{
+    assignee,
+    title: `Ticket ${ticket} worker`,
+    instruction: `fake-vera-relay:chain=${chain.join(",")};at=0`,
+    maxHops: chain.length > 0 ? 1 : 0,
+  }]
+}
+
+/** The terminal turn's dispatch batch: a fan-out or a command-cap refusal. */
+function veraDispatchBatch(mode, workers) {
+  if (mode === "fanout") {
+    return workers.map((name) => ({
+      assignee: name,
+      title: `Ticket two ${name}`,
+      instruction: `fake-vera-fanout:ticket=two;worker=${name}`,
+      maxHops: 0,
+    }))
+  }
+  const assignees = workers.length > 0 ? workers : ["Phoenix", "Kakiko"]
+  return Array.from({ length: 9 }, (_, index) => {
+    const name = assignees[index % assignees.length]
+    return {
+      assignee: name,
+      title: `Ticket three batch ${index + 1}`,
+      instruction: `fake-vera-fanout:ticket=three;worker=${name}`,
+      maxHops: 0,
+    }
+  })
+}
+
 function latestDispatchGroup(prompt) {
   let last
   for (const match of prompt.matchAll(/group="(dispatch_[^"]+)"/g)) last = match[1]
@@ -587,6 +652,25 @@ const server = createServer(async (request, response) => {
     const leaseHold = latestUserText.includes(FAKE_LEASE_PROMPT)
     const answered = /User answer:/i.test(latestUserText)
     const toolResult = lastUser >= 0 && messages.slice(lastUser + 1).some((message) => message?.role === "tool")
+    // Ticket #251 flow markers. The synthesis prompt repeats the root request
+    // after the fixed "Synthesize the completed branches" sentence, so the
+    // role is derivable from the latest user message without content logging.
+    const flowMarker = latestUserText.match(FAKE_VERA_FLOWS_RE)
+    const seedMarker = latestUserText.match(FAKE_VERA_SEED_RE)
+    const relayMarker = latestUserText.match(FAKE_VERA_RELAY_RE)
+    const fanoutMarker = latestUserText.match(FAKE_VERA_FANOUT_RE)
+    const routeMarker = latestUserText.match(FAKE_VERA_ROUTE_RE)
+    // The latest user message is the current turn: the kickoff is the raw
+    // marker, the synthesis is the instruction plus its bounded context. Older
+    // synthesis prompts remain in session history, so never scan the whole
+    // prompt for the role.
+    const flowRole = flowMarker && /Synthesize the completed branches/.test(latestUserText) ? "synthesis" : "kickoff"
+    const hasRootRequest = JSON.stringify(body).includes("<ensemble_root_request")
+    const hasBranchResults = JSON.stringify(body).includes("<ensemble_branch_results")
+    const hasRecentMessages = JSON.stringify(body).includes("<ensemble_recent_messages")
+    const rootRequestBlock = latestUserText.match(/<ensemble_root_request>[\s\S]*?<\/ensemble_root_request>/)
+    const branchResultsBlock = latestUserText.match(/<ensemble_branch_results>[\s\S]*?<\/ensemble_branch_results>/)
+    const synthesisContextChars = (rootRequestBlock?.[0].length ?? 0) + (branchResultsBlock?.[0].length ?? 0)
     // Ticket #225 benchmark metrics: shapes, sizes, and counts only. Never log
     // message content, file bytes, or paths.
     const toolSchemas = Array.isArray(body?.tools) ? body.tools : body?.tools ? Object.values(body.tools) : []
@@ -687,6 +771,26 @@ const server = createServer(async (request, response) => {
       estimatedPromptTokens: Math.ceil((messagesChars + toolSchemaChars) / 4),
       promptTail: prompt.slice(-120),
     })
+    if (body?.stream !== false && (flowMarker || relayMarker || fanoutMarker || routeMarker)) {
+      log("vera_flow", {
+        request: requestID,
+        ticket: flowMarker?.[1] ?? (relayMarker ? "relay" : fanoutMarker?.[1] ?? "route"),
+        mode: flowMarker?.[2] ?? (relayMarker ? "relay" : fanoutMarker ? "fanout" : "route"),
+        role: flowMarker ? flowRole : relayMarker ? "relay" : fanoutMarker ? "fanout" : "route",
+        hasToolResult: toolResult,
+        hasRootRequest,
+        hasBranchResults,
+        hasRecentMessages,
+        latestUserChars: latestUserText.length,
+        synthesisContextChars,
+        promptChars: prompt.length,
+        messagesChars,
+        estimatedPromptTokens: Math.ceil((messagesChars + toolSchemaChars) / 4),
+        toolCount: toolSchemas.length,
+        ensembleToolCount: ensembleSchemas.length,
+        ensembleToolSchemaChars,
+      })
+    }
     // Ticket #210: one retryable 429 per fixture text, counted only for
     // streaming model requests. The host schedules a retry and then succeeds.
     if (body?.stream !== false && retryFixture) {
@@ -714,6 +818,111 @@ const server = createServer(async (request, response) => {
       return
     }
     try {
+      if (body?.stream !== false && seedMarker && !toolResult) {
+        // A worker turn cannot dispatch. Emit the next ticket's marker as the
+        // final answer; the completion review is the terminal dispatch turn.
+        await streamCompletion(response, `${seedMarker[1]}\n`, requestID)
+        return
+      }
+      if (body?.stream !== false && flowMarker) {
+        const ticket = flowMarker[1]
+        const mode = flowMarker[2]
+        const dispatch = flowMarker[3]
+        const workers = flowNames(flowMarker[4])
+        const mentions = flowNames(flowMarker[5])
+        if (flowRole === "synthesis") {
+          if (toolResult) {
+            await streamCompletion(response, veraFlowSummary(ticket, mentions), requestID)
+            return
+          }
+          if (dispatch === "two") {
+            // The relay's first worker is the hop starter; the remaining five
+            // workers are the fan-out branches and the terminal references.
+            const fanoutWorkers = mode === "relay" ? workers.slice(1) : workers
+            const fanoutMentions = mode === "relay" ? fanoutWorkers : mentions
+            await streamToolCall(
+              response,
+              requestID,
+              "ensemble_dispatch",
+              {
+                title: "Ticket two",
+                instruction: `fake-vera-flows:ticket=two;mode=fanout;dispatch=none;workers=${fanoutWorkers.join(",")};mentions=${fanoutMentions.join(",")}`,
+                assignments: veraDispatchBatch("fanout", fanoutWorkers),
+              },
+              "vera_flow_tool_call",
+              { ticket, tool: "dispatch", assignments: fanoutWorkers.length },
+            )
+            return
+          }
+          if (dispatch === "refused") {
+            await streamToolCall(
+              response,
+              requestID,
+              "ensemble_dispatch",
+              {
+                title: "Ticket three",
+                instruction: `fake-vera-flows:ticket=three;mode=refuse;dispatch=none;workers=${workers.join(",")};mentions=${mentions.join(",")}`,
+                assignments: veraDispatchBatch("refuse", workers),
+              },
+              "vera_flow_tool_call",
+              { ticket, tool: "dispatch", assignments: 9 },
+            )
+            return
+          }
+          await streamCompletion(response, veraFlowSummary(ticket, mentions), requestID)
+          return
+        }
+        if (dispatch === "start" && !toolResult) {
+          const nextDispatch = mode === "relay" ? "two" : mode === "refuse" ? "refused" : "none"
+          const assignments = veraKickoffBatch(ticket, mode, workers, mentions)
+          await streamToolCall(
+            response,
+            requestID,
+            "ensemble_dispatch",
+            {
+              title: `Ticket ${ticket}`,
+              instruction: `fake-vera-flows:ticket=${ticket};mode=${mode};dispatch=${nextDispatch};workers=${workers.join(",")};mentions=${mentions.join(",")}`,
+              assignments,
+            },
+            "vera_flow_tool_call",
+            { ticket, tool: "dispatch", assignments: assignments.length },
+          )
+          return
+        }
+        if (toolResult) {
+          await streamCompletion(response, `Started ticket ${ticket}.\n`, requestID)
+          return
+        }
+      }
+      if (body?.stream !== false && relayMarker) {
+        // The native surface has no `ensemble_handoff`: a worker relays by
+        // naming the next sibling in its final text. The marker rides in the
+        // same text so the next peer turn is deterministic.
+        const chain = flowNames(relayMarker[1])
+        const at = Number(relayMarker[2])
+        if (at < chain.length) {
+          const next = chain[at]
+          const nextMarker = `fake-vera-relay:chain=${chain.join(",")};at=${at + 1}`
+          // Keep the marker out of the first 80 characters: the service logs a
+          // peer-turn title (the first 80 chars) but never its instruction.
+          await streamCompletion(
+            response,
+            `$${next} please take the next relay hop and keep the branch moving without waking the leader. Marker: ${nextMarker}\n`,
+            requestID,
+          )
+          return
+        }
+        await streamCompletion(response, "Relay leaf complete.\n", requestID)
+        return
+      }
+      if (body?.stream !== false && fanoutMarker) {
+        await streamCompletion(response, `Ticket ${fanoutMarker[1]} ${fanoutMarker[2]} complete.\n`, requestID)
+        return
+      }
+      if (body?.stream !== false && routeMarker) {
+        await streamCompletion(response, `$${routeMarker[1]} please take the follow-up.\n`, requestID)
+        return
+      }
       if (body?.stream !== false && veraRegression && !veraToolResult) {
         // Ticket #241: the explicit migration delegation is a real tool call
         // from the leader's native turn. maxHops: 0 keeps it a one-shot ask.

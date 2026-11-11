@@ -177,6 +177,8 @@ test("ticket160: only agent-created non-completion delegation and handoff hops c
   assert.equal(dispatchesHop(task({ workKind: "turn" })), false, "peer turns never consume")
   assert.equal(dispatchesHop(task({ workKind: "handoff", handoff: { correlationID: "c", senderID: "a", recipientID: "b", depth: 1, completion: true } })), false)
   assert.equal(dispatchesHop(task({ workKind: "handoff", handoff: { correlationID: "c", senderID: "a", recipientID: "b", depth: 1, batch: true } })), false)
+  assert.equal(dispatchesHop(task({ queueKey: "ensemble-dispatch:w:review:hash:root" })), false, "a command root container never consumes")
+  assert.equal(dispatchesHop(task({ queueKey: "ensemble-dispatch:w:review:hash:assign:0" })), true, "an assignment spends its own hop")
   assert.equal(dispatchHopCount([task(), task({ id: "2", workKind: "turn" }), task({ id: "3" })]), 2)
 })
 

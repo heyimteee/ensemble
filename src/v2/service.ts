@@ -8,7 +8,7 @@ import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, reconci
 import { ENSEMBLE_BLOCK_VERSION, agentIdentity, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
-import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
+import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, promptTextForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
 import { isSubstantiveReply, planLateSuccessRepair, settlementText, shouldInterruptSettledReply } from "./stream-settlement.ts"
 import { normalizeAgentMentions, parseMentions, unknownMentions, visibleRecipients } from "./routing.ts"
 import { planMentionRouting, type MentionConversation, type MentionLedgerSnapshot, type MentionRefusal, type MentionRosterEntry } from "./mention-routing.ts"
@@ -40,8 +40,11 @@ import {
   type DispatchRefusal,
 } from "./dispatch-budget.ts"
 import { inheritDispatchGroupID, newDispatchGroupID, resolveDispatchGroupID } from "./dispatch-group.ts"
+import { dispatchCommandKey, dispatchCommandRefusalText, dispatchCommandStartedForTurn, pendingDispatchCommandRoot, preflightDispatchCommand, type DispatchAssignmentInput } from "./dispatch-command.ts"
 import { resolveActiveTurnAnchor, type ActiveTurnAnchor } from "./turn-anchor.ts"
 import { completionDecision } from "./completion-decision.ts"
+import { resolveCommandRoot } from "./command-root.ts"
+import { hasPendingDescendant, pendingDescendantResolver } from "./branch-digest.ts"
 import { archivedMentionRefs, bareMentionToken, outsideMentionRefs, peerRefusalText } from "./peer-turn.ts"
 import { COMPLETION_CHAIN_MAX, COMPLETION_QUIET_WINDOW_MS, HANDOFF_MAX_PER_RUN, batchAllDecided, batchReviewText, batchReviewTitle, checkCompletionRoute, completionClosedText, completionReviewInstruction, completionWorkKey, groupCompletionCandidates, handoffDuplicateText, handoffFailureText, handoffGroupAckText, handoffWorkKey, newCorrelationID, parseHandoffFile, parseReviewDecisions, resolveHandoffRecipient, type ReviewDecision } from "./handoff.ts"
 import { mapNativeChat, mergeDmTranscript } from "./dm.ts"
@@ -4633,6 +4636,10 @@ export class EnsembleV2Service {
     options: { maxPerRun?: number; perRunKind?: WorkKind } = {},
   ): Promise<{ admitted: boolean; consumed: boolean; deduped?: boolean; refusal?: DispatchRefusal; group?: DispatchGroup; task?: Subtask }> {
     await this.ensureDispatchGroupLedger(task.dispatchGroupID, task.workspaceID)
+    // Ticket #250: a new command root is a container, not a dispatch hop. Its
+    // durable dispatch root key is the one root identity, so it is saved
+    // through the same queue-key/idempotency path without spending group or
+    // command budget; its assignments spend.
     if (!dispatchesHop(task)) {
       await this.store.saveSubtask(task)
       return { admitted: true, consumed: false }
@@ -4793,6 +4800,14 @@ export class EnsembleV2Service {
     taskMaxHops?: number
     maxPerRun?: number
     perRunKind?: WorkKind
+    /**
+     * Ticket #250: explicit durable idempotency key. The continuation
+     * dispatch scopes the next command to its terminal turn and assignment
+     * set; every other caller keeps the derived `workKey`.
+     */
+    queueKey?: string
+    /** Ticket #250: a command root waits for its batch and is never claimed. */
+    awaitingChildren?: boolean
   }): Promise<{ subtask: Subtask; deduped: boolean; admitted: boolean; refusal?: DispatchRefusal }> {
     const kind: WorkKind = parseWorkKind(input.kind ?? "delegation") ?? (() => { throw invalidInput(`Unknown work kind: ${String(input.kind)}.`) })()
     // Central propagation: explicit group (a user command fan-out or an
@@ -4813,7 +4828,7 @@ export class EnsembleV2Service {
     // none, so they cannot be mistaken for a granted local bound. Legacy live
     // rows are filled once by reconciliation instead.
     const taskMaxHops = input.taskMaxHops
-    const key = workKey({
+    const key = input.queueKey ?? workKey({
       actor: input.creatorAgentID ?? input.creatorType,
       workspaceID: input.workspace.id,
       kind,
@@ -4850,7 +4865,7 @@ export class EnsembleV2Service {
       stage: input.stage ?? "initial",
       outcome: "pending",
       interrupted: false,
-      awaitingChildren: false,
+      awaitingChildren: input.awaitingChildren === true,
       attempts: 0,
       createdAt: at,
       workKind: kind,
@@ -5736,6 +5751,7 @@ export class EnsembleV2Service {
       handoff: (input, context) => this.toolHandoff(input, context),
       delegate: (input, context) => this.toolDelegate(input, context),
       review: (input, context) => this.toolReview(input, context),
+      dispatch: (input, context) => this.toolDispatch(input, context),
       askPerson: (input, context) => this.toolAsk(input, context),
       remember: (input, context) => this.toolRemember(input, context),
       share: (input, context) => this.toolShare(input, context),
@@ -6256,13 +6272,19 @@ export class EnsembleV2Service {
     // Ticket #237: the parent turn's synthesis is the delivery when the leader
     // was the parent, the asker, or the sender. Queueing the completion hop
     // would only run a second leader turn to answer the same result.
+    // Ticket #247: the command root or any leader-owned ancestor owns the
+    // synthesis for a chain, so a leaf under that root must not wake the leader
+    // again either.
     const parent = finished.parentID ? state.subtasks[finished.parentID] : undefined
-    const decision = completionDecision({ task: finished, parent, leaderID: leader.id })
+    const commandRoot = resolveCommandRoot(finished.id, state.subtasks)
+    const decision = completionDecision({ task: finished, parent, commandRoot, leaderID: leader.id })
     if (decision.decision === "skip") {
       this.logger?.event("info", "dispatch", "completion.skipped", {
         workspaceID: workspace.id,
         taskID: decision.taskID,
         parentID: decision.parentID,
+        rootID: decision.rootID,
+        ancestorID: decision.ancestorID,
         leaderID: decision.leaderID,
         reason: decision.reason,
       })
@@ -6695,7 +6717,7 @@ export class EnsembleV2Service {
         kind: "system",
         taskID: batch.id,
       })
-      if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+      if (batch.parentID) await this.maybeSynthesize(batch.parentID, batch.id)
       return "Batch closed: every item decided."
     }
     let candidateID = workspace.leaderID
@@ -6721,7 +6743,7 @@ export class EnsembleV2Service {
         kind: "system",
         taskID: batch.id,
       })
-      if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+      if (batch.parentID) await this.maybeSynthesize(batch.parentID, batch.id)
       return "Batch closed: the onward chain reached its depth cap, so the batch ends here."
     }
     const target = this.store.agent(route.to)
@@ -6784,8 +6806,343 @@ export class EnsembleV2Service {
       })
       this.schedule()
     }
-    if (batch.parentID) await this.maybeSynthesize(batch.parentID)
+    if (batch.parentID) await this.maybeSynthesize(batch.parentID, batch.id)
     return `Batch handed to $${target?.name ?? route.to}: every item decided.`
+  }
+
+  /**
+   * Ticket #250: the explicit terminal continuation. A synthesis or review
+   * turn can start the next ticket as a new command root with a fresh command
+   * group and budget. The root is a leader-owned container that spends no hop
+   * and waits for its assignment batch; the assignments use the ordinary
+   * delegation admission path. Normal chat keeps the routing operator.
+   */
+  private async toolDispatch(input: Json, context: any): Promise<{ content: string }> {
+    await this.store.refreshBindings()
+    const state = this.store.read()
+    const found = this.requireToolSession(state, context.sessionID)
+    if (!found) return { content: "This session is not bound to an Ensemble workspace." }
+    const { workspace, agent } = found
+    if (workspace.paused) {
+      await this.appendMessage(workspace, { author: "system", text: `Dispatch refused: workspace ${workspace.name} is paused.`, kind: "system" })
+      return { content: "This workspace is paused." }
+    }
+    if (workspace.leaderID !== agent.id) {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: `Dispatch refused: only the workspace leader (${this.agentName(workspace.leaderID)}) can start a new command.`,
+        kind: "system",
+      })
+      return { content: "Only the workspace leader can start a new command with ensemble_dispatch." }
+    }
+    const anchor = this.activeTurnAnchor(context.sessionID, workspace, agent)
+    if (!anchor?.task) {
+      await this.appendMessage(workspace, {
+        author: "system",
+        text: "Dispatch refused: no active leader turn. Call ensemble_dispatch from the turn that must continue.",
+        kind: "system",
+      })
+      return { content: "ensemble_dispatch requires an active leader turn." }
+    }
+    const origin = anchor.task
+    // Ticket #251 review: a continuation starts only from a terminal turn.
+    // A normal worker or native turn must route with the mention grammar, so
+    // the explicit next-command tool cannot bypass the terminal boundary.
+    if (!isTerminalTurn(origin)) {
+      return this.refuseDispatchCommand(
+        workspace,
+        "ensemble_dispatch is only available from a terminal turn (synthesis, completion review, or batch review).",
+        origin.id,
+        0,
+        undefined,
+        "not-terminal",
+      )
+    }
+    const title = typeof input.title === "string" ? input.title.trim() : ""
+    const instruction = typeof input.instruction === "string" ? input.instruction.trim() : ""
+    if (!title || !instruction) {
+      return this.refuseDispatchCommand(workspace, "a command title and instruction are required.", origin.id, 0)
+    }
+    const rawAssignments = Array.isArray(input.assignments) ? input.assignments : []
+    if (rawAssignments.length === 0) {
+      return this.refuseDispatchCommand(workspace, "at least one assignment is required.", origin.id, 0)
+    }
+    // The optional continuation reference is provenance for the ticket
+    // sequence. The next command still gets its own fresh group and budget.
+    const continuationRef = typeof input.continuationOf === "string" ? input.continuationOf.trim() : ""
+    let continuationGroup: DispatchGroup | undefined
+    if (continuationRef) {
+      const namedGroup = state.dispatchGroups[continuationRef]
+      const namedTask = state.subtasks[continuationRef]
+      const resolved = namedGroup ?? (namedTask?.dispatchGroupID ? state.dispatchGroups[namedTask.dispatchGroupID] : undefined)
+      if (!resolved || resolved.workspaceID !== workspace.id) {
+        return this.refuseDispatchCommand(workspace, "continuationOf is not a command in this workspace.", origin.id, rawAssignments.length)
+      }
+      continuationGroup = resolved
+    }
+    const assignments: DispatchAssignmentInput[] = []
+    for (const raw of rawAssignments) {
+      if (!raw || typeof raw !== "object") {
+        return this.refuseDispatchCommand(workspace, "every assignment needs an assignee, title, and instruction.", origin.id, rawAssignments.length)
+      }
+      const assignee = typeof raw.assignee === "string" ? raw.assignee.trim() : ""
+      const assignmentTitle = typeof raw.title === "string" ? raw.title.trim() : ""
+      const assignmentInstruction = typeof raw.instruction === "string" ? raw.instruction.trim() : ""
+      if (!assignee || !assignmentTitle || !assignmentInstruction) {
+        return this.refuseDispatchCommand(workspace, "every assignment needs an assignee, title, and instruction.", origin.id, rawAssignments.length)
+      }
+      const budget = validateTaskMaxHops("ensemble_dispatch", raw.maxHops)
+      if (!budget.ok) return this.refuseDispatchCommand(workspace, budget.reason, origin.id, rawAssignments.length)
+      const target = Object.values(state.agents).find(
+        (item) => item.name.toLowerCase() === assignee.toLowerCase() || item.id === assignee,
+      )
+      if (!target || target.archived) {
+        return this.refuseDispatchCommand(workspace, `${assignee} is not available.`, origin.id, rawAssignments.length)
+      }
+      if (!workspace.memberIDs.includes(target.id)) {
+        return this.refuseDispatchCommand(workspace, `${target.name} is not a workspace member.`, origin.id, rawAssignments.length)
+      }
+      assignments.push({
+        assignee: target.id,
+        title: assignmentTitle,
+        instruction: assignmentInstruction,
+        ...(typeof raw.constraints === "string" && raw.constraints.trim() ? { constraints: raw.constraints } : {}),
+        ...(typeof raw.expected === "string" && raw.expected.trim() ? { expected: raw.expected } : {}),
+        mode: raw.mode === "edit" ? "edit" : "research",
+        maxHops: budget.maxHops,
+      })
+    }
+    const key = dispatchCommandKey({
+      workspaceID: workspace.id,
+      originTaskID: origin.id,
+      title,
+      instruction,
+      assignments,
+    })
+    const existingRoot = this.findWorkByKey(workspace.id, key.rootKey)
+    if (existingRoot) {
+      const existingAssignments = key.assignmentKeys
+        .map((assignmentKey) => this.findWorkByKey(workspace.id, assignmentKey))
+        .filter((task): task is Subtask => Boolean(task))
+      if (existingAssignments.length === assignments.length) {
+        this.logger?.event("info", "dispatch", "dispatch.command.deduped", {
+          workspaceID: workspace.id,
+          originTaskID: origin.id,
+          rootTaskID: existingRoot.id,
+          dispatchGroupID: existingRoot.dispatchGroupID,
+          assignmentCount: assignments.length,
+        })
+        return {
+          content: `Already started command "${title}" with ${assignments.length} assignment${assignments.length === 1 ? "" : "s"}; returning the existing root ${existingRoot.id}.`,
+        }
+      }
+      return this.createDispatchAssignments({
+        workspace,
+        agent,
+        origin,
+        key,
+        root: existingRoot,
+        assignments,
+      })
+    }
+    // Continuation cap: one terminal turn starts at most one new command.
+    // A corrected batch after a refusal has no root, so it is still allowed.
+    // The durable dispatch-key lookup is the one source; no prefix rescan here.
+    if (dispatchCommandStartedForTurn(state.subtasks, workspace.id, origin.id)) {
+      return this.refuseDispatchCommand(
+        workspace,
+        "this terminal turn already started a command; start the next command from the next review.",
+        origin.id,
+        assignments.length,
+      )
+    }
+    // Preflight the whole batch before any row exists. The command ceiling is
+    // the outer bound; group, depth, and fan-out follow. A refusal creates no
+    // work and is visible in the group chat.
+    const prospectiveGroup = newRootDispatchGroup({
+      id: newDispatchGroupID(),
+      workspaceID: workspace.id,
+      settings: state.settings,
+    })
+    const refusal = preflightDispatchCommand({
+      assignmentCount: assignments.length,
+      group: prospectiveGroup,
+      maxDelegations: state.settings.maxDelegations,
+      nextDepth: 1,
+    })
+    if (refusal) {
+      return this.refuseDispatchCommand(workspace, dispatchCommandRefusalText(refusal), origin.id, assignments.length, refusal)
+    }
+    const dispatchGroupID = prospectiveGroup.id
+    await this.ensureDispatchGroupLedger(dispatchGroupID, workspace.id)
+    const createdRoot = await this.createWorkItem({
+      workspace,
+      assigneeID: workspace.leaderID,
+      creatorType: "agent",
+      creatorAgentID: agent.id,
+      title,
+      instruction,
+      mode: "research",
+      stage: "initial",
+      kind: "delegation",
+      dispatchGroupID,
+      queueKey: key.rootKey,
+      awaitingChildren: true,
+    })
+    if (!createdRoot.admitted) {
+      return this.refuseDispatch(workspace, "delegation", createdRoot.refusal!, undefined, this.store.dispatchGroup(dispatchGroupID), { log: false })
+    }
+    const root = createdRoot.subtask
+    const created = await this.createDispatchAssignments({
+      workspace,
+      agent,
+      origin,
+      key,
+      root,
+      assignments,
+      dispatchGroupID,
+      rollbackRoot: true,
+    })
+    if (created.refused) return created
+    this.logger?.event("info", "dispatch", "dispatch.command.created", {
+      workspaceID: workspace.id,
+      originTaskID: origin.id,
+      rootTaskID: root.id,
+      dispatchGroupID,
+      ...(continuationGroup ? { parentGroupID: continuationGroup.id } : {}),
+      assignmentCount: assignments.length,
+      groupMaxHops: prospectiveGroup.maxHops,
+      groupUsedHops: assignments.length,
+      commandMaxHops: prospectiveGroup.commandMaxHops,
+      commandUsedHops: assignments.length,
+    })
+    const budget = this.dispatchResultLine({ groupID: dispatchGroupID, nextDepth: 0 })
+    return {
+      content: `Started command "${title}" as a new command root with ${assignments.length} assignment${assignments.length === 1 ? "" : "s"}. Root ${root.id}.${budget ? ` ${budget}` : ""}`,
+    }
+  }
+
+  /**
+   * Create the assignment batch under a command root. Existing rows (a retry
+   * or a partial first attempt) are reused by their durable dispatch key; the
+   * store admission remains the one hop authority.
+   */
+  private async createDispatchAssignments(input: {
+    workspace: Workspace
+    agent: Agent
+    origin: Subtask
+    key: ReturnType<typeof dispatchCommandKey>
+    root: Subtask
+    assignments: readonly DispatchAssignmentInput[]
+    dispatchGroupID?: Id
+    /** True when this attempt created the root; a retry must keep existing work. */
+    rollbackRoot?: boolean
+  }): Promise<{ content: string; refused?: true }> {
+    const state = this.store.read()
+    const dispatchGroupID = input.dispatchGroupID ?? input.root.dispatchGroupID
+    if (!dispatchGroupID) {
+      return this.refuseDispatchCommand(input.workspace, "the new command has no dispatch group.", input.origin.id, input.assignments.length)
+    }
+    const created: Subtask[] = []
+    for (let index = 0; index < input.assignments.length; index++) {
+      const assignment = input.assignments[index]
+      const assignmentKey = input.key.assignmentKeys[index]
+      const existing = this.findWorkByKey(input.workspace.id, assignmentKey)
+      if (existing) {
+        created.push(existing)
+        continue
+      }
+      const result = await this.createWorkItem({
+        workspace: input.workspace,
+        parentID: input.root.id,
+        assigneeID: assignment.assignee,
+        creatorType: "agent",
+        creatorAgentID: input.agent.id,
+        title: assignment.title,
+        instruction: assignment.instruction,
+        constraints: assignment.constraints,
+        expected: assignment.expected,
+        mode: assignment.mode,
+        kind: "delegation",
+        dispatchGroupID,
+        taskMaxHops: assignment.maxHops,
+        maxPerRun: state.settings.maxDelegations,
+        queueKey: assignmentKey,
+      })
+      if (!result.admitted) {
+        // Ticket #251 review: admission is per assignment, so a failure after
+        // the root (or an earlier assignment) exists must not leave open work.
+        // Close everything this attempt created, then return the one visible
+        // batch refusal. Existing rows from an earlier attempt stay untouched.
+        const reason = dispatchCommandRefusalText(result.refusal!)
+        await this.rollbackDispatchCommand(
+          input.rollbackRoot ? [input.root, ...created] : created,
+          reason,
+        )
+        return this.refuseDispatchCommand(
+          input.workspace,
+          reason,
+          input.origin.id,
+          input.assignments.length,
+          result.refusal!,
+        )
+      }
+      created.push(result.subtask)
+    }
+    this.schedule()
+    const budget = this.dispatchResultLine({ groupID: dispatchGroupID, nextDepth: 0 })
+    return {
+      content: `Started command "${input.root.title}" with ${created.length} assignment${created.length === 1 ? "" : "s"}. Root ${input.root.id}.${budget ? ` ${budget}` : ""}`,
+    }
+  }
+
+  /**
+   * Ticket #251 review: close the rows a partially admitted command created.
+   * Cancellation is structural (`stoppedAt`), so the rows render as cancelled
+   * and never enter synthesis or a completion hop. Residual race: rows are
+   * written sequentially, so a host could claim an earlier assignment before
+   * the later refusal lands; the cancellation stops further work, but a run
+   * that already started may still append its own answer.
+   */
+  private async rollbackDispatchCommand(rows: readonly Subtask[], reason: string): Promise<void> {
+    const at = now()
+    for (const candidate of rows) {
+      const task = this.store.cloneSubtask(candidate.id)
+      if (!task || (task.state !== "pending" && task.state !== "working")) continue
+      task.state = "replied"
+      task.outcome = "failed"
+      task.error = reason
+      task.stoppedAt = at
+      task.repliedAt = at
+      task.finishedAt = at
+      task.awaitingChildren = false
+      task.activeRunID = undefined
+      task.approvalID = undefined
+      task.claimedBy = undefined
+      task.leaseUntil = undefined
+      task.retryAfter = undefined
+      await this.store.saveSubtask(task)
+      this.noteWorkChanged(task)
+    }
+  }
+
+  /** Visible refusal for a whole continuation command; no work is created. */
+  private async refuseDispatchCommand(
+    workspace: Workspace,
+    reason: string,
+    originTaskID: Id,
+    assignmentCount: number,
+    refusal?: DispatchRefusal,
+    reasonCode = "invalid-command",
+  ): Promise<{ content: string; refused?: true }> {
+    await this.appendMessage(workspace, { author: "system", text: `Dispatch refused: ${reason}`, kind: "system" })
+    this.logger?.event("warn", "dispatch", "dispatch.command.refused", {
+      workspaceID: workspace.id,
+      originTaskID,
+      assignmentCount,
+      ...(refusal ? { layer: refusal.layer, used: refusal.used, max: refusal.max } : { reason: reasonCode }),
+    })
+    return { content: `Dispatch refused: ${reason}`, refused: true }
   }
 
   private async toolDelegate(input: Json, context: any): Promise<{ content: string }> {
@@ -7512,6 +7869,11 @@ export class EnsembleV2Service {
   private async reconcileWaitingWork(): Promise<void> {
     const tasks = this.store.subtasks()
     const at = now()
+    const subtasksByID = Object.fromEntries(tasks.map((task) => [task.id, task]))
+    const pendingDescendant = pendingDescendantResolver({
+      subtasks: subtasksByID,
+      isTerminal: (child) => isTerminalWorkStatus(deriveWorkStatus(child, at)),
+    })
     const childrenByParent = new Map<string, Subtask[]>()
     for (const task of tasks) {
       if (!task.parentID || task.handoff?.completion === true) continue
@@ -7526,10 +7888,16 @@ export class EnsembleV2Service {
       // Batch reviews close only through ensemble_review.
       if (candidate.handoff?.batch === true) continue
       const children = childrenByParent.get(candidate.id) ?? []
+      // Ticket #250: a command root is saved just before its assignment batch.
+      // Keep it waiting through that write window instead of closing a
+      // zero-child parent; the grace bound releases a crashed batch.
+      if (candidate.awaitingChildren && children.length === 0 && pendingDispatchCommandRoot(candidate, at, DEADLINE_MS)) continue
       // Ticket #170: a stalled child still persists `state: "replied"` but is
       // non-terminal. Only the canonical derived lifecycle may release a
       // parent; otherwise a lease problem would close the parent's turn.
-      if (candidate.awaitingChildren && !children.some((child) => !isTerminalWorkStatus(deriveWorkStatus(child, at)))) {
+      // Ticket #251: a replied child can route a pending peer turn, so release
+      // only when the whole non-completion subtree is terminal.
+      if (candidate.awaitingChildren && !pendingDescendant(candidate.id)) {
         const task = this.store.cloneSubtask(candidate.id)
         if (!task) continue
         task.awaitingChildren = false
@@ -7619,7 +7987,7 @@ export class EnsembleV2Service {
           if (directory) busyEditDirs.add(directory)
         }
         const pending = Object.values(state.subtasks)
-          .filter((task) => task.state === "pending" && task.assigneeID && !isNativeTurn(task) && !task.approvalID && !task.interrupted && !task.activeRunID && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
+          .filter((task) => task.state === "pending" && task.assigneeID && !isNativeTurn(task) && !task.approvalID && !task.interrupted && !task.activeRunID && !task.awaitingChildren && (task.retryAfter === undefined || task.retryAfter <= at) && !this.batchBlocked(state, task))
           .sort((a, b) => a.createdAt - b.createdAt)
         const skipped = (task: Subtask, reason: string, extra: Record<string, unknown> = {}) => {
           if (task.retryAfter === undefined) return
@@ -8681,6 +9049,9 @@ export class EnsembleV2Service {
     // contacted a recipient after the caller took its turn snapshot.
     const liveTurn = state.subtasks[task.id] ?? task
     const alreadyRouted = nativeContacted(liveTurn.native)
+    // Ticket #248: a synthesis, completion-review, or batch-review turn is
+    // terminal. Its mentions are references and never create peer work.
+    const terminal = isTerminalTurn(task)
     const plan = planMentionRouting({
       text,
       conversation,
@@ -8688,11 +9059,13 @@ export class EnsembleV2Service {
       fanOutCap: state.settings.maxDelegations,
       enabled: state.settings.nativeMentionRouting !== false,
       senderID: target.agent.id,
+      terminal,
       ...(replyToSenderID ? { replyToSenderID } : {}),
       ...(groupTrail.length > 0 ? { groupTrail } : {}),
       ...(alreadyRouted.length > 0 ? { alreadyRouted } : {}),
       ...(workspace ? { limits: dispatchLimits(state.settings), ledger: this.nativeMentionLedger(task) } : {}),
     })
+    const terminalSuppressions = plan.suppressed.filter((item) => item.reason === "terminal-turn")
 
     const excluded = plan.excluded.reduce<Record<string, number>>((counts, span) => {
       counts[span.kind] = (counts[span.kind] ?? 0) + 1
@@ -8725,7 +9098,24 @@ export class EnsembleV2Service {
         source: "agent-final",
         agentID: suppression.agentID,
         reason: suppression.reason,
+        ...(suppression.reason === "terminal-turn" ? { count: terminalSuppressions.length } : {}),
       })
+    }
+    if (isTerminalTurn(task) && terminalSuppressions.length > 0) {
+      // Ticket #248: the chain stops visibly, never silently. Ticket #250: a
+      // terminal turn that started the next command with `ensemble_dispatch`
+      // has already created work, so the "no work was created" notice would
+      // be false. The durable dispatch key scopes the lookup to this turn.
+      const dispatched = dispatchCommandStartedForTurn(this.store.read().subtasks, task.workspaceID, task.id)
+      this.logger?.event("info", "native", "native.route.terminal", {
+        ...(task.native?.sessionID ? { sessionID: task.native.sessionID } : {}),
+        turnID: task.id,
+        reason: "terminal-turn",
+        recipients: [...new Set(terminalSuppressions.map((item) => item.agentID))],
+        count: terminalSuppressions.length,
+        ...(dispatched ? { dispatched: true } : {}),
+      })
+      if (!dispatched) await this.appendTerminalTurnNotice(target, task, at)
     }
 
     if (workspace && plan.routes.length > 0) {
@@ -8819,6 +9209,34 @@ export class EnsembleV2Service {
       ...(refusal.used !== undefined ? { used: refusal.used } : {}),
       ...(refusal.max !== undefined ? { max: refusal.max } : {}),
     })
+  }
+
+  /**
+   * Ticket #248: a terminal turn's suppressed mentions stop the chain
+   * visibly. The notice names the explicit continuation path that #250 adds;
+   * it never starts work itself.
+   */
+  private async appendTerminalTurnNotice(
+    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string },
+    task: Subtask,
+    at: number,
+  ): Promise<void> {
+    const text = "No work was created from mentions in a terminal turn. Start the next batch explicitly with ensemble_dispatch."
+    if (target.conversation.kind === "workspace") {
+      const workspace = this.store.workspace(target.conversation.workspaceID)
+      if (!workspace) return
+      await this.appendMessage(workspace, { author: "system", text, kind: "system", taskID: task.id })
+    } else {
+      // Direct channels have no workspace row to append through. The
+      // deterministic id keeps a replayed terminal notice from duplicating.
+      await this.store.saveChannelMessage(target.channel, {
+        id: `msg_native_terminal_${stableHash(`native-terminal-notice:${task.id}`)}`,
+        author: "system",
+        text,
+        kind: "system",
+        createdAt: at,
+      })
+    }
   }
 
   // ---- Ticket #230: invisible shadow ingestion ---------------------------
@@ -11208,13 +11626,13 @@ export class EnsembleV2Service {
     await this.clearSupersededNotices(task)
     this.logTaskRecovered(task, previousStatus, "late-success", resultMessageID, previousFailure)
     await this.settleLinkedApprovals(task.id, "Superseded: the linked work finished.", new Set(["native"]))
-    if (task.parentID) await this.maybeSynthesize(task.parentID)
+    if (task.parentID) await this.maybeSynthesize(task.parentID, task.id)
     return true
   }
 
   private async runTask(taskID: string): Promise<void> {
     const task = this.store.cloneSubtask(taskID)
-    if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID) return
+    if (!task || task.state !== "pending" || !task.assigneeID || task.interrupted || task.activeRunID || task.awaitingChildren) return
     // Do not run work the queue has retired/stalled: the next reapAndRetire
     // pass (or the current one) records the terminal state with its reason.
     // Ticket #168: an old delivery timestamp never blocks a claim; only the
@@ -11346,11 +11764,20 @@ export class EnsembleV2Service {
       } else {
         this.liveBySession.set(binding.sessionID, { message: live, lastSave: 0, buffer: "" })
       }
+      const taskContext = contextForTask(this.store.read(), task, workspace, agent)
       await this.ctx.session.instructions.entry.put({
         sessionID: binding.sessionID,
         key: "ensemble.v2.context",
-        value: contextForTask(this.store.read(), task, workspace, agent),
+        value: taskContext,
       }).catch(() => undefined)
+      const taskPrompt = promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined)
+      // Ticket #251: a session that already ran a native turn can keep its
+      // first instruction snapshot for later prompts. Carry the bounded
+      // synthesis context in the prompt text too (the reused-session
+      // fallback), so the digest is guaranteed to reach the model even when
+      // the host reuses that snapshot. `promptTextForTask` is the one source;
+      // the synthesis benchmark measures the same string.
+      const promptText = promptTextForTask(task, taskPrompt, taskContext)
       // Ticket #103: General skills are a one-run leader grant. Apply the
       // extra allow rules before the prompt; the finally block restores the
       // Skillbox-permission baseline after the turn.
@@ -11393,7 +11820,7 @@ export class EnsembleV2Service {
         failureContext.startedAt = attemptStartedAt
         await this.ctx.session.prompt({
           sessionID: binding.sessionID,
-          text: promptForTask(task, task.handoff ? this.agentName(task.handoff.senderID) : task.turn?.askerID ? this.agentName(task.turn.askerID) : undefined),
+          text: promptText,
           delivery: "steer",
           metadata: { [NATIVE_INTERNAL_PROMPT_METADATA]: true, [NATIVE_SKIP_TURN_METADATA]: false },
           ...(attachmentFiles.length > 0 ? { files: attachmentFiles } : {}),
@@ -11626,7 +12053,7 @@ export class EnsembleV2Service {
       // mirrors are excluded: only the host or an explicit resolve settles
       // them, since the host request may still be live after our run ends.
       await this.settleLinkedApprovals(currentTask.id, "Superseded: the linked work finished.", new Set(["native"]))
-      if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID)
+      if (currentTask.parentID) await this.maybeSynthesize(currentTask.parentID, currentTask.id)
     } catch (error: any) {
       const currentTask = this.store.cloneSubtask(task.id)
       const failureText = error?.message ?? String(error)
@@ -12107,16 +12534,19 @@ export class EnsembleV2Service {
     // announced from the terminal task row like success; a generic duplicate
     // system line made failure feel secondary. Correlation-specific notices
     // above remain.
-    if (task.parentID) await this.maybeSynthesize(task.parentID)
+    if (task.parentID) await this.maybeSynthesize(task.parentID, task.id)
   }
 
-  private async maybeSynthesize(parentID: string): Promise<void> {
-    const stored = this.store.subtask(parentID)
-    if (!stored || stored.stage === "synthesis" || stored.state === "replied") return
-    // A native turn is answered by its own host execution, never by child
-    // synthesis. Routed child work must not reassign the session agent or
-    // settle the turn (ticket #220).
-    if (isNativeTurn(stored)) return
+  private async maybeSynthesize(parentID: string, childID?: string): Promise<void> {
+    // Ticket #246: only the command root may synthesize. Walk the parent chain
+    // to the topmost Subtask; an intermediate handoff/delegation parent relays
+    // its child result and settles without a leader turn. A native turn is
+    // host-answered, so a child completion never converts it (or its root)
+    // into synthesis work.
+    const resolution = resolveCommandRoot(parentID, this.store.read().subtasks)
+    if (!resolution || resolution.hostAnswered) return
+    const stored = resolution.root
+    if (stored.stage === "synthesis" || stored.state === "replied") return
     // Ticket #71: batch reviews close only via the review tool once every
     // item is acted on or dismissed — never by child completion.
     if (stored.handoff?.batch === true) return
@@ -12127,11 +12557,52 @@ export class EnsembleV2Service {
     // active until retry/cancel/dismissal. Parent completion follows the
     // canonical derived status, never the storage cache.
     const at = now()
-    if (children.length === 0 || children.some((child) => !isTerminalWorkStatus(deriveWorkStatus(child, at)))) return
+    // Ticket #251: a replied child can route a new peer turn after it settles.
+    // Wait for the whole non-completion subtree, not just the direct children,
+    // so the command root never synthesizes over a pending descendant.
+    const pendingDescendant = hasPendingDescendant({
+      parentID,
+      subtasks: this.store.read().subtasks,
+      isTerminal: (child) => isTerminalWorkStatus(deriveWorkStatus(child, at)),
+    })
+    if (children.length === 0 || pendingDescendant) return
     const workspace = this.store.workspace(stored.workspaceID)
     if (!workspace) return
     const parent = this.store.cloneSubtask(parentID)
     if (!parent) return
+    if (resolution.root.id !== parentID) {
+      // Intermediate relay: settle with the child result and propagate upward.
+      // The parent's own worker answer already owns its resultMessageID; never
+      // overwrite it with a child's message (ticket #246 clarification).
+      if (parent.stage === "synthesis" || parent.state === "replied") {
+        // Ticket #251: a replied parent can route a new peer turn after it
+        // settles. That child's completion must still wake the ancestor, where
+        // the subtree check decides whether the whole command is terminal.
+        if (parent.parentID) await this.maybeSynthesize(parent.parentID, parent.id)
+        return
+      }
+      if (parent.handoff?.batch === true) return
+      const triggering = childID ? this.store.subtask(childID) : undefined
+      const childResultID = triggering?.resultMessageID ?? children.find((child) => child.resultMessageID)?.resultMessageID
+      parent.state = "replied"
+      parent.outcome = "succeeded"
+      parent.awaitingChildren = false
+      parent.repliedAt = at
+      parent.finishedAt = at
+      parent.failure = undefined
+      parent.error = undefined
+      if (!parent.resultMessageID && childResultID) parent.resultMessageID = childResultID
+      await this.store.saveSubtask(parent)
+      this.noteWorkChanged(parent)
+      this.logger?.event("info", "task", "task.relay.settled", {
+        taskID: parent.id,
+        parentID: parent.parentID,
+        childID: triggering?.id ?? children[0]?.id,
+        reason: "children-terminal",
+      })
+      if (parent.parentID) await this.maybeSynthesize(parent.parentID, parent.id)
+      return
+    }
     if (workspace.synthesis) {
       parent.state = "pending"
       parent.stage = "synthesis"
@@ -12142,7 +12613,6 @@ export class EnsembleV2Service {
       parent.deadlineAt = now() + DEADLINE_MS
       await this.store.saveSubtask(parent)
     } else {
-      const at = now()
       parent.state = "replied"
       parent.outcome = "succeeded"
       parent.repliedAt = at
@@ -12152,6 +12622,14 @@ export class EnsembleV2Service {
       await this.appendMessage(workspace, { author: "system", text: "Delegated subtasks completed.", kind: "system", taskID: parent.id })
     }
   }
+}
+
+/**
+ * Ticket #248: synthesis, completion-review, and batch-review turns are
+ * terminal. Their mentions are references; explicit tools remain available.
+ */
+function isTerminalTurn(task: Subtask): boolean {
+  return task.stage === "synthesis" || task.handoff?.completion === true || task.handoff?.batch === true
 }
 
 /**

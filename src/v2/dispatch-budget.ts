@@ -1,3 +1,4 @@
+import { isDispatchCommandRoot } from "./dispatch-command.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
 import type { DispatchGroup, Id, Settings, Subtask, WorkKind } from "./types.ts"
 
@@ -599,16 +600,19 @@ export type DispatchHopWorkItem = {
   creatorType: "user" | "agent"
   workKind?: WorkKind
   handoff?: { completion?: boolean; batch?: boolean }
+  /** Ticket #250: the durable command-root key is the one root identity. */
+  queueKey?: string
 }
 
 /**
  * True when creating this work item spends one hop: an agent-created
  * delegation or explicit handoff. User command recipients, peer turns,
- * completion handoffs, batch review, synthesis, retries, restarts, and
- * recovery never consume.
+ * completion handoffs, batch review, synthesis, retries, restarts, recovery,
+ * and a continuation command root never consume.
  */
 export function dispatchesHop(task: DispatchHopWorkItem): boolean {
   if (task.creatorType !== "agent") return false
+  if (isDispatchCommandRoot(task)) return false
   if (task.workKind !== "delegation" && task.workKind !== "handoff") return false
   if (task.handoff?.completion === true) return false
   if (task.handoff?.batch === true) return false

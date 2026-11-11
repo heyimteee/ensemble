@@ -380,6 +380,12 @@ export type TurnInfo = {
   answeredByID?: string
 };
 
+/**
+ * One durable unit of work and one queue row (v5.3, ticket #54). There is no
+ * parallel work table: `error` doubles as the last error and `repliedAt`
+ * mirrors `finishedAt` for older readers. `deriveWorkStatus` in queue.ts is the
+ * canonical lifecycle derivation and never trusts `state` alone.
+ */
 export type Subtask = {
   id: Id
   workspaceID: Id
@@ -433,13 +439,6 @@ export type Subtask = {
    * Zero is valid and means a one-shot ask; #161 enforces the value.
    */
   taskMaxHops?: number
-  /**
-   * Durable coordination queue fields (v5.3, ticket #54). The subtask row is
-   * the work item: no parallel table, one source of truth. `error` doubles
-   * as the last error and `repliedAt` mirrors `finishedAt` for older
-   * readers; `deriveWorkStatus` in queue.ts is the canonical lifecycle
-   * derivation and never trusts `state` alone.
-   */
   /** Unit of work: "delegation" (default), "handoff", or "turn". */
   workKind?: WorkKind
   /** Idempotency key: resubmitting the same work executes once, not twice. */
