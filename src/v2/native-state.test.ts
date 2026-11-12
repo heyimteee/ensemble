@@ -4,10 +4,12 @@ import { NATIVE_INBOX_ORDER_LIMIT, NativeIngestionState } from "./native-state.t
 import { nativeFinalText } from "./native-turn.ts"
 
 /**
- * Ticket #231: the per-session native state machine. One table case per host
- * event family, so every transition that a family relies on has a named
- * behavioral expectation. These cases exercise the state seam directly; the
- * service suites remain the end-to-end safety net.
+ * Ticket #231: unit tests for the per-session native state machine. One table
+ * case per host event family, so every transition that a family relies on has
+ * a named expectation. These cases assert the state value directly; the
+ * caller-observable behavior (task state, message rows, watchdog and deferred
+ * release) is covered at the service seam in `service.test.ts` by the ticket231
+ * interruption and restart tables.
  */
 type StateCase = {
   family: string
@@ -64,29 +66,15 @@ const cases: StateCase[] = [
   },
   {
     family: "session.inbox.delivered",
-    name: "records delivery and queues one steered inbox per delivery",
+    name: "queues one steered inbox per delivery",
     run: (state) => {
-      state.deliver("s", "m2", "delivered")
       state.steer("s", "m2")
       state.steer("s", "m2")
     },
     check: (state) => {
-      assert.equal(state.session("s").delivery.get("m2"), "delivered")
       assert.deepEqual(state.session("s").steered, ["m2"])
       assert.equal(state.takeSteer("s"), "m2")
       assert.equal(state.takeSteer("s"), undefined)
-    },
-  },
-  {
-    family: "session.inbox.delivered",
-    name: "delivery.changed updates the recorded delivery only",
-    run: (state) => {
-      state.deliver("s", "m2", "delivered")
-      state.deliver("s", "m2", "consumed")
-    },
-    check: (state) => {
-      assert.equal(state.session("s").delivery.get("m2"), "consumed")
-      assert.deepEqual(state.session("s").steered, [])
     },
   },
   {
@@ -168,7 +156,7 @@ const cases: StateCase[] = [
     run: (state) => {
       state.start("s", { owner: "turn", turnID: "t1" })
       state.steer("s", "m2")
-      state.start("s", { owner: "turn", turnID: "t2", join: true })
+      state.joinExecution("s", "t2", false, "turn")
     },
     check: (state) => {
       assert.deepEqual(state.session("s").executionTurns, ["t1", "t2"])
@@ -208,7 +196,7 @@ const cases: StateCase[] = [
     run: (state) => {
       state.start("s", { owner: "skip" })
       state.markRunSettled("s", "run_1")
-      state.start("s", {})
+      state.resetExecution("s")
     },
     check: (state) => {
       assert.equal(state.session("s").owner, undefined)
@@ -277,27 +265,29 @@ const cases: StateCase[] = [
     },
   },
   {
-    family: "session deletion",
-    name: "deleteSession drops the whole per-session value",
+    family: "service stop",
+    name: "clear drops every per-session value",
     run: (state) => {
-      state.enqueue("s", { inboxID: "m1", turn: true, pending: true })
-      state.deleteSession("s")
+      state.enqueue("a", { inboxID: "m1", turn: true, pending: true })
+      state.enqueue("b", { inboxID: "m2", turn: true, pending: true })
+      state.clear()
     },
     check: (state) => {
-      assert.equal(state.peek("s"), undefined)
+      assert.equal(state.peek("a"), undefined)
+      assert.equal(state.peek("b"), undefined)
     },
   },
 ]
 
 for (const entry of cases) {
-  test(`ticket231 native state: ${entry.family} — ${entry.name}`, () => {
+  test(`ticket231 native state unit: ${entry.family} — ${entry.name}`, () => {
     const state = new NativeIngestionState()
     entry.run(state)
     entry.check(state)
   })
 }
 
-test("ticket231 native state: sessions are isolated", () => {
+test("ticket231 native state unit: sessions are isolated", () => {
   const state = new NativeIngestionState()
   state.enqueue("a", { inboxID: "m1", turn: true, pending: true })
   state.start("a", { owner: "turn", turnID: "t1" })
@@ -306,7 +296,7 @@ test("ticket231 native state: sessions are isolated", () => {
   assert.deepEqual(state.session("b").pending, ["m2"])
   assert.deepEqual(state.session("a").executionTurns, ["t1"])
   assert.deepEqual(state.session("b").executionTurns, [])
-  state.deleteSession("a")
+  state.clear()
   assert.equal(state.peek("a"), undefined)
-  assert.ok(state.peek("b"))
+  assert.equal(state.peek("b"), undefined)
 })

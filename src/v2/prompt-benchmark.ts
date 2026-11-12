@@ -53,6 +53,33 @@ const BASELINE = {
   turnContext: { chars: 2768, estimatedTokens: 692 },
 } as const
 
+/**
+ * Ticket #253 review: the released v7 contract baseline measured on the
+ * benchmark fixture after the terminal-turn section landed. The legacy ratio
+ * in `prompt-benchmark.test.ts` is the product claim; this absolute baseline
+ * is the regression ratchet, so real contract growth fails even though the
+ * v7-vs-legacy ratio has little headroom by construction.
+ */
+export const V7_PROMPT_BASELINE = {
+  identity: 5965,
+  turnContext: 2904,
+  totalPrompt: 8869,
+} as const
+
+/** Allowed copy-edit drift before the v7 ratchet treats growth as a regression. */
+export const V7_PROMPT_DRIFT_TOLERANCE = 0.02
+
+export function promptWithinV7Baseline(
+  report: BenchmarkReport,
+  tolerance: number = V7_PROMPT_DRIFT_TOLERANCE,
+): boolean {
+  return (
+    report.after.identity.chars <= Math.ceil(V7_PROMPT_BASELINE.identity * (1 + tolerance))
+    && report.after.turnContext.chars <= Math.ceil(V7_PROMPT_BASELINE.turnContext * (1 + tolerance))
+    && report.after.totalPrompt.chars <= Math.ceil(V7_PROMPT_BASELINE.totalPrompt * (1 + tolerance))
+  )
+}
+
 export function size(text: string): PromptSize {
   return { chars: text.length, estimatedTokens: Math.ceil(text.length / 4) }
 }

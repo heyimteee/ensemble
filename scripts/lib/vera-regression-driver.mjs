@@ -559,14 +559,17 @@ async function run() {
   assert("the project-owned content outside the block is preserved", content.includes(PROJECT_LINE) && !content.includes("STALE V5 CONTRACT"))
   const genericBlock = block ? withoutRosterSection(block) : undefined
   const tableText = (table ?? []).join("\n")
+  // The #238 fixed 12-member filled v6 block was 5,667 chars / 1,417 tokens.
+  // The v7 contract adds 865 generic chars / 216 tokens, so the same roster is
+  // 6,532 chars / 1,633 tokens. Re-measured against the v7 block.
   metrics.agentsBlock = {
     version: 7,
     block: size(block ?? ""),
     generic: size(genericBlock ?? ""),
     rosterTable: size(tableText),
-    fixedV7Filled12: { chars: 6032, estimatedTokens: 1508 },
-    deltaCharsVsFixedV7Filled12: (block?.length ?? 0) - 6032,
-    deltaTokensVsFixedV7Filled12: Math.ceil((block?.length ?? 0) / 4) - 1508,
+    fixedV7Filled12: { chars: 6532, estimatedTokens: 1633 },
+    deltaCharsVsFixedV7Filled12: (block?.length ?? 0) - 6532,
+    deltaTokensVsFixedV7Filled12: Math.ceil((block?.length ?? 0) / 4) - 1633,
   }
 
   // The native surface deliberately omits the explicit migration tools. Use

@@ -10623,6 +10623,141 @@ test("ticket215: restart recovers the answer or marks the turn interrupted hones
   }
 })
 
+/** Seed one open native turn plus its streaming row, as a restart would find it. */
+async function seedOpenNativeTurn(
+  ctx: any,
+  id: string,
+  inboxID: string,
+  assistantID: string,
+  text: string,
+): Promise<void> {
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seed.saveSubtask({
+    id,
+    workspaceID: "dm:a:w",
+    creatorType: "user",
+    assigneeID: "a",
+    title: "Restart turn",
+    instruction: "Restart turn",
+    mode: "research",
+    state: "working",
+    stage: "initial",
+    outcome: "pending",
+    interrupted: false,
+    awaitingChildren: false,
+    attempts: 0,
+    createdAt: 20,
+    workKind: "turn",
+    origin: "native",
+    adopted: true,
+    conversationID: "dm:a:w",
+    dispatchGroupID: `group_${id}`,
+    native: { sessionID: "s_direct", inboxID, assistantMessageIDs: [assistantID], phase: "working" },
+  })
+  await seed.saveChannelMessage("dm:a:w", {
+    id: nativeAssistantMessageID(id),
+    author: "agent",
+    agentID: "a",
+    text,
+    kind: "text",
+    taskID: id,
+    streaming: true,
+    createdAt: 21,
+    updatedAt: 21,
+    native: { sessionID: "s_direct", inboxID, assistantMessageID: assistantID, turnID: id },
+  })
+}
+
+const restartRecoveryCases = [
+  {
+    name: "a transcript answer recovers the turn as replied",
+    phase: "replied",
+    state: "replied",
+    status: "replied",
+    interrupted: false,
+    streaming: false,
+    rowInterrupted: false,
+    rowText: "Recovered after restart",
+    messages: [
+      { id: "m50", type: "user", content: [{ type: "text", text: "Survive restart" }], time: { created: 1 } },
+      { id: "m51", type: "assistant", content: [{ type: "text", text: "Recovered after restart" }], time: { created: 2 } },
+      { id: "m52", type: "idle" },
+    ],
+  },
+  {
+    name: "an idle marker without an answer settles needs_you",
+    phase: "interrupted",
+    state: "working",
+    status: "needs_you",
+    interrupted: true,
+    streaming: false,
+    rowInterrupted: true,
+    rowText: "Partial before restart",
+    messages: [
+      { id: "m50", type: "user", content: [{ type: "text", text: "Survive restart" }], time: { created: 1 } },
+      { id: "m52", type: "idle" },
+    ],
+  },
+  {
+    name: "no terminal evidence leaves the turn working",
+    phase: "working",
+    state: "working",
+    status: "working",
+    interrupted: false,
+    streaming: true,
+    rowInterrupted: undefined,
+    rowText: "Partial before restart",
+    messages: [
+      { id: "m50", type: "user", content: [{ type: "text", text: "Survive restart" }], time: { created: 1 } },
+    ],
+  },
+]
+
+for (const [index, entry] of restartRecoveryCases.entries()) {
+  test(`ticket231 service table: restart recovery — ${entry.name}`, async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ensemble-231-restart-"))
+    const home = mkdtempSync(join(tmpdir(), "ensemble-231-restart-home-"))
+    const { ctx, nativeSessions } = fakeContext()
+    nativeSessions.set("s_direct", { id: "s_direct" })
+    await seedNativeDirect(ctx, directory, home)
+    const id = `task_231_restart_${index}`
+    await seedOpenNativeTurn(ctx, id, "m50", "m51", "Partial before restart")
+    let contextCalls = 0
+    ;(ctx.session as any).context = async () => {
+      contextCalls++
+      return { data: entry.messages }
+    }
+    const service = new EnsembleV2Service(ctx)
+    const stop = await startServiceForTest(service, service.ctx)
+    const handlers = service.handlers()
+    try {
+      await waitFor(async () => contextCalls > 0)
+      await waitFor(async () => {
+        const state = await snapshotFor(handlers, directory)
+        return state.subtasks[id]?.native?.phase === entry.phase
+      })
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      const state = await snapshotFor(handlers, directory)
+      const turn = state.subtasks[id]
+      assert.equal(turn.native.phase, entry.phase)
+      assert.equal(turn.state, entry.state)
+      assert.equal(deriveWorkStatus(turn, Date.now()), entry.status)
+      assert.equal(turn.interrupted, entry.interrupted)
+      const row = (state.messages["dm:a:w"] ?? []).find((message: any) => message.taskID === id)
+      assert.ok(row, "the turn keeps its durable row")
+      assert.equal(row.text, entry.rowText)
+      assert.equal(row.streaming, entry.streaming)
+      assert.equal(row.interrupted, entry.rowInterrupted)
+      if (entry.phase === "replied") assert.equal(turn.resultMessageID, row.id)
+    } finally {
+      await stop()
+      rmSync(directory, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+}
+
 test("ticket215: native ingestion is off unless nativeFirst is on", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-215-off-"))
   const home = mkdtempSync(join(tmpdir(), "ensemble-215-off-home-"))
@@ -11639,6 +11774,81 @@ test("ticket217: a shutdown interruption settles needs_you and preserves partial
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+const interruptionSettlementCases = [
+  {
+    reason: "user",
+    phase: "cancelled",
+    state: "replied",
+    status: "cancelled",
+    interrupted: false,
+    rowInterrupted: false,
+    stopped: true,
+  },
+  {
+    reason: "shutdown",
+    phase: "interrupted",
+    state: "working",
+    status: "needs_you",
+    interrupted: true,
+    rowInterrupted: true,
+    stopped: false,
+  },
+  {
+    reason: "inactivity",
+    phase: "interrupted",
+    state: "working",
+    status: "needs_you",
+    interrupted: true,
+    rowInterrupted: true,
+    stopped: false,
+  },
+] as const
+
+for (const entry of interruptionSettlementCases) {
+  test(`ticket231 service table: session.execution.interrupted — ${entry.reason}`, async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ensemble-231-interrupt-"))
+    const home = mkdtempSync(join(tmpdir(), "ensemble-231-interrupt-home-"))
+    const { ctx, nativeSessions, emitEvent } = fakeContext()
+    nativeSessions.set("s_direct", { id: "s_direct" })
+    await seedNativeDirect(ctx, directory, home)
+    const service = new EnsembleV2Service(ctx)
+    const stop = await startServiceForTest(service, service.ctx)
+    const handlers = service.handlers()
+    try {
+      await handlers.invoke({ directory, action: "settings.update", payload: { nativeFirst: "on" } })
+      emitEvent(nativeEvent("session.inbox.enqueued", {
+        sessionID: "s_direct",
+        inboxID: "m1",
+        item: { type: "user", delivery: "steer", payload: { text: "Try the change" } },
+      }, { id: `evt_231_${entry.reason}_enqueue`, created: 100 }))
+      emitEvent(nativeEvent("session.execution.started", { sessionID: "s_direct" }, { id: `evt_231_${entry.reason}_start`, created: 101 }))
+      emitEvent(nativeEvent("session.text.started", { sessionID: "s_direct", assistantMessageID: "m2", ordinal: 0 }, { id: `evt_231_${entry.reason}_text`, created: 102 }))
+      emitEvent(nativeEvent("session.text.delta", { sessionID: "s_direct", assistantMessageID: "m2", ordinal: 0, delta: "Half" }, { id: `evt_231_${entry.reason}_delta`, created: 103 }))
+      emitEvent(nativeEvent("session.text.ended", { sessionID: "s_direct", assistantMessageID: "m2", ordinal: 0, text: "Half done" }, { id: `evt_231_${entry.reason}_ended`, created: 104 }))
+      emitEvent(nativeEvent("session.execution.interrupted", { sessionID: "s_direct", reason: entry.reason }, { id: `evt_231_${entry.reason}_interrupt`, created: 105 }))
+
+      await waitFor(async () => Boolean(nativeTurnIn(await snapshotFor(handlers, directory), entry.phase)))
+      const state = await snapshotFor(handlers, directory)
+      const turn = nativeTurnIn(state, entry.phase)
+      assert.equal(turn.state, entry.state)
+      assert.equal(turn.interrupted, entry.interrupted)
+      assert.equal(deriveWorkStatus(turn, Date.now()), entry.status)
+      assert.equal(Boolean(turn.stoppedAt), entry.stopped)
+      const rows = state.messages["dm:a:w"]
+      assert.equal(rows.length, 2, "one user row and one agent row")
+      const answer = rows.find((message: any) => message.author === "agent")
+      assert.equal(answer.id, nativeAssistantMessageID(turn.id), "the partial row is the same row")
+      assert.equal(answer.text, "Half done", "partial text is preserved")
+      assert.equal(answer.streaming, false)
+      assert.equal(answer.interrupted, entry.rowInterrupted)
+    } finally {
+      await stop()
+      rmSync(directory, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+}
 
 test("ticket217: session.idle alone never settles an active native turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-217-idle-"))

@@ -7,9 +7,9 @@ import { nativeTextForParts, type NativeTextState } from "./native-turn.ts"
  * The service keeps only two async gates outside this module: the per-session
  * event queue and the reconcile-run coalescer. Everything else — enqueue order,
  * execution owner, active turn, steering, text parts, row checkpoints, the
- * watchdog, delivery state, assistant-message mapping, and deferred child
- * settlement — lives in the per-session value below and mutates only through
- * the named transitions on `NativeIngestionState`.
+ * watchdog, assistant-message mapping, and deferred child settlement — lives
+ * in the per-session value below and mutates only through the named
+ * transitions on `NativeIngestionState`.
  */
 
 export const NATIVE_INBOX_ORDER_LIMIT = 64
@@ -70,8 +70,6 @@ export class NativeSessionState {
   watchdog = new Map<string, NativeWatchdogState>()
   /** Parent turns held for a live background child, bounded. */
   deferred = new Map<string, NativeDeferredSettlement>()
-  /** Delivery state per inbox; informational for now. */
-  delivery = new Map<string, string>()
 
   orderHead(): NativeInboxOrderEntry | undefined {
     return this.order[0]
@@ -98,10 +96,6 @@ export class NativeIngestionState {
       this.sessions.set(sessionID, state)
     }
     return state
-  }
-
-  sessionsSnapshot(): Array<[string, NativeSessionState]> {
-    return [...this.sessions]
   }
 
   // ---- session.inbox.enqueued --------------------------------------------
@@ -154,36 +148,41 @@ export class NativeIngestionState {
 
   // ---- session.execution.started -----------------------------------------
 
-  /**
-   * Open a host execution. A new execution replaces the settled participants
-   * and clears steering; a repeated start joins the open execution and keeps
-   * steering. `owner` is always written so a skipped execution can be cleared
-   * with `start(sessionID, {})`.
-   */
-  start(sessionID: string, input: { owner?: NativeExecutionOwner; turnID?: string; join?: boolean }): void {
+  /** Open a new host execution, replacing settled participants and steering. */
+  start(sessionID: string, input: { owner: NativeExecutionOwner; turnID?: string }): void {
     const state = this.session(sessionID)
-    if (input.join) {
-      if (input.turnID && !state.executionTurns.includes(input.turnID)) state.executionTurns.push(input.turnID)
-    } else {
-      state.executionTurns = input.turnID ? [input.turnID] : []
-      state.steered = []
-    }
+    state.executionTurns = input.turnID ? [input.turnID] : []
+    state.steered = []
     state.owner = input.owner
   }
 
   /**
-   * Add a turn to the current execution without changing the owner. `replace`
-   * mirrors the open-participant check: a settled execution is replaced, an
-   * open one is joined.
+   * Add a turn to the current execution. `replace` is the open-participant
+   * check from the caller: a settled execution is replaced, an open one is
+   * joined. `owner` is written when the join also owns the execution.
    */
-  joinExecution(sessionID: string, turnID: string, replace: boolean): void {
+  joinExecution(
+    sessionID: string,
+    turnID: string,
+    replace: boolean,
+    owner?: NativeExecutionOwner,
+  ): void {
     const state = this.session(sessionID)
     if (replace) {
       state.executionTurns = [turnID]
       state.steered = []
-      return
+    } else if (!state.executionTurns.includes(turnID)) {
+      state.executionTurns.push(turnID)
     }
-    if (!state.executionTurns.includes(turnID)) state.executionTurns.push(turnID)
+    if (owner) state.owner = owner
+  }
+
+  /** Clear a skipped or run-owned terminal's execution ownership. */
+  resetExecution(sessionID: string): void {
+    const state = this.session(sessionID)
+    state.executionTurns = []
+    state.steered = []
+    state.owner = undefined
   }
 
   setActiveTurn(sessionID: string, turnID: string): void {
@@ -251,10 +250,6 @@ export class NativeIngestionState {
   }
 
   // ---- session.inbox.delivered / delivery.changed ------------------------
-
-  deliver(sessionID: string, inboxID: string, delivery: string): void {
-    this.session(sessionID).delivery.set(inboxID, delivery)
-  }
 
   /** Remember a queued turn the host delivered into a running execution. */
   steer(sessionID: string, inboxID: string): void {
@@ -355,16 +350,23 @@ export class NativeIngestionState {
     return this.peek(sessionID)?.watchdog.get(turnID)
   }
 
+  /** Every watched turn across sessions, in stable session/insertion order. */
+  watchdogEntries(): Array<{ sessionID: string; turnID: string; watchdog: NativeWatchdogState }> {
+    const entries: Array<{ sessionID: string; turnID: string; watchdog: NativeWatchdogState }> = []
+    for (const [sessionID, state] of this.sessions) {
+      for (const [turnID, watchdog] of state.watchdog) entries.push({ sessionID, turnID, watchdog })
+    }
+    return entries
+  }
+
   /** Content-free support view of every watched turn, keyed by turn id. */
   watchdogDiagnostics(): Record<string, { passes: number; lastActivityAt: number; held?: boolean }> {
     const turns: Record<string, { passes: number; lastActivityAt: number; held?: boolean }> = {}
-    for (const state of this.sessions.values()) {
-      for (const [turnID, watchdog] of state.watchdog) {
-        turns[turnID] = {
-          passes: watchdog.passes,
-          lastActivityAt: watchdog.lastActivityAt,
-          ...(state.deferred.has(turnID) ? { held: true } : {}),
-        }
+    for (const { sessionID, turnID, watchdog } of this.watchdogEntries()) {
+      turns[turnID] = {
+        passes: watchdog.passes,
+        lastActivityAt: watchdog.lastActivityAt,
+        ...(this.peek(sessionID)?.deferred.has(turnID) ? { held: true } : {}),
       }
     }
     return turns
@@ -409,13 +411,6 @@ export class NativeIngestionState {
     return pending
   }
 
-  hasDeferred(): boolean {
-    for (const state of this.sessions.values()) {
-      if (state.deferred.size > 0) return true
-    }
-    return false
-  }
-
   /** Held turns for one session, or every held turn when no session is named. */
   deferredEntries(sessionID?: string): Array<{ sessionID: string; turnID: string; pending: NativeDeferredSettlement }> {
     const entries: Array<{ sessionID: string; turnID: string; pending: NativeDeferredSettlement }> = []
@@ -430,20 +425,16 @@ export class NativeIngestionState {
 
   // ---- session lifecycle -------------------------------------------------
 
-  deleteSession(sessionID: string): void {
-    const state = this.sessions.get(sessionID)
-    if (!state) return
-    for (const row of state.rows.values()) {
-      if (row.checkpointTimer !== undefined) clearTimeout(row.checkpointTimer)
-    }
-    for (const pending of state.deferred.values()) {
-      if (pending.timer !== undefined) clearTimeout(pending.timer)
-    }
-    this.sessions.delete(sessionID)
-  }
-
   /** Service stop: release every timer and drop every session value. */
   clear(): void {
-    for (const sessionID of [...this.sessions.keys()]) this.deleteSession(sessionID)
+    for (const state of this.sessions.values()) {
+      for (const row of state.rows.values()) {
+        if (row.checkpointTimer !== undefined) clearTimeout(row.checkpointTimer)
+      }
+      for (const pending of state.deferred.values()) {
+        if (pending.timer !== undefined) clearTimeout(pending.timer)
+      }
+    }
+    this.sessions.clear()
   }
 }

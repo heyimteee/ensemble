@@ -8514,10 +8514,7 @@ export class EnsembleV2Service {
    * The parent still settles only after every child mapped to that turn ends.
    */
   private async releaseNativeTurnSettlements(parentSessionID: string): Promise<void> {
-    if (!this.nativeState.hasDeferred()) return
-    for (const { sessionID, turnID } of this.nativeState.deferredEntries()) {
-      const task = this.store.subtask(turnID)
-      if (!task?.native || task.native.sessionID !== parentSessionID) continue
+    for (const { sessionID, turnID } of this.nativeState.deferredEntries(parentSessionID)) {
       await this.flushNativeDeferredSettlement(sessionID, turnID, "child-terminal")
     }
   }
@@ -9674,7 +9671,7 @@ export class EnsembleV2Service {
           this.nativeState.start(sessionID, { owner: "skip" })
         } else if (type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") {
           if (head && !head.turn) this.nativeState.takeInbox(sessionID)
-          this.nativeState.start(sessionID, {})
+          this.nativeState.resetExecution(sessionID)
           if (runID) this.nativeState.markRunSettled(sessionID, runID)
         }
         return
@@ -9821,7 +9818,7 @@ export class EnsembleV2Service {
         // A text event already started this execution, or the host repeated
         // the start. Consume only the head that belongs to the active turn.
         const replace = this.openNativeExecutionTurns(sessionID).length === 0
-        this.nativeState.start(sessionID, { owner: "turn", turnID: active.id, join: !replace })
+        this.nativeState.joinExecution(sessionID, active.id, replace, "turn")
         const head = this.nativeSession(sessionID)?.orderHead()
         if (head?.turn && head.inboxID === active.native?.inboxID) this.nativeState.takeInbox(sessionID)
         return
@@ -9849,7 +9846,6 @@ export class EnsembleV2Service {
       const inboxID = String(data?.inboxID ?? "").trim()
       if (inboxID) {
         const delivery = String(data?.delivery ?? data?.item?.delivery ?? "delivered")
-        this.nativeState.deliver(sessionID, inboxID, delivery)
         const task = this.nativeTurnByInbox(inboxID)
         if (task && isNativeTurn(task) && nativePhaseOpen(task.native?.phase)) {
           await this.updateNativeTurn(task, (next) => {
@@ -9919,7 +9915,7 @@ export class EnsembleV2Service {
 
     if (type === "session.execution.succeeded") {
       if (this.nativeSession(sessionID)?.owner === "skip") {
-        this.nativeState.start(sessionID, {})
+        this.nativeState.resetExecution(sessionID)
         return
       }
       const settled = await this.settleNativeExecution(sessionID, target, "succeeded", at)
@@ -9931,7 +9927,7 @@ export class EnsembleV2Service {
     }
     if (type === "session.execution.failed") {
       if (this.nativeSession(sessionID)?.owner === "skip") {
-        this.nativeState.start(sessionID, {})
+        this.nativeState.resetExecution(sessionID)
         return
       }
       const settled = await this.settleNativeExecution(sessionID, target, "failed", at, data?.error)
@@ -9943,7 +9939,7 @@ export class EnsembleV2Service {
     }
     if (type === "session.execution.interrupted") {
       if (this.nativeSession(sessionID)?.owner === "skip") {
-        this.nativeState.start(sessionID, {})
+        this.nativeState.resetExecution(sessionID)
         return
       }
       // Ticket #217: a user interrupt is cancelled; shutdown/inactivity keep
@@ -10290,11 +10286,6 @@ export class EnsembleV2Service {
     if (!live.message.streaming || !this.store.isStreaming(live.channel, live.message.id)) return
     live.lastSave = now()
     void this.store.checkpointMessage(live.message).catch(() => undefined)
-  }
-
-  /** Cancel a pending trailing checkpoint and drop the live row bookkeeping. */
-  private clearNativeCheckpoint(sessionID: string, turnID: string): void {
-    this.nativeState.clearRow(sessionID, turnID)
   }
 
   /**
@@ -10856,9 +10847,7 @@ export class EnsembleV2Service {
    * without an answer settles `needs_you` as a confirmed interruption.
    */
   private async reconcileNativeWatchdog(at: number): Promise<void> {
-    const watched = this.nativeState.sessionsSnapshot().flatMap(([sessionID, state]) =>
-      [...state.watchdog].map(([turnID, watchdog]) => ({ sessionID, turnID, watchdog })),
-    )
+    const watched = this.nativeState.watchdogEntries()
     if (this.stopped || watched.length === 0) return
     for (const { sessionID, turnID, watchdog } of watched) {
       const task = this.store.subtask(turnID)
@@ -11002,7 +10991,7 @@ export class EnsembleV2Service {
     if (!isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return
     // Cancel the trailing stream checkpoint before any await. Settlement owns
     // the exact final row; a queued partial checkpoint must never overwrite it.
-    this.clearNativeCheckpoint(task.native!.sessionID, task.id)
+    this.nativeState.clearRow(task.native!.sessionID, task.id)
     const state = this.nativeTextState(task) ?? {}
     let text = ""
     if (outcome === "succeeded") {
@@ -11161,7 +11150,7 @@ export class EnsembleV2Service {
   }
 
   private async markNativeInterrupted(task: Subtask, reason?: string): Promise<void> {
-    this.clearNativeCheckpoint(task.native!.sessionID, task.id)
+    this.nativeState.clearRow(task.native!.sessionID, task.id)
     const target = this.nativeIngestTarget(task.native!.sessionID, { requireMode: false })
     const at = now()
     if (target) {
