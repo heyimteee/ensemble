@@ -8,7 +8,8 @@
 - [v2 product specification #17](https://github.com/heyimteee/ensemble/issues/17): workspace group chat, subtasks, leader routing, and native-session drill-down
 - [v2 implementation tickets #18–#29](https://github.com/heyimteee/ensemble/issues): independently verifiable slices with blockers
 - [Historical v1 specification #1](https://github.com/heyimteee/ensemble/issues/1)
-- [OpenCode 2.2.1 compatibility report](compatibility/opencode-2.2.1.md): verified extension behavior, constraints, and gaps
+- [OpenCode host support range](compatibility/opencode-host-range.md): supported CLI releases, peer range, runtime warning, and CLI-to-API mapping
+- [OpenCode 2.2.1 compatibility report](compatibility/opencode-2.2.1.md): historical extension behavior, constraints, and gaps
 
 GitHub Issues are the authoritative location for the specification and tickets; avoid maintaining a competing copy of acceptance criteria here. Publishing the plan does not authorize implementation. Start with compatibility ticket #2 and only begin a ticket when its blockers are complete.
 
@@ -34,6 +35,7 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 - [Accessibility audit](verification/2026-11-12-ticket-259.md): contrast matrix for dark/light/custom themes, non-color Work status, keyboard-only reachability, reduced-motion/`NO_COLOR`/ASCII fallbacks, and the ASCII glyph fix
 - [Terminal accessibility checklist](verification/terminal-accessibility-checklist.md): manual screen-reader, high-contrast, font-scaling, reduced-motion, ASCII, keyboard-only, and host-limit checks
+- [OpenCode peer compatibility matrix](verification/2026-11-12-ticket-257.md): supported 2.2.6/2.2.7 hosts, peer range, runtime warning, and local verify/probe evidence
 - [Vera regression and cutover verification](verification/2026-11-11-ticket-241.md): unset-store default-on restart, one leader turn with explicit delegation plus multi-mention routing without duplicates, no completion bounce, exact generated roster table, one-card-per-row size matrix, rollback/restore durability, and the measured AGENTS block delta
 - [Native-first default on and rollback](verification/2026-11-11-ticket-240.md): persisted default, explicit off/shadow, tool-surface rollback, global commands, restart requirement, and the passing live matrix
 - [Contract v6 and team roster](verification/2026-11-11-ticket-238.md): native-first rules, generated roster table, content-aware reconciliation, refresh triggers, and the measured prompt delta
