@@ -90,6 +90,28 @@ test("ticket238: a roster change at the same version rewrites only the block", (
   assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, changed), false)
 })
 
+test("ticket253: a contract text change at the same version rewrites only the block", () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-contract-"))
+  const block = ensembleBlock()
+  writeFileSync(join(directory, "AGENTS.md"), `${block}\n\n# Project\n\nKeep me.\n`)
+  writeInitMetadata(directory, ENSEMBLE_BLOCK_VERSION)
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, block), false, "matching content is stable")
+
+  const changed = block.replace("One synthesis per command", "One synthesis per command, always")
+  assert.notEqual(changed, block)
+  assert.equal(
+    reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, changed),
+    true,
+    "contract text, not only the version or roster, decides staleness",
+  )
+  const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
+  assert.ok(content.includes("One synthesis per command, always"))
+  assert.doesNotMatch(content, /One synthesis per command:/)
+  assert.equal(stripEnsembleBlock(content).trim(), "# Project\n\nKeep me.")
+  assert.equal(readInitMetadata(directory).version, ENSEMBLE_BLOCK_VERSION)
+  assert.equal(reconcileEnsembleInstructions(directory, ENSEMBLE_BLOCK_VERSION, changed), false)
+})
+
 test("ticket159: a stale block refreshes without metadata, and a newer block is never downgraded", () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-refresh-"))
   writeFileSync(join(directory, "AGENTS.md"), "<!-- ensemble:start v2 -->\nOLD\n<!-- ensemble:end -->\n")
