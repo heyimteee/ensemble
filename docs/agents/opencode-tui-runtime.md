@@ -88,11 +88,17 @@ modes, workspace scope, and window budgets;
 and trade-offs are recorded in [ADR 0006](../adr/0006-three-pane-workspace-shell.md).
 
 - The root row is Rail | Chat | Work. `workspacePaneWidths` is the only width
-  function: the rail clamps to 26–34, Work takes a responsive share, and chat
-  receives the remainder with a readable minimum. Breakpoints are ≥118
-  (three panes), 96–117 (three panes, compact Work), and <96 (right drawer).
-  `workPaneBodyHeight` is the matching body-height helper. Do not recompute
-  either number in a consumer or test; the size matrix reads these helpers.
+  function: the rail clamps to 26–34, Work takes a responsive share capped at
+  53 columns, and chat receives the remainder with a readable minimum. The
+  53-column cap is the card-mode floor (49 content columns), so a very wide
+  terminal gives the reclaimed width to the chat instead of a second
+  transcript. Breakpoints are ≥118 (three panes), 96–117 (three panes,
+  compact Work), and <96 (right drawer). `workPaneBodyHeight` is the matching
+  body-height helper; `workPaneHeaderForWidth` drops the done segment only
+  when the full Work header would truncate and the compact form fits, keeping
+  the view, group/active counts, and page visible at the cap. Do not
+  recompute either number in a consumer or test; the size matrix reads these
+  helpers.
 - Rail agents group by primary workspace (active, most recent membership,
   Homeless), each appears once, the subline is role only, and `z` or a header
   click toggles a durable collapse group. The Workspaces section is a separate
