@@ -82,7 +82,7 @@ import {
   wizardValidation,
   type WizardDraft,
 } from "./wizard.ts"
-import { CHROME_CLOCK_INTERVAL_MS, EMPTY_MARK, WORK_CLOCK_INTERVAL_MS, isReducedMotion, shouldRunMotion, shouldRunWorkClock } from "./motion.ts"
+import { CHROME_CLOCK_INTERVAL_MS, WORK_CLOCK_INTERVAL_MS, emptyMark, isReducedMotion, shouldRunMotion, shouldRunWorkClock } from "./motion.ts"
 import { createTideAssignments, createTideFreezeState, pruneTideAssignments, pruneTideFreezes, retainTideFreezes, tideVariantFor } from "./tide.ts"
 import {
   TRANSCRIPT_EMPHASIS_MS,
@@ -189,13 +189,13 @@ import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"
 import { createStreamCoalescer } from "../stream-coalescer.ts"
 import { applyWorkActivity, clearWorkActivitiesForSession, isWorkActivity, pruneWorkActivities, workActivityLabel, type WorkActivity } from "../work-activity.ts"
 import {
-  NEEDS_YOU_MARK,
   TRANSCRIPT_WINDOW,
   activityStateForTask,
   activitySummary,
   hasActiveWork,
   isNeedsYouTask,
   mergeStreamingActivity,
+  needsYouMark,
   pendingWorkLabel,
   splitActivityGroups,
   splitLiveFinalized,
@@ -1727,7 +1727,7 @@ export function EnsembleV2App() {
     const tasks = activeTasks()
     const now = Date.now()
     const previous = completionMap()
-    const next = accumulateCompletions(previous, tasks, (task) => agentName(snapshot, task.assigneeID), now)
+    const next = accumulateCompletions(previous, tasks, (task) => agentName(snapshot, task.assigneeID), now, undefined, process.env)
     if (next !== previous) setCompletionMap(next)
   })
   // Ticket #122 one-shot transcript feedback: a group message that was
@@ -7401,7 +7401,7 @@ export function EnsembleV2App() {
                   <box flexDirection="column" padding={1} flexGrow={1}>
                     <text fg={colors.accent} bg={colors.bg} width="100%" truncate>No currently opened session</text>
                     <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">Select an agent for a direct chat or a workspace for the group chat. Use j/k then Enter.</text>
-                    <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{EMPTY_MARK}</text>
+                    <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{emptyMark(process.env)}</text>
                   </box>
                 }>
                     <>
@@ -7409,7 +7409,7 @@ export function EnsembleV2App() {
                         <box flexDirection="column" padding={1} flexGrow={1}>
                           <text fg={colors.accent} bg={colors.bg} width="100%" truncate>{surface()?.kind === "agent" ? `Direct chat with ${surfaceAgent()?.name ?? "agent"}` : "Group chat"}</text>
                           <text fg={colors.muted} bg={colors.bg} width="100%" wrapMode="word">{surface()?.kind === "agent" ? dmEmptyDetail() : "Say something to your team. $Name mentions an agent; @path references a file. i to compose."}</text>
-                          <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{EMPTY_MARK}</text>
+                          <text fg={colors.faint} bg={colors.bg} width="100%" truncate>{emptyMark(process.env)}</text>
                         </box>
                       }>
                         <box flexGrow={1} minHeight={0} flexDirection="column" width="100%" overflow="hidden">
@@ -7673,7 +7673,7 @@ export function EnsembleV2App() {
                           const terminal = isTerminalWorkStatus(rowStatus)
                           const needsYou = !terminal && isNeedsYouTask(task, pendingApprovalIDs(), nativeBlockedSubtaskIDs())
                           const pending = pendingWork()?.id === task.id ? pendingWork()!.action : null
-                          const glyph = needsYou ? NEEDS_YOU_MARK : workRowFrame(rowStatus, motionFrame(), process.env)
+                          const glyph = needsYou ? needsYouMark(process.env) : workRowFrame(rowStatus, motionFrame(), process.env)
                           return {
                             terminal,
                             selected: workCardsFocused(paneState()) && selectedTask()?.id === task.id,
