@@ -7,9 +7,9 @@
  * cutover end to end without a real model:
  *
  *   seed     create the Vera roster in a real temp workspace, warm the group
- *            binding, and seed a pre-v6 AGENTS.md contract.
+ *            binding, and seed a pre-v7 AGENTS.md contract.
  *   run      assert the host migrated an absent persisted nativeFirst to `on`,
- *            assert the generated v6 roster table, drive one leader native turn
+ *            assert the generated v7 roster table, drive one leader native turn
  *            that explicitly delegates one member and then `$Name`-mentions
  *            several, and prove the legacy rollback/restore path with the real
  *            `nativeFirstCommand` / `toolsCommand` patches. The TUI key handler
@@ -71,8 +71,8 @@ const FLOW_TICKET_THREE = "fake-vera-flows:ticket=three;mode=refuse;dispatch=sta
 const FLOW_TICKET_FOUR = "fake-vera-flows:ticket=four;mode=route;dispatch=start;workers=Phoenix;mentions=Clark"
 const PROJECT_LINE = "Keep this project-owned line."
 const STALE_BLOCK = `<!-- ensemble:start v5 -->\nSTALE V5 CONTRACT\n<!-- ensemble:end -->\n\n# Project-owned\n\n${PROJECT_LINE}\n`
-const V6_START = "<!-- ensemble:start v6 -->"
-const V6_END = "<!-- ensemble:end -->"
+const V7_START = "<!-- ensemble:start v7 -->"
+const BLOCK_END = "<!-- ensemble:end -->"
 
 /**
  * Fixture identities are fixed strings, never model-authored. The creation
@@ -337,9 +337,9 @@ function readAgents(workspaceDir) {
 
 function ensembleBlockText(content) {
   const start = content.indexOf("<!-- ensemble:start")
-  const end = content.indexOf(V6_END)
+  const end = content.indexOf(BLOCK_END)
   if (start < 0 || end < 0 || end < start) return undefined
-  return content.slice(start, end + V6_END.length)
+  return content.slice(start, end + BLOCK_END.length)
 }
 
 function rosterTableFrom(content) {
@@ -401,7 +401,7 @@ function saveState() {
   writeFileSync(stateFile, `${JSON.stringify(stateFileData, null, 2)}\n`)
 }
 
-/** Seed one real temp workspace and the pre-v6 contract. */
+/** Seed one real temp workspace and the pre-v7 contract. */
 async function seed() {
   const workspaceDir = join(project, "vera-workspace")
   mkdirSync(workspaceDir, { recursive: true })
@@ -474,8 +474,8 @@ async function seed() {
   }
   assert("seed creates the flows group binding", Boolean(flowsGroupBinding?.sessionID))
 
-  // A pre-v6 initialized workspace: the next service reconciliation must
-  // rewrite exactly this stale block to v6 with the generated roster.
+  // A pre-v7 initialized workspace: the next service reconciliation must
+  // rewrite exactly this stale block to v7 with the generated roster.
   mkdirSync(join(workspaceDir, ".ensemble"), { recursive: true })
   writeFileSync(join(workspaceDir, ".ensemble", "init.json"), `${JSON.stringify({ version: 5 }, null, 2)}\n`)
   writeFileSync(join(workspaceDir, "AGENTS.md"), STALE_BLOCK)
@@ -545,12 +545,12 @@ async function run() {
   )
 
   // Wait for the restart reconciliation to rewrite the stale v5 block.
-  await waitFor("the v6 AGENTS.md contract", async () => readAgents(saved.workspaceDir).includes(V6_START), 30_000)
+  await waitFor("the v7 AGENTS.md contract", async () => readAgents(saved.workspaceDir).includes(V7_START), 30_000)
   const content = readAgents(saved.workspaceDir)
   const block = ensembleBlockText(content)
   const table = rosterTableFrom(content)
   const expected = expectedRosterTable(saved)
-  assert("the workspace AGENTS.md carries one v6 block", Boolean(block) && (content.match(/<!-- ensemble:start/g) ?? []).length === 1)
+  assert("the workspace AGENTS.md carries one v7 block", Boolean(block) && (content.match(/<!-- ensemble:start/g) ?? []).length === 1)
   assert("the generated roster table is exact", JSON.stringify(table) === JSON.stringify(expected))
   assert(
     "the roster table lists active members leader-first in memberIDs order",
@@ -559,14 +559,17 @@ async function run() {
   assert("the project-owned content outside the block is preserved", content.includes(PROJECT_LINE) && !content.includes("STALE V5 CONTRACT"))
   const genericBlock = block ? withoutRosterSection(block) : undefined
   const tableText = (table ?? []).join("\n")
+  // The #238 fixed 12-member filled v6 block was 5,667 chars / 1,417 tokens.
+  // The v7 contract adds 865 generic chars / 216 tokens, so the same roster is
+  // 6,532 chars / 1,633 tokens. Re-measured against the v7 block.
   metrics.agentsBlock = {
-    version: 6,
+    version: 7,
     block: size(block ?? ""),
     generic: size(genericBlock ?? ""),
     rosterTable: size(tableText),
-    fixedV6Filled12: { chars: 5667, estimatedTokens: 1417 },
-    deltaCharsVsFixedV6Filled12: (block?.length ?? 0) - 5667,
-    deltaTokensVsFixedV6Filled12: Math.ceil((block?.length ?? 0) / 4) - 1417,
+    fixedV7Filled12: { chars: 6532, estimatedTokens: 1633 },
+    deltaCharsVsFixedV7Filled12: (block?.length ?? 0) - 6532,
+    deltaTokensVsFixedV7Filled12: Math.ceil((block?.length ?? 0) / 4) - 1633,
   }
 
   // The native surface deliberately omits the explicit migration tools. Use
@@ -1126,7 +1129,7 @@ async function restart() {
     "restart keeps the roster order and names",
     JSON.stringify(rosterMemberNames(table)) === JSON.stringify(expectedRosterNames(saved)),
   )
-  assert("restart keeps exactly one v6 block", (content.match(/<!-- ensemble:start/g) ?? []).length === 1 && content.includes(V6_START))
+  assert("restart keeps exactly one v7 block", (content.match(/<!-- ensemble:start/g) ?? []).length === 1 && content.includes(V7_START))
   const messages = channelMessages(snapshot, saved.workspaceChannel)
   const parentRows = messages.filter((message) => message.taskID === saved.parentTaskID && message.author === "agent")
   assert("restart keeps one final parent row", parentRows.length === 1 && parentRows[0].id === saved.parentResultMessageID)

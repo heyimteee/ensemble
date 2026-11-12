@@ -1,6 +1,13 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { benchmarkReport, benchmarkSummary, schemaText, synthesisBenchmark, toolSurfaceSize } from "./prompt-benchmark.ts"
+import {
+  benchmarkReport,
+  benchmarkSummary,
+  promptWithinV7Baseline,
+  schemaText,
+  synthesisBenchmark,
+  toolSurfaceSize,
+} from "./prompt-benchmark.ts"
 import { TOOL_SURFACE_TOOL_NAMES } from "./tool-surface.ts"
 
 test("ticket225: prompt-size regression gate records tool schema, identity, context, calls, and round-trips", () => {
@@ -19,12 +26,32 @@ test("ticket225: prompt-size regression gate records tool schema, identity, cont
   // The bounded last-20 transcript is part of the delegated context; the
   // roster/budget block around it stays compact.
   assert.ok(report.after.turnContext.chars < 3200, `turn context stayed bounded: ${report.after.turnContext.chars}`)
-  assert.ok(report.after.totalPrompt.estimatedTokens < report.before.totalPrompt.estimatedTokens * 0.6, benchmarkSummary(report))
-  assert.ok(report.reduction.totalPromptPct >= 40, benchmarkSummary(report))
+  // The v7 terminal-turn contract deliberately adds 865 generic chars
+  // (~216 tokens) over v6, so the measured v7-vs-legacy reduction is 33.7%.
+  // 33% is the product floor; `promptWithinV7Baseline` below is the absolute
+  // regression ratchet that fails on contract growth instead of relying on
+  // this 0.7pp ratio margin.
+  assert.ok(report.after.totalPrompt.estimatedTokens < report.before.totalPrompt.estimatedTokens * 0.67, benchmarkSummary(report))
+  assert.ok(report.reduction.totalPromptPct >= 33, benchmarkSummary(report))
+  assert.ok(promptWithinV7Baseline(report), benchmarkSummary(report))
   assert.equal(report.before.toolCalls, 1)
   assert.equal(report.after.toolCalls, 0)
   assert.equal(report.before.modelRoundTrips, 2)
   assert.equal(report.after.modelRoundTrips, 1)
+})
+
+test("ticket253: the v7 prompt baseline ratchet fails on contract growth", () => {
+  const report = benchmarkReport()
+  assert.equal(promptWithinV7Baseline(report), true, benchmarkSummary(report))
+  const copy = (): any => JSON.parse(JSON.stringify(report))
+  const small = copy()
+  small.after.identity.chars += 100
+  small.after.totalPrompt.chars += 100
+  assert.equal(promptWithinV7Baseline(small), true, "a small copy edit stays inside the 2% tolerance")
+  const grown = copy()
+  grown.after.identity.chars += 500
+  grown.after.totalPrompt.chars += 500
+  assert.equal(promptWithinV7Baseline(grown), false, "500 chars of contract growth fails the ratchet")
 })
 
 test("ticket249: a synthesis prompt is compact and drops the recent transcript", () => {

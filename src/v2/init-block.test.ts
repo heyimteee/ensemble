@@ -13,6 +13,11 @@ const roster = {
   },
 }
 
+/** Collapse rendered line breaks so a copy assertion is one exact sentence. */
+function prose(text: string): string {
+  return text.replace(/\s+/g, " ")
+}
+
 test("agent onboarding includes the persona and the full Ensemble contract", () => {
   const prompt = onboardingPrompt({ name: "Nova", title: "Frontend Engineer", role: "You own the React frontend." })
   assert.match(prompt, /You are Nova, Frontend Engineer\./)
@@ -36,26 +41,45 @@ test("agent onboarding includes the persona and the full Ensemble contract", () 
   assert.match(prompt, new RegExp(`ensemble:start v${ENSEMBLE_BLOCK_VERSION}`))
 })
 
-test("ticket238: v6 contract describes native-first rules and retires the mandatory handoff", () => {
+test("ticket238: v7 contract keeps the native-first rules and retires the mandatory handoff", () => {
   const block = ensembleBlock()
-  // External contract: the rendered marker names version 6. Other version
+  const contract = prose(block)
+  // External contract: the rendered marker names version 7. Other version
   // checks in this file derive from ENSEMBLE_BLOCK_VERSION.
-  assert.match(block, /ensemble:start v6/)
-  assert.match(block, /final native text is the group message/i)
-  assert.match(block, /\$Name.*routes work/is)
-  assert.match(block, /bare name is a reference only/i)
-  assert.match(block, /`@path` is a workspace file reference/i)
-  assert.match(block, /Code spans, URLs, and paths are literal/)
-  assert.match(block, /Direct conversations are one-to-one/)
-  assert.match(block, /The server owns routing, budgets, and completion/)
-  assert.match(block, /synthesis or review turn is terminal/i)
-  assert.match(block, /ensemble_dispatch/)
-  assert.match(block, /terminal continuation/i)
-  assert.match(block, /until their turn is\s+visible in the conversation/i)
-  assert.match(block, /second completion loop/i)
-  assert.match(block, /migration and\s+rollback tools, not the normal chat path/i)
+  assert.match(block, /ensemble:start v7/)
+  assert.ok(contract.includes("final native text is the group message"))
+  assert.ok(contract.includes("`$Name` routes work to that roster agent: they get a turn and answer in the group."))
+  assert.ok(contract.includes("A bare name is a reference only; it creates no work."))
+  assert.ok(contract.includes("`@path` is a workspace file reference, never an agent or a skill."))
+  assert.ok(contract.includes("Code spans, URLs, and paths are literal"))
+  assert.ok(contract.includes("Direct conversations are one-to-one"))
+  assert.ok(contract.includes("The server owns routing, budgets, and completion."))
+  assert.ok(contract.includes("until their turn is visible in the conversation"))
+  assert.ok(contract.includes("second completion loop"))
+  assert.ok(contract.includes("migration and rollback tools, not the normal chat path"))
   assert.doesNotMatch(block, /Every non-leader turn ends with a handoff/i)
   assert.doesNotMatch(block, /^## Team roster$/m, "the generic identity block carries no roster")
+})
+
+test("ticket253: v7 contract explains root-only synthesis and terminal-turn continuation", () => {
+  const block = ensembleBlock()
+  const contract = prose(block)
+  assert.ok(contract.includes("One synthesis per command: the command root writes it."))
+  assert.ok(contract.includes("Intermediate hops relay their child's result upward"))
+  assert.ok(contract.includes("Synthesis, completion-review, and batch-review turns are terminal."))
+  assert.ok(contract.includes("In a terminal turn `$Name` is only a reference"))
+  assert.ok(
+    contract.includes(
+      "`ensemble_dispatch` from a terminal turn with a title, an instruction, and an assignment batch. It creates a new command root with a fresh group and command budget",
+    ),
+  )
+  assert.ok(contract.includes("One terminal turn starts at most one new command"))
+  assert.ok(contract.includes("a retry returns the existing command and assignments"))
+  assert.ok(
+    contract.includes(
+      "Normal worker, handoff, and peer turns are not terminal: `$Name` there routes work to a different teammate as usual.",
+    ),
+  )
 })
 
 test("ticket238: team roster lists the active leader first, then memberIDs order", () => {

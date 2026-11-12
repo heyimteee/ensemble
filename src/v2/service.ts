@@ -154,6 +154,7 @@ import {
   type ShadowSession,
   type ShadowTurn,
 } from "./native-shadow.ts"
+import { NativeIngestionState, type NativeSessionState } from "./native-state.ts"
 import type {
   Agent,
   Approval,
@@ -349,8 +350,6 @@ const MAINTENANCE_INTERVAL_MS = 1_000
 const CONFIG_DISCOVERY_MS = 1_000
 /** Live-text crash checkpoints; no coordination version or patch is written. */
 const STREAM_CHECKPOINT_MS = 250
-/** Bounded per-session enqueue-order bookkeeping for native attribution. */
-const NATIVE_INBOX_ORDER_LIMIT = 64
 /**
  * Ticket #217: bounded missing-terminal reconciliation. An open native turn
  * with no host event for this long gets at most a few transcript reads; it is
@@ -646,20 +645,13 @@ export class EnsembleV2Service {
    * serializes every durable write.
    */
   private readonly nativeQueues = new Map<string, Promise<void>>()
-  private readonly nativePendingInboxes = new Map<string, string[]>()
-  /** Host enqueue order per session: native turns vs skipped service prompts. */
-  private readonly nativeInboxOrder = new Map<string, Array<{ inboxID: string; turn: boolean }>>()
-  /** Which kind owns the session's current host execution. */
-  private readonly nativeExecutionOwner = new Map<string, "turn" | "skip">()
-  /** Turns answered by the session's current host execution, in answer order. */
-  private readonly nativeExecutionTurns = new Map<string, string[]>()
-  /** Queued turns the host delivered into an already-running execution. */
-  private readonly nativeSteeredInboxes = new Map<string, string[]>()
-  /** Run id whose execution terminal was already observed on this session. */
-  private readonly nativeRunSettled = new Map<string, string>()
-  private readonly nativeActiveTurn = new Map<string, string>()
-  private readonly nativePendingExecutions = new Map<string, number>()
-  private readonly nativeAssistantTurns = new Map<string, string>()
+  /**
+   * Ticket #231: one per-session value owns enqueue order, execution owner,
+   * active turn, steering, text parts, live rows, watchdog, delivery,
+   * assistant-message mapping, and deferred child settlement. Mutations go
+   * through the named transitions; the service only reads the state.
+   */
+  private readonly nativeState = new NativeIngestionState()
   /**
    * Ticket #230: shadow ingestion is in-memory only. It reuses native turn
    * identities and the pure text/router helpers, writes no durable row,
@@ -670,25 +662,6 @@ export class EnsembleV2Service {
   private readonly shadowTurns = new Map<string, ShadowTurn>()
   private readonly shadowComparisons: ShadowComparison[] = []
   private shadowComparisonTotal = 0
-  /** In-memory authoritative text parts per turn; durable only at settle. */
-  private readonly nativeText = new Map<string, NativeTextState>()
-  /** Durable streaming row per turn, so deltas never open a second row. */
-  private readonly nativeRows = new Map<string, { message: Message; channel: string; lastSave: number; checkpointTimer?: ReturnType<typeof setTimeout> }>()
-  /**
-   * Ticket #217: last local receipt and reconciliation count per open native
-   * turn. Local time, not host event time, so clock skew never arms the
-   * watchdog early. In-memory only.
-   */
-  private readonly nativeWatchdog = new Map<string, { lastActivityAt: number; passes: number }>()
-  /** Ticket #217: parent turns held for a live background child, bounded. */
-  private readonly nativeDeferredSettlements = new Map<string, {
-    target: { conversation: BindingConversation; channel: string; agent: Agent; directory?: string }
-    at: number
-    deadline: number
-    timer?: ReturnType<typeof setTimeout>
-  }>()
-  /** Delivery state is informational for now; terminal events settle turns. */
-  private readonly nativeDelivery = new Map<string, string>()
   /**
    * Ticket #218: reconciliation is a bounded start/reconnect/adoption pass,
    * plus the #217 watchdog. The queue keeps it ordered with ingestion events;
@@ -865,26 +838,13 @@ export class EnsembleV2Service {
       this.streamTimer = undefined
       this.pendingStreams.clear()
       this.workActivity.dispose()
-      for (const live of this.nativeRows.values()) {
-        if (live.checkpointTimer !== undefined) clearTimeout(live.checkpointTimer)
-      }
-      this.nativeRows.clear()
-      this.nativeInboxOrder.clear()
-      this.nativeExecutionOwner.clear()
-      this.nativeExecutionTurns.clear()
-      this.nativeSteeredInboxes.clear()
-      this.nativeRunSettled.clear()
-      this.nativeWatchdog.clear()
+      this.nativeState.clear()
       this.nativeReconcileRuns.clear()
       this.clearShadowState()
       this.nativeLocationAttached = false
       this.nativeReconcilePending = 0
       this.nativeReconcileFailures = 0
       this.setNativeSync("live")
-      for (const pending of this.nativeDeferredSettlements.values()) {
-        if (pending.timer !== undefined) clearTimeout(pending.timer)
-      }
-      this.nativeDeferredSettlements.clear()
       this.toolCalls.clear()
       this.nativeSubagentParents.clear()
       this.nativeSubagentActive.clear()
@@ -2087,14 +2047,7 @@ export class EnsembleV2Service {
         sync: { ...this.nativeSync },
         watchdog: {
           maxPasses: this.nativeTurnWatchdogMaxPasses,
-          turns: Object.fromEntries([...this.nativeWatchdog].map(([turnID, state]) => [
-            turnID,
-            {
-              passes: state.passes,
-              lastActivityAt: state.lastActivityAt,
-              ...(this.nativeDeferredSettlements.has(turnID) ? { held: true } : {}),
-            },
-          ])),
+          turns: this.nativeState.watchdogDiagnostics(),
         },
         // Ticket #230: bounded, content-free shadow comparison rows. IDs,
         // phases, lengths, digests, and route counts only.
@@ -8561,11 +8514,8 @@ export class EnsembleV2Service {
    * The parent still settles only after every child mapped to that turn ends.
    */
   private async releaseNativeTurnSettlements(parentSessionID: string): Promise<void> {
-    if (this.nativeDeferredSettlements.size === 0) return
-    for (const turnID of [...this.nativeDeferredSettlements.keys()]) {
-      const task = this.store.subtask(turnID)
-      if (!task?.native || task.native.sessionID !== parentSessionID) continue
-      await this.flushNativeDeferredSettlement(turnID, "child-terminal")
+    for (const { sessionID, turnID } of this.nativeState.deferredEntries(parentSessionID)) {
+      await this.flushNativeDeferredSettlement(sessionID, turnID, "child-terminal")
     }
   }
 
@@ -9605,70 +9555,30 @@ export class EnsembleV2Service {
     )
   }
 
-  private nativeTextState(turnID: string): NativeTextState {
-    let state = this.nativeText.get(turnID)
-    if (!state) {
-      state = {}
-      this.nativeText.set(turnID, state)
-    }
-    return state
+  /** The one per-session value, read-only at call sites. */
+  private nativeSession(sessionID: string): NativeSessionState | undefined {
+    return this.nativeState.peek(sessionID)
   }
 
-  private nativeDisplayText(turnID: string): string {
-    return nativeTextForParts(this.nativeText.get(turnID) ?? {})
+  private nativeTextState(task: Subtask): NativeTextState | undefined {
+    const sessionID = task.native?.sessionID
+    return sessionID ? this.nativeState.textState(sessionID, task.id) : undefined
   }
 
-  private consumeNativeInbox(sessionID: string, inboxID: string): void {
-    const pending = this.nativePendingInboxes.get(sessionID)
-    if (!pending) return
-    const index = pending.indexOf(inboxID)
-    if (index >= 0) pending.splice(0, index + 1)
-    if (pending.length === 0) this.nativePendingInboxes.delete(sessionID)
+  private nativeDisplayText(task: Subtask): string {
+    const sessionID = task.native?.sessionID
+    return sessionID ? this.nativeState.displayText(sessionID, task.id) : ""
   }
 
-  /** Remember an enqueued prompt's kind in host order, bounded per session. */
-  private rememberNativeInbox(sessionID: string, inboxID: string, turn: boolean): void {
-    const order = this.nativeInboxOrder.get(sessionID) ?? []
-    if (!order.some((item) => item.inboxID === inboxID)) order.push({ inboxID, turn })
-    while (order.length > NATIVE_INBOX_ORDER_LIMIT) order.shift()
-    this.nativeInboxOrder.set(sessionID, order)
-  }
-
-  /** Drop one inbox that settled or cancelled before an execution claimed it. */
-  private forgetNativeInbox(sessionID: string, inboxID: string): void {
-    const order = this.nativeInboxOrder.get(sessionID)
-    if (!order) return
-    const index = order.findIndex((item) => item.inboxID === inboxID)
-    if (index >= 0) order.splice(index, 1)
-    if (order.length === 0) this.nativeInboxOrder.delete(sessionID)
-  }
-
-  /** Claim the next execution's inbox in host order. */
-  private takeNativeInbox(sessionID: string): { inboxID: string; turn: boolean } | undefined {
-    const order = this.nativeInboxOrder.get(sessionID)
-    if (!order || order.length === 0) return undefined
-    const item = order.shift()!
-    if (order.length === 0) this.nativeInboxOrder.delete(sessionID)
-    return item
-  }
-
-  /** Record that a turn is answering inside the session's current execution. */
-  private rememberNativeExecutionTurn(sessionID: string, turnID: string): void {
-    const turns = this.nativeExecutionTurns.get(sessionID) ?? []
-    if (!turns.includes(turnID)) turns.push(turnID)
-    this.nativeExecutionTurns.set(sessionID, turns)
-  }
-
-  /** Start a new host execution, replacing settled bookkeeping. */
-  private beginNativeExecution(sessionID: string, turnID?: string): void {
-    this.nativeExecutionTurns.set(sessionID, turnID ? [turnID] : [])
-    this.nativeSteeredInboxes.delete(sessionID)
+  /** Add a turn to the current execution, or begin one when none is open. */
+  private joinNativeExecution(sessionID: string, task: Subtask): void {
+    this.nativeState.joinExecution(sessionID, task.id, this.openNativeExecutionTurns(sessionID).length === 0)
   }
 
   /** Open turns participating in the current execution, in answer order. */
   private openNativeExecutionTurns(sessionID: string): Subtask[] {
     const turns: Subtask[] = []
-    for (const turnID of this.nativeExecutionTurns.get(sessionID) ?? []) {
+    for (const turnID of this.nativeSession(sessionID)?.executionTurns ?? []) {
       const task = this.store.subtask(turnID)
       if (task && isNativeTurn(task) && nativePhaseOpen(task.native?.phase)) turns.push(task)
     }
@@ -9678,44 +9588,6 @@ export class EnsembleV2Service {
   /** The turn currently answering in the session's execution. */
   private nativeExecutionCurrentTurn(sessionID: string): Subtask | undefined {
     return this.openNativeExecutionTurns(sessionID).at(-1)
-  }
-
-  /**
-   * Remember a queued turn the host delivered into a running execution. The
-   * next new assistant message after that delivery answers this inbox, not the
-   * turn that opened the execution (ticket #229).
-   */
-  private rememberNativeSteeredInbox(sessionID: string, inboxID: string): void {
-    const inboxes = this.nativeSteeredInboxes.get(sessionID) ?? []
-    if (!inboxes.includes(inboxID)) inboxes.push(inboxID)
-    this.nativeSteeredInboxes.set(sessionID, inboxes)
-  }
-
-  private takeNativeSteeredInbox(sessionID: string): string | undefined {
-    const inboxes = this.nativeSteeredInboxes.get(sessionID)
-    if (!inboxes || inboxes.length === 0) return undefined
-    const inboxID = inboxes.shift()!
-    if (inboxes.length === 0) this.nativeSteeredInboxes.delete(sessionID)
-    return inboxID
-  }
-
-  /** Drop a settled turn from the execution and steered bookkeeping. */
-  private forgetNativeExecutionTurn(task: Subtask): void {
-    const sessionID = task.native?.sessionID
-    if (!sessionID) return
-    const turns = this.nativeExecutionTurns.get(sessionID)
-    if (turns) {
-      const next = turns.filter((turnID) => turnID !== task.id)
-      if (next.length === 0) this.nativeExecutionTurns.delete(sessionID)
-      else this.nativeExecutionTurns.set(sessionID, next)
-    }
-    const inboxID = task.native?.inboxID
-    const steered = this.nativeSteeredInboxes.get(sessionID)
-    if (inboxID && steered) {
-      const next = steered.filter((candidate) => candidate !== inboxID)
-      if (next.length === 0) this.nativeSteeredInboxes.delete(sessionID)
-      else this.nativeSteeredInboxes.set(sessionID, next)
-    }
   }
 
   /**
@@ -9733,8 +9605,7 @@ export class EnsembleV2Service {
     error?: any,
   ): Promise<boolean> {
     const participants = this.openNativeExecutionTurns(sessionID)
-    this.nativeExecutionTurns.delete(sessionID)
-    this.nativeSteeredInboxes.delete(sessionID)
+    this.nativeState.settle(sessionID, { execution: true })
     if (participants.length === 0) return false
     for (const task of participants) {
       if (outcome === "succeeded") await this.settleOrDeferNativeTurn(task, target, outcome, at, error)
@@ -9788,22 +9659,20 @@ export class EnsembleV2Service {
       || type === "session.text.started"
       || type === "session.text.delta"
       || type === "session.text.ended"
-    if (runOwnsSession && runEvent && this.nativeRunSettled.get(sessionID) !== runID) {
-      const owner = this.nativeExecutionOwner.get(sessionID)
+    if (runOwnsSession && runEvent && this.nativeSession(sessionID)?.runSettled !== runID) {
+      const owner = this.nativeSession(sessionID)?.owner
       // A native turn that was already active when the run appeared keeps the
       // execution; otherwise every event before the run's terminal belongs to
       // the run, even when a user turn is queued behind it.
       if (owner !== "turn") {
-        const head = this.nativeInboxOrder.get(sessionID)?.[0]
+        const head = this.nativeSession(sessionID)?.orderHead()
         if (type === "session.execution.started") {
-          if (head && !head.turn) this.takeNativeInbox(sessionID)
-          this.beginNativeExecution(sessionID)
-          this.nativeExecutionOwner.set(sessionID, "skip")
+          if (head && !head.turn) this.nativeState.takeInbox(sessionID)
+          this.nativeState.start(sessionID, { owner: "skip" })
         } else if (type === "session.execution.succeeded" || type === "session.execution.failed" || type === "session.execution.interrupted") {
-          if (head && !head.turn) this.takeNativeInbox(sessionID)
-          this.beginNativeExecution(sessionID)
-          this.nativeExecutionOwner.delete(sessionID)
-          this.nativeRunSettled.set(sessionID, runID)
+          if (head && !head.turn) this.nativeState.takeInbox(sessionID)
+          this.nativeState.resetExecution(sessionID)
+          if (runID) this.nativeState.markRunSettled(sessionID, runID)
         }
         return
       }
@@ -9817,16 +9686,13 @@ export class EnsembleV2Service {
       const skipped = (reason: string) => {
         // An enqueue that arrives after a run-owned execution already started
         // must not leave a stale order entry; the run's events are ignored.
-        if (!(runOwnsSession && this.nativeExecutionOwner.get(sessionID) === "skip")) {
-          this.rememberNativeInbox(sessionID, inboxID, false)
+        if (!(runOwnsSession && this.nativeSession(sessionID)?.owner === "skip")) {
+          this.nativeState.enqueue(sessionID, { inboxID, turn: false })
         }
-        const waiting = this.nativePendingExecutions.get(sessionID) ?? 0
-        if (waiting > 0) {
-          this.nativePendingExecutions.set(sessionID, waiting - 1)
+        if (this.nativeState.takePendingExecution(sessionID)) {
           // The execution.started event arrived before this enqueue; it belongs
           // to the skipped prompt, not to a user turn behind it.
-          this.beginNativeExecution(sessionID)
-          this.nativeExecutionOwner.set(sessionID, "skip")
+          this.nativeState.start(sessionID, { owner: "skip" })
         }
         this.logger?.event("debug", "native", "native.turn.skipped", { sessionID, inboxID, ...(reason ? { reason } : {}) })
       }
@@ -9906,11 +9772,8 @@ export class EnsembleV2Service {
         // A duplicate enqueue for a settled turn is harmless.
         return
       }
-      this.touchNativeWatchdog(task.id)
-      this.rememberNativeInbox(sessionID, inboxID, true)
-      const pending = this.nativePendingInboxes.get(sessionID) ?? []
-      if (!pending.includes(inboxID)) pending.push(inboxID)
-      this.nativePendingInboxes.set(sessionID, pending)
+      this.nativeState.touchWatchdog(sessionID, task.id, now())
+      this.nativeState.enqueue(sessionID, { inboxID, turn: true, pending: true })
       if (internal && managedMessageID) {
         const row = this.store.cloneMessage(target.channel, managedMessageID)
         if (row) {
@@ -9942,11 +9805,8 @@ export class EnsembleV2Service {
         }
         await this.routeNativeMentions(target, task, String(payload.text ?? ""), at)
       }
-      const waiting = this.nativePendingExecutions.get(sessionID) ?? 0
-      if (waiting > 0 && !this.nativeActiveTurn.has(sessionID)) {
-        this.nativePendingExecutions.set(sessionID, waiting - 1)
-        this.beginNativeExecution(sessionID, task.id)
-        this.nativeExecutionOwner.set(sessionID, "turn")
+      if (!this.nativeSession(sessionID)?.activeTurn && this.nativeState.takePendingExecution(sessionID)) {
+        this.nativeState.start(sessionID, { owner: "turn", turnID: task.id })
         await this.startNativeTurn(sessionID, task, at)
       }
       return
@@ -9957,30 +9817,27 @@ export class EnsembleV2Service {
       if (active) {
         // A text event already started this execution, or the host repeated
         // the start. Consume only the head that belongs to the active turn.
-        this.nativeExecutionOwner.set(sessionID, "turn")
-        if (this.openNativeExecutionTurns(sessionID).length === 0) this.beginNativeExecution(sessionID, active.id)
-        else this.rememberNativeExecutionTurn(sessionID, active.id)
-        const head = this.nativeInboxOrder.get(sessionID)?.[0]
-        if (head?.turn && head.inboxID === active.native?.inboxID) this.takeNativeInbox(sessionID)
+        const replace = this.openNativeExecutionTurns(sessionID).length === 0
+        this.nativeState.joinExecution(sessionID, active.id, replace, "turn")
+        const head = this.nativeSession(sessionID)?.orderHead()
+        if (head?.turn && head.inboxID === active.native?.inboxID) this.nativeState.takeInbox(sessionID)
         return
       }
-      const next = this.takeNativeInbox(sessionID)
+      const next = this.nativeState.takeInbox(sessionID)
       if (next) {
-        this.nativeExecutionOwner.set(sessionID, next.turn ? "turn" : "skip")
         if (!next.turn) {
-          this.beginNativeExecution(sessionID)
+          this.nativeState.start(sessionID, { owner: "skip" })
           return
         }
         const task = this.store.subtask(nativeTurnID(sessionID, next.inboxID))
         if (task) {
-          this.beginNativeExecution(sessionID, task.id)
+          this.nativeState.start(sessionID, { owner: "turn", turnID: task.id })
           await this.startNativeTurn(sessionID, task, at)
           return
         }
       }
       // Reordered: no enqueue seen yet. The next enqueue consumes this start.
-      this.beginNativeExecution(sessionID)
-      this.nativeExecutionOwner.set(sessionID, "turn")
+      this.nativeState.start(sessionID, { owner: "turn" })
       await this.startNativeTurn(sessionID, undefined, at)
       return
     }
@@ -9989,7 +9846,6 @@ export class EnsembleV2Service {
       const inboxID = String(data?.inboxID ?? "").trim()
       if (inboxID) {
         const delivery = String(data?.delivery ?? data?.item?.delivery ?? "delivered")
-        this.nativeDelivery.set(inboxID, delivery)
         const task = this.nativeTurnByInbox(inboxID)
         if (task && isNativeTurn(task) && nativePhaseOpen(task.native?.phase)) {
           await this.updateNativeTurn(task, (next) => {
@@ -10007,10 +9863,10 @@ export class EnsembleV2Service {
             const participants = this.openNativeExecutionTurns(sessionID)
             if (
               participants.length > 0
-              && this.nativeExecutionOwner.get(sessionID) === "turn"
+              && this.nativeSession(sessionID)?.owner === "turn"
               && !participants.some((participant) => participant.id === task.id)
             ) {
-              this.rememberNativeSteeredInbox(sessionID, inboxID)
+              this.nativeState.steer(sessionID, inboxID)
               this.logger?.event("info", "native", "native.turn.steered", {
                 sessionID,
                 turnID: task.id,
@@ -10033,21 +9889,21 @@ export class EnsembleV2Service {
         ? this.nativeTurnByInbox(inboxID)
         : this.nativeActiveTurnTurn(sessionID)
       if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) {
-        if (inboxID) this.forgetNativeInbox(sessionID, inboxID)
+        if (inboxID) this.nativeState.forgetInbox(sessionID, inboxID)
         return
       }
-      if (inboxID) this.consumeNativeInbox(sessionID, inboxID)
+      if (inboxID) this.nativeState.consume(sessionID, inboxID)
       await this.settleNativeTurn(task, target, "cancelled", at)
       return
     }
 
     if (type === "session.retry.scheduled") {
-      if (this.nativeExecutionOwner.get(sessionID) === "skip") return
+      if (this.nativeSession(sessionID)?.owner === "skip") return
       const task = this.nativeExecutionCurrentTurn(sessionID) ?? this.nativeTerminalTurn(sessionID)
       if (!task) return
       const row = await this.ensureNativeAgentRow(task, target, at)
       if (row) this.queueNativeStream(task)
-      this.touchNativeWatchdog(task.id)
+      this.nativeState.touchWatchdog(sessionID, task.id, now())
       await this.updateNativeTurn(task, (next) => {
         next.native = { ...next.native!, phase: "retrying" }
         appendNativeTurnEvent(next.native, { type: "session.retry.scheduled", at, phase: "retrying" })
@@ -10058,9 +9914,8 @@ export class EnsembleV2Service {
     }
 
     if (type === "session.execution.succeeded") {
-      if (this.nativeExecutionOwner.get(sessionID) === "skip") {
-        this.nativeExecutionOwner.delete(sessionID)
-        this.beginNativeExecution(sessionID)
+      if (this.nativeSession(sessionID)?.owner === "skip") {
+        this.nativeState.resetExecution(sessionID)
         return
       }
       const settled = await this.settleNativeExecution(sessionID, target, "succeeded", at)
@@ -10071,9 +9926,8 @@ export class EnsembleV2Service {
       return
     }
     if (type === "session.execution.failed") {
-      if (this.nativeExecutionOwner.get(sessionID) === "skip") {
-        this.nativeExecutionOwner.delete(sessionID)
-        this.beginNativeExecution(sessionID)
+      if (this.nativeSession(sessionID)?.owner === "skip") {
+        this.nativeState.resetExecution(sessionID)
         return
       }
       const settled = await this.settleNativeExecution(sessionID, target, "failed", at, data?.error)
@@ -10084,9 +9938,8 @@ export class EnsembleV2Service {
       return
     }
     if (type === "session.execution.interrupted") {
-      if (this.nativeExecutionOwner.get(sessionID) === "skip") {
-        this.nativeExecutionOwner.delete(sessionID)
-        this.beginNativeExecution(sessionID)
+      if (this.nativeSession(sessionID)?.owner === "skip") {
+        this.nativeState.resetExecution(sessionID)
         return
       }
       // Ticket #217: a user interrupt is cancelled; shutdown/inactivity keep
@@ -10123,17 +9976,16 @@ export class EnsembleV2Service {
       if (!assistantID) return
       const task = await this.nativeTextTurn(sessionID, assistantID, at)
       if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return
-      this.touchNativeWatchdog(task.id)
+      this.nativeState.touchWatchdog(sessionID, task.id, now())
       const ordinal = Math.max(0, Math.floor(Number(data?.ordinal ?? 0) || 0))
-      const state = this.nativeTextState(task.id)
-      const part = (state[assistantID] ??= { started: [], deltas: {}, ended: {} })
-      if (!part.started.includes(ordinal)) part.started.push(ordinal)
-      if (type === "session.text.delta") {
-        part.deltas[ordinal] = (part.deltas[ordinal] ?? "") + String(data?.delta ?? "")
-      } else if (type === "session.text.ended") {
-        part.ended[ordinal] = String(data?.text ?? "")
-      }
-      this.nativeAssistantTurns.set(assistantID, task.id)
+      this.nativeState.answer(sessionID, {
+        turnID: task.id,
+        assistantID,
+        ordinal,
+        type: type === "session.text.delta" ? "delta" : type === "session.text.ended" ? "ended" : "started",
+        ...(type === "session.text.delta" ? { text: String(data?.delta ?? "") } : {}),
+        ...(type === "session.text.ended" ? { text: String(data?.text ?? "") } : {}),
+      })
       let current = task
       if (!(current.native?.assistantMessageIDs ?? []).includes(assistantID)) {
         current = await this.updateNativeTurn(current, (next) => {
@@ -10157,10 +10009,10 @@ export class EnsembleV2Service {
    * dropped here before any fallback (ticket #215 review).
    */
   private nativeActiveTurnTurn(sessionID: string): Subtask | undefined {
-    const id = this.nativeActiveTurn.get(sessionID)
+    const id = this.nativeSession(sessionID)?.activeTurn
     const task = id ? this.store.subtask(id) : undefined
     if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) {
-      if (id) this.nativeActiveTurn.delete(sessionID)
+      if (id) this.nativeState.clearActiveTurn(sessionID)
       return undefined
     }
     return task
@@ -10177,22 +10029,16 @@ export class EnsembleV2Service {
     // The next enqueued prompt may be a skipped internal one. Its execution
     // terminal must not settle a user turn queued behind it; consuming the
     // head keeps the order aligned for the next real execution.
-    const head = this.nativeInboxOrder.get(sessionID)?.[0]
+    const head = this.nativeSession(sessionID)?.orderHead()
     if (head && !head.turn) {
-      this.takeNativeInbox(sessionID)
+      this.nativeState.takeInbox(sessionID)
       return undefined
     }
-    const next = this.nativePendingInboxes.get(sessionID)?.[0]
+    const next = this.nativeSession(sessionID)?.pendingHead()
     const task = next ? this.store.subtask(nativeTurnID(sessionID, next)) : undefined
     if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return undefined
-    this.nativeActiveTurn.set(sessionID, task.id)
+    this.nativeState.setActiveTurn(sessionID, task.id)
     return task
-  }
-
-  /** Add a turn to the current execution, or begin one when none is open. */
-  private joinNativeExecution(sessionID: string, task: Subtask): void {
-    if (this.openNativeExecutionTurns(sessionID).length === 0) this.beginNativeExecution(sessionID, task.id)
-    else this.rememberNativeExecutionTurn(sessionID, task.id)
   }
 
   /**
@@ -10206,25 +10052,25 @@ export class EnsembleV2Service {
   private async nativeTextTurn(sessionID: string, assistantMessageID: string, at: number): Promise<Subtask | undefined> {
     // Text from a skipped internal execution belongs to that service prompt,
     // never to a user turn queued behind it.
-    if (this.nativeExecutionOwner.get(sessionID) === "skip") return undefined
-    const mapped = this.nativeAssistantTurns.get(assistantMessageID)
+    if (this.nativeSession(sessionID)?.owner === "skip") return undefined
+    const mapped = this.nativeSession(sessionID)?.assistantTurns.get(assistantMessageID)
     const known = mapped ? this.store.subtask(mapped) : this.nativeTurnByAssistant(assistantMessageID)
     if (known && isNativeTurn(known)) {
       if (!nativePhaseOpen(known.native?.phase)) return known
       this.joinNativeExecution(sessionID, known)
-      this.nativeActiveTurn.set(sessionID, known.id)
+      this.nativeState.setActiveTurn(sessionID, known.id)
       return known
     }
     // A prompt delivered into an already-running execution answers with the
     // next new assistant message; the execution's opening turn owns the
     // messages before that delivery.
-    const steeredInbox = this.takeNativeSteeredInbox(sessionID)
+    const steeredInbox = this.nativeState.takeSteer(sessionID)
     if (steeredInbox) {
       const steered = this.store.subtask(nativeTurnID(sessionID, steeredInbox))
       if (steered && isNativeTurn(steered) && nativePhaseOpen(steered.native?.phase)) {
         this.joinNativeExecution(sessionID, steered)
-        this.consumeNativeInbox(sessionID, steeredInbox)
-        this.nativeActiveTurn.set(sessionID, steered.id)
+        this.nativeState.consume(sessionID, steeredInbox)
+        this.nativeState.setActiveTurn(sessionID, steered.id)
         await this.ensureNativeAgentRow(steered, this.nativeIngestTarget(sessionID)!, at)
         return steered
       }
@@ -10235,15 +10081,15 @@ export class EnsembleV2Service {
     if (active) return active
     // Reordered text for a skipped service prompt must not start a native turn
     // queued behind it.
-    const head = this.nativeInboxOrder.get(sessionID)?.[0]
+    const head = this.nativeSession(sessionID)?.orderHead()
     if (head && !head.turn) return undefined
     // Reordered text can precede execution.started; the enqueued turn is the
     // next pending inbox.
-    const pending = this.nativePendingInboxes.get(sessionID)?.[0]
+    const pending = this.nativeSession(sessionID)?.pendingHead()
     const task = pending ? this.store.subtask(nativeTurnID(sessionID, pending)) : undefined
     if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return undefined
     this.joinNativeExecution(sessionID, task)
-    this.nativeActiveTurn.set(sessionID, task.id)
+    this.nativeState.setActiveTurn(sessionID, task.id)
     await this.ensureNativeAgentRow(task, this.nativeIngestTarget(sessionID)!, at)
     return task
   }
@@ -10268,26 +10114,26 @@ export class EnsembleV2Service {
     if (!target) return
     let task = explicit
     if (!task) {
-      const next = this.nativePendingInboxes.get(sessionID)?.[0]
+      const next = this.nativeSession(sessionID)?.pendingHead()
       if (!next) {
-        this.nativePendingExecutions.set(sessionID, (this.nativePendingExecutions.get(sessionID) ?? 0) + 1)
+        this.nativeState.waitForExecution(sessionID)
         return
       }
       task = this.store.subtask(nativeTurnID(sessionID, next))
     }
     if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return
-    this.touchNativeWatchdog(task.id)
+    this.nativeState.touchWatchdog(sessionID, task.id, now())
     this.joinNativeExecution(sessionID, task)
-    if (this.nativeActiveTurn.get(sessionID) === task.id) {
-      this.consumeNativeInbox(sessionID, task.native?.inboxID ?? "")
+    if (this.nativeSession(sessionID)?.activeTurn === task.id) {
+      this.nativeState.consume(sessionID, task.native?.inboxID ?? "")
       if (task.native?.phase === "working") {
         await this.injectNativeTurnContext(task, target)
         await this.ensureNativeAgentRow(task, target, at)
         return
       }
     }
-    this.nativeActiveTurn.set(sessionID, task.id)
-    this.consumeNativeInbox(sessionID, task.native?.inboxID ?? "")
+    this.nativeState.setActiveTurn(sessionID, task.id)
+    this.nativeState.consume(sessionID, task.native?.inboxID ?? "")
     await this.ensureNativeTurnTask(task, at)
     await this.injectNativeTurnContext(task, target)
     await this.ensureNativeAgentRow(task, target, at)
@@ -10355,6 +10201,7 @@ export class EnsembleV2Service {
    */
   private async ensureNativeAgentRow(task: Subtask, target: { channel: string; agent: Agent }, at: number): Promise<Message | undefined> {
     if (!isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return undefined
+    const sessionID = task.native!.sessionID
     const rowID = nativeAssistantMessageID(task.id)
     const assistantID = task.native?.assistantMessageIDs?.at(-1)
     const native = {
@@ -10370,12 +10217,12 @@ export class EnsembleV2Service {
         || row.native?.turnID !== native.turnID
         || row.native?.inboxID !== native.inboxID
         || row.native?.assistantMessageID !== native.assistantMessageID
-      row.text = this.nativeDisplayText(task.id)
+      row.text = this.nativeDisplayText(task)
       row.updatedAt = at
       row.streaming = true
       row.native = native
-      const live = this.nativeRows.get(task.id)
-      this.nativeRows.set(task.id, {
+      const live = this.nativeState.row(sessionID, task.id)
+      this.nativeState.setRow(sessionID, task.id, {
         message: row,
         channel: target.channel,
         lastSave: live?.lastSave ?? 0,
@@ -10388,7 +10235,7 @@ export class EnsembleV2Service {
       id: rowID,
       author: "agent",
       agentID: target.agent.id,
-      text: this.nativeDisplayText(task.id),
+      text: this.nativeDisplayText(task),
       kind: "text",
       taskID: task.id,
       streaming: true,
@@ -10396,15 +10243,16 @@ export class EnsembleV2Service {
       updatedAt: now(),
       native,
     })
-    this.nativeRows.set(task.id, { message: created, channel: target.channel, lastSave: 0 })
+    this.nativeState.setRow(sessionID, task.id, { message: created, channel: target.channel, lastSave: 0 })
     return created
   }
 
   private queueNativeStream(task: Subtask): void {
     if (!nativePhaseOpen(task.native?.phase)) return
-    const live = this.nativeRows.get(task.id)
+    const sessionID = task.native!.sessionID
+    const live = this.nativeState.row(sessionID, task.id)
     if (!live || !live.message.streaming) return
-    const text = this.nativeDisplayText(task.id)
+    const text = this.nativeDisplayText(task)
     const message = live.message
     message.text = text
     message.streaming = true
@@ -10424,7 +10272,7 @@ export class EnsembleV2Service {
     if (live.checkpointTimer !== undefined) return
     const delay = Math.max(0, STREAM_CHECKPOINT_MS - (at - live.lastSave))
     const timer = setTimeout(() => {
-      const current = this.nativeRows.get(task.id)
+      const current = this.nativeState.row(sessionID, task.id)
       if (!current || current.checkpointTimer !== timer) return
       current.checkpointTimer = undefined
       this.checkpointNativeRow(current)
@@ -10438,14 +10286,6 @@ export class EnsembleV2Service {
     if (!live.message.streaming || !this.store.isStreaming(live.channel, live.message.id)) return
     live.lastSave = now()
     void this.store.checkpointMessage(live.message).catch(() => undefined)
-  }
-
-  /** Cancel a pending trailing checkpoint and drop the live row bookkeeping. */
-  private clearNativeCheckpoint(turnID: string): void {
-    const live = this.nativeRows.get(turnID)
-    if (!live) return
-    if (live.checkpointTimer !== undefined) clearTimeout(live.checkpointTimer)
-    this.nativeRows.delete(turnID)
   }
 
   /**
@@ -10870,20 +10710,16 @@ export class EnsembleV2Service {
    */
   private nativeTurnIsLive(sessionID: string, task: Subtask, group: NativeContextTurn, at: number): boolean {
     if (group.settled) return false
-    if (this.nativeDeferredSettlements.has(task.id)) return true
+    if (this.nativeState.deferred(sessionID, task.id)) return true
     if (this.nativeActiveTurnTurn(sessionID)?.id === task.id) return true
-    const watchdog = this.nativeWatchdog.get(task.id)
+    const watchdog = this.nativeState.watchdog(sessionID, task.id)
     return watchdog !== undefined && at - watchdog.lastActivityAt < this.nativeTurnWatchdogMs
   }
 
   private adoptReconciledPendingTurn(sessionID: string, task: Subtask): void {
     const inboxID = task.native?.inboxID
     if (!inboxID) return
-    this.rememberNativeInbox(sessionID, inboxID, true)
-    const pending = this.nativePendingInboxes.get(sessionID) ?? []
-    if (!pending.includes(inboxID)) pending.push(inboxID)
-    this.nativePendingInboxes.set(sessionID, pending)
-    this.touchNativeWatchdog(task.id)
+    this.nativeState.reconcile(sessionID, { inboxID, turnID: task.id, at: now() })
   }
 
   /**
@@ -11011,18 +10847,18 @@ export class EnsembleV2Service {
    * without an answer settles `needs_you` as a confirmed interruption.
    */
   private async reconcileNativeWatchdog(at: number): Promise<void> {
-    if (this.stopped || this.nativeWatchdog.size === 0) return
-    for (const [turnID, state] of [...this.nativeWatchdog]) {
+    const watched = this.nativeState.watchdogEntries()
+    if (this.stopped || watched.length === 0) return
+    for (const { sessionID, turnID, watchdog } of watched) {
       const task = this.store.subtask(turnID)
       if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) {
-        this.nativeWatchdog.delete(turnID)
+        this.nativeState.forgetWatchdog(sessionID, turnID)
         continue
       }
-      if (this.nativeDeferredSettlements.has(turnID)) continue
-      if (at - state.lastActivityAt < this.nativeTurnWatchdogMs) continue
-      if (state.passes >= this.nativeTurnWatchdogMaxPasses) continue
-      state.passes += 1
-      state.lastActivityAt = at
+      if (this.nativeState.deferred(sessionID, turnID)) continue
+      if (at - watchdog.lastActivityAt < this.nativeTurnWatchdogMs) continue
+      if (watchdog.passes >= this.nativeTurnWatchdogMaxPasses) continue
+      const passes = this.nativeState.beginWatchdogPass(sessionID, turnID, at)
       const target = this.nativeIngestTarget(task.native!.sessionID, { requireMode: false })
       if (!target || target.channel !== task.conversationID) continue
       this.beginNativeReconcile("watchdog")
@@ -11039,7 +10875,7 @@ export class EnsembleV2Service {
       this.logger?.event("debug", "native", "native.turn.watchdog", {
         sessionID: task.native!.sessionID,
         turnID: task.id,
-        pass: state.passes,
+        pass: passes,
         found: answer !== undefined,
         settled: answer === undefined ? nativeContextTurnSettled(messages, task.native?.inboxID) : undefined,
       })
@@ -11054,18 +10890,12 @@ export class EnsembleV2Service {
     }
   }
 
-  private touchNativeWatchdog(turnID: string): void {
-    this.nativeWatchdog.set(turnID, { lastActivityAt: now(), passes: 0 })
-  }
-
   /** Rebuild only the final answer for a turn recovered from the transcript. */
   private seedNativeRecoveredAnswer(task: Subtask, answer: string): void {
-    const state = this.nativeTextState(task.id)
-    // The transcript answer is authoritative; discard any partial stream state
-    // so settlement cannot read the transcript a second time.
-    for (const key of Object.keys(state)) delete state[key]
+    const sessionID = task.native?.sessionID
+    if (!sessionID) return
     const assistantID = task.native?.assistantMessageIDs?.at(-1) ?? "recovered"
-    state[assistantID] = { started: [0], deltas: {}, ended: { 0: answer } }
+    this.nativeState.seedAnswer(sessionID, task.id, assistantID, answer)
   }
 
   /**
@@ -11097,16 +10927,16 @@ export class EnsembleV2Service {
   ): boolean {
     const sessionID = task.native?.sessionID
     if (!sessionID) return false
-    if (this.nativeDeferredSettlements.has(task.id)) return true
+    if (this.nativeState.deferred(sessionID, task.id)) return true
     const active = this.activeNativeChildrenForTask(sessionID, task.id)
     if (active.length === 0) return false
     const timer = setTimeout(() => {
-      void this.flushNativeDeferredSettlement(task.id, "barrier-timeout")
+      void this.flushNativeDeferredSettlement(sessionID, task.id, "barrier-timeout")
     }, this.nativeSubagentBarrierMs)
     if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
       ;(timer as unknown as { unref: () => void }).unref()
     }
-    this.nativeDeferredSettlements.set(task.id, { target, at, deadline: now() + this.nativeSubagentBarrierMs, timer })
+    this.nativeState.defer(sessionID, task.id, { target, at, deadline: now() + this.nativeSubagentBarrierMs, timer })
     this.logger?.event("info", "native", "native.turn.barrier.waiting", {
       sessionID,
       turnID: task.id,
@@ -11118,20 +10948,22 @@ export class EnsembleV2Service {
   }
 
   /** Release a held parent turn when its children finish or its bound expires. */
-  private async flushNativeDeferredSettlement(turnID: string, reason: "child-terminal" | "barrier-timeout"): Promise<void> {
+  private async flushNativeDeferredSettlement(
+    sessionID: string,
+    turnID: string,
+    reason: "child-terminal" | "barrier-timeout",
+  ): Promise<void> {
     if (this.stopped) return
-    const pending = this.nativeDeferredSettlements.get(turnID)
+    const pending = this.nativeState.deferred(sessionID, turnID)
     if (!pending) return
     const task = this.store.subtask(turnID)
     if (!task || !isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) {
-      if (pending.timer !== undefined) clearTimeout(pending.timer)
-      this.nativeDeferredSettlements.delete(turnID)
+      this.nativeState.releaseDeferred(sessionID, turnID)
       return
     }
     const active = this.activeNativeChildrenForTask(task.native!.sessionID, task.id)
     if (reason !== "barrier-timeout" && active.length > 0) return
-    if (pending.timer !== undefined) clearTimeout(pending.timer)
-    this.nativeDeferredSettlements.delete(turnID)
+    this.nativeState.releaseDeferred(sessionID, turnID)
     if (reason === "barrier-timeout") {
       this.logger?.event("warn", "native", "native.turn.barrier.timeout", {
         sessionID: task.native!.sessionID,
@@ -11159,8 +10991,8 @@ export class EnsembleV2Service {
     if (!isNativeTurn(task) || !nativePhaseOpen(task.native?.phase)) return
     // Cancel the trailing stream checkpoint before any await. Settlement owns
     // the exact final row; a queued partial checkpoint must never overwrite it.
-    this.clearNativeCheckpoint(task.id)
-    const state = this.nativeText.get(task.id) ?? {}
+    this.nativeState.clearRow(task.native!.sessionID, task.id)
+    const state = this.nativeTextState(task) ?? {}
     let text = ""
     if (outcome === "succeeded") {
       const final = nativeFinalText(state)
@@ -11168,12 +11000,12 @@ export class EnsembleV2Service {
       if (!final.complete) {
         const recovered = await this.nativeContextRead(task)
         if (recovered !== undefined) text = recovered
-        else text = final.text || this.nativeDisplayText(task.id)
+        else text = final.text || this.nativeDisplayText(task)
       }
     } else {
       // Failure/cancellation/interruption preserve whatever partial text the
       // host already ended or streamed; they never invent a new answer.
-      text = this.nativeDisplayText(task.id)
+      text = this.nativeDisplayText(task)
     }
     const rowID = nativeAssistantMessageID(task.id)
     let row = this.store.cloneMessage(target.channel, rowID)
@@ -11269,24 +11101,13 @@ export class EnsembleV2Service {
   }
 
   private cleanupNativeTurnMemory(task: Subtask): void {
-    this.nativeText.delete(task.id)
-    this.nativeWatchdog.delete(task.id)
-    const deferred = this.nativeDeferredSettlements.get(task.id)
-    if (deferred) {
-      if (deferred.timer !== undefined) clearTimeout(deferred.timer)
-      this.nativeDeferredSettlements.delete(task.id)
-    }
-    this.clearNativeCheckpoint(task.id)
-    if (task.native?.sessionID) this.nativeExecutionOwner.delete(task.native.sessionID)
-    this.forgetNativeExecutionTurn(task)
-    for (const assistantID of task.native?.assistantMessageIDs ?? []) this.nativeAssistantTurns.delete(assistantID)
-    if (this.nativeActiveTurn.get(task.native?.sessionID ?? "") === task.id) {
-      this.nativeActiveTurn.delete(task.native!.sessionID)
-    }
-    if (task.native?.inboxID) {
-      this.consumeNativeInbox(task.native.sessionID, task.native.inboxID)
-      this.forgetNativeInbox(task.native.sessionID, task.native.inboxID)
-    }
+    const sessionID = task.native?.sessionID
+    if (!sessionID) return
+    this.nativeState.settle(sessionID, {
+      turnID: task.id,
+      assistantIDs: task.native?.assistantMessageIDs ?? [],
+      ...(task.native?.inboxID ? { inboxID: task.native.inboxID } : {}),
+    })
   }
 
   /**
@@ -11329,7 +11150,7 @@ export class EnsembleV2Service {
   }
 
   private async markNativeInterrupted(task: Subtask, reason?: string): Promise<void> {
-    this.clearNativeCheckpoint(task.id)
+    this.nativeState.clearRow(task.native!.sessionID, task.id)
     const target = this.nativeIngestTarget(task.native!.sessionID, { requireMode: false })
     const at = now()
     if (target) {
