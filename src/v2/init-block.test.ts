@@ -36,11 +36,11 @@ test("agent onboarding includes the persona and the full Ensemble contract", () 
   assert.match(prompt, new RegExp(`ensemble:start v${ENSEMBLE_BLOCK_VERSION}`))
 })
 
-test("ticket238: v6 contract describes native-first rules and retires the mandatory handoff", () => {
+test("ticket238: v7 contract keeps the native-first rules and retires the mandatory handoff", () => {
   const block = ensembleBlock()
-  // External contract: the rendered marker names version 6. Other version
+  // External contract: the rendered marker names version 7. Other version
   // checks in this file derive from ENSEMBLE_BLOCK_VERSION.
-  assert.match(block, /ensemble:start v6/)
+  assert.match(block, /ensemble:start v7/)
   assert.match(block, /final native text is the group message/i)
   assert.match(block, /\$Name.*routes work/is)
   assert.match(block, /bare name is a reference only/i)
@@ -48,14 +48,26 @@ test("ticket238: v6 contract describes native-first rules and retires the mandat
   assert.match(block, /Code spans, URLs, and paths are literal/)
   assert.match(block, /Direct conversations are one-to-one/)
   assert.match(block, /The server owns routing, budgets, and completion/)
-  assert.match(block, /synthesis or review turn is terminal/i)
-  assert.match(block, /ensemble_dispatch/)
-  assert.match(block, /terminal continuation/i)
   assert.match(block, /until their turn is\s+visible in the conversation/i)
   assert.match(block, /second completion loop/i)
   assert.match(block, /migration and\s+rollback tools, not the normal chat path/i)
   assert.doesNotMatch(block, /Every non-leader turn ends with a handoff/i)
   assert.doesNotMatch(block, /^## Team roster$/m, "the generic identity block carries no roster")
+})
+
+test("ticket253: v7 contract explains root-only synthesis and terminal-turn continuation", () => {
+  const block = ensembleBlock()
+  assert.match(block, /one synthesis per command/i)
+  assert.match(block, /command root/i)
+  assert.match(block, /intermediate hops\s+relay/i)
+  assert.match(block, /synthesis, completion-review, and batch-review turns are terminal/i)
+  assert.match(block, /terminal turn `\$Name` is only a reference/i)
+  assert.match(block, /`ensemble_dispatch`.*new command root/is)
+  assert.match(block, /fresh group and command budget/i)
+  assert.match(block, /one terminal turn starts at most one\s+new command/i)
+  assert.match(block, /retry returns the existing command and assignments/i)
+  assert.match(block, /normal worker, handoff, and peer turns are not terminal/i)
+  assert.match(block, /routes work to a different teammate/i)
 })
 
 test("ticket238: team roster lists the active leader first, then memberIDs order", () => {

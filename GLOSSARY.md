@@ -74,9 +74,9 @@ _Avoid_: Batch (for the whole dispatch), run (a single execution, not the fan-ou
 
 **Hop**: One consuming agent-created delegation or explicit handoff. A user command and its initial recipients, completion handoffs, batch review, synthesis, peer turns, retries, restarts, recovery, and idempotent replays consume no hop. Cancellation does not refund one.
 
-**Terminal turn**: A synthesis, completion-review, or batch-review turn. Its routing-operator mentions are references, not work, and its final text is the group message. Explicit tools remain available. See [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md).
+**Terminal turn**: A synthesis, completion-review, or batch-review turn. Only the command root synthesizes: one synthesis per command, while intermediate hops relay their child's result. Its routing-operator mentions are references, not work, and its final text is the group message. Explicit tools remain available. See [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md).
 
-**Terminal continuation**: The next command started from a terminal turn with `ensemble_dispatch`. It is a new command root, not a continuation group of the previous command. See [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md).
+**Terminal continuation**: The next command started from a terminal turn with `ensemble_dispatch`. It is a new command root with a fresh group and command budget, not a continuation group of the previous command. One terminal turn starts at most one new command. See [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md).
 
 **Command budget**: The user-owned ceiling on hops for one user command across every group. It is the anti-laundering cap: a continuation cannot create a fresh command total.
 
