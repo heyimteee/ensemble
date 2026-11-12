@@ -269,7 +269,7 @@ client restart is the targeted remedy for a stale TUI graph.
 
 ## Verification gates
 
-Use Node **26.4+** (the package engine), with Node/npm on `PATH`. `npm ci` installs the locked development dependencies. Run from the repository:
+Use Node **22.23.4+** (the package engine; the unit/typecheck gate is verified on 22.23.4, 24.x, and 26.x), with Node/npm on `PATH`. Live suites run on Node **26.12.1**. `npm ci` installs the locked development dependencies. Run from the repository:
 
 | Command | What it establishes |
 | --- | --- |
