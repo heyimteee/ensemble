@@ -635,7 +635,10 @@ live_assert_text "$LIVE_TUI_SESSION" "y/enter yes │ n/esc no" "confirm shares 
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "n rejected the confirm and created the workspace"
-live_require_text "$LIVE_TUI_SESSION" "leader FakeAgent" 15 "leader visible on group surface"
+# The surface title wraps at the current chat width, so the header row can end
+# with `leader` and carry `FakeAgent` on the next row. Join the chat rows before
+# matching; a missing leader name or leader agent still fails the literal.
+live_require_joined_text "$LIVE_TUI_SESSION" "leader FakeAgent" 15 "leader visible on group surface"
 synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synthesis')
 [[ "$synthesis" == "true" ]] || live_fail "synthesis choice did not persist as Yes (got $synthesis)"
 leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')
@@ -1026,7 +1029,7 @@ live_assert_absence "$LIVE_TUI_SESSION" "Asking \$FakeAgent…" "asking row unmo
 # fails), and the snapshot terminal total matches all five outcomes (a
 # missing outcome fails). One capture feeds every count below, so the
 # asserts cannot race each other.
-live_require_joined_text "$LIVE_TUI_SESSION" "● FakeAgent finished: !FakeAgent peer-direct-probe fake-rich-fixture" 15 "latest outcome announced inline at the tail"
+live_require_joined_matches "$LIVE_TUI_SESSION" "● FakeAgent finished: !FakeAgent peer-direct-probe fake-rich- ?fixture" 15 "latest outcome announced inline at the tail"
 pane_done=$(live_capture "$LIVE_TUI_SESSION")
 visible_done=$(grep -oF "● FakeAgent finished:" <<<"$pane_done" | wc -l | tr -d ' ')
 [[ "$visible_done" -ge 1 ]] || live_fail "expected at least one visible completion line (got $visible_done)"
@@ -1537,6 +1540,10 @@ promotions_left=$(live_snapshot_value 'Object.values(output.state.approvals).fil
 [[ "$promotions_left" == '0' ]] || live_fail "promotion approval was not cleaned up (got $promotions_left)"
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_absence "$LIVE_TUI_SESSION" "Promote memory for FakeAgent" 10 "approvals returned to split after resolving"
+# Wait for the full-approvals footer to clear before the next key. A bare Esc
+# followed immediately by another key can coalesce into an Alt chord, which
+# leaves the surface open and swallows the next key.
+live_require_absence "$LIVE_TUI_SESSION" "esc split" 10 "full approvals closed before reopening settings"
 live_log "settings p promoted the selected memory through the full approvals surface"
 # Slice D inline filter (ticket #80): / opens the shared command-line search
 # and filters the focused settings tab live; Enter commits, Esc would restore
