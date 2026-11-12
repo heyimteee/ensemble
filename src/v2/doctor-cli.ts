@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
+import { assertSupportedNode } from "./node-version.ts"
 import { canonicalDirectory } from "./paths.ts"
 import { isDerivedWorkStatus } from "./queue.ts"
 import { workspaceConfigPath, CONFIG_VERSION, type WorkspaceConfig } from "./workspace-config.ts"
@@ -667,6 +668,7 @@ function configLabel(config: DoctorReport["locations"][number]["config"]): strin
 async function main(): Promise<void> {
   const argv = process.argv.slice(2)
   try {
+    assertSupportedNode()
     process.exitCode = await runDoctor(argv)
   } catch (error: any) {
     const report = {

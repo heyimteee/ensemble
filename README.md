@@ -31,6 +31,10 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 - **Memory and approvals are scoped.** Project memory, workspace memory, and global memory have provenance and approval rules.
 - **Work continues through OpenCode's server** after the Ensemble page closes.
 
+## Requirements
+
+- **Node 22.23.4 or newer.** The unit and typecheck gate is verified on Node 22.23.4, 24.x, and 26.x; the live suites run on Node 26.12.1. An older Node fails at plugin load with the supported range and upgrade guidance. The Node matrix runs `npm run verify` on every tested line.
+
 ## Install for local development
 
 Add the repository to `opencode.json`:

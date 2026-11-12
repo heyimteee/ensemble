@@ -39,7 +39,7 @@
     "logs:summary": "node scripts/log-summary.mjs"
   },
   "engines": {
-    "node": ">=26.4.0"
+    "node": ">=22.23.4"
   },
   "peerDependencies": {
     "@opencode/plugin": "2.2.6 || 2.2.7",
