@@ -225,7 +225,7 @@ import {
   reconcileHistoryView,
   toggleHistoryView,
   workPaneBodyHeight,
-  workPaneHeader,
+  workPaneHeaderForWidth,
   workTaskPage,
   workViewGroups,
   workspacePaneWidths,
@@ -1418,7 +1418,18 @@ export function EnsembleV2App() {
   })
   const workHeader = () => {
     const pane = workPane()
-    return workPaneHeader(pane.view, pane.counts.groups, pane.counts.active, pane.counts.done, pane.page, pane.pages)
+    // Ticket #263: the 53-column card pane keeps the view, counts, and page
+    // visible by dropping the done segment when the full header would
+    // truncate; wider widths keep the full header unchanged.
+    return workPaneHeaderForWidth(
+      workContentWidth(),
+      pane.view,
+      pane.counts.groups,
+      pane.counts.active,
+      pane.counts.done,
+      pane.page,
+      pane.pages,
+    )
   }
   // Ticket #173/#185: the full inbox owns a cursor over the pending list.
   // Keep it in range; the visibility effect above recovers focus when a split
