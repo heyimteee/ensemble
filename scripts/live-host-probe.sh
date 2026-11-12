@@ -6,11 +6,11 @@ fi
 
 # Ticket #210: native host event-contract probe.
 #
-# Starts an isolated real OpenCode 2.2.6 host pointed at the deterministic fake
-# provider, drives the native turns the native-first ingestion path depends on,
-# and records the real event order and payload shapes. No model, external
-# network request, or user credential is used. The user's live host is never
-# restarted or reconfigured.
+# Starts an isolated real OpenCode 2.2.x host (2.2.6 or 2.2.7) pointed at the
+# deterministic fake provider, drives the native turns the native-first
+# ingestion path depends on, and records the real event order and payload
+# shapes. No model, external network request, or user credential is used. The
+# user's live host is never restarted or reconfigured.
 #
 #   npm run test:live:probe
 #   ENSEMBLE_PROBE_OUT=/path/contract.jsonl npm run test:live:probe

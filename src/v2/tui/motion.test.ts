@@ -12,6 +12,7 @@ import {
   WORK_CLOCK_INTERVAL_MS,
   createStaggerState,
   effectiveTick,
+  emptyMark,
   isReducedMotion,
   motionActive,
   queuedFrame,
@@ -24,6 +25,7 @@ import {
   waitingFrame,
   workingFrame,
 } from "./motion.ts"
+import { isAsciiTerminal } from "./separators.ts"
 
 const idle = { busy: false, live: false, composerActive: false }
 
@@ -184,4 +186,21 @@ test("review fix: stagger is static when motion is off or reduced", () => {
   const reduced = createStaggerState()
   assert.deepEqual([...updateStagger(reduced, ["a", "b"], 3, true, { ENSEMBLE_REDUCED_MOTION: "1" })], [])
   assert.deepEqual([...updateStagger(reduced, ["a", "b"], 4, true, {})], [])
+})
+
+test("ticket259: ASCII mode replaces decorative glyphs with stable one-cell ASCII", () => {
+  const ascii = { ENSEMBLE_ASCII: "1" }
+  assert.equal(isAsciiTerminal(ascii), true)
+  assert.equal(isAsciiTerminal({ ENSEMBLE_ASCII: "true" }), true)
+  assert.equal(isAsciiTerminal({ TERM: "dumb" }), true)
+  assert.equal(isAsciiTerminal({ TERM: "xterm-256color" }), false)
+  for (const tick of [0, 1, 9, 120]) {
+    assert.equal(workingFrame(tick, ascii), "*", "working is a static ASCII star")
+    assert.equal(waitingFrame(tick, ascii), "-", "waiting is a static ASCII dash")
+    assert.equal(toolFrame(tick, ascii), ">", "tool activity is a static ASCII chevron")
+    assert.equal(thinkingFrame(tick, ascii), ".  ", "thinking keeps its three-cell width")
+    assert.equal(queuedFrame(ascii), "-", "queued stays parked and static")
+  }
+  assert.equal(emptyMark(ascii), "o---o---o", "the empty-state mark is ASCII")
+  assert.equal(emptyMark({}), "○───○───○", "Unicode remains the default")
 })

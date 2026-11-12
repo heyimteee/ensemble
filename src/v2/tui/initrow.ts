@@ -10,15 +10,17 @@
 import type { InitJob, InitPhase } from "../types.ts"
 import { INIT_PHASES, SYSTEM_AGENT_NAME, initJobPhase, initPhaseDetail, initPhaseLabel } from "../system-agent.ts"
 import { effectiveTick, workingFrame } from "./motion.ts"
-import { chromeJoin } from "./separators.ts"
+import { chromeJoin, isAsciiTerminal } from "./separators.ts"
 
 const STAGE_FILLED = "●"
 const STAGE_EMPTY = "○"
 
 /** Four discrete marks: stages reached (including current) are filled. */
-export function initStageIndicator(phase: InitPhase): string {
+export function initStageIndicator(phase: InitPhase, env?: NodeJS.ProcessEnv): string {
   const current = Math.max(0, INIT_PHASES.indexOf(phase))
-  return INIT_PHASES.map((_, index) => (index <= current ? STAGE_FILLED : STAGE_EMPTY)).join(" ")
+  const filled = env && isAsciiTerminal(env) ? "#" : STAGE_FILLED
+  const blank = env && isAsciiTerminal(env) ? "-" : STAGE_EMPTY
+  return INIT_PHASES.map((_, index) => (index <= current ? filled : blank)).join(" ")
 }
 
 export type InitRow = {
@@ -41,8 +43,8 @@ export function initRowForJob(job: InitJob, tick: number, env: NodeJS.ProcessEnv
     phase,
     label: initPhaseLabel(phase),
     detail: initPhaseDetail(phase),
-    stage: initStageIndicator(phase),
-    glyph: workingFrame(effectiveTick(tick, env)),
+    stage: initStageIndicator(phase, env),
+    glyph: workingFrame(effectiveTick(tick, env), env),
     startedAt: job.startedAt,
   }
 }

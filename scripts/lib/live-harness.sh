@@ -590,6 +590,20 @@ live_assert_joined_text() {
   live_capture_contains_joined "$session" "$text" || live_fail "TUI does not show: $description"
 }
 
+# Joined chat text matched as a regular expression. A row break can fall inside
+# a hyphenated word (`fake-rich-` then `fixture`), where the join inserts a
+# space the source text never had; a regex can tolerate that wrap without
+# dropping any of the expected text.
+live_capture_joined_matches() {
+  live_capture_chat_joined "$1" | grep -Eq -- "$2"
+}
+
+live_require_joined_matches() {
+  local session="$1" expression="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$expression}"
+  live_wait_for "$seconds" "$description" live_capture_joined_matches "$session" "$expression" \
+    || live_fail "TUI did not show: $description"
+}
+
 # Bounded wait for a transient label that must appear exactly once in the chat
 # column in the SAME frame. Work-card details live outside this slice, so the
 # aggregate chat line is measured without counting a card's matching detail.

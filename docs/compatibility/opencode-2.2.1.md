@@ -1,5 +1,9 @@
 # OpenCode 2.2.1 compatibility report
 
+> **Historical.** This report records the 2.2.1 compatibility probe and the
+> constraints it established. The current supported host range is OpenCode
+> **2.2.6** and **2.2.7**; see the [host support range](opencode-host-range.md).
+
 Status: **verified against a real isolated installation**
 Tested: 2026-10-29
 Target: OpenCode **2.2.1** on Linux, TUI only

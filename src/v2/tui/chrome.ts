@@ -11,7 +11,7 @@
 import { approvalSource, type Approval } from "../types.ts"
 import { statuslineHints } from "./keymap.ts"
 import { effectiveTick, workingFrame } from "./motion.ts"
-import { chromeJoin, chromeSeparator } from "./separators.ts"
+import { chromeJoin, chromeSeparator, isAsciiTerminal } from "./separators.ts"
 
 /** Columns that can own the chat-surface focus. The composer is a distinct focus state (brief §2.10). */
 export type ChromeFocusArea = "rail" | "chat"
@@ -83,7 +83,7 @@ export function railEmptyLine(): string {
 /** Rail busy count: one Braille working cell followed by the count. Empty at zero. Pure. */
 export function railBusyMark(count: number, tick = 0, env: NodeJS.ProcessEnv = process.env): string {
   if (count <= 0) return ""
-  return `${workingFrame(effectiveTick(tick, env))}${count}`
+  return `${workingFrame(effectiveTick(tick, env), env)}${count}`
 }
 
 /** Skill palette zero state: names the miss and the fix (filter without a dialog). */
@@ -114,12 +114,13 @@ export function dmEmptyDetail(): string {
 /** Approval row suffix: animated Braille `Resolving…` while that approval's resolve RPC is in flight, else empty. */
 export function approvalResolvingSuffix(resolving: boolean, tick = 0, env: NodeJS.ProcessEnv = process.env): string {
   if (!resolving) return ""
-  return ` ${chromeSeparator()} ${workingFrame(effectiveTick(tick, env))} Resolving…`
+  return ` ${chromeSeparator()} ${workingFrame(effectiveTick(tick, env), env)} Resolving…`
 }
 
 /** Resolved settle row: display-only confirmation that leaves after its window. */
-export function approvalResolvedLine(approval: Approval): string {
-  return `✓ Resolved ${chromeSeparator()} [${approvalSourceTag(approvalSource(approval))}] ${approval.title}`
+export function approvalResolvedLine(approval: Approval, env?: NodeJS.ProcessEnv): string {
+  const mark = env && isAsciiTerminal(env) ? "+" : "✓"
+  return `${mark} Resolved ${chromeSeparator()} [${approvalSourceTag(approvalSource(approval))}] ${approval.title}`
 }
 
 /** Inbox origin tag: native host blocks read differently from product decisions. Pure. */

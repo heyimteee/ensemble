@@ -13,7 +13,7 @@ set -uo pipefail
 #
 # CI also pins the expected runtime versions:
 #   ENSEMBLE_LIVE_EXPECT_NODE=26.12.1
-#   ENSEMBLE_LIVE_EXPECT_OPENCODE=2.2.5
+#   ENSEMBLE_LIVE_EXPECT_OPENCODE=2.2.7
 # A present-but-wrong version is always a failure, not a skip. Both versions
 # are compared exactly after normalizing an optional tool-name prefix and `v`.
 

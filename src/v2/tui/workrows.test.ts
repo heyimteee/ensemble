@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { NativeSubagentRun, Subtask } from "../types.ts"
+import { DERIVED_WORK_STATUSES, workStatusWord } from "../queue.ts"
 import { TIDE_GLYPHS, createTideFreezeState, type TideFreezeState } from "./tide.ts"
 import { nativeSubagentFocusID } from "./nativecards.ts"
 import {
@@ -16,6 +17,7 @@ import {
   hasActiveWork,
   isNeedsYouTask,
   mergeStreamingActivity,
+  needsYouMark,
   orderedWorkItems,
   pendingWorkLabel,
   queuedActivityFrame,
@@ -885,6 +887,86 @@ test("ticket137: state words are uppercase and queued never reads as pending", (
   assert.equal(workCardStateWord("stalled", false), "STALLED")
   assert.equal(workCardStateWord("cancelled", false), "CANCELLED")
   assert.equal(workCardStateWord("working", true), "NEEDS YOU")
+})
+
+test("ticket259: every Work status has a glyph, a word, and a tone", () => {
+  const tones = ["good", "warn", "bad", "muted", "faint"]
+  for (const status of DERIVED_WORK_STATUSES) {
+    const glyph = workGlyph(status)
+    assert.equal([...glyph].length, 1, `${status} glyph is one terminal cell`)
+    assert.match(glyph, /\S/, `${status} glyph is visible`)
+    const word = workStatusWord(status)
+    assert.ok(word.length > 0, `${status} has a state word`)
+    assert.match(word, /^[A-Z ]+$/, `${status} state word is plain uppercase text`)
+    assert.ok(workStatusLabel(status).length > 0, `${status} has a lower-case label`)
+    const stateTones = workCardTones(status, false)
+    for (const key of ["glyph", "status", "bar"] as const) {
+      assert.ok(tones.includes(stateTones[key]), `${status} ${key} tone is a palette role`)
+    }
+    assert.ok(workCardDetail(status, {}).length > 0, `${status} detail is text`)
+  }
+})
+
+test("ticket259: errors and approvals carry text, not only color", () => {
+  const failed = task({
+    state: "replied",
+    outcome: "failed",
+    failure: { kind: "native", reason: "provider-error" },
+    error: "provider unavailable",
+    repliedAt: 10,
+    finishedAt: 10,
+  })
+  const announcement = terminalAnnouncement(failed, "Sage", 20)
+  assert.ok(announcement?.includes("failed"), announcement ?? "missing announcement")
+  assert.ok(announcement?.includes("provider unavailable"), announcement ?? "missing announcement")
+  const failedCard = workCardForTask(failed, "Sage", { now: 20, width: 60 })
+  assert.equal(failedCard.header.status, "FAILED")
+  assert.equal(failedCard.detail, "failed")
+
+  const cancelled = task({ state: "replied", outcome: "succeeded", stoppedAt: 10, repliedAt: 10, finishedAt: 10 })
+  assert.ok(terminalAnnouncement(cancelled, "Sage", 20)?.includes("cancelled"))
+
+  const approval = task({ interrupted: true })
+  const approvalCard = workCardForTask(approval, "Nova", { now: 20, width: 60 })
+  assert.equal(approvalCard.header.status, "NEEDS YOU")
+  assert.equal(approvalCard.detail, "waiting for you…")
+  assert.equal(workCardDetail("needs_you", {}), "waiting for you…")
+  assert.equal(workCardDetail("needs_you", { needsYou: true }), "waiting for you…")
+})
+
+test("ticket259: ASCII mode keeps every Work status readable without Unicode glyphs", () => {
+  const ascii = { ENSEMBLE_ASCII: "1" }
+  for (const status of DERIVED_WORK_STATUSES) {
+    const glyph = workGlyph(status, ascii)
+    assert.match(glyph, /^[\x20-\x7e]$/, `${status} ASCII glyph is one printable ASCII cell`)
+    assert.equal(workRowFrame(status, 1, ascii), glyph, `${status} ASCII frame is the static glyph`)
+    assert.equal(workRowFrame(status, 9, ascii), glyph, `${status} ASCII frames never animate`)
+    assert.ok(workStatusWord(status).length > 0, `${status} keeps its state word`)
+  }
+  assert.equal(needsYouMark(ascii), "!")
+  assert.equal(needsYouMark({}), NEEDS_YOU_MARK)
+  const failed = task({
+    state: "replied",
+    outcome: "failed",
+    failure: { kind: "native", reason: "provider-error" },
+    error: "provider unavailable",
+    repliedAt: 10,
+    finishedAt: 10,
+  })
+  const announcement = terminalAnnouncement(failed, "Sage", 20, ascii)
+  assert.match(announcement ?? "", /^x /, "the failure mark is ASCII")
+  assert.ok(announcement?.includes("failed") && announcement.includes("provider unavailable"), announcement ?? "missing announcement")
+})
+
+test("ticket259: NO_COLOR freezes motion but keeps state words, glyphs, and tones", () => {
+  const card = cardWithMotion(
+    task({ state: "working", claimedBy: "run", leaseUntil: 9000, attempts: 1 }),
+    "Nova",
+    { now: 1000, tick: 9, width: 40, env: { NO_COLOR: "1" } },
+  )
+  assert.equal(card.header.glyph, "⠋", "reduced motion pins the working frame")
+  assert.equal(card.header.status, "WORKING", "the state word survives color suppression")
+  assert.deepEqual(card.tones, { glyph: "warn", status: "muted", bar: "warn" })
 })
 
 test("ticket170: every non-terminal status keeps the Work block mounted", () => {
