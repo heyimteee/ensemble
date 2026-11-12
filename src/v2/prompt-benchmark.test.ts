@@ -19,8 +19,11 @@ test("ticket225: prompt-size regression gate records tool schema, identity, cont
   // The bounded last-20 transcript is part of the delegated context; the
   // roster/budget block around it stays compact.
   assert.ok(report.after.turnContext.chars < 3200, `turn context stayed bounded: ${report.after.turnContext.chars}`)
-  assert.ok(report.after.totalPrompt.estimatedTokens < report.before.totalPrompt.estimatedTokens * 0.6, benchmarkSummary(report))
-  assert.ok(report.reduction.totalPromptPct >= 40, benchmarkSummary(report))
+  // v7 adds the terminal-turn workflow to the contract, so the total-prompt
+  // gate moves from 40% to 33% while the native surface still stays well
+  // below the legacy prompt.
+  assert.ok(report.after.totalPrompt.estimatedTokens < report.before.totalPrompt.estimatedTokens * 0.67, benchmarkSummary(report))
+  assert.ok(report.reduction.totalPromptPct >= 33, benchmarkSummary(report))
   assert.equal(report.before.toolCalls, 1)
   assert.equal(report.after.toolCalls, 0)
   assert.equal(report.before.modelRoundTrips, 2)

@@ -47,7 +47,9 @@ Related: [handoff terminology](../../GLOSSARY.md), tickets
 
 ## Terminal turns
 
-A synthesis, completion-review, or batch-review turn is terminal. Its
+Only the command root synthesizes: one synthesis per command. Intermediate
+handoff and delegation hops relay their child's result upward without a leader
+turn. A synthesis, completion-review, or batch-review turn is terminal. Its
 routing-operator mentions are references, not work; the final text still posts
 as the group message. To start the next ticket explicitly, the leader calls
 `ensemble_dispatch` with a title, an instruction, and an assignment batch. It
@@ -58,7 +60,10 @@ new command with its own caps; `continuationOf` is provenance, not a shared
 budget, and one terminal turn starts at most one command. A batch above the new
 command's own ceiling is refused as batch-too-large (reduce or split it), not
 as an exhausted user command. A terminal turn with suppressed mentions and no
-dispatch posts a visible no-work notice. See
+dispatch posts a visible no-work notice.
+
+Normal worker, handoff, and peer turns are not terminal. They keep the full
+routing grammar, including `$Name` to a different teammate. See
 [ADR 0012](../adr/0012-terminal-turns-and-root-synthesis.md).
 
 ## Review obligations

@@ -10,12 +10,12 @@ fi
 # One isolated fake host, three host starts, and a fresh-store upgrade shape:
 #
 #   seed    create the Vera roster in a real temp workspace, warm the group
-#           binding, and seed a pre-v6 AGENTS.md contract. A second VeraFlows
+#           binding, and seed a pre-v7 AGENTS.md contract. A second VeraFlows
 #           workspace runs the ticket #251 relay/fan-out/multi-ticket flows.
 #   unset   stop the host and remove the persisted nativeFirst key from the
 #           isolated plugin store, exactly as a pre-#240 store looked.
 #   run     restart, prove the effective mode is `on` and the default was
-#           persisted, assert the generated v6 roster table, drive one leader
+#           persisted, assert the generated v7 roster table, drive one leader
 #           native turn that delegates one member and then `$Name`-mentions
 #           several, and prove `:native-first off` + `:tools legacy` rollback
 #           and on/native restore.
