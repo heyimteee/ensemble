@@ -28,6 +28,7 @@ import {
   terminalAnnouncement,
   terminalAnnouncements,
   retryCardDetail,
+  workCardContentWidth,
   workCardDetail,
   workCardForTask,
   workCardForTaskCached,
@@ -593,6 +594,43 @@ test("ticket160: budget labels preserve the card right edge and yield before the
   assert.equal(at(24), "3/8", "short label at compact card width")
   assert.equal(at(32), "3/8 · 21 left", "medium label when the command segment fits")
   assert.equal(at(40), "hops 3/8 · cmd 21 left", "full label at a wide card")
+})
+
+test("ticket263: a 53-column card keeps its title, status, and budget readable", () => {
+  const width = workCardContentWidth(49)
+  assert.equal(width, 44, "the 53-column card leaves 44 content cells")
+  const budget = { usedHops: 0, maxHops: 8, commandRemaining: 24, commandMaxHops: 24 }
+  const card = workCardForTask(
+    task({
+      state: "working",
+      claimedBy: "run",
+      leaseUntil: 9_000,
+      attempts: 1,
+      title: "Refactor the dispatch ledger reconciliation path",
+    }),
+    "SizeAgent1",
+    { now: 1_000, width, budgetFor: () => budget },
+  )
+  const header = workCardHeaderText({ ...card.header, glyph: "⠋" })
+  assert.equal(header.length, width, "the header keeps the card's exact right edge")
+  assert.equal(card.header.name, "SIZEAGENT1", "the full agent name survives at the card-mode floor")
+  assert.equal(card.header.status, "WORKING", "the status word is never truncated")
+  assert.ok(header.endsWith("⠋ WORKING"), "the status stays at the right edge")
+  assert.equal(card.header.budget.trimEnd(), "hops 0/8 · cmd 24 left", "the richest budget label still fits")
+  assert.equal(card.title.length, width - 2, "the title truncates to the text width")
+  assert.ok(card.title.startsWith("Refactor the dispatch"), "the title keeps a readable prefix")
+  assert.ok(card.title.endsWith("…"), "the title ellipsizes rather than overflowing")
+  assert.ok(card.detail.length <= width - 2, "the detail stays inside the card")
+
+  const needsYou = workCardForTask(task({ interrupted: true }), "SizeAgent1", {
+    now: 1_000,
+    width,
+    budgetFor: () => budget,
+  })
+  const needsYouHeader = workCardHeaderText({ ...needsYou.header, glyph: NEEDS_YOU_MARK })
+  assert.equal(needsYouHeader.length, width, "the widest status still keeps the exact right edge")
+  assert.ok(needsYouHeader.endsWith("◆ NEEDS YOU"), "the widest status word is never truncated")
+  assert.ok(needsYou.header.budget.length > 0, "the budget yields to the widest status but stays visible")
 })
 
 test("ticket160: compact rows carry the budget without moving the right edge", () => {

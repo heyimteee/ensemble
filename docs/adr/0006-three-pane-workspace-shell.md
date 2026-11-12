@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-09
-- **Tickets:** #166 (parent), #171, #172, #173, #174, #239
+- **Tickets:** #166 (parent), #171, #172, #173, #174, #239, #263
 - **Supersedes:** none
 - **Related:** ADR 0005, ADR 0008, ADR 0009, `src/v2/tui/workpane.ts`, `src/v2/tui/railmodel.ts`, `src/v2/tui/workfocus.ts`, `src/v2/tui/workapprovals.ts`, `src/v2/tui/picker.ts`
 
@@ -26,7 +26,10 @@ rendered `name | role` without one label column, so separators did not align.
    value as the transcript and composer. Breakpoints are ≥118 columns (full
    three panes), 96–117 (three panes with compact Work), and <96 (Work becomes
    a right drawer toggled by `Space b r`; ticket #183 made both column
-   switches durable). The Work card design
+   switches durable). Ticket #263 caps the Work share at 53 columns on wide
+   terminals: that is the narrowest pane that still fits one full-width card
+   (49 content columns is exactly two minimum cards plus the inter-card gap),
+   and every reclaimed column goes to the chat. The Work card design
    is unchanged; only container width/height and the focus border adapt.
 
 2. **Rail is two panes, grouped by primary workspace.**
@@ -49,7 +52,13 @@ rendered `name | role` without one label column, so separators did not align.
    2–3 column grid. Card mode is a width/height decision, not a column count:
    the pane needs the width that formerly fit a second minimum card, so
    160×50 (and wider) render one card per row while 100×30, 120×40, and the
-   80×24 drawer keep the compact-row fallback. The newest history group
+   80×24 drawer keep the compact-row fallback. Ticket #263 makes 53 columns the
+   card-mode floor and the Work cap: 49 content columns fits the full-width
+   card, so 196/200/240-column terminals render Work at 53 instead of growing
+   it into a second transcript. At that width the Work header uses a compact
+   form that drops the done segment when the full header would truncate,
+   keeping the view name, group/active counts, and page visible; wider panes
+   keep the full header. The newest history group
    expands, older groups roll up, and a seen group keeps its row when later
    finishes reorder it. Pagination is pure and sized by the Work pane body;
    each section carries one card, and a group that spans pages repeats its
@@ -113,6 +122,10 @@ rendered `name | role` without one label column, so separators did not align.
   fewer cards per page than the retired 2–3 column grid, but each card keeps a
   readable full-width header, title, detail, and tide. Panes too narrow for a
   comfortable full-width card keep compact rows.
+- **The Work cap is the card-mode floor.** Fifty-three columns is narrow
+  enough that the full Work header would truncate, so the compact form drops
+  the done segment to keep the view, counts, and page. The chat gains the
+  remaining width; Work never becomes a second transcript.
 - **HISTORY is not a second retention policy.** It reads the same task graph
   and the existing finished-work retention; the pane does not keep rows alive
   beyond the service's retention.
@@ -137,6 +150,9 @@ rendered `name | role` without one label column, so separators did not align.
 | Behavior | Test |
 |---|---|
 | Pane breakpoints, exact tiling, drawer right edge, Work content width, size matrix | `src/v2/tui/workpane.test.ts` |
+| 53-column cap, 49-column card-mode floor, 196/200/240 right edge | `src/v2/tui/workpane.test.ts`, `src/v2/tui/workfocus.test.ts` |
+| Full/compact Work header fit and the dropped done segment | `src/v2/tui/workpane.test.ts` |
+| Card title, status, and budget readability at 49 content columns | `src/v2/tui/workrows.test.ts` |
 | One full-width card per row, exact card width, compact fallback, page-split `cont.` | `src/v2/tui/workpane.test.ts` |
 | ACTIVE/HISTORY partitioning, ordering, history rollups, empty work | `src/v2/tui/workpane.test.ts` |
 | Spatial navigation, one-column page edges, half pages, focus settlement, card rectangles | `src/v2/tui/workfocus.test.ts` |
