@@ -2,7 +2,7 @@
 
 > **v3 UI and streaming pass.** The v3 work adds real delta streaming, inline composer completions, a searchable member checklist, semantic theme tokens, focus borders, git metadata, and the visible `I` init shortcut. The v2 runtime model and authority boundaries are unchanged.
 
-Status: **developer preview**, compatibility recorded against OpenCode 2.2.1. The v2 runtime is the default. The v1 preview was removed. The v5.8 live matrix ran on OpenCode 2.2.5.
+Status: **developer preview**, compatibility verified on OpenCode 2.2.6 and 2.2.7. The v2 runtime is the default. The v1 preview was removed. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence; see the [host support range](compatibility/opencode-host-range.md).
 
 > **Native-first decisions (2026-11-10).** [ADR 0009](adr/0009-conversation-identity-and-sessions.md), [ADR 0010](adr/0010-native-turn-ingestion.md), and [ADR 0011](adr/0011-mention-routing-and-budgets.md) record the decided conversation/session, ingestion, and routing model. Where this document describes the current v2 path that differs (one workspace session per agent, a DM reusing it, TUI transcript reads, explicit `maxHops`), the ADR is authoritative for the target; implementation lands under tickets #212–#227.
 

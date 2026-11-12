@@ -4,7 +4,7 @@
 
 Ensemble is a TUI workspace where you and a team of named agents share one group chat, delegate visible subtasks, and inspect each agent's native OpenCode session underneath.
 
-> **Status: developer preview.** The v2 runtime is the default. It is not published, versioned, or licensed. Compatibility is recorded against OpenCode 2.2.1; the v5.8 live matrix was run on OpenCode 2.2.5.
+> **Status: developer preview.** The v2 runtime is the default. It is not published, versioned, or licensed. Compatibility is verified on OpenCode **2.2.6** and **2.2.7** (Linux/tmux, Node 26.12.1). The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
 
 > **Native-first decisions.** The conversation/session, ingestion, and mention-routing decisions for native-first coordination are recorded in [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md), [ADR 0010](docs/adr/0010-native-turn-ingestion.md), and [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md). Product behavior follows in tickets #212–#227.
 
@@ -45,6 +45,8 @@ Add the repository to `opencode.json`:
 Run `/ensemble` or the **Open Ensemble** palette command. Do not also load the same plugin from `.opencode/plugins/`; that creates a duplicate plugin ID.
 
 If the plugin was already loaded before updating the package exports, run `opencode reload` or restart the OpenCode service.
+
+Ensemble supports OpenCode **2.2.6** and **2.2.7** on Linux/tmux with Node 26.12.1. The `@opencode/plugin` peer range is `2.2.6 || 2.2.7`. An unsupported host still loads, but Ensemble writes a runtime warning because its behavior is untested. See the [OpenCode host support range](docs/compatibility/opencode-host-range.md) for the CLI-to-API mapping and evidence.
 
 Upgrading from a pre-ledger workspace synthesizes dispatch groups on first
 access: used hops come from the existing non-completion delegations and
@@ -169,7 +171,8 @@ Every requested directory is queried on the **one selected service**, sequential
 - [v5.7 verification record](docs/verification/2026-11-05-v57.md)
 - [v2 specification](https://github.com/heyimteee/ensemble/issues/17)
 - [v2 tickets](https://github.com/heyimteee/ensemble/issues)
-- [OpenCode compatibility report](docs/compatibility/opencode-2.2.1.md)
+- [OpenCode host support range](docs/compatibility/opencode-host-range.md): supported CLI releases, peer range, and runtime warning
+- [OpenCode 2.2.1 compatibility report](docs/compatibility/opencode-2.2.1.md): historical extension behavior, constraints, and gaps
 - [OpenTUI assessment](docs/assessments/opentui.md)
 - [Glossary](GLOSSARY.md)
 - [Contributing](CONTRIBUTING.md)
