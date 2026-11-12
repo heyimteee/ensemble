@@ -376,7 +376,7 @@ test("ticket173: the size matrix emits in-bounds rectangles for every supported 
     working({ id: "c1", dispatchGroupID: "dispatch_3", createdAt: 5 }),
   ]
   const views = workViewGroups(items, record(...items), { now: 5_000 })
-  const matrix: Array<[number, number]> = [[80, 24], [100, 30], [120, 40], [160, 50]]
+  const matrix: Array<[number, number]> = [[80, 24], [100, 30], [120, 40], [160, 50], [196, 50], [200, 50], [240, 50]]
   for (const [width, height] of matrix) {
     const panes = workspacePaneWidths(width)
     const content = panes.workContentWidth
@@ -399,6 +399,26 @@ test("ticket173: the size matrix emits in-bounds rectangles for every supported 
       current = navigateWorkFocus(pages, current.id, "down")
     }
     assert.ok(seen.size >= 1)
+  }
+})
+
+test("ticket263: the capped 196/200/240 Work pane keeps one card at the exact right edge", () => {
+  const items = [
+    working({ id: "a1", dispatchGroupID: "dispatch_1", createdAt: 1 }),
+    working({ id: "b1", dispatchGroupID: "dispatch_2", createdAt: 2 }),
+  ]
+  const views = workViewGroups(items, record(...items), { now: 5_000 })
+  for (const width of [196, 200, 240]) {
+    const panes = workspacePaneWidths(width)
+    assert.equal(panes.workWidth, 53, `${width}: Work is capped at 53`)
+    assert.equal(panes.workContentWidth, 49, `${width}: content is the card-mode floor`)
+    const layout = paginateWorkGroups(views.active, panes.workContentWidth, workPaneBodyHeight(50), 5_000)
+    assert.equal(layout.mode, "cards", `${width}: the capped pane keeps card mode`)
+    assert.equal(layout.cardWidth, 49, `${width}: the card spans the content width`)
+    const first = workLayoutRects(layout)[0]?.rects[0]
+    assert.equal(first?.width, 49, `${width}: the card keeps its full width`)
+    assert.equal(first?.x, 0, `${width}: the card starts at the content left edge`)
+    assert.equal(first ? first.x + first.width : -1, panes.workContentWidth, `${width}: the card ends at the exact right edge`)
   }
 })
 
