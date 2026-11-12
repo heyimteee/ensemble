@@ -21,6 +21,31 @@ export type Palette = {
   bg: RGBA | string
 }
 
+/**
+ * Ticket #259: WCAG AA thresholds. Text roles need 4.5:1; large text and
+ * non-text UI roles need 3:1. The palette matrix in theme.test.ts classifies
+ * every role so a new color cannot escape the accessibility contract.
+ */
+export const WCAG_AA_TEXT = 4.5
+export const WCAG_AA_UI = 3
+
+/** Palette roles painted as text; each must meet WCAG AA 4.5:1. */
+export const PALETTE_TEXT_ROLES = [
+  "text",
+  "muted",
+  "faint",
+  "good",
+  "warn",
+  "bad",
+  "info",
+  "paleBlue",
+  "leader",
+  "accent",
+] as const satisfies readonly (keyof Palette)[]
+
+/** Palette roles painted as borders or focus chrome; each must meet WCAG AA 3:1. */
+export const PALETTE_UI_ROLES = ["border", "cardFocus", "focus"] as const satisfies readonly (keyof Palette)[]
+
 const PALE_BLUE_DARK = "#a8c7fa"
 const PALE_BLUE_LIGHT = "#3b6ea5"
 
@@ -92,11 +117,38 @@ function toRgba(color: ThemeColor | null | undefined): RGBA | null {
   }
 }
 
-function relativeLuminance(color: ThemeColor): number | null {
-  const rgba = toRgba(color)
-  if (!rgba) return null
+function rgbaLuminance(rgba: RGBA): number {
   const linear = (value: number) => (value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
   return 0.2126 * linear(rgba.r) + 0.7152 * linear(rgba.g) + 0.0722 * linear(rgba.b)
+}
+
+function relativeLuminance(color: ThemeColor): number | null {
+  const rgba = toRgba(color)
+  return rgba ? rgbaLuminance(rgba) : null
+}
+
+/**
+ * Ticket #259: WCAG contrast ratio between two colors. Returns null when
+ * either side is not a concrete color (for example `transparent`), so a
+ * caller cannot accidentally treat "unknown" as a passing value.
+ */
+export function contrastRatio(foreground: ThemeColor, background: ThemeColor): number | null {
+  const foregroundRgba = toRgba(foreground)
+  const backgroundRgba = toRgba(background)
+  // A translucent color has no single contrast ratio: its rendered value
+  // depends on the backdrop behind it.
+  if (!foregroundRgba || !backgroundRgba || foregroundRgba.a < 1 || backgroundRgba.a < 1) return null
+  const foregroundLuminance = rgbaLuminance(foregroundRgba)
+  const backgroundLuminance = rgbaLuminance(backgroundRgba)
+  const lighter = Math.max(foregroundLuminance, backgroundLuminance)
+  const darker = Math.min(foregroundLuminance, backgroundLuminance)
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+/** True when a foreground/background pair meets the WCAG AA threshold for its role. */
+export function meetsContrast(foreground: ThemeColor, background: ThemeColor, role: "text" | "ui"): boolean {
+  const ratio = contrastRatio(foreground, background)
+  return ratio !== null && ratio >= (role === "text" ? WCAG_AA_TEXT : WCAG_AA_UI)
 }
 
 /** Automatic black/white text for a filled chip or badge. */

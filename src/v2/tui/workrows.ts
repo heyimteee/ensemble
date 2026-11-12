@@ -6,7 +6,7 @@ import { TRANSCRIPT_WINDOW } from "../scoped-read.ts"
 import type { NativeSubagentRun, Subtask } from "../types.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
-import { chromeJoin } from "./separators.ts"
+import { chromeJoin, isAsciiTerminal } from "./separators.ts"
 import { nativeSubagentFocusID, nativeSubagentTitle, nativeSubagentWorkStatus } from "./nativecards.ts"
 import {
   flatTideLevels,
@@ -50,8 +50,30 @@ const GLYPHS: Record<DerivedWorkStatus, string> = {
   cancelled: "⊘",
 }
 
-export function workGlyph(status: DerivedWorkStatus): string {
-  return GLYPHS[status]
+/**
+ * Ticket #259: one-cell ASCII stand-ins for every Work state. The state word
+ * still carries the meaning; these only keep a terminal without Unicode or a
+ * Braille font from painting tofu in the glyph slot.
+ */
+const ASCII_GLYPHS: Record<DerivedWorkStatus, string> = {
+  pending: "-",
+  working: "*",
+  waiting: "o",
+  retrying: "~",
+  needs_you: "!",
+  replied: "+",
+  failed: "x",
+  stalled: "%",
+  cancelled: "/",
+}
+
+export function workGlyph(status: DerivedWorkStatus, env?: NodeJS.ProcessEnv): string {
+  return env && isAsciiTerminal(env) ? ASCII_GLYPHS[status] : GLYPHS[status]
+}
+
+/** The needs-you marker, with the ASCII `!` fallback. */
+export function needsYouMark(env?: NodeJS.ProcessEnv): string {
+  return env && isAsciiTerminal(env) ? "!" : NEEDS_YOU_MARK
 }
 
 /** One inline status label for work, shared by activity and card copy. Pure. */
@@ -103,6 +125,7 @@ export { isNeedsYouTask }
  * working still reads `⠋`. Pure.
  */
 export function workRowFrame(status: DerivedWorkStatus, tick: number, env: NodeJS.ProcessEnv = process.env): string {
+  if (isAsciiTerminal(env)) return workGlyph(status, env)
   const frame = effectiveTick(tick, env)
   switch (status) {
     case "working":
@@ -134,24 +157,24 @@ export function activityFrameForKind(kind: ActivityVerbKind, tick: number, env: 
     case "searching":
     case "running":
     case "writing":
-      return toolFrame(frame)
+      return toolFrame(frame, env)
     case "waiting":
-      return waitingFrame(frame)
+      return waitingFrame(frame, env)
     case "thinking":
-      return thinkingFrame(frame)
+      return thinkingFrame(frame, env)
     case "asking":
     case "checking":
     case "wrapping":
     case "working":
-      return workingFrame(frame)
+      return workingFrame(frame, env)
     case "retrying":
-      return waitingFrame(frame)
+      return waitingFrame(frame, env)
   }
 }
 
 /** Static mark for queued-behind-live activity lines. Never animated. */
-export function queuedActivityFrame(): string {
-  return queuedFrame()
+export function queuedActivityFrame(env: NodeJS.ProcessEnv = process.env): string {
+  return queuedFrame(env)
 }
 
 /** Active work first: working/retrying, then pending, oldest first. Terminal rows never render here. */
@@ -165,11 +188,16 @@ export function hasActiveWork(tasks: Subtask[], now: number): boolean {
 }
 
 /** One terminal outcome announced once as a transcript system line. Non-terminal work announces nothing. */
-export function terminalAnnouncement(task: Subtask, agentLabel: string, now: number): string | undefined {
+export function terminalAnnouncement(
+  task: Subtask,
+  agentLabel: string,
+  now: number,
+  env?: NodeJS.ProcessEnv,
+): string | undefined {
   const status = deriveWorkStatus(task, now)
-  if (status === "replied") return `● ${agentLabel} finished: ${short(task.title || "(untitled)", 60)}`
-  if (status === "failed") return `✕ ${agentLabel} failed: ${short(task.error || task.title || "(unknown reason)", 80)}`
-  if (status === "cancelled") return `⊘ ${short(task.title || "(untitled)", 60)} cancelled`
+  if (status === "replied") return `${workGlyph(status, env)} ${agentLabel} finished: ${short(task.title || "(untitled)", 60)}`
+  if (status === "failed") return `${workGlyph(status, env)} ${agentLabel} failed: ${short(task.error || task.title || "(unknown reason)", 80)}`
+  if (status === "cancelled") return `${workGlyph(status, env)} ${short(task.title || "(untitled)", 60)} cancelled`
   // A stall is a queue problem, not a finished run: it stays on the Work
   // surface until the user retries, cancels, or dismisses it (#170).
   return undefined
@@ -180,6 +208,7 @@ export function terminalAnnouncements(
   tasks: Subtask[],
   agentLabelFor: (task: Subtask) => string,
   now: number,
+  env?: NodeJS.ProcessEnv,
 ): Array<{ id: string; text: string }> {
   return tasks
     .filter((task) => isTerminalWorkStatus(deriveWorkStatus(task, now)))
@@ -188,7 +217,7 @@ export function terminalAnnouncements(
         (a.finishedAt ?? a.repliedAt ?? a.createdAt) - (b.finishedAt ?? b.repliedAt ?? b.createdAt),
     )
     .flatMap((task) => {
-      const text = terminalAnnouncement(task, agentLabelFor(task), now)
+      const text = terminalAnnouncement(task, agentLabelFor(task), now, env)
       return text === undefined ? [] : [{ id: task.id, text }]
     })
 }
@@ -946,7 +975,7 @@ export function workCardGlyph(
   tick: number,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return card.needsYou ? NEEDS_YOU_MARK : workRowFrame(card.status, tick, env)
+  return card.needsYou ? needsYouMark(env) : workRowFrame(card.status, tick, env)
 }
 
 /** The animated tide strip; only these cells read the 15 fps clock. */

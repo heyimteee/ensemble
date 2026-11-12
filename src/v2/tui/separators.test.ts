@@ -8,6 +8,7 @@ import {
   chromeSeparator,
   chromeSeparatorParts,
   chromeSplit,
+  isAsciiTerminal,
 } from "./separators.ts"
 import { settingsHeader, modelPickerLabel } from "./settings.ts"
 import { memoryProvenanceLine } from "./memories.ts"
@@ -26,6 +27,15 @@ test("ASCII is only the fallback for a dumb or explicitly-ASCII terminal", () =>
   assert.equal(chromeSeparator({ ENSEMBLE_ASCII: "1" }), "|")
   assert.equal(chromeSeparator({ ENSEMBLE_ASCII: "true" }), "|")
   assert.equal(chromeSeparator({ TERM: "dumb" }), "|")
+})
+
+test("ticket259: ASCII mode is one predicate shared by chrome and glyph fallbacks", () => {
+  assert.equal(isAsciiTerminal({}), false)
+  assert.equal(isAsciiTerminal({ TERM: "xterm-256color" }), false)
+  assert.equal(isAsciiTerminal({ ENSEMBLE_ASCII: "1" }), true)
+  assert.equal(isAsciiTerminal({ ENSEMBLE_ASCII: "true" }), true)
+  assert.equal(isAsciiTerminal({ ENSEMBLE_ASCII: "0" }), false)
+  assert.equal(isAsciiTerminal({ TERM: "dumb" }), true)
 })
 
 test("splitting a chrome line keeps separator spans addressable", () => {
