@@ -164,6 +164,13 @@ rules are in
   publish or credentials and is not part of PR CI. See the
   [ticket #279 record](../docs/verification/2026-11-16-ticket-279.md) and the
   [ticket #270 source-package failure](../docs/verification/2026-11-16-ticket-270.md).
+- `scripts/release-guard.mjs`: ticket #275's release preflight. Validates the
+  triggering ref against `package.json` (a tag push must be exactly
+  `v<version>`; a dispatch is always a dry run), refuses a version with no
+  non-empty `CHANGELOG.md` section, writes `RELEASE_NOTES.md`, and exports
+  `version`, `tag`, `dry-run`, and `dist-tag` to the workflow. It reads no
+  credential. Run it with `--event` and `--ref` locally; see
+  [release operations](../docs/operations/release.md).
 - `npm run test:live:multilocation`: the single-service regression probe. Starts
   the isolated fake host and TUI, creates four channels and eight agents, sends
   100 requests, and asserts one `service.start`, zero `task.failed`, zero
