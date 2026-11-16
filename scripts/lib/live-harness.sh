@@ -702,6 +702,56 @@ live_require_joined_matches() {
     || live_fail "TUI did not show: $description"
 }
 
+# Composer text: the composer draws its own single border inside the chat
+# content cells, so a draft that wraps ends one row with `│` and starts the
+# next with `│`. A plain chat join would put those edges between the wrapped
+# words. Slice the chat cell, find the composer box (the last single-line box
+# above the footer; message bubbles are rounded and the completion palette
+# sits above the composer), and join only its text rows with the vertical
+# edges removed. The suffix after a file selection still has to be present;
+# a missing suffix still fails.
+live_capture_composer_joined() {
+  local start end
+  read -r start end <<<"$(live_chat_columns)"
+  live_capture "$1" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const start = Number(process.argv[1]) - 1;
+      const end = Number(process.argv[2]);
+      const rows = value.split("\n")
+        .map((line) => line.slice(start, end).replace(/[▁▂▃▄▅▆▇█]+\s*$/, "").trim());
+      let bottom = -1;
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        if (/^└─+┘$/.test(rows[i])) { bottom = i; break }
+      }
+      if (bottom === -1) return;
+      let top = -1;
+      for (let i = bottom - 1; i >= 0; i -= 1) {
+        if (/^┌─+┐$/.test(rows[i])) { top = i; break }
+      }
+      if (top === -1) return;
+      const text = [];
+      for (let i = top + 1; i < bottom; i += 1) {
+        const row = rows[i].replace(/^│\s*/, "").replace(/\s*│$/, "").trim();
+        if (row.length > 0) text.push(row);
+      }
+      process.stdout.write(text.join(" "));
+    });
+  ' "$start" "$end"
+}
+
+live_capture_composer_contains() {
+  live_capture_composer_joined "$1" | grep -qF -- "$2"
+}
+
+live_require_composer_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  live_wait_for "$seconds" "$description" live_capture_composer_contains "$session" "$text" \
+    || live_fail "TUI composer did not show: $description"
+}
+
 # Bounded wait for a transient label that must appear exactly once in the chat
 # column in the SAME frame. Work-card details live outside this slice, so the
 # aggregate chat line is measured without counting a card's matching detail.
