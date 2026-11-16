@@ -154,6 +154,14 @@ rules are in
   `fd`; `npm run test:live:preflight -- all` also requires and prints it for the
   real scenario. Set `ENSEMBLE_LIVE_EXPECT_NODE` and
   `ENSEMBLE_LIVE_EXPECT_OPENCODE` to fail on a present-but-wrong version.
+- `npm run test:install:rc`: ticket #270's clean-install release-candidate
+  proof. Packs the current package, serves it from a loopback-only npm registry,
+  installs it with `opencode plugin add` into an isolated OpenCode 2.2.7 host,
+  and checks `opencode plugin list`, the server tools, and the TUI route and
+  `/ensemble` command. It needs no public registry or credentials and is not
+  part of PR CI. The source package currently fails at TUI load; see the
+  [ticket #270 record](../docs/verification/2026-11-16-ticket-270.md) and
+  [#279](https://github.com/heyimteee/ensemble/issues/279).
 - `npm run test:live:multilocation`: the single-service regression probe. Starts
   the isolated fake host and TUI, creates four channels and eight agents, sends
   100 requests, and asserts one `service.start`, zero `task.failed`, zero
