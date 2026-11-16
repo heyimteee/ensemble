@@ -71,7 +71,7 @@ Expected evidence:
 | Busy service | `busy`; nothing is written |
 
 A real package downgrade rehearsal (install `0.1.0`, then reinstall
-`0.1.0-rc.1`) is blocked until the candidate is published and a previous
+`0.1.0-rc.2`) is blocked until the candidate is published and a previous
 installable version exists. Record it in the release sign-off (#278) rather
 than claiming it here. The blocked check is listed in
 [the ticket #273 record](../verification/2026-11-16-ticket-273.md).

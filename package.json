@@ -1,6 +1,6 @@
 {
   "name": "@heyimteee/ensemble",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0-rc.2",
   "description": "Persistent agent teams inside OpenCode",
   "license": "MIT",
   "author": "heyimteee",
@@ -26,27 +26,17 @@
   },
   "type": "module",
   "exports": {
-    ".": "./src/v2/server.ts",
-    "./tui": "./src/v2/tui/index.tsx",
-    "./rpc": "./src/v2/rpc.ts"
+    ".": "./dist/server.js",
+    "./tui": "./dist/tui/index.js",
+    "./rpc": "./dist/rpc.js"
   },
   "files": [
-    "src/v2/**/*.ts",
-    "src/v2/**/*.tsx",
-    "!src/v2/**/*.test.ts",
-    "!src/v2/**/*.test.tsx",
-    "!src/v2/fixtures/**",
-    "!src/v2/ci-workflows.ts",
-    "!src/v2/data-cli.ts",
-    "!src/v2/doctor-cli.ts",
-    "!src/v2/doctor.ts",
-    "!src/v2/flake-policy.ts",
-    "!src/v2/latency-budget.ts",
-    "!src/v2/live-matrix.ts",
-    "!src/v2/prompt-benchmark.ts",
-    "!src/v2/test-service.ts"
+    "dist"
   ],
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "check:build": "tsc -p tsconfig.build.json && node scripts/check-build.mjs",
+    "prepack": "npm run build && npm run check:build",
     "check": "tsc --noEmit",
     "verify": "npm run check && npm test",
     "doctor": "node --experimental-strip-types src/v2/doctor-cli.ts",
@@ -81,32 +71,25 @@
   "engines": {
     "node": ">=22.23.4"
   },
+  "dependencies": {
+    "@opentui/core": "0.7.0",
+    "@opentui/solid": "0.7.0",
+    "solid-js": "1.9.12"
+  },
   "peerDependencies": {
-    "@opencode/plugin": "2.2.6 || 2.2.7",
-    "@opentui/core": ">=0.7.0",
-    "@opentui/solid": ">=0.7.0",
-    "solid-js": ">=1.9.0"
+    "@opencode/plugin": "2.2.6 || 2.2.7"
   },
   "peerDependenciesMeta": {
     "@opencode/plugin": {
       "optional": true
-    },
-    "@opentui/core": {
-      "optional": true
-    },
-    "@opentui/solid": {
-      "optional": true
-    },
-    "solid-js": {
-      "optional": true
     }
   },
   "devDependencies": {
+    "@babel/core": "7.29.7",
+    "@babel/preset-typescript": "7.27.1",
     "@opencode/plugin": "2.2.1",
-    "@opentui/core": "0.7.0",
-    "@opentui/solid": "0.7.0",
     "@types/node": "26.6.6",
-    "solid-js": "1.9.12",
+    "babel-preset-solid": "1.9.12",
     "typescript": "7.0.2"
   }
 }

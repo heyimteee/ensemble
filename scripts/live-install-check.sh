@@ -30,8 +30,8 @@ PACKAGE_NAME=$("$LIVE_NODE_BIN" -p 'require(process.argv[1]).name' "$LIVE_ROOT/p
 PACKAGE_VERSION=$("$LIVE_NODE_BIN" -p 'require(process.argv[1]).version' "$LIVE_ROOT/package.json")
 [[ "$PACKAGE_NAME" == "@heyimteee/ensemble" ]] \
   || live_fail "unexpected package name: $PACKAGE_NAME"
-[[ "$PACKAGE_VERSION" == "0.1.0-rc.1" ]] \
-  || live_fail "expected release candidate 0.1.0-rc.1, found $PACKAGE_VERSION"
+[[ "$PACKAGE_VERSION" == "0.1.0-rc.2" ]] \
+  || live_fail "expected release candidate 0.1.0-rc.2, found $PACKAGE_VERSION"
 PACKAGE_SPEC="$PACKAGE_NAME@$PACKAGE_VERSION"
 
 # A mock project and agent prove the install does not need the repository as a
@@ -66,13 +66,11 @@ LIVE_SESSION_NAMES+=("$LIVE_REGISTRY_SESSION")
 live_wait_for 20 "local npm registry" test -s "$REGISTRY_URL_FILE" \
   || live_fail "local npm registry did not start"
 REGISTRY_URL=$(cat "$REGISTRY_URL_FILE")
-printf 'registry=%s\n' "$REGISTRY_URL" >"$LIVE_HOME/.npmrc"
-live_log "PASS registry: loopback-only candidate"
+printf '@heyimteee:registry=%s\n' "$REGISTRY_URL" >"$LIVE_HOME/.npmrc"
+live_log "PASS registry: loopback-only candidate package; runtime dependencies stay on the public registry"
 
 INSTALL_ENV=(
   "${LIVE_PROCESS_ENV[@]}"
-  "NPM_CONFIG_REGISTRY=$REGISTRY_URL"
-  "npm_config_registry=$REGISTRY_URL"
 )
 live_run_isolated() {
   ( cd "$LIVE_PROJECT" && env -i "${INSTALL_ENV[@]}" "$@" )
@@ -96,6 +94,27 @@ fi
 ' "$LIVE_CONFIG/opencode/opencode.json" "$PACKAGE_SPEC" \
   || live_fail "opencode plugin add did not record $PACKAGE_SPEC"
 live_log "PASS plugin add: recorded $PACKAGE_SPEC in isolated config"
+
+# The installed package, not the checkout, must carry the built TUI entry and
+# resolve its declared runtime dependencies from the same plugin cache.
+CACHE_PACKAGE=$(ls -d "$LIVE_BASE"/cache/opencode/npm/@heyimteee/ensemble@"$PACKAGE_VERSION"/*/node_modules/@heyimteee/ensemble 2>/dev/null | head -n 1)
+[[ -n "$CACHE_PACKAGE" && -f "$CACHE_PACKAGE/dist/tui/index.js" ]] \
+  || live_fail "the installed package has no dist/tui/index.js in the plugin cache"
+[[ ! -e "$CACHE_PACKAGE/src" ]] \
+  || live_fail "the installed package still ships TypeScript sources"
+"$LIVE_NODE_BIN" -e '
+  const { createRequire } = require("node:module");
+  const resolved = createRequire(process.argv[1] + "/package.json");
+  for (const name of ["@opentui/core", "@opentui/solid", "solid-js"]) {
+    const path = resolved.resolve(name);
+    if (!path.startsWith(process.argv[2])) {
+      console.error(`${name} resolved outside the plugin cache: ${path}`);
+      process.exit(1);
+    }
+  }
+' "$CACHE_PACKAGE" "$LIVE_BASE/cache/opencode/npm" \
+  || live_fail "the installed TUI runtime dependencies do not resolve from the plugin cache"
+live_log "PASS installed package: dist/tui/index.js and declared TUI dependencies resolve in the plugin cache"
 
 # --- plugin list -----------------------------------------------------------
 

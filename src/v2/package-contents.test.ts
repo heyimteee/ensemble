@@ -1,27 +1,32 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { readFileSync, readdirSync, statSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { dirname, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 
 /**
- * Ticket #269: the published tarball is a runtime artifact. This suite packs the
- * package the way `npm publish` does and asserts the contents are exactly the
- * import closure of the public exports, so a stray test, fixture, doc, script,
- * or development-only module cannot leak into a release.
+ * Ticket #269/#279: the published tarball is a runtime artifact. This suite
+ * packs the package the way `npm publish` does (which runs the `prepack`
+ * build) and asserts the contents are exactly the built import closure of the
+ * public exports, so a stray test, fixture, doc, script, TypeScript source, or
+ * development-only module cannot leak into a release.
  */
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url))
 const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"))
 
 const ROOT_FILES = new Set(["package.json", "README.md", "LICENSE"])
 
+/** The source entries behind the `.`, `./tui`, and `./rpc` exports. */
+const SOURCE_ENTRIES = ["./src/v2/server.ts", "./src/v2/tui/index.tsx", "./src/v2/rpc.ts"]
+
 const FORBIDDEN: ReadonlyArray<readonly [RegExp, string]> = [
-  [/\.test\.tsx?$/, "test file"],
+  [/\.test\.jsx?$/, "test file"],
+  [/\.(ts|tsx|mts|cts)$/, "TypeScript source"],
   [/(^|\/)fixtures\//, "fixture"],
   [/^(docs|scripts)\//, "docs or scripts"],
   [/(^|\/)(AGENTS|CONTRIBUTING|GLOSSARY|SECURITY)\.md$/, "repository document"],
-  [/^(tsconfig\.json|package-lock\.json)$/, "development artifact"],
+  [/^(tsconfig\.json|tsconfig\.build\.json|package-lock\.json)$/, "development artifact"],
   [/(^|\/)node_modules\//, "dependency tree"],
   [/\.(tgz|tsbuildinfo|log|sqlite|sqlite-\w+|map)$/, "development artifact"],
 ]
@@ -79,7 +84,7 @@ function importSpecifiers(source: string): string[] {
   return specifiers
 }
 
-/** Resolve a relative TypeScript import the way Node's strip-types loader does. */
+/** Resolve a relative TypeScript import the way the source graph uses it. */
 function resolveModule(from: string, specifier: string, modules: ReadonlySet<string>): string | null {
   if (!specifier.startsWith(".")) return null
   const base = resolve(dirname(from), specifier)
@@ -89,12 +94,10 @@ function resolveModule(from: string, specifier: string, modules: ReadonlySet<str
   return null
 }
 
-/** Every module loadable from the package's exports, including `./rpc`. */
-function runtimeModules(): Set<string> {
+/** Every source module loadable from the package's three public entries. */
+function runtimeSourceModules(): Set<string> {
   const modules = new Set(sourceModules())
-  const entries = Object.values(packageJson.exports as Record<string, string>).map((entry) =>
-    resolve(repoRoot, entry),
-  )
+  const entries = SOURCE_ENTRIES.map((entry) => resolve(repoRoot, entry))
   const reached = new Set<string>()
   const pending = [...entries]
   while (pending.length > 0) {
@@ -108,16 +111,26 @@ function runtimeModules(): Set<string> {
       if (dependency && !reached.has(dependency)) pending.push(dependency)
     }
   }
-  return new Set([...reached].map((file) => relative(repoRoot, file).split(sep).join("/")))
+  return reached
+}
+
+/** The built paths the three exports must ship, derived from the source closure. */
+function expectedBuiltPaths(): Set<string> {
+  return new Set(
+    [...runtimeSourceModules()].map((file) => {
+      const sourcePath = relative(join(repoRoot, "src", "v2"), file).split(sep).join("/")
+      return `dist/${sourcePath.replace(/\.tsx?$/, ".js")}`
+    }),
+  )
 }
 
 /**
  * The allowlist contract, independent of npm's glob engine: only the root
- * package documents and the runtime module closure may ship.
+ * package documents and the built runtime closure may ship.
  */
-function packedContentFailures(paths: readonly string[], runtime: ReadonlySet<string>): string[] {
+function packedContentFailures(paths: readonly string[], expected: ReadonlySet<string>): string[] {
   const failures: string[] = []
-  const packedModules = new Set<string>()
+  const packedBuilt = new Set<string>()
   for (const path of paths) {
     const forbidden = FORBIDDEN.find(([pattern]) => pattern.test(path))
     if (forbidden) {
@@ -125,53 +138,102 @@ function packedContentFailures(paths: readonly string[], runtime: ReadonlySet<st
       continue
     }
     if (ROOT_FILES.has(path)) continue
-    if (/^src\/v2\/.*\.tsx?$/.test(path)) {
-      packedModules.add(path)
+    if (path.startsWith("dist/") && path.endsWith(".js")) {
+      packedBuilt.add(path)
       continue
     }
     failures.push(`${path}: not an allowed package file`)
   }
-  for (const path of [...runtime].sort()) {
-    if (!packedModules.has(path)) failures.push(`${path}: runtime module is missing from the package`)
+  for (const path of [...expected].sort()) {
+    if (!packedBuilt.has(path)) failures.push(`${path}: built runtime module is missing from the package`)
   }
-  for (const path of [...packedModules].sort()) {
-    if (!runtime.has(path)) failures.push(`${path}: is not reachable from the package exports`)
+  for (const path of [...packedBuilt].sort()) {
+    if (!expected.has(path)) failures.push(`${path}: is not reachable from the package exports`)
   }
   return failures
 }
 
-test("the tarball ships exactly the runtime module closure", () => {
+function builtSources(): Map<string, string> {
+  const dist = join(repoRoot, "dist")
+  const sources = new Map<string, string>()
+  const walk = (directory: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      const full = join(directory, name)
+      if (statSync(full).isDirectory()) walk(full)
+      else sources.set(relative(repoRoot, full).split(sep).join("/"), readFileSync(full, "utf8"))
+    }
+  }
+  walk(dist)
+  return sources
+}
+
+test("the tarball ships exactly the built runtime closure", () => {
   const report = packReport()
   const paths = report.files.map((file) => file.path).sort()
-  assert.deepEqual(packedContentFailures(paths, runtimeModules()), [])
+  assert.deepEqual(packedContentFailures(paths, expectedBuiltPaths()), [])
   for (const required of ["package.json", "README.md", "LICENSE"]) {
     assert.ok(paths.includes(required), `${required} ships`)
   }
+  for (const entry of ["./dist/server.js", "./dist/tui/index.js", "./dist/rpc.js"]) {
+    assert.ok(paths.includes(entry.slice(2)), `${entry} ships`)
+  }
 })
 
-test("the content check rejects a leaked test, fixture, doc, script, or dev module", () => {
-  const runtime = new Set(["src/v2/server.ts"])
+test("the content check rejects a leaked test, fixture, doc, script, source, or dev module", () => {
+  const expected = new Set(["dist/server.js", "dist/tui/index.js", "dist/rpc.js"])
   const failures = packedContentFailures(
     [
       "package.json",
       "README.md",
       "LICENSE",
+      "dist/server.js",
+      "dist/tui/index.js",
+      "dist/rpc.js",
+      "dist/service.test.js",
+      "dist/fixtures/native-host-contract.jsonl",
+      "dist/tui/index.tsx",
       "src/v2/server.ts",
-      "src/v2/service.test.ts",
-      "src/v2/fixtures/native-host-contract.jsonl",
+      "dist/doctor.js",
       "docs/implementation.md",
       "scripts/docs-check.mjs",
-      "src/v2/doctor.ts",
       "tsconfig.json",
+      "tsconfig.build.json",
     ],
-    runtime,
+    expected,
   )
-  assert.ok(failures.some((failure) => /service\.test\.ts: test file/.test(failure)), failures.join("\n"))
+  assert.ok(failures.some((failure) => /service\.test\.js: test file/.test(failure)), failures.join("\n"))
   assert.ok(failures.some((failure) => /fixtures\/.*fixture/.test(failure)), failures.join("\n"))
+  assert.ok(failures.some((failure) => /tui\/index\.tsx: TypeScript source/.test(failure)), failures.join("\n"))
+  assert.ok(failures.some((failure) => /src\/v2\/server\.ts: TypeScript source/.test(failure)), failures.join("\n"))
+  assert.ok(failures.some((failure) => /dist\/doctor\.js: is not reachable/.test(failure)), failures.join("\n"))
   assert.ok(failures.some((failure) => /^docs\/implementation\.md: docs or scripts/.test(failure)), failures.join("\n"))
   assert.ok(failures.some((failure) => /^scripts\/docs-check\.mjs: docs or scripts/.test(failure)), failures.join("\n"))
-  assert.ok(failures.some((failure) => /doctor\.ts: is not reachable/.test(failure)), failures.join("\n"))
   assert.ok(failures.some((failure) => /tsconfig\.json: development artifact/.test(failure)), failures.join("\n"))
+  assert.ok(failures.some((failure) => /tsconfig\.build\.json: development artifact/.test(failure)), failures.join("\n"))
+})
+
+test("the built entries are JavaScript for the Solid OpenTUI runtime", () => {
+  packReport()
+  const built = builtSources()
+  assert.deepEqual(
+    [...built.keys()].sort(),
+    [...expectedBuiltPaths()].sort(),
+    "the build emits exactly the runtime closure",
+  )
+  const tui = built.get("dist/tui/index.js")
+  assert.ok(tui, "dist/tui/index.js exists")
+  assert.match(tui, /from "@opentui\/solid"/)
+  const allBuilt = [...built.values()].join("\n")
+  assert.match(allBuilt, /from "solid-js"/, "the built TUI uses Solid's reactive runtime")
+  assert.doesNotMatch(allBuilt, /["']react["']|react\/jsx/)
+  for (const [path, source] of built) {
+    if (!path.endsWith(".js")) continue
+    for (const specifier of importSpecifiers(source)) {
+      if (!specifier.startsWith(".")) continue
+      assert.match(specifier, /\.js$/, `${path} keeps a JavaScript relative import: ${specifier}`)
+    }
+    assert.doesNotMatch(source, /\bfrom\s*["'][^"']+\.(ts|tsx)["']/, `${path} imports no TypeScript source`)
+  }
 })
 
 test("the package identity is the scoped MIT OpenCode plugin", () => {
@@ -186,12 +248,28 @@ test("the package identity is the scoped MIT OpenCode plugin", () => {
   assert.ok(Array.isArray(packageJson.keywords) && packageJson.keywords.length > 0)
   assert.equal(packageJson.publishConfig?.access, "public")
   assert.deepEqual(packageJson.exports, {
-    ".": "./src/v2/server.ts",
-    "./tui": "./src/v2/tui/index.tsx",
-    "./rpc": "./src/v2/rpc.ts",
+    ".": "./dist/server.js",
+    "./tui": "./dist/tui/index.js",
+    "./rpc": "./dist/rpc.js",
   })
+  assert.deepEqual(packageJson.files, ["dist"])
+  assert.ok(
+    typeof packageJson.scripts?.build === "string" && packageJson.scripts.build.length > 0,
+    "the package declares a build script",
+  )
+  assert.ok(
+    /build/.test(packageJson.scripts?.prepack ?? ""),
+    "prepack runs the build before a tarball is produced",
+  )
+  assert.equal(existsSync(join(repoRoot, "tsconfig.build.json")), true)
   assert.equal(packageJson.engines?.node, ">=22.23.4")
   assert.equal(packageJson.peerDependencies?.["@opencode/plugin"], "2.2.6 || 2.2.7")
+  assert.deepEqual(Object.keys(packageJson.peerDependencies ?? {}), ["@opencode/plugin"])
+  assert.deepEqual(packageJson.dependencies, {
+    "@opentui/core": "0.7.0",
+    "@opentui/solid": "0.7.0",
+    "solid-js": "1.9.12",
+  })
 })
 
 test("the shipped license is the MIT text", () => {

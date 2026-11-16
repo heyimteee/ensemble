@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "src/v2"
+  },
+  "include": ["src/v2/**/*.ts", "src/v2/**/*.tsx"],
+  "exclude": [
+    "src/v2/**/*.test.ts",
+    "src/v2/**/*.test.tsx",
+    "src/v2/ci-workflows.ts",
+    "src/v2/data-cli.ts",
+    "src/v2/doctor-cli.ts",
+    "src/v2/doctor.ts",
+    "src/v2/flake-policy.ts",
+    "src/v2/latency-budget.ts",
+    "src/v2/live-matrix.ts",
+    "src/v2/prompt-benchmark.ts",
+    "src/v2/test-service.ts"
+  ]
+}

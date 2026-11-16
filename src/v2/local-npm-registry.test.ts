@@ -37,6 +37,7 @@ test("ticket270: the local npm registry serves the packed candidate and its tarb
     name: "@heyimteee/ensemble",
     version: "9.9.9-rc.1",
     license: "MIT",
+    dependencies: { "solid-js": "1.9.12" },
   }))
   await writeFile(tarballPath, tarball)
   const child = spawn(process.execPath, [
@@ -61,6 +62,7 @@ test("ticket270: the local npm registry serves the packed candidate and its tarb
   assert.equal(version.version, "9.9.9-rc.1")
   assert.match(version.dist.integrity, /^sha512-/)
   assert.match(version.dist.shasum, /^[0-9a-f]{40}$/)
+  assert.deepEqual(version.dependencies, { "solid-js": "1.9.12" })
 
   const tarballResponse = await fetch(version.dist.tarball)
   assert.equal(tarballResponse.status, 200)
