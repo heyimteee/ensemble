@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/heyimteee/ensemble/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue or post exploit details.
+  - name: Support policy and diagnostics
+    url: https://github.com/heyimteee/ensemble/blob/main/docs/support/README.md
+    about: Read what to include, how to collect redacted diagnostics, and what to keep private.
+  - name: Support matrix and known limitations
+    url: https://github.com/heyimteee/ensemble/blob/main/docs/support/support-matrix.md
+    about: Check supported platforms, OpenCode and Node versions, and live-suite prerequisites before filing.
