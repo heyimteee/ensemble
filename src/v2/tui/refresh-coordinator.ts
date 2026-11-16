@@ -63,6 +63,25 @@ export function decideSnapshotApply(previous: SnapshotMeta | undefined, next: Sn
   return sameMetadata(previous, next) ? "skip" : "metadata"
 }
 
+/** A forced read that lost a same-epoch race must refetch, never rewind. */
+export type SnapshotFetchDecision = SnapshotApply | "refetch"
+
+/**
+ * Ticket #283: a reconnect asks for a replacement that bypasses the version
+ * guard, but a patch may still advance the cursor while that read is in
+ * flight. A same-epoch snapshot older than the cursor is stale: keep the
+ * forced bit and read again instead of repainting old state.
+ */
+export function decideSnapshotFetch(
+  previous: SnapshotMeta | undefined,
+  next: SnapshotMeta,
+  forced: boolean,
+): SnapshotFetchDecision {
+  if (!forced) return decideSnapshotApply(previous, next)
+  if (previous && next.epoch === previous.epoch && next.version < previous.version) return "refetch"
+  return "replace"
+}
+
 /** True when the snapshot advertised the patch-feed contract. */
 export function supportsPatchFeed(previous: SnapshotMeta | undefined): boolean {
   return previous !== undefined
@@ -301,6 +320,34 @@ export function revisionChanged(previous: SnapshotMeta | undefined, next: Revisi
     || previous.configRevision !== next.configRevision
     || previous.protocol !== next.protocol
     || previous.epoch !== next.epoch
+}
+
+/**
+ * Ticket #283: a reconnected client must rebuild from the durable snapshot
+ * boundary. A cold client still takes the cheap scoped bootstrap, but a
+ * loaded client cannot prove its cursor survived the service restart, so the
+ * next read is a forced replacement rather than a revision/feed delta.
+ */
+export function reconnectRequiresReplacement(previous: SnapshotMeta | undefined): boolean {
+  return previous !== undefined
+}
+
+/**
+ * Ticket #283: advance the cursor after a scoped resync only when the resync
+ * describes the same service epoch. A foreign epoch names just the scopes it
+ * read; adopting its global version would let the heartbeat treat every other
+ * scope (notably Work) as current even though it still belongs to the old
+ * store generation. The caller keeps the old cursor and forces the full
+ * durable boundary instead.
+ */
+export function advanceScopedCursor(
+  previous: SnapshotMeta | undefined,
+  epoch: number,
+  version: number,
+): SnapshotMeta | undefined {
+  if (!previous) return undefined
+  if (previous.epoch !== undefined && epoch !== previous.epoch) return undefined
+  return { ...previous, version, epoch }
 }
 
 /**
