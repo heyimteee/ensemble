@@ -182,7 +182,7 @@ import { normalizeAgentMentions } from "../routing.ts"
 import { deriveWorkStatus, isTerminalWorkStatus } from "../queue.ts"
 import { scopesToResync } from "../scoped-read.ts"
 import { approvalResolutionAt } from "../work-groups.ts"
-import { configMetadataApplies, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotApply, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
+import { configMetadataApplies, advanceScopedCursor, createRefreshCoordinator, decideChangesSince, decidePatchApply, decideSnapshotFetch, heartbeatDelay, isForeignEpochPatch, isWorkOnlyPatch, mergeFeedMeta, reconnectRequiresReplacement, revisionChanged, snapshotMeta, supportsPatchFeed, supportsScopedReads, validMessageStream, type PatchDecision, type Revision, type SnapshotMeta } from "./refresh-coordinator.ts"
 import { createFeedGapReporter } from "./feed-gaps.ts"
 import { createClientStore } from "./client-store.ts"
 import { createFileIndex, discoverWorkspaceFiles } from "./file-index.ts"
@@ -440,7 +440,8 @@ export function EnsembleV2App() {
     if (tuiLogger === logger) tuiLogger = undefined
   })
   // Ticket #137: the host theme mode selects the readable pale-blue identity pair.
-  const colors = palette(context.theme as any, context.themeMode)
+  // Ticket #282: NO_COLOR resolves every role to terminal defaults at this seam.
+  const colors = palette(context.theme as any, context.themeMode, process.env)
   // Ticket #119: the host toast is only a fallback for feedback that cannot be
   // painted by the mounted Ensemble surface (setup failure, or an async
   // completion while the native route is visible). Everything else renders in
@@ -2629,9 +2630,15 @@ export function EnsembleV2App() {
     // A feed reset or epoch change forces a real replacement even when the
     // restarted store reports a version the client has not seen before.
     const forced = forceSnapshotReplace
-    forceSnapshotReplace = false
-    const apply = forced ? "replace" : decideSnapshotApply(lastSnapshotMeta, nextMeta)
+    const apply = decideSnapshotFetch(lastSnapshotMeta, nextMeta, forced)
     if (apply === "skip") return
+    // A same-epoch patch moved the cursor during this forced read. Keeping
+    // the forced bit turns the queued pass into the replacement.
+    if (apply === "refetch") {
+      snapshotRefresh.request()
+      return
+    }
+    forceSnapshotReplace = false
     lastSnapshotMeta = nextMeta
     if (apply === "replace") client.applySnapshot(next)
     else client.applyMetadata(next)
@@ -2671,6 +2678,10 @@ export function EnsembleV2App() {
     // A patch may have advanced the cursor while the resync was in flight.
     // Never rewind entity state to an older durable version.
     if (lastSnapshotMeta && result.epoch === lastSnapshotMeta.epoch && result.version < lastSnapshotMeta.version) return
+    // Ticket #283: only a same-epoch resync can advance the cursor. A
+    // foreign epoch names just the scopes it read, so Work or the shell may
+    // still be the old store generation; never mark them current.
+    const cursor = advanceScopedCursor(lastSnapshotMeta, result.epoch, result.version)
     batch(() => {
       if (result.shell) client.applyShellSnapshot(result.shell)
       if (result.work) client.applyWorkProjection(result.work, result.version, result.dispatchGroups)
@@ -2679,8 +2690,14 @@ export function EnsembleV2App() {
       if (window && target) client.applyTranscriptWindow(target, window, "replace")
       client.applyCounts(result.counts)
       if (result.meta) client.applyChanges([], undefined, result.meta, result.counts)
-      if (lastSnapshotMeta) lastSnapshotMeta = { ...lastSnapshotMeta, version: result.version, epoch: result.epoch }
+      if (cursor) lastSnapshotMeta = cursor
     })
+    if (lastSnapshotMeta && !cursor) {
+      // The scoped read applied what it carried; the full boundary must
+      // rebuild the scopes it did not, from the restarted durable store.
+      forceSnapshotReplace = true
+      snapshotRefresh.request()
+    }
     syncScopedSelection()
     repaintFromFeed()
   }
@@ -5430,7 +5447,19 @@ export function EnsembleV2App() {
       if (type === "server.connected") {
         // Ticket #224: a restarted service restarts the picker revision.
         lastSessionPickerRevision = undefined
-        void checkRevision(true)
+        // Ticket #283: a loaded client cannot prove its cursor survived the
+        // service restart. Drop ephemeral text and replace the whole durable
+        // snapshot even if a heartbeat is in flight or a scoped read already
+        // touched one scope. A cold client keeps the cheap bootstrap path.
+        if (reconnectRequiresReplacement(lastSnapshotMeta)) {
+          groupStream.clear()
+          dmStream.clear()
+          setLiveDm(null)
+          setWorkActivities(new Map())
+          void refreshFull()
+        } else {
+          void checkRevision(true)
+        }
         return
       }
       // Ticket #224: the service emits one id-only refresh signal per claimed

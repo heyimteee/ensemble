@@ -6,7 +6,7 @@
  * `Message.displayAuthor` and reports the internal native init job.
  */
 
-import type { InitPhase } from "./types.ts"
+import type { InitPhase, InitRollback } from "./types.ts"
 
 export const SYSTEM_AGENT_NAME = "System Agent"
 export const ENSEMBLE_INIT_SKILL = "ensemble-init"
@@ -130,7 +130,16 @@ export function initComposerIssue(value: string): string | undefined {
   return undefined
 }
 
-function rollbackLine(previousExisted: boolean): string {
+function expectedRollback(previousExisted: boolean): InitRollback {
+  return previousExisted ? "restored" : "removed"
+}
+
+function rollbackLine(previousExisted: boolean, rollback: InitRollback): string {
+  if (rollback === "failed") {
+    return previousExisted
+      ? "AGENTS.md could not be restored automatically; its previous content is not confirmed on disk."
+      : "AGENTS.md could not be removed automatically."
+  }
   return previousExisted
     ? "AGENTS.md was restored to its previous content."
     : "AGENTS.md was removed because it did not exist before init."
@@ -148,27 +157,27 @@ export function initSuccessReport(directory: string, nativeReport: string): stri
   ].join("\n")
 }
 
-export function initFailureReport(message: string, previousExisted: boolean): string {
+export function initFailureReport(message: string, previousExisted: boolean, rollback = expectedRollback(previousExisted)): string {
   return [
     `Ensemble init failed: ${message}`,
-    rollbackLine(previousExisted),
+    rollbackLine(previousExisted, rollback),
     "Rerun /init after fixing the failure.",
   ].join("\n")
 }
 
-export function initCancelReport(reason: string, previousExisted = true): string {
+export function initCancelReport(reason: string, previousExisted = true, rollback = expectedRollback(previousExisted)): string {
   return [
     `Ensemble init cancelled: ${reason}`,
-    rollbackLine(previousExisted),
+    rollbackLine(previousExisted, rollback),
     "Rerun /init when the workspace is ready.",
   ].join("\n")
 }
 
 /** Restart recovery report: a running job cannot keep its native session. */
-export function initInterruptedReport(previousExisted: boolean): string {
+export function initInterruptedReport(previousExisted: boolean, rollback = expectedRollback(previousExisted)): string {
   return [
     "Ensemble init was interrupted by a service restart.",
-    rollbackLine(previousExisted),
+    rollbackLine(previousExisted, rollback),
     "Rerun /init to try again.",
   ].join("\n")
 }

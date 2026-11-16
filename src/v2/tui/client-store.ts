@@ -1,6 +1,7 @@
 import { batch, createSignal } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { createInitialState } from "../defaults.ts"
+import { REPLY_INTERRUPTED } from "../execution.ts"
 import { bindingStateKey, bindingStateKeyFor } from "../conversation-binding.ts"
 import { WORK_GROUP_HOLD_MS } from "../work-groups.ts"
 import { CLIENT_MESSAGE_LIMIT, mergeRetainedWork, projectRetainedWork, trimMessages } from "../scoped-read.ts"
@@ -374,6 +375,32 @@ export function reduceClientState(state: SnapshotState, update: ClientStateUpdat
 }
 
 /**
+ * Ticket #283: a new service epoch means every stream producer from the prior
+ * process is gone. A durable row may still say `streaming: true` (for example
+ * a live lease the restarted service deliberately defers), but the transcript
+ * must show it interrupted, not live. A later durable upsert or stream delta
+ * from the new epoch is authoritative again.
+ */
+export function interruptStaleStreams(state: SnapshotState): SnapshotState {
+  let messages: SnapshotState["messages"] | undefined
+  for (const [workspaceID, list] of Object.entries(state.messages)) {
+    if (!list.some((message) => message.streaming === true)) continue
+    messages ??= { ...state.messages }
+    messages[workspaceID] = list.map((message) =>
+      message.streaming === true
+        ? {
+            ...message,
+            text: message.text.trim().length > 0 ? message.text : REPLY_INTERRUPTED,
+            streaming: false,
+            interrupted: true,
+          }
+        : message,
+    )
+  }
+  return messages ? { ...state, messages } : state
+}
+
+/**
  * Ticket #141 bounded client cache for patch/window updates. Keep at most one
  * transcript window per workspace and only visible Work rows. A full snapshot
  * is the legacy recovery path and is applied whole. Identity is preserved when
@@ -641,6 +668,9 @@ export function createClientStore(): ClientStore {
             }
           }
         }
+        // Ticket #283: the previous process cannot still be streaming. Mark
+        // its rows interrupted before the replacement is visible.
+        if (epochChanged) applied = { ...applied, state: interruptStaleStreams(applied.state) }
         const scopedWorkspace = applied.window ? Object.keys(applied.state.messages)[0] : undefined
         const nextWindows: Record<Id, ClientTranscriptWindow> = {}
         for (const [workspaceID, list] of Object.entries(applied.state.messages)) {

@@ -68,3 +68,17 @@ test("restart recovery settles to an explicit report with the rollback outcome",
   const removed = initInterruptedReport(false)
   assert.match(removed, /removed/)
 })
+
+test("ticket281: a rollback that could not be confirmed is reported honestly", () => {
+  for (const report of [
+    initFailureReport("native command failed", true, "failed"),
+    initCancelReport("Workspace archived.", true, "failed"),
+    initInterruptedReport(true, "failed"),
+  ]) {
+    assert.match(report, /could not be restored/i)
+    assert.doesNotMatch(report, /was restored/)
+  }
+  const absent = initInterruptedReport(false, "failed")
+  assert.match(absent, /could not be removed/i)
+  assert.doesNotMatch(absent, /was removed/)
+})
