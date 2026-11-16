@@ -1,0 +1,67 @@
+version: 2
+
+# Ticket #271: dependency update automation.
+#
+# npm runs weekly. Minor and patch updates for development dependencies are
+# grouped into one PR to keep review cheap; runtime peers stay in a separate
+# group because they define the supported OpenCode host boundary. Major updates
+# arrive individually. GitHub Actions run monthly; they change CI behavior and
+# do not need a weekly cadence.
+#
+# Security updates are separate from version updates: grouping and ignore rules
+# do not apply to them. They must be enabled in repository settings (an operator
+# action, recorded in the ticket #271 verification record).
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    versioning-strategy: "increase"
+    labels:
+      - "maintenance"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(dev-deps)"
+      include: "scope"
+    groups:
+      development-minor-patch:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      peer-minor-patch:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # @opentui/solid 0.7.0 pins its peer to solid-js 1.9.12. A version update
+      # cannot satisfy that peer range; the pair moves together with the
+      # OpenCode/OpenTUI host. See docs/security/accepted-risks.md AR-271-01.
+      - dependency-name: "solid-js"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "maintenance"
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
