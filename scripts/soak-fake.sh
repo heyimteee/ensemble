@@ -348,6 +348,8 @@ done
 soak_wait_idle 300 || true
 : >"$SOAK_STOP"
 wait "$SAMPLER_PID" 2>/dev/null || true
+# Record the settled tail after the final drain, never a mid-cycle sample.
+soak_sample_once || true
 live_log "soak: workload done cycles=$cycles sent=$sent failed=$failed"
 
 WARMUP=$(( duration / 10 ))

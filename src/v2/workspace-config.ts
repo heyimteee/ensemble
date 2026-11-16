@@ -63,7 +63,6 @@ export function readWorkspaceConfig(directory: string): WorkspaceConfig | undefi
 
 export function writeWorkspaceConfig(workspace: Workspace, agents: Record<string, Agent>): void {
   if (workspace.archived) return
-  ensureEnsembleDirectory(workspace.directory)
   const config: WorkspaceConfig = {
     version: CONFIG_VERSION,
     id: workspace.id,
@@ -73,7 +72,17 @@ export function writeWorkspaceConfig(workspace: Workspace, agents: Record<string
     synthesis: workspace.synthesis,
     paused: workspace.paused,
   }
-  writeFileSync(workspaceConfigPath(workspace.directory), `${JSON.stringify(config, null, 2)}\n`)
+  writeWorkspaceConfigValue(workspace.directory, config)
+}
+
+/**
+ * Ticket #273: write one already-validated config document. Restore keeps the
+ * backed-up authority (names, members) instead of re-deriving it from a
+ * possibly newer roster.
+ */
+export function writeWorkspaceConfigValue(directory: string, config: WorkspaceConfig): void {
+  ensureEnsembleDirectory(directory)
+  writeFileSync(workspaceConfigPath(directory), `${JSON.stringify(config, null, 2)}\n`)
 }
 
 export function writeInitMetadata(directory: string, version: number): void {

@@ -30,16 +30,38 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Reviewer standards](agents/review-standards.md): judgement calls only; mechanical rules stay in automated checks
 - [Domain document conventions](agents/domain.md)
 - [Contributing](../CONTRIBUTING.md)
-- [Security](../SECURITY.md)
+- [Security policy](../SECURITY.md)
+- [Threat model](security/threat-model.md): storage, filesystem/shell, tools, cross-workspace access, skills, approvals, model fallback, and logs, with code evidence
+- [Permission-model review](security/permission-model-review.md): approvals, outside-roster contact, external directories, self-approval, and native permission preservation
+- [Accepted risks](security/accepted-risks.md): dependency advisories and residual risks with review dates
+- [Data classes, retention, export, and delete](privacy/data-and-retention.md): what Ensemble stores, the 24-hour Work and 7-day log retention, the `ensemble.data-export` format, the scoped delete path, and the v7 `AGENTS.md` roster disclosure guidance and manual opt-out
+
+## Support
+
+- [Support policy](support/README.md): channel, response expectations, evidence, and redaction rules
+- [Incident runbook](support/incident-runbook.md): symptoms, diagnostics, package rollback, escalation, and data recovery
+- [Support matrix and known limitations](support/support-matrix.md): Linux/tmux, macOS/Herdr, Windows, OpenCode/Node ranges, and live-suite prerequisites
+
+## Operations
+
+- [Backup and restore](operations/backup-restore.md): the durable-state document, RPC actions, the operator CLI, the automatic rollback slot, and failure recovery
+- [Upgrade from the pre-release](operations/upgrade.md): native-first defaults, AGENTS v7, the native-state refactor, and additive durable-state migrations
+- [Package rollback](operations/rollback.md): package-only and state rollback, plus the rehearsed failure path
 
 ## Verification
 
+- [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
+- [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run
+- [Clean-install release candidate](verification/2026-11-16-ticket-270.md): the loopback-registry `opencode plugin add` proof, the installed server tools and package source, and the exact TUI source-package load failure deferred to #279
+- [Security and privacy audit](verification/2026-11-16-ticket-271.md): threat model and permission review, the handoff symlink containment fix, `npm audit` baseline and accepted risks, Dependabot configuration, and the passing verify/docs gates
+- [Backup/restore and upgrade/rollback](verification/2026-11-16-ticket-273.md): the versioned backup document, the service RPC and operator CLI, the automatic rollback slot, the injected-failure recovery rehearsal, restored-state doctor compatibility, and the upgrade/rollback guides
 - [Scale/soak and local diagnostics](verification/2026-11-16-ticket-276.md): the fake soak harness and smoke record, the tested operating envelope, the redacted support bundle, the no-telemetry policy, and the settled native-session cap fix
 - [Production-readiness partials full E2E](verification/2026-11-16-prod-partials-e2e.md): the 17-suite matrix on OpenCode 2.2.7, the 2.2.6/2.2.7 compatibility runs, the Node 22/24/26 unit matrix, the latency smoke and reference profiles, and zero retries across the fake suites
 - [CI stabilization after the first PR run](verification/2026-11-16-ticket-267.md): the linked E2E record, the settle-aware skill-validation probe, the Ensemble-scoped reduced-motion still frame, and the passing verify/docs/fake matrix
 - [Production-readiness partials review fixes](verification/2026-11-16-ticket-255-review-fixes.md): the runtime-seam removal, pure matrix decision, header-scoped live assertion, compatibility artifacts, real card geometry, and the passing verify/latency/fake matrix
 - [Full deterministic E2E in CI](verification/2026-11-16-ticket-261.md): cost-split PR jobs, nightly latency and opt-in real-model jobs, failure artifacts, the OpenCode 2.2.7 pin, the job-graph checker, and the passing deterministic matrix
 - [Documentation freshness](verification/2026-11-12-ticket-262.md): canonical contract/host/Node constants, the docs index, ADR 0011 at contract v7, and the `docs:check` CI gate
+- [Data retention, export, delete, and roster disclosure](verification/2026-11-16-ticket-272.md): the `data.export`/`data.delete` RPC actions and CLI, the documented retention and export format, post-delete workspace health, log deletion, and the v7 `AGENTS.md` title/role disclosure guidance
 - [Live harness flake policy](verification/flake-policy.md): timing-only retry, flake budget, failure artifacts, and the issue/owner quarantine rule
 - [Live harness flake policy verification](verification/2026-11-12-ticket-256.md): readiness-based wizard alignment, classified timing retry, artifact preservation, and the passing deterministic matrix
 - [Latency budget and SLO](verification/latency-budget.md): split rail/patch-card/first-token metrics, reference and smoke profiles, the deterministic patch-card fixture, and the deliberate regression gate

@@ -468,7 +468,11 @@ export class NativeIngestionState {
 
   // ---- session lifecycle -------------------------------------------------
 
-  /** Service stop: release every timer and drop every session value. */
+  /**
+   * Service stop and durable restore: release every timer and drop every
+   * session value. Ticket #273 uses this after a restore because host sessions
+   * from the replaced state cannot own turns in the restored store.
+   */
   clear(): void {
     for (const state of this.sessions.values()) {
       for (const row of state.rows.values()) {

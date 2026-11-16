@@ -154,6 +154,14 @@ rules are in
   `fd`; `npm run test:live:preflight -- all` also requires and prints it for the
   real scenario. Set `ENSEMBLE_LIVE_EXPECT_NODE` and
   `ENSEMBLE_LIVE_EXPECT_OPENCODE` to fail on a present-but-wrong version.
+- `npm run test:install:rc`: ticket #270's clean-install release-candidate
+  proof. Packs the current package, serves it from a loopback-only npm registry,
+  installs it with `opencode plugin add` into an isolated OpenCode 2.2.7 host,
+  and checks `opencode plugin list`, the server tools, and the TUI route and
+  `/ensemble` command. It needs no public registry or credentials and is not
+  part of PR CI. The source package currently fails at TUI load; see the
+  [ticket #270 record](../docs/verification/2026-11-16-ticket-270.md) and
+  [#279](https://github.com/heyimteee/ensemble/issues/279).
 - `npm run test:live:multilocation`: the single-service regression probe. Starts
   the isolated fake host and TUI, creates four channels and eight agents, sends
   100 requests, and asserts one `service.start`, zero `task.failed`, zero
@@ -410,6 +418,25 @@ viewport-sensitive transcript assertions. Use the size matrix for other
 geometries; running the full scenario at a smaller height can fail because a
 finalized rich reply is not visible in the shorter pane, not because the Work
 layout is wrong.
+
+## Backup and restore
+
+`npm run backup` is the operator client for ticket #273's durable-state
+recovery path. It calls the running service's existing `ensemble.v2` RPC
+`invoke` method and resolves the same service descriptor as `doctor`:
+
+```sh
+npm run backup -- export --out ./ensemble-backup.json "$PWD"
+npm run backup -- status "$PWD"
+npm run backup -- restore --in ./ensemble-backup.json --confirm RESTORE "$PWD"
+npm run backup -- rollback --confirm ROLLBACK "$PWD"
+```
+
+`export` writes an owner-only (`0600`) file atomically and prints counts only.
+`restore` and `rollback` refuse while work is running and never print
+conversation content or credentials. The document contains conversation
+content: keep it private. The full procedure, format, and failure behavior are
+in [backup and restore](../docs/operations/backup-restore.md).
 
 ## Issue hygiene
 

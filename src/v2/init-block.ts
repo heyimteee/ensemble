@@ -59,6 +59,11 @@ export function teamRosterTable(roster: ContractRoster): string {
  * Ticket #225/#238: the injected team contract. Roster, conversation, and
  * budget values arrive in `ensemble_turn`; this text carries stable rules and,
  * when rendered for a workspace file, the generated roster table.
+ *
+ * Ticket #272: the roster table discloses every active member's name, title,
+ * and role into the workspace `AGENTS.md`, which is often a public repository
+ * file. The data-control documentation covers the risk, the guidance, and the
+ * supported manual opt-out; do not add the table to per-session prompts.
  */
 export function ensembleBlock(roster?: ContractRoster): string {
   const lines = [

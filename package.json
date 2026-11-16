@@ -1,16 +1,52 @@
 {
-  "name": "ensemble",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
+  "name": "@heyimteee/ensemble",
+  "version": "0.1.0-rc.1",
   "description": "Persistent agent teams inside OpenCode",
+  "license": "MIT",
+  "author": "heyimteee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heyimteee/ensemble.git"
+  },
+  "homepage": "https://github.com/heyimteee/ensemble#readme",
+  "bugs": {
+    "url": "https://github.com/heyimteee/ensemble/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "ai-agents",
+    "agent-teams",
+    "multi-agent",
+    "tui",
+    "terminal"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
   "exports": {
     ".": "./src/v2/server.ts",
     "./tui": "./src/v2/tui/index.tsx",
     "./rpc": "./src/v2/rpc.ts"
   },
   "files": [
-    "src"
+    "src/v2/**/*.ts",
+    "src/v2/**/*.tsx",
+    "!src/v2/**/*.test.ts",
+    "!src/v2/**/*.test.tsx",
+    "!src/v2/fixtures/**",
+    "!src/v2/ci-workflows.ts",
+    "!src/v2/data-cli.ts",
+    "!src/v2/doctor-cli.ts",
+    "!src/v2/doctor.ts",
+    "!src/v2/flake-policy.ts",
+    "!src/v2/latency-budget.ts",
+    "!src/v2/live-matrix.ts",
+    "!src/v2/prompt-benchmark.ts",
+    "!src/v2/soak-metrics.ts",
+    "!src/v2/support-bundle.ts",
+    "!src/v2/test-service.ts"
   ],
   "scripts": {
     "check": "tsc --noEmit",
@@ -42,7 +78,10 @@
     "support:bundle": "node --experimental-strip-types scripts/support-bundle.mjs",
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
     "logs:summary": "node scripts/log-summary.mjs",
-    "docs:check": "node --experimental-strip-types scripts/docs-check.mjs"
+    "docs:check": "node --experimental-strip-types scripts/docs-check.mjs",
+    "backup": "node scripts/backup.mjs",
+    "test:install:rc": "bash scripts/live-install-check.sh",
+    "data": "node --experimental-strip-types src/v2/data-cli.ts"
   },
   "engines": {
     "node": ">=22.23.4"

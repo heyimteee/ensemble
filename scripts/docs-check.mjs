@@ -155,6 +155,55 @@ function checkVerificationIndex(root, failures) {
   }
 }
 
+const SUPPORT_DOCS = [
+  "docs/support/README.md",
+  "docs/support/incident-runbook.md",
+  "docs/support/support-matrix.md",
+]
+
+const SUPPORT_TEMPLATES = [
+  ".github/ISSUE_TEMPLATE/bug.yml",
+  ".github/ISSUE_TEMPLATE/question.yml",
+  ".github/PULL_REQUEST_TEMPLATE.md",
+]
+
+/**
+ * Ticket #274: the public support path is part of the release contract. The
+ * hub, runbook, matrix, and intake templates must exist, be reachable from the
+ * index, and warn against posting credentials or conversation content.
+ */
+function checkSupport(root, failures) {
+  for (const path of [...SUPPORT_DOCS, ...SUPPORT_TEMPLATES, ".github/ISSUE_TEMPLATE/config.yml"]) {
+    if (!existsSync(join(root, path))) {
+      failures.push(`${path}: file is missing`)
+    }
+  }
+
+  const readme = read(root, "README.md", failures)
+  requireClaims("README.md", readme, ["docs/support/README.md"], failures)
+
+  const support = read(root, "docs/support/README.md", failures)
+  requireClaims(
+    "docs/support/README.md",
+    support,
+    ["incident-runbook.md", "support-matrix.md"],
+    failures,
+  )
+
+  const index = read(root, "docs/README.md", failures)
+  requireClaims(
+    "docs/README.md",
+    index,
+    ["support/README.md", "support/incident-runbook.md", "support/support-matrix.md"],
+    failures,
+  )
+
+  for (const path of SUPPORT_TEMPLATES) {
+    const template = read(root, path, failures)
+    requireClaims(path, template, ["credentials", "conversation content"], failures)
+  }
+}
+
 function checkDocs(root = REPO_ROOT) {
   const failures = []
   const version = ENSEMBLE_BLOCK_VERSION
@@ -178,13 +227,30 @@ function checkDocs(root = REPO_ROOT) {
       ...(testedNodeClaim ? [testedNodeClaim] : []),
       OPENCODE_PLUGIN_PEER_RANGE,
       `contract v${version}`,
+      "Ensemble is released under the [MIT License](LICENSE).",
     ],
     failures,
   )
-  rejectClaims("README.md", readme, ["not published, versioned, or licensed"], failures)
+  rejectClaims(
+    "README.md",
+    readme,
+    [
+      "not published, versioned, or licensed",
+      "no license has been selected",
+      "A license has not been selected",
+      "package is private",
+      "No npm package or license",
+    ],
+    failures,
+  )
   requireCurrentContractClaims("README.md", readme, failures)
   requireCurrentNodeFloors("README.md", readme, failures)
   requireSupportedHostClaims("README.md", readme, failures)
+
+  // Ticket #269 owns the license and package identity contract: the README
+  // install command, LICENSE text, and package metadata must agree.
+  const license = read(root, "LICENSE", failures)
+  requireClaims("LICENSE", license, ["MIT License", "Permission is hereby granted"], failures)
 
   const docsIndex = read(root, "docs/README.md", failures)
   requireClaims("docs/README.md", docsIndex, [`v${version} roster contract`], failures)
@@ -239,16 +305,30 @@ function checkDocs(root = REPO_ROOT) {
   // constants. Keeping these checks here is deliberate, not a scope leak.
   const packageJson = read(root, "package.json", failures)
   if (packageJson) {
-    let engines = ""
+    let pkg
     try {
-      engines = JSON.parse(packageJson)?.engines?.node ?? ""
+      pkg = JSON.parse(packageJson)
     } catch {
       failures.push("package.json: not valid JSON")
     }
-    if (engines !== `>=${MINIMUM_NODE_VERSION}`) {
-      failures.push(
-        `package.json: engines.node ${JSON.stringify(engines)} does not match >=${MINIMUM_NODE_VERSION}`,
-      )
+    if (pkg) {
+      const engines = pkg.engines?.node ?? ""
+      if (engines !== `>=${MINIMUM_NODE_VERSION}`) {
+        failures.push(
+          `package.json: engines.node ${JSON.stringify(engines)} does not match >=${MINIMUM_NODE_VERSION}`,
+        )
+      }
+      if (pkg.license !== "MIT") {
+        failures.push(`package.json: license ${JSON.stringify(pkg.license)} does not match MIT`)
+      }
+      if (pkg.private === true) {
+        failures.push("package.json: a publishable package must not set private")
+      }
+      if (typeof pkg.name !== "string" || pkg.name.length === 0) {
+        failures.push("package.json: name is missing")
+      } else {
+        requireClaims("README.md", readme, [`opencode plugin add ${pkg.name}`], failures)
+      }
     }
   }
 
@@ -271,6 +351,7 @@ function checkDocs(root = REPO_ROOT) {
   }
 
   checkVerificationIndex(root, failures)
+  checkSupport(root, failures)
 
   return { failures, version, hosts, liveNode }
 }
