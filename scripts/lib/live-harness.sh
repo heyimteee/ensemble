@@ -215,6 +215,9 @@ live_setup() {
   mkdir -p "$tmp"
   LIVE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
   LIVE_BASE=$(mktemp -d "$tmp/ensemble-$kind-XXXXXX")
+  # macOS $TMPDIR sits behind the /var -> /private/var symlink. Resolve it once
+  # so host-reported paths compare equal to the harness paths.
+  LIVE_BASE=$(cd "$LIVE_BASE" && pwd -P)
   LIVE_CONFIG="$LIVE_BASE/config"
   LIVE_DATA="$LIVE_BASE/data"
   LIVE_STATE="$LIVE_BASE/state"
