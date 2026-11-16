@@ -39,7 +39,8 @@
     "test:live:multilocation": "bash scripts/live-multilocation.sh",
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
     "logs:summary": "node scripts/log-summary.mjs",
-    "docs:check": "node --experimental-strip-types scripts/docs-check.mjs"
+    "docs:check": "node --experimental-strip-types scripts/docs-check.mjs",
+    "data": "node --experimental-strip-types src/v2/data-cli.ts"
   },
   "engines": {
     "node": ">=22.23.4"

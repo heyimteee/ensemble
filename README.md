@@ -160,6 +160,8 @@ By default it reads `$XDG_STATE_HOME/opencode/service.json`, or `~/.local/state/
 
 Every requested directory is queried on the **one selected service**, sequentially. Cross-location differences can reveal stale snapshots or concurrent changes, but this command does not discover or compare separate service processes. Config is read after each snapshot, so this is not an atomic pre-reconciliation view. Review remediation manually; the command does not apply it.
 
+`npm run data -- export` writes the documented `ensemble.data-export` JSON; `npm run data -- delete --confirm DELETE` removes this workspace's Ensemble conversation, Work, and memory data while keeping the roster and workspace usable. Both use the same service descriptor as `doctor`. See [data classes, retention, export, and delete](docs/privacy/data-and-retention.md) for the format, the full retention policy, and the `AGENTS.md` roster disclosure guidance.
+
 ## Known limitations
 
 - **Distribution and license are pending.** The package is private at version `0.1.0`; it is not published to a registry, and no license has been selected. Public repository visibility does not grant an open-source license.

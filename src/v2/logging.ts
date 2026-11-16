@@ -92,6 +92,15 @@ const MAX_STRING = 16_384
 const FLUSH_DELAY_MS = 50
 const FLUSH_BATCH = 256
 
+/**
+ * Ticket #272: the documented local log retention defaults. They are exported
+ * so the data policy and `data.export` report the same numbers the logger
+ * enforces instead of a hand-written mirror.
+ */
+export const LOG_RETENTION_DAYS = 7
+export const LOG_MAX_FILES = 5
+export const LOG_MAX_BYTES = 10 * 1024 * 1024
+
 function isTestRuntime(): boolean {
   return process.env.NODE_TEST_CONTEXT !== undefined
     || process.execArgv.includes("--test")
@@ -104,6 +113,32 @@ export function defaultLogDirectory(): string {
   if (explicit) return explicit
   const state = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state")
   return join(state, "ensemble", "logs")
+}
+
+/** The Ensemble-owned log file names; rotated files append `.1`..`.N`. */
+const LOG_FILE_PATTERN = /^(service|tui)(-failures)?-\d{8}-\d+\.jsonl(\.\d+)?$/
+
+/**
+ * Ticket #272: delete the local Ensemble log files (`data.delete --logs`).
+ * Only files matching the logger's own name pattern are removed, so a shared
+ * or misconfigured directory never loses unrelated files. Returns the count.
+ */
+export function purgeLogFiles(directory = defaultLogDirectory()): number {
+  let names: string[]
+  try {
+    names = readdirSync(directory)
+  } catch {
+    return 0
+  }
+  let removed = 0
+  for (const name of names) {
+    if (!LOG_FILE_PATTERN.test(name)) continue
+    try {
+      unlinkSync(join(directory, name))
+      removed++
+    } catch {}
+  }
+  return removed
 }
 
 function dateStamp(now: number): string {
@@ -200,9 +235,9 @@ export class EnsembleLogger {
     this.level = requested in LEVELS ? requested : "info"
     this.content = options.content ?? process.env.ENSEMBLE_LOG_CONTENT === "1"
     this.ringLimit = Math.max(1, options.ringSize ?? 2_000)
-    this.maxBytes = Math.max(1_024, options.maxBytes ?? 10 * 1024 * 1024)
-    this.maxFiles = Math.max(1, options.maxFiles ?? 5)
-    this.retentionDays = Math.max(0, options.retentionDays ?? 7)
+    this.maxBytes = Math.max(1_024, options.maxBytes ?? LOG_MAX_BYTES)
+    this.maxFiles = Math.max(1, options.maxFiles ?? LOG_MAX_FILES)
+    this.retentionDays = Math.max(0, options.retentionDays ?? LOG_RETENTION_DAYS)
     this.stderr = options.stderr ?? process.env.ENSEMBLE_LOG_STDERR === "1"
     this.now = options.now ?? Date.now
     // Tests keep the ring but do not write into the user's state directory
