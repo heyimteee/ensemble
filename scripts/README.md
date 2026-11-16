@@ -2,6 +2,17 @@
 
 Run from the repository with Node 22.23.4+, OpenCode, tmux, Git, and curl available:
 
+Flake policy: `scripts/live-matrix.sh` retries a failed suite at most once, and
+only when the harness classified the failure as a TUI timing failure. Product,
+unknown, and infrastructure failures never retry. Every attempt is recorded in
+`flake-records.jsonl`; the matrix prints `flake-report` rows with suite,
+attempt, classification, and artifact path, and writes `flake-report.json`
+beside the failure artifacts. A failure preserves redacted pane captures and
+logs under `ENSEMBLE_LIVE_ARTIFACTS` (CI uploads them). Quarantine entries in
+`scripts/flake-quarantine.json` require a linked issue and an owner. The full
+budget and quarantine rules are in
+[docs/verification/flake-policy.md](../docs/verification/flake-policy.md).
+
 - `npm run test:live`: existing real-runtime acceptance (agent/workspace wizards,
   composer agent/file completions, sending, command palette, RPC deletion, help,
   and return to the native TUI). The v5.8 section checks the message-start
