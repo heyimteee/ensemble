@@ -101,9 +101,12 @@ tmux sessions.
 
 The matrix validates the file before running. A missing issue, a missing owner,
 a duplicate suite, or a non-array file fails the run before any scenario starts.
-A failing quarantined suite is reported as `QUARANTINE` with its issue and
-owner, is never retried, and remains visible in the report. Quarantine entries
-are reviewed at least monthly and removed when the source fix lands.
+A failing quarantined suite is quarantined only when the harness classified the
+failure as `timing`: product, unknown, and infrastructure failures always fail,
+so a quarantine can never mask a defect. A quarantined timing failure is
+reported as `QUARANTINE` with its issue and owner, is never retried, is not
+counted as a pass, and remains visible in the report. Quarantine entries are
+reviewed at least monthly and removed when the source fix lands.
 
 ## Report
 
@@ -125,6 +128,9 @@ flake-report: flake budget: maxRetriesPerSuite=1 maxUnclassifiedRetries=0 unclas
 ```
 
 The pure classifier, retry decision, quarantine validation, and report builder
-live in `src/v2/flake-policy.ts` and are covered by
-`src/v2/flake-policy.test.ts`. The matrix integration is covered by
-`src/v2/live-matrix.test.ts` with stub scenarios.
+live in `src/v2/flake-policy.ts`; the matrix's retry/quarantine decision lives
+in `src/v2/live-matrix.ts` and is consumed by `scripts/flake-report.mjs decide`.
+They are covered by `src/v2/flake-policy.test.ts` and
+`src/v2/live-matrix.test.ts`. The matrix itself is exercised through its public
+`fake`/`all` CLI and the harness header matcher is covered by a positive and a
+negative pane fixture.

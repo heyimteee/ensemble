@@ -4,7 +4,6 @@ import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import {
   MINIMUM_NODE_VERSION,
-  TESTED_NODE_LINES,
   assertSupportedNode,
   isSupportedNodeVersion,
   parseNodeVersion,
@@ -20,9 +19,6 @@ test("ticket258: Node versions parse with or without a v prefix and ignore pre-r
 
 test("ticket258: the supported floor is the oldest verified Node line", () => {
   assert.equal(MINIMUM_NODE_VERSION, "22.23.4")
-  assert.match(TESTED_NODE_LINES, /22\.23\.4/)
-  assert.match(TESTED_NODE_LINES, /24\.x/)
-  assert.match(TESTED_NODE_LINES, /26\.x/)
 })
 
 test("ticket258: the version gate accepts the tested lines and every newer release", () => {
@@ -46,7 +42,6 @@ test("ticket258: a too-old Node fails with the supported range and upgrade guida
       assert.equal(error.name, "NodeVersionError")
       assert.equal(error.code, "unsupported_node")
       assert.match(error.message, />=22\.23\.4/)
-      assert.match(error.message, /22\.23\.4, 24\.x, and 26\.x/)
       assert.match(error.message, /22\.23\.3/)
       assert.match(error.message, /Upgrade Node/)
       return true

@@ -9,7 +9,8 @@
  *
  * Usage:
  *   node scripts/flake-report.mjs classify --file FAILURE.json
- *   node scripts/flake-report.mjs retry --file FAILURE.json [--attempt N] [--quarantined]
+ *   node scripts/flake-report.mjs decide --classification CLASS --attempt N [--quarantined 0|1]
+ *   node scripts/flake-report.mjs retry --file FAILURE.json [--attempt N]
  *   node scripts/flake-report.mjs report --records RECORDS.jsonl [--out REPORT.json]
  *   node scripts/flake-report.mjs quarantine --file QUARANTINE.json
  *
@@ -23,6 +24,7 @@ import {
   retryDecision,
   validateQuarantine,
 } from "../src/v2/flake-policy.ts"
+import { decideFailedAttempt } from "../src/v2/live-matrix.ts"
 
 function arg(name, fallback) {
   const index = process.argv.indexOf(name)
@@ -58,13 +60,24 @@ function main() {
     process.stdout.write(`${classification}\n`)
     return 0
   }
+  if (command === "decide") {
+    const classification = arg("--classification")
+    if (!["timing", "product", "infrastructure", "unknown"].includes(classification)) {
+      throw new Error(`--classification must be timing, product, infrastructure, or unknown; got ${classification}`)
+    }
+    const attempt = Number(arg("--attempt", "1"))
+    if (!Number.isInteger(attempt) || attempt < 1) throw new Error(`--attempt must be a positive integer; got ${attempt}`)
+    const quarantined = arg("--quarantined", "0") === "1"
+    const decision = decideFailedAttempt({ classification, attempt, quarantined })
+    process.stdout.write(`${decision.outcome} ${decision.reason}\n`)
+    return 0
+  }
   if (command === "retry") {
     const record = readJson(arg("--file"))
     const attempt = Number(arg("--attempt", String(record.attempt ?? 1)))
     const classification = classifyFailure({ message: String(record.message ?? ""), kind: record.kind })
     const decision = retryDecision(
       { suite: String(record.suite ?? "unknown"), attempt, status: "failed", classification, message: record.message },
-      { quarantined: has("--quarantined") },
     )
     process.stdout.write(`${decision.retry ? "retry" : "no-retry"} ${decision.reason}\n`)
     return 0

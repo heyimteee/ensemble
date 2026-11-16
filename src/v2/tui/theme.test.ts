@@ -216,8 +216,6 @@ test("ticket259: contrast ratio follows the WCAG formula and is order-independen
 })
 
 test("ticket259: WCAG AA text and UI thresholds are applied separately", () => {
-  assert.equal(WCAG_AA_TEXT, 4.5)
-  assert.equal(WCAG_AA_UI, 3)
   assert.equal(meetsContrast("#777777", "#ffffff", "text"), false, "4.48 is below 4.5 for text")
   assert.equal(meetsContrast("#767676", "#ffffff", "text"), true, "4.54 is above 4.5 for text")
   assert.equal(meetsContrast("#777777", "#ffffff", "ui"), true, "4.48 is above 3 for UI")

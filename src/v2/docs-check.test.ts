@@ -45,6 +45,12 @@ function replace(root: string, path: string, from: string, to: string): void {
   write(root, path, text.replace(from, to))
 }
 
+function replaceAll(root: string, path: string, from: string, to: string): void {
+  const text = read(root, path)
+  assert.ok(text.includes(from), `${path} must contain ${JSON.stringify(from)} for the fixture`)
+  write(root, path, text.replaceAll(from, to))
+}
+
 function run(root: string) {
   return spawnSync(process.execPath, ["--experimental-strip-types", script, "--root", root], {
     encoding: "utf8",
@@ -86,6 +92,36 @@ test("docs-check rejects a stale Node floor claim", () => {
     assert.equal(result.status, 1)
     assert.match(result.stderr, /scripts\/README\.md.*Node 26\.4\+/)
     assert.match(result.stderr, /22\.23\.4/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check rejects a tested Node line missing from the README", () => {
+  const root = fixtureRepo()
+  try {
+    replaceAll(
+      root,
+      "README.md",
+      "Node 22.23.4, 24.22.1, and 26.12.1",
+      "Node 22.23.4, 24.22.1, and 25.0.0",
+    )
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md: missing current claim "Node 22\.23\.4, 24\.22\.1, and 26\.12\.1"/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("docs-check derives the tested Node claim from the matrix workflow", () => {
+  const root = fixtureRepo()
+  try {
+    replace(root, ".github/workflows/node-matrix.yml", '"26.12.1"', '"26.13.0"')
+    const result = run(root)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /README\.md: missing current claim "Node 22\.23\.4, 24\.22\.1, and 26\.13\.0"/)
+    assert.match(result.stderr, /tested Node 26\.12\.1 is not in the matrix/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

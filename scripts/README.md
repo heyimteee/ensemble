@@ -9,8 +9,10 @@ unknown, and infrastructure failures never retry. Every attempt is recorded in
 attempt, classification, and artifact path, and writes `flake-report.json`
 beside the failure artifacts. A failure preserves redacted pane captures and
 logs under `ENSEMBLE_LIVE_ARTIFACTS` (CI uploads them). Quarantine entries in
-`scripts/flake-quarantine.json` require a linked issue and an owner. The full
-budget and quarantine rules are in
+`scripts/flake-quarantine.json` require a linked issue and an owner, and they
+apply only to a classified timing failure; any product, unknown, or
+infrastructure failure still fails the run. The full budget and quarantine
+rules are in
 [docs/verification/flake-policy.md](../docs/verification/flake-policy.md).
 
 - `npm run test:live`: existing real-runtime acceptance (agent/workspace wizards,

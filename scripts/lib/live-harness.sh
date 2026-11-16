@@ -483,6 +483,57 @@ live_capture_contains_joined() {
   live_capture_chat_joined "$1" | grep -qF -- "$2"
 }
 
+# Ticket #264: the group surface header is the contiguous block at the top of
+# the chat pane — the surface title plus any rows it wraps onto. Find the first
+# chat row that starts the title, cut the shared Work-pane edge (`│ │`), and
+# stop at the first blank row. Every transcript row carries a top margin, so a
+# later transcript mention can never satisfy a header assertion.
+live_capture_chat_header() {
+  local start end
+  read -r start end <<<"$(live_chat_columns)"
+  live_capture "$1" | "$LIVE_NODE_BIN" -e '
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { value += chunk });
+    process.stdin.on("end", () => {
+      const start = Number(process.argv[1]) - 1;
+      const rows = value.split("\n");
+      const first = rows.findIndex((line) => line.slice(start).trimStart().startsWith("#"));
+      if (first < 0) {
+        process.stdout.write("");
+        return;
+      }
+      const header = [];
+      for (let index = first; index < rows.length; index += 1) {
+        let row = rows[index].slice(start);
+        // The Work pane shares this row in the three-pane layout; cut at the
+        // border pair so its text cannot join the chat header.
+        const workEdge = row.indexOf("│ │");
+        if (workEdge >= 0) row = row.slice(0, workEdge);
+        row = row.replace(/\s*│\s*$/, "").trim();
+        if (row.length === 0) break;
+        header.push(row);
+      }
+      process.stdout.write(header.join(" "));
+    });
+  ' "$start"
+}
+
+live_chat_header_contains() {
+  live_capture_chat_header "$1" | grep -qF -- "$2"
+}
+
+live_require_chat_header_text() {
+  local session="$1" text="$2" seconds="${3:-$LIVE_STEP_TIMEOUT}" description="${4:-$text}"
+  live_wait_for "$seconds" "$description" live_chat_header_contains "$session" "$text" \
+    || live_fail "group header does not show: $description"
+}
+
+live_assert_chat_header_text() {
+  local session="$1" text="$2" description="${3:-$text}"
+  live_chat_header_contains "$session" "$text" || live_fail "group header does not show: $description"
+}
+
 # Work-column bounds from the same shared pane model. Used for Work-local
 # assertions so a transcript copy of a title cannot satisfy a card check.
 LIVE_WORK_COLUMNS=""

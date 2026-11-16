@@ -16,21 +16,18 @@ set -uo pipefail
 #
 # Flake policy: a failed attempt is classified from the harness failure record.
 # Only a `timing` classification may retry, and only once. Product, unknown,
-# and infrastructure failures never retry. Every attempt is recorded and the
-# report lists suite, retry, classification, and artifact path. A quarantine
-# entry needs a linked issue and an owner; the matrix refuses to run otherwise.
-# See docs/verification/flake-policy.md.
+# and infrastructure failures never retry or quarantine. Every attempt is
+# recorded and the report lists suite, retry, classification, and artifact
+# path. A quarantine entry needs a linked issue and an owner; the matrix
+# refuses to run otherwise. See docs/verification/flake-policy.md.
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-# Test seam: a synthetic matrix can point at stub scenarios without touching
-# the real live scripts. Production and CI leave this unset.
-SCENARIO_ROOT="${ENSEMBLE_LIVE_SCENARIO_ROOT:-$SCRIPT_DIR}"
 
 scenario_script() {
   case "$1" in
-    fake) printf '%s\n' "$SCENARIO_ROOT/live-check-fake.sh" ;;
-    fake-empty) printf '%s\n' "$SCENARIO_ROOT/live-check-fake-empty.sh" ;;
-    real) printf '%s\n' "$SCENARIO_ROOT/live-check.sh" ;;
+    fake) printf '%s\n' "$SCRIPT_DIR/live-check-fake.sh" ;;
+    fake-empty) printf '%s\n' "$SCRIPT_DIR/live-check-fake-empty.sh" ;;
+    real) printf '%s\n' "$SCRIPT_DIR/live-check.sh" ;;
     *) return 1 ;;
   esac
 }
@@ -197,29 +194,43 @@ for ((i = 0; i < ${#scenarios[@]}; i++)); do
     fi
 
     quarantine_info=$(quarantine_for "$name")
-    if [[ -n "$quarantine_info" ]]; then
-      issue=$(cut -f1 <<<"$quarantine_info")
-      owner=$(cut -f2 <<<"$quarantine_info")
-      printf 'live-matrix: %s: QUARANTINE (%ss; issue=%s owner=%s)\n' "$name" "$elapsed" "$issue" "$owner" >&2
-      summary+=("QUARANTINE $name (${elapsed}s; issue=$issue owner=$owner)")
-      quarantined=$((quarantined + 1))
-      record_attempt "$name" "$attempt" "quarantined" "$classification" "${cause:-unknown failure}" "$artifact_dir" "$elapsed"
-      break
+    quarantined_flag=0
+    [[ -n "$quarantine_info" ]] && quarantined_flag=1
+    # Classification comes first: the pure decision refuses to retry or
+    # quarantine a product, unknown, or infrastructure failure. A missing
+    # decision fails closed rather than looking green.
+    decision=""
+    if [[ -n "$node_bin" ]]; then
+      decision=$("$node_bin" --experimental-strip-types "$flake_cli" decide \
+        --classification "$classification" --attempt "$attempt" --quarantined "$quarantined_flag" 2>/dev/null || true)
     fi
+    decision_outcome="${decision%% *}"
+    decision_reason="${decision#* }"
+
+    case "$decision_outcome" in
+      retry)
+        record_attempt "$name" "$attempt" "failed" "$classification" "${cause:-unknown failure}" "$artifact_dir" "$elapsed"
+        printf 'live-matrix: %s: RETRY (attempt %s; %s)\n' "$name" "$attempt" "$decision_reason" >&2
+        retries=$((retries + 1))
+        attempt=$((attempt + 1))
+        continue
+        ;;
+      quarantine)
+        issue=$(cut -f1 <<<"$quarantine_info")
+        owner=$(cut -f2 <<<"$quarantine_info")
+        printf 'live-matrix: %s: QUARANTINE (%ss; issue=%s owner=%s)\n' "$name" "$elapsed" "$issue" "$owner" >&2
+        summary+=("QUARANTINE $name (${elapsed}s; issue=$issue owner=$owner)")
+        quarantined=$((quarantined + 1))
+        record_attempt "$name" "$attempt" "quarantined" "$classification" "${cause:-unknown failure}" "$artifact_dir" "$elapsed"
+        break
+        ;;
+      fail) ;;
+      *)
+        printf 'live-matrix: %s: no decision (%s); failing closed\n' "$name" "${decision_reason:-decision unavailable}" >&2
+        ;;
+    esac
 
     record_attempt "$name" "$attempt" "failed" "$classification" "${cause:-unknown failure}" "$artifact_dir" "$elapsed"
-
-    decision=""
-    if [[ -n "$node_bin" && -f "$failure_file" ]]; then
-      decision=$("$node_bin" --experimental-strip-types "$flake_cli" retry --file "$failure_file" --attempt "$attempt" 2>/dev/null || true)
-    fi
-    if [[ "$decision" == retry* && "$attempt" -lt 2 ]]; then
-      printf 'live-matrix: %s: RETRY (attempt %s; %s)\n' "$name" "$attempt" "${decision#retry }" >&2
-      retries=$((retries + 1))
-      attempt=$((attempt + 1))
-      continue
-    fi
-
     printf 'live-matrix: %s: FAIL (%ss)\n' "$name" "$elapsed" >&2
     if [[ -n "$cause" ]]; then
       summary+=("FAIL  $name (${elapsed}s): $cause")

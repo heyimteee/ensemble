@@ -9,6 +9,7 @@
  */
 import type { InitJob, InitPhase } from "../types.ts"
 import { INIT_PHASES, SYSTEM_AGENT_NAME, initJobPhase, initPhaseDetail, initPhaseLabel } from "../system-agent.ts"
+import { ASCII_GLYPHS } from "./ascii.ts"
 import { effectiveTick, workingFrame } from "./motion.ts"
 import { chromeJoin, isAsciiTerminal } from "./separators.ts"
 
@@ -18,8 +19,8 @@ const STAGE_EMPTY = "○"
 /** Four discrete marks: stages reached (including current) are filled. */
 export function initStageIndicator(phase: InitPhase, env?: NodeJS.ProcessEnv): string {
   const current = Math.max(0, INIT_PHASES.indexOf(phase))
-  const filled = env && isAsciiTerminal(env) ? "#" : STAGE_FILLED
-  const blank = env && isAsciiTerminal(env) ? "-" : STAGE_EMPTY
+  const filled = env && isAsciiTerminal(env) ? ASCII_GLYPHS.stageFilled : STAGE_FILLED
+  const blank = env && isAsciiTerminal(env) ? ASCII_GLYPHS.stageEmpty : STAGE_EMPTY
   return INIT_PHASES.map((_, index) => (index <= current ? filled : blank)).join(" ")
 }
 

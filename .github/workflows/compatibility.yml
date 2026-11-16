@@ -49,6 +49,7 @@ jobs:
       - name: Deterministic fake smoke
         env:
           ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
         run: npm run test:live:fake:all
       - name: Upload sanitized host contract record
         if: failure()
@@ -56,4 +57,11 @@ jobs:
         with:
           name: host-contract-${{ matrix.opencode }}
           path: ${{ runner.temp }}/native-host-contract-${{ matrix.opencode }}.jsonl
+          if-no-files-found: ignore
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-artifacts-${{ matrix.opencode }}
+          path: ${{ runner.temp }}/ensemble-live-artifacts
           if-no-files-found: ignore
