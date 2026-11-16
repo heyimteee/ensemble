@@ -103,7 +103,10 @@ TASK_START_MS=$(date +%s%3N)
 live_invoke "message.send" "{\"workspaceID\":\"$WS_ID\",\"text\":\"fake-lease-hold lease-first\",\"recipientIDs\":[\"$AGENT_ID\"]}" >/dev/null
 live_require_active_work "$LIVE_TUI_SESSION" 20 "long lease work mounts"
 live_require_text "$LIVE_TUI_SESSION" "LIFEAGENT" 20 "lifecycle card names its agent"
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active · 0 done" 20 "one active lifecycle group"
+# The Work pane is capped at the 53-column card-mode floor (#263), so its
+# header uses the compact form without the done count. Match the common
+# prefix; the group label below still carries the active/done counts.
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 1 group · 1 active" 20 "one active lifecycle group"
 
 first_id=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title.indexOf("lease-first") >= 0 })[0]?.id' | tr -d '"')
 [[ -n "$first_id" && "$first_id" != "null" ]] || live_fail "lease-hold task id is missing"
@@ -116,7 +119,7 @@ initial_deadline=$(live_snapshot_value "output.state.subtasks[\"$first_id\"].dea
 # agent session. It must stay pending past its own delivery timestamp.
 sleep 2
 live_invoke "message.send" "{\"workspaceID\":\"$WS_ID\",\"text\":\"lease-backlog\",\"recipientIDs\":[\"$AGENT_ID\"]}" >/dev/null
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active · 0 done" 20 "backlog group joins the active pane"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active" 20 "backlog group joins the active pane"
 backlog_id=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (task) { return task.title === "lease-backlog" })[0]?.id' | tr -d '"')
 [[ -n "$backlog_id" && "$backlog_id" != "null" ]] || live_fail "backlog task id is missing"
 backlog_deadline=$(live_snapshot_value "output.state.subtasks[\"$backlog_id\"].deadlineAt")
@@ -137,7 +140,7 @@ lease_now=$(live_snapshot_value "output.state.subtasks[\"$first_id\"].leaseUntil
 status_now=$(live_snapshot_value "output.state.subtasks[\"$first_id\"].status" | tr -d '"')
 [[ "$status_now" == "working" ]] || live_fail "long run is not working at 70s (got $status_now)"
 [[ "$lease_now" -gt "$initial_lease" ]] || live_fail "heartbeat did not renew the lease ($initial_lease -> $lease_now)"
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active · 0 done" 10 "long card and backlog stay mounted at 70s"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active" 10 "long card and backlog stay mounted at 70s"
 live_require_text "$LIVE_TUI_SESSION" "LIFEAGENT" 10 "long card stays mounted at 70s"
 live_log "heartbeat renewed the live lease at 70s ($initial_lease -> $lease_now)"
 
@@ -156,7 +159,7 @@ backlog_deadline_now=$(live_snapshot_value "output.state.subtasks[\"$backlog_id\
 [[ "$backlog_status" == "pending" ]] || live_fail "queued backlog did not stay pending past its delivery window (got $backlog_status)"
 [[ "$backlog_attempts" == "0" ]] || live_fail "queued backlog was claimed or retried (attempts $backlog_attempts)"
 [[ "$now_ms" -gt "$backlog_deadline_now" ]] || live_fail "backlog delivery timestamp has not passed"
-live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active · 0 done" 10 "card persists past the deadline"
+live_require_text "$LIVE_TUI_SESSION" "WORK ACTIVE │ 2 groups · 2 active" 10 "card persists past the deadline"
 live_require_text "$LIVE_TUI_SESSION" "LIFEAGENT" 10 "working card is still mounted past the deadline"
 live_log "delivery deadline crossed while working; backlog stayed pending at ${elapsed_ms}ms"
 

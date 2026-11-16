@@ -181,18 +181,54 @@ retries. A failing scenario stops the run and later scenarios are reported as
 
 ## CI
 
-CI keeps the existing `verify` job (`npm ci` then `npm run verify`) and adds a
-`live` job on every push and pull request. The live job pins the host toolset:
-Ubuntu 24.04, Node 26.12.1 through `actions/setup-node`, OpenCode 2.2.6 through
-`npm install --global @opencode/cli@2.2.6`, the runner's `tmux`, and fd 10.2.0
-from its release archive. It then runs `npm run test:live:preflight` (fake
-scope), `npm run test:live:fake:all`, and
-`npm run test:live:multilocation`; all steps set `ENSEMBLE_LIVE_REQUIRE=1`. The
-preflight prints the resolved versions and fails if a required tool is missing
-or the pinned Node/OpenCode version differs. The fake/empty and multi-location
-suites do not use fd; the job still installs it so the same pinned toolset can
-validate the full local matrix with `npm run test:live:preflight -- all`.
-Real-model checks stay local and are never required in CI.
+PR feedback is split by cost; the expensive environment-sensitive checks are
+nightly. Every live job pins the same toolset through
+[`.github/actions/live-host`](../.github/actions/live-host/action.yml): Ubuntu
+24.04, Node 26.12.1, OpenCode 2.2.7 (the latest host in the compatibility
+matrix; `compatibility.yml` covers 2.2.6 and 2.2.7), the runner's `tmux`, fd
+10.2.0, and `npm ci`. Every live job sets `ENSEMBLE_LIVE_REQUIRE=1`, writes
+redacted artifacts to `$RUNNER_TEMP/ensemble-live-artifacts`, and uploads them
+on failure. The preflight prints the resolved versions and fails if a required
+tool is missing or the pinned Node/OpenCode version differs.
+
+### Pull request and push (`verify.yml`)
+
+| Job | Suites | Timeout | Observed |
+| --- | --- | ---: | ---: |
+| `verify` | `npm run verify` (typecheck + unit suite, including the CI job-graph check) | 15 min | ~1 min |
+| `live-fake` | `test:live:fake:all`, `test:live:sizes`, `test:live:lifecycle`, `test:live:subagent` | 45 min | ~17 min |
+| `live-native` | `test:live:native-first`, `test:live:vera`, `test:live:tool-surface` | 20 min | ~3 min |
+| `live-multilocation` | `test:live:multilocation` | 20 min | ~3 min |
+| `latency-smoke` | `test:live:latency` (`smoke` profile: 500 ms rail, 5000 ms card) | 20 min | ~3 min |
+
+The live jobs run in parallel after checkout, so the PR critical path is the
+longest live job plus tool setup: target 20 minutes, budget 30 minutes wall
+clock. The sum of job timeouts is 120 minutes; the deterministic suite sum is
+about 20 minutes on the local reference host (fake 8 min, lifecycle 6 min,
+sizes 1 min, multilocation 1 min, the native suites under 1 min, latency under
+1 min). The `live-fake` timeout is 45 minutes to absorb a slower shared runner
+without letting one job hang indefinitely.
+
+### Nightly (`nightly.yml`)
+
+| Job | Suites | Timeout | Observed |
+| --- | --- | ---: | ---: |
+| `latency-reference` | `test:live:latency` (`reference` profile: 50 ms rail, 250 ms card) | 30 min | ~3 min |
+| `real` | `test:live` with the real host catalog; opt-in via the `real` dispatch input or `ENSEMBLE_NIGHTLY_REAL=1` | 30 min | ~3 min |
+
+The schedule is `17 4 * * *`; `workflow_dispatch` allows a manual run. The
+real-model job is skipped unless opted in, so credentials and model cost stay
+controlled. Nightly wall-clock budget is 60 minutes with both jobs.
+
+### Kept separate
+
+`compatibility.yml` runs the host probe and deterministic fake smoke on
+OpenCode 2.2.6 and 2.2.7; `node-matrix.yml` runs `npm run verify` on Node
+22.23.4, 24.22.1, and 26.12.1; `docs.yml` runs `npm run docs:check`. The old
+`latency.yml` is removed: the smoke profile lives in `verify.yml` and the
+reference gate in `nightly.yml`. `src/v2/ci-workflows.ts` and its test assert
+this job graph, the suite ownership, the timeouts, the artifact uploads, the
+`ENSEMBLE_LIVE_REQUIRE=1` contract, and the OpenCode pin.
 
 ## Skip versus fail
 

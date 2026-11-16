@@ -1,0 +1,47 @@
+name: Live host tools
+description: Install the pinned Node, tmux, fd, OpenCode, and npm dependencies for a live suite.
+
+inputs:
+  node-version:
+    description: Node version for setup-node
+    required: true
+  opencode-version:
+    description: OpenCode CLI version from the compatibility matrix
+    required: true
+  fd-version:
+    description: fd release version
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+    - name: Install tmux
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends tmux
+    - name: Install fd
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        FD_VERSION: ${{ inputs.fd-version }}
+      run: |
+        # The release web download path can return 504; the authenticated
+        # release API serves the same pinned archive.
+        gh release download "v${FD_VERSION}" --repo sharkdp/fd \
+          --pattern "fd-v${FD_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+          --dir /tmp/fd-download
+        tar -xzf "/tmp/fd-download/fd-v${FD_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C /tmp
+        sudo install -m 0755 "/tmp/fd-v${FD_VERSION}-x86_64-unknown-linux-gnu/fd" /usr/local/bin/fd
+    - name: Install OpenCode
+      shell: bash
+      env:
+        OPENCODE_VERSION: ${{ inputs.opencode-version }}
+      run: npm install --global "@opencode/cli@${OPENCODE_VERSION}"
+    - name: Install npm dependencies
+      shell: bash
+      run: npm ci

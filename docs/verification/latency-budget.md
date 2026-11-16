@@ -58,10 +58,11 @@ npm run latency:budget -- path/to/latency-result.json
 
 Run `npm run test:live:preflight` first on a new reference host. The reference
 gate expects the pinned live versions (Node 26.12.1, OpenCode 2.2.7 at the time
-of this record), Linux, tmux, and a quiet machine. The nightly workflow
-`.github/workflows/latency.yml` runs the smoke profile on pull requests and the
-reference profile on its schedule. The pure evaluator is covered by
-`npm run verify` on every PR.
+of this record), Linux, tmux, and a quiet machine. `verify.yml` runs the smoke
+profile in the `latency-smoke` PR job, and `nightly.yml` runs the reference
+profile in `latency-reference`. The pure evaluator is covered by
+`npm run verify` on every PR. The separate `latency.yml` workflow was removed
+by ticket #261 so each gate has one owner.
 
 ## Baseline
 
