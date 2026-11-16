@@ -36,6 +36,8 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Documentation freshness](verification/2026-11-12-ticket-262.md): canonical contract/host/Node constants, the docs index, ADR 0011 at contract v7, and the `docs:check` CI gate
 - [Live harness flake policy](verification/flake-policy.md): timing-only retry, flake budget, failure artifacts, and the issue/owner quarantine rule
 - [Live harness flake policy verification](verification/2026-11-12-ticket-256.md): readiness-based wizard alignment, classified timing retry, artifact preservation, and the passing deterministic matrix
+- [Latency budget and SLO](verification/latency-budget.md): split rail/patch-card/first-token metrics, reference and smoke profiles, the deterministic patch-card fixture, and the deliberate regression gate
+- [Latency budget verification](verification/2026-11-16-ticket-260.md): baseline samples, reference-host gate, regression evidence, and the verify/latency results
 - [Node support policy and CI matrix](verification/2026-11-12-node-matrix.md): `npm run verify` on Node 22.23.4, 24.22.1, and 26.12.1, the `>=22.23.4` engine floor, the load-time version gate, and the separate Node matrix workflow
 - [Accessibility audit](verification/2026-11-12-ticket-259.md): contrast matrix for dark/light/custom themes, non-color Work status, keyboard-only reachability, reduced-motion/`NO_COLOR`/ASCII fallbacks, and the ASCII glyph fix
 - [Terminal accessibility checklist](verification/terminal-accessibility-checklist.md): manual screen-reader, high-contrast, font-scaling, reduced-motion, ASCII, keyboard-only, and host-limit checks
