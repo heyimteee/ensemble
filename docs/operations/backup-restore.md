@@ -29,6 +29,17 @@ with owner-only permissions, keep it out of the repository, and delete it when
 it is no longer needed. Retention and user-facing delete policy belong to
 #272; the backup path does not prune or delete existing data.
 
+### Relationship to the user data export
+
+#272 ships `npm run data -- export` and the `ensemble.data-export` format. That
+is a deliberate user-facing projection: it excludes bindings, host session
+ids, workspace directories, settings, model configuration, and operational
+logs. Those exclusions are exactly what a restore needs, so the recovery
+document stays `ensemble.backup`. The two formats are intentionally separate;
+do not use `ensemble.data-export` to restore a workspace, and do not treat a
+recovery backup as a portable data export. See
+[Data classes, retention, export, and delete](../privacy/data-and-retention.md).
+
 ## Document format
 
 ```json
@@ -142,4 +153,6 @@ the service-seam suite (`src/v2/service.test.ts`, `ticket273:` cases):
 
 See [the ticket #273 record](../verification/2026-11-16-ticket-273.md) for the
 run evidence. The upgrade and package rollback procedures are in
-[upgrade.md](upgrade.md) and [rollback.md](rollback.md).
+[upgrade.md](upgrade.md) and [rollback.md](rollback.md). The incident runbook
+uses this path for host-owned state recovery:
+[support/incident-runbook.md](../support/incident-runbook.md).

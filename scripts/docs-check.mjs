@@ -155,6 +155,55 @@ function checkVerificationIndex(root, failures) {
   }
 }
 
+const SUPPORT_DOCS = [
+  "docs/support/README.md",
+  "docs/support/incident-runbook.md",
+  "docs/support/support-matrix.md",
+]
+
+const SUPPORT_TEMPLATES = [
+  ".github/ISSUE_TEMPLATE/bug.yml",
+  ".github/ISSUE_TEMPLATE/question.yml",
+  ".github/PULL_REQUEST_TEMPLATE.md",
+]
+
+/**
+ * Ticket #274: the public support path is part of the release contract. The
+ * hub, runbook, matrix, and intake templates must exist, be reachable from the
+ * index, and warn against posting credentials or conversation content.
+ */
+function checkSupport(root, failures) {
+  for (const path of [...SUPPORT_DOCS, ...SUPPORT_TEMPLATES, ".github/ISSUE_TEMPLATE/config.yml"]) {
+    if (!existsSync(join(root, path))) {
+      failures.push(`${path}: file is missing`)
+    }
+  }
+
+  const readme = read(root, "README.md", failures)
+  requireClaims("README.md", readme, ["docs/support/README.md"], failures)
+
+  const support = read(root, "docs/support/README.md", failures)
+  requireClaims(
+    "docs/support/README.md",
+    support,
+    ["incident-runbook.md", "support-matrix.md"],
+    failures,
+  )
+
+  const index = read(root, "docs/README.md", failures)
+  requireClaims(
+    "docs/README.md",
+    index,
+    ["support/README.md", "support/incident-runbook.md", "support/support-matrix.md"],
+    failures,
+  )
+
+  for (const path of SUPPORT_TEMPLATES) {
+    const template = read(root, path, failures)
+    requireClaims(path, template, ["credentials", "conversation content"], failures)
+  }
+}
+
 function checkDocs(root = REPO_ROOT) {
   const failures = []
   const version = ENSEMBLE_BLOCK_VERSION
@@ -302,6 +351,7 @@ function checkDocs(root = REPO_ROOT) {
   }
 
   checkVerificationIndex(root, failures)
+  checkSupport(root, failures)
 
   return { failures, version, hosts, liveNode }
 }

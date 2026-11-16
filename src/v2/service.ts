@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto"
 import type { Plugin } from "@opencode/plugin"
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
 import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, reconcileEnsembleInstructions, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
 import { ENSEMBLE_BLOCK_VERSION, agentIdentity, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
+import { workspaceDataExport, type WorkspaceDataExport } from "./data-control.ts"
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
 import { Catalog } from "./catalog.ts"
 import { anyToolCall, assistantResult, availabilityFailure, contextForTask, isFallbackReply, promptForTask, promptTextForTask, REPLY_INTERRUPTED, skillPermissions } from "./execution.ts"
@@ -80,11 +81,11 @@ import {
 import { planSkillInvocation, directSkillIssue, skillWorkTitle } from "./skill-invocation.ts"
 import { projectVisibleWork, tier3Gate, transcriptWindow as deriveTranscriptWindow, workspaceCounts } from "./scoped-read.ts"
 import { selectWorkHistory, workHistoryGroups } from "./work-history.ts"
-import { chatLineFromMessage, directMessageChannelForBinding, isDirectMessageChannel } from "./message-channel.ts"
+import { chatLineFromMessage, directMessageChannelForBinding, isDirectMessageChannel, isWorkspaceConversationChannel } from "./message-channel.ts"
 import { V2Store, bindingKey, cloneDebugEnabled, cloneStats, streamKey, type StoreObserver } from "./store.ts"
 import { STREAM_COALESCE_MS, createStreamCoalescer } from "./stream-coalescer.ts"
 import { WORK_ACTIVITY_COALESCE_MS, boundedToolName, limitToolInput, thinkingActivityLabel, toolActivityLabel, writingReplyLabel, type WorkActivity } from "./work-activity.ts"
-import { createLogRateLimiter, createLogger, defaultLogDirectory, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
+import { createLogRateLimiter, createLogger, defaultLogDirectory, purgeLogFiles, setGlobalLogger, type EnsembleLogger, type LogEntry } from "./logging.ts"
 import { SUPPORTED_OPENCODE_VERSIONS, normalizeHostVersion, warnUnsupportedHost } from "./host-compatibility.ts"
 import { createStoreObserver, dispatchGroupEvent, dispatchHopEvent } from "./log-events.ts"
 import { registerEnsembleTools, type EnsembleToolHandlers } from "./tool-registrar.ts"
@@ -2185,6 +2186,8 @@ export class EnsembleV2Service {
       case "memory.promote": return this.promoteMemory(payload)
       case "settings.update": return this.updateSettings(payload)
       case "ensemble.reset": return this.resetEnsemble(Boolean(payload.deleteHandoffs), String(payload.confirmation ?? ""))
+      case "data.export": return this.exportWorkspaceData(directory, payload)
+      case "data.delete": return this.deleteWorkspaceData(directory, payload)
       case "backup.export": return this.exportBackup()
       case "backup.restore": return this.restoreBackup(payload)
       case "backup.rollback": return this.rollbackBackup(payload)
@@ -4308,6 +4311,120 @@ export class EnsembleV2Service {
     return { ok: true }
   }
 
+  /**
+   * Ticket #272: resolve the one workspace a data-control request names. An
+   * explicit id wins; otherwise the requested directory must match exactly one
+   * workspace. The general reader falls back to "most recent", which would let
+   * an export silently leave the directory the user asked about.
+   */
+  private dataWorkspace(directory: string, requested?: string): Workspace {
+    const state = this.store.read()
+    if (requested) {
+      const workspace = state.workspaces[requested]
+      if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+      return workspace
+    }
+    let canonical: string
+    try {
+      canonical = canonicalDirectory(directory)
+    } catch {
+      throw Object.assign(new Error("Not a directory."), { code: "invalid_directory" })
+    }
+    const matches = Object.values(state.workspaces).filter((workspace) => {
+      try {
+        return canonicalDirectory(workspace.directory) === canonical
+      } catch {
+        return false
+      }
+    })
+    if (matches.length === 1) return matches[0]!
+    if (matches.length > 1) {
+      throw Object.assign(new Error("More than one workspace is registered for this directory; pass workspaceID."), {
+        code: "ambiguous_workspace",
+      })
+    }
+    throw Object.assign(new Error("No Ensemble workspace is registered for this directory."), { code: "not_found" })
+  }
+
+  /** Ticket #272: one workspace's documented export. No logs or counts of content in the log line. */
+  private async exportWorkspaceData(directory: string, payload: Json): Promise<WorkspaceDataExport> {
+    const workspace = this.dataWorkspace(directory, typeof payload.workspaceID === "string" ? payload.workspaceID : undefined)
+    const exported = workspaceDataExport(this.store.read(), workspace.id, { generatedAt: now() })
+    if (!exported) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
+    this.logger?.event("info", "service", "data.export", {
+      workspaceID: workspace.id,
+      conversations: exported.counts.conversations,
+      messages: exported.counts.messages,
+      work: exported.counts.work,
+      memories: exported.counts.memories,
+    })
+    return exported
+  }
+
+  /**
+   * Ticket #272: delete one workspace's conversation, Work, and memory data.
+   *
+   * The workspace, its roster, and its config stay, so the team keeps working
+   * and the next message starts a fresh native session. Bindings are removed
+   * with the transcripts; otherwise the next host reconcile would re-ingest
+   * the history this action just deleted. Native host sessions are removed
+   * only when `deleteNativeSessions` is explicitly requested.
+   */
+  private async deleteWorkspaceData(directory: string, payload: Json): Promise<any> {
+    if (String(payload.confirmation ?? "") !== "DELETE") {
+      throw Object.assign(new Error('Type DELETE to confirm deleting this workspace\'s Ensemble conversation, Work, and memory data.'), {
+        code: "confirmation_required",
+      })
+    }
+    const workspace = this.dataWorkspace(directory, typeof payload.workspaceID === "string" ? payload.workspaceID : undefined)
+    const deleteNativeSessions = payload.deleteNativeSessions === true
+    const deleteLogs = payload.logs === true
+    const bindings = this.store.bindings().filter((binding) => binding.workspaceID === workspace.id && binding.kind !== "home")
+    this.workspaceEpoch.set(workspace.id, (this.workspaceEpoch.get(workspace.id) ?? 0) + 1)
+    this.wakeNativeSubagentWaitersForWorkspace(workspace.id)
+    await this.cancelActiveInitJobs(workspace.id, "Workspace data deleted.")
+    await this.waitForInitRuns()
+    await this.cancelSubtasks(
+      (subtask) => isWorkspaceConversationChannel(subtask.workspaceID, workspace.id)
+        || (subtask.conversationID !== undefined && isWorkspaceConversationChannel(subtask.conversationID, workspace.id)),
+      "Workspace data deleted.",
+    )
+    for (const run of this.activeRuns.values()) {
+      if (!isWorkspaceConversationChannel(run.workspaceID, workspace.id)) continue
+      await this.ctx.session.interrupt({ sessionID: run.sessionID, resume: false }).catch(() => undefined)
+    }
+    await this.waitForRuns()
+    if (deleteNativeSessions) {
+      for (const binding of bindings) {
+        for (const sessionID of [...(binding.history ?? []), binding.sessionID]) {
+          await this.ctx.session.remove({ sessionID }).catch(() => undefined)
+        }
+      }
+    }
+    cleanupWorkspaceAttachments(workspace.directory)
+    const deleted = await this.store.purgeWorkspaceData(workspace.id)
+    const logsDeleted = deleteLogs ? purgeLogFiles() : 0
+    this.logger?.event("info", "service", "data.delete", {
+      workspaceID: workspace.id,
+      ...deleted,
+      nativeSessionsDeleted: deleteNativeSessions ? bindings.length : 0,
+      logsDeleted,
+    })
+    return {
+      ok: true,
+      workspace: { id: workspace.id, name: workspace.name },
+      deleted,
+      nativeSessionsDeleted: deleteNativeSessions ? bindings.length : 0,
+      logsDeleted,
+      retained: [
+        "workspace",
+        "agents",
+        "workspace-config",
+        ...(deleteNativeSessions ? [] : ["native-host-sessions"]),
+      ],
+    }
+  }
+
   private async pauseWorkspace(workspaceID: string, paused: boolean): Promise<Workspace> {
     const workspace = this.store.cloneWorkspace(workspaceID)
     if (!workspace) throw Object.assign(new Error("Workspace not found."), { code: "not_found" })
@@ -6155,8 +6272,18 @@ export class EnsembleV2Service {
     if (absolute !== handoffs && !absolute.startsWith(`${handoffs}${sep}`)) {
       return fail("The handoff path must be inside .ensemble/handoffs/.")
     }
-    if (!existsSync(absolute) || !statSync(absolute).isFile()) return fail("The handoff file does not exist.")
-    const content = readFileSync(absolute, "utf8")
+    // Ticket #271: a lexical prefix check is not containment. Resolve both
+    // sides so a symlink under handoffs cannot read a file outside it.
+    let file: string
+    try {
+      const root = realpathSync(handoffs)
+      file = realpathSync(absolute)
+      if (!file.startsWith(`${root}${sep}`)) return fail("The handoff path must be inside .ensemble/handoffs/.")
+    } catch {
+      return fail("The handoff file does not exist.")
+    }
+    if (!statSync(file).isFile()) return fail("The handoff file does not exist.")
+    const content = readFileSync(file, "utf8")
     const parsed = parseHandoffFile(content)
     if (!parsed.ok) return fail(parsed.reason)
     const task = parsed.data.task || String(input.task ?? "").trim()

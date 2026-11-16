@@ -65,7 +65,9 @@ rows, applies additive defaults, and writes only what a later mutation needs.
 
 The roster table in AGENTS v7 writes member names, titles, and roles into the
 workspace file. If a repository is public, review those fields before the
-first commit that includes the block. The disclosure policy belongs to #272.
+first commit that includes the block. The disclosure policy and the guidance
+for disabling or limiting it are in
+[Data classes, retention, export, and delete](../privacy/data-and-retention.md).
 
 ## Verify the upgrade
 

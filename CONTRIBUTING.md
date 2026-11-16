@@ -24,6 +24,6 @@ Ensemble is in developer preview. The server and TUI parts load directly from Ty
 
 ## Reporting issues
 
-Use GitHub Issues for bugs, feature requests, documentation, research, and questions. Include reproduction steps and expected versus actual behavior where relevant. Apply an appropriate type label and triage state; see the [label guide](docs/agents/triage-labels.md).
+Use GitHub Issues for bugs, feature requests, documentation, research, and questions. Include reproduction steps and expected versus actual behavior where relevant. Apply an appropriate type label and triage state; see the [label guide](docs/agents/triage-labels.md) and the [support policy](docs/support/README.md) for response expectations, diagnostics, and redaction rules.
 
 Security-sensitive reports belong in the private process described in [SECURITY.md](SECURITY.md).

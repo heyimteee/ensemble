@@ -46,6 +46,16 @@ export function messageChannel(message: Pick<Message, "workspaceID" | "channel">
   return message.channel ?? message.workspaceID
 }
 
+/**
+ * Ticket #272: true when a channel belongs to one workspace — its group
+ * channel or a direct channel scoped to that workspace. A home direct channel
+ * (`dm:<agentID>`) is not workspace data and never matches.
+ */
+export function isWorkspaceConversationChannel(channel: Id, workspaceID: Id): boolean {
+  if (channel === workspaceID) return true
+  return parseDirectMessageChannel(channel)?.workspaceID === workspaceID
+}
+
 export function chatLineFromMessage(message: Message, agentName: string): ChatMessage {
   const role = message.author === "user" ? "user" : message.author === "system" ? "system" : "assistant"
   return {

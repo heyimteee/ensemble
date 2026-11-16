@@ -2,7 +2,7 @@ import { bindingConversation, conversationStateKey } from "./conversation-bindin
 import { createInitialState, DEFAULT_SETTINGS } from "./defaults.ts"
 import { continuationDispatchLedger, dispatchAdmissionRefusal, dispatchBudgetState, dispatchChildDepth, dispatchFanOutCount, dispatchGroupExhausted, dispatchRefusalReasonCode, reconcileLegacyDispatchGroup, reconcileLegacyTaskBudgets, validateContinuation, type ContinuationRefusal, type DispatchRefusal, type DispatchRefusalReason } from "./dispatch-budget.ts"
 import { resolveDispatchGroupID } from "./dispatch-group.ts"
-import { directMessageChannelForBinding, isDirectMessageChannel, messageChannel, parseDirectMessageChannel } from "./message-channel.ts"
+import { directMessageChannelForBinding, isDirectMessageChannel, isWorkspaceConversationChannel, messageChannel, parseDirectMessageChannel } from "./message-channel.ts"
 import { isNativeFirstMode, DEFAULT_NATIVE_FIRST_MODE, nativeFirstMode } from "./native-first.ts"
 import { withNativeContact } from "./native-turn.ts"
 import { parseWorkKind, workKey } from "./queue.ts"
@@ -63,6 +63,20 @@ export type CloneStats = {
 
 const CLONE_DEBUG_ENV = "ENSEMBLE_DEBUG_CLONES"
 const NO_CLONE_STATS = { count: 0, totalMs: 0, maxMs: 0, lastMs: 0 }
+
+/** Ticket #272: the rows one workspace data purge removed. */
+export type WorkspaceDataPurge = {
+  conversations: number
+  messages: number
+  subtasks: number
+  dispatchGroups: number
+  initJobs: number
+  nativeSubagents: number
+  memories: number
+  approvals: number
+  dmQueue: number
+  bindings: number
+}
 /** Ticket #138: bounded in-memory change ring for `changes.since`. */
 export const CHANGE_RING_LIMIT = 256
 /** Ticket #160: legacy group writes per reconciliation pass. */
@@ -1691,81 +1705,135 @@ export class V2Store {
     })
   }
 
-  async pruneWorkspace(workspaceID: string): Promise<void> {
-    await this.write(async () => {
-      // Group messages use the workspace id as their channel; a workspace
-      // direct conversation uses `dm:<agentID>:<workspaceID>`. Retention must
-      // cover both without touching home direct channels.
-      const messageChannels = [
+  /**
+   * Ticket #272: delete one workspace's conversation, Work, memory, approval,
+   * DM-queue, and binding rows while keeping the workspace itself usable.
+   *
+   * Bindings are removed with the transcripts they point at: a kept binding
+   * would let the next reconcile re-ingest the deleted native history. The
+   * workspace row, its agents, and workspace config stay, so the next message
+   * starts a fresh native session in the same team.
+   */
+  async purgeWorkspaceData(workspaceID: string): Promise<WorkspaceDataPurge> {
+    return this.write(() => this.purgeWorkspaceRows(workspaceID, { keepWorkspace: true }))
+  }
+
+  async pruneWorkspace(workspaceID: string): Promise<WorkspaceDataPurge> {
+    return this.write(() => this.purgeWorkspaceRows(workspaceID, { keepWorkspace: false }))
+  }
+
+  /**
+   * Shared retention pass for `pruneWorkspace` (delete the workspace) and
+   * `purgeWorkspaceData` (delete its user data only). Group messages use the
+   * workspace id as their channel; a workspace direct conversation uses
+   * `dm:<agentID>:<workspaceID>`. Both channels belong to the workspace while
+   * home direct channels never do.
+   */
+  private async purgeWorkspaceRows(workspaceID: string, options: { keepWorkspace: boolean }): Promise<WorkspaceDataPurge> {
+    const messageChannels = [
+      ...new Set([
         workspaceID,
         ...Object.keys(this.state.messages).filter(
-          (channel) => parseDirectMessageChannel(channel)?.workspaceID === workspaceID,
+          (channel) => isWorkspaceConversationChannel(channel, workspaceID),
         ),
-      ]
-      const messages = messageChannels.flatMap((channel) => [...(this.state.messages[channel] ?? [])])
-      const subtaskIDs = Object.values(this.state.subtasks).filter((subtask) => subtask.workspaceID === workspaceID).map((subtask) => subtask.id)
-      const dispatchGroupIDs = Object.values(this.state.dispatchGroups).filter((group) => group.workspaceID === workspaceID).map((group) => group.id)
-      const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
-      const nativeSubagentIDs = Object.values(this.state.nativeSubagents).filter((run) => run.workspaceID === workspaceID).map((run) => run.childSessionID)
-      const memoryIDs = Object.values(this.state.memories).filter((memory) => memory.workspaceID === workspaceID).map((memory) => memory.id)
-      const approvalIDs = Object.values(this.state.approvals).filter((approval) => approval.workspaceID === workspaceID).map((approval) => approval.id)
-      const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
-      const bindingRows = Object.values(this.state.bindings).filter((binding) => binding.workspaceID === workspaceID)
-      for (const channel of messageChannels) delete this.state.messages[channel]
-      for (const key of [...this.streaming]) {
-        if (messageChannels.some((channel) => key.startsWith(`${channel}\u0000`))) this.streaming.delete(key)
+      ]),
+    ]
+    const channels = new Set(messageChannels)
+    const messages = messageChannels.flatMap((channel) => [...(this.state.messages[channel] ?? [])])
+    const conversationCount = messageChannels.filter((channel) => (this.state.messages[channel]?.length ?? 0) > 0).length
+    const subtaskIDs = Object.values(this.state.subtasks)
+      .filter((subtask) => channels.has(subtask.workspaceID) || (subtask.conversationID !== undefined && channels.has(subtask.conversationID)))
+      .map((subtask) => subtask.id)
+    const subtasks = new Set(subtaskIDs)
+    const dispatchGroupIDs = Object.values(this.state.dispatchGroups)
+      .filter((group) => channels.has(group.workspaceID))
+      .map((group) => group.id)
+    const initJobIDs = Object.values(this.state.initJobs).filter((job) => job.workspaceID === workspaceID).map((job) => job.id)
+    const nativeSubagentIDs = Object.values(this.state.nativeSubagents)
+      .filter((run) => (run.workspaceID !== undefined && channels.has(run.workspaceID)) || (run.parentTaskID !== undefined && subtasks.has(run.parentTaskID)))
+      .map((run) => run.childSessionID)
+    const memoryIDs = Object.values(this.state.memories)
+      .filter((memory) => memory.workspaceID !== undefined && channels.has(memory.workspaceID))
+      .map((memory) => memory.id)
+    const approvalIDs = Object.values(this.state.approvals)
+      .filter((approval) => (approval.workspaceID !== undefined && channels.has(approval.workspaceID))
+        || (approval.subtaskID !== undefined && subtasks.has(approval.subtaskID)))
+      .map((approval) => approval.id)
+    const dmQueueIDs = Object.values(this.state.dmQueue).filter((entry) => entry.workspaceID === workspaceID).map((entry) => entry.id)
+    const bindingRows = Object.values(this.state.bindings)
+      .filter((binding) => binding.workspaceID === workspaceID && binding.kind !== "home")
+    for (const channel of messageChannels) delete this.state.messages[channel]
+    for (const key of [...this.streaming]) {
+      if (messageChannels.some((channel) => key.startsWith(`${channel}\u0000`))) this.streaming.delete(key)
+    }
+    for (const id of subtaskIDs) delete this.state.subtasks[id]
+    for (const id of dispatchGroupIDs) delete this.state.dispatchGroups[id]
+    for (const id of initJobIDs) delete this.state.initJobs[id]
+    for (const id of nativeSubagentIDs) delete this.state.nativeSubagents[id]
+    if (bindingRows.length > 0) {
+      for (const [key, binding] of Object.entries(this.state.bindings)) {
+        if (binding.workspaceID === workspaceID && binding.kind !== "home") delete this.state.bindings[key]
       }
-      for (const id of subtaskIDs) delete this.state.subtasks[id]
-      for (const id of dispatchGroupIDs) delete this.state.dispatchGroups[id]
-      for (const id of initJobIDs) delete this.state.initJobs[id]
-      for (const id of nativeSubagentIDs) delete this.state.nativeSubagents[id]
-      for (const [key, binding] of Object.entries(this.state.bindings)) if (binding.workspaceID === workspaceID) delete this.state.bindings[key]
       this.reindexBindings()
-      for (const id of memoryIDs) delete this.state.memories[id]
-      for (const id of approvalIDs) delete this.state.approvals[id]
-      for (const id of dmQueueIDs) delete this.state.dmQueue[id]
-      for (const channel of messageChannels) await this.removePrefixNow(`v2/message/${channel}/`)
-      await this.removePrefixNow(`v2/binding/${workspaceID}/`)
-      await this.removePrefixNow(`v2/binding/direct/${workspaceID}/`)
-      await this.removePrefixNow(`v2/dm/${workspaceID}/`)
-      for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
-      for (const id of dispatchGroupIDs) await this.ctx.storage.remove(`v2/dispatchgroup/${id}`)
-      for (const id of initJobIDs) await this.ctx.storage.remove(`v2/init/${id}`)
-      for (const id of nativeSubagentIDs) await this.ctx.storage.remove(`v2/native-subagent/${id}`)
-      for (const id of memoryIDs) await this.ctx.storage.remove(`v2/memory/${id}`)
-      for (const id of approvalIDs) await this.ctx.storage.remove(`v2/approval/${id}`)
-      for (const id of dmQueueIDs) await this.ctx.storage.remove(`v2/dmqueue/${id}`)
+    }
+    for (const id of memoryIDs) delete this.state.memories[id]
+    for (const id of approvalIDs) delete this.state.approvals[id]
+    for (const id of dmQueueIDs) delete this.state.dmQueue[id]
+    for (const channel of messageChannels) await this.removePrefixNow(`v2/message/${channel}/`)
+    await this.removePrefixNow(`v2/binding/${workspaceID}/`)
+    await this.removePrefixNow(`v2/binding/direct/${workspaceID}/`)
+    await this.removePrefixNow(`v2/dm/${workspaceID}/`)
+    for (const id of subtaskIDs) await this.ctx.storage.remove(`v2/subtask/${id}`)
+    for (const id of dispatchGroupIDs) await this.ctx.storage.remove(`v2/dispatchgroup/${id}`)
+    for (const id of initJobIDs) await this.ctx.storage.remove(`v2/init/${id}`)
+    for (const id of nativeSubagentIDs) await this.ctx.storage.remove(`v2/native-subagent/${id}`)
+    for (const id of memoryIDs) await this.ctx.storage.remove(`v2/memory/${id}`)
+    for (const id of approvalIDs) await this.ctx.storage.remove(`v2/approval/${id}`)
+    for (const id of dmQueueIDs) await this.ctx.storage.remove(`v2/dmqueue/${id}`)
+    if (!options.keepWorkspace) {
       delete this.state.workspaces[workspaceID]
       await this.ctx.storage.remove(`v2/workspace/${workspaceID}`)
-      // Messages remove through the feed. DM queue rows are still outside it,
-      // so their removal keeps the protocol-3 snapshot fallback.
-      await this.commit(
-        [
-          { entity: "workspace" as const, op: "remove" as const, id: workspaceID },
-          ...messages.map((message) => ({
-            entity: "message" as const,
-            op: "remove" as const,
-            workspaceID: messageChannel(message),
-            ...(message.channel ? { channel: message.channel } : {}),
-            id: message.id,
-          })),
-          ...subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
-          ...dispatchGroupIDs.map((id) => ({ entity: "dispatchGroup" as const, op: "remove" as const, id })),
-          ...initJobIDs.map((id) => ({ entity: "initJob" as const, op: "remove" as const, id })),
-          ...nativeSubagentIDs.map((id) => ({ entity: "nativeSubagent" as const, op: "remove" as const, id })),
-          ...memoryIDs.map((id) => ({ entity: "memory" as const, op: "remove" as const, id })),
-          ...approvalIDs.map((id) => ({ entity: "approval" as const, op: "remove" as const, id })),
-          ...bindingRows.map((binding) => ({
-            entity: "binding" as const,
-            op: "remove" as const,
-            workspaceID,
-            agentID: binding.agentID,
-            ...(binding.kind === "direct" ? { kind: "direct" as const } : {}),
-          })),
-        ],
-        dmQueueIDs.length > 0,
-      )
-    })
+    }
+    // Messages remove through the feed. DM queue rows are still outside it,
+    // so their removal keeps the protocol-3 snapshot fallback.
+    await this.commit(
+      [
+        ...(options.keepWorkspace ? [] : [{ entity: "workspace" as const, op: "remove" as const, id: workspaceID }]),
+        ...messages.map((message) => ({
+          entity: "message" as const,
+          op: "remove" as const,
+          workspaceID: messageChannel(message),
+          ...(message.channel ? { channel: message.channel } : {}),
+          id: message.id,
+        })),
+        ...subtaskIDs.map((id) => ({ entity: "subtask" as const, op: "remove" as const, id })),
+        ...dispatchGroupIDs.map((id) => ({ entity: "dispatchGroup" as const, op: "remove" as const, id })),
+        ...initJobIDs.map((id) => ({ entity: "initJob" as const, op: "remove" as const, id })),
+        ...nativeSubagentIDs.map((id) => ({ entity: "nativeSubagent" as const, op: "remove" as const, id })),
+        ...memoryIDs.map((id) => ({ entity: "memory" as const, op: "remove" as const, id })),
+        ...approvalIDs.map((id) => ({ entity: "approval" as const, op: "remove" as const, id })),
+        ...bindingRows.map((binding) => ({
+          entity: "binding" as const,
+          op: "remove" as const,
+          workspaceID,
+          agentID: binding.agentID,
+          ...(binding.kind === "direct" ? { kind: "direct" as const } : {}),
+        })),
+      ],
+      dmQueueIDs.length > 0,
+    )
+    return {
+      conversations: conversationCount,
+      messages: messages.length,
+      subtasks: subtaskIDs.length,
+      dispatchGroups: dispatchGroupIDs.length,
+      initJobs: initJobIDs.length,
+      nativeSubagents: nativeSubagentIDs.length,
+      memories: memoryIDs.length,
+      approvals: approvalIDs.length,
+      dmQueue: dmQueueIDs.length,
+      bindings: bindingRows.length,
+    }
   }
 
   async removePrefix(prefix: string): Promise<void> {
