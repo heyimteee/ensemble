@@ -75,6 +75,11 @@ function packument(origin) {
         name,
         version,
         license: manifest.license,
+        ...(manifest.dependencies ? { dependencies: manifest.dependencies } : {}),
+        ...(manifest.peerDependencies ? { peerDependencies: manifest.peerDependencies } : {}),
+        ...(manifest.peerDependenciesMeta ? { peerDependenciesMeta: manifest.peerDependenciesMeta } : {}),
+        ...(manifest.optionalDependencies ? { optionalDependencies: manifest.optionalDependencies } : {}),
+        ...(manifest.engines ? { engines: manifest.engines } : {}),
         dist: {
           tarball: `${origin}${tarballRoute}`,
           shasum,
