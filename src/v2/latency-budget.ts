@@ -68,12 +68,6 @@ export const LATENCY_BUDGETS = {
 
 const METRIC_ORDER: readonly LatencyMetric[] = ["rail", "patchCard", "firstToken"]
 
-const METRIC_LABEL: Record<LatencyMetric, string> = {
-  rail: "rail",
-  patchCard: "patchCard",
-  firstToken: "firstToken",
-}
-
 /** Nearest-rank percentiles, matching the shell probe's previous awk summary. */
 export function summarizeSamples(samples: readonly number[]): LatencySummary | undefined {
   if (samples.length === 0) return undefined
@@ -122,7 +116,7 @@ export function evaluateLatencyBudget(input: {
     const valid: number[] = []
     samples.forEach((sample, index) => {
       if (typeof sample !== "number" || !Number.isFinite(sample) || sample < 0) {
-        failures.push(`${METRIC_LABEL[metric]}: sample ${index + 1} is not a finite non-negative number`)
+        failures.push(`${metric}: sample ${index + 1} is not a finite non-negative number`)
         return
       }
       valid.push(sample)
@@ -134,10 +128,10 @@ export function evaluateLatencyBudget(input: {
     if (kind === "gate") {
       if (!summary) {
         ok = false
-        failures.push(`${METRIC_LABEL[metric]}: no samples`)
+        failures.push(`${metric}: no samples`)
       } else if (budgetMs !== undefined && summary.p95 > budgetMs) {
         ok = false
-        failures.push(`${METRIC_LABEL[metric]} p95=${summary.p95}ms exceeds ${budgetMs}ms`)
+        failures.push(`${metric} p95=${summary.p95}ms exceeds ${budgetMs}ms`)
       }
     }
     metrics.push({

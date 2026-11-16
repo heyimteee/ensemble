@@ -1738,7 +1738,7 @@ export function EnsembleV2App() {
     const tasks = activeTasks()
     const now = Date.now()
     const previous = completionMap()
-    const next = accumulateCompletions(previous, tasks, (task) => agentName(snapshot, task.assigneeID), now, undefined, process.env)
+    const next = accumulateCompletions(previous, tasks, (task) => agentName(snapshot, task.assigneeID), now, { env: process.env })
     if (next !== previous) setCompletionMap(next)
   })
   // Ticket #122 one-shot transcript feedback: a group message that was

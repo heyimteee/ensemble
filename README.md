@@ -4,7 +4,7 @@
 
 Ensemble is a TUI workspace where you and a team of named agents share one group chat, delegate visible subtasks, and inspect each agent's native OpenCode session underneath.
 
-> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is not published and no license has been selected. Compatibility is verified on OpenCode **2.2.6** and **2.2.7** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.x, and 26.x, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
+> **Status: developer preview.** The v2 runtime is the default and the workspace `AGENTS.md` contract is **v7**. The package is not published and no license has been selected. Compatibility is verified on OpenCode **2.2.6** and **2.2.7** (Linux/tmux); the unit/typecheck gate runs on Node 22.23.4, 24.22.1, and 26.12.1, and the live suites run on Node 26.12.1. The 2.2.1 report and v5.8 matrix are historical, version-scoped evidence.
 
 > **Native-first decisions.** The conversation/session, ingestion, and mention-routing decisions for native-first coordination are recorded in [ADR 0009](docs/adr/0009-conversation-identity-and-sessions.md), [ADR 0010](docs/adr/0010-native-turn-ingestion.md), and [ADR 0011](docs/adr/0011-mention-routing-and-budgets.md); the terminal-turn workflow is in [ADR 0012](docs/adr/0012-terminal-turns-and-root-synthesis.md). Current behavior and evidence are recorded in the verification index.
 
@@ -33,7 +33,7 @@ Ensemble is a TUI workspace where you and a team of named agents share one group
 
 ## Requirements
 
-- **Node 22.23.4 or newer.** The unit and typecheck gate is verified on Node 22.23.4, 24.x, and 26.x; the live suites run on Node 26.12.1. An older Node fails at plugin load with the supported range and upgrade guidance. The Node matrix runs `npm run verify` on every tested line.
+- **Node 22.23.4 or newer.** The unit and typecheck gate is verified on Node 22.23.4, 24.22.1, and 26.12.1; the live suites run on Node 26.12.1. An older Node fails at plugin load with the supported range and upgrade guidance. The Node matrix runs `npm run verify` on every tested line.
 
 ## Install for local development
 

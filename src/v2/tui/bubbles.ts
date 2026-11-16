@@ -187,13 +187,13 @@ export function accumulateCompletions(
   tasks: Subtask[],
   agentLabelFor: (task: Subtask) => string,
   now: number,
-  limit: number = CLIENT_MESSAGE_LIMIT,
-  env?: NodeJS.ProcessEnv,
+  options: { limit?: number; env?: NodeJS.ProcessEnv } = {},
 ): Map<string, InlineCompletion> {
+  const limit = options.limit ?? CLIENT_MESSAGE_LIMIT
   let next: Map<string, InlineCompletion> | undefined
   for (const task of tasks) {
     if (previous.has(task.id) || next?.has(task.id)) continue
-    const entry = completionEntry(task, agentLabelFor(task), now, env)
+    const entry = completionEntry(task, agentLabelFor(task), now, options.env)
     if (!entry) continue
     if (!next) next = new Map(previous)
     next.set(task.id, entry)

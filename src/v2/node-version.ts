@@ -2,12 +2,11 @@
  * Ticket #258: the Node support floor is evidence-based.
  *
  * `MINIMUM_NODE_VERSION` is the oldest release that passed `npm run verify`
- * on the 22 line; `TESTED_NODE_LINES` is the tested set recorded in the
- * README and the Node matrix workflow. Keep all three in sync with
- * `package.json` `engines.node`.
+ * on the 22 line. The tested lines are recorded by `node-matrix.yml`; the docs
+ * check derives its claim from that workflow instead of mirroring the list in
+ * a second constant. Keep the floor in sync with `package.json` `engines.node`.
  */
 export const MINIMUM_NODE_VERSION = "22.23.4"
-export const TESTED_NODE_LINES = "22.23.4, 24.x, and 26.x"
 
 export type ParsedNodeVersion = { major: number; minor: number; patch: number }
 
@@ -40,8 +39,8 @@ export class NodeVersionError extends Error {
 
   constructor(version: string) {
     super(
-      `Ensemble requires Node >=${MINIMUM_NODE_VERSION} (tested lines: ${TESTED_NODE_LINES}); ` +
-        `this process is running Node ${version}. Upgrade Node and restart OpenCode.`,
+      `Ensemble requires Node >=${MINIMUM_NODE_VERSION}; this process is running Node ${version}. ` +
+        `Upgrade Node and restart OpenCode.`,
     )
     this.name = "NodeVersionError"
     this.version = version

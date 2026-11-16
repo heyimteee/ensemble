@@ -317,13 +317,13 @@ live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "a opens the memory field in Insert"
 live_assert_text "$LIVE_TUI_SESSION" "enter save │ esc list" "the memory field teaches its persistent ladder"
 live_require_text "$LIVE_TUI_SESSION" "The team uses pnpm." 10 "the memory input is mounted"
-sleep 0.2
+live_require_ready_text "$LIVE_TUI_SESSION" "enter save │ esc list" 10 "the memory field is ready for typing"
 live_type "$LIVE_TUI_SESSION" "Likes deterministic fixtures"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "memories: 1" 10 "the first memory joined the list"
 live_require_text "$LIVE_TUI_SESSION" "The team uses pnpm." 10 "the add field cleared after Enter"
 live_assert_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" "the add field stayed in Insert"
-sleep 0.2
+live_require_ready_text "$LIVE_TUI_SESSION" "enter save │ esc list" 10 "the add field is ready for the next memory"
 live_type "$LIVE_TUI_SESSION" "Never edit generated files"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "memories: 2" 10 "the second memory joined the list"
@@ -335,7 +335,7 @@ live_require_ready_absence "$LIVE_TUI_SESSION" "enter save │ esc list" 10 "the
 live_key "$LIVE_TUI_SESSION" "k"
 live_key "$LIVE_TUI_SESSION" "e"
 live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "e opens the memory in Insert"
-sleep 0.2
+live_require_ready_text "$LIVE_TUI_SESSION" "Likes deterministic fixtures" 10 "the edit field carries the saved memory"
 live_type "$LIVE_TUI_SESSION" " v2"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "edit Enter saves and keeps the field"
@@ -351,11 +351,12 @@ live_require_absence "$LIVE_TUI_SESSION" "Never edit generated files" 10 "the de
 # Add another entry so creation saves a multi-item list one by one.
 live_key "$LIVE_TUI_SESSION" "a"
 live_require_text "$LIVE_TUI_SESSION" "INSERT  │ Wizard" 10 "the add field reopens in Insert"
-sleep 0.2
+live_require_ready_text "$LIVE_TUI_SESSION" "enter save │ esc list" 10 "the add field is ready for typing"
 live_type "$LIVE_TUI_SESSION" "Uses pnpm"
 live_key "$LIVE_TUI_SESSION" Enter
 live_key "$LIVE_TUI_SESSION" Escape
-sleep 0.25
+live_require_ready_text "$LIVE_TUI_SESSION" "NORMAL  │ Wizard" 10 "the memory list returns to Normal"
+live_require_ready_absence "$LIVE_TUI_SESSION" "enter save │ esc list" 10 "the add field closed before Enter advances"
 live_require_text "$LIVE_TUI_SESSION" "memories: 2" 10 "the final memory list has two entries"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_text "$LIVE_TUI_SESSION" "Main model" 10 "Enter advances from the memory list"
@@ -366,11 +367,11 @@ live_assert_text "$LIVE_TUI_SESSION" "j/k select" "wizard list uses the shared n
 live_assert_text "$LIVE_TUI_SESSION" "/ filter" "wizard list names the filter key"
 live_assert_text "$LIVE_TUI_SESSION" "esc cancel" "wizard list names the cancel key"
 live_key "$LIVE_TUI_SESSION" ":"
-sleep 0.25
+live_require_quiescent "$LIVE_TUI_SESSION" 10 "colon ignored in a wizard"
 live_assert_absence "$LIVE_TUI_SESSION" "COMMAND  │" "colon is disabled in a wizard"
 live_assert_text "$LIVE_TUI_SESSION" "Main model" "the wizard stayed open after colon"
 live_key "$LIVE_TUI_SESSION" Space
-sleep 0.25
+live_require_quiescent "$LIVE_TUI_SESSION" 10 "Space ignored in a wizard"
 live_assert_absence "$LIVE_TUI_SESSION" "LEADER" "Space never opens the leader in a wizard"
 live_key "$LIVE_TUI_SESSION" "/"
 live_require_text "$LIVE_TUI_SESSION" "type to filter │ enter done │ esc clear" 10 "wizard filter enters the shared filter mode"
@@ -379,7 +380,7 @@ live_require_text "$LIVE_TUI_SESSION" "filter: zzz-no-model" 10 "wizard filter f
 live_key "$LIVE_TUI_SESSION" Escape
 live_require_text "$LIVE_TUI_SESSION" "filter: (none)" 10 "first Esc cleared the wizard filter"
 live_assert_text "$LIVE_TUI_SESSION" "Main model" "clearing the filter kept the wizard step"
-sleep 0.3
+live_require_ready_absence "$LIVE_TUI_SESSION" "type to filter │ enter done │ esc clear" 10 "the wizard filter closed before Enter"
 live_key "$LIVE_TUI_SESSION" Enter
 live_require_any_text "$LIVE_TUI_SESSION" 15 "reasoning step or direct chat" "Reasoning effort" "FakeAgent │ direct"
 if live_capture_contains "$LIVE_TUI_SESSION" "Reasoning effort"; then
@@ -629,10 +630,11 @@ live_assert_text "$LIVE_TUI_SESSION" "y/enter yes │ n/esc no" "confirm shares 
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" "n"
 live_require_text "$LIVE_TUI_SESSION" "#LiveSite" 20 "n rejected the confirm and created the workspace"
-# The surface title wraps at the current chat width, so the header row can end
-# with `leader` and carry `FakeAgent` on the next row. Join the chat rows before
-# matching; a missing leader name or leader agent still fails the literal.
-live_require_joined_text "$LIVE_TUI_SESSION" "leader FakeAgent" 15 "leader visible on group surface"
+# Ticket #264: the surface title wraps at the current chat width, so the header
+# row can end with `leader` and carry `FakeAgent` on the next row. Assert the
+# header block only; a transcript row after the blank separator can mention the
+# same agent and must not make a missing leader pass.
+live_require_chat_header_text "$LIVE_TUI_SESSION" "leader FakeAgent" 15 "leader visible on group surface"
 synthesis=$(live_snapshot_value 'Object.values(output.state.workspaces)[0].synthesis')
 [[ "$synthesis" == "true" ]] || live_fail "synthesis choice did not persist as Yes (got $synthesis)"
 leader_name=$(live_snapshot_value 'Object.values(output.state.agents).filter(function (agent) { return !agent.archived })[0].name')

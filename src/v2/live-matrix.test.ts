@@ -2,9 +2,12 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
+
+import { FLAKE_BUDGET } from "./flake-policy.ts"
+import { decideFailedAttempt } from "./live-matrix.ts"
 
 const matrix = fileURLToPath(new URL("../../scripts/live-matrix.sh", import.meta.url))
 const harness = fileURLToPath(new URL("../../scripts/lib/live-harness.sh", import.meta.url))
@@ -52,6 +55,24 @@ test("the matrix creates its temp root on a clean host", () => {
   }
 })
 
+test("the matrix runs every scenario in order through its public CLI", () => {
+  const box = sandbox()
+  try {
+    const result = spawnSync(bash, [matrix, "all"], {
+      encoding: "utf8",
+      env: environment(box),
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const fake = result.stdout.search(/SKIP {2}fake\b/)
+    const empty = result.stdout.search(/SKIP {2}fake-empty\b/)
+    const real = result.stdout.search(/SKIP {2}real\b/)
+    assert.ok(fake >= 0 && empty > fake && real > empty, "the matrix keeps the declared scenario order")
+    assert.match(result.stdout, /3 skipped/)
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
 test("the harness skip is a structural marker, not log text", () => {
   const box = sandbox()
   try {
@@ -94,6 +115,38 @@ test("the matrix treats a required skip as a failure", () => {
   }
 })
 
+test("only a timing failure may retry, and the budget comes from the flake policy", () => {
+  assert.equal(decideFailedAttempt({ classification: "timing", attempt: 1 }).outcome, "retry")
+  assert.equal(
+    decideFailedAttempt({ classification: "timing", attempt: FLAKE_BUDGET.maxRetriesPerSuite }).outcome,
+    "retry",
+    "the retry ceiling is the flake budget, not a second literal",
+  )
+  assert.equal(
+    decideFailedAttempt({ classification: "timing", attempt: FLAKE_BUDGET.maxRetriesPerSuite + 1 }).outcome,
+    "fail",
+    "a timing retry past the budget fails",
+  )
+})
+
+test("product, unknown, and infrastructure failures always fail, even when quarantined", () => {
+  for (const classification of ["product", "unknown", "infrastructure"] as const) {
+    assert.equal(decideFailedAttempt({ classification, attempt: 1 }).outcome, "fail")
+    assert.equal(
+      decideFailedAttempt({ classification, attempt: 1, quarantined: true }).outcome,
+      "fail",
+      `${classification} must never be masked by a quarantine`,
+    )
+  }
+})
+
+test("a quarantined timing failure is quarantined, never passed or retried", () => {
+  const decision = decideFailedAttempt({ classification: "timing", attempt: 1, quarantined: true })
+  assert.equal(decision.outcome, "quarantine")
+  assert.notEqual(decision.outcome, "pass")
+  assert.match(decision.reason, /quarantined/)
+})
+
 test("a failed attempt writes a classified record and redacted pane/log artifacts", () => {
   const box = sandbox()
   try {
@@ -127,77 +180,54 @@ test("a failed attempt writes a classified record and redacted pane/log artifact
   }
 })
 
-function scenarioStub(dir: string, name: string, body: string): void {
-  const path = join(dir, name)
-  writeFileSync(path, `#!/usr/bin/env bash\nset -u\n${body}\n`, { mode: 0o755 })
+function captureChatHeader(box: Sandbox, pane: string): number | null {
+  const result = spawnSync(
+    bash,
+    [
+      "-c",
+      'source "$1"; LIVE_NODE_BIN="$2"; PANE="$3"; live_capture() { cat "$PANE"; }; live_chat_columns() { printf "%s\\n" "1 80"; }; live_chat_header_contains "$4" "leader FakeAgent"',
+      "--",
+      harness,
+      process.execPath,
+      pane,
+      "fixture",
+    ],
+    { encoding: "utf8", env: environment(box) },
+  )
+  return result.status
 }
 
-test("the matrix retries one classified timing failure and reports it", () => {
+test("the group header assertion joins a wrapped title but ignores transcript rows", () => {
   const box = sandbox()
   try {
-    const stubs = join(box.root, "scenarios")
-    mkdirSync(stubs)
-    scenarioStub(
-      stubs,
-      "live-check-fake.sh",
-      [
-        'attempt="${ENSEMBLE_LIVE_ATTEMPT:-1}"',
-        'artifacts="${ENSEMBLE_LIVE_ARTIFACTS:-}"',
-        'mkdir -p "$artifacts"',
-        'if [[ "$attempt" == "1" ]]; then',
-        '  printf \'{"suite":"fake","attempt":1,"status":"failed","kind":"timing","message":"timed out after 10s waiting for members step","artifactPath":"%s","exitCode":1}\\n\' "$artifacts" > "$artifacts/failure.json"',
-        '  echo "live: TUI did not become ready: members step" >&2',
-        '  exit 1',
-        'fi',
-        'echo "live: stub pass"',
-      ].join("\n"),
+    const wrapped = join(box.root, "wrapped.txt")
+    writeFileSync(
+      wrapped,
+      ["#LiveSite │ /tmp/project │ leader", "FakeAgent", "", "→ Assigned to $Helper: transcript row", ""].join("\n"),
     )
-    scenarioStub(stubs, "live-check-fake-empty.sh", 'echo "live: stub empty pass"')
-    const nodePath = `${dirname(process.execPath)}:/usr/bin:/bin`
-    const result = spawnSync(bash, [matrix, "fake"], {
-      encoding: "utf8",
-      env: environment(box, { ENSEMBLE_LIVE_SCENARIO_ROOT: stubs, PATH: nodePath }),
-    })
-    assert.equal(result.status, 0, result.stderr)
-    assert.match(result.stderr, /fake: RETRY \(attempt 1; timing failure on attempt 1\)/)
-    assert.match(result.stdout, /PASS {2}fake .*flaky, retried once/)
-    assert.match(result.stdout, /PASS {2}fake-empty/)
-    assert.match(result.stdout, /1 retries/)
-    assert.match(result.stdout, /flake-report: suite=fake attempt=1 classification=timing artifact=/)
-    assert.match(result.stdout, /flake-report: suite=fake attempt=2 classification=none artifact=/)
-  } finally {
-    rmSync(box.root, { recursive: true, force: true })
-  }
-})
+    assert.equal(captureChatHeader(box, wrapped), 0, "a wrapped header names the leader and leader agent")
 
-test("the matrix never retries a product assertion failure", () => {
-  const box = sandbox()
-  try {
-    const stubs = join(box.root, "scenarios")
-    mkdirSync(stubs)
-    scenarioStub(
-      stubs,
-      "live-check-fake.sh",
-      [
-        'artifacts="${ENSEMBLE_LIVE_ARTIFACTS:-}"',
-        'mkdir -p "$artifacts"',
-        'printf \'{"suite":"fake","attempt":1,"status":"failed","kind":"product","message":"member wizard separators do not align in one column","artifactPath":"%s","exitCode":1}\\n\' "$artifacts" > "$artifacts/failure.json"',
-        'echo "live: member wizard separators do not align in one column" >&2',
-        'exit 1',
-      ].join("\n"),
+    const missingAgent = join(box.root, "missing-agent.txt")
+    writeFileSync(
+      missingAgent,
+      ["#LiveSite │ /tmp/project │ leader", "", "→ Assigned to $FakeAgent: leader FakeAgent elsewhere", ""].join("\n"),
     )
-    scenarioStub(stubs, "live-check-fake-empty.sh", 'echo "live: stub empty pass"')
-    const nodePath = `${dirname(process.execPath)}:/usr/bin:/bin`
-    const result = spawnSync(bash, [matrix, "fake"], {
-      encoding: "utf8",
-      env: environment(box, { ENSEMBLE_LIVE_SCENARIO_ROOT: stubs, PATH: nodePath }),
-    })
-    assert.notEqual(result.status, 0)
-    assert.doesNotMatch(result.stderr, /RETRY/)
-    assert.match(result.stdout, /FAIL {2}fake/)
-    assert.match(result.stdout, /NOT RUN fake-empty/)
-    assert.match(result.stdout, /0 retries/)
-    assert.match(result.stdout, /classification=product/)
+    assert.notEqual(
+      captureChatHeader(box, missingAgent),
+      0,
+      "a missing header leader agent cannot be satisfied by a transcript row",
+    )
+
+    const missingLeader = join(box.root, "missing-leader.txt")
+    writeFileSync(
+      missingLeader,
+      ["#LiveSite │ /tmp/project │ leader Helper", "", "→ Assigned to $FakeAgent: transcript row", ""].join("\n"),
+    )
+    assert.notEqual(
+      captureChatHeader(box, missingLeader),
+      0,
+      "a header naming a different leader does not pass",
+    )
   } finally {
     rmSync(box.root, { recursive: true, force: true })
   }

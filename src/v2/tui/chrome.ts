@@ -11,6 +11,7 @@
 import { approvalSource, type Approval } from "../types.ts"
 import { statuslineHints } from "./keymap.ts"
 import { effectiveTick, workingFrame } from "./motion.ts"
+import { ASCII_GLYPHS } from "./ascii.ts"
 import { chromeJoin, chromeSeparator, isAsciiTerminal } from "./separators.ts"
 
 /** Columns that can own the chat-surface focus. The composer is a distinct focus state (brief §2.10). */
@@ -119,7 +120,7 @@ export function approvalResolvingSuffix(resolving: boolean, tick = 0, env: NodeJ
 
 /** Resolved settle row: display-only confirmation that leaves after its window. */
 export function approvalResolvedLine(approval: Approval, env?: NodeJS.ProcessEnv): string {
-  const mark = env && isAsciiTerminal(env) ? "+" : "✓"
+  const mark = env && isAsciiTerminal(env) ? ASCII_GLYPHS.resolved : "✓"
   return `${mark} Resolved ${chromeSeparator()} [${approvalSourceTag(approvalSource(approval))}] ${approval.title}`
 }
 

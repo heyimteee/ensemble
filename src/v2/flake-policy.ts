@@ -114,14 +114,13 @@ export function classifyFailure(input: { message?: string; kind?: FailureKind })
   return "unknown"
 }
 
-/** Retry only a timing failure, only once, and never a quarantined suite. */
+/** Retry only a timing failure, and only while the flake budget allows it. */
 export function retryDecision(
   record: AttemptRecord,
-  options: { maxRetries?: number; quarantined?: boolean } = {},
+  options: { maxRetries?: number } = {},
 ): RetryDecision {
   const maxRetries = Math.max(0, Math.trunc(options.maxRetries ?? FLAKE_BUDGET.maxRetriesPerSuite))
   if (record.status !== "failed") return { retry: false, reason: "attempt did not fail" }
-  if (options.quarantined) return { retry: false, reason: "suite is quarantined" }
   const classification = record.classification ?? classifyFailure({ message: record.message })
   if (classification !== "timing") return { retry: false, reason: `${classification} failure never retries` }
   if (record.attempt > maxRetries) return { retry: false, reason: `retry budget exhausted (${maxRetries})` }

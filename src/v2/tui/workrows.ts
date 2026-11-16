@@ -4,6 +4,7 @@ import { nextRetryAttempt } from "../retry.ts"
 import { isNeedsYouTask, orderedGroupTasks, taskNeedsYou } from "../work-groups.ts"
 import { TRANSCRIPT_WINDOW } from "../scoped-read.ts"
 import type { NativeSubagentRun, Subtask } from "../types.ts"
+import { ASCII_GLYPHS } from "./ascii.ts"
 import { effectiveTick, queuedFrame, thinkingFrame, toolFrame, waitingFrame, workingFrame } from "./motion.ts"
 import { askingLine, short } from "./format.ts"
 import { chromeJoin, isAsciiTerminal } from "./separators.ts"
@@ -55,25 +56,25 @@ const GLYPHS: Record<DerivedWorkStatus, string> = {
  * still carries the meaning; these only keep a terminal without Unicode or a
  * Braille font from painting tofu in the glyph slot.
  */
-const ASCII_GLYPHS: Record<DerivedWorkStatus, string> = {
-  pending: "-",
-  working: "*",
-  waiting: "o",
-  retrying: "~",
-  needs_you: "!",
-  replied: "+",
-  failed: "x",
-  stalled: "%",
-  cancelled: "/",
+const ASCII_STATUS_GLYPHS: Record<DerivedWorkStatus, string> = {
+  pending: ASCII_GLYPHS.pending,
+  working: ASCII_GLYPHS.working,
+  waiting: ASCII_GLYPHS.workWaiting,
+  retrying: ASCII_GLYPHS.retrying,
+  needs_you: ASCII_GLYPHS.needsYou,
+  replied: ASCII_GLYPHS.replied,
+  failed: ASCII_GLYPHS.failed,
+  stalled: ASCII_GLYPHS.stalled,
+  cancelled: ASCII_GLYPHS.cancelled,
 }
 
 export function workGlyph(status: DerivedWorkStatus, env?: NodeJS.ProcessEnv): string {
-  return env && isAsciiTerminal(env) ? ASCII_GLYPHS[status] : GLYPHS[status]
+  return env && isAsciiTerminal(env) ? ASCII_STATUS_GLYPHS[status] : GLYPHS[status]
 }
 
 /** The needs-you marker, with the ASCII `!` fallback. */
 export function needsYouMark(env?: NodeJS.ProcessEnv): string {
-  return env && isAsciiTerminal(env) ? "!" : NEEDS_YOU_MARK
+  return env && isAsciiTerminal(env) ? ASCII_GLYPHS.needsYou : NEEDS_YOU_MARK
 }
 
 /** One inline status label for work, shared by activity and card copy. Pure. */

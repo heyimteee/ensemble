@@ -9,6 +9,7 @@ import {
   PR_JOB_BUDGET_MINUTES,
   PR_LIVE_SUITES,
   checkCiRepository,
+  checkCompatibilityWorkflow,
   checkLiveHostAction,
   checkNightlyWorkflow,
   checkVerifyWorkflow,
@@ -149,6 +150,21 @@ test("a nightly workflow triggered by pull requests is rejected", () => {
   const text = read(nightlyWorkflowPath).replace("on:\n", "on:\n  pull_request:\n")
   const failures = checkNightlyWorkflow(text, supported)
   assert.ok(failuresMatching(failures, /nightly.*pull request/).length > 0)
+})
+
+test("the compatibility fake smoke keeps harness artifacts for a failure diagnosis", () => {
+  const text = read(".github/workflows/compatibility.yml")
+  assert.deepEqual(checkCompatibilityWorkflow(text, supported), [])
+
+  const noArtifactDir = removeLine(text, "ENSEMBLE_LIVE_ARTIFACTS:")
+  assert.ok(
+    failuresMatching(checkCompatibilityWorkflow(noArtifactDir, supported), /ENSEMBLE_LIVE_ARTIFACTS/).length > 0,
+  )
+
+  const noUpload = text.replace("        if: failure()\n        uses: actions/upload-artifact@v4\n        with:\n          name: live-artifacts-${{ matrix.opencode }}", "        uses: actions/upload-artifact@v4\n        with:\n          name: live-artifacts-${{ matrix.opencode }}")
+  assert.ok(
+    failuresMatching(checkCompatibilityWorkflow(noUpload, supported), /live artifacts.*if: failure\(\)/).length > 0,
+  )
 })
 
 test("the live host action pins every tool through its inputs", () => {

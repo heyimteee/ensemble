@@ -53,7 +53,6 @@ test("only a classified timing failure retries, and only once", () => {
   assert.equal(retryDecision(attempt({ classification: "unknown" })).retry, false)
   assert.equal(retryDecision(attempt({ classification: "infrastructure" })).retry, false)
   assert.equal(retryDecision(attempt({ status: "passed" })).retry, false)
-  assert.equal(retryDecision(attempt(), { quarantined: true }).retry, false)
 })
 
 test("quarantine requires a linked issue and an owner", () => {
@@ -123,6 +122,22 @@ test("the CLI classifies a failure record and refuses an unlinked quarantine", (
     const retry = spawnSync(process.execPath, ["--experimental-strip-types", cli, "retry", "--file", failure, "--attempt", "1"], { encoding: "utf8" })
     assert.equal(retry.status, 0, retry.stderr)
     assert.match(retry.stdout, /^retry /)
+
+    const product = spawnSync(
+      process.execPath,
+      ["--experimental-strip-types", cli, "decide", "--classification", "product", "--attempt", "1", "--quarantined", "1"],
+      { encoding: "utf8" },
+    )
+    assert.equal(product.status, 0, product.stderr)
+    assert.match(product.stdout, /^fail .*never retries or quarantines/)
+
+    const quarantinedTiming = spawnSync(
+      process.execPath,
+      ["--experimental-strip-types", cli, "decide", "--classification", "timing", "--attempt", "1", "--quarantined", "1"],
+      { encoding: "utf8" },
+    )
+    assert.equal(quarantinedTiming.status, 0, quarantinedTiming.stderr)
+    assert.match(quarantinedTiming.stdout, /^quarantine /)
 
     const quarantine = join(dir, "quarantine.json")
     writeFileSync(quarantine, JSON.stringify([{ suite: "fake" }]))

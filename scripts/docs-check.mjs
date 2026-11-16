@@ -17,11 +17,12 @@ import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { ENSEMBLE_BLOCK_VERSION } from "../src/v2/init-block.ts"
+import { workflowValue } from "../src/v2/ci-workflows.ts"
 import {
   OPENCODE_PLUGIN_PEER_RANGE,
   SUPPORTED_OPENCODE_VERSIONS,
 } from "../src/v2/host-compatibility.ts"
-import { MINIMUM_NODE_VERSION, TESTED_NODE_LINES } from "../src/v2/node-version.ts"
+import { MINIMUM_NODE_VERSION } from "../src/v2/node-version.ts"
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -93,6 +94,30 @@ function requireCurrentNodeFloors(file, text, failures) {
   }
 }
 
+/** The tested Node versions come from the CI matrix, not a hand-written mirror. */
+function testedNodeVersions(text) {
+  const lines = text.split(/\r?\n/)
+  const start = lines.findIndex((line) => /^\s*node:\s*$/.test(line))
+  if (start < 0) return []
+  const versions = []
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    const match = /^\s*-\s*"([^"]+)"\s*$/.exec(line)
+    if (match) {
+      versions.push(match[1])
+      continue
+    }
+    if (line.trim() === "") continue
+    break
+  }
+  return versions
+}
+
+function joinClaim(values) {
+  if (values.length <= 2) return values.join(" and ")
+  return `${values.slice(0, -1).join(", ")}, and ${values[values.length - 1]}`
+}
+
 /** Every bold `OpenCode **X**` claim must be a supported host. */
 function requireSupportedHostClaims(file, text, failures) {
   for (const match of text.matchAll(/\bOpenCode\s+\*\*(\d+\.\d+\.\d+)\*\*/g)) {
@@ -103,11 +128,6 @@ function requireSupportedHostClaims(file, text, failures) {
       )
     }
   }
-}
-
-function workflowValue(text, name) {
-  const match = new RegExp(`^\\s*${name}:\\s*"([^"]+)"`, "m").exec(text)
-  return match?.[1]
 }
 
 function checkWorkflow(root, path, failures) {
@@ -144,6 +164,9 @@ function checkDocs(root = REPO_ROOT) {
 
   const verifyWorkflow = checkWorkflow(root, ".github/workflows/verify.yml", failures)
   const liveNode = workflowValue(verifyWorkflow, "NODE_VERSION") ?? ""
+  const nodeMatrix = checkWorkflow(root, ".github/workflows/node-matrix.yml", failures)
+  const testedNodes = testedNodeVersions(nodeMatrix)
+  const testedNodeClaim = testedNodes.length > 0 ? `Node ${joinClaim(testedNodes)}` : undefined
 
   const readme = read(root, "README.md", failures)
   requireClaims(
@@ -152,7 +175,7 @@ function checkDocs(root = REPO_ROOT) {
     [
       `OpenCode ${boldHostList}`,
       `Node ${MINIMUM_NODE_VERSION} or newer`,
-      `Node ${TESTED_NODE_LINES}`,
+      ...(testedNodeClaim ? [testedNodeClaim] : []),
       OPENCODE_PLUGIN_PEER_RANGE,
       `contract v${version}`,
     ],
@@ -211,6 +234,9 @@ function checkDocs(root = REPO_ROOT) {
   requireClaims("scripts/README.md", scriptsReadme, [`Node ${MINIMUM_NODE_VERSION}+`, `v${version} roster table`], failures)
   requireCurrentNodeFloors("scripts/README.md", scriptsReadme, failures)
 
+  // Ticket #262 owns the docs/package contract: the README claims, engines
+  // floor, Node matrix, and docs:check must agree with the canonical
+  // constants. Keeping these checks here is deliberate, not a scope leak.
   const packageJson = read(root, "package.json", failures)
   if (packageJson) {
     let engines = ""
@@ -233,7 +259,6 @@ function checkDocs(root = REPO_ROOT) {
     }
   }
 
-  const nodeMatrix = checkWorkflow(root, ".github/workflows/node-matrix.yml", failures)
   if (nodeMatrix) {
     for (const node of [MINIMUM_NODE_VERSION, liveNode].filter(Boolean)) {
       if (!nodeMatrix.includes(`"${node}"`)) {
@@ -241,7 +266,6 @@ function checkDocs(root = REPO_ROOT) {
       }
     }
   }
-
   if (liveNode) {
     requireClaims("README.md", readme, [`Node ${liveNode}`], failures)
   }

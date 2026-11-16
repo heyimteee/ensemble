@@ -758,6 +758,22 @@ export function workTaskPage(layout: Pick<WorkPaneLayout, "pages">, taskID: stri
   return page?.number
 }
 
+/** One count grammar for the full and compact Work headers. */
+function workHeaderSummary(groupCount: number, activeCount: number, doneCount?: number): string {
+  const groups = Math.max(0, Math.floor(groupCount))
+  const active = Math.max(0, Math.floor(activeCount))
+  if (groups === 0) return "none yet"
+  const counts = `${groups} ${groups === 1 ? "group" : "groups"} · ${active} active`
+  if (doneCount === undefined) return counts
+  return `${counts} · ${Math.max(0, Math.floor(doneCount))} done`
+}
+
+function workHeaderLine(view: WorkView, summary: string, page: number, pageCount: number): string {
+  const current = Math.max(1, Math.floor(page))
+  const pages = Math.max(1, Math.floor(pageCount))
+  return `WORK ${view.toUpperCase()} │ ${summary} │ page ${Math.min(current, pages)}/${pages}`
+}
+
 /** Ticket #172: the pane header before truncation. */
 export function workPaneHeader(
   view: WorkView,
@@ -767,15 +783,7 @@ export function workPaneHeader(
   page: number,
   pageCount: number,
 ): string {
-  const groups = Math.max(0, Math.floor(groupCount))
-  const active = Math.max(0, Math.floor(activeCount))
-  const done = Math.max(0, Math.floor(doneCount))
-  const current = Math.max(1, Math.floor(page))
-  const pages = Math.max(1, Math.floor(pageCount))
-  const summary = groups === 0
-    ? "none yet"
-    : `${groups} ${groups === 1 ? "group" : "groups"} · ${active} active · ${done} done`
-  return `WORK ${view.toUpperCase()} │ ${summary} │ page ${Math.min(current, pages)}/${pages}`
+  return workHeaderLine(view, workHeaderSummary(groupCount, activeCount, doneCount), page, pageCount)
 }
 
 /**
@@ -791,14 +799,7 @@ export function workPaneHeaderCompact(
   page: number,
   pageCount: number,
 ): string {
-  const groups = Math.max(0, Math.floor(groupCount))
-  const active = Math.max(0, Math.floor(activeCount))
-  const current = Math.max(1, Math.floor(page))
-  const pages = Math.max(1, Math.floor(pageCount))
-  const summary = groups === 0
-    ? "none yet"
-    : `${groups} ${groups === 1 ? "group" : "groups"} · ${active} active`
-  return `WORK ${view.toUpperCase()} │ ${summary} │ page ${Math.min(current, pages)}/${pages}`
+  return workHeaderLine(view, workHeaderSummary(groupCount, activeCount), page, pageCount)
 }
 
 /**

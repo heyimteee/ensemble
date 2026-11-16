@@ -19,7 +19,8 @@
 
 import { randomUUID } from "node:crypto"
 import { writeFileSync } from "node:fs"
-import { workCardForTask } from "../../src/v2/tui/workrows.ts"
+import { workspacePaneWidths } from "../../src/v2/tui/workpane.ts"
+import { workCardContentWidth, workCardForTask } from "../../src/v2/tui/workrows.ts"
 
 const SERVER_URL = process.env.ENSEMBLE_LATENCY_SERVER_URL ?? ""
 const SERVER_PASSWORD = process.env.ENSEMBLE_LATENCY_SERVER_PASSWORD ?? ""
@@ -32,6 +33,12 @@ const PROFILE = process.env.ENSEMBLE_LATENCY_PROFILE ?? "smoke"
 const OUTPUT = process.env.ENSEMBLE_LATENCY_OUT ?? ""
 const RAIL_SAMPLES = parseSamples(process.env.ENSEMBLE_LATENCY_RAIL_SAMPLES)
 const FIRST_TOKEN_SAMPLES = parseSamples(process.env.ENSEMBLE_LATENCY_FIRST_TOKEN_SAMPLES)
+// The TUI renders the full-width card at the live pane's content width. Derive
+// that geometry from the same pane model instead of measuring a 49-cell card
+// that the TUI never draws at the 53-column cap.
+const TUI_WIDTH = positiveInteger(process.env.ENSEMBLE_LIVE_TUI_WIDTH, 140)
+const CARD_OUTER_WIDTH = workspacePaneWidths(TUI_WIDTH).workContentWidth
+const CARD_CONTENT_WIDTH = workCardContentWidth(CARD_OUTER_WIDTH)
 
 for (const [name, value] of [
   ["ENSEMBLE_LATENCY_SERVER_URL", SERVER_URL],
@@ -155,7 +162,7 @@ async function measureCard(sample, runID) {
   const patchedAt = performance.now()
   const patched = subtasks[taskID] ?? Object.values(subtasks).find((item) => item.title === title)
   if (!patched) fail("durable patch did not include the fixture task")
-  const card = workCardForTask(patched, agent.name, { now: Date.now(), width: 49 })
+  const card = workCardForTask(patched, agent.name, { now: Date.now(), width: CARD_CONTENT_WIDTH })
   const renderedAt = performance.now()
   if (card.title !== title) fail("Work card did not render the fixture title")
 

@@ -96,6 +96,17 @@ function hasFailureUpload(block: string): boolean {
   return /uses:\s*actions\/upload-artifact@v4/.test(block) && /^\s*if:\s*failure\(\)\s*$/m.test(block)
 }
 
+/** One upload step for `path` that runs only on failure. */
+function hasFailureUploadOf(block: string, path: string): boolean {
+  const steps = block.split(/\n\s*-\s+(?:name|uses):/)
+  return steps.some(
+    (step) =>
+      step.includes(`path: ${path}`) &&
+      /^\s*if:\s*failure\(\)\s*$/m.test(step) &&
+      /uses:\s*actions\/upload-artifact@v4/.test(step),
+  )
+}
+
 function hasLiveHostAction(block: string): boolean {
   return /uses:\s*\.\/\.github\/actions\/live-host\s*$/m.test(block)
 }
@@ -317,6 +328,38 @@ function readWorkflow(root: string, path: string, failures: string[]): string {
   return readFileSync(full, "utf8")
 }
 
+/**
+ * Ticket #257/#261 contract: every supported host runs the native probe and
+ * the deterministic fake smoke, and the fake smoke keeps its harness artifacts
+ * for a failure diagnosis. The job graph (cost split, timeouts, host pin) and
+ * the docs/package checks live here because they are the CI contract this
+ * ticket owns, not a restatement of a product helper.
+ */
+export function checkCompatibilityWorkflow(text: string, supportedHosts: readonly string[]): string[] {
+  const failures: string[] = []
+  const file = "compatibility.yml"
+  for (const host of supportedHosts) {
+    if (!text.includes(`"${host}"`)) {
+      failures.push(`${file}: supported host ${host} is not in the matrix`)
+    }
+  }
+  for (const required of ["npm run test:live:probe", "npm run test:live:fake:all"]) {
+    if (!text.includes(required)) failures.push(`${file}: missing ${required}`)
+  }
+  if (!/ENSEMBLE_LIVE_EXPECT_OPENCODE:\s*\$\{\{\s*matrix\.opencode\s*\}\}/.test(text)) {
+    failures.push(`${file}: preflight must expect matrix.opencode`)
+  }
+  if (!hasArtifacts(text)) {
+    failures.push(`${file}: the fake smoke must set ENSEMBLE_LIVE_ARTIFACTS to ${ARTIFACTS_PATH}`)
+  }
+  if (!text.includes(`path: ${ARTIFACTS_PATH}`)) {
+    failures.push(`${file}: failure artifacts must be uploaded from ${ARTIFACTS_PATH}`)
+  } else if (!hasFailureUploadOf(text, ARTIFACTS_PATH)) {
+    failures.push(`${file}: live artifacts must use actions/upload-artifact@v4 with if: failure()`)
+  }
+  return failures
+}
+
 export function checkCiRepository(
   root: string,
   supportedHosts: readonly string[] = SUPPORTED_OPENCODE_VERSIONS,
@@ -335,23 +378,11 @@ export function checkCiRepository(
   if (verify) failures.push(...checkVerifyWorkflow(verify, supportedHosts))
   if (nightly) failures.push(...checkNightlyWorkflow(nightly, supportedHosts))
   if (action) failures.push(...checkLiveHostAction(action))
+  if (compatibility) failures.push(...checkCompatibilityWorkflow(compatibility, supportedHosts))
 
-  for (const host of supportedHosts) {
-    if (compatibility && !compatibility.includes(`"${host}"`)) {
-      failures.push(`${COMPATIBILITY_WORKFLOW}: supported host ${host} is not in the matrix`)
-    }
-  }
-  if (compatibility) {
-    for (const required of ["npm run test:live:probe", "npm run test:live:fake:all"]) {
-      if (!compatibility.includes(required)) {
-        failures.push(`${COMPATIBILITY_WORKFLOW}: missing ${required}`)
-      }
-    }
-    if (!/ENSEMBLE_LIVE_EXPECT_OPENCODE:\s*\$\{\{\s*matrix\.opencode\s*\}\}/.test(compatibility)) {
-      failures.push(`${COMPATIBILITY_WORKFLOW}: preflight must expect matrix.opencode`)
-    }
-  }
-
+  // Ticket #262 owns the docs/package contract: `engines.node`, the Node
+  // matrix, and `docs:check` must agree with the canonical version constants.
+  // The job-graph checks above stay here because #261 owns the CI cost split.
   const liveNode = workflowValue(verify, "NODE_VERSION")
   if (nodeMatrix) {
     for (const node of [MINIMUM_NODE_VERSION, liveNode].filter((value): value is string => Boolean(value))) {

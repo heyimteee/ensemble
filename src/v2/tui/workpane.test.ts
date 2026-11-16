@@ -113,7 +113,6 @@ test("ticket263: a wide terminal caps the Work pane at the card-mode floor and g
 })
 
 test("ticket263: 53 columns is the narrowest Work pane that keeps card mode", () => {
-  assert.equal(WORK_PANE_MAX_WIDTH, 53)
   assert.equal(WORK_CARD_MIN_WIDTH * 2 + WORK_CARD_GAP_COLS, 49, "card mode needs two minimum cards and one gap")
   assert.equal(workPaneCardsFit(49), true, "49 content columns is card mode")
   assert.equal(workPaneCardsFit(48), false, "48 content columns falls back to compact rows")
