@@ -1,6 +1,6 @@
 # Live TUI verification
 
-Run from the repository with Node 26.4+, OpenCode, tmux, Git, and curl available:
+Run from the repository with Node 22.23.4+, OpenCode, tmux, Git, and curl available:
 
 Flake policy: `scripts/live-matrix.sh` retries a failed suite at most once, and
 only when the harness classified the failure as a TUI timing failure. Product,
@@ -82,7 +82,7 @@ budget and quarantine rules are in
   and a real temp workspace. The scenario seeds a v5 contract, removes the
   persisted `nativeFirst` key from the isolated plugin store, restarts, and
   requires the effective mode to be `on` and the default to be persisted. It
-  then checks the generated v6 roster table, drives one leader native turn that
+  then checks the generated v7 roster table, drives one leader native turn that
   explicitly delegates one member and `$Name`-mentions several more, and
   asserts one work item per member, one `already-routed` suppression for the
   explicit recipient, no completion hop back to the leader, and one settlement.
