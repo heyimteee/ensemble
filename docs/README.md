@@ -3,7 +3,7 @@
 ## Product
 
 - [Project overview](../README.md)
-- [Changelog](../CHANGELOG.md): release scaffolding; the tag-driven workflow uses the matching version section as the GitHub release body
+- [Changelog](../CHANGELOG.md): release history and the `0.1.0-rc.2` candidate notes; the tag-driven workflow uses the matching version section as the GitHub release body
 - [Domain glossary](../GLOSSARY.md)
 - [Implementation and acceptance notes](implementation.md)
 - [Scale, soak, and local diagnostics](operations/scale-and-monitoring.md): operating envelope, soak/leak harness, support bundle, and no-telemetry policy
@@ -49,10 +49,13 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 - [Upgrade from the pre-release](operations/upgrade.md): native-first defaults, AGENTS v7, the native-state refactor, and additive durable-state migrations
 - [Package rollback](operations/rollback.md): package-only and state rollback, plus the rehearsed failure path
 - [Release operations](operations/release.md): the tag-driven workflow, the token-free dry run, main protection and its 11 real check contexts, provenance, the SBOM, and the changelog-based GitHub release
-- [Release sign-off checklist](operations/release-signoff.md): security, MIT license/legal, package contents, clean-install proof, rollback, support readiness, publish, and post-release checks
+- [Release notes for 0.1.0-rc.2](operations/release-notes-0.1.0-rc.2.md): the public-facing candidate notes, install/upgrade/rollback path, support route, and known limitations
+- [Launch plan for 0.1.0-rc.2](operations/launch-plan-0.1.0-rc.2.md): audience, channels, support path, rollback triggers, and the human-gated publish/announce sequence
+- [Release sign-off checklist](operations/release-signoff.md): the completed candidate sign-off plus the final pre-tag gate for security, MIT license/legal, package contents, clean-install proof, rollback, support readiness, publish, and post-release checks
 
 ## Verification
 
+- [Public release readiness — parent #268](verification/2026-11-17-ticket-268.md): the `0.1.0-rc.2` version/tag decision, every child ticket result, the PASS/PENDING release gates, the macOS 1.7 deferral, and the remaining human-gated publish steps
 - [Release workflow, branch protection, and publish provenance](verification/2026-11-16-ticket-275.md): the applied `main` ruleset with the real check contexts, the tag/dry-run workflow, the token boundary and provenance, the CycloneDX SBOM, the changelog-based release, the sign-off checklist, and the local dry-run evidence
 - [Operations runbook, support intake, and templates](verification/2026-11-16-ticket-274.md): the support channel and response targets, diagnostics and rollback runbook, support matrix, issue/PR forms with redaction rules, and the docs-check support assertions
 - [MIT license and npm package identity](verification/2026-11-16-ticket-269.md): the MIT license and scoped package metadata, the runtime-only contents allowlist (119 modules), the pack-content guard, and the passing verify/docs/pack dry run

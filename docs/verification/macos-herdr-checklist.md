@@ -1,11 +1,13 @@
 # macOS/Herdr manual verification checklist
 
-Status: **Manual and unexecuted.** No macOS/Herdr host has run this checklist.
-It is a repeatable procedure, not evidence. Until a run is recorded below or in
-a dated verification record, treat macOS/Herdr behavior as unverified and do
-not cite this document as a pass. Sections 5–8 add the v6 motion checks and
-section 9 adds the v7 dispatch-group and durable-feed checks. All of 5–9 are
-**NOT RUN**.
+Status: **Executed on macOS/Herdr; see the dated record.** The run is recorded
+in [the #277 verification record](2026-11-16-ticket-277.md). Checklist items
+1.1–1.6 and 1.8–1.10, and sections 2–9, passed as recorded there, some via the
+deterministic fake E2E rather than a repeated manual step. Checklist item
+**1.7 mouse drag was NOT RUN** and is not
+a pass: no selection or drag-copy behavior is claimed. Herdr prefix ownership
+is inconclusive host-level evidence. This page remains the repeatable
+procedure; the dated record is the evidence.
 
 This checklist covers the areas that Linux/tmux cannot prove:
 

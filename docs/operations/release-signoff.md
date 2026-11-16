@@ -2,13 +2,45 @@
 
 Ticket #275. Complete every item before creating the release tag, then copy the
 completed table into the release ticket and the verification record. Mark each
-item **PASS**, **FAIL**, or **BLOCKED** with a linked command output or record.
-A blocked check is not a pass; the release manager must state why the release
-proceeds without it.
+item **PASS**, **FAIL**, **BLOCKED**, or **PENDING** with a linked command
+output or record. A blocked or pending check is not a pass; the release
+manager must state why the release proceeds without it.
 
 Release: `v<version>` at commit `<sha>`
 Release manager: `<name>`
 Date: `<YYYY-MM-DD>`
+
+The three fields above are for the final tagged release. The candidate record
+below is dated separately.
+
+## Candidate sign-off — 0.1.0-rc.2 (2026-11-17)
+
+This is the release-candidate sign-off, not the final publish authorization.
+The pre-tag checklist in sections 1–9 below remains the final gate. A pending
+or blocked item is not a pass.
+
+| Area | Status | Evidence | Scope and remaining work |
+|---|---|---|---|
+| MIT license and package identity (#269) | **PASS** | [record](../verification/2026-11-16-ticket-269.md), [`LICENSE`](../../LICENSE), `package.json` | MIT text; `@heyimteee/ensemble`; scoped publish metadata; runtime-only `dist` allowlist. No public publish. The third-party runtime dependency license review remains the final pre-tag checklist item. |
+| Security and privacy (#271) | **PASS** | [record](../verification/2026-11-16-ticket-271.md), [threat model](../security/threat-model.md), [permission review](../security/permission-model-review.md), [accepted risks](../security/accepted-risks.md) | Threat model, permission matrix, supported-version policy, Dependabot, handoff symlink containment. Production audit is clean; dev/peer advisories are accepted with owners and review dates. |
+| Data retention, export, and delete (#272) | **PASS** | [record](../verification/2026-11-16-ticket-272.md), [data policy](../privacy/data-and-retention.md) | Scoped export/delete, 24-hour Work and 7-day log retention, AGENTS v7 roster disclosure guidance. |
+| Backup/restore, upgrade, and state rollback (#273) | **PASS** | [record](../verification/2026-11-16-ticket-273.md), [backup/restore](../operations/backup-restore.md), [rollback](../operations/rollback.md) | Versioned backup document, RPC/CLI, automatic rollback slot, injected-failure rehearsal, doctor on restored state. Package downgrade is not possible until a previous public version exists. |
+| Support and operator readiness (#274) | **PASS** | [record](../verification/2026-11-16-ticket-274.md), [support policy](../support/README.md), [runbook](../support/incident-runbook.md), [matrix](../support/support-matrix.md) | GitHub Issues intake, private security route, response targets, issue/PR templates, redaction rules. |
+| Release workflow and provenance configuration (#275) | **PASS (dry run)** | [record](../verification/2026-11-16-ticket-275.md), [release guide](../operations/release.md) | Tag-only publish path, token-free dry run, changelog notes, `--provenance`, CycloneDX SBOM, sign-off checklist. No real publish or attestation yet. |
+| Clean install (#270, #279) | **PASS** | [built-package record](../verification/2026-11-16-ticket-279.md), [macOS record](../verification/2026-11-16-ticket-277.md) | `0.1.0-rc.2` installs through `opencode plugin add` into isolated OpenCode 2.2.7, loads six server tools, the TUI route, and `/ensemble`. The fixed #281–#284 runtime was installed on macOS; a public-registry smoke of the final tagged build is pending. The `0.1.0-rc.1` TUI failure is superseded, not hidden. |
+| Built package (#280) | **PASS** | [built-package record](../verification/2026-11-16-ticket-279.md) | Solid-compiled `dist` server/TUI/RPC entries; runtime dependencies resolve from the plugin cache; pack guard passes. |
+| macOS/Herdr (#277) | **PASS except 1.7 PENDING** | [macOS record](../verification/2026-11-16-ticket-277.md) | Installed package, six server tools, Herdr/Ghostty TUI route, checklist except 1.7, fake E2E and size matrix. Mouse drag 1.7 was **not run** and is not claimed. Herdr prefix control is inconclusive host evidence. |
+| Regression fixes (#281–#284) | **PASS** | [macOS record](../verification/2026-11-16-ticket-277.md) | Init interruption restore, `NO_COLOR` Work and transcript suppression, and durable Work feed reconstruction were re-verified on macOS. |
+| Scale, soak, and no telemetry (#276) | **PASS (smoke), 4-HOUR SOAK PENDING** | [record](../verification/2026-11-16-ticket-276.md), [scale policy](scale-and-monitoring.md) | Harness, operating envelope, redacted local support bundle, no-upload stance. Only the smoke run is recorded; the 4-hour nightly/opt-in gate has not passed and is not claimed. |
+| Package-level downgrade rollback (#273) | **PENDING** | [rollback guide](rollback.md#rehearsal) | No previous public package exists, so `opencode plugin add @heyimteee/ensemble@<previous>` cannot be rehearsed. State rollback is rehearsed. |
+| Final artifact identity | **PASS for the `0.1.0-rc.2` runtime; final tagged build PENDING** | [parent #268 record](../verification/2026-11-17-ticket-268.md#version-and-tag-decision) | Version and runtime closure are frozen. If any runtime source changes, rebuild and rerun the clean-install proof; do not publish an unproven runtime. The final tag rebuild gets a public-registry smoke. |
+| Final tag, npm publish, provenance attestation, GitHub release | **PENDING** | [launch plan](launch-plan-0.1.0-rc.2.md) | Human-gated. Requires the approved commit and version, the matching `v<version>` tag, green required checks, successful publish, and a public-registry install smoke. |
+| Launch announcement | **PENDING** | [launch plan](launch-plan-0.1.0-rc.2.md) | Must follow a successful publish and install smoke. |
+
+**Decision: HOLD publication.** The candidate is documented and proven for the
+scope above, but the release manager has not approved the public tag, publish,
+or announcement. The pending items must be recorded and explicitly accepted
+before the tag is pushed.
 
 ## 1. Release identity and notes
 

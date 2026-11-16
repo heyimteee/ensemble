@@ -5,6 +5,28 @@ records the release workflow, the main-branch protection, the credential
 boundary, and the dry-run rehearsal. Use
 [the release sign-off checklist](release-signoff.md) before creating the tag.
 
+## Current candidate
+
+The release candidate is `@heyimteee/ensemble@0.1.0-rc.2`. No version bump or
+rebuild is planned for the remaining manual check. The public release is
+**not approved**; the final public version and tag are cut on the approved
+commit after the human-gated publish decision. If the artifact stays at
+`0.1.0-rc.2`, the matching release tag is `v0.1.0-rc.2` and the dist-tag is
+`next`; a final `0.1.0` is a separate version and tag.
+
+The release-candidate verification tag is `rc-0.1.0-rc.2` at `d74fc3d`. It
+predates the #281–#284 fixes, so it is an evidence base, not a publish source,
+and it must not be moved. The fixed runtime was installed and checked on macOS
+from the build at `70f3da7`;
+the current integration tip adds only the repository-only doctor CLI and live
+harness plus documentation. If any runtime source changes, rerun the
+clean-install proof before tagging.
+
+See the [release notes](release-notes-0.1.0-rc.2.md), [launch
+plan](launch-plan-0.1.0-rc.2.md), [candidate
+sign-off](release-signoff.md#candidate-sign-off--010-rc2-2026-11-17), and
+[parent #268 verification](../verification/2026-11-17-ticket-268.md).
+
 ## Required checks and main protection
 
 `main` is protected by the repository ruleset **main protection** (ruleset id
@@ -119,9 +141,11 @@ missing export fails before any upload.
 
 ### Tagged release
 
-1. Update `CHANGELOG.md` and let #278 close the notes and launch sign-off.
-2. Bump `version` in `package.json` and `package-lock.json`; open the release
-   pull request and let every required check pass.
+1. Approve the candidate and its notes, launch plan, and sign-off (#278). The
+   current candidate is `0.1.0-rc.2`; bump the version only if the approved
+   artifact or version decision changes.
+2. Confirm `version` in `package.json` and `package-lock.json` agree; open the
+   release pull request and let every required check pass.
 3. Merge to `main`, then tag the merge commit:
    ```sh
    version=$(node -p "require('./package.json').version")

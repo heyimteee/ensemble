@@ -2,8 +2,9 @@
 
 This page is the support boundary for the public preview. A supported
 combination has test evidence in this repository. An unverified combination may
-work, but it is not a support claim. A skipped or blocked check is not a pass,
-and the pending macOS/Herdr run is itself a release gate for #277.
+work, but it is not a support claim. A skipped or blocked check is not a pass.
+The macOS/Herdr run is recorded in #277; manual check 1.7 remains pending and
+is not a support claim.
 
 If a platform or version is outside this matrix, the issue may be closed as out
 of scope with a pointer here. See the [support policy](README.md) for the
@@ -14,7 +15,7 @@ channel and response expectations.
 | Platform | Status | Evidence | Notes |
 |---|---|---|---|
 | Linux with tmux | **Supported** | [Production-readiness partials E2E](../verification/2026-11-16-prod-partials-e2e.md), the deterministic fake suites, and the real TUI acceptance | The tested terminal host is tmux 3.5a on Linux. Other terminals on Linux are untested. |
-| macOS with Herdr | **Unverified and not supported yet** | [Manual checklist](../verification/macos-herdr-checklist.md) is **NOT RUN**; ticket #277 must record the run | Do not claim macOS support before #277 runs. Herdr key interception, font coverage, motion, and copy/paste remain unproven there. |
+| macOS with Herdr | **Supported for the installed path; 1.7 pending** | [macOS/Herdr record](../verification/2026-11-16-ticket-277.md) | Installed `0.1.0-rc.2`, six server tools, TUI route in Herdr/Ghostty, checklist except 1.7, and the fake E2E pass. Mouse drag 1.7 was **NOT RUN**; no selection/copy claim. Herdr prefix ownership is inconclusive host evidence. |
 | Windows | **Out of scope** | None | Native Windows is not tested and is not a supported platform. Do not assume PowerShell, WSL, or a Windows terminal behaves like the Linux path. |
 | Other Unix-like hosts | **Untested** | None | No support claim. |
 
@@ -78,23 +79,29 @@ pass without the pinned host and tools is not equivalent to CI evidence.
 These are accepted boundaries, not open troubleshooting threads. Report a new
 symptom through the [support policy](README.md) if it is not listed.
 
-- **Distribution and license are transitional until the public release is
-  tagged.** The repository may be public while the package is still private or
-  unpublished; public visibility does not grant an open-source license on its
-  own.
-- **macOS/Herdr is unverified.** Ticket #277 must run the manual checklist and
-  record PASS/FAIL/BLOCKED. Until then, macOS behavior is not supported and the
-  checklist is not evidence.
+- **Distribution is pending.** The package is `@heyimteee/ensemble` under the
+  MIT license. The built `0.1.0-rc.2` candidate passes the isolated
+  `opencode plugin add` checks but is not published to a registry yet. See the
+  [release notes](../operations/release-notes-0.1.0-rc.2.md).
+- **macOS mouse drag is not verified.** Manual checklist item 1.7 was not run;
+  selection and drag-copy behavior are not claimed. Cmd+C/Cmd+V passed. Herdr
+  prefix control is inconclusive host evidence, not a checklist failure.
 - **Windows is out of scope.** WSL is untested and is not a substitute for
   Linux/tmux evidence.
+- **Git-spec installs fail upstream in OpenCode 2.2.7.** `github:` and
+  `git+https://` specs fail during Git dependency preparation. Use the npm
+  package or a loopback registry.
 - **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 are tested. Other
   releases load with a warning and may break in untested ways.
 - **Live evidence is platform-bound.** The real-model acceptance is opt-in and
   not part of the PR gate. A local run without the pinned tools is not CI
   evidence.
 - **Diagnostics are local and the doctor is checkout-based.** Ensemble does not
-  upload logs or a support bundle. The doctor ships in the repository; a
-  package-only install uses the in-app `:logs` viewer and host logs.
+  upload logs or a support bundle and has no telemetry. The doctor ships in the
+  repository; a package-only install uses the in-app `:logs` viewer and host
+  logs.
+- **The 4-hour soak is a nightly/opt-in gate.** The recorded evidence is a smoke
+  run. The multi-hour gate has not been claimed as passed.
 - **Conversation history is host-owned.** Ensemble does not hand-edit or
   reconstruct OpenCode storage. Back up and restore it through the host; see
   the [incident runbook](incident-runbook.md#data-recovery).
