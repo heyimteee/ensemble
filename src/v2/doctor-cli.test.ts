@@ -2,7 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -488,6 +488,20 @@ test("the CLI exits 2 for usage and connection failures", () => {
     assert.equal(report.ok, false)
     assert.equal(report.error.code, "snapshot_failed")
     assert.equal(`${failed.stdout}${failed.stderr}`.includes(PASSWORD), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("the CLI entry runs when the script is reached through a symlinked path", () => {
+  const root = mkdtempSync(join(tmpdir(), "ensemble-doctor-link-"))
+  try {
+    const link = join(root, "repo")
+    symlinkSync(fileURLToPath(new URL("../..", import.meta.url)), link, "dir")
+    const script = join(link, "src", "v2", "doctor-cli.ts")
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", script, "--help"], { encoding: "utf8" })
+    assert.equal(result.status, 0)
+    assert.match(result.stdout, /Ensemble doctor/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

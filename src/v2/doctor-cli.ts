@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath } from "node:url"
 import { assertSupportedNode } from "./node-version.ts"
 import { canonicalDirectory } from "./paths.ts"
 import { isDerivedWorkStatus } from "./queue.ts"
@@ -684,6 +684,20 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * A symlinked invocation path (macOS `/tmp` -> `/private/tmp`, or a linked
+ * checkout) must still run the CLI. Node resolves the module URL to its real
+ * path, so compare real paths rather than the raw argv spelling.
+ */
+function isMainModule(argvPath: string | undefined, moduleURL: string): boolean {
+  if (!argvPath) return false
+  try {
+    return realpathSync(argvPath) === realpathSync(fileURLToPath(moduleURL))
+  } catch {
+    return false
+  }
+}
+
+if (isMainModule(process.argv[1], import.meta.url)) {
   await main()
 }
