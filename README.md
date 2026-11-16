@@ -164,7 +164,7 @@ Every requested directory is queried on the **one selected service**, sequential
 
 - **Distribution and license are pending.** The package is private at version `0.1.0`; it is not published to a registry, and no license has been selected. Public repository visibility does not grant an open-source license.
 - **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 on Linux/tmux are tested. Other host releases load with a runtime warning but are untested, and macOS/Herdr and Windows remain unverified.
-- **Live evidence is platform-bound.** The live suites require Linux/tmux, Node 26.12.1, `tmux`, and `fd`. The real-model `npm run test:live` acceptance is opt-in and is not part of the deterministic CI gate; CI runs the fake-provider and multi-location suites.
+- **Live evidence is platform-bound.** The live suites require Linux/tmux, Node 26.12.1, `tmux`, and `fd`. Every PR runs the deterministic fake, size, lifecycle, subagent, native-first, Vera, tool-surface, multi-location, and latency-smoke jobs; the real-model `npm run test:live` acceptance is opt-in in the nightly workflow (`ENSEMBLE_NIGHTLY_REAL=1`) and is never part of the PR gate.
 - **Terminal accessibility depends on the host.** Screen-reader output, high-contrast modes, font scaling, and mouse drag-copy are host features. Ensemble supplies glyph-and-word status, reduced-motion, `NO_COLOR`, and ASCII fallbacks; see the [terminal accessibility checklist](docs/verification/terminal-accessibility-checklist.md).
 - **Some surfaces stay native.** Arbitrary OpenCode slash commands are not proxied into the group chat, rich Markdown links are not clickable, and direct conversations have no separate Ensemble search or export.
 - **The host owns page lifetime.** OpenCode keeps old plugin pages mounted; Ensemble's route gate prevents stale key ownership but cannot force the host to dispose them.
@@ -195,7 +195,7 @@ Every requested directory is queried on the **one selected service**, sequential
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 
-`npm run docs:check` asserts that the current contract, host, and Node claims stay aligned with the canonical constants and CI matrices.
+`npm run docs:check` asserts that the current contract, host, and Node claims stay aligned with the canonical constants and CI matrices. `npm run verify` also runs the CI job-graph check (`src/v2/ci-workflows.test.ts`), which keeps the PR/nightly suite ownership, timeouts, artifact uploads, and OpenCode pin aligned.
 
 ## License
 

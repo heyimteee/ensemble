@@ -1,5 +1,12 @@
 name: Verify
 
+# Ticket #261: the deterministic matrix is split by cost so PR feedback stays
+# fast and a failure points at one surface. `verify` is the unit/typecheck gate,
+# `live-fake` owns the long fake suites, `live-native` owns the native host
+# suites, `live-multilocation` owns the shared-service regression, and
+# `latency-smoke` keeps the PR latency threshold generous. The strict 50/250 ms
+# gate and the real-model suite live in nightly.yml.
+
 on:
   push:
   pull_request:
@@ -7,14 +14,23 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   NODE_VERSION: "26.12.1"
-  OPENCODE_VERSION: "2.2.6"
+  # Keep aligned with SUPPORTED_OPENCODE_VERSIONS in
+  # src/v2/host-compatibility.ts. The compatibility matrix covers 2.2.6 and
+  # 2.2.7; the PR matrix runs the latest tested host.
+  OPENCODE_VERSION: "2.2.7"
   FD_VERSION: "10.2.0"
 
 jobs:
   verify:
+    name: verify
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,49 +40,154 @@ jobs:
       - run: npm ci
       - run: npm run verify
 
-  live:
+  live-fake:
+    name: live-fake
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      ENSEMBLE_LIVE_REQUIRE: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/live-host
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - name: Install tmux and fd
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tmux
-          # The release web download path can return 504; the authenticated
-          # release API serves the same pinned archive.
-          gh release download "v${FD_VERSION}" --repo sharkdp/fd \
-            --pattern "fd-v${FD_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
-            --dir /tmp/fd-download
-          tar -xzf "/tmp/fd-download/fd-v${FD_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C /tmp
-          sudo install -m 0755 "/tmp/fd-v${FD_VERSION}-x86_64-unknown-linux-gnu/fd" /usr/local/bin/fd
-      - name: Install OpenCode
-        run: npm install --global "@opencode/cli@${OPENCODE_VERSION}"
-      - run: npm ci
+          opencode-version: ${{ env.OPENCODE_VERSION }}
+          fd-version: ${{ env.FD_VERSION }}
       - name: Preflight live host tools
         env:
-          ENSEMBLE_LIVE_REQUIRE: "1"
           ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
           ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
         run: npm run test:live:preflight
-      - name: Deterministic fake and empty live suite
+      - name: Deterministic fake and empty suite
         env:
-          ENSEMBLE_LIVE_REQUIRE: "1"
           ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
         run: npm run test:live:fake:all
+      - name: Size matrix
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:sizes
+      - name: Lifecycle suite
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:lifecycle
+      - name: Native subagent probe
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:subagent
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-fake-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  live-native:
+    name: live-native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ENSEMBLE_LIVE_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/live-host
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          opencode-version: ${{ env.OPENCODE_VERSION }}
+          fd-version: ${{ env.FD_VERSION }}
+      - name: Preflight live host tools
+        env:
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:preflight
+      - name: Native-first cutover matrix
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:native-first
+      - name: Vera regression
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:vera
+      - name: Tool surface benchmark
+        env:
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:tool-surface
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-native-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  live-multilocation:
+    name: live-multilocation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ENSEMBLE_LIVE_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/live-host
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          opencode-version: ${{ env.OPENCODE_VERSION }}
+          fd-version: ${{ env.FD_VERSION }}
+      - name: Preflight live host tools
+        env:
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:preflight
       - name: Multi-location single-service check
         env:
-          ENSEMBLE_LIVE_REQUIRE: "1"
           ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
         run: npm run test:live:multilocation
       - name: Upload live failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: live-failure-artifacts
+          name: live-multilocation-artifacts
           path: ${{ runner.temp }}/ensemble-live-artifacts
           if-no-files-found: ignore
+          retention-days: 7
+
+  latency-smoke:
+    name: latency-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ENSEMBLE_LIVE_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/live-host
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          opencode-version: ${{ env.OPENCODE_VERSION }}
+          fd-version: ${{ env.FD_VERSION }}
+      - name: Preflight live host tools
+        env:
+          ENSEMBLE_LIVE_EXPECT_NODE: ${{ env.NODE_VERSION }}
+          ENSEMBLE_LIVE_EXPECT_OPENCODE: ${{ env.OPENCODE_VERSION }}
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:preflight
+      - name: Latency smoke budget
+        env:
+          ENSEMBLE_LATENCY_PROFILE: smoke
+          ENSEMBLE_LATENCY_SAMPLES: "10"
+          ENSEMBLE_LATENCY_CARD_SAMPLES: "5"
+          ENSEMBLE_LATENCY_OUT: ${{ runner.temp }}/ensemble-live-artifacts/latency-result.json
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
+        run: npm run test:live:latency
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latency-smoke-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
