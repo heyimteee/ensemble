@@ -56,8 +56,17 @@ jobs:
       - name: Deterministic fake and empty live suite
         env:
           ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
         run: npm run test:live:fake:all
       - name: Multi-location single-service check
         env:
           ENSEMBLE_LIVE_REQUIRE: "1"
+          ENSEMBLE_LIVE_ARTIFACTS: ${{ runner.temp }}/ensemble-live-artifacts
         run: npm run test:live:multilocation
+      - name: Upload live failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-failure-artifacts
+          path: ${{ runner.temp }}/ensemble-live-artifacts
+          if-no-files-found: ignore
