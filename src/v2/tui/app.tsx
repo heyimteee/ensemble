@@ -440,7 +440,8 @@ export function EnsembleV2App() {
     if (tuiLogger === logger) tuiLogger = undefined
   })
   // Ticket #137: the host theme mode selects the readable pale-blue identity pair.
-  const colors = palette(context.theme as any, context.themeMode)
+  // Ticket #282: NO_COLOR resolves every role to terminal defaults at this seam.
+  const colors = palette(context.theme as any, context.themeMode, process.env)
   // Ticket #119: the host toast is only a fallback for feedback that cannot be
   // painted by the mounted Ensemble surface (setup failure, or an async
   // completion while the native route is visible). Everything else renders in
