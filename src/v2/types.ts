@@ -85,6 +85,13 @@ export type Workspace = {
 export type InitJobState = "running" | "succeeded" | "failed" | "interrupted" | "cancelled"
 
 /**
+ * Verified result of rolling an uncommitted init back to its captured file
+ * state. Ticket #281: the report names this outcome rather than assuming the
+ * restore landed.
+ */
+export type InitRollback = "restored" | "removed" | "failed"
+
+/**
  * One honest init stage (ticket #118). `running` covers the opaque native
  * `/init` call: it never carries a fabricated percentage or within-stage
  * progress. `reporting` is entered by every terminal path before its explicit
@@ -112,6 +119,12 @@ export type InitJob = {
   phases?: InitPhase[]
   /** AGENTS.md captured before the run; null means the file did not exist. */
   previousAgentsMD: string | null
+  /**
+   * Ticket #281: set before the deterministic write and cleared only after a
+   * rollback is verified on disk. A restart repairs a job whose rollback is
+   * still pending, even when the dying process already settled it terminal.
+   */
+  restorePending?: boolean
   error?: string
   report?: string
   startedAt: number

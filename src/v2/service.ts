@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
-import { ensureEnsembleDirectory, handoffDirectory, readWorkspaceConfig, reconcileEnsembleInstructions, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
+import { ensureEnsembleDirectory, handoffDirectory, initMetadataPath, readEnsembleBlock, readWorkspaceConfig, reconcileEnsembleInstructions, removeInitMetadata, writeAgentsBlock, writeInitMetadata, writeWorkspaceConfig, workspaceConfigPath } from "./workspace-config.ts"
 import { ENSEMBLE_BLOCK_VERSION, agentIdentity, ensembleBlock, initInstructions, onboardingPrompt } from "./init-block.ts"
 import { workspaceDataExport, type WorkspaceDataExport } from "./data-control.ts"
 import { INIT_COMMAND, INIT_START_TEXT, SYSTEM_AGENT_NAME, initCancelReport, initComposerIssue, initFailureReport, initInterruptedReport, initPhaseText, initSuccessReport } from "./system-agent.ts"
@@ -170,6 +170,7 @@ import type {
   Id,
   InitJob,
   InitPhase,
+  InitRollback,
   Memory,
   MemoryScope,
   Message,
@@ -3910,16 +3911,35 @@ export class EnsembleV2Service {
    * across a service restart. Restore the captured AGENTS.md, settle the
    * System Agent row with an explicit rerun instruction, and remove the dead
    * temporary session if the host still knows it.
+   *
+   * Ticket #281: a job the dying process managed to settle (or a rollback that
+   * could not be confirmed) is repaired here too. `restorePending` is durable
+   * evidence that the block write may have landed without a verified rollback;
+   * its report is rewritten from the state actually observed on disk.
    */
   private async reconcileInitJobs(): Promise<void> {
-    for (const candidate of this.store.initJobs()) {
-      if (candidate.state !== "running") continue
+    const jobs = this.store.initJobs()
+    for (const candidate of jobs) {
       const job = this.store.cloneInitJob(candidate.id)
       if (!job) continue
+      if (job.state !== "running" && !this.initRestoreNeeded(job, jobs)) continue
       const workspace = this.store.workspace(job.workspaceID)
-      if (workspace) this.restoreAgentsFile(workspace.directory, job)
+      const rollback = workspace ? this.restoreAgentsFile(workspace.directory, job) : "failed"
+      job.restorePending = workspace !== undefined && rollback === "failed"
+      if (job.state !== "running") {
+        job.report = this.initRollbackReport(job, rollback)
+        await this.store.saveInitJob(job)
+        const terminal = this.initMessage(job)
+        const row = terminal ? this.store.cloneMessage(job.workspaceID, terminal.id) : undefined
+        if (row) {
+          settleStreamMessage(row, job.report, true)
+          await this.store.saveMessage(row)
+        }
+        if (job.sessionID) await this.ctx.session.remove({ sessionID: job.sessionID }).catch(() => undefined)
+        continue
+      }
       recordInitPhase(job, "reporting")
-      const report = initInterruptedReport(job.previousAgentsMD !== null)
+      const report = initInterruptedReport(job.previousAgentsMD !== null, rollback)
       const found = this.initMessage(job)
       const message = found ? this.store.cloneMessage(job.workspaceID, found.id) : undefined
       if (message) {
@@ -3935,28 +3955,87 @@ export class EnsembleV2Service {
     }
   }
 
+  /**
+   * Ticket #281: decide whether a terminal job still needs its rollback
+   * verified. The durable marker covers jobs settled by this build. A job
+   * settled by an older build has no marker, so the current file is the
+   * evidence: the newest job for the workspace captured no block, yet a block
+   * or init metadata remains. A plain user edit after the failure is neither,
+   * and is left alone.
+   */
+  private initRestoreNeeded(job: InitJob, jobs: InitJob[]): boolean {
+    if (job.state === "succeeded") return false
+    if (job.restorePending === true) return true
+    const workspace = this.store.workspace(job.workspaceID)
+    if (!workspace) return false
+    const newest = jobs
+      .filter((other) => other.workspaceID === job.workspaceID)
+      .reduce((latest, other) => (other.startedAt > latest.startedAt ? other : latest))
+    if (newest.id !== job.id) return false
+    if (job.previousAgentsMD !== null && readEnsembleBlock(job.previousAgentsMD) !== undefined) return false
+    try {
+      const path = join(workspace.directory, "AGENTS.md")
+      const content = existsSync(path) ? readFileSync(path, "utf8") : ""
+      return readEnsembleBlock(content) !== undefined || existsSync(initMetadataPath(workspace.directory))
+    } catch {
+      return false
+    }
+  }
+
+  /** Report copy for a terminal job re-checked by restart repair. */
+  private initRollbackReport(job: InitJob, rollback: InitRollback): string {
+    const existed = job.previousAgentsMD !== null
+    switch (job.state) {
+      case "failed":
+        return initFailureReport(job.error ?? "Init failed.", existed, rollback)
+      case "cancelled":
+        return initCancelReport(job.error ?? "Init cancelled.", existed, rollback)
+      case "interrupted":
+        return initInterruptedReport(existed, rollback)
+      default:
+        return job.report ?? initInterruptedReport(existed, rollback)
+    }
+  }
+
   private initMessage(job: InitJob): Message | undefined {
     return this.store.message(job.workspaceID, job.messageID)
   }
 
-  private restoreAgentsFile(directory: string, job: InitJob): void {
+  /**
+   * Restore the captured AGENTS.md and verify the result. Ticket #281: an
+   * uncommitted init also retracts the `.ensemble/init.json` it wrote whenever
+   * the captured file carried no Ensemble block. Reconciliation treats that
+   * metadata as an accepted contract, so leaving it behind would resurrect
+   * the block on the next maintenance pass even though the restore succeeded.
+   * Returns the observed outcome; `failed` means the report must not claim a
+   * rollback that is not on disk.
+   */
+  private restoreAgentsFile(directory: string, job: InitJob): InitRollback {
     const path = join(directory, "AGENTS.md")
+    const expected = job.previousAgentsMD
     try {
-      if (job.previousAgentsMD === null) {
+      if (expected === null) {
         if (existsSync(path)) unlinkSync(path)
       } else {
-        writeFileSync(path, job.previousAgentsMD)
+        writeFileSync(path, expected)
       }
+      const accepted = expected !== null && readEnsembleBlock(expected) !== undefined
+      if (!accepted && !removeInitMetadata(directory)) return "failed"
+      const actual = existsSync(path) ? readFileSync(path, "utf8") : null
+      if (actual !== expected) return "failed"
+      return expected === null ? "removed" : "restored"
     } catch {
-      // Best-effort rollback: the failure report still names the intended
-      // state. A read-only checkout cannot be repaired by the service.
+      // Best-effort rollback: a read-only checkout cannot be repaired by the
+      // service, and the report below says so instead of claiming success.
+      return "failed"
     }
   }
 
   /** Move a live init job to a stage and persist it before doing that stage's work. */
-  private async advanceInitPhase(jobID: string, phase: InitPhase): Promise<InitJob | undefined> {
+  private async advanceInitPhase(jobID: string, phase: InitPhase, mutate?: (job: InitJob) => void): Promise<InitJob | undefined> {
     const job = this.store.cloneInitJob(jobID)
     if (!job || job.state !== "running") return undefined
+    mutate?.(job)
     recordInitPhase(job, phase)
     await this.store.saveInitJob(job)
     return job
@@ -4033,7 +4112,9 @@ export class EnsembleV2Service {
       const currentWorkspace = current.workspaces[claimed.workspaceID]
       if (!currentJob || currentJob.state !== "running" || !currentWorkspace) return
       if (this.globalEpoch !== globalEpoch || (this.workspaceEpoch.get(claimed.workspaceID) ?? 0) !== workspaceEpoch) return
-      const writing = await this.advanceInitPhase(jobID, "writing")
+      const writing = await this.advanceInitPhase(jobID, "writing", (next) => {
+        next.restorePending = true
+      })
       if (!writing) return
       await this.updateInitRow(writing, initPhaseText("writing"))
       if (run.cancelled) {
@@ -4062,6 +4143,7 @@ export class EnsembleV2Service {
       reporting.report = report
       reporting.finishedAt = now()
       reporting.error = undefined
+      reporting.restorePending = false
       // Mark the job terminal before awaiting storage so a concurrent delete
       // or archive sees a finished job and cannot half-cancel the write.
       await this.store.saveInitJob(reporting)
@@ -4083,9 +4165,12 @@ export class EnsembleV2Service {
     const job = this.store.cloneInitJob(jobID)
     if (!job || job.state !== "running") return
     const workspace = this.store.workspace(job.workspaceID)
-    if (workspace) this.restoreAgentsFile(workspace.directory, job)
+    const rollback = workspace ? this.restoreAgentsFile(workspace.directory, job) : "failed"
+    // A failed rollback stays pending so the next start retries it; reported
+    // truthfully below instead of claiming a restore that did not land.
+    job.restorePending = workspace !== undefined && rollback === "failed"
     recordInitPhase(job, "reporting")
-    const report = initFailureReport(message, job.previousAgentsMD !== null)
+    const report = initFailureReport(message, job.previousAgentsMD !== null, rollback)
     job.state = "failed"
     job.error = message
     job.report = report
@@ -4123,9 +4208,10 @@ export class EnsembleV2Service {
     if (run) run.cancelled = true
     const sessionID = current.sessionID ?? run?.sessionID
     const workspace = this.store.workspace(current.workspaceID)
-    if (workspace) this.restoreAgentsFile(workspace.directory, current)
+    const rollback = workspace ? this.restoreAgentsFile(workspace.directory, current) : "failed"
+    current.restorePending = workspace !== undefined && rollback === "failed"
     recordInitPhase(current, "reporting")
-    const report = initCancelReport(reason, current.previousAgentsMD !== null)
+    const report = initCancelReport(reason, current.previousAgentsMD !== null, rollback)
     current.state = "cancelled"
     current.error = reason
     current.report = report

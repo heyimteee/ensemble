@@ -5,7 +5,7 @@ import { approvalSource } from "../types.ts"
 import type { DispatchLimits } from "../dispatch-budget.ts"
 import { limitsPanelFooter, limitsPanelRows, limitsPanelSubtitle, limitsPanelTitle } from "./limits.ts"
 import type { InteractionMode } from "./interaction.ts"
-import { contrastText, type Palette, type ThemeColor, workCardBorderColor } from "./theme.ts"
+import { contrastText, isDefaultColor, type Palette, type ThemeColor, workCardBorderColor } from "./theme.ts"
 import { missingSkills, short } from "./format.ts"
 import { settingsTabLine, skillAssigned, skillPageItems, skillPaginationText, skillToggleMark } from "./skills.ts"
 import { memoryNeedsReview, memoryProvenanceLine } from "./memories.ts"
@@ -195,8 +195,12 @@ export function StatuslineRow(props: {
           const background = props.colors[part.chip]
           // Normal mode uses the muted grey chip; the user wants black text
           // there even when luminance contrast would pick white. Other modes
-          // keep automatic contrast.
-          const foreground = part.chip === "muted" ? "#000000" : contrastText(background)
+          // keep automatic contrast. Ticket #282: under NO_COLOR both roles are
+          // terminal defaults, so the chip keeps its bold weight and emits no
+          // concrete foreground or background.
+          const foreground = isDefaultColor(background)
+            ? background
+            : part.chip === "muted" ? "#000000" : contrastText(background)
           const padding = " ".repeat(part.padding ?? 0)
           if (padding) next.push({ text: padding, fg: foreground, bg: background, attributes: TextAttributes.BOLD })
           next.push({ text: part.text, fg: foreground, bg: background, attributes: TextAttributes.BOLD })

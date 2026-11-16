@@ -2637,6 +2637,7 @@ test("init runs as a visible System Agent job and publishes the full report", as
     assert.match(report.text, /Native init inspected the repo\./)
     const job = final.state.initJobs[init.result.jobID]
     assert.ok(job.sessionID)
+    assert.equal(job.restorePending, false, "a successful init no longer needs a rollback")
     assert.equal(job.sessionID.startsWith("session_"), true)
     assert.equal(commands.filter((entry) => entry.name === "init").length, 1)
     const content = readFileSync(join(directory, "AGENTS.md"), "utf8")
@@ -3017,7 +3018,11 @@ test("init rejects duplicate runs and non-solo or direct requests before appendi
 test("service restart marks a running init interrupted, restores AGENTS.md, and tells the user to rerun", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
   const previous = "# Before restart\n"
-  writeFileSync(join(directory, "AGENTS.md"), previous)
+  // Ticket #281: the process died after the deterministic write, so the block
+  // and init metadata are on disk while the captured prior file has neither.
+  writeFileSync(join(directory, "AGENTS.md"), `${ensembleBlock()}\n\n${previous}`)
+  mkdirSync(join(directory, ".ensemble"), { recursive: true })
+  writeFileSync(join(directory, ".ensemble", "init.json"), `${JSON.stringify({ version: ENSEMBLE_BLOCK_VERSION }, null, 2)}\n`)
   const { ctx, removedSessions } = fakeContext()
   const seed = new V2Store(ctx)
   await seed.load()
@@ -3025,7 +3030,7 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
   await seedWorkspace(seed, directory)
   await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: "Initializing workspace…", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
   await seed.saveMessage({ id: "other", workspaceID: "w", seq: 2, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: INIT_START_TEXT, kind: "text", createdAt: 2 })
-  await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", phases: ["starting", "running"], previousAgentsMD: previous, startedAt: 1 })
+  await seed.saveInitJob({ id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "running", phases: ["starting", "running", "writing"], previousAgentsMD: previous, restorePending: true, startedAt: 1 })
   const service = new EnsembleV2Service(ctx)
   const stop = await startServiceForTest(service, service.ctx)
   const handlers = service.handlers()
@@ -3035,7 +3040,10 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
     assert.ok(after.state.initJobs.init_1.error)
     assert.match(after.state.initJobs.init_1.error, /restart/i)
     assert.equal(initJobPhase(after.state.initJobs.init_1), "reporting")
-    assert.deepEqual(after.state.initJobs.init_1.phases, ["starting", "running", "reporting"])
+    assert.deepEqual(after.state.initJobs.init_1.phases, ["starting", "running", "writing", "reporting"])
+    assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
+    assert.equal(existsSync(join(directory, ".ensemble", "init.json")), false, "uncommitted init metadata cannot resurrect the block")
+    assert.equal(after.state.initJobs.init_1.restorePending, false)
     const message = after.state.messages.w.find((item: any) => item.id === "m")
     assert.ok(message)
     assert.equal(message.streaming, false)
@@ -3047,8 +3055,100 @@ test("service restart marks a running init interrupted, restores AGENTS.md, and 
     assert.ok(unrelated)
     assert.equal(unrelated.interrupted, undefined, "reconciliation only settles the running init job's row")
     assert.equal(unrelated.text, INIT_START_TEXT)
-    assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
     assert.ok(removedSessions.includes("old_session"))
+  } finally {
+    await stop()
+  }
+})
+
+test("service restart repairs an init the dying process settled failed after the block write", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const previous = "# Prior user guidance\n\nKeep this line.\n"
+  writeFileSync(join(directory, "AGENTS.md"), `${ensembleBlock()}\n\n${previous}`)
+  mkdirSync(join(directory, ".ensemble"), { recursive: true })
+  writeFileSync(join(directory, ".ensemble", "init.json"), `${JSON.stringify({ version: ENSEMBLE_BLOCK_VERSION }, null, 2)}\n`)
+  const { ctx, removedSessions } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  const stale = "Ensemble init failed: All fibers interrupted without error\nAGENTS.md was restored to its previous content.\nRerun /init after fixing the failure."
+  await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: stale, kind: "text", streaming: false, interrupted: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveInitJob({
+    id: "init_1", workspaceID: "w", messageID: "m", sessionID: "old_session", state: "failed",
+    phases: ["starting", "running", "writing", "reporting"], previousAgentsMD: previous,
+    error: "All fibers interrupted without error", report: stale, startedAt: 1, finishedAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.initJobs.init_1.state, "failed", "repair keeps the terminal state")
+    assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
+    assert.equal(existsSync(join(directory, ".ensemble", "init.json")), false)
+    assert.equal(after.state.initJobs.init_1.restorePending, false)
+    const message = after.state.messages.w.find((item: any) => item.id === "m")
+    assert.ok(message)
+    assert.match(message.text, /All fibers interrupted without error/)
+    assert.match(message.text, /restored/)
+    assert.doesNotMatch(message.text, /could not/i)
+    assert.ok(removedSessions.includes("old_session"))
+  } finally {
+    await stop()
+  }
+})
+
+test("service restart removes AGENTS.md when an uncommitted init created it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  writeFileSync(join(directory, "AGENTS.md"), `${ensembleBlock()}\n`)
+  mkdirSync(join(directory, ".ensemble"), { recursive: true })
+  writeFileSync(join(directory, ".ensemble", "init.json"), `${JSON.stringify({ version: ENSEMBLE_BLOCK_VERSION }, null, 2)}\n`)
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: "Initializing workspace…", kind: "text", streaming: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveInitJob({
+    id: "init_1", workspaceID: "w", messageID: "m", state: "failed",
+    phases: ["starting", "running", "writing", "reporting"], previousAgentsMD: null, restorePending: true,
+    error: "All fibers interrupted without error", startedAt: 1, finishedAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  const handlers = service.handlers()
+  try {
+    const after = await handlers.snapshot({ directory })
+    assert.equal(after.state.initJobs.init_1.state, "failed")
+    assert.equal(existsSync(join(directory, "AGENTS.md")), false)
+    assert.equal(existsSync(join(directory, ".ensemble", "init.json")), false)
+    const message = after.state.messages.w.find((item: any) => item.id === "m")
+    assert.ok(message)
+    assert.match(message.text, /removed/)
+  } finally {
+    await stop()
+  }
+})
+
+test("service restart leaves a settled failed init's later AGENTS.md edits alone", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ensemble-service-"))
+  const edited = "# Written after the failed init\n"
+  writeFileSync(join(directory, "AGENTS.md"), edited)
+  const { ctx } = fakeContext()
+  const seed = new V2Store(ctx)
+  await seed.load()
+  await seedAgent(seed)
+  await seedWorkspace(seed, directory)
+  await seed.saveMessage({ id: "m", workspaceID: "w", seq: 1, author: "agent", displayAuthor: SYSTEM_AGENT_NAME, text: "Report", kind: "text", streaming: false, interrupted: true, createdAt: 1, updatedAt: 1 })
+  await seed.saveInitJob({
+    id: "init_1", workspaceID: "w", messageID: "m", state: "failed",
+    phases: ["starting", "running", "reporting"], previousAgentsMD: null, startedAt: 1, finishedAt: 2,
+  })
+  const service = new EnsembleV2Service(ctx)
+  const stop = await startServiceForTest(service, service.ctx)
+  try {
+    assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), edited)
   } finally {
     await stop()
   }
@@ -3149,6 +3249,8 @@ test("failed init restores the previous AGENTS.md content", async () => {
   const { ctx } = fakeContext()
   ;(ctx.session as any).command = async () => {
     writeFileSync(join(directory, "AGENTS.md"), "<!-- ensemble:start v2 -->\npartial\n<!-- ensemble:end -->\n")
+    mkdirSync(join(directory, ".ensemble"), { recursive: true })
+    writeFileSync(join(directory, ".ensemble", "init.json"), `${JSON.stringify({ version: ENSEMBLE_BLOCK_VERSION }, null, 2)}\n`)
     return { data: {} }
   }
   ;(ctx.session as any).wait = async () => { throw new Error("native init failed") }
@@ -3164,6 +3266,7 @@ test("failed init restores the previous AGENTS.md content", async () => {
       return next.state.initJobs[init.result.jobID]?.state === "failed"
     }, 3000)
     assert.equal(readFileSync(join(directory, "AGENTS.md"), "utf8"), previous)
+    assert.equal(existsSync(join(directory, ".ensemble", "init.json")), false, "a failed run retracts metadata it wrote")
     const final = await handlers.snapshot({ directory })
     const report = final.state.messages[workspace.result.id].find((message: any) => message.id === init.result.messageID)
     assert.ok(report)

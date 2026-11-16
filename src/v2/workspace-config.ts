@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import type { Agent, Workspace } from "./types.ts"
 
@@ -88,6 +88,16 @@ export function writeWorkspaceConfigValue(directory: string, config: WorkspaceCo
 export function writeInitMetadata(directory: string, version: number): void {
   ensureEnsembleDirectory(directory)
   writeFileSync(initMetadataPath(directory), `${JSON.stringify({ version, installedAt: Date.now() }, null, 2)}\n`)
+}
+
+/**
+ * Ticket #281: reconciliation treats init metadata as evidence that the
+ * workspace accepted the contract, so an uncommitted init must retract the
+ * metadata it wrote. Returns whether the file is absent afterwards.
+ */
+export function removeInitMetadata(directory: string): boolean {
+  try { unlinkSync(initMetadataPath(directory)) } catch {}
+  return !existsSync(initMetadataPath(directory))
 }
 
 export function readInitMetadata(directory: string): { version?: number; installedAt?: number } {
