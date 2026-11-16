@@ -152,6 +152,20 @@ carry display metadata only. The export never includes:
 - operational logs (they are local JSONL and can be deleted with `--logs`);
 - agent-global memories or other workspaces' data.
 
+### Recovery backups are a separate document
+
+`npm run backup` (ticket #273) is the operator recovery path, not this export.
+A recovery backup (`ensemble.backup`) is a full durable-state snapshot: it
+includes conversation content, Work, memories, bindings, host session ids,
+workspace directories, settings, and the workspace config so that a restore can
+reproduce the team exactly. It is created only when an operator runs the
+command, never automatically, and it is never this data export.
+
+`data.export` is a deliberate projection and excludes the fields the store
+needs to restore. Do not use it as a recovery backup. The procedure, security
+handling, and failure behavior are in
+[backup and restore](../operations/backup-restore.md).
+
 ## Delete
 
 Delete is the `data.delete` action, exposed by the same CLI:

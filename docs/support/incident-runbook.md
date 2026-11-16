@@ -154,7 +154,10 @@ Attach evidence only after reading it; GitHub issues are public.
 ## Rollback
 
 Rollback the package first. Restore data only if the package rollback is not
-enough, because restoring data is destructive and can discard newer state.
+enough, because restoring data is destructive and can discard newer state. The
+detailed procedures are in
+[upgrade](../operations/upgrade.md) and
+[package rollback](../operations/rollback.md).
 
 ### Package rollback
 
@@ -219,11 +222,21 @@ with the same backup when possible.
 ### 3. Restore host-owned state
 
 Conversations, messages, Work, approvals, memories, and bindings live in
-OpenCode plugin storage. Treat it as host-owned: there is no supported
-hand-edit path and no documented public repair format. Restore it only from a
-backup of the whole host data directory, with all clients and the service
-stopped, using the host's own restore procedure. Then start the service and run
-the doctor before opening a workspace.
+OpenCode plugin storage. There is no supported hand-edit path. Use the ticket
+#273 recovery path when an `ensemble.backup` file exists:
+
+```sh
+npm run backup -- status /path/to/project
+npm run backup -- restore --in ./ensemble-backup.json --confirm RESTORE /path/to/project
+npm run backup -- rollback --confirm ROLLBACK /path/to/project
+```
+
+Restore validates the document, refuses while work is running, keeps one
+pre-restore rollback slot, and restores state plus the workspace config. It
+contains conversation content: keep it private and never attach it to an
+issue. If no Ensemble backup exists, restore the whole host data directory
+with the host's own procedure, with all clients and the service stopped, then
+start the service and run the doctor before opening a workspace.
 
 If no backup exists, do not reconstruct history by editing storage. Preserve
 what remains, run the doctor, and report the symptom with identifiers and

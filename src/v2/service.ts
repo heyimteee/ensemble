@@ -93,6 +93,7 @@ import { effectiveToolSurface, isToolSurface } from "./tool-surface.ts"
 import { ensembleTurnContext } from "./turn-context.ts"
 import { buildFailureRecord, classifyFailure, type FailureClass, type FailureDecision, type ToolOutcome } from "./failure-record.ts"
 import { SHARED_SERVICE_VERSION } from "./shared-version.ts"
+import { BackupError, applyBackup, collectBackup, readRollbackStatus, rollbackBackup as applyRollbackBackup, type BackupApplyReport, type BackupSlotStatus, type EnsembleBackup } from "./backup.ts"
 import { nativeFirstMode, isNativeFirstMode, nativeMirrorEnabled } from "./native-first.ts"
 import { directSessionCutover, selectDirectConversation } from "./direct-session.ts"
 import { bindingConversation, conversationStateKey } from "./conversation-binding.ts"
@@ -329,6 +330,19 @@ function stringList(value: unknown, field: string): string[] {
 
 function errorResult(error: any): { ok: false; error: { code: string; message: string } } {
   return { ok: false, error: { code: error?.code ?? "error", message: error?.message ?? String(error) } }
+}
+
+/** Ticket #273: content-free backup report fields for structured logs. */
+function backupReportFields(report: BackupApplyReport): Json {
+  return {
+    formatVersion: report.formatVersion,
+    version: report.version,
+    entities: Object.values(report.counts).reduce((total, count) => total + count, 0),
+    workspaces: report.workspaces.restored,
+    skippedWorkspaces: report.workspaces.skipped,
+    removedConfigs: report.workspaces.removed,
+    rollbackSlot: report.rollbackSlot.written,
+  }
 }
 
 function id(prefix: string): string {
@@ -2174,6 +2188,10 @@ export class EnsembleV2Service {
       case "ensemble.reset": return this.resetEnsemble(Boolean(payload.deleteHandoffs), String(payload.confirmation ?? ""))
       case "data.export": return this.exportWorkspaceData(directory, payload)
       case "data.delete": return this.deleteWorkspaceData(directory, payload)
+      case "backup.export": return this.exportBackup()
+      case "backup.restore": return this.restoreBackup(payload)
+      case "backup.rollback": return this.rollbackBackup(payload)
+      case "backup.status": return this.backupStatus()
       default: throw Object.assign(new Error(`Unknown Ensemble v2 action: ${action}`), { code: "unknown_action" })
     }
   }
@@ -4152,6 +4170,108 @@ export class EnsembleV2Service {
   private async waitForRuns(): Promise<void> {
     if (this.running.size === 0) return
     await Promise.race([Promise.allSettled([...this.running]), new Promise<void>((resolve) => setTimeout(resolve, 2000))])
+  }
+
+  /**
+   * Ticket #273: export the durable plugin state and derived workspace config
+   * as one portable document. No file is written here: the caller owns the
+   * backup location and its permissions.
+   */
+  private async exportBackup(): Promise<{ backup: EnsembleBackup }> {
+    await this.store.settled()
+    const backup = await collectBackup(this.ctx.storage, {
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      contractVersion: ENSEMBLE_BLOCK_VERSION,
+    })
+    this.logger?.event("info", "service", "service.backup.exported", {
+      formatVersion: backup.formatVersion,
+      entries: backup.payload.entries.length,
+      workspaces: backup.payload.workspaceConfigs.length,
+      digest: backup.digest,
+    })
+    return { backup }
+  }
+
+  /**
+   * Replace durable state from a backup. The previous state is copied to one
+   * rollback slot first, so a failed write or a later regret has a documented
+   * recovery path. Live work must be stopped: the restored bindings cannot
+   * name the sessions a running turn owns.
+   */
+  private async restoreBackup(payload: Json): Promise<BackupApplyReport> {
+    if (String(payload.confirmation ?? "") !== "RESTORE") {
+      throw Object.assign(new Error("Type RESTORE to confirm."), { code: "confirmation_required" })
+    }
+    this.assertRecoveryIdle("restoring a backup")
+    const report = await this.store.runExclusive(() => applyBackup(this.ctx.storage, payload.backup, {
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      contractVersion: ENSEMBLE_BLOCK_VERSION,
+      versionFloor: this.store.version(),
+    }))
+    await this.afterRecovery()
+    this.logger?.event("info", "service", "service.backup.restored", backupReportFields(report))
+    return report
+  }
+
+  /** Re-apply the pre-restore slot. The slot itself is never overwritten. */
+  private async rollbackBackup(payload: Json): Promise<BackupApplyReport> {
+    if (String(payload.confirmation ?? "") !== "ROLLBACK") {
+      throw Object.assign(new Error("Type ROLLBACK to confirm."), { code: "confirmation_required" })
+    }
+    this.assertRecoveryIdle("rolling back a restore")
+    const report = await this.store.runExclusive(() => applyRollbackBackup(this.ctx.storage, {
+      protocol: ENSEMBLE_PROTOCOL_VERSION,
+      contractVersion: ENSEMBLE_BLOCK_VERSION,
+      versionFloor: this.store.version(),
+    }))
+    await this.afterRecovery()
+    this.logger?.event("info", "service", "service.backup.rolled_back", backupReportFields(report))
+    return report
+  }
+
+  /** Read-only slot status; never carries backed-up content. */
+  private async backupStatus(): Promise<{ rollback: BackupSlotStatus }> {
+    await this.store.settled()
+    return { rollback: await readRollbackStatus(this.ctx.storage) }
+  }
+
+  private assertRecoveryIdle(action: string): void {
+    if (this.activeRuns.size > 0 || this.initRuns.size > 0 || this.running.size > 0) {
+      throw new BackupError("busy", `Stop active work before ${action}.`)
+    }
+  }
+
+  /**
+   * Drop in-memory state keyed by the replaced durable rows, then re-read the
+   * store. The feed reset from `reload` is the only honest client signal: the
+   * ring cannot describe a wholesale replacement.
+   */
+  private async afterRecovery(): Promise<void> {
+    this.globalEpoch++
+    this.releaseNativeSubagentWaiters()
+    this.nativeState.clear()
+    this.shadowSessions.clear()
+    this.shadowTurns.clear()
+    this.liveBySession.clear()
+    this.pendingStreams.clear()
+    this.nativeSubagentParents.clear()
+    this.nativeSubagentActive.clear()
+    this.nativeSubagentPending.clear()
+    this.nativeSubagentPendingStates.clear()
+    this.nativeSubagentFallbacks.clear()
+    this.toolCalls.clear()
+    this.recentHostEvents.clear()
+    this.recentRetryEvents.clear()
+    this.legacyTerminalChecked.clear()
+    this.identityVersions.clear()
+    this.nativeSync.state = "live"
+    delete this.nativeSync.reason
+    await this.store.reload()
+    for (const workspaceID of Object.keys(this.store.read().workspaces)) {
+      this.workspaceEpoch.set(workspaceID, (this.workspaceEpoch.get(workspaceID) ?? 0) + 1)
+    }
+    this.refreshDmClock()
+    this.configDirty = true
   }
 
   private async resetEnsemble(deleteHandoffs: boolean, confirmation: string): Promise<any> {
