@@ -150,6 +150,22 @@ the current memory and clears the add field while keeping it focused, so
 several memories can be entered in succession. Each list entry is saved as its
 own agent memory on creation; an empty list skips cleanly.
 
+## Support
+
+Ensemble is a developer preview. Support is **best effort through GitHub
+Issues**; there is no paid support or SLA. Read the [support policy](docs/support/README.md)
+for the channel, response expectations, and the evidence to include.
+
+- Check the [support matrix and known limitations](docs/support/support-matrix.md)
+  before filing. Linux/tmux is the supported path; macOS/Herdr is unverified
+  until ticket #277 runs, and Windows is out of scope.
+- Use the [incident runbook](docs/support/incident-runbook.md) for a broken
+  workspace, stuck work, a failed upgrade, or suspected data loss.
+- Report vulnerabilities privately through [SECURITY.md](SECURITY.md), never in
+  a public issue. Issue and pull-request templates collect versions, commands,
+  evidence, and redacted logs, and explicitly forbid credentials and
+  conversation content.
+
 ## Development
 
 ```bash
@@ -174,10 +190,12 @@ By default it reads `$XDG_STATE_HOME/opencode/service.json`, or `~/.local/state/
 
 Every requested directory is queried on the **one selected service**, sequentially. Cross-location differences can reveal stale snapshots or concurrent changes, but this command does not discover or compare separate service processes. Config is read after each snapshot, so this is not an atomic pre-reconciliation view. Review remediation manually; the command does not apply it.
 
+`npm run data -- export` writes the documented `ensemble.data-export` JSON; `npm run data -- delete --confirm DELETE` removes this workspace's Ensemble conversation, Work, and memory data while keeping the roster and workspace usable. Both use the same service descriptor as `doctor`. See [data classes, retention, export, and delete](docs/privacy/data-and-retention.md) for the format, the full retention policy, and the `AGENTS.md` roster disclosure guidance.
+
 ## Known limitations
 
 - **Distribution is pending.** The package is `@heyimteee/ensemble` under the MIT license. The local release candidate is `0.1.0-rc.1`; it is not published to a registry yet, and the installed TUI part is blocked on the built-package follow-up ([#279](https://github.com/heyimteee/ensemble/issues/279)).
-- **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 on Linux/tmux are tested. Other host releases load with a runtime warning but are untested, and macOS/Herdr and Windows remain unverified.
+- **Host support is narrow.** Only OpenCode 2.2.6 and 2.2.7 on Linux/tmux are tested. Other host releases load with a runtime warning but are untested, and macOS/Herdr and Windows remain unverified. See the [support matrix](docs/support/support-matrix.md) for the evidence and platform boundary.
 - **Live evidence is platform-bound.** The live suites require Linux/tmux, Node 26.12.1, `tmux`, and `fd`. Every PR runs the deterministic fake, size, lifecycle, subagent, native-first, Vera, tool-surface, multi-location, and latency-smoke jobs; the real-model `npm run test:live` acceptance is opt-in in the nightly workflow (`ENSEMBLE_NIGHTLY_REAL=1`) and is never part of the PR gate.
 - **Terminal accessibility depends on the host.** Screen-reader output, high-contrast modes, font scaling, and mouse drag-copy are host features. Ensemble supplies glyph-and-word status, reduced-motion, `NO_COLOR`, and ASCII fallbacks; see the [terminal accessibility checklist](docs/verification/terminal-accessibility-checklist.md).
 - **Some surfaces stay native.** Arbitrary OpenCode slash commands are not proxied into the group chat, rich Markdown links are not clickable, and direct conversations have no separate Ensemble search or export.

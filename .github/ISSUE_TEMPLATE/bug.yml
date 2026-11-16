@@ -1,0 +1,147 @@
+name: Bug report
+description: Report a reproducible defect in Ensemble
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Keep private data out.** Do not include credentials, passwords, API keys, tokens, cookies, conversation content, message or memory text, proprietary file bytes, or private absolute paths. Redact usernames, hostnames, project paths, and log lines before posting.
+
+        Read the [support policy](https://github.com/heyimteee/ensemble/blob/main/docs/support/README.md) and check the [support matrix](https://github.com/heyimteee/ensemble/blob/main/docs/support/support-matrix.md) first. Security vulnerabilities belong in the private process described in [SECURITY.md](https://github.com/heyimteee/ensemble/blob/main/SECURITY.md), not in this issue.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the failure without conversation content or private paths.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give the smallest reproducible sequence. Use placeholder workspace and agent names.
+      placeholder: |
+        1. Start with a scratch workspace containing 2 agents.
+        2. Run ...
+        3. Press ...
+        4. Observe ...
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: ensemble-version
+    attributes:
+      label: Ensemble version
+      description: The version shown by `opencode plugin list`, or the Git commit for a checkout.
+      placeholder: "e.g. 0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - npm package (opencode plugin add)
+        - Git package spec
+        - Local checkout
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: opencode-version
+    attributes:
+      label: OpenCode version
+      description: Output of `opencode --version`.
+      placeholder: "e.g. 2.2.7"
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: Output of `node --version`.
+      placeholder: "e.g. v26.12.1"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and terminal
+      description: OS and terminal host. macOS/Herdr is unverified and Windows is out of scope.
+      placeholder: "e.g. Linux with tmux 3.5a, 120x40"
+    validations:
+      required: true
+
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands and output
+      description: Paste the exact commands you ran and their redacted output. Use `npm run --silent doctor -- --json ...` from a checkout when available.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Doctor exit code and mismatch codes, redacted logs or `:logs failures` field excerpts, and log-summary counts. Do not paste raw logs or the service descriptor.
+      placeholder: |
+        doctor exit code:
+        mismatch codes:
+        log summary (counts/events only):
+        relevant timestamps:
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Screenshots, a minimal reproduction, or text captures. Remove conversation content, memories, attachment bytes, and private paths first.
+    validations:
+      required: false
+
+  - type: input
+    id: last-good
+    attributes:
+      label: Last known-good version
+      description: The last Ensemble version or commit that worked, if any.
+      placeholder: "e.g. 0.1.0-rc.1, or never worked"
+    validations:
+      required: false
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround
+      description: Any action that restores the workspace, including a rollback or restart. Do not include sensitive data.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction and scope
+      options:
+        - label: I removed credentials, tokens, conversation content, memories, proprietary file bytes, and private absolute paths from this report.
+          required: true
+        - label: This is not a security vulnerability; vulnerabilities use the private process in SECURITY.md.
+          required: true
+        - label: I checked the support matrix and this report is on a supported or explicitly unverified configuration.
+          required: true

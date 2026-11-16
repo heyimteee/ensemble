@@ -37,6 +37,7 @@
     "!src/v2/**/*.test.tsx",
     "!src/v2/fixtures/**",
     "!src/v2/ci-workflows.ts",
+    "!src/v2/data-cli.ts",
     "!src/v2/doctor-cli.ts",
     "!src/v2/doctor.ts",
     "!src/v2/flake-policy.ts",
@@ -73,7 +74,8 @@
     "issue:hygiene": "node scripts/issue-hygiene.mjs",
     "logs:summary": "node scripts/log-summary.mjs",
     "docs:check": "node --experimental-strip-types scripts/docs-check.mjs",
-    "test:install:rc": "bash scripts/live-install-check.sh"
+    "test:install:rc": "bash scripts/live-install-check.sh",
+    "data": "node --experimental-strip-types src/v2/data-cli.ts"
   },
   "engines": {
     "node": ">=22.23.4"
