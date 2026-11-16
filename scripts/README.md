@@ -205,7 +205,9 @@ nightly. Every live job pins the same toolset through
 [`.github/actions/live-host`](../.github/actions/live-host/action.yml): Ubuntu
 24.04, Node 26.12.1, OpenCode 2.2.7 (the latest host in the compatibility
 matrix; `compatibility.yml` covers 2.2.6 and 2.2.7), the runner's `tmux`, fd
-10.2.0, and `npm ci`. Every live job sets `ENSEMBLE_LIVE_REQUIRE=1`, writes
+10.2.0, `npm ci`, and `npm run build` (the package exports load `dist/`, so a
+fresh checkout must build the runtime before a live suite starts a host).
+Every live job sets `ENSEMBLE_LIVE_REQUIRE=1`, writes
 redacted artifacts to `$RUNNER_TEMP/ensemble-live-artifacts`, and uploads them
 on failure. The preflight prints the resolved versions and fails if a required
 tool is missing or the pinned Node/OpenCode version differs.
@@ -244,13 +246,14 @@ manual/opt-in run recorded in a verification record.
 
 ### Kept separate
 
-`compatibility.yml` runs the host probe and deterministic fake smoke on
-OpenCode 2.2.6 and 2.2.7; `node-matrix.yml` runs `npm run verify` on Node
-22.23.4, 24.22.1, and 26.12.1; `docs.yml` runs `npm run docs:check`. The old
-`latency.yml` is removed: the smoke profile lives in `verify.yml` and the
-reference gate in `nightly.yml`. `src/v2/ci-workflows.ts` and its test assert
-this job graph, the suite ownership, the timeouts, the artifact uploads, the
-`ENSEMBLE_LIVE_REQUIRE=1` contract, and the OpenCode pin.
+`compatibility.yml` runs `npm ci`, `npm run build`, the host probe, and the
+deterministic fake smoke on OpenCode 2.2.6 and 2.2.7; `node-matrix.yml` runs
+`npm run verify` on Node 22.23.4, 24.22.1, and 26.12.1; `docs.yml` runs
+`npm run docs:check`. The old `latency.yml` is removed: the smoke profile lives
+in `verify.yml` and the reference gate in `nightly.yml`. `src/v2/ci-workflows.ts`
+and its test assert this job graph, the suite ownership, the timeouts, the
+artifact uploads, the `ENSEMBLE_LIVE_REQUIRE=1` contract, the runtime build
+after dependency install, and the OpenCode pin.
 
 ## Skip versus fail
 

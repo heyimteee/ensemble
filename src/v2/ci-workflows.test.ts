@@ -39,6 +39,18 @@ function removeLine(text: string, needle: string): string {
   return lines.join("\n")
 }
 
+/** Drop a whole `- name: ...` step so the fixture stays valid YAML. */
+function removeStep(text: string, name: string, indent = "    "): string {
+  const lines = text.split("\n")
+  const prefix = `${indent}- `
+  const index = lines.findIndex((line) => line.startsWith(prefix) && line.includes(name))
+  assert.notEqual(index, -1, `fixture must contain a step named ${JSON.stringify(name)}`)
+  let end = index + 1
+  while (end < lines.length && !lines[end]!.startsWith(prefix)) end += 1
+  lines.splice(index, end - index)
+  return lines.join("\n")
+}
+
 function failuresMatching(failures: string[], pattern: RegExp): string[] {
   return failures.filter((failure) => pattern.test(failure))
 }
@@ -173,6 +185,36 @@ test("the compatibility fake smoke keeps harness artifacts for a failure diagnos
 test("the live host action pins every tool through its inputs", () => {
   const text = read(liveHostActionPath)
   assert.deepEqual(checkLiveHostAction(text), [])
+})
+
+test("a live host action that installs dependencies without building the runtime is rejected", () => {
+  const text = read(liveHostActionPath)
+  assert.match(text, /npm run build/, "the live host action builds the runtime")
+
+  const withoutBuild = removeStep(text, "Build runtime")
+  assert.ok(failuresMatching(checkLiveHostAction(withoutBuild), /npm run build/).length > 0)
+
+  // The package exports load dist/, so the build has to survive the install.
+  const beforeInstall = removeStep(text, "Build runtime").replace(
+    "    - name: Install npm dependencies",
+    "    - name: Build runtime\n      shell: bash\n      run: npm run build\n    - name: Install npm dependencies",
+  )
+  assert.ok(failuresMatching(checkLiveHostAction(beforeInstall), /npm run build/).length > 0)
+})
+
+test("a compatibility job that probes or fakes the host without a dist build is rejected", () => {
+  const text = read(".github/workflows/compatibility.yml")
+  assert.match(text, /npm run build/, "the compatibility job builds the runtime")
+
+  const withoutBuild = removeStep(text, "Build runtime", "      ")
+  assert.ok(failuresMatching(checkCompatibilityWorkflow(withoutBuild, supported), /npm run build/).length > 0)
+
+  // A build after the fake smoke is too late: the host already loaded the plugin.
+  const afterSuites = removeStep(text, "Build runtime", "      ").replace(
+    "      - name: Upload sanitized host contract record",
+    "      - name: Build runtime\n        run: npm run build\n      - name: Upload sanitized host contract record",
+  )
+  assert.ok(failuresMatching(checkCompatibilityWorkflow(afterSuites, supported), /npm run build/).length > 0)
 })
 
 test("a hardcoded host version in the live host action is rejected", () => {
