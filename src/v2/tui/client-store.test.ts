@@ -5,6 +5,7 @@ import { createInitialState } from "../defaults.ts"
 import { CLIENT_MESSAGE_LIMIT } from "../scoped-read.ts"
 import type { Agent, Approval, DispatchGroup, InitJob, Memory, Message, ModelOption, NativeSubagentRun, SessionBinding, SkillOption, Snapshot, SnapshotState, Subtask, WorkHistoryPage } from "../types.ts"
 import { createClientStore, reduceClientState } from "./client-store.ts"
+import { workViewGroups } from "./workpane.ts"
 import { directMessageChannel } from "../message-channel.ts"
 
 const agent = (id: string, name: string): Agent => ({
@@ -193,6 +194,77 @@ test("a full snapshot replaces prior state, including removals", () => {
   assert.equal(store.state()?.agents.a2, undefined)
   assert.equal(store.state()?.subtasks.t1, undefined)
   assert.equal(store.state()?.agents.a1?.name, "Ada")
+})
+
+test("ticket283: a new-epoch replacement reconstructs the active Work group", () => {
+  const store = createClientStore()
+  const working = task("t1", {
+    state: "working",
+    claimedBy: "run_1",
+    activeRunID: "run_1",
+    leaseUntil: 90_000,
+    attempts: 1,
+    dispatchGroupID: "g1",
+  })
+  const restarted = () => stateWith((state) => {
+    state.workspaces.w1 = workspace("w1", "Repro")
+    state.subtasks.t1 = { ...working }
+    state.dispatchGroups.g1 = dispatchGroup("g1")
+  })
+
+  store.applySnapshot(snapshot(restarted(), { epoch: 1 }))
+  assert.equal(
+    workViewGroups(Object.values(store.state()!.subtasks), store.state()!.subtasks, {
+      now: 1_000,
+      dispatchGroups: store.state()!.dispatchGroups,
+    }).active.length,
+    1,
+    "the first snapshot builds the active group",
+  )
+
+  store.applySnapshot(snapshot(restarted(), { epoch: 2 }))
+  const state = store.state()!
+  const views = workViewGroups(Object.values(state.subtasks), state.subtasks, {
+    now: 1_000,
+    dispatchGroups: state.dispatchGroups,
+  })
+  assert.equal(views.active.length, 1, "the restarted service snapshot rebuilds the Work group")
+  assert.equal(views.active[0]?.tasks[0]?.id, "t1", "the working card comes from durable state")
+  assert.equal(views.active[0]?.tasks.length, 1, "a replacement never duplicates the durable row")
+})
+
+test("ticket283: a restart interrupts a stale streaming row", () => {
+  const store = createClientStore()
+  const streaming = () => stateWith((state) => {
+    state.messages.w1 = [message("m1", "partial", { streaming: true, updatedAt: 2, author: "agent", taskID: "t1" })]
+    state.subtasks.t1 = task("t1", { state: "working", claimedBy: "run_1", activeRunID: "run_1", leaseUntil: 90_000, attempts: 1 })
+  })
+
+  store.applySnapshot(snapshot(streaming(), { epoch: 1 }))
+  assert.equal(store.state()?.messages.w1?.[0]?.streaming, true)
+
+  store.applySnapshot(snapshot(streaming(), { epoch: 2 }))
+  assert.equal(store.state()?.messages.w1?.[0]?.streaming, false, "the old process cannot still be streaming")
+  assert.equal(store.state()?.messages.w1?.[0]?.interrupted, true, "the transcript says interrupted, not live")
+  assert.equal(store.state()?.subtasks.t1?.state, "working", "the durable task still drives its Work card")
+
+  store.applyStream({ epoch: 2, workspaceID: "w1", id: "m1", text: "a late delta cannot revive a settled row", updatedAt: 99 })
+  assert.equal(store.state()?.messages.w1?.[0]?.text, "partial")
+  assert.equal(store.state()?.messages.w1?.[0]?.streaming, false)
+})
+
+test("ticket283: a same-epoch replacement keeps a live stream streaming", () => {
+  const store = createClientStore()
+  const streaming = (version: number) => snapshot(stateWith((state) => {
+    state.version = version
+    state.messages.w1 = [message("m1", "partial", { streaming: true, updatedAt: 2, author: "agent", taskID: "t1" })]
+    state.subtasks.t1 = task("t1", { state: "working", claimedBy: "run_1", activeRunID: "run_1", leaseUntil: 90_000, attempts: 1 })
+  }), { epoch: 4 })
+
+  store.applySnapshot(streaming(4))
+  store.applySnapshot(streaming(5))
+  assert.equal(store.state()?.messages.w1?.[0]?.streaming, true)
+  assert.equal(store.state()?.messages.w1?.[0]?.interrupted, undefined)
 })
 
 test("a subtask update keeps unrelated entity and metadata references", () => {

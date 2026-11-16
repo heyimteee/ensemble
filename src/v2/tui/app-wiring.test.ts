@@ -93,7 +93,7 @@ test("snapshot and chat refreshes share a single-flight coordinator", () => {
 })
 
 test("equal-version snapshots use the metadata-aware guard", () => {
-  assert.ok(has(app(), "decideSnapshotApply(lastSnapshotMeta, nextMeta)"))
+  assert.ok(has(app(), "decideSnapshotFetch(lastSnapshotMeta, nextMeta, forced)"))
 })
 
 test("snapshot awaiters observe a queued dirty pass", () => {
@@ -114,6 +114,16 @@ test("the heartbeat pauses full refresh while the route is hidden", () => {
 
 test("a server schema reset reconnects the feed", () => {
   assert.ok(has(app(), 'if (type === "server.connected")'))
+})
+
+test("a loaded client forces a full snapshot replacement on reconnect", () => {
+  assert.ok(has(app(), "reconnectRequiresReplacement(lastSnapshotMeta)"))
+  assert.ok(has(app(), "void refreshFull()"))
+})
+
+test("a foreign-epoch scoped resync keeps the old cursor and forces a full read", () => {
+  assert.ok(has(app(), "advanceScopedCursor(lastSnapshotMeta, result.epoch, result.version)"))
+  assert.ok(has(app(), "if (lastSnapshotMeta && !cursor)"))
 })
 
 test("the patch feed handles the patches event", () => {
