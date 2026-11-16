@@ -1868,9 +1868,11 @@ live_invoke task.cancel "{\"id\":\"$t4_native_id\"}" >/dev/null
 live_log "work-list o opens the selected work's native session"
 
 # Slice B reduced-motion run: restart the TUI with ENSEMBLE_REDUCED_MOTION=1
-# and prove live work renders static frame-0 glyphs only — the Work card stays
-# on ⠋ and no non-zero motion codepoint
-# (⠙⠹⠸⠼⠴⠦⠧⠇⠏▪▹▌) appears across sustained captures while work is in flight.
+# and prove live work renders static frame-0 glyphs only — the Ensemble Work
+# card stays on ⠋ and no later frame (⠙⠹⠸⠼⠴⠦⠧⠇⠏) replaces it across
+# sustained captures while work is in flight. The scan is scoped to the Work
+# card and rail because a compatibility host draws its own footer spinner; that
+# is host chrome, not Ensemble motion.
 live_log "restarting TUI under ENSEMBLE_REDUCED_MOTION=1"
 "$LIVE_TMUX_BIN" kill-session -t "$LIVE_TUI_SESSION" 2>/dev/null || true
 live_tmux_env_add "ENSEMBLE_REDUCED_MOTION=1"
@@ -1898,10 +1900,9 @@ live_capture_matches "$LIVE_TUI_SESSION" "FAKEAGENT.*⠋ WORKING" || live_fail "
 sleep 0.25
 live_key "$LIVE_TUI_SESSION" Escape
 for _ in $(seq 1 8); do
-  pane=$(live_capture "$LIVE_TUI_SESSION")
-  for glyph in "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏" "▪" "▹" "▌"; do
-    grep -qF -- "$glyph" <<<"$pane" && live_fail "reduced-motion run animated (saw $glyph)"
-  done
+  live_capture_reduced_motion_frame0 "$LIVE_TUI_SESSION" "FAKEAGENT" "WORKING" "#LiveSite" \
+    || live_fail "reduced-motion Work card or rail left frame 0"
+  live_assert_absence "$LIVE_TUI_SESSION" "▌" "no blink glyph while reduced-motion work is live"
   sleep 0.3
 done
 live_log "reduced-motion run stayed on frame-0 glyphs while live"
@@ -2163,12 +2164,16 @@ live_key "$LIVE_TUI_SESSION" C-g
 live_key "$LIVE_TUI_SESSION" "i"
 live_require_text "$LIVE_TUI_SESSION" "COMPOSER" 10 "composer focus for skill validation"
 live_type "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill wrong-owner"
-live_key "$LIVE_TUI_SESSION" Escape
-live_require_absence "$LIVE_TUI_SESSION" "\$Helper / │ skills" 10 "validation palette closed"
-live_require_ready_absence "$LIVE_TUI_SESSION" "↑/↓ select" 10 "completion popup closed before the validation probe"
-live_require_ready_text "$LIVE_TUI_SESSION" "enter send" 10 "composer ready to send the validation probe"
+# A late completion refresh under CI load can consume Enter as a palette
+# selection, which keeps this exact draft and reports nothing. Settle a full
+# composer Normal/Insert round-trip first so the submit is a real key event,
+# then allow the validation error time to render on a slow host. The validation
+# assertion below remains a product assertion; only the readiness waits are
+# timing-classified.
+live_settle_composer_insert "$LIVE_TUI_SESSION" "$LIVE_STEP_TIMEOUT" "skill validation probe"
+live_assert_text "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill wrong-owner" "validation probe keeps its draft before sending"
 live_key "$LIVE_TUI_SESSION" Enter
-live_require_text "$LIVE_TUI_SESSION" "Skill /ensemble-live-skill is assigned to \$FakeAgent, not \$Helper." 10 "skill validation names the owner and the wrong agent"
+live_require_text "$LIVE_TUI_SESSION" "Skill /ensemble-live-skill is assigned to \$FakeAgent, not \$Helper." 30 "skill validation names the owner and the wrong agent"
 live_assert_text "$LIVE_TUI_SESSION" "!Helper /ensemble-live-skill wrong-owner" "validation failure keeps the draft"
 invalid_skill_tasks=$(live_snapshot_value 'Object.values(output.state.subtasks).filter(function (t) { return t.instruction.indexOf("wrong-owner") >= 0 }).length')
 [[ "$invalid_skill_tasks" == "0" ]] || live_fail "invalid skill reference created work (got $invalid_skill_tasks rows)"

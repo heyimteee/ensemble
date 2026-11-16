@@ -33,6 +33,8 @@ GitHub Issues are the authoritative location for the specification and tickets; 
 
 ## Verification
 
+- [Production-readiness partials full E2E](verification/2026-11-16-prod-partials-e2e.md): the 17-suite matrix on OpenCode 2.2.7, the 2.2.6/2.2.7 compatibility runs, the Node 22/24/26 unit matrix, the latency smoke and reference profiles, and zero retries across the fake suites
+- [CI stabilization after the first PR run](verification/2026-11-16-ticket-267.md): the linked E2E record, the settle-aware skill-validation probe, the Ensemble-scoped reduced-motion still frame, and the passing verify/docs/fake matrix
 - [Production-readiness partials review fixes](verification/2026-11-16-ticket-255-review-fixes.md): the runtime-seam removal, pure matrix decision, header-scoped live assertion, compatibility artifacts, real card geometry, and the passing verify/latency/fake matrix
 - [Full deterministic E2E in CI](verification/2026-11-16-ticket-261.md): cost-split PR jobs, nightly latency and opt-in real-model jobs, failure artifacts, the OpenCode 2.2.7 pin, the job-graph checker, and the passing deterministic matrix
 - [Documentation freshness](verification/2026-11-12-ticket-262.md): canonical contract/host/Node constants, the docs index, ADR 0011 at contract v7, and the `docs:check` CI gate
