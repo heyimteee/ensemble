@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import type { Plugin } from "@opencode/plugin"
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { canonicalDirectory, workspaceFileReferences } from "./paths.ts"
@@ -6152,8 +6152,18 @@ export class EnsembleV2Service {
     if (absolute !== handoffs && !absolute.startsWith(`${handoffs}${sep}`)) {
       return fail("The handoff path must be inside .ensemble/handoffs/.")
     }
-    if (!existsSync(absolute) || !statSync(absolute).isFile()) return fail("The handoff file does not exist.")
-    const content = readFileSync(absolute, "utf8")
+    // Ticket #271: a lexical prefix check is not containment. Resolve both
+    // sides so a symlink under handoffs cannot read a file outside it.
+    let file: string
+    try {
+      const root = realpathSync(handoffs)
+      file = realpathSync(absolute)
+      if (!file.startsWith(`${root}${sep}`)) return fail("The handoff path must be inside .ensemble/handoffs/.")
+    } catch {
+      return fail("The handoff file does not exist.")
+    }
+    if (!statSync(file).isFile()) return fail("The handoff file does not exist.")
+    const content = readFileSync(file, "utf8")
     const parsed = parseHandoffFile(content)
     if (!parsed.ok) return fail(parsed.reason)
     const task = parsed.data.task || String(input.task ?? "").trim()
