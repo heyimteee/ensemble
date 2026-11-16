@@ -1,8 +1,8 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 
@@ -89,6 +89,115 @@ test("the matrix treats a required skip as a failure", () => {
     assert.match(result.stdout, /FAIL {2}fake\b/)
     assert.match(result.stdout, /NOT RUN fake-empty/)
     assert.doesNotMatch(result.stdout, /0 failed/)
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
+test("a failed attempt writes a classified record and redacted pane/log artifacts", () => {
+  const box = sandbox()
+  try {
+    const artifacts = join(box.root, "artifacts")
+    const command = [
+      'source "$1"',
+      'live_setup "artifact"',
+      'LIVE_FAILURE_KIND=timing',
+      'printf "server listening on http://127.0.0.1:1\\npath=%s\\n" "$LIVE_BASE" > "$LIVE_LOGS/server.log"',
+      'live_fail_timing "typed text did not reach the TUI: AlignProbe"',
+    ].join("; ")
+    const result = spawnSync(bash, ["-c", command, "--", harness], {
+      encoding: "utf8",
+      env: environment(box, {
+        ENSEMBLE_LIVE_ARTIFACTS: artifacts,
+        ENSEMBLE_LIVE_SUITE: "fake",
+        ENSEMBLE_LIVE_ATTEMPT: "1",
+      }),
+    })
+    assert.notEqual(result.status, 0)
+    const record = JSON.parse(readFileSync(join(artifacts, "failure.json"), "utf8"))
+    assert.equal(record.suite, "fake")
+    assert.equal(record.attempt, 1)
+    assert.equal(record.kind, "timing")
+    assert.match(record.message, /typed text did not reach the TUI/)
+    const log = readFileSync(join(artifacts, "logs", "server.log"), "utf8")
+    assert.match(log, /<live-base>/, "the live base path is redacted")
+    assert.doesNotMatch(log, new RegExp(box.tmp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
+function scenarioStub(dir: string, name: string, body: string): void {
+  const path = join(dir, name)
+  writeFileSync(path, `#!/usr/bin/env bash\nset -u\n${body}\n`, { mode: 0o755 })
+}
+
+test("the matrix retries one classified timing failure and reports it", () => {
+  const box = sandbox()
+  try {
+    const stubs = join(box.root, "scenarios")
+    mkdirSync(stubs)
+    scenarioStub(
+      stubs,
+      "live-check-fake.sh",
+      [
+        'attempt="${ENSEMBLE_LIVE_ATTEMPT:-1}"',
+        'artifacts="${ENSEMBLE_LIVE_ARTIFACTS:-}"',
+        'mkdir -p "$artifacts"',
+        'if [[ "$attempt" == "1" ]]; then',
+        '  printf \'{"suite":"fake","attempt":1,"status":"failed","kind":"timing","message":"timed out after 10s waiting for members step","artifactPath":"%s","exitCode":1}\\n\' "$artifacts" > "$artifacts/failure.json"',
+        '  echo "live: TUI did not become ready: members step" >&2',
+        '  exit 1',
+        'fi',
+        'echo "live: stub pass"',
+      ].join("\n"),
+    )
+    scenarioStub(stubs, "live-check-fake-empty.sh", 'echo "live: stub empty pass"')
+    const nodePath = `${dirname(process.execPath)}:/usr/bin:/bin`
+    const result = spawnSync(bash, [matrix, "fake"], {
+      encoding: "utf8",
+      env: environment(box, { ENSEMBLE_LIVE_SCENARIO_ROOT: stubs, PATH: nodePath }),
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stderr, /fake: RETRY \(attempt 1; timing failure on attempt 1\)/)
+    assert.match(result.stdout, /PASS {2}fake .*flaky, retried once/)
+    assert.match(result.stdout, /PASS {2}fake-empty/)
+    assert.match(result.stdout, /1 retries/)
+    assert.match(result.stdout, /flake-report: suite=fake attempt=1 classification=timing artifact=/)
+    assert.match(result.stdout, /flake-report: suite=fake attempt=2 classification=none artifact=/)
+  } finally {
+    rmSync(box.root, { recursive: true, force: true })
+  }
+})
+
+test("the matrix never retries a product assertion failure", () => {
+  const box = sandbox()
+  try {
+    const stubs = join(box.root, "scenarios")
+    mkdirSync(stubs)
+    scenarioStub(
+      stubs,
+      "live-check-fake.sh",
+      [
+        'artifacts="${ENSEMBLE_LIVE_ARTIFACTS:-}"',
+        'mkdir -p "$artifacts"',
+        'printf \'{"suite":"fake","attempt":1,"status":"failed","kind":"product","message":"member wizard separators do not align in one column","artifactPath":"%s","exitCode":1}\\n\' "$artifacts" > "$artifacts/failure.json"',
+        'echo "live: member wizard separators do not align in one column" >&2',
+        'exit 1',
+      ].join("\n"),
+    )
+    scenarioStub(stubs, "live-check-fake-empty.sh", 'echo "live: stub empty pass"')
+    const nodePath = `${dirname(process.execPath)}:/usr/bin:/bin`
+    const result = spawnSync(bash, [matrix, "fake"], {
+      encoding: "utf8",
+      env: environment(box, { ENSEMBLE_LIVE_SCENARIO_ROOT: stubs, PATH: nodePath }),
+    })
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stderr, /RETRY/)
+    assert.match(result.stdout, /FAIL {2}fake/)
+    assert.match(result.stdout, /NOT RUN fake-empty/)
+    assert.match(result.stdout, /0 retries/)
+    assert.match(result.stdout, /classification=product/)
   } finally {
     rmSync(box.root, { recursive: true, force: true })
   }
