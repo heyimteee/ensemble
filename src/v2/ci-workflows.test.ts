@@ -123,7 +123,7 @@ test("the nightly job graph gates latency on the reference profile and keeps the
   assert.deepEqual(checkNightlyWorkflow(text, supported), [])
   assert.deepEqual(
     [...workflowJobs(text).keys()].sort(),
-    ["latency-reference", "real"],
+    ["latency-reference", "real", "soak-smoke"],
   )
   for (const [job, budget] of Object.entries(NIGHTLY_JOB_BUDGET_MINUTES)) {
     assert.ok(job in NIGHTLY_JOB_BUDGET_MINUTES, `${job} has a budget`)

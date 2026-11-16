@@ -32,6 +32,8 @@ const DEV_ONLY = new Set([
   "latency-budget.ts",
   "live-matrix.ts",
   "prompt-benchmark.ts",
+  "soak-metrics.ts",
+  "support-bundle.ts",
   "test-service.ts",
 ])
 
